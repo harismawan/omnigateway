@@ -1927,3 +1927,1164 @@ git commit -m "feat(dashboard): add the app shell and the authenticated layout g
 ```
 
 ---
+
+## Task 6: Credentials screen — grouping, health, expiry, quota, inline edit
+
+**Files:**
+- Create: `apps/dashboard/src/components/Health.tsx`, `apps/dashboard/src/components/QuotaBar.tsx`, `apps/dashboard/src/features/credentials/CredentialCard.tsx`, `apps/dashboard/src/features/credentials/ProviderGroup.tsx`, `apps/dashboard/src/routes/_app.credentials.tsx`
+- Test: `apps/dashboard/test/features/credentials.test.tsx`
+
+**Interfaces:**
+- Consumes: `api` (Task 2); `WireCredential`, `CredentialHealth`, `QuotaWindow`, `ProviderId`, `PROVIDER_IDS`, `PROVIDER_LABELS`, `CredentialPatch` (Task 2); `credentialsQuery`, `qk`, `useInvalidate` (Task 3); `formatExpiry`, `formatMs`, `formatRelative` (Task 3); `ErrorState` (Task 4); fixtures and `renderWithProviders` (Task 3).
+- Produces:
+  - `HealthPill({ health, now })` — one of `healthy` / `rate limited` / `breaker open` / `unused`
+  - `QuotaBar({ window: QuotaWindow })` — a labelled bar, rendered only when `limit !== null`
+  - `CredentialCard({ credential, health, quota, now })` — one account, with inline tier and weight editing
+  - `ProviderGroup({ provider, credentials, health, quota, now })`
+  - `CredentialsScreen({ now })` — the screen body, exported for testing
+- Task 7 mounts its connect dialog into `CredentialsScreen`.
+
+**Health and quota are not on `GET /api/credentials`.** The core plan's credential projection carries only the `Credential` fields; `CredentialHealth` and `QuotaWindow` rows live behind `store.credentials.listHealth()` and `listQuota()`, which no `/api/*` route exposes. This task therefore ships the health and quota **rendering** driven by props, with the screen passing empty collections, and **Task 12** adds the single control route (`GET /api/credentials/health`) that fills them. Splitting it this way keeps the two independently reviewable: a reviewer can reject the server addition without rejecting the card layout.
+
+The gateway's `credentialPatchSchema` is `.strict()` and accepts exactly `label`, `enabled`, `tier`, `weight`. Sending anything else is a 400, so `CredentialPatch` (Task 2) mirrors it exactly.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/dashboard/test/features/credentials.test.tsx`:
+
+```tsx
+import { afterEach, expect, test } from "bun:test";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { CredentialsScreen } from "../../src/routes/_app.credentials.tsx";
+import { HealthPill } from "../../src/components/Health.tsx";
+import { QuotaBar } from "../../src/components/QuotaBar.tsx";
+import { createFetchStub } from "../helpers/fetchStub.ts";
+import { credentialFixture, healthFixture, NOW, quotaFixture } from "../helpers/fixtures.ts";
+import { renderWithProviders } from "../helpers/render.tsx";
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+test("accounts are grouped under their provider heading", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({
+      credentials: [
+        credentialFixture({ id: "c1", provider: "anthropic", label: "work" }),
+        credentialFixture({ id: "c2", provider: "anthropic", label: "personal" }),
+        credentialFixture({ id: "c3", provider: "kimi", label: "kimi one" }),
+      ],
+    }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  const anthropic = await screen.findByRole("region", { name: /anthropic/i });
+  expect(within(anthropic).getByText("work")).toBeDefined();
+  expect(within(anthropic).getByText("personal")).toBeDefined();
+
+  const kimi = screen.getByRole("region", { name: /kimi coding/i });
+  expect(within(kimi).getByText("kimi one")).toBeDefined();
+  expect(within(kimi).queryByText("work")).toBeNull();
+});
+
+test("a provider with no accounts still renders its group so the operator can add one", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [] }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  expect(await screen.findByRole("region", { name: /openai/i })).toBeDefined();
+  expect(screen.getAllByRole("button", { name: /add account/i })).toHaveLength(3);
+});
+
+test("the health pill names each breaker state", () => {
+  const { rerender } = renderWithProviders(
+    <HealthPill health={[healthFixture({ breakerState: "closed" })]} now={NOW} />,
+  );
+  expect(screen.getByText(/healthy/i)).toBeDefined();
+
+  rerender(
+    <HealthPill
+      health={[healthFixture({ breakerState: "open", openedAt: NOW - 1_000, consecutiveFailures: 3 })]}
+      now={NOW}
+    />,
+  );
+  expect(screen.getByText(/breaker open/i)).toBeDefined();
+
+  rerender(
+    <HealthPill health={[healthFixture({ rateLimitedUntil: NOW + 60_000 })]} now={NOW} />,
+  );
+  expect(screen.getByText(/rate limited/i)).toBeDefined();
+
+  rerender(<HealthPill health={[]} now={NOW} />);
+  expect(screen.getByText(/unused/i)).toBeDefined();
+});
+
+test("an expired rate limit reads as healthy again", () => {
+  renderWithProviders(
+    <HealthPill health={[healthFixture({ rateLimitedUntil: NOW - 1_000 })]} now={NOW} />,
+  );
+  expect(screen.getByText(/healthy/i)).toBeDefined();
+});
+
+test("the quota bar shows used against limit and its fill percentage", () => {
+  renderWithProviders(
+    <QuotaBar window={quotaFixture({ windowType: "fiveHour", used: 250, limit: 1_000 })} />,
+  );
+  const bar = screen.getByRole("progressbar", { name: /5-hour/i });
+  expect(bar.getAttribute("aria-valuenow")).toBe("25");
+  expect(screen.getByText("250 / 1,000")).toBeDefined();
+});
+
+test("a window with no configured limit says so instead of rendering a bar", () => {
+  renderWithProviders(<QuotaBar window={quotaFixture({ limit: null, used: 900 })} />);
+  expect(screen.queryByRole("progressbar")).toBeNull();
+  expect(screen.getByText(/no limit configured/i)).toBeDefined();
+});
+
+test("token expiry is rendered in relative terms", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({
+      credentials: [credentialFixture({ id: "c1", expiresAt: NOW + 3_600_000 })],
+    }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  expect(await screen.findByText(/expires in 1h/i)).toBeDefined();
+});
+
+test("an expired credential with no refresh token is called out", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({
+      credentials: [
+        credentialFixture({ id: "c1", expiresAt: NOW - 1_000, hasRefreshToken: false }),
+      ],
+    }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  expect(await screen.findByText(/expired/i)).toBeDefined();
+  expect(screen.getByText(/reconnect required/i)).toBeDefined();
+});
+
+test("editing tier patches only the changed field", async () => {
+  const stub = createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [credentialFixture({ id: "c1", tier: 1 })] }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+    "PATCH /api/credentials/c1": () => ({ ok: true }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  await screen.findByText("work");
+
+  const user = userEvent.setup();
+  const tier = screen.getByLabelText(/tier/i);
+  await user.clear(tier);
+  await user.type(tier, "3");
+  await user.click(screen.getByRole("button", { name: /save/i }));
+
+  await waitFor(() =>
+    expect(stub.calls.some((c) => c.url === "/api/credentials/c1")).toBe(true),
+  );
+  const patch = stub.calls.find((c) => c.url === "/api/credentials/c1");
+  expect(patch?.init?.method).toBe("PATCH");
+  expect(patch?.init?.body).toBe(JSON.stringify({ tier: 3 }));
+});
+
+test("editing weight and toggling enabled send both fields in one patch", async () => {
+  const stub = createFetchStub({
+    "GET /api/credentials": () => ({
+      credentials: [credentialFixture({ id: "c1", weight: 1, enabled: true })],
+    }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+    "PATCH /api/credentials/c1": () => ({ ok: true }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  await screen.findByText("work");
+
+  const user = userEvent.setup();
+  const weight = screen.getByLabelText(/weight/i);
+  await user.clear(weight);
+  await user.type(weight, "2.5");
+  await user.click(screen.getByRole("switch", { name: /enabled/i }));
+  await user.click(screen.getByRole("button", { name: /save/i }));
+
+  await waitFor(() =>
+    expect(stub.calls.some((c) => c.url === "/api/credentials/c1")).toBe(true),
+  );
+  expect(stub.calls.find((c) => c.url === "/api/credentials/c1")?.init?.body).toBe(
+    JSON.stringify({ enabled: false, weight: 2.5 }),
+  );
+});
+
+test("save is disabled until a field actually changes", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [credentialFixture({ id: "c1" })] }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  await screen.findByText("work");
+  expect(screen.getByRole("button", { name: /save/i }).hasAttribute("disabled")).toBe(true);
+});
+
+test("a successful patch refetches the credential list", async () => {
+  let listCalls = 0;
+  createFetchStub({
+    "GET /api/credentials": () => {
+      listCalls += 1;
+      return { credentials: [credentialFixture({ id: "c1", tier: 1 })] };
+    },
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+    "PATCH /api/credentials/c1": () => ({ ok: true }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  await screen.findByText("work");
+  expect(listCalls).toBe(1);
+
+  const user = userEvent.setup();
+  const tier = screen.getByLabelText(/tier/i);
+  await user.clear(tier);
+  await user.type(tier, "2");
+  await user.click(screen.getByRole("button", { name: /save/i }));
+
+  await waitFor(() => expect(listCalls).toBe(2));
+});
+
+test("deleting an account asks first and then calls delete", async () => {
+  const stub = createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [credentialFixture({ id: "c1" })] }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+    "DELETE /api/credentials/c1": () => ({ ok: true }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  await screen.findByText("work");
+
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: /remove/i }));
+  expect(await screen.findByText(/remove “work”\?/i)).toBeDefined();
+  await user.click(screen.getByRole("button", { name: /^remove account$/i }));
+
+  await waitFor(() =>
+    expect(stub.calls.some((c) => c.url === "/api/credentials/c1" && c.init?.method === "DELETE")).toBe(true),
+  );
+});
+
+test("a failed list renders the gateway's error rather than an empty page", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({
+      status: 500,
+      body: { error: { code: "INTERNAL", message: "database is locked" } },
+    }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  expect(await screen.findByText(/database is locked/i)).toBeDefined();
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/dashboard/test/features/credentials.test.tsx`
+Expected: FAIL — cannot resolve `../../src/components/Health.tsx`.
+
+- [ ] **Step 3: Write the health pill**
+
+`apps/dashboard/src/components/Health.tsx`:
+
+```tsx
+import type { CredentialHealth } from "@/api/types.ts";
+import { Badge } from "@/components/ui/badge.tsx";
+import { formatMs, formatRelative } from "@/lib/format.ts";
+
+export type HealthSummary = {
+  label: "healthy" | "rate limited" | "breaker open" | "unused";
+  tone: "ok" | "warn" | "bad" | "muted";
+  detail: string | null;
+};
+
+/**
+ * Health is per (credential, model), so one credential has several rows. The
+ * pill shows the worst of them: an account healthy for one model and dead for
+ * another is not an account an operator should read as "healthy".
+ */
+export function summarizeHealth(rows: CredentialHealth[], now: number): HealthSummary {
+  if (rows.length === 0) return { label: "unused", tone: "muted", detail: null };
+
+  const open = rows.find((r) => r.breakerState === "open");
+  if (open !== undefined) {
+    return {
+      label: "breaker open",
+      tone: "bad",
+      detail: `${open.model}, ${open.consecutiveFailures} consecutive failures`,
+    };
+  }
+
+  const limited = rows.find((r) => r.rateLimitedUntil !== null && r.rateLimitedUntil > now);
+  if (limited !== undefined) {
+    return {
+      label: "rate limited",
+      tone: "warn",
+      detail: `${limited.model}, clears ${formatRelative(limited.rateLimitedUntil as number, now)}`,
+    };
+  }
+
+  const latencies = rows.flatMap((r) => (r.ewmaTtftMs === null ? [] : [r.ewmaTtftMs]));
+  const detail =
+    latencies.length === 0
+      ? null
+      : `TTFT ${formatMs(latencies.reduce((a, b) => a + b, 0) / latencies.length)}`;
+  return { label: "healthy", tone: "ok", detail };
+}
+
+const TONE_CLASS: Readonly<Record<HealthSummary["tone"], string>> = {
+  ok: "bg-ok/15 text-ok border-ok/30",
+  warn: "bg-warn/15 text-warn border-warn/30",
+  bad: "bg-bad/15 text-bad border-bad/30",
+  muted: "bg-muted text-muted-foreground border-transparent",
+};
+
+export function HealthPill({ health, now }: { health: CredentialHealth[]; now: number }) {
+  const summary = summarizeHealth(health, now);
+  return (
+    <span className="inline-flex items-center gap-2">
+      <Badge variant="outline" className={TONE_CLASS[summary.tone]}>
+        {summary.label}
+      </Badge>
+      {summary.detail !== null && (
+        <span className="text-xs opacity-60">{summary.detail}</span>
+      )}
+    </span>
+  );
+}
+```
+
+- [ ] **Step 4: Write the quota bar**
+
+`apps/dashboard/src/components/QuotaBar.tsx`:
+
+```tsx
+import type { QuotaWindow, WindowType } from "@/api/types.ts";
+
+const WINDOW_LABELS: Readonly<Record<WindowType, string>> = {
+  fiveHour: "5-hour",
+  daily: "Daily",
+  weekly: "Weekly",
+};
+
+export function QuotaBar({ window }: { window: QuotaWindow }) {
+  const label = WINDOW_LABELS[window.windowType];
+
+  // A credential with no configured limit is never excluded by the quota
+  // filter, so drawing a bar against an imaginary ceiling would be a lie.
+  if (window.limit === null) {
+    return (
+      <div className="text-xs">
+        <span className="font-medium">{label}</span>
+        <span className="ml-2 opacity-60">no limit configured</span>
+      </div>
+    );
+  }
+
+  const percent = Math.min(100, Math.round((window.used / window.limit) * 100));
+  const tone = percent >= 90 ? "bg-bad" : percent >= 70 ? "bg-warn" : "bg-ok";
+
+  return (
+    <div className="text-xs">
+      <div className="flex items-baseline justify-between">
+        <span className="font-medium">{label}</span>
+        <span className="opacity-70">
+          {window.used.toLocaleString("en-US")} / {window.limit.toLocaleString("en-US")}
+        </span>
+      </div>
+      <div
+        role="progressbar"
+        aria-label={`${label} quota`}
+        aria-valuenow={percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted"
+      >
+        <div className={`h-full ${tone}`} style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 5: Write the credential card**
+
+`apps/dashboard/src/features/credentials/CredentialCard.tsx`:
+
+```tsx
+import { useMutation } from "@tanstack/react-query";
+import { useState } from "react";
+import { api } from "@/api/client.ts";
+import { qk, useInvalidate } from "@/api/queries.ts";
+import type {
+  CredentialHealth,
+  CredentialPatch,
+  OkResponse,
+  QuotaWindow,
+  WireCredential,
+} from "@/api/types.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { HealthPill } from "@/components/Health.tsx";
+import { QuotaBar } from "@/components/QuotaBar.tsx";
+import { Button } from "@/components/ui/button.tsx";
+import { Card } from "@/components/ui/card.tsx";
+import { Input } from "@/components/ui/input.tsx";
+import { Label } from "@/components/ui/label.tsx";
+import { Switch } from "@/components/ui/switch.tsx";
+import { formatExpiry } from "@/lib/format.ts";
+
+/** Only the fields that actually changed. The gateway's patch schema is strict. */
+function buildPatch(
+  original: WireCredential,
+  draft: { enabled: boolean; tier: number; weight: number },
+): CredentialPatch {
+  const patch: CredentialPatch = {};
+  if (draft.enabled !== original.enabled) patch.enabled = draft.enabled;
+  if (draft.tier !== original.tier) patch.tier = draft.tier;
+  if (draft.weight !== original.weight) patch.weight = draft.weight;
+  return patch;
+}
+
+export function CredentialCard({
+  credential,
+  health,
+  quota,
+  now,
+}: {
+  credential: WireCredential;
+  health: CredentialHealth[];
+  quota: QuotaWindow[];
+  now: number;
+}) {
+  const invalidate = useInvalidate();
+  const [enabled, setEnabled] = useState(credential.enabled);
+  const [tier, setTier] = useState(String(credential.tier));
+  const [weight, setWeight] = useState(String(credential.weight));
+  const [confirming, setConfirming] = useState(false);
+
+  const draft = { enabled, tier: Number(tier), weight: Number(weight) };
+  const patch = buildPatch(credential, draft);
+  const valid = Number.isInteger(draft.tier) && draft.tier >= 1 && draft.weight > 0;
+  const dirty = Object.keys(patch).length > 0;
+
+  const save = useMutation({
+    mutationFn: () => api.patch<OkResponse>(`/api/credentials/${credential.id}`, patch),
+    // Ranking depends on tier and weight, so the dry-run panel is stale too.
+    onSuccess: () => invalidate([qk.credentials(), qk.dryRun(credential.id)]),
+  });
+
+  const remove = useMutation({
+    mutationFn: () => api.del<OkResponse>(`/api/credentials/${credential.id}`),
+    onSuccess: () => invalidate([qk.credentials()]),
+  });
+
+  const expired = credential.expiresAt !== null && credential.expiresAt <= now;
+
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate font-medium">{credential.label}</p>
+          <p className="truncate text-xs opacity-60">
+            {credential.accountEmail ?? credential.id}
+          </p>
+        </div>
+        <HealthPill health={health} now={now} />
+      </div>
+
+      <p className="mt-3 text-xs opacity-70">
+        {formatExpiry(credential.expiresAt, now)}
+        {expired && !credential.hasRefreshToken && (
+          <span className="ml-2 text-bad">reconnect required</span>
+        )}
+      </p>
+
+      {quota.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {quota.map((w) => (
+            <QuotaBar key={`${w.credentialId}-${w.windowType}-${w.startsAt}`} window={w} />
+          ))}
+        </div>
+      )}
+
+      <div className="mt-4 flex flex-wrap items-end gap-4">
+        <div className="w-20 space-y-1.5">
+          <Label htmlFor={`tier-${credential.id}`}>Tier</Label>
+          <Input
+            id={`tier-${credential.id}`}
+            type="number"
+            min={1}
+            step={1}
+            value={tier}
+            onChange={(e) => setTier(e.target.value)}
+          />
+        </div>
+        <div className="w-24 space-y-1.5">
+          <Label htmlFor={`weight-${credential.id}`}>Weight</Label>
+          <Input
+            id={`weight-${credential.id}`}
+            type="number"
+            min={0.1}
+            step={0.1}
+            value={weight}
+            onChange={(e) => setWeight(e.target.value)}
+          />
+        </div>
+        <div className="flex items-center gap-2 pb-2">
+          <Switch
+            id={`enabled-${credential.id}`}
+            aria-label="Enabled"
+            checked={enabled}
+            onCheckedChange={setEnabled}
+          />
+          <Label htmlFor={`enabled-${credential.id}`}>Enabled</Label>
+        </div>
+
+        <div className="ml-auto flex gap-2 pb-1">
+          <Button
+            size="sm"
+            disabled={!dirty || !valid || save.isPending}
+            onClick={() => save.mutate()}
+          >
+            Save
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+            Remove
+          </Button>
+        </div>
+      </div>
+
+      {confirming && (
+        <div role="alertdialog" className="mt-4 rounded-md border border-bad/40 p-3 text-sm">
+          <p>Remove “{credential.label}”? Its tokens are deleted and cannot be recovered.</p>
+          <div className="mt-3 flex gap-2">
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={remove.isPending}
+              onClick={() => remove.mutate()}
+            >
+              Remove account
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {save.isError && <ErrorState error={save.error} />}
+      {remove.isError && <ErrorState error={remove.error} />}
+    </Card>
+  );
+}
+```
+
+- [ ] **Step 6: Write the provider group**
+
+`apps/dashboard/src/features/credentials/ProviderGroup.tsx`:
+
+```tsx
+import type { CredentialHealth, ProviderId, QuotaWindow, WireCredential } from "@/api/types.ts";
+import { PROVIDER_LABELS } from "@/api/types.ts";
+import { Button } from "@/components/ui/button.tsx";
+import { CredentialCard } from "./CredentialCard.tsx";
+
+export function ProviderGroup({
+  provider,
+  credentials,
+  health,
+  quota,
+  now,
+  onAdd,
+}: {
+  provider: ProviderId;
+  credentials: WireCredential[];
+  health: CredentialHealth[];
+  quota: QuotaWindow[];
+  now: number;
+  onAdd: (provider: ProviderId) => void;
+}) {
+  const label = PROVIDER_LABELS[provider];
+  return (
+    <section aria-label={label} className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold tracking-tight">{label}</h2>
+        <Button size="sm" variant="outline" onClick={() => onAdd(provider)}>
+          Add account
+        </Button>
+      </div>
+
+      {credentials.length === 0 ? (
+        <p className="text-sm opacity-60">No accounts connected.</p>
+      ) : (
+        <div className="grid gap-3 lg:grid-cols-2">
+          {credentials.map((credential) => (
+            <CredentialCard
+              key={credential.id}
+              credential={credential}
+              health={health.filter((h) => h.credentialId === credential.id)}
+              quota={quota.filter((q) => q.credentialId === credential.id)}
+              now={now}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+```
+
+- [ ] **Step 7: Write the screen and its route**
+
+`apps/dashboard/src/routes/_app.credentials.tsx`:
+
+```tsx
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
+import { credentialsQuery, credentialHealthQuery } from "@/api/queries.ts";
+import type { ProviderId } from "@/api/types.ts";
+import { PROVIDER_IDS } from "@/api/types.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { ProviderGroup } from "@/features/credentials/ProviderGroup.tsx";
+
+export function CredentialsScreen({ now }: { now: number }) {
+  const credentials = useQuery(credentialsQuery());
+  const health = useQuery(credentialHealthQuery());
+  const [pendingProvider, setPendingProvider] = useState<ProviderId | null>(null);
+
+  if (credentials.isPending) return <p className="text-sm opacity-70">Loading accounts…</p>;
+  if (credentials.isError) {
+    return <ErrorState error={credentials.error} onRetry={() => credentials.refetch()} />;
+  }
+
+  return (
+    <div className="space-y-8">
+      <h1 className="text-lg font-semibold tracking-tight">Credentials</h1>
+
+      {PROVIDER_IDS.map((provider) => (
+        <ProviderGroup
+          key={provider}
+          provider={provider}
+          credentials={credentials.data.filter((c) => c.provider === provider)}
+          health={health.data?.health ?? []}
+          quota={health.data?.quota ?? []}
+          now={now}
+          onAdd={setPendingProvider}
+        />
+      ))}
+
+      {/* Task 7 replaces this with <ConnectDialog />. */}
+      {pendingProvider !== null && null}
+    </div>
+  );
+}
+
+export const Route = createFileRoute("/_app/credentials")({
+  component: () => <CredentialsScreen now={Date.now()} />,
+});
+```
+
+- [ ] **Step 8: Add the health query**
+
+Append to `apps/dashboard/src/api/queries.ts`, and add `CredentialHealthResponse` to the import list from `./types.ts`:
+
+```ts
+/**
+ * Health and quota for every credential.
+ *
+ * Served by `GET /api/credentials/health`, which Task 12 adds to the gateway.
+ * Until then this 501s against the stub and the screen renders accounts with
+ * no health pill detail — deliberately degraded rather than broken.
+ */
+export function credentialHealthQuery() {
+  return queryOptions({
+    queryKey: qk.credentialHealth(),
+    queryFn: () => api.get<CredentialHealthResponse>("/api/credentials/health"),
+    // Health moves on every request; a long stale window makes the pill lie.
+    staleTime: 2_000,
+    retry: false,
+  });
+}
+```
+
+Add to `qk` in the same file:
+
+```ts
+  credentialHealth: () => ["credentials", "health"] as const,
+```
+
+Add to `apps/dashboard/src/api/types.ts`:
+
+```ts
+/** `GET /api/credentials/health` — added to the gateway in Task 12. */
+export type CredentialHealthResponse = { health: CredentialHealth[]; quota: QuotaWindow[] };
+```
+
+- [ ] **Step 9: Run the tests to verify they pass**
+
+Run: `bun test apps/dashboard`
+Expected: 40 pass, 0 fail.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add apps/dashboard
+git commit -m "feat(dashboard): add the credentials screen with health, quota and inline editing"
+```
+
+---
+
+## Task 7: The connect dialog — PKCE redirect, manual paste, and device code
+
+**Files:**
+- Create: `apps/dashboard/src/features/credentials/ConnectDialog.tsx`
+- Modify: `apps/dashboard/src/routes/_app.credentials.tsx` (mount the dialog)
+- Test: `apps/dashboard/test/features/connect.test.tsx`
+
+**Interfaces:**
+- Consumes: `api` (Task 2); `ConnectStart`, `ConnectFinish`, `ConnectPoll`, `ProviderId`, `PROVIDER_LABELS` (Task 2); `qk`, `useInvalidate` (Task 3); `ErrorState` (Task 4); `CredentialsScreen` (Task 6).
+- Produces: `ConnectDialog({ provider, onClose, openWindow? })` — the whole OAuth UI for all three flows.
+
+Three flows, one dialog, driven entirely by `POST /api/connect/start`'s response:
+
+| `kind` | `supportsManualPaste` | UI |
+| --- | --- | --- |
+| `pkce` | `true` | Step 1 opens `authorizeUrl`. Step 2 offers both: wait for the browser redirect to complete server-side, or paste the code into a field that POSTs `/api/connect/finish`. |
+| `pkce` | `false` | Redirect only. The dialog polls the credential list until the account appears. |
+| `device` | `false` | Show `userCode`, open `authorizeUrl`, and poll `/api/connect/poll` at `pollIntervalMs` until it returns `status: "complete"`. |
+
+The redirect path completes **server-side**: `GET /oauth/callback` exchanges the code and writes the credential, then renders its own HTML page. The dialog therefore cannot observe that completion directly — it watches for the new credential to appear in the refetched list. That is why redirect mode polls the credential list rather than `/api/connect/poll`, which is device-code's endpoint and consumes the pending flow.
+
+`window.open` is injected as `openWindow` so a test can assert the URL without a real popup.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/dashboard/test/features/connect.test.tsx`:
+
+```tsx
+import { afterEach, expect, test } from "bun:test";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { ConnectDialog } from "../../src/features/credentials/ConnectDialog.tsx";
+import { createFetchStub } from "../helpers/fetchStub.ts";
+import { renderWithProviders } from "../helpers/render.tsx";
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+const PKCE_START = {
+  flowId: "flow-1",
+  authorizeUrl: "https://claude.ai/authorize?state=abc",
+  userCode: null,
+  kind: "pkce" as const,
+  supportsManualPaste: true,
+  pollIntervalMs: 5_000,
+};
+
+const DEVICE_START = {
+  flowId: "flow-2",
+  authorizeUrl: "https://www.kimi.com/device",
+  userCode: "WDJB-MJHT",
+  kind: "device" as const,
+  supportsManualPaste: false,
+  pollIntervalMs: 1_000,
+};
+
+test("starting a flow posts the provider and the operator's label", async () => {
+  const stub = createFetchStub({ "POST /api/connect/start": () => PKCE_START });
+  renderWithProviders(
+    <ConnectDialog provider="anthropic" onClose={() => {}} openWindow={() => {}} />,
+  );
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/label/i), "work");
+  await user.click(screen.getByRole("button", { name: /start authorization/i }));
+
+  await waitFor(() => expect(stub.calls.some((c) => c.url === "/api/connect/start")).toBe(true));
+  expect(stub.calls.find((c) => c.url === "/api/connect/start")?.init?.body).toBe(
+    JSON.stringify({ provider: "anthropic", label: "work" }),
+  );
+});
+
+test("a pkce flow opens the authorize url and offers the paste field", async () => {
+  createFetchStub({ "POST /api/connect/start": () => PKCE_START });
+  const opened: string[] = [];
+  renderWithProviders(
+    <ConnectDialog provider="anthropic" onClose={() => {}} openWindow={(url) => opened.push(url)} />,
+  );
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/label/i), "work");
+  await user.click(screen.getByRole("button", { name: /start authorization/i }));
+
+  await waitFor(() => expect(opened).toEqual(["https://claude.ai/authorize?state=abc"]));
+  expect(await screen.findByLabelText(/authorization code/i)).toBeDefined();
+});
+
+test("pasting a code posts finish with the flow id and closes on success", async () => {
+  const stub = createFetchStub({
+    "POST /api/connect/start": () => PKCE_START,
+    "POST /api/connect/finish": () => ({ id: "cred-9" }),
+  });
+  let closed = false;
+  renderWithProviders(
+    <ConnectDialog provider="anthropic" onClose={() => { closed = true; }} openWindow={() => {}} />,
+  );
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/label/i), "work");
+  await user.click(screen.getByRole("button", { name: /start authorization/i }));
+  await screen.findByLabelText(/authorization code/i);
+
+  await user.type(screen.getByLabelText(/authorization code/i), "the-auth-code");
+  await user.click(screen.getByRole("button", { name: /^connect$/i }));
+
+  await waitFor(() => expect(closed).toBe(true));
+  expect(stub.calls.find((c) => c.url === "/api/connect/finish")?.init?.body).toBe(
+    JSON.stringify({ flowId: "flow-1", code: "the-auth-code" }),
+  );
+});
+
+test("a rejected code keeps the dialog open and shows the gateway's message", async () => {
+  createFetchStub({
+    "POST /api/connect/start": () => PKCE_START,
+    "POST /api/connect/finish": () => ({
+      status: 400,
+      body: { error: { code: "BAD_REQUEST", message: "unknown or expired authorization" } },
+    }),
+  });
+  let closed = false;
+  renderWithProviders(
+    <ConnectDialog provider="anthropic" onClose={() => { closed = true; }} openWindow={() => {}} />,
+  );
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/label/i), "work");
+  await user.click(screen.getByRole("button", { name: /start authorization/i }));
+  await screen.findByLabelText(/authorization code/i);
+  await user.type(screen.getByLabelText(/authorization code/i), "bad");
+  await user.click(screen.getByRole("button", { name: /^connect$/i }));
+
+  expect(await screen.findByText(/unknown or expired authorization/i)).toBeDefined();
+  expect(closed).toBe(false);
+});
+
+test("a device flow shows the user code and does not offer a paste field", async () => {
+  createFetchStub({
+    "POST /api/connect/start": () => DEVICE_START,
+    "POST /api/connect/poll": () => ({ status: 202, body: { status: "pending" } }),
+  });
+  renderWithProviders(<ConnectDialog provider="kimi" onClose={() => {}} openWindow={() => {}} />);
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/label/i), "kimi one");
+  await user.click(screen.getByRole("button", { name: /start authorization/i }));
+
+  expect(await screen.findByText("WDJB-MJHT")).toBeDefined();
+  expect(screen.queryByLabelText(/authorization code/i)).toBeNull();
+  expect(screen.getByText(/waiting for approval/i)).toBeDefined();
+});
+
+test("a device flow polls until it completes and then closes", async () => {
+  let polls = 0;
+  createFetchStub({
+    "POST /api/connect/start": () => DEVICE_START,
+    "POST /api/connect/poll": () => {
+      polls += 1;
+      return polls < 2
+        ? { status: 202, body: { status: "pending" } }
+        : { status: 200, body: { status: "complete", id: "cred-7" } };
+    },
+  });
+  let closed = false;
+  renderWithProviders(
+    <ConnectDialog provider="kimi" onClose={() => { closed = true; }} openWindow={() => {}} />,
+  );
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/label/i), "kimi one");
+  await user.click(screen.getByRole("button", { name: /start authorization/i }));
+  await screen.findByText("WDJB-MJHT");
+
+  await waitFor(() => expect(closed).toBe(true), { timeout: 5_000 });
+  expect(polls).toBeGreaterThanOrEqual(2);
+});
+
+test("a device flow that errors stops polling and reports why", async () => {
+  createFetchStub({
+    "POST /api/connect/start": () => DEVICE_START,
+    "POST /api/connect/poll": () => ({
+      status: 400,
+      body: { error: { code: "BAD_REQUEST", message: "the device code expired" } },
+    }),
+  });
+  renderWithProviders(<ConnectDialog provider="kimi" onClose={() => {}} openWindow={() => {}} />);
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/label/i), "kimi one");
+  await user.click(screen.getByRole("button", { name: /start authorization/i }));
+
+  expect(await screen.findByText(/the device code expired/i)).toBeDefined();
+});
+
+test("a redirect-only pkce provider omits the paste field entirely", async () => {
+  createFetchStub({
+    "POST /api/connect/start": () => ({ ...PKCE_START, supportsManualPaste: false }),
+    "GET /api/credentials": () => ({ credentials: [] }),
+  });
+  renderWithProviders(
+    <ConnectDialog provider="openai" onClose={() => {}} openWindow={() => {}} />,
+  );
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/label/i), "codex");
+  await user.click(screen.getByRole("button", { name: /start authorization/i }));
+
+  expect(await screen.findByText(/finish signing in/i)).toBeDefined();
+  expect(screen.queryByLabelText(/authorization code/i)).toBeNull();
+});
+
+test("a start failure surfaces before any window is opened", async () => {
+  createFetchStub({
+    "POST /api/connect/start": () => ({
+      status: 400,
+      body: { error: { code: "BAD_REQUEST", message: "provider must be one of anthropic, openai, kimi" } },
+    }),
+  });
+  const opened: string[] = [];
+  renderWithProviders(
+    <ConnectDialog provider="anthropic" onClose={() => {}} openWindow={(url) => opened.push(url)} />,
+  );
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/label/i), "work");
+  await user.click(screen.getByRole("button", { name: /start authorization/i }));
+
+  expect(await screen.findByText(/provider must be one of/i)).toBeDefined();
+  expect(opened).toEqual([]);
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/dashboard/test/features/connect.test.tsx`
+Expected: FAIL — cannot resolve `../../src/features/credentials/ConnectDialog.tsx`.
+
+- [ ] **Step 3: Write the dialog**
+
+`apps/dashboard/src/features/credentials/ConnectDialog.tsx`:
+
+```tsx
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { api } from "@/api/client.ts";
+import { credentialsQuery, qk, useInvalidate } from "@/api/queries.ts";
+import type {
+  ConnectFinish,
+  ConnectPoll,
+  ConnectStart,
+  ProviderId,
+} from "@/api/types.ts";
+import { PROVIDER_LABELS } from "@/api/types.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { Button } from "@/components/ui/button.tsx";
+import { Card } from "@/components/ui/card.tsx";
+import { Input } from "@/components/ui/input.tsx";
+import { Label } from "@/components/ui/label.tsx";
+
+export function ConnectDialog({
+  provider,
+  onClose,
+  openWindow = (url: string) => {
+    globalThis.open(url, "_blank", "noopener,noreferrer");
+  },
+}: {
+  provider: ProviderId;
+  onClose: () => void;
+  openWindow?: (url: string) => void;
+}) {
+  const invalidate = useInvalidate();
+  const [label, setLabel] = useState("");
+  const [code, setCode] = useState("");
+  const [flow, setFlow] = useState<ConnectStart | null>(null);
+
+  const start = useMutation({
+    mutationFn: () =>
+      api.post<ConnectStart>("/api/connect/start", { provider, label: label.trim() }),
+    onSuccess: (started) => {
+      setFlow(started);
+      // Opened only after the server minted a flow: a failed start must not
+      // send the operator to a provider consent screen that leads nowhere.
+      openWindow(started.authorizeUrl);
+    },
+  });
+
+  async function settle(): Promise<void> {
+    await invalidate([qk.credentials(), qk.credentialHealth()]);
+    onClose();
+  }
+
+  const finish = useMutation({
+    mutationFn: () =>
+      api.post<ConnectFinish>("/api/connect/finish", {
+        flowId: (flow as ConnectStart).flowId,
+        code: code.trim(),
+      }),
+    onSuccess: settle,
+  });
+
+  // Device code: the gateway answers 202 while the operator has not approved.
+  const poll = useQuery({
+    queryKey: ["connect", "poll", flow?.flowId ?? "none"],
+    queryFn: () =>
+      api.post<ConnectPoll>("/api/connect/poll", { flowId: (flow as ConnectStart).flowId }),
+    enabled: flow !== null && flow.kind === "device",
+    refetchInterval: flow?.pollIntervalMs ?? 5_000,
+    retry: false,
+    staleTime: 0,
+  });
+
+  if (poll.data?.status === "complete") {
+    void settle();
+  }
+
+  // Redirect-only PKCE completes inside /oauth/callback, so the dialog cannot
+  // observe it. It watches for the credential list to grow instead.
+  const watching = flow !== null && flow.kind === "pkce" && !flow.supportsManualPaste;
+  const credentials = useQuery({ ...credentialsQuery(), enabled: watching, refetchInterval: 2_000 });
+  const [baseline, setBaseline] = useState<number | null>(null);
+  if (watching && baseline === null && credentials.data !== undefined) {
+    setBaseline(credentials.data.length);
+  }
+  if (watching && baseline !== null && (credentials.data?.length ?? 0) > baseline) {
+    void settle();
+  }
+
+  return (
+    <div role="dialog" aria-label={`Connect ${PROVIDER_LABELS[provider]}`} className="mt-6">
+      <Card className="max-w-lg p-5">
+        <h2 className="text-sm font-semibold">Connect {PROVIDER_LABELS[provider]}</h2>
+
+        {flow === null ? (
+          <div className="mt-4 space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="connect-label">Label</Label>
+              <Input
+                id="connect-label"
+                value={label}
+                placeholder="work"
+                onChange={(e) => setLabel(e.target.value)}
+              />
+            </div>
+            {start.isError && <ErrorState error={start.error} />}
+            <div className="flex gap-2">
+              <Button disabled={start.isPending} onClick={() => start.mutate()}>
+                Start authorization
+              </Button>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : flow.kind === "device" ? (
+          <div className="mt-4 space-y-4">
+            <p className="text-sm">Enter this code at the provider:</p>
+            <p className="font-mono text-2xl tracking-widest">{flow.userCode}</p>
+            <p className="text-sm opacity-70">
+              A browser tab was opened at <span className="break-all">{flow.authorizeUrl}</span>.
+            </p>
+            {poll.isError ? (
+              <ErrorState error={poll.error} />
+            ) : (
+              <p className="text-sm opacity-70">Waiting for approval…</p>
+            )}
+            <Button variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+          </div>
+        ) : flow.supportsManualPaste ? (
+          <div className="mt-4 space-y-4">
+            <p className="text-sm">
+              Approve access in the tab that opened. If the redirect back here did not work, paste
+              the authorization code below.
+            </p>
+            <div className="space-y-1.5">
+              <Label htmlFor="connect-code">Authorization code</Label>
+              <Input id="connect-code" value={code} onChange={(e) => setCode(e.target.value)} />
+            </div>
+            {finish.isError && <ErrorState error={finish.error} />}
+            <div className="flex gap-2">
+              <Button
+                disabled={code.trim().length === 0 || finish.isPending}
+                onClick={() => finish.mutate()}
+              >
+                Connect
+              </Button>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <p className="text-sm">Finish signing in in the tab that opened.</p>
+            <p className="text-sm opacity-70">
+              This dialog closes on its own once the account is connected.
+            </p>
+            <Button variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 4: Mount the dialog on the credentials screen**
+
+In `apps/dashboard/src/routes/_app.credentials.tsx`, replace the placeholder line:
+
+```tsx
+      {/* Task 7 replaces this with <ConnectDialog />. */}
+      {pendingProvider !== null && null}
+```
+
+with:
+
+```tsx
+      {pendingProvider !== null && (
+        <ConnectDialog provider={pendingProvider} onClose={() => setPendingProvider(null)} />
+      )}
+```
+
+and add the import:
+
+```tsx
+import { ConnectDialog } from "@/features/credentials/ConnectDialog.tsx";
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `bun test apps/dashboard`
+Expected: 49 pass, 0 fail.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/dashboard
+git commit -m "feat(dashboard): add the oauth connect dialog for pkce, paste and device flows"
+```
+
+---
