@@ -37,14 +37,16 @@ omnigateway/
   package.json                       workspace root
   biome.json
   tsconfig.base.json
+  Dockerfile                         single-stage; Bun runs TS directly
+  .dockerignore
   packages/
     ir/
       package.json
       src/
         index.ts                     re-exports
         request.ts                   ChatRequest, Message, ContentBlock, ToolDef
-        stream.ts                    StreamEvent, deltas, ErrorCode
-        errors.ts                    GatewayError classes, ErrorCode enum
+        stream.ts                    StreamEvent, Delta, Usage, StopReason, collect
+        errors.ts                    ErrorCode union, RETRYABLE, HTTP_STATUS, GatewayError
         validate.ts                  boundary invariants
       test/
         validate.test.ts
@@ -252,13 +254,17 @@ dist/
 ```
 # Required. 32 random bytes, base64.
 # Generate: bun -e "console.log(Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64'))"
-STORAGE_ENCRYPTION_KEY=
+OMNI_ENCRYPTION_KEY=
 
 # Optional, defaults shown.
 OMNI_HOST=127.0.0.1
 OMNI_PORT=8787
 OMNI_DB_PATH=./omnigateway.db
-OMNI_LOG_LEVEL=info
+
+# Optional. Defaults to http://$OMNI_HOST:$OMNI_PORT. Set this when the gateway
+# sits behind a proxy: OAuth redirect URIs are built from it, and a provider
+# rejects a callback to an address it was not registered against.
+OMNI_BASE_URL=
 ```
 
 - [ ] **Step 2: Create the ir package skeleton**
@@ -330,7 +336,7 @@ git commit -m "chore: scaffold bun workspace with ir package"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `ChatRequest`, `Message`, `ContentBlock`, `ToolDef`, `ToolChoice`, `ProviderId`, `ErrorCode`, `GatewayError`, `RETRYABLE`, `HTTP_STATUS`, and `validate(req: ChatRequest): ChatRequest`. Nearly every later task depends on these names.
+- Produces: `ChatRequest`, `Message`, `ContentBlock`, `ToolDef`, `ToolChoice`, `ProviderId`, `ErrorCode`, `GatewayError`, `RETRYABLE`, `HTTP_STATUS`, and `validateRequest(req: ChatRequest): ChatRequest`. Nearly every later task depends on these names.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -339,7 +345,7 @@ git commit -m "chore: scaffold bun workspace with ir package"
 ```ts
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "../src/request.ts";
-import { validate } from "../src/validate.ts";
+import { validateRequest } from "../src/validate.ts";
 
 const base = (messages: ChatRequest["messages"]): ChatRequest => ({
   model: "m",
@@ -348,7 +354,7 @@ const base = (messages: ChatRequest["messages"]): ChatRequest => ({
 });
 
 test("drops toolResult blocks with no matching toolUse", () => {
-  const out = validate(
+  const out = validateRequest(
     base([
       {
         role: "user",
@@ -363,7 +369,7 @@ test("drops toolResult blocks with no matching toolUse", () => {
 });
 
 test("keeps toolResult blocks whose toolUse appeared earlier", () => {
-  const out = validate(
+  const out = validateRequest(
     base([
       { role: "assistant", content: [{ type: "toolUse", id: "t1", name: "f", input: {} }] },
       {
@@ -376,7 +382,7 @@ test("keeps toolResult blocks whose toolUse appeared earlier", () => {
 });
 
 test("synthesizes ids for toolUse blocks that lack them", () => {
-  const out = validate(
+  const out = validateRequest(
     base([{ role: "assistant", content: [{ type: "toolUse", id: "", name: "f", input: {} }] }]),
   );
   const block = out.messages[0]?.content[0];
@@ -385,7 +391,7 @@ test("synthesizes ids for toolUse blocks that lack them", () => {
 });
 
 test("merges adjacent messages that share a role", () => {
-  const out = validate(
+  const out = validateRequest(
     base([
       { role: "user", content: [{ type: "text", text: "a" }] },
       { role: "user", content: [{ type: "text", text: "b" }] },
@@ -397,7 +403,7 @@ test("merges adjacent messages that share a role", () => {
 });
 
 test("drops messages left empty after filtering", () => {
-  const out = validate(
+  const out = validateRequest(
     base([
       { role: "user", content: [{ type: "toolResult", toolUseId: "ghost", content: "" }] },
       { role: "user", content: [{ type: "text", text: "real" }] },
@@ -412,7 +418,7 @@ test("does not mutate the input request", () => {
     { role: "user", content: [{ type: "text", text: "a" }] },
     { role: "user", content: [{ type: "text", text: "b" }] },
   ]);
-  validate(input);
+  validateRequest(input);
   expect(input.messages).toHaveLength(2);
 });
 ```
@@ -621,7 +627,7 @@ import type { ChatRequest, ContentBlock, Message } from "./request.ts";
  * Enforces the IR boundary invariants once, at ingress, so no downstream module
  * has to defend against malformed tool sequences. Returns a new request.
  */
-export function validate(req: ChatRequest): ChatRequest {
+export function validateRequest(req: ChatRequest): ChatRequest {
   const seenToolUseIds = new Set<string>();
   const cleaned: Message[] = [];
 
@@ -697,8 +703,16 @@ git commit -m "feat(ir): add request types and boundary validation"
 
 ```ts
 import { expect, test } from "bun:test";
-import type { StreamEvent } from "../src/stream.ts";
+import type { StreamEvent, Usage } from "../src/stream.ts";
 import { collect } from "../src/stream.ts";
+
+const usage = (overrides: Partial<Usage> = {}): Usage => ({
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  ...overrides,
+});
 
 test("collect assembles text deltas into one block", () => {
   const events: StreamEvent[] = [
@@ -707,25 +721,24 @@ test("collect assembles text deltas into one block", () => {
     { type: "blockDelta", index: 0, delta: { type: "text", text: "Hel" } },
     { type: "blockDelta", index: 0, delta: { type: "text", text: "lo" } },
     { type: "blockEnd", index: 0 },
-    { type: "usage", input: 10, output: 2 },
-    { type: "end", stopReason: "stop" },
+    { type: "end", stopReason: "endTurn", usage: usage({ inputTokens: 10, outputTokens: 2 }) },
   ];
   const r = collect(events);
   expect(r.content).toEqual([{ type: "text", text: "Hello" }]);
-  expect(r.stopReason).toBe("stop");
-  expect(r.usage).toEqual({ input: 10, output: 2 });
+  expect(r.stopReason).toBe("endTurn");
+  expect(r.usage).toEqual(usage({ inputTokens: 10, outputTokens: 2 }));
   expect(r.id).toBe("msg_1");
   expect(r.model).toBe("claude-opus-4");
 });
 
-test("collect assembles json deltas into toolUse input", () => {
+test("collect assembles tool json deltas into toolUse input", () => {
   const r = collect([
     { type: "start", id: "m", model: "x" },
     { type: "blockStart", index: 0, block: { type: "toolUse", id: "t1", name: "get" } },
-    { type: "blockDelta", index: 0, delta: { type: "json", partial: '{"a":' } },
-    { type: "blockDelta", index: 0, delta: { type: "json", partial: "1}" } },
+    { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '{"a":' } },
+    { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: "1}" } },
     { type: "blockEnd", index: 0 },
-    { type: "end", stopReason: "toolUse" },
+    { type: "end", stopReason: "toolUse", usage: usage() },
   ]);
   expect(r.content).toEqual([{ type: "toolUse", id: "t1", name: "get", input: { a: 1 } }]);
 });
@@ -735,9 +748,9 @@ test("collect preserves thinking text and signature", () => {
     { type: "start", id: "m", model: "x" },
     { type: "blockStart", index: 0, block: { type: "thinking" } },
     { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hmm" } },
-    { type: "blockDelta", index: 0, delta: { type: "signature", signature: "sig123" } },
+    { type: "blockDelta", index: 0, delta: { type: "thinkingSignature", signature: "sig123" } },
     { type: "blockEnd", index: 0 },
-    { type: "end", stopReason: "stop" },
+    { type: "end", stopReason: "endTurn", usage: usage() },
   ]);
   expect(r.content).toEqual([{ type: "thinking", text: "hmm", signature: "sig123" }]);
 });
@@ -749,7 +762,7 @@ test("collect orders blocks by index, not arrival", () => {
     { type: "blockStart", index: 1, block: { type: "text" } },
     { type: "blockDelta", index: 1, delta: { type: "text", text: "second" } },
     { type: "blockDelta", index: 0, delta: { type: "text", text: "first" } },
-    { type: "end", stopReason: "stop" },
+    { type: "end", stopReason: "endTurn", usage: usage() },
   ]);
   expect(r.content).toEqual([
     { type: "text", text: "first" },
@@ -761,10 +774,22 @@ test("collect tolerates truncated tool json", () => {
   const r = collect([
     { type: "start", id: "m", model: "x" },
     { type: "blockStart", index: 0, block: { type: "toolUse", id: "t1", name: "get" } },
-    { type: "blockDelta", index: 0, delta: { type: "json", partial: "{not json" } },
-    { type: "end", stopReason: "toolUse" },
+    { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: "{not json" } },
+    { type: "end", stopReason: "toolUse", usage: usage() },
   ]);
   expect(r.content).toEqual([{ type: "toolUse", id: "t1", name: "get", input: {} }]);
+});
+
+test("collect reports zero usage for a stream that never ends", () => {
+  const r = collect([
+    { type: "start", id: "m", model: "x" },
+    { type: "blockStart", index: 0, block: { type: "text" } },
+    { type: "blockDelta", index: 0, delta: { type: "text", text: "cut off" } },
+  ]);
+  // No `end` event means no usage was ever reported. Zero is the honest
+  // answer; dispatch prices this at zero rather than guessing.
+  expect(r.usage).toEqual(usage());
+  expect(r.stopReason).toBe("endTurn");
 });
 ```
 
@@ -781,9 +806,25 @@ Expected: FAIL — cannot resolve `../src/stream.ts`.
 import type { ErrorCode } from "./errors.ts";
 import type { ContentBlock } from "./request.ts";
 
-export type StopReason = "stop" | "maxTokens" | "toolUse" | "stopSequence";
+export type StopReason =
+  | "endTurn"
+  | "maxTokens"
+  | "toolUse"
+  | "stopSequence"
+  | "contentFilter";
 
-export type Usage = { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+/**
+ * All four counts are required. Cache fields being optional would mean every
+ * consumer — the cost calculation in Task 15, the usage rows in Task 19, the
+ * aggregates in Task 25 — writes the same `?? 0`, and one that forgets silently
+ * bills a cache read at the full input rate.
+ */
+export type Usage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
 
 export type ContentBlockStart =
   | { type: "text" }
@@ -793,16 +834,24 @@ export type ContentBlockStart =
 export type Delta =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
-  | { type: "signature"; signature: string }
-  | { type: "json"; partial: string };
+  | { type: "thinkingSignature"; signature: string }
+  | { type: "toolJson"; partial: string };
 
+/**
+ * Usage rides on `end` rather than being its own event.
+ *
+ * Providers report totals at different moments — Anthropic splits them across
+ * `message_start` and `message_delta`, OpenAI sends one block with the final
+ * chunk — so each decoder accumulates and reports once. That gives dispatch a
+ * single place to price the request and one guarantee to rely on: a stream
+ * that ends has usage.
+ */
 export type StreamEvent =
   | { type: "start"; id: string; model: string }
   | { type: "blockStart"; index: number; block: ContentBlockStart }
   | { type: "blockDelta"; index: number; delta: Delta }
   | { type: "blockEnd"; index: number }
-  | { type: "usage"; input: number; output: number; cacheRead?: number; cacheWrite?: number }
-  | { type: "end"; stopReason: StopReason }
+  | { type: "end"; stopReason: StopReason; usage: Usage }
   | { type: "error"; code: ErrorCode; message: string; retryable: boolean };
 
 export type CollectedResponse = {
@@ -826,8 +875,13 @@ type Accum =
 export function collect(events: Iterable<StreamEvent>): CollectedResponse {
   let id = "";
   let model = "";
-  let stopReason: StopReason = "stop";
-  let usage: Usage = { input: 0, output: 0 };
+  let stopReason: StopReason = "endTurn";
+  let usage: Usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  };
   const blocks = new Map<number, Accum>();
 
   for (const ev of events) {
@@ -851,21 +905,15 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
         if (!acc) break;
         if (ev.delta.type === "text" && acc.kind === "text") acc.text += ev.delta.text;
         else if (ev.delta.type === "thinking" && acc.kind === "thinking") acc.text += ev.delta.text;
-        else if (ev.delta.type === "signature" && acc.kind === "thinking")
+        else if (ev.delta.type === "thinkingSignature" && acc.kind === "thinking")
           acc.signature = ev.delta.signature;
-        else if (ev.delta.type === "json" && acc.kind === "toolUse") acc.json += ev.delta.partial;
+        else if (ev.delta.type === "toolJson" && acc.kind === "toolUse")
+          acc.json += ev.delta.partial;
         break;
       }
-      case "usage":
-        usage = {
-          input: ev.input,
-          output: ev.output,
-          ...(ev.cacheRead === undefined ? {} : { cacheRead: ev.cacheRead }),
-          ...(ev.cacheWrite === undefined ? {} : { cacheWrite: ev.cacheWrite }),
-        };
-        break;
       case "end":
         stopReason = ev.stopReason;
+        usage = ev.usage;
         break;
       default:
         break;
@@ -910,7 +958,7 @@ export * from "./stream.ts";
 - [ ] **Step 5: Run the tests**
 
 Run: `bun test packages/ir`
-Expected: 12 pass, 0 fail.
+Expected: 13 pass, 0 fail.
 
 - [ ] **Step 6: Commit**
 
@@ -3457,7 +3505,9 @@ Append to `packages/providers/src/index.ts`:
 
 ```ts
 export { httpError, parseRetryAfter } from "./http.ts";
-export { anthropicAdapter } from "./anthropic/index.ts";
+// The codec is exported alongside the adapter so the round-trip tests in
+// Task 17 can drive it without a live HTTP call.
+export { anthropicAdapter, decodeAnthropic, toWire as toAnthropicWire } from "./anthropic/index.ts";
 ```
 
 - [ ] **Step 8: Run the tests**
@@ -4147,7 +4197,7 @@ export { decodeResponses, toResponsesWire };
 Append to `packages/providers/src/index.ts`:
 
 ```ts
-export { openaiAdapter } from "./openai/index.ts";
+export { openaiAdapter, decodeResponses, toResponsesWire } from "./openai/index.ts";
 ```
 
 - [ ] **Step 7: Run the tests**
@@ -4679,7 +4729,7 @@ export const ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>> = {
 Append to `packages/providers/src/index.ts`:
 
 ```ts
-export { kimiAdapter } from "./kimi/index.ts";
+export { kimiAdapter, decodeChat, toChatWire } from "./kimi/index.ts";
 export { ADAPTERS } from "./registry.ts";
 ```
 
@@ -5938,7 +5988,7 @@ export type { Candidate, Excluded, RankInput, RankResult, Snapshot } from "./typ
 - [ ] **Step 7: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 39 pass, 0 fail.
+Expected: 38 pass, 0 fail.
 
 - [ ] **Step 8: Commit**
 
@@ -6217,7 +6267,7 @@ export function recordFailure(
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 55 pass, 0 fail.
+Expected: 54 pass, 0 fail.
 
 - [ ] **Step 5: Commit**
 
@@ -6905,7 +6955,7 @@ function priceOf(
 - [ ] **Step 7: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 72 pass, 0 fail.
+Expected: 71 pass, 0 fail.
 
 - [ ] **Step 8: Commit**
 
@@ -7670,7 +7720,7 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
 - [ ] **Step 7: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 100 pass, 0 fail.
+Expected: 99 pass, 0 fail.
 
 - [ ] **Step 8: Commit**
 
@@ -7685,15 +7735,19 @@ git commit -m "feat(gateway): add anthropic and openai ingress parsers"
 
 **Files:**
 - Create: `apps/gateway/src/egress/anthropic.ts`, `apps/gateway/src/egress/openai.ts`
-- Test: `apps/gateway/test/egress/anthropic.test.ts`, `apps/gateway/test/egress/openai.test.ts`
+- Modify: `packages/providers/src/index.ts` (export the codecs the round-trip tests drive)
+- Test: `apps/gateway/test/egress/anthropic.test.ts`, `apps/gateway/test/egress/openai.test.ts`, `apps/gateway/test/egress/roundtrip.test.ts`
 
 **Interfaces:**
-- Consumes: `StreamEvent`, `collect`, `CollectedResponse`, `HTTP_STATUS` (Tasks 2-3).
+- Consumes: `StreamEvent`, `collect`, `CollectedResponse`, `HTTP_STATUS` (Tasks 2-3); `parseAnthropicRequest`, `parseOpenAIRequest` (Task 16); `toAnthropicWire`, `decodeAnthropic`, `toResponsesWire`, `toChatWire`, `decodeChat` (Tasks 9-11) — round-trip tests only.
 - Produces:
   - `anthropicStream(events, requestId): AsyncGenerator<{ event: string; data: string }>`
   - `anthropicResponse(collected, requestId): unknown`
+  - `anthropicErrorBody(code, message): unknown`
   - `openaiStream(events, requestId, created): AsyncGenerator<{ event: string; data: string }>`
   - `openaiResponse(collected, requestId, created): unknown`
+  - `openaiErrorBody(code, message): unknown`
+  - `SseFrame` — the `{ event, data }` record both stream renderers yield.
   Streaming yields SSE frames for the route to serialize; non-streaming takes the already-collected response.
 
 Non-streaming and streaming share the same upstream path: dispatch always produces events, and a non-streaming request is folded with `collect()` before rendering. `created` and `requestId` are parameters rather than generated here, so responses are deterministic under test.
@@ -7740,10 +7794,12 @@ test("emits the full anthropic sse sequence", async () => {
     "message_stop",
   ]);
   expect(f[0]?.data.message.id).toBe("msg_1");
-  expect(f[0]?.data.message.usage.input_tokens).toBe(10);
+  // message_start goes out before any usage is known, so it reports zero and
+  // message_delta carries the real counts.
+  expect(f[0]?.data.message.usage.input_tokens).toBe(0);
   expect(f[2]?.data.delta).toEqual({ type: "text_delta", text: "Hi" });
   expect(f[4]?.data.delta.stop_reason).toBe("end_turn");
-  expect(f[4]?.data.usage.output_tokens).toBe(2);
+  expect(f[4]?.data.usage).toEqual({ input_tokens: 10, output_tokens: 2 });
 });
 
 test("renders tool use blocks with input_json_delta", async () => {
@@ -8016,12 +8072,15 @@ export async function* anthropicStream(
   requestId: string,
 ): AsyncGenerator<SseFrame, void, undefined> {
   let model = "";
-  let inputTokens = 0;
 
   for await (const event of events) {
     switch (event.type) {
       case "start":
         model = event.model;
+        // Zero input tokens, always. The IR carries usage on `end`, and this
+        // frame goes out before the upstream has reported any. The real count
+        // arrives in `message_delta` below, which is where a client that cares
+        // about totals reads them anyway.
         yield frame("message_start", {
           type: "message_start",
           message: {
@@ -8032,7 +8091,7 @@ export async function* anthropicStream(
             content: [],
             stop_reason: null,
             stop_sequence: null,
-            usage: { input_tokens: inputTokens, output_tokens: 0 },
+            usage: { input_tokens: 0, output_tokens: 0 },
           },
         });
         break;
@@ -8079,7 +8138,10 @@ export async function* anthropicStream(
         yield frame("message_delta", {
           type: "message_delta",
           delta: { stop_reason: STOP_REASON[event.stopReason], stop_sequence: null },
-          usage: { output_tokens: event.usage.outputTokens },
+          usage: {
+            input_tokens: event.usage.inputTokens,
+            output_tokens: event.usage.outputTokens,
+          },
         });
         yield frame("message_stop", { type: "message_stop" });
         break;
@@ -8325,16 +8387,216 @@ export function openaiErrorBody(code: ErrorCode, message: string): unknown {
 }
 ```
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 6: Write the round-trip tests**
+
+Everything before this task built one half of a translation each: Task 16 turns a client's wire format into the IR, Tasks 9-11 turn the IR into each provider's wire format and back, and this task turns the IR into a client's wire format. This is the first point at which both halves exist, so it is the first point at which they can be checked against each other.
+
+Each test drives a full circuit and asserts the far end matches the near end. A `toWire`/`decode` pair that agrees with itself but not with the IR passes every unit test in Tasks 9-11 and fails here.
+
+Two things are deliberately *not* asserted. Wire bytes are not compared — Anthropic sends a `message_start` frame that OpenAI has no equivalent for, so byte equality across formats is not a property the system has or wants. And degradations are expected, not treated as failures: an image sent to Kimi is dropped by design, and the test asserts the drop is *reported* rather than asserting it did not happen.
+
+`apps/gateway/test/egress/roundtrip.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { collect, type ChatRequest, type StreamEvent } from "@omni/ir";
+import {
+  decodeAnthropic,
+  decodeChat,
+  decodeResponses,
+  toAnthropicWire,
+  toChatWire,
+  toResponsesWire,
+} from "@omni/providers";
+import { parseAnthropicRequest } from "../../src/ingress/anthropic.ts";
+import { parseOpenAIRequest } from "../../src/ingress/openai.ts";
+import { anthropicResponse, anthropicStream } from "../../src/egress/anthropic.ts";
+import { openaiResponse, openaiStream } from "../../src/egress/openai.ts";
+
+/**
+ * Re-parses rendered SSE frames as if they had arrived from an upstream.
+ *
+ * The egress renderers emit `{event, data}` records, which is exactly what the
+ * provider decoders consume, so a frame stream can be fed straight back in
+ * without serializing to bytes and parsing them again.
+ */
+async function* replay(
+  frames: AsyncGenerator<{ event: string; data: string }>,
+): AsyncGenerator<{ event: string; data: string }> {
+  for await (const f of frames) yield f;
+}
+
+async function drain(events: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
+  const out: StreamEvent[] = [];
+  for await (const e of events) out.push(e);
+  return out;
+}
+
+const RESPONSE: StreamEvent[] = [
+  { type: "start", id: "msg_1", model: "claude-opus-4" },
+  { type: "blockStart", index: 0, block: { type: "text" } },
+  { type: "blockDelta", index: 0, delta: { type: "text", text: "Hello " } },
+  { type: "blockDelta", index: 0, delta: { type: "text", text: "world" } },
+  { type: "blockEnd", index: 0 },
+  {
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  },
+];
+
+const TOOL_RESPONSE: StreamEvent[] = [
+  { type: "start", id: "msg_2", model: "claude-opus-4" },
+  { type: "blockStart", index: 0, block: { type: "toolUse", id: "tu_1", name: "get_weather" } },
+  { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '{"city":' } },
+  { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '"SF"}' } },
+  { type: "blockEnd", index: 0 },
+  {
+    type: "end",
+    stopReason: "toolUse",
+    usage: { inputTokens: 5, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  },
+];
+
+async function* source(events: StreamEvent[]): AsyncGenerator<StreamEvent> {
+  for (const e of events) yield e;
+}
+
+test("an anthropic response survives the round trip through anthropic egress", async () => {
+  const back = await drain(
+    decodeAnthropic(replay(anthropicStream(source(RESPONSE), "msg_1"))),
+  );
+  expect(collect(back)).toEqual(collect(RESPONSE));
+});
+
+test("tool use survives the round trip through anthropic egress", async () => {
+  const back = await drain(
+    decodeAnthropic(replay(anthropicStream(source(TOOL_RESPONSE), "msg_2"))),
+  );
+  const [a, b] = [collect(back), collect(TOOL_RESPONSE)];
+  expect(a.content).toEqual(b.content);
+  expect(a.stopReason).toBe(b.stopReason);
+});
+
+test("a response survives the round trip through openai egress", async () => {
+  const back = await drain(decodeChat(replay(openaiStream(source(RESPONSE), "msg_1", 0))));
+  const [a, b] = [collect(back), collect(RESPONSE)];
+  expect(a.content).toEqual(b.content);
+  expect(a.stopReason).toBe(b.stopReason);
+  expect(a.usage.inputTokens).toBe(b.usage.inputTokens);
+  expect(a.usage.outputTokens).toBe(b.usage.outputTokens);
+});
+
+test("tool use survives the round trip through openai egress", async () => {
+  const back = await drain(decodeChat(replay(openaiStream(source(TOOL_RESPONSE), "msg_2", 0))));
+  expect(collect(back).content).toEqual(collect(TOOL_RESPONSE).content);
+});
+
+test("a non-streaming anthropic body carries the same content as the stream", () => {
+  const body = anthropicResponse(collect(RESPONSE), "msg_1") as Record<string, any>;
+  expect(body.content).toEqual([{ type: "text", text: "Hello world" }]);
+  expect(body.usage).toEqual({ input_tokens: 10, output_tokens: 2 });
+});
+
+test("a non-streaming openai body carries the same content as the stream", () => {
+  const body = openaiResponse(collect(RESPONSE), "msg_1", 0) as Record<string, any>;
+  expect(body.choices[0].message.content).toBe("Hello world");
+  expect(body.usage.total_tokens).toBe(12);
+});
+
+const REQUEST: ChatRequest = {
+  model: "claude-opus-4",
+  system: [{ type: "text", text: "be terse" }],
+  messages: [
+    { role: "user", content: [{ type: "text", text: "weather in SF?" }] },
+    {
+      role: "assistant",
+      content: [{ type: "toolUse", id: "tu_1", name: "get_weather", input: { city: "SF" } }],
+    },
+    { role: "user", content: [{ type: "toolResult", toolUseId: "tu_1", content: "sunny" }] },
+  ],
+  tools: [
+    {
+      name: "get_weather",
+      description: "look up weather",
+      inputSchema: { type: "object", properties: { city: { type: "string" } } },
+    },
+  ],
+  toolChoice: { type: "auto" },
+  maxTokens: 1024,
+  temperature: 0.5,
+  stream: false,
+};
+
+test("a request survives ingress after anthropic encoding", () => {
+  const { body } = toAnthropicWire(REQUEST, "claude-opus-4", { oauth: false });
+  const back = parseAnthropicRequest(body);
+
+  expect(back.messages).toEqual(REQUEST.messages);
+  expect(back.system).toEqual(REQUEST.system);
+  expect(back.tools).toEqual(REQUEST.tools);
+  expect(back.toolChoice).toEqual(REQUEST.toolChoice);
+  expect(back.maxTokens).toBe(1024);
+  expect(back.temperature).toBe(0.5);
+});
+
+test("a request survives ingress after kimi encoding, minus what that format cannot hold", () => {
+  const { body } = toChatWire(REQUEST, "kimi-k2");
+  const back = parseOpenAIRequest(body);
+
+  // The Chat Completions format carries the system prompt as a message rather
+  // than a top-level field, and ingress puts it back where the IR expects it.
+  expect(back.system).toEqual(REQUEST.system);
+  expect(back.messages).toEqual(REQUEST.messages);
+  expect(back.tools).toEqual(REQUEST.tools);
+  expect(back.toolChoice).toEqual(REQUEST.toolChoice);
+});
+
+test("an image is reported as a degradation rather than silently dropped", () => {
+  const withImage: ChatRequest = {
+    model: "kimi-k2",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what is this?" },
+          { type: "image", mediaType: "image/png", data: "aGk=" },
+        ],
+      },
+    ],
+    stream: false,
+  };
+
+  const { body, degradations } = toChatWire(withImage, "kimi-k2");
+  expect(degradations).toContain("kimi:images-dropped");
+
+  // The text survives; only the image is gone, and the caller was told.
+  const back = parseOpenAIRequest(body);
+  expect(back.messages[0]?.content).toEqual([{ type: "text", text: "what is this?" }]);
+});
+
+test("the responses format round-trips a request through openai encoding", () => {
+  const { body } = toResponsesWire(REQUEST, "gpt-5");
+  // No ingress parser reads the Responses format — the gateway speaks Chat
+  // Completions to clients — so this asserts the encoder's own invariants:
+  // every IR message is represented, and nothing is invented.
+  expect(Array.isArray(body.input)).toBe(true);
+  expect(JSON.stringify(body.input)).toContain("weather in SF?");
+  expect(JSON.stringify(body.input)).toContain("sunny");
+  expect(body.tools?.[0]).toMatchObject({ name: "get_weather" });
+});
+```
+
+- [ ] **Step 7: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 113 pass, 0 fail.
+Expected: 122 pass, 0 fail.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add apps/gateway
-git commit -m "feat(gateway): add anthropic and openai egress renderers"
+git add apps/gateway packages/providers
+git commit -m "feat(gateway): add anthropic and openai egress renderers with round-trip tests"
 ```
 
 ---
@@ -8725,7 +8987,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
 - [ ] **Step 8: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 129 pass, 0 fail.
+Expected: 137 pass, 0 fail.
 
 - [ ] **Step 9: Commit**
 
@@ -9177,7 +9439,7 @@ export function proxyRoutes(deps: ProxyDeps): Elysia {
 - [ ] **Step 7: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 140 pass, 0 fail.
+Expected: 148 pass, 0 fail.
 
 - [ ] **Step 8: Commit**
 
@@ -9576,7 +9838,7 @@ export const anthropicOAuth: OAuthProvider = {
 - [ ] **Step 7: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 155 pass, 0 fail.
+Expected: 162 pass, 0 fail.
 
 - [ ] **Step 8: Commit**
 
@@ -9842,7 +10104,7 @@ export const openaiOAuth: OAuthProvider = {
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 161 pass, 0 fail.
+Expected: 168 pass, 0 fail.
 
 - [ ] **Step 5: Commit**
 
@@ -10201,7 +10463,7 @@ export type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider, PendingFlow 
 - [ ] **Step 6: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 171 pass, 0 fail.
+Expected: 178 pass, 0 fail.
 
 - [ ] **Step 7: Commit**
 
@@ -10527,7 +10789,7 @@ export function createRefresher(deps: RefreshDeps): Refresher {
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 180 pass, 0 fail.
+Expected: 187 pass, 0 fail.
 
 - [ ] **Step 5: Commit**
 
@@ -11141,7 +11403,7 @@ export function connectRoutes(deps: ConnectDeps): Elysia {
 - [ ] **Step 6: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 200 pass, 0 fail.
+Expected: 206 pass, 0 fail.
 
 - [ ] **Step 7: Commit**
 
@@ -11729,7 +11991,7 @@ export function adminRoutes(deps: AdminDeps): Elysia {
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 219 pass, 0 fail.
+Expected: 225 pass, 0 fail.
 
 - [ ] **Step 5: Commit**
 
@@ -11743,7 +12005,7 @@ git commit -m "feat(gateway): add the admin api for credentials, models, keys an
 ## Task 26: Configuration, boot, and the maintenance loop
 
 **Files:**
-- Create: `apps/gateway/src/config.ts`, `apps/gateway/src/app.ts`, `apps/gateway/src/index.ts`, `apps/gateway/src/maintenance.ts`, `.env.example`
+- Create: `apps/gateway/src/config.ts`, `apps/gateway/src/app.ts`, `apps/gateway/src/index.ts`, `apps/gateway/src/maintenance.ts`, `.env.example`, `Dockerfile`, `.dockerignore`
 - Test: `apps/gateway/test/config.test.ts`, `apps/gateway/test/maintenance.test.ts`
 - Modify: root `package.json` (add the `dev` and `start` scripts)
 
@@ -12074,16 +12336,102 @@ Modify the root `package.json` `scripts` block:
   }
 ```
 
-- [ ] **Step 10: Run the tests and the type check**
+- [ ] **Step 10: Write the Dockerfile**
 
-Run: `bun test && bunx tsc --noEmit`
-Expected: 229 pass, 0 fail; no type errors.
+There is no build step — Bun runs TypeScript directly — so this image copies
+source rather than compiled output. The two things it must get right are the
+database and the port.
 
-- [ ] **Step 11: Commit**
+The database lives on a volume. `OMNI_DB_PATH` points at `/data` because a
+SQLite file written into the container's own filesystem is destroyed with the
+container, taking every stored credential with it. `/data` is declared a
+`VOLUME` so that mistake requires opting out rather than forgetting.
+
+`OMNI_HOST` is `0.0.0.0` here and `127.0.0.1` everywhere else. A process bound
+to loopback inside a container is unreachable from outside it, so the default
+that is right for a laptop is wrong here. It is set in the image rather than
+documented, because a container that silently accepts no connections is a bad
+way to learn this.
+
+`.dockerignore` at the repository root:
+
+```
+node_modules
+*.db
+*.db-wal
+*.db-shm
+.env
+.git
+docs
+apps/dashboard/dist
+```
+
+`Dockerfile` at the repository root:
+
+```dockerfile
+FROM oven/bun:1.4-slim
+
+WORKDIR /app
+
+# Manifests first: this layer is cached until a dependency actually changes,
+# so editing source does not reinstall node_modules.
+COPY package.json bun.lock ./
+COPY packages/ir/package.json packages/ir/
+COPY packages/store/package.json packages/store/
+COPY packages/providers/package.json packages/providers/
+COPY apps/gateway/package.json apps/gateway/
+RUN bun install --frozen-lockfile --production
+
+COPY tsconfig.base.json ./
+COPY packages packages
+COPY apps/gateway apps/gateway
+
+ENV OMNI_HOST=0.0.0.0 \
+    OMNI_PORT=8787 \
+    OMNI_DB_PATH=/data/omnigateway.db
+
+# Credentials outlive the container. Without this, `docker rm` deletes them.
+VOLUME /data
+EXPOSE 8787
+
+# OMNI_ENCRYPTION_KEY is deliberately not set. The gateway refuses to boot
+# without it, which is the intended behaviour: baking a key into an image
+# would mean every deployment of it shares one.
+CMD ["bun", "apps/gateway/src/index.ts"]
+```
+
+- [ ] **Step 11: Build the image and verify it refuses to boot without a key**
 
 ```bash
-git add apps/gateway package.json .env.example
-git commit -m "feat(gateway): add configuration, app assembly and the maintenance loop"
+docker build -t omnigateway .
+docker run --rm omnigateway
+```
+
+Expected: exit non-zero, stderr matching `OMNI_ENCRYPTION_KEY`. Then:
+
+```bash
+docker run --rm -p 8787:8787 -v omni-data:/data \
+  -e OMNI_ENCRYPTION_KEY="$(bun -e "console.log(Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64'))")" \
+  omnigateway
+```
+
+Expected: `omnigateway listening on http://0.0.0.0:8787`, and `curl
+localhost:8787/health` returns `{"ok":true}`.
+
+If the build fails on `bun.lock` not existing, run `bun install` at the root
+first — Task 1 creates the lockfile but it is only committed once a dependency
+has been added.
+
+- [ ] **Step 12: Run the tests and the type check**
+
+Run: `bun test && bunx tsc --noEmit`
+Expected: 320 pass, 0 fail; no type errors.
+
+- [ ] **Step 13: Commit**
+
+```bash
+git add apps/gateway package.json .env.example Dockerfile .dockerignore
+git commit -m "feat(gateway): add configuration, app assembly, maintenance loop and dockerfile"
 ```
 
 ---
@@ -12465,7 +12813,7 @@ If the "401 refreshes and retries" test fails with an unexpected call to the stu
 - [ ] **Step 4: Run the whole suite and the type check**
 
 Run: `bun test && bunx tsc --noEmit`
-Expected: 239 pass, 0 fail; no type errors.
+Expected: 330 pass, 0 fail; no type errors.
 
 - [ ] **Step 5: Commit**
 
