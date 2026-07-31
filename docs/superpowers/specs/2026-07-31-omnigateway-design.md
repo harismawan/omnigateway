@@ -486,6 +486,36 @@ minutes.
 Kimi requires stable synthetic device identifiers, persisted in `providerData`;
 its API rejects requests whose device identity changes between calls.
 
+### Client identification
+
+Each provider's OAuth flow uses that provider's public CLI client ID. These are
+not secrets — they ship inside publicly distributed binaries — and no OAuth flow
+against these providers is possible without them. The operator authenticates to
+their own accounts with their own consent.
+
+The gateway identifies itself honestly. It sends
+`User-Agent: omnigateway/<version>` and does **not** send the telemetry and
+client-version headers the official CLIs emit (`X-Stainless-*`, pinned CLI
+version strings, `X-App`). Those headers serve only to make gateway traffic
+indistinguishable from a first-party client, which is not a capability this
+project wants.
+
+Protocol-required headers are still sent, because the APIs reject requests
+without them:
+
+- Anthropic: `anthropic-version: 2023-06-01`, and `anthropic-beta:
+  oauth-2025-04-20` — OAuth-issued tokens are rejected on the Messages API
+  without the beta flag. Additional beta flags are sent only when a request
+  actually uses the corresponding feature.
+- OpenAI: `originator` and the `chatgpt-account-id` workspace binding.
+- Kimi: the `X-Msh-*` device identity block, populated with values the gateway
+  generates for itself rather than copied from another client.
+
+**Operator risk.** Routing subscription OAuth credentials through a proxy may
+conflict with a provider's consumer terms of service independent of how the
+client identifies itself. Identifying honestly makes that visible rather than
+concealed; it does not make it permitted. This is the operator's decision.
+
 ### Token refresh
 
 Refresh is proactive, with a per-provider lead time defaulting to five minutes
