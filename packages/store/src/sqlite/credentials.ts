@@ -100,7 +100,7 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
       const { accessToken, refreshToken, apiKey, idToken, ...meta } = input;
       return {
         ...meta,
-        hasRefreshToken: refreshToken !== null,
+        hasRefreshToken: refreshToken != null,
         createdAt: now,
         updatedAt: now,
       } satisfies Credential;

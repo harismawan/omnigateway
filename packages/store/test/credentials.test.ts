@@ -87,6 +87,72 @@ test("updateSecrets replaces tokens and expiry", async () => {
   db.close();
 });
 
+test("updateSecrets encrypts refreshToken, apiKey, and idToken at rest", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  await repo.updateSecrets(
+    "c1",
+    { refreshToken: "test-token-10", apiKey: "test-token-11", idToken: "test-token-12" },
+    5000,
+  );
+
+  const raw = db
+    .query<{ refresh_token: string; api_key: string; id_token: string }, []>(
+      "SELECT refresh_token, api_key, id_token FROM credentials WHERE id='c1'",
+    )
+    .get();
+  expect(raw?.refresh_token.startsWith("enc:v1:")).toBe(true);
+  expect(raw?.refresh_token).not.toContain("test-token-10");
+  expect(raw?.api_key.startsWith("enc:v1:")).toBe(true);
+  expect(raw?.api_key).not.toContain("test-token-11");
+  expect(raw?.id_token.startsWith("enc:v1:")).toBe(true);
+  expect(raw?.id_token).not.toContain("test-token-12");
+
+  const secrets = await (await repo.get("c1"))?.secrets();
+  expect(secrets?.refreshToken).toBe("test-token-10");
+  expect(secrets?.apiKey).toBe("test-token-11");
+  expect(secrets?.idToken).toBe("test-token-12");
+  db.close();
+});
+
+test("hasRefreshToken reflects presence of a refresh token on create and get", async () => {
+  const { repo, db } = await setup();
+  const created = await repo.create(input);
+  expect(created.hasRefreshToken).toBe(true);
+  const got = await repo.get("c1");
+  expect(got?.hasRefreshToken).toBe(true);
+
+  const createdNoRefresh = await repo.create({ ...input, id: "c2", refreshToken: null });
+  expect(createdNoRefresh.hasRefreshToken).toBe(false);
+  const gotNoRefresh = await repo.get("c2");
+  expect(gotNoRefresh?.hasRefreshToken).toBe(false);
+  db.close();
+});
+
+test("hasRefreshToken treats a JSON-boundary undefined the same as null", async () => {
+  const { repo, db } = await setup();
+  // A real deserialization boundary (e.g. an admin API JSON body) can omit the key
+  // entirely rather than sending an explicit null. JSON.stringify drops `undefined`
+  // properties, so round-tripping through it reproduces that shape without an
+  // unsafe cast.
+  const withOmittedRefresh = JSON.parse(
+    JSON.stringify({ ...input, id: "c3", refreshToken: undefined }),
+  );
+  const created = await repo.create(withOmittedRefresh);
+  expect(created.hasRefreshToken).toBe(false);
+  const got = await repo.get("c3");
+  expect(got?.hasRefreshToken).toBe(false);
+  db.close();
+});
+
+test("null refresh token round-trips as null", async () => {
+  const { repo, db } = await setup();
+  await repo.create({ ...input, refreshToken: null });
+  const secrets = await (await repo.get("c1"))?.secrets();
+  expect(secrets?.refreshToken).toBeNull();
+  db.close();
+});
+
 test("health and quota rows round-trip", async () => {
   const { repo, db } = await setup();
   await repo.create(input);
@@ -141,6 +207,32 @@ test("remove deletes the credential", async () => {
   await repo.create(input);
   await repo.remove("c1");
   expect(await repo.get("c1")).toBeNull();
+  db.close();
+});
+
+test("remove cascades to health and quota rows", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  await repo.saveHealth([
+    {
+      credentialId: "c1",
+      model: "claude-opus-4",
+      breakerState: "closed",
+      consecutiveFailures: 0,
+      openedAt: null,
+      rateLimitedUntil: null,
+      ewmaTtftMs: null,
+      lastUsedAt: null,
+    },
+  ]);
+  await repo.saveQuota([
+    { credentialId: "c1", windowType: "fiveHour", startsAt: 10, used: 5, limit: 100 },
+  ]);
+
+  await repo.remove("c1");
+
+  expect(await repo.listHealth()).toHaveLength(0);
+  expect(await repo.listQuota()).toHaveLength(0);
   db.close();
 });
 
