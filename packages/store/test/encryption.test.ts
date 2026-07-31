@@ -40,11 +40,23 @@ test("malformed ciphertext is rejected", async () => {
   expect(decrypt(key, "not-ciphertext")).rejects.toThrow("malformed ciphertext");
 });
 
+test("non-hex ciphertext body is rejected", async () => {
+  const key = await deriveKey(SECRET);
+  const parts = (await encrypt(key, "value")).split(":");
+  parts[3] = "zz".repeat(16);
+  await expect(decrypt(key, parts.join(":"))).rejects.toThrow("malformed ciphertext");
+});
+
 test("isEncrypted distinguishes ciphertext from plaintext", async () => {
   const key = await deriveKey(SECRET);
   expect(isEncrypted(await encrypt(key, "x"))).toBe(true);
   expect(isEncrypted("sk-plain-value")).toBe(false);
   expect(isEncrypted("")).toBe(false);
+});
+
+test("isEncrypted fails safe on non-string input", () => {
+  expect(isEncrypted(null as unknown as string)).toBe(false);
+  expect(isEncrypted(undefined as unknown as string)).toBe(false);
 });
 
 test("round-trips empty and multi-byte values", async () => {

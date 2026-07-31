@@ -42,13 +42,29 @@ export async function encrypt(key: CryptoKey, plaintext: string): Promise<string
   return [PREFIX, hex(iv), hex(body), hex(tag)].join(":");
 }
 
+const HEX = /^[0-9a-f]*$/;
+
+function isHex(s: string): boolean {
+  return s.length % 2 === 0 && HEX.test(s);
+}
+
 export async function decrypt(key: CryptoKey, value: string): Promise<string> {
   const parts = value.split(":");
   const [scheme, version, ivHex, bodyHex, tagHex] = parts;
-  if (parts.length !== 5 || scheme !== "enc" || version !== "v1" || !ivHex || !tagHex) {
+  if (
+    parts.length !== 5 ||
+    scheme !== "enc" ||
+    version !== "v1" ||
+    !ivHex ||
+    !tagHex ||
+    bodyHex === undefined ||
+    !isHex(ivHex) ||
+    !isHex(bodyHex) ||
+    !isHex(tagHex)
+  ) {
     throw new Error("malformed ciphertext");
   }
-  const sealed = new Uint8Array([...unhex(bodyHex ?? ""), ...unhex(tagHex)]);
+  const sealed = new Uint8Array([...unhex(bodyHex), ...unhex(tagHex)]);
   const plain = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: unhex(ivHex), tagLength: TAG_BYTES * 8 },
     key,
@@ -58,6 +74,7 @@ export async function decrypt(key: CryptoKey, value: string): Promise<string> {
 }
 
 export function isEncrypted(value: string): boolean {
+  if (typeof value !== "string") return false;
   return value.startsWith(`${PREFIX}:`);
 }
 
