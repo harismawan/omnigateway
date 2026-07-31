@@ -5859,3 +5859,970 @@ git commit -m "feat(gateway): add candidate filtering and weighted scoring"
 ```
 
 ---
+
+## Task 14: Health tracking and the circuit breaker
+
+**Files:**
+- Create: `apps/gateway/src/router/breaker.ts`
+- Test: `apps/gateway/test/router/breaker.test.ts`
+
+**Interfaces:**
+- Consumes: `CredentialHealth`, `Settings` (Task 5); `ErrorCode` (Task 2).
+- Produces:
+  - `recordSuccess(current, opts): CredentialHealth`
+  - `recordFailure(current, opts): CredentialHealth`
+  - `blankHealth(credentialId, model): CredentialHealth`
+  - `PENALTY: Readonly<Record<ErrorCode, "none" | "soft" | "hard">>`
+
+Both record functions are pure: they take the prior health row and return the next one. Dispatch (Task 15) persists whatever they return. `now` and any jitter are passed in, never read from the environment.
+
+**Penalty classes.** Not every failure means the credential is bad.
+- `hard` — the credential itself failed (`AUTH`, `UPSTREAM`, `TIMEOUT`, `NETWORK`). Increments the failure count and can open the breaker.
+- `soft` — the credential is fine but temporarily unusable (`RATE_LIMIT`, `QUOTA_EXHAUSTED`, `OVERLOADED`). Sets `rateLimitedUntil` and leaves the breaker alone.
+- `none` — the request was at fault (`BAD_REQUEST`, `CONTENT_FILTER`, `CAPABILITY_MISMATCH`). Records nothing; the next candidate is tried with no health change.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/gateway/test/router/breaker.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { DEFAULT_SETTINGS } from "@omni/store";
+import { PENALTY, blankHealth, recordFailure, recordSuccess } from "../../src/router/breaker.ts";
+import { health } from "../helpers/fixtures.ts";
+
+const NOW = 1_000_000;
+const opts = { settings: DEFAULT_SETTINGS, now: NOW, jitter: 0 };
+
+test("blank health starts closed with no failures", () => {
+  const h = blankHealth("c1", "m");
+  expect(h).toEqual({
+    credentialId: "c1",
+    model: "m",
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+    rateLimitedUntil: null,
+    ewmaTtftMs: null,
+    lastUsedAt: null,
+  });
+});
+
+test("success clears failures and closes the breaker", () => {
+  const next = recordSuccess(
+    health({ breakerState: "open", consecutiveFailures: 5, openedAt: NOW - 1000 }),
+    { ...opts, ttftMs: 400 },
+  );
+  expect(next.breakerState).toBe("closed");
+  expect(next.consecutiveFailures).toBe(0);
+  expect(next.openedAt).toBeNull();
+  expect(next.lastUsedAt).toBe(NOW);
+});
+
+test("success clears a stale rate-limit window", () => {
+  const next = recordSuccess(health({ rateLimitedUntil: NOW + 5000 }), { ...opts, ttftMs: 100 });
+  expect(next.rateLimitedUntil).toBeNull();
+});
+
+test("first latency sample seeds the ewma directly", () => {
+  expect(recordSuccess(health(), { ...opts, ttftMs: 500 }).ewmaTtftMs).toBe(500);
+});
+
+test("subsequent latency samples blend at alpha 0.3", () => {
+  const next = recordSuccess(health({ ewmaTtftMs: 1000 }), { ...opts, ttftMs: 500 });
+  expect(next.ewmaTtftMs).toBeCloseTo(850, 5);
+});
+
+test("a success with no measured ttft leaves the ewma untouched", () => {
+  expect(recordSuccess(health({ ewmaTtftMs: 700 }), { ...opts, ttftMs: null }).ewmaTtftMs).toBe(700);
+});
+
+test("hard failures accumulate without opening below the threshold", () => {
+  const next = recordFailure(health(), { ...opts, code: "UPSTREAM" });
+  expect(next.consecutiveFailures).toBe(1);
+  expect(next.breakerState).toBe("closed");
+});
+
+test("the breaker opens once the threshold is reached", () => {
+  const next = recordFailure(health({ consecutiveFailures: 2 }), { ...opts, code: "UPSTREAM" });
+  expect(next.consecutiveFailures).toBe(3);
+  expect(next.breakerState).toBe("open");
+  expect(next.openedAt).toBe(NOW);
+});
+
+test("a failure on a half-open probe reopens immediately", () => {
+  const next = recordFailure(health({ breakerState: "halfOpen", consecutiveFailures: 1 }), {
+    ...opts,
+    code: "NETWORK",
+  });
+  expect(next.breakerState).toBe("open");
+  expect(next.openedAt).toBe(NOW);
+});
+
+test("an auth failure opens the breaker on the first occurrence", () => {
+  const next = recordFailure(health(), { ...opts, code: "AUTH" });
+  expect(next.breakerState).toBe("open");
+  expect(next.consecutiveFailures).toBe(1);
+});
+
+test("a rate limit sets a window without touching the breaker", () => {
+  const next = recordFailure(health(), { ...opts, code: "RATE_LIMIT", retryAfterMs: 30_000 });
+  expect(next.rateLimitedUntil).toBe(NOW + 30_000);
+  expect(next.breakerState).toBe("closed");
+  expect(next.consecutiveFailures).toBe(0);
+});
+
+test("a rate limit with no retry-after falls back to the default window", () => {
+  const next = recordFailure(health(), { ...opts, code: "RATE_LIMIT" });
+  expect(next.rateLimitedUntil).toBe(NOW + 60_000);
+});
+
+test("jitter spreads the rate-limit window so credentials do not resume in lockstep", () => {
+  const a = recordFailure(health(), { ...opts, code: "RATE_LIMIT", retryAfterMs: 10_000, jitter: 0 });
+  const b = recordFailure(health(), { ...opts, code: "RATE_LIMIT", retryAfterMs: 10_000, jitter: 1 });
+  expect(b.rateLimitedUntil as number).toBeGreaterThan(a.rateLimitedUntil as number);
+  expect((b.rateLimitedUntil as number) - (a.rateLimitedUntil as number)).toBeLessThanOrEqual(2_000);
+});
+
+test("quota exhaustion parks the credential for an hour", () => {
+  const next = recordFailure(health(), { ...opts, code: "QUOTA_EXHAUSTED" });
+  expect(next.rateLimitedUntil).toBe(NOW + 3_600_000);
+});
+
+test("request-level errors change nothing", () => {
+  const before = health({ consecutiveFailures: 1, ewmaTtftMs: 300 });
+  expect(recordFailure(before, { ...opts, code: "BAD_REQUEST" })).toEqual(before);
+  expect(recordFailure(before, { ...opts, code: "CAPABILITY_MISMATCH" })).toEqual(before);
+  expect(recordFailure(before, { ...opts, code: "CONTENT_FILTER" })).toEqual(before);
+});
+
+test("every error code has a penalty class", () => {
+  for (const cls of Object.values(PENALTY)) {
+    expect(["none", "soft", "hard"]).toContain(cls);
+  }
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/gateway/test/router/breaker.test.ts`
+Expected: FAIL — cannot resolve `../../src/router/breaker.ts`.
+
+- [ ] **Step 3: Write the breaker**
+
+`apps/gateway/src/router/breaker.ts`:
+
+```ts
+import type { ErrorCode } from "@omni/ir";
+import type { CredentialHealth, Settings } from "@omni/store";
+
+export type Penalty = "none" | "soft" | "hard";
+
+/**
+ * How a failure reflects on the credential.
+ *
+ * `hard` blames the credential, `soft` parks it briefly, `none` blames the
+ * request and leaves health untouched so a malformed prompt cannot walk the
+ * whole pool into an open breaker.
+ */
+export const PENALTY: Readonly<Record<ErrorCode, Penalty>> = {
+  AUTH: "hard",
+  UPSTREAM: "hard",
+  TIMEOUT: "hard",
+  NETWORK: "hard",
+  MODEL_UNAVAILABLE: "hard",
+  RATE_LIMIT: "soft",
+  QUOTA_EXHAUSTED: "soft",
+  OVERLOADED: "soft",
+  BAD_REQUEST: "none",
+  CONTENT_FILTER: "none",
+  CAPABILITY_MISMATCH: "none",
+  NO_CANDIDATES: "none",
+  ALL_CANDIDATES_FAILED: "none",
+  INTERNAL: "none",
+};
+
+/** Weight of the newest latency sample. Low enough to ride out one slow call. */
+const EWMA_ALPHA = 0.3;
+const DEFAULT_RATE_LIMIT_MS = 60_000;
+const QUOTA_PARK_MS = 3_600_000;
+const MAX_JITTER_MS = 2_000;
+
+export function blankHealth(credentialId: string, model: string): CredentialHealth {
+  return {
+    credentialId,
+    model,
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+    rateLimitedUntil: null,
+    ewmaTtftMs: null,
+    lastUsedAt: null,
+  };
+}
+
+export function recordSuccess(
+  current: CredentialHealth,
+  opts: { settings: Settings; now: number; ttftMs: number | null },
+): CredentialHealth {
+  const ewma =
+    opts.ttftMs === null
+      ? current.ewmaTtftMs
+      : current.ewmaTtftMs === null
+        ? opts.ttftMs
+        : current.ewmaTtftMs * (1 - EWMA_ALPHA) + opts.ttftMs * EWMA_ALPHA;
+
+  return {
+    ...current,
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+    rateLimitedUntil: null,
+    ewmaTtftMs: ewma,
+    lastUsedAt: opts.now,
+  };
+}
+
+export function recordFailure(
+  current: CredentialHealth,
+  opts: {
+    settings: Settings;
+    now: number;
+    code: ErrorCode;
+    retryAfterMs?: number;
+    /** 0..1, injected so the jittered window stays testable. */
+    jitter?: number;
+  },
+): CredentialHealth {
+  const penalty = PENALTY[opts.code];
+  if (penalty === "none") return current;
+
+  if (penalty === "soft") {
+    const base =
+      opts.code === "QUOTA_EXHAUSTED"
+        ? QUOTA_PARK_MS
+        : (opts.retryAfterMs ?? DEFAULT_RATE_LIMIT_MS);
+    // Jitter keeps a pool that rate-limited together from resuming together.
+    const until = opts.now + base + Math.round((opts.jitter ?? 0) * MAX_JITTER_MS);
+    return { ...current, rateLimitedUntil: until, lastUsedAt: opts.now };
+  }
+
+  const failures = current.consecutiveFailures + 1;
+  // A bad token will not fix itself, and a failed probe means the credential is
+  // still down; both open immediately rather than burning the threshold.
+  const open =
+    opts.code === "AUTH" ||
+    current.breakerState === "halfOpen" ||
+    failures >= opts.settings.breakerThreshold;
+
+  return {
+    ...current,
+    consecutiveFailures: failures,
+    breakerState: open ? "open" : "closed",
+    openedAt: open ? opts.now : current.openedAt,
+    lastUsedAt: opts.now,
+  };
+}
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 55 pass, 0 fail.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add circuit breaker and health tracking"
+```
+
+---
+
+## Task 15: Dispatch — failover, the commit point, and health writeback
+
+**Files:**
+- Create: `apps/gateway/src/dispatch/classify.ts`, `apps/gateway/src/dispatch/attempt.ts`, `apps/gateway/src/dispatch/index.ts`
+- Test: `apps/gateway/test/dispatch/classify.test.ts`, `apps/gateway/test/dispatch/dispatch.test.ts`
+
+**Interfaces:**
+- Consumes: `rank`, `resolveModel`, `buildSnapshot`, `healthKey`, `Candidate` (Tasks 12-13); `recordSuccess`, `recordFailure`, `blankHealth`, `PENALTY` (Task 14); `ADAPTERS`, `ProviderAdapter` (Task 11); `Store`, `CredentialView` (Tasks 5-7).
+- Produces:
+  - `classify(error): { code: ErrorCode; retryAfterMs?: number }`
+  - `DispatchDeps = { store; adapters; now: () => number; rand: () => number; refresh: (c: CredentialView) => Promise<CredentialSecrets> }`
+  - `dispatch(request, deps, signal): Promise<DispatchOutcome>` where `DispatchOutcome = { events: AsyncGenerator<StreamEvent>; log: () => RequestLog }`
+
+**The commit point.** Failover is only possible while nothing has reached the client. Dispatch treats the first `blockDelta` as the commit point: before it, a retryable error advances to the next candidate invisibly; after it, the error is forwarded as an `error` event in the live stream, because the bytes already sent cannot be recalled. The `start` event is deliberately *not* the commit point — providers routinely return 200 and a `message_start` before failing.
+
+**Refresh is injected.** `deps.refresh` is supplied by Task 23. Dispatch only knows that an expired OAuth credential needs one call before use.
+
+- [ ] **Step 1: Write the failing classify test**
+
+`apps/gateway/test/dispatch/classify.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { classify } from "../../src/dispatch/classify.ts";
+
+test("passes a gateway error through with its retry hint", () => {
+  const e = new GatewayError("RATE_LIMIT", "slow down", { retryAfterMs: 5000 });
+  expect(classify(e)).toEqual({ code: "RATE_LIMIT", retryAfterMs: 5000 });
+});
+
+test("maps an abort to TIMEOUT", () => {
+  const e = new DOMException("aborted", "AbortError");
+  expect(classify(e).code).toBe("TIMEOUT");
+});
+
+test("maps a fetch failure to NETWORK", () => {
+  expect(classify(new TypeError("fetch failed")).code).toBe("NETWORK");
+});
+
+test("maps connection errors to NETWORK", () => {
+  expect(classify(new Error("ECONNREFUSED 1.2.3.4:443")).code).toBe("NETWORK");
+  expect(classify(new Error("Unable to connect")).code).toBe("NETWORK");
+});
+
+test("falls back to INTERNAL for anything unrecognised", () => {
+  expect(classify(new Error("something odd")).code).toBe("INTERNAL");
+  expect(classify("a string").code).toBe("INTERNAL");
+});
+```
+
+- [ ] **Step 2: Write the failing dispatch test**
+
+`apps/gateway/test/dispatch/dispatch.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError, type ChatRequest, type StreamEvent } from "@omni/ir";
+import type { ProviderAdapter } from "@omni/providers";
+import { deriveKey, createStore } from "@omni/store";
+import type { Store } from "@omni/store";
+import { dispatch } from "../../src/dispatch/index.ts";
+
+const req: ChatRequest = {
+  model: "fast",
+  messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  stream: true,
+};
+
+async function* textStream(text: string): AsyncGenerator<StreamEvent> {
+  yield { type: "start", id: "m", model: "claude-opus-4" };
+  yield { type: "blockStart", index: 0, block: { type: "text" } };
+  yield { type: "blockDelta", index: 0, delta: { type: "text", text } };
+  yield { type: "blockEnd", index: 0 };
+  yield {
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  };
+}
+
+/** Records every call so a test can assert which credential was used. */
+function stubAdapter(
+  behaviour: (call: number) => AsyncGenerator<StreamEvent> | Error,
+): ProviderAdapter & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    id: "anthropic",
+    capabilities: { tools: true, images: true, reasoning: true },
+    calls,
+    async send(r) {
+      calls.push(r.credentials.accessToken ?? "none");
+      const result = behaviour(calls.length);
+      if (result instanceof Error) throw result;
+      return { events: result, degradations: [] };
+    },
+  };
+}
+
+async function seeded(credentials: number): Promise<Store> {
+  const store = await createStore({
+    path: ":memory:",
+    encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
+  });
+  for (let i = 1; i <= credentials; i++) {
+    await store.credentials.create({
+      id: `c${i}`,
+      provider: "anthropic",
+      label: `c${i}`,
+      authType: "oauth",
+      enabled: true,
+      tier: 1,
+      weight: 1,
+      expiresAt: null,
+      accountEmail: null,
+      providerData: {},
+      accessToken: `test-token-${i}`,
+      refreshToken: `test-refresh-${i}`,
+      apiKey: null,
+      idToken: null,
+    });
+  }
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  return store;
+}
+
+function deps(store: Store, adapter: ProviderAdapter) {
+  return {
+    store,
+    adapters: { anthropic: adapter, openai: adapter, kimi: adapter },
+    now: () => 1_000_000,
+    rand: () => 0,
+    refresh: async () => ({
+      accessToken: "refreshed",
+      refreshToken: "r",
+      apiKey: null,
+      idToken: null,
+    }),
+  };
+}
+
+async function drain(events: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
+  const out: StreamEvent[] = [];
+  for await (const e of events) out.push(e);
+  return out;
+}
+
+test("streams a successful response and logs it", async () => {
+  const store = await seeded(1);
+  const adapter = stubAdapter(() => textStream("hello"));
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  const log = outcome.log();
+  expect(log.status).toBe(200);
+  expect(log.attempts).toBe(1);
+  expect(log.inputTokens).toBe(10);
+  expect(log.resolvedModel).toBe("claude-opus-4");
+  store.close();
+});
+
+test("fails over to the next credential before the commit point", async () => {
+  const store = await seeded(2);
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("UPSTREAM", "boom") : textStream("recovered"),
+  );
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(adapter.calls).toHaveLength(2);
+  expect(events.some((e) => e.type === "blockDelta")).toBe(true);
+  expect(outcome.log().attempts).toBe(2);
+  expect(outcome.log().status).toBe(200);
+  store.close();
+});
+
+test("a failure after the commit point surfaces as an error event, not a retry", async () => {
+  const store = await seeded(2);
+  const adapter = stubAdapter((call) => {
+    if (call > 1) return textStream("should not be reached");
+    return (async function* () {
+      yield { type: "start", id: "m", model: "claude-opus-4" } as StreamEvent;
+      yield { type: "blockStart", index: 0, block: { type: "text" } } as StreamEvent;
+      yield { type: "blockDelta", index: 0, delta: { type: "text", text: "partial" } } as StreamEvent;
+      throw new GatewayError("UPSTREAM", "died mid-stream");
+    })();
+  });
+
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(adapter.calls).toHaveLength(1);
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(outcome.log().status).toBe(502);
+  store.close();
+});
+
+test("a non-retryable error stops immediately without trying other credentials", async () => {
+  const store = await seeded(3);
+  const adapter = stubAdapter(() => new GatewayError("BAD_REQUEST", "malformed"));
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(adapter.calls).toHaveLength(1);
+  expect(events[0]).toMatchObject({ type: "error", code: "BAD_REQUEST" });
+  expect(outcome.log().status).toBe(400);
+  store.close();
+});
+
+test("stops after maxAttempts even with candidates remaining", async () => {
+  const store = await seeded(5);
+  await store.config.putSettings({ maxAttempts: 2 });
+  const adapter = stubAdapter(() => new GatewayError("UPSTREAM", "boom"));
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  await drain(outcome.events);
+
+  expect(adapter.calls).toHaveLength(2);
+  expect(outcome.log().errorCode).toBe("ALL_CANDIDATES_FAILED");
+  store.close();
+});
+
+test("emits NO_CANDIDATES when the pool is empty", async () => {
+  const store = await seeded(0);
+  const adapter = stubAdapter(() => textStream("x"));
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(events[0]).toMatchObject({ type: "error", code: "NO_CANDIDATES" });
+  expect(outcome.log().status).toBe(503);
+  store.close();
+});
+
+test("a hard failure opens the breaker and persists it", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ maxAttempts: 1, breakerThreshold: 1 });
+  const adapter = stubAdapter(() => new GatewayError("UPSTREAM", "boom"));
+  await drain((await dispatch(req, deps(store, adapter), new AbortController().signal)).events);
+
+  const rows = await store.credentials.listHealth();
+  expect(rows[0]?.breakerState).toBe("open");
+  expect(rows[0]?.consecutiveFailures).toBe(1);
+  store.close();
+});
+
+test("a rate limit parks the credential without opening the breaker", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ maxAttempts: 1 });
+  const adapter = stubAdapter(
+    () => new GatewayError("RATE_LIMIT", "slow down", { retryAfterMs: 30_000 }),
+  );
+  await drain((await dispatch(req, deps(store, adapter), new AbortController().signal)).events);
+
+  const rows = await store.credentials.listHealth();
+  expect(rows[0]?.breakerState).toBe("closed");
+  expect(rows[0]?.rateLimitedUntil).toBe(1_030_000);
+  store.close();
+});
+
+test("a success records latency and marks the credential used", async () => {
+  const store = await seeded(1);
+  const adapter = stubAdapter(() => textStream("hi"));
+  await drain((await dispatch(req, deps(store, adapter), new AbortController().signal)).events);
+
+  const rows = await store.credentials.listHealth();
+  expect(rows[0]?.lastUsedAt).toBe(1_000_000);
+  expect(rows[0]?.ewmaTtftMs).not.toBeNull();
+  store.close();
+});
+
+test("refreshes an expired oauth credential before calling the adapter", async () => {
+  const store = await seeded(1);
+  await store.credentials.update("c1", { expiresAt: 500_000 });
+  const adapter = stubAdapter(() => textStream("hi"));
+  await drain((await dispatch(req, deps(store, adapter), new AbortController().signal)).events);
+
+  expect(adapter.calls[0]).toBe("refreshed");
+  store.close();
+});
+
+test("collects the stream for a non-streaming request", async () => {
+  const store = await seeded(1);
+  const adapter = stubAdapter(() => textStream("hello"));
+  const outcome = await dispatch(
+    { ...req, stream: false },
+    deps(store, adapter),
+    new AbortController().signal,
+  );
+  const events = await drain(outcome.events);
+  // The caller still receives events; egress folds them with collect().
+  expect(events.filter((e) => e.type === "blockDelta")).toHaveLength(1);
+  store.close();
+});
+
+test("the log records the excluded candidates and their reasons", async () => {
+  const store = await seeded(2);
+  await store.credentials.update("c1", { enabled: false });
+  const adapter = stubAdapter(() => textStream("hi"));
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  await drain(outcome.events);
+
+  expect(outcome.log().degradations).toContain("excluded:c1:disabled");
+  store.close();
+});
+```
+
+- [ ] **Step 3: Run both tests to verify they fail**
+
+Run: `bun test apps/gateway/test/dispatch`
+Expected: FAIL — cannot resolve `../../src/dispatch/classify.ts`.
+
+- [ ] **Step 4: Write the classifier**
+
+`apps/gateway/src/dispatch/classify.ts`:
+
+```ts
+import { type ErrorCode, GatewayError } from "@omni/ir";
+
+/** Substrings that identify a transport failure across Bun and undici. */
+const NETWORK_HINTS = [
+  "fetch failed",
+  "econnrefused",
+  "econnreset",
+  "enotfound",
+  "etimedout",
+  "socket hang up",
+  "unable to connect",
+];
+
+/** Turns anything thrown during an attempt into a canonical code. */
+export function classify(error: unknown): { code: ErrorCode; retryAfterMs?: number } {
+  if (error instanceof GatewayError) {
+    return { code: error.code, retryAfterMs: error.retryAfterMs };
+  }
+
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return { code: "TIMEOUT" };
+  }
+
+  if (error instanceof Error) {
+    const text = `${error.name} ${error.message}`.toLowerCase();
+    if (NETWORK_HINTS.some((hint) => text.includes(hint))) return { code: "NETWORK" };
+  }
+
+  return { code: "INTERNAL" };
+}
+```
+
+- [ ] **Step 5: Write the single-attempt runner**
+
+`apps/gateway/src/dispatch/attempt.ts`:
+
+```ts
+import { GatewayError, type StreamEvent } from "@omni/ir";
+import type { ProviderAdapter } from "@omni/providers";
+import type { CredentialSecrets, CredentialView } from "@omni/store";
+import type { Candidate } from "../router/index.ts";
+
+export type AttemptResult = {
+  events: AsyncGenerator<StreamEvent, void, undefined>;
+  degradations: string[];
+};
+
+/**
+ * Runs one candidate.
+ *
+ * Refreshes an OAuth token that is expired or within the lead window, then
+ * hands the adapter its credentials. Throws before yielding if the upstream
+ * rejects the request; the caller decides whether that is retryable.
+ */
+export async function attempt(opts: {
+  candidate: Candidate;
+  request: Parameters<ProviderAdapter["send"]>[0]["request"];
+  adapter: ProviderAdapter;
+  now: number;
+  signal: AbortSignal;
+  refresh: (credential: CredentialView) => Promise<CredentialSecrets>;
+  /** Refresh this far before actual expiry so a long request cannot expire mid-flight. */
+  refreshLeadMs: number;
+}): Promise<AttemptResult> {
+  const { candidate, adapter, now, signal, refresh, refreshLeadMs } = opts;
+  const credential = candidate.credential;
+
+  let secrets = await credential.secrets();
+
+  const stale =
+    credential.authType === "oauth" &&
+    credential.expiresAt !== null &&
+    credential.expiresAt - refreshLeadMs <= now;
+
+  if (stale) {
+    if (!credential.hasRefreshToken) {
+      throw new GatewayError("AUTH", "credential expired with no refresh token", {
+        provider: credential.provider,
+      });
+    }
+    secrets = await refresh(credential);
+  }
+
+  return adapter.send({
+    request: opts.request,
+    model: candidate.target.model,
+    credentials: {
+      accessToken: secrets.accessToken,
+      apiKey: secrets.apiKey,
+      providerData: credential.providerData,
+    },
+    signal,
+  });
+}
+```
+
+- [ ] **Step 6: Write dispatch**
+
+`apps/gateway/src/dispatch/index.ts`:
+
+```ts
+import {
+  type ChatRequest,
+  GatewayError,
+  HTTP_STATUS,
+  RETRYABLE,
+  type StreamEvent,
+} from "@omni/ir";
+import type { ProviderAdapter } from "@omni/providers";
+import type { CredentialSecrets, CredentialView, ProviderId, RequestLog, Store } from "@omni/store";
+import { blankHealth, recordFailure, recordSuccess } from "../router/breaker.ts";
+import { buildSnapshot, healthKey, rank, resolveModel, type Candidate } from "../router/index.ts";
+import { attempt } from "./attempt.ts";
+import { classify } from "./classify.ts";
+
+/** Refresh this far ahead of expiry so a long stream cannot outlive its token. */
+const REFRESH_LEAD_MS = 120_000;
+
+export type DispatchDeps = {
+  store: Store;
+  adapters: Readonly<Record<ProviderId, ProviderAdapter>>;
+  now: () => number;
+  rand: () => number;
+  refresh: (credential: CredentialView) => Promise<CredentialSecrets>;
+};
+
+export type DispatchOutcome = {
+  events: AsyncGenerator<StreamEvent, void, undefined>;
+  /** Valid once the stream is drained. Egress writes it to the usage repo. */
+  log: () => RequestLog;
+};
+
+export async function dispatch(
+  request: ChatRequest,
+  deps: DispatchDeps,
+  signal: AbortSignal,
+): Promise<DispatchOutcome> {
+  const startedAt = deps.now();
+  const snapshot = await buildSnapshot(deps.store, startedAt);
+
+  const log: RequestLog = {
+    id: crypto.randomUUID(),
+    at: startedAt,
+    apiKeyId: null,
+    requestedModel: request.model,
+    resolvedProvider: null,
+    resolvedModel: null,
+    credentialId: null,
+    attempts: 0,
+    status: 200,
+    errorCode: null,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: null,
+    durationMs: 0,
+    costUsd: 0,
+    degradations: [],
+  };
+
+  const fail = (code: GatewayError["code"], message: string): DispatchOutcome => {
+    log.errorCode = code;
+    log.status = HTTP_STATUS[code];
+    log.durationMs = deps.now() - startedAt;
+    return {
+      events: (async function* () {
+        yield { type: "error", code, message, retryable: RETRYABLE[code] } as StreamEvent;
+      })(),
+      log: () => log,
+    };
+  };
+
+  let model;
+  try {
+    model = resolveModel(request.model, snapshot);
+  } catch (error) {
+    const { code } = classify(error);
+    return fail(code, error instanceof Error ? error.message : "unresolvable model");
+  }
+
+  const { candidates, excluded } = rank({
+    request,
+    model,
+    snapshot,
+    now: startedAt,
+    rand: deps.rand(),
+  });
+
+  for (const e of excluded) {
+    log.degradations.push(`excluded:${e.credentialId}:${e.reason}`);
+  }
+
+  if (candidates.length === 0) {
+    return fail("NO_CANDIDATES", `no eligible credential for model "${request.model}"`);
+  }
+
+  const maxAttempts = Math.min(snapshot.settings.maxAttempts, candidates.length);
+
+  const persistHealth = async (
+    candidate: Candidate,
+    next: ReturnType<typeof recordSuccess>,
+  ): Promise<void> => {
+    await deps.store.credentials.saveHealth([next]);
+  };
+
+  const healthFor = (candidate: Candidate) =>
+    snapshot.health.get(healthKey(candidate.credential.id, candidate.target.model)) ??
+    blankHealth(candidate.credential.id, candidate.target.model);
+
+  async function* run(): AsyncGenerator<StreamEvent, void, undefined> {
+    let lastError: GatewayError | null = null;
+
+    for (let i = 0; i < maxAttempts; i++) {
+      const candidate = candidates[i] as Candidate;
+      log.attempts = i + 1;
+      log.credentialId = candidate.credential.id;
+      log.resolvedProvider = candidate.target.provider;
+      log.resolvedModel = candidate.target.model;
+
+      // Reset per-attempt: a failed attempt's partial usage must not leak into
+      // the next one's log.
+      log.inputTokens = 0;
+      log.outputTokens = 0;
+      log.cacheReadTokens = 0;
+      log.cacheWriteTokens = 0;
+      log.ttftMs = null;
+
+      let committed = false;
+
+      try {
+        const result = await attempt({
+          candidate,
+          request,
+          adapter: deps.adapters[candidate.target.provider],
+          now: deps.now(),
+          signal,
+          refresh: deps.refresh,
+          refreshLeadMs: REFRESH_LEAD_MS,
+        });
+
+        for (const d of result.degradations) log.degradations.push(d);
+
+        for await (const event of result.events) {
+          if (event.type === "blockDelta" && !committed) {
+            // Commit point: the client is about to see bytes, so from here on
+            // failover is impossible and errors must be forwarded in-stream.
+            committed = true;
+            log.ttftMs = deps.now() - startedAt;
+          }
+
+          if (event.type === "end") {
+            log.inputTokens = event.usage.inputTokens;
+            log.outputTokens = event.usage.outputTokens;
+            log.cacheReadTokens = event.usage.cacheReadTokens;
+            log.cacheWriteTokens = event.usage.cacheWriteTokens;
+            log.costUsd = priceOf(candidate, event.usage);
+          }
+
+          if (event.type === "error") {
+            // An in-stream error before commit is retryable like a thrown one.
+            if (!committed && RETRYABLE[event.code]) {
+              throw new GatewayError(event.code, event.message);
+            }
+            committed = true;
+          }
+
+          yield event;
+        }
+
+        await persistHealth(
+          candidate,
+          recordSuccess(healthFor(candidate), {
+            settings: snapshot.settings,
+            now: deps.now(),
+            ttftMs: log.ttftMs,
+          }),
+        );
+        log.status = 200;
+        log.errorCode = null;
+        log.durationMs = deps.now() - startedAt;
+        return;
+      } catch (error) {
+        const { code, retryAfterMs } = classify(error);
+        const message = error instanceof Error ? error.message : "attempt failed";
+        lastError = new GatewayError(code, message, { retryAfterMs });
+
+        await persistHealth(
+          candidate,
+          recordFailure(healthFor(candidate), {
+            settings: snapshot.settings,
+            now: deps.now(),
+            code,
+            retryAfterMs,
+            jitter: deps.rand(),
+          }),
+        );
+
+        if (committed) {
+          // Bytes already went out; the client gets an in-band error and the
+          // stream ends there.
+          log.status = HTTP_STATUS[code];
+          log.errorCode = code;
+          log.durationMs = deps.now() - startedAt;
+          yield { type: "error", code, message, retryable: false };
+          return;
+        }
+
+        if (!RETRYABLE[code]) break;
+      }
+    }
+
+    const code = lastError !== null && !RETRYABLE[lastError.code]
+      ? lastError.code
+      : "ALL_CANDIDATES_FAILED";
+    log.status = HTTP_STATUS[code];
+    log.errorCode = code;
+    log.durationMs = deps.now() - startedAt;
+    yield {
+      type: "error",
+      code,
+      message: lastError?.message ?? "all candidates failed",
+      retryable: false,
+    };
+  }
+
+  return { events: run(), log: () => log };
+}
+
+function priceOf(
+  candidate: Candidate,
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number },
+): number {
+  const p = candidate.target.costPerMTok;
+  const cacheRate = p.cacheRead ?? p.input * 0.1;
+  return (
+    (usage.inputTokens * p.input +
+      usage.outputTokens * p.output +
+      usage.cacheReadTokens * cacheRate) /
+    1_000_000
+  );
+}
+```
+
+- [ ] **Step 7: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 72 pass, 0 fail.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add dispatch with failover and commit-point handling"
+```
+
+---
