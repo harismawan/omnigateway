@@ -1912,3 +1912,2690 @@ git commit -m "feat(store): add sqlite credential repository with lazy decryptio
 ```
 
 ---
+
+## Task 7: Config, key, and usage repositories
+
+**Files:**
+- Create: `packages/store/src/sqlite/config.ts`, `packages/store/src/sqlite/keys.ts`, `packages/store/src/sqlite/usage.ts`, `packages/store/src/sqlite/store.ts`
+- Modify: `packages/store/src/index.ts`
+- Test: `packages/store/test/repos.test.ts`
+
+**Interfaces:**
+- Consumes: `ConfigRepo`, `KeyRepo`, `UsageRepo`, `Store`, `DEFAULT_SETTINGS` (Task 5).
+- Produces: `createStore(opts: { path: string; encryptionKey: CryptoKey }): Promise<Store>` — the single entry point every consumer uses. Also `hashApiKey(raw: string): Promise<string>` and `generateApiKey(): string`.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/store/test/repos.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { deriveKey } from "../src/encryption.ts";
+import { generateApiKey, hashApiKey } from "../src/sqlite/keys.ts";
+import { createStore } from "../src/sqlite/store.ts";
+import type { Store } from "../src/types.ts";
+
+async function store(): Promise<Store> {
+  return createStore({
+    path: ":memory:",
+    encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
+  });
+}
+
+test("settings return defaults then persist patches", async () => {
+  const s = await store();
+  const defaults = await s.config.getSettings();
+  expect(defaults.maxAttempts).toBe(3);
+  expect(defaults.weights.tier).toBe(10);
+
+  const patched = await s.config.putSettings({ maxAttempts: 5 });
+  expect(patched.maxAttempts).toBe(5);
+  expect(patched.weights.tier).toBe(10);
+  expect((await s.config.getSettings()).maxAttempts).toBe(5);
+  s.close();
+});
+
+test("virtual models round-trip with nested targets", async () => {
+  const s = await store();
+  await s.config.putModel({
+    id: "fast",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  const models = await s.config.listModels();
+  expect(models).toHaveLength(1);
+  expect(models[0]?.targets[0]?.model).toBe("claude-opus-4");
+  expect(models[0]?.targets[0]?.capabilities.tools).toBe(true);
+  s.close();
+});
+
+test("putModel replaces an existing model rather than duplicating", async () => {
+  const s = await store();
+  const model = { id: "fast", strategy: "score" as const, isAlias: false, targets: [] };
+  await s.config.putModel(model);
+  await s.config.putModel({ ...model, strategy: "priority" });
+  const models = await s.config.listModels();
+  expect(models).toHaveLength(1);
+  expect(models[0]?.strategy).toBe("priority");
+  s.close();
+});
+
+test("admin password hash round-trips and starts null", async () => {
+  const s = await store();
+  expect(await s.config.getAdminPasswordHash()).toBeNull();
+  await s.config.setAdminPasswordHash("hash-value");
+  expect(await s.config.getAdminPasswordHash()).toBe("hash-value");
+  s.close();
+});
+
+test("api keys are found by hash and never store the raw value", async () => {
+  const s = await store();
+  const raw = generateApiKey();
+  expect(raw.startsWith("sk-omni-")).toBe(true);
+
+  const hash = await hashApiKey(raw);
+  await s.keys.create({
+    id: "k1",
+    label: "laptop",
+    prefix: raw.slice(0, 12),
+    hash,
+    modelAllowlist: ["fast"],
+    rateLimitPerMin: 60,
+  });
+
+  const found = await s.keys.findByHash(hash);
+  expect(found?.label).toBe("laptop");
+  expect(found?.modelAllowlist).toEqual(["fast"]);
+  expect(JSON.stringify(found)).not.toContain(raw);
+  s.close();
+});
+
+test("revoked keys are still listed but marked revoked", async () => {
+  const s = await store();
+  const hash = await hashApiKey(generateApiKey());
+  await s.keys.create({
+    id: "k1",
+    label: "l",
+    prefix: "sk-omni-abcd",
+    hash,
+    modelAllowlist: null,
+    rateLimitPerMin: null,
+  });
+  await s.keys.revoke("k1");
+  const found = await s.keys.findByHash(hash);
+  expect(found?.revokedAt).not.toBeNull();
+  expect(await s.keys.list()).toHaveLength(1);
+  s.close();
+});
+
+test("hashApiKey is deterministic and differs per input", async () => {
+  const a = generateApiKey();
+  const b = generateApiKey();
+  expect(await hashApiKey(a)).toBe(await hashApiKey(a));
+  expect(await hashApiKey(a)).not.toBe(await hashApiKey(b));
+});
+
+test("usage appends, lists recent, and aggregates by model", async () => {
+  const s = await store();
+  const log = {
+    id: "r1",
+    at: 1000,
+    apiKeyId: "k1",
+    requestedModel: "fast",
+    resolvedProvider: "anthropic" as const,
+    resolvedModel: "claude-opus-4",
+    credentialId: "c1",
+    attempts: 1,
+    status: 200,
+    errorCode: null,
+    inputTokens: 100,
+    outputTokens: 50,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: 300,
+    durationMs: 1200,
+    costUsd: 0.005,
+    degradations: [],
+  };
+  await s.usage.append(log);
+  await s.usage.append({ ...log, id: "r2", at: 2000, status: 429, errorCode: "RATE_LIMIT" });
+
+  const recent = await s.usage.recent(10);
+  expect(recent).toHaveLength(2);
+  expect(recent[0]?.id).toBe("r2");
+  expect(recent[0]?.degradations).toEqual([]);
+
+  const byModel = await s.usage.aggregate({ since: 0, groupBy: "model" });
+  expect(byModel[0]?.key).toBe("claude-opus-4");
+  expect(byModel[0]?.requests).toBe(2);
+  expect(byModel[0]?.inputTokens).toBe(200);
+  expect(byModel[0]?.errors).toBe(1);
+  s.close();
+});
+
+test("prune removes logs older than the cutoff", async () => {
+  const s = await store();
+  const base = {
+    apiKeyId: null,
+    requestedModel: "m",
+    resolvedProvider: null,
+    resolvedModel: null,
+    credentialId: null,
+    attempts: 1,
+    status: 200,
+    errorCode: null,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: null,
+    durationMs: 1,
+    costUsd: 0,
+    degradations: [],
+  };
+  await s.usage.append({ ...base, id: "old", at: 100 });
+  await s.usage.append({ ...base, id: "new", at: 9000 });
+  expect(await s.usage.prune(5000)).toBe(1);
+  expect(await s.usage.recent(10)).toHaveLength(1);
+  s.close();
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test packages/store/test/repos.test.ts`
+Expected: FAIL — cannot resolve `../src/sqlite/store.ts`.
+
+- [ ] **Step 3: Implement the config repository**
+
+`packages/store/src/sqlite/config.ts`:
+
+```ts
+import type { Database } from "bun:sqlite";
+import type { ConfigRepo, Settings, Strategy, Target, VirtualModel } from "../types.ts";
+import { DEFAULT_SETTINGS } from "../types.ts";
+
+const SETTINGS_KEY = "settings";
+const ADMIN_HASH_KEY = "adminPasswordHash";
+
+export function createConfigRepo(db: Database): ConfigRepo {
+  const readRaw = (key: string): string | null =>
+    db.query<{ value: string }, [string]>("SELECT value FROM settings WHERE key = ?").get(key)
+      ?.value ?? null;
+
+  const writeRaw = (key: string, value: string): void => {
+    db.run(
+      "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      [key, value],
+    );
+  };
+
+  return {
+    async listModels() {
+      type R = { id: string; targets: string; strategy: string; is_alias: number };
+      return db
+        .query<R, []>("SELECT * FROM virtual_models ORDER BY id")
+        .all()
+        .map((r) => ({
+          id: r.id,
+          targets: JSON.parse(r.targets) as Target[],
+          strategy: r.strategy as Strategy,
+          isAlias: r.is_alias === 1,
+        }));
+    },
+
+    async putModel(model: VirtualModel) {
+      db.run(
+        `INSERT INTO virtual_models (id, targets, strategy, is_alias) VALUES (?,?,?,?)
+         ON CONFLICT (id) DO UPDATE SET
+           targets = excluded.targets,
+           strategy = excluded.strategy,
+           is_alias = excluded.is_alias`,
+        [model.id, JSON.stringify(model.targets), model.strategy, model.isAlias ? 1 : 0],
+      );
+    },
+
+    async removeModel(id: string) {
+      db.run("DELETE FROM virtual_models WHERE id = ?", [id]);
+    },
+
+    async getSettings() {
+      const raw = readRaw(SETTINGS_KEY);
+      if (raw === null) return DEFAULT_SETTINGS;
+      const stored = JSON.parse(raw) as Partial<Settings>;
+      // Merge over defaults so a settings row written by an older version does
+      // not leave newly-added fields undefined.
+      return {
+        ...DEFAULT_SETTINGS,
+        ...stored,
+        weights: { ...DEFAULT_SETTINGS.weights, ...stored.weights },
+      };
+    },
+
+    async putSettings(patch: Partial<Settings>) {
+      const current = await this.getSettings();
+      const next: Settings = {
+        ...current,
+        ...patch,
+        weights: { ...current.weights, ...patch.weights },
+      };
+      writeRaw(SETTINGS_KEY, JSON.stringify(next));
+      return next;
+    },
+
+    async getAdminPasswordHash() {
+      return readRaw(ADMIN_HASH_KEY);
+    },
+
+    async setAdminPasswordHash(hash: string) {
+      writeRaw(ADMIN_HASH_KEY, hash);
+    },
+  };
+}
+```
+
+- [ ] **Step 4: Implement the key repository**
+
+`packages/store/src/sqlite/keys.ts`:
+
+```ts
+import type { Database } from "bun:sqlite";
+import type { ApiKey, KeyRepo } from "../types.ts";
+
+const PREFIX = "sk-omni-";
+
+/** 32 bytes of entropy, base64url, prefixed for recognisability in logs. */
+export function generateApiKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const b64 = btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+  return PREFIX + b64;
+}
+
+/**
+ * SHA-256, not Argon2id.
+ *
+ * Argon2 exists to slow brute force against low-entropy human passwords. An API
+ * key is 256 bits of CSPRNG output, so there is nothing to brute force, and a
+ * slow hash on the hot path of every proxied request would be a real cost. The
+ * admin *password* does use Argon2id (Task 18) because it is human-chosen.
+ */
+export async function hashApiKey(raw: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+type Row = {
+  id: string;
+  label: string;
+  prefix: string;
+  hash: string;
+  model_allowlist: string | null;
+  rate_limit_per_min: number | null;
+  created_at: number;
+  revoked_at: number | null;
+};
+
+const toKey = (r: Row): ApiKey => ({
+  id: r.id,
+  label: r.label,
+  prefix: r.prefix,
+  hash: r.hash,
+  modelAllowlist: r.model_allowlist === null ? null : (JSON.parse(r.model_allowlist) as string[]),
+  rateLimitPerMin: r.rate_limit_per_min,
+  createdAt: r.created_at,
+  revokedAt: r.revoked_at,
+});
+
+export function createKeyRepo(db: Database): KeyRepo {
+  return {
+    async list() {
+      return db.query<Row, []>("SELECT * FROM api_keys ORDER BY created_at DESC").all().map(toKey);
+    },
+
+    async findByHash(hash: string) {
+      const row = db.query<Row, [string]>("SELECT * FROM api_keys WHERE hash = ?").get(hash);
+      return row ? toKey(row) : null;
+    },
+
+    async create(input) {
+      const now = Date.now();
+      db.run(
+        `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, rate_limit_per_min, created_at, revoked_at)
+         VALUES (?,?,?,?,?,?,?,NULL)`,
+        [
+          input.id,
+          input.label,
+          input.prefix,
+          input.hash,
+          input.modelAllowlist === null ? null : JSON.stringify(input.modelAllowlist),
+          input.rateLimitPerMin,
+          now,
+        ],
+      );
+      return { ...input, createdAt: now, revokedAt: null };
+    },
+
+    async revoke(id: string) {
+      db.run("UPDATE api_keys SET revoked_at = ? WHERE id = ?", [Date.now(), id]);
+    },
+  };
+}
+```
+
+- [ ] **Step 5: Implement the usage repository**
+
+`packages/store/src/sqlite/usage.ts`:
+
+```ts
+import type { Database } from "bun:sqlite";
+import type { ProviderId } from "@omni/ir";
+import type { RequestLog, UsageBucket, UsageQuery, UsageRepo } from "../types.ts";
+
+type Row = {
+  id: string;
+  at: number;
+  api_key_id: string | null;
+  requested_model: string;
+  resolved_provider: string | null;
+  resolved_model: string | null;
+  credential_id: string | null;
+  attempts: number;
+  status: number;
+  error_code: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  ttft_ms: number | null;
+  duration_ms: number;
+  cost_usd: number;
+  degradations: string;
+};
+
+const toLog = (r: Row): RequestLog => ({
+  id: r.id,
+  at: r.at,
+  apiKeyId: r.api_key_id,
+  requestedModel: r.requested_model,
+  resolvedProvider: r.resolved_provider as ProviderId | null,
+  resolvedModel: r.resolved_model,
+  credentialId: r.credential_id,
+  attempts: r.attempts,
+  status: r.status,
+  errorCode: r.error_code,
+  inputTokens: r.input_tokens,
+  outputTokens: r.output_tokens,
+  cacheReadTokens: r.cache_read_tokens,
+  cacheWriteTokens: r.cache_write_tokens,
+  ttftMs: r.ttft_ms,
+  durationMs: r.duration_ms,
+  costUsd: r.cost_usd,
+  degradations: JSON.parse(r.degradations) as string[],
+});
+
+/** Whitelisted so the groupBy value can never reach SQL as raw text. */
+const GROUP_COLUMN: Readonly<Record<UsageQuery["groupBy"], string>> = {
+  credential: "credential_id",
+  model: "resolved_model",
+  apiKey: "api_key_id",
+  hour: "at / 3600000",
+};
+
+export function createUsageRepo(db: Database): UsageRepo {
+  return {
+    async append(log: RequestLog) {
+      db.run(
+        `INSERT INTO request_logs
+           (id, at, api_key_id, requested_model, resolved_provider, resolved_model, credential_id,
+            attempts, status, error_code, input_tokens, output_tokens, cache_read_tokens,
+            cache_write_tokens, ttft_ms, duration_ms, cost_usd, degradations)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          log.id,
+          log.at,
+          log.apiKeyId,
+          log.requestedModel,
+          log.resolvedProvider,
+          log.resolvedModel,
+          log.credentialId,
+          log.attempts,
+          log.status,
+          log.errorCode,
+          log.inputTokens,
+          log.outputTokens,
+          log.cacheReadTokens,
+          log.cacheWriteTokens,
+          log.ttftMs,
+          log.durationMs,
+          log.costUsd,
+          JSON.stringify(log.degradations),
+        ],
+      );
+    },
+
+    async recent(limit: number) {
+      return db
+        .query<Row, [number]>("SELECT * FROM request_logs ORDER BY at DESC LIMIT ?")
+        .all(limit)
+        .map(toLog);
+    },
+
+    async aggregate(q: UsageQuery) {
+      const col = GROUP_COLUMN[q.groupBy];
+      const until = q.until ?? Number.MAX_SAFE_INTEGER;
+      type Agg = {
+        key: string | null;
+        requests: number;
+        input_tokens: number;
+        output_tokens: number;
+        cost_usd: number;
+        errors: number;
+      };
+      return db
+        .query<Agg, [number, number]>(
+          `SELECT ${col} AS key,
+                  COUNT(*) AS requests,
+                  COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                  COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                  COALESCE(SUM(cost_usd), 0) AS cost_usd,
+                  COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0) AS errors
+             FROM request_logs
+            WHERE at >= ? AND at <= ?
+            GROUP BY key
+            ORDER BY requests DESC`,
+        )
+        .all(q.since, until)
+        .map(
+          (r): UsageBucket => ({
+            key: r.key === null ? "unknown" : String(r.key),
+            requests: r.requests,
+            inputTokens: r.input_tokens,
+            outputTokens: r.output_tokens,
+            costUsd: r.cost_usd,
+            errors: r.errors,
+          }),
+        );
+    },
+
+    async prune(olderThan: number) {
+      db.run("DELETE FROM request_logs WHERE at < ?", [olderThan]);
+      return db.query<{ n: number }, []>("SELECT changes() AS n").get()?.n ?? 0;
+    },
+  };
+}
+```
+
+- [ ] **Step 6: Compose the store**
+
+`packages/store/src/sqlite/store.ts`:
+
+```ts
+import type { Store } from "../types.ts";
+import { createConfigRepo } from "./config.ts";
+import { createCredentialRepo } from "./credentials.ts";
+import { openDb } from "./db.ts";
+import { createKeyRepo } from "./keys.ts";
+import { createUsageRepo } from "./usage.ts";
+
+export async function createStore(opts: {
+  path: string;
+  encryptionKey: CryptoKey;
+}): Promise<Store> {
+  const db = openDb(opts.path);
+  return {
+    credentials: createCredentialRepo(db, opts.encryptionKey),
+    config: createConfigRepo(db),
+    keys: createKeyRepo(db),
+    usage: createUsageRepo(db),
+    close: () => db.close(),
+  };
+}
+```
+
+- [ ] **Step 7: Export from the index**
+
+`packages/store/src/index.ts`:
+
+```ts
+export * from "./types.ts";
+export * from "./encryption.ts";
+export { openDb } from "./sqlite/db.ts";
+export { createCredentialRepo } from "./sqlite/credentials.ts";
+export { createConfigRepo } from "./sqlite/config.ts";
+export { createKeyRepo, generateApiKey, hashApiKey } from "./sqlite/keys.ts";
+export { createUsageRepo } from "./sqlite/usage.ts";
+export { createStore } from "./sqlite/store.ts";
+```
+
+- [ ] **Step 8: Run the tests**
+
+Run: `bun test packages/store`
+Expected: 30 pass, 0 fail.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add packages/store
+git commit -m "feat(store): add config, key, and usage repositories"
+```
+
+---
+
+## Task 8: Provider adapter interface and SSE parser
+
+**Files:**
+- Create: `packages/providers/package.json`, `packages/providers/tsconfig.json`, `packages/providers/src/types.ts`, `packages/providers/src/sse.ts`, `packages/providers/src/index.ts`
+- Test: `packages/providers/test/sse.test.ts`
+
+**Interfaces:**
+- Consumes: `ChatRequest`, `StreamEvent`, `ProviderId` (Tasks 2-3).
+- Produces: `ProviderAdapter`, `AdapterContext`, `AdapterRequest`, `Capabilities`, `parseSse(stream): AsyncGenerator<SseMessage>`, `USER_AGENT`. Tasks 9-11 implement `ProviderAdapter`; Task 15 consumes it.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/providers/test/sse.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { parseSse } from "../src/sse.ts";
+
+function streamOf(...chunks: string[]): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  return new ReadableStream({
+    start(c) {
+      for (const chunk of chunks) c.enqueue(enc.encode(chunk));
+      c.close();
+    },
+  });
+}
+
+async function drain(s: ReadableStream<Uint8Array>) {
+  const out = [];
+  for await (const m of parseSse(s)) out.push(m);
+  return out;
+}
+
+test("parses event and data pairs", async () => {
+  const msgs = await drain(
+    streamOf("event: message_start\ndata: {\"a\":1}\n\nevent: ping\ndata: {}\n\n"),
+  );
+  expect(msgs).toEqual([
+    { event: "message_start", data: '{"a":1}' },
+    { event: "ping", data: "{}" },
+  ]);
+});
+
+test("handles messages split across chunk boundaries", async () => {
+  const msgs = await drain(streamOf("event: msg\nda", "ta: {\"x\":", "2}\n\n"));
+  expect(msgs).toEqual([{ event: "msg", data: '{"x":2}' }]);
+});
+
+test("defaults the event name to 'message' when absent", async () => {
+  expect(await drain(streamOf("data: hello\n\n"))).toEqual([{ event: "message", data: "hello" }]);
+});
+
+test("joins multi-line data with newlines", async () => {
+  expect(await drain(streamOf("data: line1\ndata: line2\n\n"))).toEqual([
+    { event: "message", data: "line1\nline2" },
+  ]);
+});
+
+test("ignores comment lines used as heartbeats", async () => {
+  expect(await drain(streamOf(": keep-alive\n\ndata: real\n\n"))).toEqual([
+    { event: "message", data: "real" },
+  ]);
+});
+
+test("tolerates CRLF line endings", async () => {
+  expect(await drain(streamOf("event: e\r\ndata: d\r\n\r\n"))).toEqual([
+    { event: "e", data: "d" },
+  ]);
+});
+
+test("emits a trailing message with no terminating blank line", async () => {
+  expect(await drain(streamOf("data: last"))).toEqual([{ event: "message", data: "last" }]);
+});
+```
+
+- [ ] **Step 2: Create the package and run the test to see it fail**
+
+`packages/providers/package.json`:
+
+```json
+{
+  "name": "@omni/providers",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@omni/ir": "workspace:*" }
+}
+```
+
+`packages/providers/tsconfig.json`:
+
+```json
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["src", "test"]
+}
+```
+
+Run: `bun install && bun test packages/providers/test/sse.test.ts`
+Expected: FAIL — cannot resolve `../src/sse.ts`.
+
+- [ ] **Step 3: Write the SSE parser**
+
+`packages/providers/src/sse.ts`:
+
+```ts
+export type SseMessage = { event: string; data: string };
+
+/**
+ * Parses an SSE byte stream into messages.
+ *
+ * Chunk boundaries fall anywhere, including mid-field, so the buffer is only
+ * consumed up to the last complete record.
+ */
+export async function* parseSse(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<SseMessage, void, undefined> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      buf = buf.replaceAll("\r\n", "\n");
+
+      let sep = buf.indexOf("\n\n");
+      while (sep !== -1) {
+        const record = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const msg = parseRecord(record);
+        if (msg) yield msg;
+        sep = buf.indexOf("\n\n");
+      }
+    }
+    // A stream that ends without a final blank line still carries a message.
+    const tail = parseRecord(buf.replaceAll("\r\n", "\n"));
+    if (tail) yield tail;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseRecord(record: string): SseMessage | null {
+  let event = "message";
+  const data: string[] = [];
+
+  for (const line of record.split("\n")) {
+    if (line.length === 0 || line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    const rawValue = colon === -1 ? "" : line.slice(colon + 1);
+    const value = rawValue.startsWith(" ") ? rawValue.slice(1) : rawValue;
+    if (field === "event") event = value;
+    else if (field === "data") data.push(value);
+  }
+
+  return data.length === 0 ? null : { event, data: data.join("\n") };
+}
+```
+
+- [ ] **Step 4: Write the adapter interface**
+
+`packages/providers/src/types.ts`:
+
+```ts
+import type { ChatRequest, ProviderId, StreamEvent } from "@omni/ir";
+
+/** Sent on every upstream request. Deliberately identifies this gateway. */
+export const USER_AGENT = "omnigateway/0.1.0";
+
+export type Capabilities = { tools: boolean; images: boolean; reasoning: boolean };
+
+export type AdapterCredentials = {
+  accessToken: string | null;
+  apiKey: string | null;
+  /** Durable provider-specific state: Kimi device identity, Codex workspace id. */
+  providerData: Record<string, unknown>;
+};
+
+export type AdapterRequest = {
+  request: ChatRequest;
+  /** Concrete upstream model id, already resolved from the virtual model. */
+  model: string;
+  credentials: AdapterCredentials;
+  signal: AbortSignal;
+};
+
+export type AdapterResult = {
+  /** Canonical events. The first blockDelta is dispatch's commit point. */
+  events: AsyncGenerator<StreamEvent, void, undefined>;
+  /** Capability reductions applied while building the wire request. */
+  degradations: string[];
+};
+
+export interface ProviderAdapter {
+  readonly id: ProviderId;
+  readonly capabilities: Capabilities;
+  /**
+   * Issues the upstream request and returns canonical events.
+   *
+   * Throws GatewayError before yielding when the upstream rejects the request;
+   * after the first event, errors surface as an `error` event in the stream.
+   */
+  send(req: AdapterRequest): Promise<AdapterResult>;
+}
+```
+
+- [ ] **Step 5: Write the package index**
+
+`packages/providers/src/index.ts`:
+
+```ts
+export * from "./types.ts";
+export * from "./sse.ts";
+```
+
+- [ ] **Step 6: Run the tests**
+
+Run: `bun test packages/providers`
+Expected: 7 pass, 0 fail.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add packages/providers
+git commit -m "feat(providers): add adapter interface and SSE parser"
+```
+
+---
+
+## Task 9: Anthropic adapter
+
+**Files:**
+- Create: `packages/providers/src/anthropic/wire.ts`, `packages/providers/src/anthropic/decode.ts`, `packages/providers/src/anthropic/index.ts`, `packages/providers/src/http.ts`
+- Modify: `packages/providers/src/index.ts`
+- Test: `packages/providers/test/anthropic.test.ts`
+
+**Interfaces:**
+- Consumes: `ProviderAdapter`, `AdapterRequest`, `parseSse`, `USER_AGENT` (Task 8); IR types (Tasks 2-3).
+- Produces: `anthropicAdapter: ProviderAdapter`, plus `toWire(req, model): { body, degradations }` and `decodeAnthropic(sse): AsyncGenerator<StreamEvent>` exported for direct unit testing. Also `httpError(res, provider): GatewayError` in `http.ts`, reused by Tasks 10-11.
+
+The IR was modelled on Anthropic's shape, so `toWire` is nearly structural. The two real jobs are the OAuth system-prompt requirement and mapping upstream errors onto `ErrorCode`.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/providers/test/anthropic.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import type { ChatRequest, StreamEvent } from "@omni/ir";
+import { decodeAnthropic } from "../src/anthropic/decode.ts";
+import { toWire } from "../src/anthropic/wire.ts";
+import type { SseMessage } from "../src/sse.ts";
+
+const base: ChatRequest = {
+  model: "fast",
+  messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  stream: true,
+};
+
+async function* msgs(...m: SseMessage[]): AsyncGenerator<SseMessage> {
+  for (const x of m) yield x;
+}
+
+async function collectEvents(g: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
+  const out: StreamEvent[] = [];
+  for await (const e of g) out.push(e);
+  return out;
+}
+
+test("maps messages and model onto the wire body", () => {
+  const { body } = toWire(base, "claude-opus-4", { oauth: false });
+  expect(body.model).toBe("claude-opus-4");
+  expect(body.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
+  expect(body.stream).toBe(true);
+  expect(body.max_tokens).toBe(4096);
+});
+
+test("passes the system prompt through as blocks", () => {
+  const { body } = toWire(
+    { ...base, system: [{ type: "text", text: "be terse" }] },
+    "claude-opus-4",
+    { oauth: false },
+  );
+  expect(body.system).toEqual([{ type: "text", text: "be terse" }]);
+});
+
+test("prepends the required identity block on the oauth path and records it", () => {
+  const { body, degradations } = toWire(
+    { ...base, system: [{ type: "text", text: "be terse" }] },
+    "claude-opus-4",
+    { oauth: true },
+  );
+  expect(body.system?.[0]?.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+  expect(body.system?.[1]?.text).toBe("be terse");
+  expect(degradations).toContain("anthropic:oauth-system-prefix");
+});
+
+test("does not duplicate the identity block when the caller already sent it", () => {
+  const identity = "You are Claude Code, Anthropic's official CLI for Claude.";
+  const { body, degradations } = toWire({ ...base, system: [{ type: "text", text: identity }] }, "m", {
+    oauth: true,
+  });
+  expect(body.system).toHaveLength(1);
+  expect(degradations).not.toContain("anthropic:oauth-system-prefix");
+});
+
+test("translates tools and tool choice", () => {
+  const { body } = toWire(
+    {
+      ...base,
+      tools: [{ name: "get_weather", description: "d", inputSchema: { type: "object" } }],
+      toolChoice: { type: "tool", name: "get_weather" },
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(body.tools).toEqual([
+    { name: "get_weather", description: "d", input_schema: { type: "object" } },
+  ]);
+  expect(body.tool_choice).toEqual({ type: "tool", name: "get_weather" });
+});
+
+test("maps reasoning config onto the thinking block", () => {
+  const { body } = toWire({ ...base, reasoning: { effort: "high", budgetTokens: 8000 } }, "m", {
+    oauth: false,
+  });
+  expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
+});
+
+test("merges vendor passthrough last so it can override", () => {
+  const { body } = toWire({ ...base, vendor: { anthropic: { top_k: 40 } } }, "m", { oauth: false });
+  expect(body.top_k).toBe(40);
+});
+
+test("decodes a text stream into canonical events", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs(
+        {
+          event: "message_start",
+          data: JSON.stringify({
+            message: { id: "msg_1", model: "claude-opus-4", usage: { input_tokens: 10 } },
+          }),
+        },
+        {
+          event: "content_block_start",
+          data: JSON.stringify({ index: 0, content_block: { type: "text", text: "" } }),
+        },
+        {
+          event: "content_block_delta",
+          data: JSON.stringify({ index: 0, delta: { type: "text_delta", text: "Hel" } }),
+        },
+        {
+          event: "content_block_delta",
+          data: JSON.stringify({ index: 0, delta: { type: "text_delta", text: "lo" } }),
+        },
+        { event: "content_block_stop", data: JSON.stringify({ index: 0 }) },
+        {
+          event: "message_delta",
+          data: JSON.stringify({
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 5 },
+          }),
+        },
+        { event: "message_stop", data: "{}" },
+      ),
+    ),
+  );
+
+  expect(events[0]).toEqual({ type: "start", id: "msg_1", model: "claude-opus-4" });
+  expect(events[1]).toEqual({ type: "blockStart", index: 0, block: { type: "text" } });
+  expect(events[2]).toEqual({ type: "blockDelta", index: 0, delta: { type: "text", text: "Hel" } });
+  expect(events.at(-1)).toEqual({
+    type: "end",
+    stopReason: "endTurn",
+    usage: {
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    },
+  });
+});
+
+test("decodes tool use with partial json deltas", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs(
+        {
+          event: "content_block_start",
+          data: JSON.stringify({
+            index: 1,
+            content_block: { type: "tool_use", id: "tu_1", name: "get_weather" },
+          }),
+        },
+        {
+          event: "content_block_delta",
+          data: JSON.stringify({
+            index: 1,
+            delta: { type: "input_json_delta", partial_json: '{"city":' },
+          }),
+        },
+        {
+          event: "content_block_delta",
+          data: JSON.stringify({
+            index: 1,
+            delta: { type: "input_json_delta", partial_json: '"SF"}' },
+          }),
+        },
+        { event: "content_block_stop", data: JSON.stringify({ index: 1 }) },
+      ),
+    ),
+  );
+
+  expect(events[0]).toEqual({
+    type: "blockStart",
+    index: 1,
+    block: { type: "toolUse", id: "tu_1", name: "get_weather" },
+  });
+  expect(events[1]).toEqual({
+    type: "blockDelta",
+    index: 1,
+    delta: { type: "toolJson", partial: '{"city":' },
+  });
+  expect(events.at(-1)).toEqual({ type: "blockEnd", index: 1 });
+});
+
+test("decodes thinking deltas and signatures", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs(
+        {
+          event: "content_block_start",
+          data: JSON.stringify({ index: 0, content_block: { type: "thinking" } }),
+        },
+        {
+          event: "content_block_delta",
+          data: JSON.stringify({ index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }),
+        },
+        {
+          event: "content_block_delta",
+          data: JSON.stringify({ index: 0, delta: { type: "signature_delta", signature: "sig" } }),
+        },
+      ),
+    ),
+  );
+  expect(events[1]).toEqual({ type: "blockDelta", index: 0, delta: { type: "thinking", text: "hmm" } });
+  expect(events[2]).toEqual({
+    type: "blockDelta",
+    index: 0,
+    delta: { type: "thinkingSignature", signature: "sig" },
+  });
+});
+
+test("turns a mid-stream error event into an error event", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs({
+        event: "error",
+        data: JSON.stringify({ error: { type: "overloaded_error", message: "overloaded" } }),
+      }),
+    ),
+  );
+  expect(events[0]).toEqual({
+    type: "error",
+    code: "OVERLOADED",
+    message: "overloaded",
+    retryable: true,
+  });
+});
+
+test("ignores ping events and unparseable payloads", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(msgs({ event: "ping", data: "{}" }, { event: "message_stop", data: "not-json" })),
+  );
+  expect(events).toEqual([]);
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test packages/providers/test/anthropic.test.ts`
+Expected: FAIL — cannot resolve `../src/anthropic/wire.ts`.
+
+- [ ] **Step 3: Write the shared HTTP error mapper**
+
+`packages/providers/src/http.ts`:
+
+```ts
+import { type ErrorCode, GatewayError, type ProviderId } from "@omni/ir";
+
+/** Maps an upstream status to a canonical code, before body inspection. */
+function codeForStatus(status: number): ErrorCode {
+  if (status === 401 || status === 403) return "AUTH";
+  if (status === 402) return "QUOTA_EXHAUSTED";
+  if (status === 404) return "MODEL_UNAVAILABLE";
+  if (status === 413 || status === 422 || status === 400) return "BAD_REQUEST";
+  if (status === 429) return "RATE_LIMIT";
+  if (status === 529) return "OVERLOADED";
+  if (status >= 500) return "UPSTREAM";
+  return "UPSTREAM";
+}
+
+/** `Retry-After` is seconds or an HTTP date; both appear in the wild. */
+export function parseRetryAfter(header: string | null, now: number): number | undefined {
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const at = Date.parse(header);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - now);
+}
+
+/**
+ * Builds a GatewayError from a failed upstream response.
+ *
+ * Reads the body so the message is useful, but never logs it — the caller
+ * decides what to surface, and the message is truncated to keep prompt
+ * echoes out of error text.
+ */
+export async function httpError(
+  res: Response,
+  provider: ProviderId,
+  now = Date.now(),
+): Promise<GatewayError> {
+  const text = await res.text().catch(() => "");
+  let message = text.slice(0, 500);
+  let code = codeForStatus(res.status);
+
+  try {
+    const parsed = JSON.parse(text) as {
+      error?: { type?: string; message?: string; code?: string };
+    };
+    if (typeof parsed.error?.message === "string") message = parsed.error.message.slice(0, 500);
+    const type = parsed.error?.type ?? parsed.error?.code;
+    if (type === "overloaded_error") code = "OVERLOADED";
+    else if (type === "insufficient_quota") code = "QUOTA_EXHAUSTED";
+    else if (type === "context_length_exceeded") code = "BAD_REQUEST";
+    else if (type === "content_policy_violation") code = "CONTENT_FILTER";
+  } catch {
+    // Non-JSON error bodies (HTML gateway pages) keep the status-derived code.
+  }
+
+  return new GatewayError(code, message || `${provider} returned ${res.status}`, {
+    provider,
+    status: res.status,
+    retryAfterMs: parseRetryAfter(res.headers.get("retry-after"), now),
+  });
+}
+```
+
+- [ ] **Step 4: Write the wire encoder**
+
+`packages/providers/src/anthropic/wire.ts`:
+
+```ts
+import type { ChatRequest, ContentBlock, ToolChoice } from "@omni/ir";
+
+export const OAUTH_IDENTITY =
+  "You are Claude Code, Anthropic's official CLI for Claude.";
+
+export type AnthropicBody = {
+  model: string;
+  messages: unknown[];
+  system?: { type: "text"; text: string }[];
+  max_tokens: number;
+  stream: boolean;
+  temperature?: number;
+  stop_sequences?: string[];
+  tools?: { name: string; description?: string; input_schema: unknown }[];
+  tool_choice?: unknown;
+  thinking?: { type: "enabled"; budget_tokens: number };
+  [key: string]: unknown;
+};
+
+const EFFORT_BUDGET = { low: 2048, medium: 8192, high: 24576 } as const;
+
+function encodeBlock(b: ContentBlock): unknown {
+  switch (b.type) {
+    case "text":
+      return { type: "text", text: b.text };
+    case "image":
+      return {
+        type: "image",
+        source: { type: "base64", media_type: b.mediaType, data: b.data },
+      };
+    case "thinking":
+      return { type: "thinking", thinking: b.text, signature: b.signature };
+    case "toolUse":
+      return { type: "tool_use", id: b.id, name: b.name, input: b.input };
+    case "toolResult":
+      return {
+        type: "tool_result",
+        tool_use_id: b.toolUseId,
+        content: b.content,
+        is_error: b.isError,
+      };
+  }
+}
+
+function encodeToolChoice(c: ToolChoice): unknown {
+  switch (c.type) {
+    case "auto":
+      return { type: "auto" };
+    case "any":
+      return { type: "any" };
+    case "none":
+      return { type: "none" };
+    case "tool":
+      return { type: "tool", name: c.name };
+  }
+}
+
+export function toWire(
+  req: ChatRequest,
+  model: string,
+  opts: { oauth: boolean },
+): { body: AnthropicBody; degradations: string[] } {
+  const degradations: string[] = [];
+
+  let system = req.system?.flatMap((b) =>
+    b.type === "text" ? [{ type: "text" as const, text: b.text }] : [],
+  );
+
+  // The OAuth token endpoint rejects requests whose first system block is not
+  // this string. It is a functional requirement of the credential, not a
+  // disguise: the User-Agent still identifies this gateway. Recorded as a
+  // degradation so it is visible in the request log.
+  if (opts.oauth && system?.[0]?.text !== OAUTH_IDENTITY) {
+    system = [{ type: "text" as const, text: OAUTH_IDENTITY }, ...(system ?? [])];
+    degradations.push("anthropic:oauth-system-prefix");
+  }
+
+  const body: AnthropicBody = {
+    model,
+    messages: req.messages.map((m) => ({ role: m.role, content: m.content.map(encodeBlock) })),
+    max_tokens: req.maxTokens ?? 4096,
+    stream: req.stream,
+  };
+
+  if (system !== undefined && system.length > 0) body.system = system;
+  if (req.temperature !== undefined) body.temperature = req.temperature;
+  if (req.stopSequences !== undefined) body.stop_sequences = req.stopSequences;
+  if (req.tools !== undefined) {
+    body.tools = req.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.inputSchema,
+    }));
+  }
+  if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
+  if (req.reasoning !== undefined) {
+    const budget = req.reasoning.budgetTokens ?? EFFORT_BUDGET[req.reasoning.effort];
+    body.thinking = { type: "enabled", budget_tokens: budget };
+  }
+
+  // Vendor passthrough is applied last: an operator setting a raw Anthropic
+  // field is stating an explicit intent that outranks our mapping.
+  Object.assign(body, req.vendor?.anthropic ?? {});
+
+  return { body, degradations };
+}
+```
+
+- [ ] **Step 5: Write the stream decoder**
+
+`packages/providers/src/anthropic/decode.ts`:
+
+```ts
+import { type ErrorCode, RETRYABLE, type StopReason, type StreamEvent } from "@omni/ir";
+import type { SseMessage } from "../sse.ts";
+
+const STOP_REASON: Readonly<Record<string, StopReason>> = {
+  end_turn: "endTurn",
+  max_tokens: "maxTokens",
+  stop_sequence: "stopSequence",
+  tool_use: "toolUse",
+  refusal: "contentFilter",
+};
+
+const ERROR_TYPE: Readonly<Record<string, ErrorCode>> = {
+  overloaded_error: "OVERLOADED",
+  rate_limit_error: "RATE_LIMIT",
+  authentication_error: "AUTH",
+  permission_error: "AUTH",
+  invalid_request_error: "BAD_REQUEST",
+  api_error: "UPSTREAM",
+};
+
+/** SSE payloads are trusted to be JSON; a malformed one is skipped, not fatal. */
+function json(data: string): Record<string, any> | null {
+  try {
+    const v: unknown = JSON.parse(data);
+    return typeof v === "object" && v !== null ? (v as Record<string, any>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function* decodeAnthropic(
+  messages: AsyncGenerator<SseMessage> | AsyncIterable<SseMessage>,
+): AsyncGenerator<StreamEvent, void, undefined> {
+  let inputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
+  let outputTokens = 0;
+  let stopReason: StopReason = "endTurn";
+
+  for await (const msg of messages) {
+    const d = json(msg.data);
+    if (d === null) continue;
+
+    switch (msg.event) {
+      case "message_start": {
+        const m = d.message ?? {};
+        inputTokens = m.usage?.input_tokens ?? 0;
+        cacheReadTokens = m.usage?.cache_read_input_tokens ?? 0;
+        cacheWriteTokens = m.usage?.cache_creation_input_tokens ?? 0;
+        yield { type: "start", id: String(m.id ?? ""), model: String(m.model ?? "") };
+        break;
+      }
+
+      case "content_block_start": {
+        const cb = d.content_block ?? {};
+        const index: number = d.index ?? 0;
+        if (cb.type === "text") yield { type: "blockStart", index, block: { type: "text" } };
+        else if (cb.type === "thinking")
+          yield { type: "blockStart", index, block: { type: "thinking" } };
+        else if (cb.type === "tool_use")
+          yield {
+            type: "blockStart",
+            index,
+            block: { type: "toolUse", id: String(cb.id), name: String(cb.name) },
+          };
+        break;
+      }
+
+      case "content_block_delta": {
+        const index: number = d.index ?? 0;
+        const delta = d.delta ?? {};
+        if (delta.type === "text_delta")
+          yield { type: "blockDelta", index, delta: { type: "text", text: delta.text } };
+        else if (delta.type === "thinking_delta")
+          yield { type: "blockDelta", index, delta: { type: "thinking", text: delta.thinking } };
+        else if (delta.type === "signature_delta")
+          yield {
+            type: "blockDelta",
+            index,
+            delta: { type: "thinkingSignature", signature: delta.signature },
+          };
+        else if (delta.type === "input_json_delta")
+          yield {
+            type: "blockDelta",
+            index,
+            delta: { type: "toolJson", partial: delta.partial_json ?? "" },
+          };
+        break;
+      }
+
+      case "content_block_stop":
+        yield { type: "blockEnd", index: d.index ?? 0 };
+        break;
+
+      case "message_delta": {
+        const reason = d.delta?.stop_reason;
+        if (typeof reason === "string") stopReason = STOP_REASON[reason] ?? "endTurn";
+        outputTokens = d.usage?.output_tokens ?? outputTokens;
+        break;
+      }
+
+      case "message_stop":
+        yield {
+          type: "end",
+          stopReason,
+          usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+        };
+        break;
+
+      case "error": {
+        const code = ERROR_TYPE[String(d.error?.type)] ?? "UPSTREAM";
+        yield {
+          type: "error",
+          code,
+          message: String(d.error?.message ?? "upstream error"),
+          retryable: RETRYABLE[code],
+        };
+        break;
+      }
+
+      default:
+        // ping and any future event types are ignored by design.
+        break;
+    }
+  }
+}
+```
+
+- [ ] **Step 6: Write the adapter**
+
+`packages/providers/src/anthropic/index.ts`:
+
+```ts
+import { GatewayError } from "@omni/ir";
+import { httpError } from "../http.ts";
+import { parseSse } from "../sse.ts";
+import { type AdapterRequest, type AdapterResult, type ProviderAdapter, USER_AGENT } from "../types.ts";
+import { decodeAnthropic } from "./decode.ts";
+import { toWire } from "./wire.ts";
+
+const BASE_URL = "https://api.anthropic.com/v1/messages";
+const API_VERSION = "2023-06-01";
+const OAUTH_BETA = "oauth-2025-04-20";
+
+export const anthropicAdapter: ProviderAdapter = {
+  id: "anthropic",
+  capabilities: { tools: true, images: true, reasoning: true },
+
+  async send(req: AdapterRequest): Promise<AdapterResult> {
+    const oauth = req.credentials.accessToken !== null;
+    const { body, degradations } = toWire(req.request, req.model, { oauth });
+
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "user-agent": USER_AGENT,
+      "anthropic-version": API_VERSION,
+      accept: req.request.stream ? "text/event-stream" : "application/json",
+    };
+
+    if (oauth) {
+      headers.authorization = `Bearer ${req.credentials.accessToken}`;
+      headers["anthropic-beta"] = OAUTH_BETA;
+    } else if (req.credentials.apiKey !== null) {
+      headers["x-api-key"] = req.credentials.apiKey;
+    } else {
+      throw new GatewayError("AUTH", "anthropic credential has no token", { provider: "anthropic" });
+    }
+
+    const res = await fetch(BASE_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: req.signal,
+    });
+
+    if (!res.ok) throw await httpError(res, "anthropic");
+    if (res.body === null) throw new GatewayError("UPSTREAM", "empty response body", { provider: "anthropic" });
+
+    return { events: decodeAnthropic(parseSse(res.body)), degradations };
+  },
+};
+
+export { decodeAnthropic, toWire };
+```
+
+- [ ] **Step 7: Export from the package index**
+
+Append to `packages/providers/src/index.ts`:
+
+```ts
+export { httpError, parseRetryAfter } from "./http.ts";
+export { anthropicAdapter } from "./anthropic/index.ts";
+```
+
+- [ ] **Step 8: Run the tests**
+
+Run: `bun test packages/providers`
+Expected: 19 pass, 0 fail.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add packages/providers
+git commit -m "feat(providers): add anthropic adapter"
+```
+
+---
+
+## Task 10: OpenAI adapter
+
+**Files:**
+- Create: `packages/providers/src/openai/wire.ts`, `packages/providers/src/openai/decode.ts`, `packages/providers/src/openai/index.ts`
+- Modify: `packages/providers/src/index.ts`
+- Test: `packages/providers/test/openai.test.ts`
+
+**Interfaces:**
+- Consumes: `ProviderAdapter`, `httpError`, `parseSse` (Tasks 8-9).
+- Produces: `openaiAdapter: ProviderAdapter`, `toResponsesWire(req, model)`, `decodeResponses(sse)`.
+
+**Why the Responses API and not Chat Completions.** A ChatGPT OAuth token is only accepted at `https://chatgpt.com/backend-api/codex/responses`, which speaks the Responses API. An API-key credential could use either. Supporting one upstream shape keeps the adapter to a single code path, and the Responses API is the one that carries reasoning items, so it is the strict superset. `openaiAdapter` therefore always emits Responses-shaped bodies and switches only the URL and auth header.
+
+**Index mapping.** Responses events carry `output_index` and `content_index` separately; the IR has one flat index. The decoder keeps a `Map<string, number>` keyed by `${output_index}:${content_index}` and assigns IR indices in first-seen order, so a reasoning item at output 0 and a message at output 1 become IR blocks 0 and 1.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/providers/test/openai.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import type { ChatRequest, StreamEvent } from "@omni/ir";
+import { decodeResponses } from "../src/openai/decode.ts";
+import { toResponsesWire } from "../src/openai/wire.ts";
+import type { SseMessage } from "../src/sse.ts";
+
+const base: ChatRequest = {
+  model: "smart",
+  messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  stream: true,
+};
+
+async function* msgs(...m: SseMessage[]): AsyncGenerator<SseMessage> {
+  for (const x of m) yield x;
+}
+
+async function collect(g: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
+  const out: StreamEvent[] = [];
+  for await (const e of g) out.push(e);
+  return out;
+}
+
+test("maps messages onto responses input items", () => {
+  const { body } = toResponsesWire(base, "gpt-5");
+  expect(body.model).toBe("gpt-5");
+  expect(body.input).toEqual([
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+  ]);
+  expect(body.stream).toBe(true);
+});
+
+test("uses output_text for assistant content", () => {
+  const { body } = toResponsesWire(
+    { ...base, messages: [{ role: "assistant", content: [{ type: "text", text: "yo" }] }] },
+    "gpt-5",
+  );
+  expect(body.input[0]).toEqual({
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "yo" }],
+  });
+});
+
+test("maps the system prompt onto instructions", () => {
+  const { body } = toResponsesWire({ ...base, system: [{ type: "text", text: "be terse" }] }, "gpt-5");
+  expect(body.instructions).toBe("be terse");
+});
+
+test("lifts tool use and tool result to top-level items", () => {
+  const { body } = toResponsesWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "toolUse", id: "call_1", name: "get_weather", input: { city: "SF" } }],
+        },
+        {
+          role: "user",
+          content: [{ type: "toolResult", toolUseId: "call_1", content: "sunny", isError: false }],
+        },
+      ],
+    },
+    "gpt-5",
+  );
+  expect(body.input[0]).toEqual({
+    type: "function_call",
+    call_id: "call_1",
+    name: "get_weather",
+    arguments: '{"city":"SF"}',
+  });
+  expect(body.input[1]).toEqual({
+    type: "function_call_output",
+    call_id: "call_1",
+    output: "sunny",
+  });
+});
+
+test("flattens tool definitions and maps tool choice", () => {
+  const { body } = toResponsesWire(
+    {
+      ...base,
+      tools: [{ name: "f", description: "d", inputSchema: { type: "object" } }],
+      toolChoice: { type: "tool", name: "f" },
+    },
+    "gpt-5",
+  );
+  expect(body.tools).toEqual([
+    { type: "function", name: "f", description: "d", parameters: { type: "object" } },
+  ]);
+  expect(body.tool_choice).toEqual({ type: "function", name: "f" });
+});
+
+test("maps reasoning effort and drops the budget with a degradation", () => {
+  const { body, degradations } = toResponsesWire(
+    { ...base, reasoning: { effort: "high", budgetTokens: 8000 } },
+    "gpt-5",
+  );
+  expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+  expect(degradations).toContain("openai:reasoning-budget-dropped");
+});
+
+test("drops images with a degradation when the request carries them", () => {
+  const { body, degradations } = toResponsesWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "look" },
+            { type: "image", mediaType: "image/png", data: "AAAA" },
+          ],
+        },
+      ],
+    },
+    "gpt-5",
+  );
+  expect(body.input[0]).toEqual({
+    type: "message",
+    role: "user",
+    content: [
+      { type: "input_text", text: "look" },
+      { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+    ],
+  });
+  expect(degradations).toEqual([]);
+});
+
+test("maps maxTokens onto max_output_tokens", () => {
+  const { body } = toResponsesWire({ ...base, maxTokens: 100 }, "gpt-5");
+  expect(body.max_output_tokens).toBe(100);
+});
+
+test("decodes a text response stream", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.created",
+          data: JSON.stringify({ response: { id: "resp_1", model: "gpt-5" } }),
+        },
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({ output_index: 0, item: { type: "message" } }),
+        },
+        {
+          event: "response.content_part.added",
+          data: JSON.stringify({ output_index: 0, content_index: 0, part: { type: "output_text" } }),
+        },
+        {
+          event: "response.output_text.delta",
+          data: JSON.stringify({ output_index: 0, content_index: 0, delta: "Hel" }),
+        },
+        {
+          event: "response.output_text.delta",
+          data: JSON.stringify({ output_index: 0, content_index: 0, delta: "lo" }),
+        },
+        {
+          event: "response.content_part.done",
+          data: JSON.stringify({ output_index: 0, content_index: 0 }),
+        },
+        {
+          event: "response.completed",
+          data: JSON.stringify({
+            response: {
+              status: "completed",
+              usage: {
+                input_tokens: 10,
+                output_tokens: 5,
+                input_tokens_details: { cached_tokens: 4 },
+              },
+            },
+          }),
+        },
+      ),
+    ),
+  );
+
+  expect(events[0]).toEqual({ type: "start", id: "resp_1", model: "gpt-5" });
+  expect(events[1]).toEqual({ type: "blockStart", index: 0, block: { type: "text" } });
+  expect(events[2]).toEqual({ type: "blockDelta", index: 0, delta: { type: "text", text: "Hel" } });
+  expect(events.at(-1)).toEqual({
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 4, cacheWriteTokens: 0 },
+  });
+});
+
+test("assigns distinct ir indices to reasoning and message items", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({ output_index: 0, item: { type: "reasoning" } }),
+        },
+        {
+          event: "response.reasoning_summary_text.delta",
+          data: JSON.stringify({ output_index: 0, content_index: 0, delta: "thinking" }),
+        },
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({ output_index: 1, item: { type: "message" } }),
+        },
+        {
+          event: "response.content_part.added",
+          data: JSON.stringify({ output_index: 1, content_index: 0, part: { type: "output_text" } }),
+        },
+        {
+          event: "response.output_text.delta",
+          data: JSON.stringify({ output_index: 1, content_index: 0, delta: "answer" }),
+        },
+      ),
+    ),
+  );
+  expect(events[0]).toEqual({ type: "blockStart", index: 0, block: { type: "thinking" } });
+  expect(events[1]).toEqual({ type: "blockDelta", index: 0, delta: { type: "thinking", text: "thinking" } });
+  expect(events[2]).toEqual({ type: "blockStart", index: 1, block: { type: "text" } });
+  expect(events[3]).toEqual({ type: "blockDelta", index: 1, delta: { type: "text", text: "answer" } });
+});
+
+test("decodes function call items with argument deltas", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({
+            output_index: 0,
+            item: { type: "function_call", call_id: "call_1", name: "f" },
+          }),
+        },
+        {
+          event: "response.function_call_arguments.delta",
+          data: JSON.stringify({ output_index: 0, delta: '{"a":1}' }),
+        },
+        { event: "response.output_item.done", data: JSON.stringify({ output_index: 0 }) },
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+      ),
+    ),
+  );
+  expect(events[0]).toEqual({
+    type: "blockStart",
+    index: 0,
+    block: { type: "toolUse", id: "call_1", name: "f" },
+  });
+  expect(events[1]).toEqual({ type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '{"a":1}' } });
+  expect(events[2]).toEqual({ type: "blockEnd", index: 0 });
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "toolUse" });
+});
+
+test("maps an incomplete response with a token cap onto maxTokens", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs({
+        event: "response.completed",
+        data: JSON.stringify({
+          response: {
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+            usage: {},
+          },
+        }),
+      }),
+    ),
+  );
+  expect(events[0]).toMatchObject({ type: "end", stopReason: "maxTokens" });
+});
+
+test("turns a response.failed event into an error event", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs({
+        event: "response.failed",
+        data: JSON.stringify({
+          response: { error: { code: "rate_limit_exceeded", message: "slow down" } },
+        }),
+      }),
+    ),
+  );
+  expect(events[0]).toEqual({
+    type: "error",
+    code: "RATE_LIMIT",
+    message: "slow down",
+    retryable: true,
+  });
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test packages/providers/test/openai.test.ts`
+Expected: FAIL — cannot resolve `../src/openai/wire.ts`.
+
+- [ ] **Step 3: Write the wire encoder**
+
+`packages/providers/src/openai/wire.ts`:
+
+```ts
+import type { ChatRequest, ToolChoice } from "@omni/ir";
+
+export type ResponsesBody = {
+  model: string;
+  input: unknown[];
+  instructions?: string;
+  stream: boolean;
+  max_output_tokens?: number;
+  temperature?: number;
+  tools?: unknown[];
+  tool_choice?: unknown;
+  reasoning?: { effort: string; summary: string };
+  store?: boolean;
+  [key: string]: unknown;
+};
+
+function encodeToolChoice(c: ToolChoice): unknown {
+  switch (c.type) {
+    case "auto":
+      return "auto";
+    case "any":
+      return "required";
+    case "none":
+      return "none";
+    case "tool":
+      return { type: "function", name: c.name };
+  }
+}
+
+/**
+ * Flattens IR messages into Responses input items.
+ *
+ * Tool use and tool result are top-level items in this API rather than content
+ * blocks inside a message, so a single IR message can expand into several items.
+ */
+export function toResponsesWire(
+  req: ChatRequest,
+  model: string,
+): { body: ResponsesBody; degradations: string[] } {
+  const degradations: string[] = [];
+  const input: unknown[] = [];
+
+  for (const message of req.messages) {
+    const parts: unknown[] = [];
+
+    const flush = (): void => {
+      if (parts.length === 0) return;
+      input.push({ type: "message", role: message.role, content: [...parts] });
+      parts.length = 0;
+    };
+
+    for (const block of message.content) {
+      switch (block.type) {
+        case "text":
+          parts.push({
+            type: message.role === "assistant" ? "output_text" : "input_text",
+            text: block.text,
+          });
+          break;
+        case "image":
+          parts.push({
+            type: "input_image",
+            image_url: `data:${block.mediaType};base64,${block.data}`,
+          });
+          break;
+        case "thinking":
+          // Anthropic thinking blocks carry a provider-specific signature that
+          // is meaningless here. Dropping them is lossless for the model.
+          if (!degradations.includes("openai:thinking-dropped")) {
+            degradations.push("openai:thinking-dropped");
+          }
+          break;
+        case "toolUse":
+          flush();
+          input.push({
+            type: "function_call",
+            call_id: block.id,
+            name: block.name,
+            arguments: JSON.stringify(block.input),
+          });
+          break;
+        case "toolResult":
+          flush();
+          input.push({
+            type: "function_call_output",
+            call_id: block.toolUseId,
+            output: block.content,
+          });
+          break;
+      }
+    }
+    flush();
+  }
+
+  const body: ResponsesBody = { model, input, stream: req.stream, store: false };
+
+  const instructions = req.system
+    ?.flatMap((b) => (b.type === "text" ? [b.text] : []))
+    .join("\n\n");
+  if (instructions !== undefined && instructions.length > 0) body.instructions = instructions;
+
+  if (req.maxTokens !== undefined) body.max_output_tokens = req.maxTokens;
+  if (req.temperature !== undefined) body.temperature = req.temperature;
+  if (req.tools !== undefined) {
+    body.tools = req.tools.map((t) => ({
+      type: "function",
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema,
+    }));
+  }
+  if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
+  if (req.reasoning !== undefined) {
+    body.reasoning = { effort: req.reasoning.effort, summary: "auto" };
+    // This API takes a coarse effort level, not a token budget.
+    if (req.reasoning.budgetTokens !== undefined) {
+      degradations.push("openai:reasoning-budget-dropped");
+    }
+  }
+
+  Object.assign(body, req.vendor?.openai ?? {});
+  return { body, degradations };
+}
+```
+
+- [ ] **Step 4: Write the stream decoder**
+
+`packages/providers/src/openai/decode.ts`:
+
+```ts
+import { type ErrorCode, RETRYABLE, type StopReason, type StreamEvent } from "@omni/ir";
+import type { SseMessage } from "../sse.ts";
+
+const ERROR_CODE: Readonly<Record<string, ErrorCode>> = {
+  rate_limit_exceeded: "RATE_LIMIT",
+  insufficient_quota: "QUOTA_EXHAUSTED",
+  invalid_api_key: "AUTH",
+  server_error: "UPSTREAM",
+  context_length_exceeded: "BAD_REQUEST",
+  content_policy_violation: "CONTENT_FILTER",
+};
+
+function json(data: string): Record<string, any> | null {
+  try {
+    const v: unknown = JSON.parse(data);
+    return typeof v === "object" && v !== null ? (v as Record<string, any>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function* decodeResponses(
+  messages: AsyncGenerator<SseMessage> | AsyncIterable<SseMessage>,
+): AsyncGenerator<StreamEvent, void, undefined> {
+  // Responses addresses blocks by (output_index, content_index); the IR uses a
+  // single flat index. Assign IR indices in first-seen order.
+  const indices = new Map<string, number>();
+  let next = 0;
+  const irIndex = (outputIndex: number, contentIndex = 0): number => {
+    const key = `${outputIndex}:${contentIndex}`;
+    const existing = indices.get(key);
+    if (existing !== undefined) return existing;
+    const assigned = next++;
+    indices.set(key, assigned);
+    return assigned;
+  };
+
+  let sawToolCall = false;
+
+  for await (const msg of messages) {
+    const d = json(msg.data);
+    if (d === null) continue;
+
+    switch (msg.event) {
+      case "response.created":
+        yield {
+          type: "start",
+          id: String(d.response?.id ?? ""),
+          model: String(d.response?.model ?? ""),
+        };
+        break;
+
+      case "response.output_item.added": {
+        const item = d.item ?? {};
+        if (item.type === "reasoning") {
+          yield { type: "blockStart", index: irIndex(d.output_index ?? 0), block: { type: "thinking" } };
+        } else if (item.type === "function_call") {
+          sawToolCall = true;
+          yield {
+            type: "blockStart",
+            index: irIndex(d.output_index ?? 0),
+            block: { type: "toolUse", id: String(item.call_id), name: String(item.name) },
+          };
+        }
+        // A message item emits nothing here; its content_part.added does.
+        break;
+      }
+
+      case "response.content_part.added":
+        if (d.part?.type === "output_text") {
+          yield {
+            type: "blockStart",
+            index: irIndex(d.output_index ?? 0, d.content_index ?? 0),
+            block: { type: "text" },
+          };
+        }
+        break;
+
+      case "response.output_text.delta":
+        yield {
+          type: "blockDelta",
+          index: irIndex(d.output_index ?? 0, d.content_index ?? 0),
+          delta: { type: "text", text: String(d.delta ?? "") },
+        };
+        break;
+
+      case "response.reasoning_summary_text.delta":
+        yield {
+          type: "blockDelta",
+          index: irIndex(d.output_index ?? 0),
+          delta: { type: "thinking", text: String(d.delta ?? "") },
+        };
+        break;
+
+      case "response.function_call_arguments.delta":
+        yield {
+          type: "blockDelta",
+          index: irIndex(d.output_index ?? 0),
+          delta: { type: "toolJson", partial: String(d.delta ?? "") },
+        };
+        break;
+
+      case "response.content_part.done":
+        yield { type: "blockEnd", index: irIndex(d.output_index ?? 0, d.content_index ?? 0) };
+        break;
+
+      case "response.output_item.done": {
+        // Only close items that opened their own block; message items closed
+        // via content_part.done above.
+        const key = `${d.output_index ?? 0}:0`;
+        if (indices.has(key)) yield { type: "blockEnd", index: irIndex(d.output_index ?? 0) };
+        break;
+      }
+
+      case "response.completed":
+      case "response.incomplete": {
+        const r = d.response ?? {};
+        const reason = r.incomplete_details?.reason;
+        let stopReason: StopReason = sawToolCall ? "toolUse" : "endTurn";
+        if (reason === "max_output_tokens") stopReason = "maxTokens";
+        else if (reason === "content_filter") stopReason = "contentFilter";
+        yield {
+          type: "end",
+          stopReason,
+          usage: {
+            inputTokens: r.usage?.input_tokens ?? 0,
+            outputTokens: r.usage?.output_tokens ?? 0,
+            cacheReadTokens: r.usage?.input_tokens_details?.cached_tokens ?? 0,
+            cacheWriteTokens: 0,
+          },
+        };
+        break;
+      }
+
+      case "response.failed":
+      case "error": {
+        const err = d.response?.error ?? d.error ?? {};
+        const code = ERROR_CODE[String(err.code ?? err.type)] ?? "UPSTREAM";
+        yield {
+          type: "error",
+          code,
+          message: String(err.message ?? "upstream error"),
+          retryable: RETRYABLE[code],
+        };
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+}
+```
+
+- [ ] **Step 5: Write the adapter**
+
+`packages/providers/src/openai/index.ts`:
+
+```ts
+import { GatewayError } from "@omni/ir";
+import { httpError } from "../http.ts";
+import { parseSse } from "../sse.ts";
+import { type AdapterRequest, type AdapterResult, type ProviderAdapter, USER_AGENT } from "../types.ts";
+import { decodeResponses } from "./decode.ts";
+import { toResponsesWire } from "./wire.ts";
+
+const OAUTH_URL = "https://chatgpt.com/backend-api/codex/responses";
+const API_URL = "https://api.openai.com/v1/responses";
+
+export const openaiAdapter: ProviderAdapter = {
+  id: "openai",
+  capabilities: { tools: true, images: true, reasoning: true },
+
+  async send(req: AdapterRequest): Promise<AdapterResult> {
+    const oauth = req.credentials.accessToken !== null;
+    const { body, degradations } = toResponsesWire(req.request, req.model);
+
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "user-agent": USER_AGENT,
+      accept: "text/event-stream",
+    };
+
+    if (oauth) {
+      headers.authorization = `Bearer ${req.credentials.accessToken}`;
+      // Required by the Codex backend to select the billing account. Stored on
+      // the credential at OAuth time (Task 21).
+      const accountId = req.credentials.providerData.accountId;
+      if (typeof accountId === "string") headers["chatgpt-account-id"] = accountId;
+      headers.originator = "codex_cli_rs";
+    } else if (req.credentials.apiKey !== null) {
+      headers.authorization = `Bearer ${req.credentials.apiKey}`;
+    } else {
+      throw new GatewayError("AUTH", "openai credential has no token", { provider: "openai" });
+    }
+
+    // The Codex endpoint only streams. Non-streaming client requests are served
+    // by collecting the stream in dispatch, so always ask for SSE.
+    const res = await fetch(oauth ? OAUTH_URL : API_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: req.signal,
+    });
+
+    if (!res.ok) throw await httpError(res, "openai");
+    if (res.body === null) throw new GatewayError("UPSTREAM", "empty response body", { provider: "openai" });
+
+    return { events: decodeResponses(parseSse(res.body)), degradations };
+  },
+};
+
+export { decodeResponses, toResponsesWire };
+```
+
+- [ ] **Step 6: Export from the package index**
+
+Append to `packages/providers/src/index.ts`:
+
+```ts
+export { openaiAdapter } from "./openai/index.ts";
+```
+
+- [ ] **Step 7: Run the tests**
+
+Run: `bun test packages/providers`
+Expected: 32 pass, 0 fail.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add packages/providers
+git commit -m "feat(providers): add openai responses adapter"
+```
+
+---
+
+## Task 11: Kimi adapter and the adapter registry
+
+**Files:**
+- Create: `packages/providers/src/kimi/wire.ts`, `packages/providers/src/kimi/decode.ts`, `packages/providers/src/kimi/index.ts`, `packages/providers/src/registry.ts`
+- Modify: `packages/providers/src/index.ts`
+- Test: `packages/providers/test/kimi.test.ts`
+
+**Interfaces:**
+- Consumes: `ProviderAdapter`, `httpError`, `parseSse`, and the anthropic/openai adapters.
+- Produces: `kimiAdapter: ProviderAdapter`, `toChatWire(req, model)`, `decodeChat(sse)`, and `ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>>` — the lookup dispatch uses in Task 15.
+
+Kimi speaks OpenAI Chat Completions. Its device identity headers (`X-Msh-Device-Id`, `X-Msh-Platform`) come from `providerData` written at OAuth time (Task 22) and must stay stable for the life of the credential — a changing device id triggers re-auth.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/providers/test/kimi.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import type { ChatRequest, StreamEvent } from "@omni/ir";
+import { decodeChat } from "../src/kimi/decode.ts";
+import { toChatWire } from "../src/kimi/wire.ts";
+import { ADAPTERS } from "../src/registry.ts";
+import type { SseMessage } from "../src/sse.ts";
+
+const base: ChatRequest = {
+  model: "cheap",
+  messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  stream: true,
+};
+
+async function* msgs(...m: SseMessage[]): AsyncGenerator<SseMessage> {
+  for (const x of m) yield x;
+}
+
+async function collect(g: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
+  const out: StreamEvent[] = [];
+  for await (const e of g) out.push(e);
+  return out;
+}
+
+test("collapses single text blocks to a plain string content", () => {
+  const { body } = toChatWire(base, "kimi-k2");
+  expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
+  expect(body.model).toBe("kimi-k2");
+  expect(body.stream).toBe(true);
+});
+
+test("prepends the system prompt as a system message", () => {
+  const { body } = toChatWire({ ...base, system: [{ type: "text", text: "be terse" }] }, "kimi-k2");
+  expect(body.messages[0]).toEqual({ role: "system", content: "be terse" });
+});
+
+test("emits assistant tool_calls and a tool role result", () => {
+  const { body } = toChatWire(
+    {
+      ...base,
+      messages: [
+        { role: "assistant", content: [{ type: "toolUse", id: "c1", name: "f", input: { a: 1 } }] },
+        { role: "user", content: [{ type: "toolResult", toolUseId: "c1", content: "ok", isError: false }] },
+      ],
+    },
+    "kimi-k2",
+  );
+  expect(body.messages[0]).toEqual({
+    role: "assistant",
+    content: null,
+    tool_calls: [
+      { id: "c1", type: "function", function: { name: "f", arguments: '{"a":1}' } },
+    ],
+  });
+  expect(body.messages[1]).toEqual({ role: "tool", tool_call_id: "c1", content: "ok" });
+});
+
+test("drops images with a degradation", () => {
+  const { body, degradations } = toChatWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "look" },
+            { type: "image", mediaType: "image/png", data: "AAAA" },
+          ],
+        },
+      ],
+    },
+    "kimi-k2",
+  );
+  expect(body.messages[0]).toEqual({ role: "user", content: "look" });
+  expect(degradations).toContain("kimi:images-dropped");
+});
+
+test("drops reasoning config with a degradation", () => {
+  const { body, degradations } = toChatWire({ ...base, reasoning: { effort: "high" } }, "kimi-k2");
+  expect(body.reasoning).toBeUndefined();
+  expect(degradations).toContain("kimi:reasoning-dropped");
+});
+
+test("decodes chat completion chunks into canonical events", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs(
+        {
+          event: "message",
+          data: JSON.stringify({
+            id: "c1",
+            model: "kimi-k2",
+            choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }],
+          }),
+        },
+        {
+          event: "message",
+          data: JSON.stringify({ choices: [{ index: 0, delta: { content: "lo" } }] }),
+        },
+        {
+          event: "message",
+          data: JSON.stringify({
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+          }),
+        },
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+
+  expect(events[0]).toEqual({ type: "start", id: "c1", model: "kimi-k2" });
+  expect(events[1]).toEqual({ type: "blockStart", index: 0, block: { type: "text" } });
+  expect(events[2]).toEqual({ type: "blockDelta", index: 0, delta: { type: "text", text: "Hel" } });
+  expect(events.at(-1)).toEqual({
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+});
+
+test("decodes streamed tool calls indexed after text", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs(
+        {
+          event: "message",
+          data: JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: "c1", function: { name: "f", arguments: '{"a"' } },
+                  ],
+                },
+              },
+            ],
+          }),
+        },
+        {
+          event: "message",
+          data: JSON.stringify({
+            choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ":1}" } }] } }],
+          }),
+        },
+        {
+          event: "message",
+          data: JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+        },
+      ),
+    ),
+  );
+  expect(events[0]).toEqual({
+    type: "blockStart",
+    index: 0,
+    block: { type: "toolUse", id: "c1", name: "f" },
+  });
+  expect(events[1]).toEqual({ type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '{"a"' } });
+  expect(events[2]).toEqual({ type: "blockDelta", index: 0, delta: { type: "toolJson", partial: ":1}" } });
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "toolUse" });
+});
+
+test("maps a length finish reason", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs({
+        event: "message",
+        data: JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }] }),
+      }),
+    ),
+  );
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "maxTokens" });
+});
+
+test("[DONE] with no finish_reason still terminates the stream", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs(
+        { event: "message", data: JSON.stringify({ choices: [{ delta: { content: "x" } }] }) },
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+});
+
+test("the registry exposes exactly the three v1 providers", () => {
+  expect(Object.keys(ADAPTERS).sort()).toEqual(["anthropic", "kimi", "openai"]);
+  expect(ADAPTERS.kimi.capabilities.images).toBe(false);
+  expect(ADAPTERS.anthropic.capabilities.reasoning).toBe(true);
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test packages/providers/test/kimi.test.ts`
+Expected: FAIL — cannot resolve `../src/kimi/wire.ts`.
+
+- [ ] **Step 3: Write the wire encoder**
+
+`packages/providers/src/kimi/wire.ts`:
+
+```ts
+import type { ChatRequest, ToolChoice } from "@omni/ir";
+
+export type ChatBody = {
+  model: string;
+  messages: unknown[];
+  stream: boolean;
+  max_tokens?: number;
+  temperature?: number;
+  stop?: string[];
+  tools?: unknown[];
+  tool_choice?: unknown;
+  [key: string]: unknown;
+};
+
+function encodeToolChoice(c: ToolChoice): unknown {
+  switch (c.type) {
+    case "auto":
+      return "auto";
+    case "any":
+      return "required";
+    case "none":
+      return "none";
+    case "tool":
+      return { type: "function", function: { name: c.name } };
+  }
+}
+
+export function toChatWire(
+  req: ChatRequest,
+  model: string,
+): { body: ChatBody; degradations: string[] } {
+  const degradations: string[] = [];
+  const note = (d: string): void => {
+    if (!degradations.includes(d)) degradations.push(d);
+  };
+
+  const messages: unknown[] = [];
+
+  const system = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  if (system !== undefined && system.length > 0) messages.push({ role: "system", content: system });
+
+  for (const message of req.messages) {
+    const text: string[] = [];
+    const toolCalls: unknown[] = [];
+
+    for (const block of message.content) {
+      switch (block.type) {
+        case "text":
+          text.push(block.text);
+          break;
+        case "image":
+          note("kimi:images-dropped");
+          break;
+        case "thinking":
+          note("kimi:thinking-dropped");
+          break;
+        case "toolUse":
+          toolCalls.push({
+            id: block.id,
+            type: "function",
+            function: { name: block.name, arguments: JSON.stringify(block.input) },
+          });
+          break;
+        case "toolResult":
+          // A tool result is its own message in this API, not a content block.
+          messages.push({
+            role: "tool",
+            tool_call_id: block.toolUseId,
+            content: block.content,
+          });
+          break;
+      }
+    }
+
+    if (toolCalls.length > 0) {
+      messages.push({
+        role: message.role,
+        content: text.length > 0 ? text.join("\n") : null,
+        tool_calls: toolCalls,
+      });
+    } else if (text.length > 0) {
+      messages.push({ role: message.role, content: text.join("\n") });
+    }
+  }
+
+  const body: ChatBody = { model, messages, stream: req.stream };
+  if (req.maxTokens !== undefined) body.max_tokens = req.maxTokens;
+  if (req.temperature !== undefined) body.temperature = req.temperature;
+  if (req.stopSequences !== undefined) body.stop = req.stopSequences;
+  if (req.tools !== undefined) {
+    body.tools = req.tools.map((t) => ({
+      type: "function",
+      function: { name: t.name, description: t.description, parameters: t.inputSchema },
+    }));
+  }
+  if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
+  if (req.reasoning !== undefined) note("kimi:reasoning-dropped");
+
+  Object.assign(body, req.vendor?.kimi ?? {});
+  return { body, degradations };
+}
+```
+
+- [ ] **Step 4: Write the stream decoder**
+
+`packages/providers/src/kimi/decode.ts`:
+
+```ts
+import { type StopReason, type StreamEvent } from "@omni/ir";
+import type { SseMessage } from "../sse.ts";
+
+const FINISH: Readonly<Record<string, StopReason>> = {
+  stop: "endTurn",
+  length: "maxTokens",
+  tool_calls: "toolUse",
+  content_filter: "contentFilter",
+};
+
+function json(data: string): Record<string, any> | null {
+  try {
+    const v: unknown = JSON.parse(data);
+    return typeof v === "object" && v !== null ? (v as Record<string, any>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function* decodeChat(
+  messages: AsyncGenerator<SseMessage> | AsyncIterable<SseMessage>,
+): AsyncGenerator<StreamEvent, void, undefined> {
+  let started = false;
+  let textOpen = false;
+  let ended = false;
+  let stopReason: StopReason = "endTurn";
+  let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  // Text is block 0 when present; tool calls take indices above it.
+  const toolIndex = new Map<number, number>();
+  let nextIndex = 1;
+
+  const emitEnd = (): StreamEvent => {
+    ended = true;
+    return { type: "end", stopReason, usage };
+  };
+
+  for await (const msg of messages) {
+    if (msg.data === "[DONE]") break;
+    const d = json(msg.data);
+    if (d === null) continue;
+
+    if (!started) {
+      started = true;
+      yield { type: "start", id: String(d.id ?? ""), model: String(d.model ?? "") };
+    }
+
+    if (d.usage) {
+      usage = {
+        inputTokens: d.usage.prompt_tokens ?? 0,
+        outputTokens: d.usage.completion_tokens ?? 0,
+        cacheReadTokens: d.usage.prompt_cache_hit_tokens ?? 0,
+        cacheWriteTokens: 0,
+      };
+    }
+
+    const choice = d.choices?.[0];
+    if (!choice) continue;
+    const delta = choice.delta ?? {};
+
+    if (typeof delta.content === "string" && delta.content.length > 0) {
+      if (!textOpen) {
+        textOpen = true;
+        yield { type: "blockStart", index: 0, block: { type: "text" } };
+      }
+      yield { type: "blockDelta", index: 0, delta: { type: "text", text: delta.content } };
+    }
+
+    for (const call of delta.tool_calls ?? []) {
+      const wireIndex: number = call.index ?? 0;
+      let index = toolIndex.get(wireIndex);
+      if (index === undefined) {
+        index = nextIndex++;
+        toolIndex.set(wireIndex, index);
+        yield {
+          type: "blockStart",
+          index,
+          block: {
+            type: "toolUse",
+            id: String(call.id ?? `call_${wireIndex}`),
+            name: String(call.function?.name ?? ""),
+          },
+        };
+      }
+      const args = call.function?.arguments;
+      if (typeof args === "string" && args.length > 0) {
+        yield { type: "blockDelta", index, delta: { type: "toolJson", partial: args } };
+      }
+    }
+
+    if (typeof choice.finish_reason === "string") {
+      stopReason = FINISH[choice.finish_reason] ?? "endTurn";
+      if (textOpen) yield { type: "blockEnd", index: 0 };
+      for (const index of toolIndex.values()) yield { type: "blockEnd", index };
+      yield emitEnd();
+    }
+  }
+
+  // A stream that reaches [DONE] without a finish_reason still needs a terminal
+  // event, or collect() would report an unterminated response.
+  if (!ended) {
+    if (textOpen) yield { type: "blockEnd", index: 0 };
+    for (const index of toolIndex.values()) yield { type: "blockEnd", index };
+    yield emitEnd();
+  }
+}
+```
+
+- [ ] **Step 5: Write the adapter**
+
+`packages/providers/src/kimi/index.ts`:
+
+```ts
+import { GatewayError } from "@omni/ir";
+import { httpError } from "../http.ts";
+import { parseSse } from "../sse.ts";
+import { type AdapterRequest, type AdapterResult, type ProviderAdapter, USER_AGENT } from "../types.ts";
+import { decodeChat } from "./decode.ts";
+import { toChatWire } from "./wire.ts";
+
+const BASE_URL = "https://api.moonshot.ai/v1/chat/completions";
+
+export const kimiAdapter: ProviderAdapter = {
+  id: "kimi",
+  capabilities: { tools: true, images: false, reasoning: false },
+
+  async send(req: AdapterRequest): Promise<AdapterResult> {
+    const { body, degradations } = toChatWire(req.request, req.model);
+    const token = req.credentials.accessToken ?? req.credentials.apiKey;
+    if (token === null) {
+      throw new GatewayError("AUTH", "kimi credential has no token", { provider: "kimi" });
+    }
+
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "user-agent": USER_AGENT,
+      accept: "text/event-stream",
+      authorization: `Bearer ${token}`,
+    };
+
+    // Device identity is bound to the credential at OAuth time and must stay
+    // stable; a changing device id forces re-authentication upstream.
+    const deviceId = req.credentials.providerData.deviceId;
+    if (typeof deviceId === "string") {
+      headers["X-Msh-Device-Id"] = deviceId;
+      headers["X-Msh-Platform"] = "cli";
+    }
+
+    const res = await fetch(BASE_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: req.signal,
+    });
+
+    if (!res.ok) throw await httpError(res, "kimi");
+    if (res.body === null) throw new GatewayError("UPSTREAM", "empty response body", { provider: "kimi" });
+
+    return { events: decodeChat(parseSse(res.body)), degradations };
+  },
+};
+
+export { decodeChat, toChatWire };
+```
+
+- [ ] **Step 6: Write the registry**
+
+`packages/providers/src/registry.ts`:
+
+```ts
+import type { ProviderId } from "@omni/ir";
+import { anthropicAdapter } from "./anthropic/index.ts";
+import { kimiAdapter } from "./kimi/index.ts";
+import { openaiAdapter } from "./openai/index.ts";
+import type { ProviderAdapter } from "./types.ts";
+
+export const ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>> = {
+  anthropic: anthropicAdapter,
+  openai: openaiAdapter,
+  kimi: kimiAdapter,
+};
+```
+
+- [ ] **Step 7: Export from the package index**
+
+Append to `packages/providers/src/index.ts`:
+
+```ts
+export { kimiAdapter } from "./kimi/index.ts";
+export { ADAPTERS } from "./registry.ts";
+```
+
+- [ ] **Step 8: Run the tests**
+
+Run: `bun test packages/providers`
+Expected: 42 pass, 0 fail.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add packages/providers
+git commit -m "feat(providers): add kimi adapter and provider registry"
+```
+
+---
