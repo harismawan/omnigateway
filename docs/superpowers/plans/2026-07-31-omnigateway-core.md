@@ -10640,10 +10640,7 @@ test("poll reports pending for a device flow that is not yet approved", async ()
       },
     }),
     exchange: async () => {
-      const { isAuthorizationPending } = await import("../../src/oauth/kimi.ts");
-      void isAuthorizationPending;
-      const { kimiOAuth } = await import("../../src/oauth/kimi.ts");
-      void kimiOAuth;
+      // Mirrors what kimiOAuth throws while the operator has not yet approved.
       const error = new GatewayError("AUTH", "authorization not yet complete") as GatewayError & {
         __omni_authorization_pending?: boolean;
       };
@@ -10973,6 +10970,632 @@ Expected: 200 pass, 0 fail.
 ```bash
 git add apps/gateway
 git commit -m "feat(gateway): add the oauth connect flow and browser callback"
+```
+
+---
+
+## Task 25: The admin API
+
+**Files:**
+- Create: `apps/gateway/src/routes/admin.ts`
+- Test: `apps/gateway/test/routes/admin.test.ts`
+
+**Interfaces:**
+- Consumes: `Store` (Task 7); `AdminAuth`, `ADMIN_COOKIE` (Task 18); `generateApiKey` (Task 7); `DEFAULT_SETTINGS` (Task 5).
+- Produces: `adminRoutes(deps: AdminDeps): Elysia` mounting the `/api/*` surface the dashboard consumes.
+
+Routes:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/status` | whether an admin password is configured; whether the caller is signed in |
+| `POST` | `/api/setup` | set the initial admin password (only when unconfigured) |
+| `POST` | `/api/login` / `/api/logout` | session cookie lifecycle |
+| `GET` `PATCH` `DELETE` | `/api/credentials[/:id]` | list, adjust tier/weight/enabled/label, delete |
+| `GET` `PUT` `DELETE` | `/api/models[/:name]` | virtual model CRUD |
+| `GET` `POST` `PATCH` `DELETE` | `/api/keys[/:id]` | proxy API key lifecycle |
+| `GET` `PUT` | `/api/settings` | routing weights and limits |
+| `GET` | `/api/usage` | aggregated usage for the dashboard |
+| `GET` | `/api/logs` | recent request log rows |
+
+The invariant threaded through every handler: **no secret ever crosses this boundary outbound.** Credentials serialize without their tokens; API keys return their raw value exactly once, at creation, because that is the only moment it exists in memory in plaintext.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/gateway/test/routes/admin.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { generateApiKey } from "@omni/store";
+import { createAdminAuth } from "../../src/auth/admin.ts";
+import { adminRoutes } from "../../src/routes/admin.ts";
+import { credential, memoryStore, virtualModel } from "../helpers/fixtures.ts";
+
+const NOW = 1_000_000;
+
+async function harness({ configured = true } = {}) {
+  const store = await memoryStore();
+  const admin = createAdminAuth(store, { now: () => NOW, sessionTtlMs: 60_000 });
+
+  let cookie = "";
+  if (configured) {
+    await admin.setPassword("hunter2hunter2");
+    cookie = `omni_admin=${(await admin.login("hunter2hunter2")) as string}`;
+  }
+
+  const app = adminRoutes({ store, admin, now: () => NOW });
+
+  const call = (method: string, path: string, body?: unknown, auth = true) =>
+    app.handle(
+      new Request(`http://localhost${path}`, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(auth && cookie.length > 0 ? { cookie } : {}),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
+
+  return { store, app, admin, call };
+}
+
+test("status reports an unconfigured gateway without a session", async () => {
+  const { call } = await harness({ configured: false });
+  const body = (await (await call("GET", "/api/status", undefined, false)).json()) as Record<string, any>;
+  expect(body.configured).toBe(false);
+  expect(body.authenticated).toBe(false);
+});
+
+test("setup sets the first password and refuses a second time", async () => {
+  const { call } = await harness({ configured: false });
+  expect((await call("POST", "/api/setup", { password: "hunter2hunter2" }, false)).status).toBe(200);
+  expect((await call("POST", "/api/setup", { password: "another-password" }, false)).status).toBe(409);
+});
+
+test("login sets an http-only session cookie", async () => {
+  const { call } = await harness();
+  const res = await call("POST", "/api/login", { password: "hunter2hunter2" }, false);
+  expect(res.status).toBe(200);
+  const setCookie = res.headers.get("set-cookie") ?? "";
+  expect(setCookie).toContain("omni_admin=");
+  expect(setCookie.toLowerCase()).toContain("httponly");
+  expect(setCookie.toLowerCase()).toContain("samesite=strict");
+});
+
+test("login rejects the wrong password", async () => {
+  const { call } = await harness();
+  expect((await call("POST", "/api/login", { password: "wrong-password-x" }, false)).status).toBe(401);
+});
+
+test("every data route requires a session", async () => {
+  const { call } = await harness();
+  for (const path of ["/api/credentials", "/api/models", "/api/keys", "/api/settings", "/api/usage", "/api/logs"]) {
+    expect((await call("GET", path, undefined, false)).status).toBe(401);
+  }
+});
+
+test("credentials are listed without their secrets", async () => {
+  const { call, store } = await harness();
+  await store.credentials.create({
+    ...credential({ id: "c1", provider: "anthropic", label: "work" }),
+    accessToken: "test-token-1",
+    refreshToken: "test-token-2",
+    apiKey: null,
+  });
+
+  const res = await call("GET", "/api/credentials");
+  const text = await res.text();
+  expect(text).not.toContain("test-token-1");
+  expect(text).not.toContain("secrets");
+  const body = JSON.parse(text) as Record<string, any>;
+  expect(body.credentials[0].label).toBe("work");
+  expect(body.credentials[0].hasRefreshToken).toBe(true);
+});
+
+test("patching a credential updates tier, weight and enabled", async () => {
+  const { call, store } = await harness();
+  await store.credentials.create({
+    ...credential({ id: "c1", provider: "anthropic" }),
+    accessToken: "test-token-1",
+    refreshToken: null,
+    apiKey: null,
+  });
+
+  expect((await call("PATCH", "/api/credentials/c1", { tier: 2, weight: 0.5, enabled: false })).status).toBe(200);
+  const reloaded = await store.credentials.get("c1");
+  expect(reloaded?.tier).toBe(2);
+  expect(reloaded?.weight).toBe(0.5);
+  expect(reloaded?.enabled).toBe(false);
+});
+
+test("patching a credential cannot inject a token", async () => {
+  const { call, store } = await harness();
+  await store.credentials.create({
+    ...credential({ id: "c1", provider: "anthropic" }),
+    accessToken: "test-token-1",
+    refreshToken: null,
+    apiKey: null,
+  });
+
+  await call("PATCH", "/api/credentials/c1", { accessToken: "attacker-token" });
+  const view = await store.credentials.get("c1");
+  expect((await view?.secrets())?.accessToken).toBe("test-token-1");
+});
+
+test("deleting a credential removes it", async () => {
+  const { call, store } = await harness();
+  await store.credentials.create({
+    ...credential({ id: "c1", provider: "anthropic" }),
+    accessToken: "test-token-1",
+    refreshToken: null,
+    apiKey: null,
+  });
+
+  expect((await call("DELETE", "/api/credentials/c1")).status).toBe(200);
+  expect(await store.credentials.get("c1")).toBeNull();
+});
+
+test("models can be created, listed and deleted", async () => {
+  const { call } = await harness();
+  const model = virtualModel({
+    name: "fast",
+    targets: [{ provider: "anthropic", model: "claude-opus-4", weight: 1 }],
+  });
+
+  expect((await call("PUT", "/api/models/fast", model)).status).toBe(200);
+  const body = (await (await call("GET", "/api/models")).json()) as Record<string, any>;
+  expect(body.models.map((m: { name: string }) => m.name)).toEqual(["fast"]);
+  expect((await call("DELETE", "/api/models/fast")).status).toBe(200);
+  expect(((await (await call("GET", "/api/models")).json()) as any).models).toHaveLength(0);
+});
+
+test("a model with no targets is rejected", async () => {
+  const { call } = await harness();
+  expect((await call("PUT", "/api/models/empty", virtualModel({ name: "empty" }))).status).toBe(400);
+});
+
+test("a model whose path name and body name disagree is rejected", async () => {
+  const { call } = await harness();
+  const model = virtualModel({
+    name: "other",
+    targets: [{ provider: "anthropic", model: "claude-opus-4", weight: 1 }],
+  });
+  expect((await call("PUT", "/api/models/fast", model)).status).toBe(400);
+});
+
+test("creating an api key returns the raw value exactly once", async () => {
+  const { call } = await harness();
+  const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as Record<string, any>;
+  expect(created.key).toMatch(/^sk-omni-/);
+
+  const listed = (await (await call("GET", "/api/keys")).json()) as Record<string, any>;
+  expect(listed.keys[0].label).toBe("cli");
+  expect(listed.keys[0].key).toBeUndefined();
+  expect(JSON.stringify(listed)).not.toContain(created.key);
+});
+
+test("an api key can be disabled and deleted", async () => {
+  const { call, store } = await harness();
+  const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as { id: string };
+
+  expect((await call("PATCH", `/api/keys/${created.id}`, { enabled: false })).status).toBe(200);
+  expect((await store.keys.list()).find((k) => k.id === created.id)?.enabled).toBe(false);
+
+  expect((await call("DELETE", `/api/keys/${created.id}`)).status).toBe(200);
+  expect(await store.keys.list()).toHaveLength(0);
+});
+
+test("settings round-trip and reject an unknown weight", async () => {
+  const { call } = await harness();
+  const current = (await (await call("GET", "/api/settings")).json()) as Record<string, any>;
+  expect(current.settings.weights.tier).toBe(10);
+
+  const next = { ...current.settings, weights: { ...current.settings.weights, tier: 20 } };
+  expect((await call("PUT", "/api/settings", next)).status).toBe(200);
+  expect(((await (await call("GET", "/api/settings")).json()) as any).settings.weights.tier).toBe(20);
+
+  expect(
+    (await call("PUT", "/api/settings", { ...next, weights: { ...next.weights, bogus: 1 } })).status,
+  ).toBe(400);
+});
+
+test("usage aggregates by the requested dimension", async () => {
+  const { call, store } = await harness();
+  await store.usage.appendLog({
+    id: "r1",
+    apiKeyId: null,
+    startedAt: NOW,
+    durationMs: 100,
+    surface: "anthropic",
+    requestedModel: "fast",
+    credentialId: "c1",
+    provider: "anthropic",
+    upstreamModel: "claude-opus-4",
+    status: "ok",
+    errorCode: null,
+    attempts: 1,
+    inputTokens: 10,
+    outputTokens: 5,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: 40,
+    streamed: false,
+    degradations: [],
+  });
+
+  const body = (await (await call("GET", "/api/usage?groupBy=provider")).json()) as Record<string, any>;
+  expect(body.rows[0]).toMatchObject({ key: "anthropic", requests: 1, outputTokens: 5 });
+});
+
+test("usage rejects an unknown groupBy rather than passing it to sql", async () => {
+  const { call } = await harness();
+  expect((await call("GET", "/api/usage?groupBy=1;DROP+TABLE+usage")).status).toBe(400);
+});
+
+test("logs are returned newest first and capped", async () => {
+  const { call, store } = await harness();
+  for (let i = 0; i < 3; i += 1) {
+    await store.usage.appendLog({
+      id: `r${i}`,
+      apiKeyId: null,
+      startedAt: NOW + i,
+      durationMs: 1,
+      surface: "anthropic",
+      requestedModel: "fast",
+      credentialId: "c1",
+      provider: "anthropic",
+      upstreamModel: "claude-opus-4",
+      status: "ok",
+      errorCode: null,
+      attempts: 1,
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      ttftMs: null,
+      streamed: false,
+      degradations: [],
+    });
+  }
+
+  const body = (await (await call("GET", "/api/logs?limit=2")).json()) as Record<string, any>;
+  expect(body.logs).toHaveLength(2);
+  expect(body.logs[0].id).toBe("r2");
+});
+
+test("logout invalidates the session", async () => {
+  const { call } = await harness();
+  expect((await call("POST", "/api/logout")).status).toBe(200);
+  expect((await call("GET", "/api/credentials")).status).toBe(401);
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/gateway/test/routes/admin.test.ts`
+Expected: FAIL — cannot resolve `../../src/routes/admin.ts`.
+
+- [ ] **Step 3: Write the admin routes**
+
+`apps/gateway/src/routes/admin.ts`:
+
+```ts
+import { GatewayError, HTTP_STATUS } from "@omni/ir";
+import {
+  DEFAULT_SETTINGS,
+  generateApiKey,
+  type Settings,
+  type Store,
+  type VirtualModel,
+} from "@omni/store";
+import { Elysia } from "elysia";
+import { z } from "zod";
+import { ADMIN_COOKIE, type AdminAuth } from "../auth/admin.ts";
+import { parseOrThrow } from "../ingress/schemas.ts";
+
+export type AdminDeps = {
+  store: Store;
+  admin: AdminAuth;
+  now: () => number;
+};
+
+const SESSION_TTL_SECONDS = 60 * 60 * 12;
+const MAX_LOG_LIMIT = 500;
+
+const providerId = z.enum(["anthropic", "openai", "kimi"]);
+
+const modelSchema = z.object({
+  name: z.string().min(1),
+  strategy: z.enum(["score", "priority", "roundRobin", "weighted"]),
+  enabled: z.boolean(),
+  targets: z
+    .array(
+      z.object({
+        provider: providerId,
+        model: z.string().min(1),
+        weight: z.number().positive(),
+      }),
+    )
+    .min(1, "a virtual model needs at least one target"),
+});
+
+const settingsSchema = z.object({
+  weights: z
+    .object({
+      tier: z.number(),
+      health: z.number(),
+      quota: z.number(),
+      cost: z.number(),
+      latency: z.number(),
+      recency: z.number(),
+    })
+    .strict(),
+  maxAttempts: z.number().int().min(1).max(10),
+  requestDeadlineMs: z.number().int().positive(),
+  breakerThreshold: z.number().int().min(1),
+  breakerCooldownMs: z.number().int().positive(),
+  logRetentionDays: z.number().int().min(1),
+});
+
+/** Only these credential fields are operator-editable. Secrets are not. */
+const credentialPatchSchema = z
+  .object({
+    label: z.string().min(1).optional(),
+    enabled: z.boolean().optional(),
+    tier: z.number().int().min(1).optional(),
+    weight: z.number().positive().optional(),
+  })
+  .strict();
+
+const groupBySchema = z.enum(["provider", "credential", "model", "day", "apiKey"]);
+
+function sessionCookie(token: string): string {
+  return [
+    `${ADMIN_COOKIE}=${token}`,
+    "Path=/",
+    "HttpOnly",
+    // Strict, because no legitimate cross-site request should carry this.
+    "SameSite=Strict",
+    `Max-Age=${SESSION_TTL_SECONDS}`,
+  ].join("; ");
+}
+
+function readCookie(request: Request, name: string): string | null {
+  const header = request.headers.get("cookie");
+  if (header === null) return null;
+  for (const part of header.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return rest.join("=");
+  }
+  return null;
+}
+
+export function adminRoutes(deps: AdminDeps): Elysia {
+  async function requireAdmin(request: Request): Promise<void> {
+    const token = readCookie(request, ADMIN_COOKIE);
+    if (token === null || !(await deps.admin.verify(token))) {
+      throw new GatewayError("AUTH", "admin session required");
+    }
+  }
+
+  return new Elysia()
+    .get("/api/status", async ({ request }) => {
+      const token = readCookie(request, ADMIN_COOKIE);
+      return {
+        configured: await deps.admin.isConfigured(),
+        authenticated: token !== null && (await deps.admin.verify(token)),
+      };
+    })
+
+    .post("/api/setup", async ({ request, set }) => {
+      if (await deps.admin.isConfigured()) {
+        set.status = 409;
+        return { error: { code: "CONFLICT", message: "an admin password is already configured" } };
+      }
+
+      const body = (await request.json()) as { password?: unknown };
+      if (typeof body.password !== "string") {
+        throw new GatewayError("BAD_REQUEST", "password is required");
+      }
+
+      try {
+        await deps.admin.setPassword(body.password);
+      } catch (error) {
+        throw new GatewayError("BAD_REQUEST", error instanceof Error ? error.message : "invalid password");
+      }
+
+      const token = await deps.admin.login(body.password);
+      set.headers["set-cookie"] = sessionCookie(token as string);
+      return { ok: true };
+    })
+
+    .post("/api/login", async ({ request, set }) => {
+      const body = (await request.json()) as { password?: unknown };
+      const token =
+        typeof body.password === "string" ? await deps.admin.login(body.password) : null;
+      if (token === null) throw new GatewayError("AUTH", "invalid password");
+
+      set.headers["set-cookie"] = sessionCookie(token);
+      return { ok: true };
+    })
+
+    .post("/api/logout", async ({ request, set }) => {
+      const token = readCookie(request, ADMIN_COOKIE);
+      if (token !== null) deps.admin.logout(token);
+      set.headers["set-cookie"] = `${ADMIN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
+      return { ok: true };
+    })
+
+    .get("/api/credentials", async ({ request }) => {
+      await requireAdmin(request);
+      const credentials = await deps.store.credentials.list();
+      // `secrets` is a function on the view; spreading drops it, but the
+      // explicit projection makes that a decision rather than an accident.
+      return {
+        credentials: credentials.map((c) => ({
+          id: c.id,
+          provider: c.provider,
+          label: c.label,
+          authType: c.authType,
+          enabled: c.enabled,
+          tier: c.tier,
+          weight: c.weight,
+          expiresAt: c.expiresAt,
+          accountEmail: c.accountEmail,
+          providerData: c.providerData,
+          hasRefreshToken: c.hasRefreshToken,
+          createdAt: c.createdAt,
+          updatedAt: c.updatedAt,
+        })),
+      };
+    })
+
+    .patch("/api/credentials/:id", async ({ request, params }) => {
+      await requireAdmin(request);
+      const patch = parseOrThrow(credentialPatchSchema, await request.json());
+      const existing = await deps.store.credentials.get(params.id);
+      if (existing === null) throw new GatewayError("BAD_REQUEST", "no such credential");
+
+      await deps.store.credentials.update(params.id, patch);
+      return { ok: true };
+    })
+
+    .delete("/api/credentials/:id", async ({ request, params }) => {
+      await requireAdmin(request);
+      await deps.store.credentials.delete(params.id);
+      return { ok: true };
+    })
+
+    .get("/api/models", async ({ request }) => {
+      await requireAdmin(request);
+      return { models: await deps.store.config.listModels() };
+    })
+
+    .put("/api/models/:name", async ({ request, params }) => {
+      await requireAdmin(request);
+      const model: VirtualModel = parseOrThrow(modelSchema, await request.json());
+      if (model.name !== params.name) {
+        throw new GatewayError("BAD_REQUEST", "model name in the path and body must match");
+      }
+      await deps.store.config.putModel(model);
+      return { ok: true };
+    })
+
+    .delete("/api/models/:name", async ({ request, params }) => {
+      await requireAdmin(request);
+      await deps.store.config.deleteModel(params.name);
+      return { ok: true };
+    })
+
+    .get("/api/keys", async ({ request }) => {
+      await requireAdmin(request);
+      // The store never holds the raw key, only its hash, so there is nothing
+      // to strip here — but the shape is explicit for the same reason.
+      const keys = await deps.store.keys.list();
+      return {
+        keys: keys.map((k) => ({
+          id: k.id,
+          label: k.label,
+          enabled: k.enabled,
+          expiresAt: k.expiresAt,
+          lastUsedAt: k.lastUsedAt,
+          createdAt: k.createdAt,
+        })),
+      };
+    })
+
+    .post("/api/keys", async ({ request }) => {
+      await requireAdmin(request);
+      const body = (await request.json()) as { label?: unknown; expiresAt?: unknown };
+      const label = typeof body.label === "string" && body.label.trim().length > 0
+        ? body.label.trim()
+        : "api key";
+
+      const raw = generateApiKey();
+      const created = await deps.store.keys.create({
+        label,
+        raw,
+        enabled: true,
+        expiresAt: typeof body.expiresAt === "number" ? body.expiresAt : null,
+      });
+
+      // The only response that ever contains a key. It exists in plaintext
+      // nowhere else, so an operator who loses it must issue a new one.
+      return { id: created.id, label: created.label, key: raw };
+    })
+
+    .patch("/api/keys/:id", async ({ request, params }) => {
+      await requireAdmin(request);
+      const body = (await request.json()) as { enabled?: unknown; label?: unknown };
+      const patch: { enabled?: boolean; label?: string } = {};
+      if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+      if (typeof body.label === "string") patch.label = body.label;
+      await deps.store.keys.update(params.id, patch);
+      return { ok: true };
+    })
+
+    .delete("/api/keys/:id", async ({ request, params }) => {
+      await requireAdmin(request);
+      await deps.store.keys.delete(params.id);
+      return { ok: true };
+    })
+
+    .get("/api/settings", async ({ request }) => {
+      await requireAdmin(request);
+      return { settings: (await deps.store.config.getSettings()) ?? DEFAULT_SETTINGS };
+    })
+
+    .put("/api/settings", async ({ request }) => {
+      await requireAdmin(request);
+      const settings: Settings = parseOrThrow(settingsSchema, await request.json());
+      await deps.store.config.putSettings(settings);
+      return { ok: true };
+    })
+
+    .get("/api/usage", async ({ request, query }) => {
+      await requireAdmin(request);
+      const groupBy = parseOrThrow(groupBySchema, query.groupBy ?? "provider");
+      const since = typeof query.since === "string" ? Number(query.since) : 0;
+      const until = typeof query.until === "string" ? Number(query.until) : deps.now();
+
+      return {
+        rows: await deps.store.usage.aggregate({
+          groupBy,
+          since: Number.isFinite(since) ? since : 0,
+          until: Number.isFinite(until) ? until : deps.now(),
+        }),
+      };
+    })
+
+    .get("/api/logs", async ({ request, query }) => {
+      await requireAdmin(request);
+      const requested = typeof query.limit === "string" ? Number(query.limit) : 100;
+      const limit = Number.isFinite(requested) ? Math.min(Math.max(1, requested), MAX_LOG_LIMIT) : 100;
+      return { logs: await deps.store.usage.listLogs({ limit }) };
+    })
+
+    .onError(({ error, set }) => {
+      const gatewayError =
+        error instanceof GatewayError
+          ? error
+          : new GatewayError("INTERNAL", error instanceof Error ? error.message : "internal error");
+      set.status = HTTP_STATUS[gatewayError.code];
+      return { error: { code: gatewayError.code, message: gatewayError.message } };
+    });
+}
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 219 pass, 0 fail.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add the admin api for credentials, models, keys and usage"
 ```
 
 ---
