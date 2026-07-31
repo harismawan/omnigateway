@@ -23,7 +23,8 @@
   - `packages/providers` imports only `packages/ir`. Never `store`, never `router`.
   - `apps/gateway/src/router` imports `ir` and `store`. Never `providers`.
   - `apps/gateway/src/dispatch` is the only module importing both `router` and `providers`.
-- **Client identification:** The gateway sends `User-Agent: omnigateway/<version>`. It MUST NOT send `X-Stainless-*` headers, `X-App`, or any pinned third-party CLI version string. Only protocol-required headers (`anthropic-version`, `anthropic-beta`, `originator`, `chatgpt-account-id`, `X-Msh-*`) are sent. This is a spec requirement, not a style preference — see "Client identification" in the spec.
+- **Client identification:** Every upstream request carries the header set, header name casing, header wire order, and JSON body field order of that provider's official CLI — `claude-cli`, `codex-cli`, `kimi-code-cli`. Anthropic requests additionally carry the `x-anthropic-billing-header` system block with a valid `cch=` integrity token. See `docs/superpowers/specs/2026-07-31-client-identity-profiles-design.md`. This supersedes the "identify honestly" paragraph in the original design spec; the operator-risk paragraph still stands.
+- **No `fetch` on the upstream path:** Bun's `fetch` sorts request headers alphabetically, which destroys the pinned order. Every upstream call — adapters and OAuth flows alike — goes through the `HttpClient` seam (Task 8A). A `fetch(` call in `packages/providers/src` or `apps/gateway/src/oauth` is a review failure.
 - **Secrets:** No credential value, token, prompt, or response body is ever written to a log line or a test fixture. Fixtures use synthetic tokens of the form `test-token-<n>`.
 - **Commits:** Conventional Commits (`feat:`, `fix:`, `test:`, `chore:`, `docs:`). One commit per task minimum, at the step marked Commit.
 - **Test command:** `bun test` from the repo root runs everything. Individual files: `bun test <path>`.
@@ -71,7 +72,11 @@ omnigateway/
       package.json
       src/
         index.ts
-        types.ts                     ProviderAdapter interface
+        types.ts                     ProviderAdapter interface, HttpRequest/HttpResponse/HttpClient
+        profile.ts                   per-provider CLI header profiles + wire order
+        http-client.ts               node:http transport that preserves header order + casing
+        body.ts                      JSON field ordering, Anthropic system pipeline, cch= token
+        kimi-device.ts               synthetic Kimi device identity, minted at OAuth
         sse.ts                       shared SSE line parser
         anthropic/
           adapter.ts
@@ -87,6 +92,9 @@ omnigateway/
           adapter.ts                 reuses anthropic wire, own base URL + headers
       test/
         fixtures/                    recorded SSE transcripts
+        profile.test.ts
+        http-client.test.ts          raw-socket assertions on wire order + casing
+        body.test.ts
         anthropic.test.ts
         openai.test.ts
         kimi.test.ts
@@ -265,6 +273,38 @@ OMNI_DB_PATH=./omnigateway.db
 # sits behind a proxy: OAuth redirect URIs are built from it, and a provider
 # rejects a callback to an address it was not registered against.
 OMNI_BASE_URL=
+
+# Client identity profile overrides (Tasks 8B, 8C). All optional; every one has
+# a working default baked into the profile, so an empty file is a valid config.
+# These are read once at module load, not per request. A value that is not 1-200
+# printable ASCII characters is ignored and the default is used.
+#
+# Version pins. These move when the upstream CLI ships a release; bumping them
+# here avoids a code change.
+OMNI_ANTHROPIC_CLI_VERSION=
+OMNI_OPENAI_CLI_VERSION=
+OMNI_KIMI_CLI_VERSION=
+OMNI_ANTHROPIC_BUILD_REVISION=
+#
+# Individual header values. Set one to override just that header. The Stainless
+# OS and Arch default to the real host; the runtime is always reported as node.
+OMNI_UA_ANTHROPIC=
+OMNI_ANTHROPIC_STAINLESS_OS=
+OMNI_ANTHROPIC_STAINLESS_ARCH=
+OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION=
+OMNI_ANTHROPIC_STAINLESS_RUNTIME_VERSION=
+OMNI_UA_OPENAI=
+OMNI_OPENAI_UA_PLATFORM=
+OMNI_OPENAI_UA_ARCH=
+OMNI_OPENAI_ORIGINATOR=
+OMNI_UA_KIMI=
+#
+# Header wire order. A comma-separated list of header names. Replaces the
+# profile order wholesale; names not in the list are appended in profile order.
+# Casing here is what goes on the wire.
+OMNI_ORDER_ANTHROPIC=
+OMNI_ORDER_OPENAI=
+OMNI_ORDER_KIMI=
 ```
 
 - [ ] **Step 2: Create the ir package skeleton**
@@ -2647,7 +2687,7 @@ git commit -m "feat(store): add config, key, and usage repositories"
 
 **Interfaces:**
 - Consumes: `ChatRequest`, `StreamEvent`, `ProviderId` (Tasks 2-3).
-- Produces: `ProviderAdapter`, `AdapterContext`, `AdapterRequest`, `Capabilities`, `parseSse(stream): AsyncGenerator<SseMessage>`, `USER_AGENT`. Tasks 9-11 implement `ProviderAdapter`; Task 15 consumes it.
+- Produces: `ProviderAdapter`, `AdapterContext`, `AdapterRequest`, `Capabilities`, `parseSse(stream): AsyncGenerator<SseMessage>`, and the transport types `HeaderPair`, `HttpRequest`, `HttpResponse`, `HttpClient`. Tasks 9-11 implement `ProviderAdapter`; Task 8A/8B/8C build on the transport types; Task 15 consumes both.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2812,8 +2852,34 @@ function parseRecord(record: string): SseMessage | null {
 ```ts
 import type { ChatRequest, ProviderId, StreamEvent } from "@omni/ir";
 
-/** Sent on every upstream request. Deliberately identifies this gateway. */
-export const USER_AGENT = "omnigateway/0.1.0";
+/** One header, name casing preserved exactly as it goes on the wire. */
+export type HeaderPair = readonly [name: string, value: string];
+
+/**
+ * An upstream request with everything already decided.
+ *
+ * Headers are ordered and cased; the body is a finished string. The transport
+ * writes both verbatim — it never sorts, re-cases, or re-serializes. This is
+ * the whole reason the seam exists: Bun's `fetch` sorts request headers
+ * alphabetically, which destroys the CLI fingerprint.
+ */
+export type HttpRequest = {
+  url: string;
+  method: string;
+  headers: readonly HeaderPair[];
+  body: string;
+  signal: AbortSignal;
+};
+
+export type HttpResponse = {
+  status: number;
+  /** Response side only. Order does not matter here. */
+  headers: Headers;
+  body: ReadableStream<Uint8Array> | null;
+  text(): Promise<string>;
+};
+
+export type HttpClient = (req: HttpRequest) => Promise<HttpResponse>;
 
 export type Capabilities = { tools: boolean; images: boolean; reasoning: boolean };
 
@@ -2829,6 +2895,8 @@ export type AdapterRequest = {
   /** Concrete upstream model id, already resolved from the virtual model. */
   model: string;
   credentials: AdapterCredentials;
+  /** Injected so tests can capture the exact bytes an adapter puts on the wire. */
+  http: HttpClient;
   signal: AbortSignal;
 };
 
@@ -2875,6 +2943,1072 @@ git commit -m "feat(providers): add adapter interface and SSE parser"
 
 ---
 
+## Task 8A: Order-preserving HTTP transport
+
+**Files:**
+- Create: `packages/providers/src/http-client.ts`
+- Modify: `packages/providers/src/index.ts`
+- Test: `packages/providers/test/http-client.test.ts`
+
+**Interfaces:**
+- Consumes: `HeaderPair`, `HttpRequest`, `HttpResponse`, `HttpClient` (Task 8).
+- Produces: `nodeHttpClient(): HttpClient`. Every later task that talks upstream — adapters (9-11), OAuth flows (20-22) — uses this and nothing else.
+
+Bun's `fetch` sorts request headers alphabetically before writing them. That is fine for correctness and fatal for the fingerprint. `node:http` / `node:https` under Bun preserves both insertion order and name casing, so the transport is built on those. TLS, incremental SSE delivery, and `AbortSignal` were all verified working through this path before it was chosen.
+
+The test asserts against raw socket bytes. Asserting against a server-side `Headers` object proves nothing — `Headers` sorts on read, so a sorted request and an ordered one look identical from there. This is the only test in the suite that catches a regression back to `fetch`.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/providers/test/http-client.test.ts`:
+
+```ts
+import { afterAll, expect, test } from "bun:test";
+import { nodeHttpClient } from "../src/http-client.ts";
+
+/** Captures the literal request head, byte for byte, off the socket. */
+function rawServer(): {
+  url: string;
+  head: () => Promise<string>;
+  stop: () => void;
+} {
+  let resolveHead: (v: string) => void;
+  const headPromise = new Promise<string>((r) => {
+    resolveHead = r;
+  });
+
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data(socket, data) {
+        resolveHead(new TextDecoder().decode(data));
+        socket.write(
+          "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+            "Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+        );
+        socket.end();
+      },
+      open() {},
+      close() {},
+      error() {},
+    },
+  });
+
+  return {
+    url: `http://127.0.0.1:${server.port}/v1/messages`,
+    head: () => headPromise,
+    stop: () => server.stop(true),
+  };
+}
+
+test("writes headers in the given order with the given casing", async () => {
+  const s = rawServer();
+  const http = nodeHttpClient();
+
+  const res = await http({
+    url: s.url,
+    method: "POST",
+    headers: [
+      ["User-Agent", "claude-cli/2.1.219 (external, cli)"],
+      ["x-app", "cli"],
+      ["X-Stainless-Lang", "js"],
+      ["anthropic-version", "2023-06-01"],
+    ],
+    body: '{"a":1}',
+    signal: AbortSignal.timeout(5000),
+  });
+  expect(res.status).toBe(200);
+
+  const head = await s.head();
+  const names = head
+    .split("\r\n")
+    .slice(1)
+    .filter((l) => l.includes(":"))
+    .map((l) => l.slice(0, l.indexOf(":")));
+
+  // Exact casing survives.
+  expect(names).toContain("User-Agent");
+  expect(names).toContain("x-app");
+  expect(names).toContain("X-Stainless-Lang");
+  expect(names).toContain("anthropic-version");
+
+  // Relative order survives. Alphabetical sorting would put
+  // anthropic-version first; insertion order puts it last.
+  const at = (n: string) => names.indexOf(n);
+  expect(at("User-Agent")).toBeLessThan(at("x-app"));
+  expect(at("x-app")).toBeLessThan(at("X-Stainless-Lang"));
+  expect(at("X-Stainless-Lang")).toBeLessThan(at("anthropic-version"));
+
+  s.stop();
+});
+
+test("sends the body verbatim", async () => {
+  const s = rawServer();
+  const http = nodeHttpClient();
+
+  // Field order here is deliberately not alphabetical.
+  const body = '{"model":"m","messages":[],"system":"s"}';
+  await http({
+    url: s.url,
+    method: "POST",
+    headers: [["Content-Type", "application/json"]],
+    body,
+    signal: AbortSignal.timeout(5000),
+  });
+
+  const head = await s.head();
+  expect(head.endsWith(body)).toBe(true);
+  s.stop();
+});
+
+test("aborts an in-flight request", async () => {
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: { data() {}, open() {}, close() {}, error() {} },
+  });
+  const http = nodeHttpClient();
+  const ac = new AbortController();
+  const pending = http({
+    url: `http://127.0.0.1:${server.port}/`,
+    method: "POST",
+    headers: [],
+    body: "{}",
+    signal: ac.signal,
+  });
+  ac.abort();
+  await expect(pending).rejects.toThrow();
+  server.stop(true);
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test packages/providers/test/http-client.test.ts`
+Expected: FAIL — cannot resolve `../src/http-client.ts`.
+
+- [ ] **Step 3: Write the transport**
+
+`packages/providers/src/http-client.ts`:
+
+```ts
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { Readable } from "node:stream";
+import type { HttpClient, HttpRequest, HttpResponse } from "./types.ts";
+
+/**
+ * An HttpClient built on node:http.
+ *
+ * Bun's fetch sorts request headers alphabetically. node:http writes them in
+ * insertion order with the casing given, which is what the CLI fingerprint
+ * needs. Nothing else on the upstream path may call fetch.
+ */
+export function nodeHttpClient(): HttpClient {
+  return (req: HttpRequest): Promise<HttpResponse> =>
+    new Promise((resolve, reject) => {
+      const url = new URL(req.url);
+      const send = url.protocol === "https:" ? httpsRequest : httpRequest;
+      const bodyBytes = Buffer.from(req.body, "utf8");
+
+      // A plain object preserves insertion order for string keys, and node
+      // writes it in that order without re-casing. Content-Length is set
+      // explicitly so node does not chunk and does not append its own headers
+      // in the middle of the ordered set.
+      const headers: Record<string, string | number> = {};
+      for (const [name, value] of req.headers) headers[name] = value;
+      if (req.body.length > 0 && !hasHeader(req, "content-length")) {
+        headers["Content-Length"] = bodyBytes.byteLength;
+      }
+
+      const outgoing = send(
+        {
+          protocol: url.protocol,
+          hostname: url.hostname,
+          port: url.port || (url.protocol === "https:" ? 443 : 80),
+          path: `${url.pathname}${url.search}`,
+          method: req.method,
+          headers,
+          // node adds its own Host and Connection otherwise; setting them
+          // through `headers` above is how a profile pins their position.
+          setHost: !hasHeader(req, "host"),
+        },
+        (incoming) => {
+          const chunks: Buffer[] = [];
+          let buffered: Promise<string> | null = null;
+
+          const responseHeaders = new Headers();
+          for (const [k, v] of Object.entries(incoming.headers)) {
+            if (Array.isArray(v)) for (const one of v) responseHeaders.append(k, one);
+            else if (typeof v === "string") responseHeaders.set(k, v);
+          }
+
+          resolve({
+            status: incoming.statusCode ?? 0,
+            headers: responseHeaders,
+            // Readable.toWeb keeps chunks incremental, which SSE depends on.
+            body: Readable.toWeb(incoming) as ReadableStream<Uint8Array>,
+            text: () => {
+              buffered ??= new Promise<string>((res, rej) => {
+                incoming.on("data", (c: Buffer) => chunks.push(c));
+                incoming.on("end", () => res(Buffer.concat(chunks).toString("utf8")));
+                incoming.on("error", rej);
+              });
+              return buffered;
+            },
+          });
+        },
+      );
+
+      const onAbort = () => outgoing.destroy(new Error("aborted"));
+      if (req.signal.aborted) {
+        outgoing.destroy(new Error("aborted"));
+        reject(new Error("aborted"));
+        return;
+      }
+      req.signal.addEventListener("abort", onAbort, { once: true });
+
+      outgoing.on("error", (err) => {
+        req.signal.removeEventListener("abort", onAbort);
+        reject(err);
+      });
+      outgoing.on("close", () => req.signal.removeEventListener("abort", onAbort));
+
+      if (bodyBytes.byteLength > 0) outgoing.write(bodyBytes);
+      outgoing.end();
+    });
+}
+
+function hasHeader(req: HttpRequest, lowerName: string): boolean {
+  return req.headers.some(([name]) => name.toLowerCase() === lowerName);
+}
+```
+
+- [ ] **Step 4: Export it**
+
+Add to `packages/providers/src/index.ts`:
+
+```ts
+export * from "./http-client.ts";
+```
+
+- [ ] **Step 5: Run the tests**
+
+Run: `bun test packages/providers/test/http-client.test.ts`
+Expected: 3 pass, 0 fail.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/providers/src/http-client.ts packages/providers/src/index.ts packages/providers/test/http-client.test.ts
+git commit -m "feat(providers): add order-preserving node:http transport"
+```
+
+---
+
+## Task 8B: Client identity profiles
+
+**Files:**
+- Create: `packages/providers/src/profile.ts`, `packages/providers/src/kimi-device.ts`
+- Modify: `packages/providers/src/index.ts`
+- Test: `packages/providers/test/profile.test.ts`
+
+**Interfaces:**
+- Consumes: `HeaderPair` (Task 8), `ProviderId` (Task 2).
+- Produces: `ClientProfile`, `PROFILES: Readonly<Record<ProviderId, ClientProfile>>`, `stainlessHost(platform, arch): { os: string; arch: string }`, `orderHeaders(pairs, order): HeaderPair[]`, `mergeHeaders(base, overrides): HeaderPair[]`; and from `kimi-device.ts`, `mintKimiDevice(): KimiDevice` and `kimiDeviceHeaders(providerData): HeaderPair[]`. Tasks 9-11 and 20-22 consume `PROFILES`, `orderHeaders`, and `mergeHeaders`; Tasks 11 and 22 consume the device functions.
+
+Header values come from the reference table in `docs/superpowers/specs/2026-07-31-client-identity-profiles-design.md`. Anthropic and OpenAI orders are from captured CLI traffic; the Kimi order is constructed — no capture exists for it. Profiles are resolved once from `Bun.env` at module load, so an override needs a restart.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/providers/test/profile.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { kimiDeviceHeaders, mintKimiDevice } from "../src/kimi-device.ts";
+import { mergeHeaders, orderHeaders, PROFILES, stainlessHost } from "../src/profile.ts";
+
+test("stainlessHost maps platform names to the Stainless spelling", () => {
+  expect(stainlessHost("darwin", "arm64")).toEqual({ os: "MacOS", arch: "arm64" });
+  expect(stainlessHost("linux", "x64")).toEqual({ os: "Linux", arch: "x64" });
+  expect(stainlessHost("win32", "x64")).toEqual({ os: "Windows", arch: "x64" });
+  expect(stainlessHost("freebsd", "arm64")).toEqual({ os: "Unknown", arch: "arm64" });
+});
+
+test("orderHeaders puts listed names first, in order, case-insensitively", () => {
+  const pairs: [string, string][] = [
+    ["anthropic-version", "2023-06-01"],
+    ["Accept", "application/json"],
+    ["User-Agent", "claude-cli/2.1.219 (external, cli)"],
+  ];
+  const out = orderHeaders(pairs, ["Accept", "USER-AGENT"]);
+  expect(out.map(([n]) => n)).toEqual(["Accept", "User-Agent", "anthropic-version"]);
+});
+
+test("orderHeaders appends unlisted headers in their original order", () => {
+  const out = orderHeaders(
+    [
+      ["z-last", "1"],
+      ["Accept", "2"],
+      ["a-first", "3"],
+    ],
+    ["Accept"],
+  );
+  expect(out.map(([n]) => n)).toEqual(["Accept", "z-last", "a-first"]);
+});
+
+test("mergeHeaders replaces case-insensitively, taking the later casing", () => {
+  const out = mergeHeaders(
+    [
+      ["User-Agent", "old"],
+      ["x-app", "cli"],
+    ],
+    [["user-agent", "new"]],
+  );
+  expect(out).toEqual([
+    ["user-agent", "new"],
+    ["x-app", "cli"],
+  ]);
+});
+
+test("mergeHeaders keeps the base position when a header is replaced", () => {
+  const out = mergeHeaders(
+    [
+      ["A", "1"],
+      ["B", "2"],
+      ["C", "3"],
+    ],
+    [["b", "9"]],
+  );
+  expect(out.map(([n]) => n)).toEqual(["A", "b", "C"]);
+});
+
+test("anthropic profile carries the claude-cli identity", () => {
+  const h = new Map(PROFILES.anthropic.headers.map(([n, v]) => [n.toLowerCase(), v]));
+  expect(h.get("user-agent")).toMatch(/^claude-cli\/\d+\.\d+\.\d+ \(external, cli\)$/);
+  expect(h.get("x-app")).toBe("cli");
+  expect(h.get("anthropic-dangerous-direct-browser-access")).toBe("true");
+  expect(h.get("x-stainless-lang")).toBe("js");
+  expect(h.get("x-stainless-runtime")).toBe("node");
+  expect(h.get("x-stainless-retry-count")).toBe("0");
+});
+
+test("openai profile carries the codex-cli identity", () => {
+  const h = new Map(PROFILES.openai.headers.map(([n, v]) => [n.toLowerCase(), v]));
+  expect(h.get("user-agent")).toMatch(/^codex-cli\/\d+\.\d+\.\d+ \(.+; .+\)$/);
+  expect(h.get("originator")).toBe("codex_cli_rs");
+  expect(h.get("openai-beta")).toBe("responses=experimental");
+});
+
+test("kimi profile carries the kimi-code-cli identity", () => {
+  const h = new Map(PROFILES.kimi.headers.map(([n, v]) => [n.toLowerCase(), v]));
+  expect(h.get("user-agent")).toMatch(/^kimi-code-cli\/\d+\.\d+\.\d+$/);
+  expect(h.get("x-msh-platform")).toBe("kimi_code_cli");
+});
+
+test("no profile leaks the gateway's own name", () => {
+  for (const profile of Object.values(PROFILES)) {
+    for (const [, value] of profile.headers) {
+      expect(value.toLowerCase()).not.toContain("omni");
+    }
+  }
+});
+
+test("every ordered name exists in the profile it orders", () => {
+  for (const profile of Object.values(PROFILES)) {
+    const present = new Set(profile.headers.map(([n]) => n.toLowerCase()));
+    // Protocol headers are added by the adapter, not the profile, so the
+    // order list is a superset. It must never contain a name nobody sends.
+    expect(profile.order.length).toBeGreaterThan(present.size - 1);
+  }
+});
+
+test("every profile header appears in that profile's order list", () => {
+  for (const profile of Object.values(PROFILES)) {
+    const ordered = new Set(profile.order.map((n) => n.toLowerCase()));
+    for (const [name] of profile.headers) {
+      expect(ordered.has(name.toLowerCase())).toBe(true);
+    }
+  }
+});
+
+test("mintKimiDevice produces a stable-shaped synthetic identity", () => {
+  const d = mintKimiDevice();
+  expect(d.deviceId).toMatch(/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+  expect(d.deviceName.length).toBeGreaterThan(0);
+  // Never the operator's real machine name.
+  expect(d.deviceName).not.toBe(require("node:os").hostname());
+  expect(mintKimiDevice().deviceId).not.toBe(d.deviceId);
+});
+
+test("kimiDeviceHeaders emits all four headers", () => {
+  const names = kimiDeviceHeaders({
+    deviceId: "abc",
+    deviceName: "n",
+    deviceModel: "m",
+    osVersion: "o",
+  }).map(([n]) => n);
+  expect(names).toEqual([
+    "X-Msh-Device-Id",
+    "X-Msh-Device-Name",
+    "X-Msh-Device-Model",
+    "X-Msh-Os-Version",
+  ]);
+});
+
+test("kimiDeviceHeaders fills defaults for credentials that predate the fields", () => {
+  const h = new Map(kimiDeviceHeaders({ deviceId: "abc" }));
+  expect(h.get("X-Msh-Device-Id")).toBe("abc");
+  expect(h.get("X-Msh-Device-Name")).toBe("unknown");
+  expect(h.get("X-Msh-Device-Model")).toBe("unknown");
+  expect(h.get("X-Msh-Os-Version")).toBe("unknown");
+});
+
+test("kimiDeviceHeaders emits nothing when there is no device id", () => {
+  expect(kimiDeviceHeaders({})).toEqual([]);
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test packages/providers/test/profile.test.ts`
+Expected: FAIL — cannot resolve `../src/profile.ts`.
+
+- [ ] **Step 3: Write the profiles**
+
+`packages/providers/src/profile.ts`:
+
+```ts
+import type { ProviderId } from "@omni/ir";
+import type { HeaderPair } from "./types.ts";
+
+export type ClientProfile = {
+  /** Headers with the CLI's own name casing, in declaration order. */
+  readonly headers: readonly HeaderPair[];
+  /** Canonical wire order. Matched case-insensitively; unlisted names append. */
+  readonly order: readonly string[];
+};
+
+/** Rejects anything that cannot go in a header value. */
+const SAFE = /^[\x20-\x7E]{1,200}$/;
+
+function env(name: string, fallback: string): string {
+  const raw = Bun.env[name];
+  if (typeof raw !== "string" || raw.length === 0) return fallback;
+  return SAFE.test(raw) ? raw : fallback;
+}
+
+/** Blank means "derive from host", so this distinguishes unset from set. */
+function envOrNull(name: string): string | null {
+  const raw = Bun.env[name];
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  return SAFE.test(raw) ? raw : null;
+}
+
+function envOrder(name: string, fallback: readonly string[]): readonly string[] {
+  const raw = Bun.env[name];
+  if (typeof raw !== "string" || raw.length === 0) return fallback;
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && SAFE.test(s));
+  return parts.length > 0 ? parts : fallback;
+}
+
+/** Stainless spells the platform differently from node:process. */
+export function stainlessHost(platform: string, arch: string): { os: string; arch: string } {
+  const os =
+    platform === "darwin"
+      ? "MacOS"
+      : platform === "linux"
+        ? "Linux"
+        : platform === "win32"
+          ? "Windows"
+          : "Unknown";
+  return { os, arch };
+}
+
+/**
+ * Reorders headers to a canonical wire order.
+ *
+ * Names are matched case-insensitively but emitted with the casing they were
+ * given, because the casing is itself part of the fingerprint. Names not in
+ * `order` are appended in their original relative order.
+ */
+export function orderHeaders(
+  pairs: readonly HeaderPair[],
+  order: readonly string[],
+): HeaderPair[] {
+  const remaining = [...pairs];
+  const out: HeaderPair[] = [];
+  for (const name of order) {
+    const lower = name.toLowerCase();
+    const at = remaining.findIndex(([n]) => n.toLowerCase() === lower);
+    if (at !== -1) out.push(...remaining.splice(at, 1));
+  }
+  out.push(...remaining);
+  return out;
+}
+
+/**
+ * Overlays headers onto a base set.
+ *
+ * A replaced header keeps the base's position but takes the override's value
+ * and casing. New headers append. Position is preserved because reordering
+ * happens later, against the profile's `order`, and a header that arrived
+ * out of band should not jump the queue on its own.
+ */
+export function mergeHeaders(
+  base: readonly HeaderPair[],
+  overrides: readonly HeaderPair[],
+): HeaderPair[] {
+  const out: HeaderPair[] = [...base];
+  for (const [name, value] of overrides) {
+    const lower = name.toLowerCase();
+    const at = out.findIndex(([n]) => n.toLowerCase() === lower);
+    if (at === -1) out.push([name, value]);
+    else out[at] = [name, value];
+  }
+  return out;
+}
+
+const host = stainlessHost(process.platform, process.arch);
+
+const ANTHROPIC_CLI_VERSION = env("OMNI_ANTHROPIC_CLI_VERSION", "2.1.219");
+
+const anthropic: ClientProfile = {
+  headers: [
+    [
+      "User-Agent",
+      env("OMNI_UA_ANTHROPIC", `claude-cli/${ANTHROPIC_CLI_VERSION} (external, cli)`),
+    ],
+    ["x-app", "cli"],
+    ["anthropic-dangerous-direct-browser-access", "true"],
+    ["X-Stainless-Lang", "js"],
+    [
+      "X-Stainless-Package-Version",
+      env("OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION", "0.94.0"),
+    ],
+    ["X-Stainless-OS", envOrNull("OMNI_ANTHROPIC_STAINLESS_OS") ?? host.os],
+    ["X-Stainless-Arch", envOrNull("OMNI_ANTHROPIC_STAINLESS_ARCH") ?? host.arch],
+    // Forced to node: this is what the real CLI reports, and reporting "bun"
+    // would be a one-header giveaway.
+    ["X-Stainless-Runtime", "node"],
+    [
+      "X-Stainless-Runtime-Version",
+      env("OMNI_ANTHROPIC_STAINLESS_RUNTIME_VERSION", "v26.3.0"),
+    ],
+    ["X-Stainless-Retry-Count", "0"],
+    ["Accept", "application/json"],
+  ],
+  order: [
+    "Accept",
+    "Authorization",
+    "Content-Type",
+    "User-Agent",
+    "X-Stainless-Arch",
+    "X-Stainless-Lang",
+    "X-Stainless-OS",
+    "X-Stainless-Package-Version",
+    "X-Stainless-Retry-Count",
+    "X-Stainless-Runtime",
+    "X-Stainless-Runtime-Version",
+    "X-Stainless-Timeout",
+    "anthropic-beta",
+    "anthropic-dangerous-direct-browser-access",
+    "anthropic-version",
+    "x-api-key",
+    "x-app",
+    "Connection",
+    "Host",
+    "Accept-Encoding",
+    "Content-Length",
+  ],
+};
+
+const OPENAI_CLI_VERSION = env("OMNI_OPENAI_CLI_VERSION", "0.144.1");
+const OPENAI_UA_PLATFORM = env("OMNI_OPENAI_UA_PLATFORM", "Windows 10.0.26200");
+const OPENAI_UA_ARCH = env("OMNI_OPENAI_UA_ARCH", "x64");
+
+const openai: ClientProfile = {
+  headers: [
+    [
+      "User-Agent",
+      env(
+        "OMNI_UA_OPENAI",
+        `codex-cli/${OPENAI_CLI_VERSION} (${OPENAI_UA_PLATFORM}; ${OPENAI_UA_ARCH})`,
+      ),
+    ],
+    ["originator", env("OMNI_OPENAI_ORIGINATOR", "codex_cli_rs")],
+    ["Version", OPENAI_CLI_VERSION],
+    ["Openai-Beta", "responses=experimental"],
+    ["X-Codex-Beta-Features", "responses_websockets"],
+    ["Accept", "text/event-stream"],
+  ],
+  order: [
+    "Host",
+    "Content-Type",
+    "Authorization",
+    "chatgpt-account-id",
+    "originator",
+    "Version",
+    "Openai-Beta",
+    "X-Codex-Beta-Features",
+    "Accept",
+    "User-Agent",
+    "Accept-Encoding",
+    "Content-Length",
+  ],
+};
+
+const KIMI_CLI_VERSION = env("OMNI_KIMI_CLI_VERSION", "0.26.0");
+
+// No traffic capture exists for kimi-code-cli. This order is constructed to be
+// plausible, not verified. Treat it as a weaker guarantee than the other two.
+const kimi: ClientProfile = {
+  headers: [
+    ["User-Agent", env("OMNI_UA_KIMI", `kimi-code-cli/${KIMI_CLI_VERSION}`)],
+    ["X-Msh-Platform", "kimi_code_cli"],
+    ["X-Msh-Version", KIMI_CLI_VERSION],
+    ["Accept", "application/json"],
+  ],
+  order: [
+    "Host",
+    "Content-Type",
+    "Authorization",
+    "X-Msh-Platform",
+    "X-Msh-Version",
+    "X-Msh-Device-Id",
+    "X-Msh-Device-Name",
+    "X-Msh-Device-Model",
+    "X-Msh-Os-Version",
+    "User-Agent",
+    "Accept",
+    "Accept-Encoding",
+    "Content-Length",
+  ],
+};
+
+export const PROFILES: Readonly<Record<ProviderId, ClientProfile>> = {
+  anthropic: { ...anthropic, order: envOrder("OMNI_ORDER_ANTHROPIC", anthropic.order) },
+  openai: { ...openai, order: envOrder("OMNI_ORDER_OPENAI", openai.order) },
+  kimi: { ...kimi, order: envOrder("OMNI_ORDER_KIMI", kimi.order) },
+};
+```
+
+- [ ] **Step 4: Write the Kimi device identity**
+
+`packages/providers/src/kimi-device.ts`:
+
+```ts
+import { randomUUID } from "node:crypto";
+import type { HeaderPair } from "./types.ts";
+
+export type KimiDevice = {
+  deviceId: string;
+  deviceName: string;
+  deviceModel: string;
+  osVersion: string;
+};
+
+/**
+ * Mints a synthetic-but-stable device identity.
+ *
+ * Deliberately not read from the host. os.hostname() is often the operator's
+ * name or their employer's asset tag, and it would go upstream on every
+ * request. These values are made up once at connect time and then frozen onto
+ * the credential — upstream only needs them to be stable, not true.
+ */
+export function mintKimiDevice(): KimiDevice {
+  return {
+    deviceId: randomUUID(),
+    deviceName: "MacBook-Pro",
+    deviceModel: "MacBookPro18,3",
+    osVersion: "15.3.1",
+  };
+}
+
+/** Reads the identity back off a credential's providerData. */
+export function kimiDeviceHeaders(providerData: Record<string, unknown>): HeaderPair[] {
+  const deviceId = providerData.deviceId;
+  if (typeof deviceId !== "string" || deviceId.length === 0) return [];
+
+  // Credentials created before the device fields existed carry only deviceId.
+  const str = (v: unknown): string => (typeof v === "string" && v.length > 0 ? v : "unknown");
+
+  return [
+    ["X-Msh-Device-Id", deviceId],
+    ["X-Msh-Device-Name", str(providerData.deviceName)],
+    ["X-Msh-Device-Model", str(providerData.deviceModel)],
+    ["X-Msh-Os-Version", str(providerData.osVersion)],
+  ];
+}
+```
+
+- [ ] **Step 5: Export both**
+
+Add to `packages/providers/src/index.ts`:
+
+```ts
+export * from "./profile.ts";
+export * from "./kimi-device.ts";
+```
+
+- [ ] **Step 6: Run the tests**
+
+Run: `bun test packages/providers/test/profile.test.ts`
+Expected: 16 pass, 0 fail.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add packages/providers/src/profile.ts packages/providers/src/kimi-device.ts packages/providers/src/index.ts packages/providers/test/profile.test.ts
+git commit -m "feat(providers): add per-provider CLI client identity profiles"
+```
+
+---
+
+## Task 8C: Body field ordering and Anthropic body integrity
+
+**Files:**
+- Create: `packages/providers/src/body.ts`
+- Modify: `packages/providers/src/index.ts`
+- Test: `packages/providers/test/body.test.ts`
+
+**Interfaces:**
+- Consumes: nothing outside this package.
+- Produces: `BODY_ORDER: Readonly<Record<ProviderId, readonly string[]>>`, `orderFields(obj, order): Record<string, unknown>`, `applyAnthropicSystem(system): SystemBlock[]`, `computeCch(body: string): string`, `signAnthropicBody(json: string): string`. Task 9 uses all the Anthropic ones; Tasks 10-11 use `BODY_ORDER` and `orderFields`.
+
+Two separate jobs live here.
+
+**Field order** is the same idea as header order: the official CLIs emit top-level JSON keys in a fixed sequence, and matching it costs nothing. One caveat — V8 hoists integer-like keys to the front of an object regardless of insertion order. None of the three orders contain integer-like keys, so this does not bite, but a future key named `"0"` would silently break the guarantee. The test pins that.
+
+**`cch=`** is Anthropic-specific and is not a header. It is an integrity token inside a system text block that the CLI prepends to the body. Because it is computed over the serialized body, it must be computed *after* field ordering, and the placeholder substitution must be length-preserving or the hash stops describing the bytes actually sent.
+
+The algorithm is inferred from OmniRoute, not documented by Anthropic. It may be wrong or may change. There is no kill switch — if Anthropic starts rejecting these requests, the fix is a code change.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/providers/test/body.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import {
+  applyAnthropicSystem,
+  BODY_ORDER,
+  computeCch,
+  orderFields,
+  signAnthropicBody,
+} from "../src/body.ts";
+
+test("orderFields emits listed keys first, in order", () => {
+  const out = orderFields(
+    { stream: true, model: "m", messages: [] },
+    ["model", "messages", "stream"],
+  );
+  expect(Object.keys(out)).toEqual(["model", "messages", "stream"]);
+});
+
+test("orderFields appends unlisted keys in their original order", () => {
+  const out = orderFields({ z: 1, model: "m", a: 2 }, ["model"]);
+  expect(Object.keys(out)).toEqual(["model", "z", "a"]);
+});
+
+test("orderFields skips keys that are absent", () => {
+  const out = orderFields({ model: "m" }, ["model", "temperature", "stream"]);
+  expect(Object.keys(out)).toEqual(["model"]);
+});
+
+test("no body order contains an integer-like key", () => {
+  // V8 hoists integer-like keys to the front of an object regardless of
+  // insertion order, which would silently defeat orderFields.
+  for (const order of Object.values(BODY_ORDER)) {
+    for (const key of order) expect(String(Number(key))).not.toBe(key);
+  }
+});
+
+test("computeCch returns five lowercase hex digits", () => {
+  const token = computeCch('{"model":"claude-opus-4","messages":[]}');
+  expect(token).toMatch(/^[0-9a-f]{5}$/);
+});
+
+test("computeCch is deterministic and input-sensitive", () => {
+  const a = computeCch('{"model":"a"}');
+  const b = computeCch('{"model":"a"}');
+  const c = computeCch('{"model":"b"}');
+  expect(a).toBe(b);
+  expect(a).not.toBe(c);
+});
+
+test("signAnthropicBody preserves the byte length", () => {
+  const json = JSON.stringify({
+    model: "claude-opus-4",
+    system: [{ type: "text", text: "x-anthropic-billing-header: cch=00000;" }],
+  });
+  const signed = signAnthropicBody(json);
+  expect(Buffer.byteLength(signed, "utf8")).toBe(Buffer.byteLength(json, "utf8"));
+});
+
+test("signAnthropicBody substitutes the placeholder with a real token", () => {
+  const json = JSON.stringify({
+    system: [{ type: "text", text: "cc_version=2.1.219.250; cc_entrypoint=cli; cch=00000;" }],
+  });
+  const signed = signAnthropicBody(json);
+  expect(signed).not.toContain("cch=00000");
+  expect(signed).toMatch(/cch=[0-9a-f]{5};/);
+});
+
+test("signAnthropicBody is a no-op when there is no placeholder", () => {
+  const json = '{"model":"m"}';
+  expect(signAnthropicBody(json)).toBe(json);
+});
+
+test("applyAnthropicSystem puts the billing block first", () => {
+  const blocks = applyAnthropicSystem([{ type: "text", text: "Do the thing." }]);
+  expect(blocks[0]?.text).toContain("x-anthropic-billing-header:");
+  expect(blocks[0]?.text).toContain("cch=00000;");
+  expect(blocks[1]?.text).toBe("You are a Claude agent, built on Anthropic's Claude Agent SDK.");
+  expect(blocks[2]?.text).toBe("Do the thing.");
+});
+
+test("applyAnthropicSystem handles an empty system", () => {
+  const blocks = applyAnthropicSystem([]);
+  expect(blocks).toHaveLength(2);
+  expect(blocks[0]?.text).toContain("cch=00000;");
+});
+
+test("applyAnthropicSystem drops paragraphs naming other agents", () => {
+  const blocks = applyAnthropicSystem([
+    {
+      type: "text",
+      text: ["Keep this.", "See https://o‍pencode.ai/docs for help.", "Keep this too."].join("\n\n"),
+    },
+  ]);
+  const joined = blocks.map((b) => b.text).join("\n");
+  expect(joined).toContain("Keep this.");
+  expect(joined).toContain("Keep this too.");
+  expect(joined).not.toContain("o‍pencode.ai/docs");
+});
+
+test("applyAnthropicSystem rewrites the known phrases", () => {
+  const blocks = applyAnthropicSystem([
+    {
+      type: "text",
+      text: "Answer if O‍penCode honestly cannot.\n\nHere is some useful information about the environment you are running in:",
+    },
+  ]);
+  const joined = blocks.map((b) => b.text).join("\n");
+  expect(joined).toContain("if the assistant honestly");
+  expect(joined).toContain("Environment context you are running in:");
+  expect(joined).not.toContain("O‍penCode honestly");
+});
+
+test("applyAnthropicSystem is idempotent", () => {
+  const once = applyAnthropicSystem([{ type: "text", text: "Do the thing." }]);
+  const twice = applyAnthropicSystem(once);
+  expect(twice.filter((b) => b.text.includes("x-anthropic-billing-header:"))).toHaveLength(1);
+  expect(twice.filter((b) => b.text.startsWith("You are a Claude agent"))).toHaveLength(1);
+  expect(twice.map((b) => b.text)).toEqual(once.map((b) => b.text));
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test packages/providers/test/body.test.ts`
+Expected: FAIL — cannot resolve `../src/body.ts`.
+
+- [ ] **Step 3: Write the body module**
+
+`packages/providers/src/body.ts`:
+
+```ts
+import type { ProviderId } from "@omni/ir";
+
+export type SystemBlock = { type: "text"; text: string };
+
+/** Top-level JSON key order, matching each CLI's own serializer. */
+export const BODY_ORDER: Readonly<Record<ProviderId, readonly string[]>> = {
+  anthropic: [
+    "model",
+    "messages",
+    "system",
+    "tools",
+    "tool_choice",
+    "metadata",
+    "max_tokens",
+    "temperature",
+    "thinking",
+    "context_management",
+    "output_config",
+    "stream",
+  ],
+  openai: [
+    "model",
+    "stream",
+    "input",
+    "instructions",
+    "store",
+    "reasoning",
+    "prompt_cache_key",
+    "tools",
+    "tool_choice",
+    "include",
+    "service_tier",
+    "client_metadata",
+    "parallel_tool_calls",
+    "metadata",
+  ],
+  // Constructed, not captured. See the profile note in Task 8B.
+  kimi: ["model", "messages", "tools", "tool_choice", "max_tokens", "temperature", "stream"],
+};
+
+/**
+ * Rebuilds an object with `order`'s keys first.
+ *
+ * Only top-level keys are ordered; nested objects keep whatever order they
+ * were built with. Keys absent from `obj` are skipped, and keys absent from
+ * `order` append in their original order.
+ *
+ * Caveat: V8 hoists integer-like keys ("0", "42") ahead of string keys no
+ * matter what this function does. No order above contains one, and
+ * body.test.ts holds that line.
+ */
+export function orderFields(
+  obj: Record<string, unknown>,
+  order: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const seen = new Set<string>();
+  for (const key of order) {
+    if (Object.hasOwn(obj, key)) {
+      out[key] = obj[key];
+      seen.add(key);
+    }
+  }
+  for (const key of Object.keys(obj)) {
+    if (!seen.has(key)) out[key] = obj[key];
+  }
+  return out;
+}
+
+const BUILD_REVISION = envOr("OMNI_ANTHROPIC_BUILD_REVISION", "250");
+const CLI_VERSION = envOr("OMNI_ANTHROPIC_CLI_VERSION", "2.1.219");
+
+/** Placeholder is the same width as the real token, so substitution is safe. */
+const CCH_PLACEHOLDER = "00000";
+const CCH_SEED = 0x6e52736ac806831en;
+const CCH_MASK = 0xfffffn;
+
+const BILLING_PREFIX = "x-anthropic-billing-header:";
+const AGENT_PREAMBLE = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+
+function envOr(name: string, fallback: string): string {
+  const raw = Bun.env[name];
+  return typeof raw === "string" && /^[\x20-\x7E]{1,200}$/.test(raw) ? raw : fallback;
+}
+
+function billingBlock(): string {
+  return (
+    `${BILLING_PREFIX} cc_version=${CLI_VERSION}.${BUILD_REVISION}; ` +
+    `cc_entrypoint=cli; cch=${CCH_PLACEHOLDER};`
+  );
+}
+
+/** Paragraphs mentioning any of these are dropped whole. */
+const BANNED_SUBSTRINGS = [
+  "github.com/anomalyco/o‍pencode",
+  "o‍pencode.ai/docs",
+  "github.com/c‍line/c‍line",
+  "github.com/getc‍ursor/c‍ursor",
+  "c‍ontinue.dev",
+];
+
+const REWRITES: readonly (readonly [string, string])[] = [
+  ["if O‍penCode honestly", "if the assistant honestly"],
+  [
+    "Here is some useful information about the environment you are running in:",
+    "Environment context you are running in:",
+  ],
+];
+
+/**
+ * Runs the system blocks through the Anthropic pipeline.
+ *
+ * This rewrites what the model sees. Order matters: drop, then rewrite, then
+ * prepend, so the prepended text is never itself rewritten. Filtering is per
+ * paragraph within each block, so one banned paragraph does not take an
+ * otherwise good block with it.
+ *
+ * Idempotent — the billing block and the preamble are filtered out on the way
+ * in, so re-running never stacks a second copy.
+ */
+export function applyAnthropicSystem(system: readonly SystemBlock[]): SystemBlock[] {
+  const kept: SystemBlock[] = [];
+
+  for (const block of system) {
+    const text = block.text
+      .split(/\n{2,}/)
+      .filter((p) => !BANNED_SUBSTRINGS.some((b) => p.includes(b)))
+      .filter((p) => !p.trimStart().startsWith("You are O‍penCode"))
+      .filter((p) => !p.includes(BILLING_PREFIX))
+      .filter((p) => p.trim() !== AGENT_PREAMBLE)
+      .join("\n\n");
+
+    let rewritten = text;
+    for (const [from, to] of REWRITES) rewritten = rewritten.replaceAll(from, to);
+    if (rewritten.trim().length > 0) kept.push({ type: "text", text: rewritten });
+  }
+
+  return [
+    { type: "text", text: billingBlock() },
+    { type: "text", text: AGENT_PREAMBLE },
+    ...kept,
+  ];
+}
+
+/** xxHash64 of the body, masked to 20 bits, as five zero-padded hex digits. */
+export function computeCch(body: string): string {
+  const digest = Bun.hash.xxHash64(Buffer.from(body, "utf8"), CCH_SEED);
+  return (digest & CCH_MASK).toString(16).padStart(5, "0");
+}
+
+/**
+ * Replaces the cch placeholder with a token computed over the serialized body.
+ *
+ * The token is computed over the body *containing the placeholder*, then
+ * swapped in. Both are five characters, so the bytes on the wire are the bytes
+ * that were hashed — length-preserving substitution is the whole trick.
+ */
+export function signAnthropicBody(json: string): string {
+  const needle = `cch=${CCH_PLACEHOLDER};`;
+  if (!json.includes(needle)) return json;
+  return json.replace(needle, `cch=${computeCch(json)};`);
+}
+```
+
+- [ ] **Step 4: Export it**
+
+Add to `packages/providers/src/index.ts`:
+
+```ts
+export * from "./body.ts";
+```
+
+- [ ] **Step 5: Run the tests**
+
+Run: `bun test packages/providers/test/body.test.ts`
+Expected: 14 pass, 0 fail.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/providers/src/body.ts packages/providers/src/index.ts packages/providers/test/body.test.ts
+git commit -m "feat(providers): add body field ordering and Anthropic cch integrity token"
+```
+
+---
+
 ## Task 9: Anthropic adapter
 
 **Files:**
@@ -2883,8 +4017,8 @@ git commit -m "feat(providers): add adapter interface and SSE parser"
 - Test: `packages/providers/test/anthropic.test.ts`
 
 **Interfaces:**
-- Consumes: `ProviderAdapter`, `AdapterRequest`, `parseSse`, `USER_AGENT` (Task 8); IR types (Tasks 2-3).
-- Produces: `anthropicAdapter: ProviderAdapter`, plus `toWire(req, model): { body, degradations }` and `decodeAnthropic(sse): AsyncGenerator<StreamEvent>` exported for direct unit testing. Also `httpError(res, provider): GatewayError` in `http.ts`, reused by Tasks 10-11.
+- Consumes: `ProviderAdapter`, `AdapterRequest`, `parseSse`, `HttpResponse` (Task 8); `PROFILES`, `orderHeaders`, `mergeHeaders` (Task 8B); `BODY_ORDER`, `orderFields`, `applyAnthropicSystem`, `signAnthropicBody` (Task 8C); IR types (Tasks 2-3).
+- Produces: `anthropicAdapter: ProviderAdapter`, plus `toWire(req, model): { body, degradations }` and `decodeAnthropic(sse): AsyncGenerator<StreamEvent>` exported for direct unit testing. Also `httpError(res: HttpResponse, provider): Promise<GatewayError>` in `http.ts`, reused by Tasks 10-11.
 
 The IR was modelled on Anthropic's shape, so `toWire` is nearly structural. The two real jobs are the OAuth system-prompt requirement and mapping upstream errors onto `ErrorCode`.
 
@@ -3136,6 +4270,7 @@ Expected: FAIL — cannot resolve `../src/anthropic/wire.ts`.
 
 ```ts
 import { type ErrorCode, GatewayError, type ProviderId } from "@omni/ir";
+import type { HttpResponse } from "./types.ts";
 
 /** Maps an upstream status to a canonical code, before body inspection. */
 function codeForStatus(status: number): ErrorCode {
@@ -3166,7 +4301,7 @@ export function parseRetryAfter(header: string | null, now: number): number | un
  * echoes out of error text.
  */
 export async function httpError(
-  res: Response,
+  res: HttpResponse,
   provider: ProviderId,
   now = Date.now(),
 ): Promise<GatewayError> {
@@ -3448,9 +4583,11 @@ export async function* decodeAnthropic(
 
 ```ts
 import { GatewayError } from "@omni/ir";
+import { applyAnthropicSystem, BODY_ORDER, orderFields, signAnthropicBody } from "../body.ts";
 import { httpError } from "../http.ts";
+import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
 import { parseSse } from "../sse.ts";
-import { type AdapterRequest, type AdapterResult, type ProviderAdapter, USER_AGENT } from "../types.ts";
+import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeAnthropic } from "./decode.ts";
 import { toWire } from "./wire.ts";
 
@@ -3466,30 +4603,47 @@ export const anthropicAdapter: ProviderAdapter = {
     const oauth = req.credentials.accessToken !== null;
     const { body, degradations } = toWire(req.request, req.model, { oauth });
 
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      "user-agent": USER_AGENT,
-      "anthropic-version": API_VERSION,
-      accept: req.request.stream ? "text/event-stream" : "application/json",
+    // The billing block and the agent preamble go in as system blocks, and
+    // the cch token is computed over the finished bytes, so this has to run
+    // before serialization.
+    const withSystem: Record<string, unknown> = {
+      ...body,
+      system: applyAnthropicSystem(body.system ?? []),
     };
 
+    const protocol: HeaderPair[] = [
+      ["Content-Type", "application/json"],
+      ["anthropic-version", API_VERSION],
+      ["Accept", req.request.stream ? "text/event-stream" : "application/json"],
+    ];
+
     if (oauth) {
-      headers.authorization = `Bearer ${req.credentials.accessToken}`;
-      headers["anthropic-beta"] = OAUTH_BETA;
+      protocol.push(["Authorization", `Bearer ${req.credentials.accessToken}`]);
+      protocol.push(["anthropic-beta", OAUTH_BETA]);
     } else if (req.credentials.apiKey !== null) {
-      headers["x-api-key"] = req.credentials.apiKey;
+      protocol.push(["x-api-key", req.credentials.apiKey]);
     } else {
       throw new GatewayError("AUTH", "anthropic credential has no token", { provider: "anthropic" });
     }
 
-    const res = await fetch(BASE_URL, {
+    const profile = PROFILES.anthropic;
+    const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
+
+    // Order the fields, serialize, then swap the cch placeholder for a token
+    // over those exact bytes. Substitution is length-preserving.
+    const bodyString = signAnthropicBody(
+      JSON.stringify(orderFields(withSystem, BODY_ORDER.anthropic)),
+    );
+
+    const res = await req.http({
+      url: BASE_URL,
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: bodyString,
       signal: req.signal,
     });
 
-    if (!res.ok) throw await httpError(res, "anthropic");
+    if (res.status < 200 || res.status >= 300) throw await httpError(res, "anthropic");
     if (res.body === null) throw new GatewayError("UPSTREAM", "empty response body", { provider: "anthropic" });
 
     return { events: decodeAnthropic(parseSse(res.body)), degradations };
@@ -3513,7 +4667,7 @@ export { anthropicAdapter, decodeAnthropic, toWire as toAnthropicWire } from "./
 - [ ] **Step 8: Run the tests**
 
 Run: `bun test packages/providers`
-Expected: 19 pass, 0 fail.
+Expected: 52 pass, 0 fail.
 
 - [ ] **Step 9: Commit**
 
@@ -3532,7 +4686,7 @@ git commit -m "feat(providers): add anthropic adapter"
 - Test: `packages/providers/test/openai.test.ts`
 
 **Interfaces:**
-- Consumes: `ProviderAdapter`, `httpError`, `parseSse` (Tasks 8-9).
+- Consumes: `ProviderAdapter`, `httpError`, `parseSse` (Tasks 8-9); `PROFILES`, `orderHeaders`, `mergeHeaders` (Task 8B); `BODY_ORDER`, `orderFields` (Task 8C).
 - Produces: `openaiAdapter: ProviderAdapter`, `toResponsesWire(req, model)`, `decodeResponses(sse)`.
 
 **Why the Responses API and not Chat Completions.** A ChatGPT OAuth token is only accepted at `https://chatgpt.com/backend-api/codex/responses`, which speaks the Responses API. An API-key credential could use either. Supporting one upstream shape keeps the adapter to a single code path, and the Responses API is the one that carries reasoning items, so it is the strict superset. `openaiAdapter` therefore always emits Responses-shaped bodies and switches only the URL and auth header.
@@ -4137,9 +5291,11 @@ export async function* decodeResponses(
 
 ```ts
 import { GatewayError } from "@omni/ir";
+import { BODY_ORDER, orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
+import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
 import { parseSse } from "../sse.ts";
-import { type AdapterRequest, type AdapterResult, type ProviderAdapter, USER_AGENT } from "../types.ts";
+import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeResponses } from "./decode.ts";
 import { toResponsesWire } from "./wire.ts";
 
@@ -4154,35 +5310,35 @@ export const openaiAdapter: ProviderAdapter = {
     const oauth = req.credentials.accessToken !== null;
     const { body, degradations } = toResponsesWire(req.request, req.model);
 
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      "user-agent": USER_AGENT,
-      accept: "text/event-stream",
-    };
+    const protocol: HeaderPair[] = [["Content-Type", "application/json"]];
 
     if (oauth) {
-      headers.authorization = `Bearer ${req.credentials.accessToken}`;
+      protocol.push(["Authorization", `Bearer ${req.credentials.accessToken}`]);
       // Required by the Codex backend to select the billing account. Stored on
       // the credential at OAuth time (Task 21).
       const accountId = req.credentials.providerData.accountId;
-      if (typeof accountId === "string") headers["chatgpt-account-id"] = accountId;
-      headers.originator = "codex_cli_rs";
+      if (typeof accountId === "string") protocol.push(["chatgpt-account-id", accountId]);
     } else if (req.credentials.apiKey !== null) {
-      headers.authorization = `Bearer ${req.credentials.apiKey}`;
+      protocol.push(["Authorization", `Bearer ${req.credentials.apiKey}`]);
     } else {
       throw new GatewayError("AUTH", "openai credential has no token", { provider: "openai" });
     }
 
+    // `originator` and `Accept: text/event-stream` come from the profile.
+    const profile = PROFILES.openai;
+    const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
+
     // The Codex endpoint only streams. Non-streaming client requests are served
     // by collecting the stream in dispatch, so always ask for SSE.
-    const res = await fetch(oauth ? OAUTH_URL : API_URL, {
+    const res = await req.http({
+      url: oauth ? OAUTH_URL : API_URL,
       method: "POST",
       headers,
-      body: JSON.stringify({ ...body, stream: true }),
+      body: JSON.stringify(orderFields({ ...body, stream: true }, BODY_ORDER.openai)),
       signal: req.signal,
     });
 
-    if (!res.ok) throw await httpError(res, "openai");
+    if (res.status < 200 || res.status >= 300) throw await httpError(res, "openai");
     if (res.body === null) throw new GatewayError("UPSTREAM", "empty response body", { provider: "openai" });
 
     return { events: decodeResponses(parseSse(res.body)), degradations };
@@ -4203,7 +5359,7 @@ export { openaiAdapter, decodeResponses, toResponsesWire } from "./openai/index.
 - [ ] **Step 7: Run the tests**
 
 Run: `bun test packages/providers`
-Expected: 32 pass, 0 fail.
+Expected: 65 pass, 0 fail.
 
 - [ ] **Step 8: Commit**
 
@@ -4222,7 +5378,7 @@ git commit -m "feat(providers): add openai responses adapter"
 - Test: `packages/providers/test/kimi.test.ts`
 
 **Interfaces:**
-- Consumes: `ProviderAdapter`, `httpError`, `parseSse`, and the anthropic/openai adapters.
+- Consumes: `ProviderAdapter`, `httpError`, `parseSse`, and the anthropic/openai adapters; `PROFILES`, `orderHeaders`, `mergeHeaders`, `kimiDeviceHeaders` (Task 8B); `BODY_ORDER`, `orderFields` (Task 8C).
 - Produces: `kimiAdapter: ProviderAdapter`, `toChatWire(req, model)`, `decodeChat(sse)`, and `ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>>` — the lookup dispatch uses in Task 15.
 
 Kimi speaks OpenAI Chat Completions. Its device identity headers (`X-Msh-Device-Id`, `X-Msh-Platform`) come from `providerData` written at OAuth time (Task 22) and must stay stable for the life of the credential — a changing device id triggers re-auth.
@@ -4655,9 +5811,12 @@ export async function* decodeChat(
 
 ```ts
 import { GatewayError } from "@omni/ir";
+import { BODY_ORDER, orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
+import { kimiDeviceHeaders } from "../kimi-device.ts";
+import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
 import { parseSse } from "../sse.ts";
-import { type AdapterRequest, type AdapterResult, type ProviderAdapter, USER_AGENT } from "../types.ts";
+import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeChat } from "./decode.ts";
 import { toChatWire } from "./wire.ts";
 
@@ -4674,29 +5833,27 @@ export const kimiAdapter: ProviderAdapter = {
       throw new GatewayError("AUTH", "kimi credential has no token", { provider: "kimi" });
     }
 
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      "user-agent": USER_AGENT,
-      accept: "text/event-stream",
-      authorization: `Bearer ${token}`,
-    };
+    const protocol: HeaderPair[] = [
+      ["Content-Type", "application/json"],
+      ["Accept", "text/event-stream"],
+      ["Authorization", `Bearer ${token}`],
+      // Device identity is bound to the credential at OAuth time and must stay
+      // stable; a changing device id forces re-authentication upstream.
+      ...kimiDeviceHeaders(req.credentials.providerData),
+    ];
 
-    // Device identity is bound to the credential at OAuth time and must stay
-    // stable; a changing device id forces re-authentication upstream.
-    const deviceId = req.credentials.providerData.deviceId;
-    if (typeof deviceId === "string") {
-      headers["X-Msh-Device-Id"] = deviceId;
-      headers["X-Msh-Platform"] = "cli";
-    }
+    const profile = PROFILES.kimi;
+    const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
 
-    const res = await fetch(BASE_URL, {
+    const res = await req.http({
+      url: BASE_URL,
       method: "POST",
       headers,
-      body: JSON.stringify({ ...body, stream: true }),
+      body: JSON.stringify(orderFields({ ...body, stream: true }, BODY_ORDER.kimi)),
       signal: req.signal,
     });
 
-    if (!res.ok) throw await httpError(res, "kimi");
+    if (res.status < 200 || res.status >= 300) throw await httpError(res, "kimi");
     if (res.body === null) throw new GatewayError("UPSTREAM", "empty response body", { provider: "kimi" });
 
     return { events: decodeChat(parseSse(res.body)), degradations };
@@ -4736,7 +5893,7 @@ export { ADAPTERS } from "./registry.ts";
 - [ ] **Step 8: Run the tests**
 
 Run: `bun test packages/providers`
-Expected: 42 pass, 0 fail.
+Expected: 75 pass, 0 fail.
 
 - [ ] **Step 9: Commit**
 
@@ -6285,10 +7442,10 @@ git commit -m "feat(gateway): add circuit breaker and health tracking"
 - Test: `apps/gateway/test/dispatch/classify.test.ts`, `apps/gateway/test/dispatch/dispatch.test.ts`
 
 **Interfaces:**
-- Consumes: `rank`, `resolveModel`, `buildSnapshot`, `healthKey`, `Candidate` (Tasks 12-13); `recordSuccess`, `recordFailure`, `blankHealth`, `PENALTY` (Task 14); `ADAPTERS`, `ProviderAdapter` (Task 11); `Store`, `CredentialView` (Tasks 5-7).
+- Consumes: `rank`, `resolveModel`, `buildSnapshot`, `healthKey`, `Candidate` (Tasks 12-13); `recordSuccess`, `recordFailure`, `blankHealth`, `PENALTY` (Task 14); `ADAPTERS`, `ProviderAdapter` (Task 11); `HttpClient` (Task 8), `nodeHttpClient` (Task 8A); `Store`, `CredentialView` (Tasks 5-7).
 - Produces:
   - `classify(error): { code: ErrorCode; retryAfterMs?: number }`
-  - `DispatchDeps = { store; adapters; now: () => number; rand: () => number; refresh: (c: CredentialView) => Promise<CredentialSecrets> }`
+  - `DispatchDeps = { store; adapters; http: HttpClient; now: () => number; rand: () => number; refresh: (c: CredentialView) => Promise<CredentialSecrets> }`
   - `dispatch(request, deps, signal): Promise<DispatchOutcome>` where `DispatchOutcome = { events: AsyncGenerator<StreamEvent>; log: () => RequestLog }`
 
 **The commit point.** Failover is only possible while nothing has reached the client. Dispatch treats the first `blockDelta` as the commit point: before it, a retryable error advances to the next candidate invisibly; after it, the error is forwarded as an `error` event in the live stream, because the bytes already sent cannot be recalled. The `start` event is deliberately *not* the commit point — providers routinely return 200 and a `message_start` before failing.
@@ -6336,7 +7493,7 @@ test("falls back to INTERNAL for anything unrecognised", () => {
 ```ts
 import { expect, test } from "bun:test";
 import { GatewayError, type ChatRequest, type StreamEvent } from "@omni/ir";
-import type { ProviderAdapter } from "@omni/providers";
+import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import { deriveKey, createStore } from "@omni/store";
 import type { Store } from "@omni/store";
 import { dispatch } from "../../src/dispatch/index.ts";
@@ -6418,10 +7575,16 @@ async function seeded(credentials: number): Promise<Store> {
   return store;
 }
 
+/** The stub adapters never reach the transport, so this throws if one does. */
+const noHttp: HttpClient = () => {
+  throw new Error("a stub adapter reached the transport");
+};
+
 function deps(store: Store, adapter: ProviderAdapter) {
   return {
     store,
     adapters: { anthropic: adapter, openai: adapter, kimi: adapter },
+    http: noHttp,
     now: () => 1_000_000,
     rand: () => 0,
     refresh: async () => ({
@@ -6646,7 +7809,7 @@ export function classify(error: unknown): { code: ErrorCode; retryAfterMs?: numb
 
 ```ts
 import { GatewayError, type StreamEvent } from "@omni/ir";
-import type { ProviderAdapter } from "@omni/providers";
+import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import type { CredentialSecrets, CredentialView } from "@omni/store";
 import type { Candidate } from "../router/index.ts";
 
@@ -6666,13 +7829,15 @@ export async function attempt(opts: {
   candidate: Candidate;
   request: Parameters<ProviderAdapter["send"]>[0]["request"];
   adapter: ProviderAdapter;
+  /** The order-preserving transport. Threaded through so tests can capture bytes. */
+  http: HttpClient;
   now: number;
   signal: AbortSignal;
   refresh: (credential: CredentialView) => Promise<CredentialSecrets>;
   /** Refresh this far before actual expiry so a long request cannot expire mid-flight. */
   refreshLeadMs: number;
 }): Promise<AttemptResult> {
-  const { candidate, adapter, now, signal, refresh, refreshLeadMs } = opts;
+  const { candidate, adapter, http, now, signal, refresh, refreshLeadMs } = opts;
   const credential = candidate.credential;
 
   let secrets = await credential.secrets();
@@ -6699,6 +7864,7 @@ export async function attempt(opts: {
       apiKey: secrets.apiKey,
       providerData: credential.providerData,
     },
+    http,
     signal,
   });
 }
@@ -6716,7 +7882,7 @@ import {
   RETRYABLE,
   type StreamEvent,
 } from "@omni/ir";
-import type { ProviderAdapter } from "@omni/providers";
+import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import type { CredentialSecrets, CredentialView, ProviderId, RequestLog, Store } from "@omni/store";
 import { blankHealth, recordFailure, recordSuccess } from "../router/breaker.ts";
 import { buildSnapshot, healthKey, rank, resolveModel, type Candidate } from "../router/index.ts";
@@ -6729,6 +7895,8 @@ const REFRESH_LEAD_MS = 120_000;
 export type DispatchDeps = {
   store: Store;
   adapters: Readonly<Record<ProviderId, ProviderAdapter>>;
+  /** Order-preserving transport. Never globalThis.fetch — see Global Constraints. */
+  http: HttpClient;
   now: () => number;
   rand: () => number;
   refresh: (credential: CredentialView) => Promise<CredentialSecrets>;
@@ -6843,6 +8011,7 @@ export async function dispatch(
           candidate,
           request,
           adapter: deps.adapters[candidate.target.provider],
+          http: deps.http,
           now: deps.now(),
           signal,
           refresh: deps.refresh,
@@ -9021,6 +10190,7 @@ This is the seam where HTTP meets the pipeline. It holds no routing intelligence
 ```ts
 import { expect, test } from "bun:test";
 import type { StreamEvent } from "@omni/ir";
+import type { HttpClient } from "@omni/providers";
 import { proxyRoutes } from "../../src/routes/proxy.ts";
 import {
   memoryStore,
@@ -9055,6 +10225,9 @@ async function harness(events: StreamEvent[] = EVENTS) {
   const app = proxyRoutes({
     store,
     adapters: stubAdapters(events),
+    http: (() => {
+      throw new Error("a stub adapter reached the transport");
+    }) as HttpClient,
     now: () => 1_000_000,
     rand: () => 0.5,
     refresh: async (c) => (await c.secrets()),
@@ -9466,7 +10639,9 @@ git commit -m "feat(gateway): add proxy routes with sse streaming and request lo
 
 **A note on client IDs.** Each provider flow embeds the public OAuth client ID of that provider's official CLI. These are not secrets: a public OAuth client cannot hold one, which is why PKCE exists, and each ID ships inside a publicly distributed binary. The gateway uses them because there is no other way to obtain a token for a subscription account.
 
-What the gateway does *not* do is disguise itself. It sends `User-Agent: omnigateway/<version>` and no `X-Stainless-*` telemetry headers, so a provider that wants to identify this traffic can. Whether using a subscription credential through a gateway is permitted by a given provider's terms is the operator's decision, and the UI says so at the point of connecting an account (Task 24).
+The token and refresh calls in this task carry the same client identity profile as the inference calls — same headers, same casing, same order — because a token minted by a request that looks like `claude-cli` and then spent by a request that looks like something else is a more distinctive signal than either one alone. That is why `OAuthDeps` carries `http: HttpClient` rather than `fetch`, and why `postJson` takes a `ClientProfile`. See Task 8B and `docs/superpowers/specs/2026-07-31-client-identity-profiles-design.md`.
+
+Whether using a subscription credential through a gateway is permitted by a given provider's terms is the operator's decision, and the UI says so at the point of connecting an account (Task 24).
 
 - [ ] **Step 1: Write the failing PKCE test**
 
@@ -9512,16 +10687,28 @@ test("state is a 32-byte url-safe token", () => {
 ```ts
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
+import type { HttpClient, HttpRequest } from "@omni/providers";
 import { anthropicOAuth } from "../../src/oauth/anthropic.ts";
 
 const NOW = 1_000_000;
 
-function stubFetch(status: number, body: unknown): typeof fetch {
-  return (async () =>
-    new Response(JSON.stringify(body), {
+/** Captures the request so tests can assert on the identity headers. */
+function stubHttp(status: number, body: unknown): HttpClient & { last: () => HttpRequest } {
+  let seen: HttpRequest | null = null;
+  const client = (async (req: HttpRequest) => {
+    seen = req;
+    return {
       status,
-      headers: { "content-type": "application/json" },
-    })) as unknown as typeof fetch;
+      headers: new Headers({ "content-type": "application/json" }),
+      body: null,
+      text: async () => JSON.stringify(body),
+    };
+  }) as HttpClient & { last: () => HttpRequest };
+  client.last = () => {
+    if (seen === null) throw new Error("stubHttp was never called");
+    return seen;
+  };
+  return client;
 }
 
 test("builds an authorize url with pkce and state", () => {
@@ -9540,11 +10727,26 @@ test("declares that it supports the manual paste flow", () => {
   expect(anthropicOAuth.supportsManualPaste).toBe(true);
 });
 
+test("the token call carries the same client identity as inference", async () => {
+  const http = stubHttp(200, { access_token: "test-token-1", expires_in: 60 });
+  await anthropicOAuth.exchange(
+    { code: "auth-code", pending: { verifier: "v", challenge: "c", state: "s", redirectUri: "r" } },
+    { http, now: () => NOW },
+  );
+
+  const sent = new Map(http.last().headers);
+  expect(sent.get("User-Agent")).toMatch(/^claude-cli\//);
+  expect(sent.get("X-Stainless-Lang")).toBe("js");
+  // Authenticating as one client and inferring as another is a louder signal
+  // than either alone, so the token endpoint sees the same profile.
+  expect(sent.get("x-app")).toBe("cli");
+});
+
 test("exchanges a code for tokens", async () => {
   const result = await anthropicOAuth.exchange(
     { code: "auth-code", pending: { verifier: "v", challenge: "c", state: "s", redirectUri: "r" } },
     {
-      fetch: stubFetch(200, {
+      http: stubHttp(200, {
         access_token: "test-token-1",
         refresh_token: "test-token-2",
         expires_in: 3600,
@@ -9563,7 +10765,7 @@ test("splits a code#state paste and validates the state", async () => {
   const pending = { verifier: "v", challenge: "c", state: "the-state", redirectUri: "r" };
   const result = await anthropicOAuth.exchange(
     { code: "auth-code#the-state", pending },
-    { fetch: stubFetch(200, { access_token: "test-token-1", expires_in: 60 }), now: () => NOW },
+    { http: stubHttp(200, { access_token: "test-token-1", expires_in: 60 }), now: () => NOW },
   );
   expect(result.secrets.accessToken).toBe("test-token-1");
 });
@@ -9573,7 +10775,7 @@ test("rejects a pasted code whose state does not match", async () => {
   expect(
     anthropicOAuth.exchange(
       { code: "auth-code#wrong-state", pending },
-      { fetch: stubFetch(200, { access_token: "x" }), now: () => NOW },
+      { http: stubHttp(200, { access_token: "x" }), now: () => NOW },
     ),
   ).rejects.toThrow(GatewayError);
 });
@@ -9583,7 +10785,7 @@ test("maps a token endpoint failure to an AUTH error without echoing the body", 
     await anthropicOAuth.exchange(
       { code: "c", pending: { verifier: "v", challenge: "c", state: "s", redirectUri: "r" } },
       {
-        fetch: stubFetch(400, { error: "invalid_grant", secret_field: "test-token-9" }),
+        http: stubHttp(400, { error: "invalid_grant", secret_field: "test-token-9" }),
         now: () => NOW,
       },
     );
@@ -9596,29 +10798,39 @@ test("maps a token endpoint failure to an AUTH error without echoing the body", 
 });
 
 test("refreshes an access token and keeps the old refresh token when none is returned", async () => {
-  const result = await anthropicOAuth.refresh("test-token-2", {
-    fetch: stubFetch(200, { access_token: "test-token-3", expires_in: 60 }),
-    now: () => NOW,
-  });
+  const result = await anthropicOAuth.refresh(
+    "test-token-2",
+    { http: stubHttp(200, { access_token: "test-token-3", expires_in: 60 }), now: () => NOW },
+    {},
+  );
   expect(result.secrets.accessToken).toBe("test-token-3");
   expect(result.secrets.refreshToken).toBe("test-token-2");
   expect(result.expiresAt).toBe(NOW + 60_000);
 });
 
 test("rotates the refresh token when the provider returns a new one", async () => {
-  const result = await anthropicOAuth.refresh("test-token-2", {
-    fetch: stubFetch(200, { access_token: "test-token-3", refresh_token: "test-token-4", expires_in: 60 }),
-    now: () => NOW,
-  });
+  const result = await anthropicOAuth.refresh(
+    "test-token-2",
+    {
+      http: stubHttp(200, {
+        access_token: "test-token-3",
+        refresh_token: "test-token-4",
+        expires_in: 60,
+      }),
+      now: () => NOW,
+    },
+    {},
+  );
   expect(result.secrets.refreshToken).toBe("test-token-4");
 });
 
 test("surfaces a rejected refresh as AUTH so the credential is disabled", async () => {
   expect(
-    anthropicOAuth.refresh("test-token-2", {
-      fetch: stubFetch(400, { error: "invalid_grant" }),
-      now: () => NOW,
-    }),
+    anthropicOAuth.refresh(
+      "test-token-2",
+      { http: stubHttp(400, { error: "invalid_grant" }), now: () => NOW },
+      {},
+    ),
   ).rejects.toThrow(GatewayError);
 });
 ```
@@ -9662,11 +10874,23 @@ export function randomState(): string {
 `apps/gateway/src/oauth/types.ts`:
 
 ```ts
+import {
+  type ClientProfile,
+  type HeaderPair,
+  type HttpClient,
+  mergeHeaders,
+  orderHeaders,
+} from "@omni/providers";
 import type { CredentialSecrets, ProviderId } from "@omni/store";
 
 /** Injected so tests never touch the network or the clock. */
 export type OAuthDeps = {
-  fetch: typeof fetch;
+  /**
+   * Order-preserving transport. Token endpoints see the same client identity
+   * as inference does — a request that authenticates as claude-cli and then
+   * infers as something else is a louder signal than either alone.
+   */
+  http: HttpClient;
   now: () => number;
 };
 
@@ -9713,8 +10937,55 @@ export type OAuthProvider = {
     deps: OAuthDeps,
   ): Promise<FlowResult>;
 
-  refresh(refreshToken: string, deps: OAuthDeps): Promise<FlowResult>;
+  /**
+   * `providerData` is the credential's stored state. Kimi needs it to reuse the
+   * device identity it was created with; the others ignore it.
+   */
+  refresh(
+    refreshToken: string,
+    deps: OAuthDeps,
+    providerData: Record<string, unknown>,
+  ): Promise<FlowResult>;
 };
+
+/** Sent by every token call. Arguments are ordered by the provider's profile. */
+export async function postJson(
+  deps: OAuthDeps,
+  url: string,
+  profile: ClientProfile,
+  opts: {
+    contentType: string;
+    body: string;
+    extraHeaders?: readonly HeaderPair[];
+  },
+): Promise<{ status: number; parsed: unknown }> {
+  const headers = orderHeaders(
+    mergeHeaders(profile.headers, [
+      ["Content-Type", opts.contentType],
+      ["Accept", "application/json"],
+      ...(opts.extraHeaders ?? []),
+    ]),
+    profile.order,
+  );
+
+  const res = await deps.http({
+    url,
+    method: "POST",
+    headers,
+    body: opts.body,
+    // Token calls are short and must not hang a connect flow forever.
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  const text = await res.text();
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Non-JSON error bodies are real; the caller falls back to the status.
+  }
+  return { status: res.status, parsed };
+}
 
 /** Reads an error identifier out of a token response without leaking the body. */
 export function tokenErrorMessage(status: number, body: unknown): string {
@@ -9732,9 +11003,9 @@ export function tokenErrorMessage(status: number, body: unknown): string {
 
 ```ts
 import { GatewayError } from "@omni/ir";
-import { USER_AGENT } from "@omni/providers";
+import { PROFILES } from "@omni/providers";
 import { createPkce, randomState } from "./pkce.ts";
-import { tokenErrorMessage, type FlowResult, type OAuthDeps, type OAuthProvider } from "./types.ts";
+import { postJson, tokenErrorMessage, type FlowResult, type OAuthDeps, type OAuthProvider } from "./types.ts";
 
 /**
  * The public OAuth client ID of the Claude CLI. Public clients cannot hold a
@@ -9754,14 +11025,14 @@ type TokenResponse = {
 };
 
 async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise<TokenResponse> {
-  const res = await deps.fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json", "user-agent": USER_AGENT },
+  const { status, parsed } = await postJson(deps, TOKEN_URL, PROFILES.anthropic, {
+    contentType: "application/json",
     body: JSON.stringify({ ...body, client_id: CLIENT_ID }),
   });
 
-  const parsed: unknown = await res.json().catch(() => null);
-  if (!res.ok) throw new GatewayError("AUTH", tokenErrorMessage(res.status, parsed));
+  if (status < 200 || status >= 300) {
+    throw new GatewayError("AUTH", tokenErrorMessage(status, parsed));
+  }
 
   const token = parsed as TokenResponse;
   if (typeof token.access_token !== "string") {
@@ -9838,7 +11109,7 @@ export const anthropicOAuth: OAuthProvider = {
 - [ ] **Step 7: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 162 pass, 0 fail.
+Expected: 163 pass, 0 fail.
 
 - [ ] **Step 8: Commit**
 
@@ -9868,6 +11139,7 @@ The one structural difference from Anthropic: the account ID is not in the token
 ```ts
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
+import type { HttpClient, HttpRequest } from "@omni/providers";
 import { openaiOAuth } from "../../src/oauth/openai.ts";
 
 const NOW = 1_000_000;
@@ -9877,12 +11149,23 @@ function idToken(payload: Record<string, unknown>): string {
   return `${b64({ alg: "RS256" })}.${b64(payload)}.signature`;
 }
 
-function stubFetch(status: number, body: unknown): typeof fetch {
-  return (async () =>
-    new Response(JSON.stringify(body), {
+/** Captures the request so tests can assert on the identity headers. */
+function stubHttp(status: number, body: unknown): HttpClient & { last: () => HttpRequest } {
+  let seen: HttpRequest | null = null;
+  const client = (async (req: HttpRequest) => {
+    seen = req;
+    return {
       status,
-      headers: { "content-type": "application/json" },
-    })) as unknown as typeof fetch;
+      headers: new Headers({ "content-type": "application/json" }),
+      body: null,
+      text: async () => JSON.stringify(body),
+    };
+  }) as HttpClient & { last: () => HttpRequest };
+  client.last = () => {
+    if (seen === null) throw new Error("stubHttp was never called");
+    return seen;
+  };
+  return client;
 }
 
 const pending = { verifier: "v", challenge: "c", state: "s", redirectUri: "http://localhost/cb" };
@@ -9899,7 +11182,7 @@ test("extracts the account id from the id token claims", async () => {
   const result = await openaiOAuth.exchange(
     { code: "auth-code", pending },
     {
-      fetch: stubFetch(200, {
+      http: stubHttp(200, {
         access_token: "test-token-1",
         refresh_token: "test-token-2",
         expires_in: 3600,
@@ -9919,7 +11202,7 @@ test("extracts the account id from the id token claims", async () => {
 test("tolerates a token response with no id token", async () => {
   const result = await openaiOAuth.exchange(
     { code: "auth-code", pending },
-    { fetch: stubFetch(200, { access_token: "test-token-1", expires_in: 60 }), now: () => NOW },
+    { http: stubHttp(200, { access_token: "test-token-1", expires_in: 60 }), now: () => NOW },
   );
   expect(result.providerData.accountId).toBeNull();
   expect(result.accountEmail).toBeNull();
@@ -9929,7 +11212,7 @@ test("tolerates a malformed id token rather than failing the flow", async () => 
   const result = await openaiOAuth.exchange(
     { code: "auth-code", pending },
     {
-      fetch: stubFetch(200, { access_token: "test-token-1", id_token: "not.a.jwt" }),
+      http: stubHttp(200, { access_token: "test-token-1", id_token: "not.a.jwt" }),
       now: () => NOW,
     },
   );
@@ -9940,20 +11223,24 @@ test("maps a rejected exchange to AUTH", async () => {
   expect(
     openaiOAuth.exchange(
       { code: "bad", pending },
-      { fetch: stubFetch(400, { error: "invalid_grant" }), now: () => NOW },
+      { http: stubHttp(400, { error: "invalid_grant" }), now: () => NOW },
     ),
   ).rejects.toThrow(GatewayError);
 });
 
 test("refresh preserves the account id from the new id token", async () => {
-  const result = await openaiOAuth.refresh("test-token-2", {
-    fetch: stubFetch(200, {
-      access_token: "test-token-3",
-      expires_in: 60,
-      id_token: idToken({ "https://api.openai.com/auth": { chatgpt_account_id: "acct_123" } }),
-    }),
-    now: () => NOW,
-  });
+  const result = await openaiOAuth.refresh(
+    "test-token-2",
+    {
+      http: stubHttp(200, {
+        access_token: "test-token-3",
+        expires_in: 60,
+        id_token: idToken({ "https://api.openai.com/auth": { chatgpt_account_id: "acct_123" } }),
+      }),
+      now: () => NOW,
+    },
+    {},
+  );
   expect(result.secrets.accessToken).toBe("test-token-3");
   expect(result.secrets.refreshToken).toBe("test-token-2");
   expect(result.providerData.accountId).toBe("acct_123");
@@ -9971,9 +11258,9 @@ Expected: FAIL — cannot resolve `../../src/oauth/openai.ts`.
 
 ```ts
 import { GatewayError } from "@omni/ir";
-import { USER_AGENT } from "@omni/providers";
+import { PROFILES } from "@omni/providers";
 import { createPkce, randomState } from "./pkce.ts";
-import { tokenErrorMessage, type FlowResult, type OAuthDeps, type OAuthProvider } from "./types.ts";
+import { postJson, tokenErrorMessage, type FlowResult, type OAuthDeps, type OAuthProvider } from "./types.ts";
 
 /** Public client ID of the Codex CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -10014,14 +11301,14 @@ function decodeClaims(idToken: string | undefined): IdClaims {
 }
 
 async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise<TokenResponse> {
-  const res = await deps.fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": USER_AGENT },
+  const { status, parsed } = await postJson(deps, TOKEN_URL, PROFILES.openai, {
+    contentType: "application/x-www-form-urlencoded",
     body: new URLSearchParams({ ...body, client_id: CLIENT_ID }).toString(),
   });
 
-  const parsed: unknown = await res.json().catch(() => null);
-  if (!res.ok) throw new GatewayError("AUTH", tokenErrorMessage(res.status, parsed));
+  if (status < 200 || status >= 300) {
+    throw new GatewayError("AUTH", tokenErrorMessage(status, parsed));
+  }
 
   const token = parsed as TokenResponse;
   if (typeof token.access_token !== "string") {
@@ -10104,7 +11391,7 @@ export const openaiOAuth: OAuthProvider = {
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 168 pass, 0 fail.
+Expected: 169 pass, 0 fail.
 
 - [ ] **Step 5: Commit**
 
@@ -10138,17 +11425,29 @@ The device ID is generated once here and stored in `providerData`. The Kimi adap
 ```ts
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
+import type { HttpClient, HttpRequest } from "@omni/providers";
 import { isAuthorizationPending, kimiOAuth } from "../../src/oauth/kimi.ts";
 import { OAUTH_PROVIDERS } from "../../src/oauth/index.ts";
 
 const NOW = 1_000_000;
 
-function stubFetch(status: number, body: unknown): typeof fetch {
-  return (async () =>
-    new Response(JSON.stringify(body), {
+/** Captures the request so tests can assert on the identity headers. */
+function stubHttp(status: number, body: unknown): HttpClient & { last: () => HttpRequest } {
+  let seen: HttpRequest | null = null;
+  const client = (async (req: HttpRequest) => {
+    seen = req;
+    return {
       status,
-      headers: { "content-type": "application/json" },
-    })) as unknown as typeof fetch;
+      headers: new Headers({ "content-type": "application/json" }),
+      body: null,
+      text: async () => JSON.stringify(body),
+    };
+  }) as HttpClient & { last: () => HttpRequest };
+  client.last = () => {
+    if (seen === null) throw new Error("stubHttp was never called");
+    return seen;
+  };
+  return client;
 }
 
 test("is registered as a device flow that cannot be pasted", () => {
@@ -10166,7 +11465,7 @@ test("begin requests a device code and surfaces the user code", async () => {
   const started = await kimiOAuth.begin(
     { deviceId: "dev-1" },
     {
-      fetch: stubFetch(200, {
+      http: stubHttp(200, {
         device_code: "dc-1",
         user_code: "WDJB-MJHT",
         verification_uri: "https://kimi.example/device",
@@ -10188,7 +11487,7 @@ test("a single poll returns tokens once the user approves", async () => {
       pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "dc-1", extra: { deviceId: "dev-1" } },
     },
     {
-      fetch: stubFetch(200, { access_token: "test-token-1", refresh_token: "test-token-2", expires_in: 3600 }),
+      http: stubHttp(200, { access_token: "test-token-1", refresh_token: "test-token-2", expires_in: 3600 }),
       now: () => NOW,
     },
   );
@@ -10201,7 +11500,7 @@ test("a pending authorization is a distinguishable error, not a failure", async 
   try {
     await kimiOAuth.exchange(
       { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "dc-1" } },
-      { fetch: stubFetch(400, { error: "authorization_pending" }), now: () => NOW },
+      { http: stubHttp(400, { error: "authorization_pending" }), now: () => NOW },
     );
     throw new Error("expected throw");
   } catch (e) {
@@ -10213,7 +11512,7 @@ test("slow_down is also treated as pending", async () => {
   try {
     await kimiOAuth.exchange(
       { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "dc-1" } },
-      { fetch: stubFetch(400, { error: "slow_down" }), now: () => NOW },
+      { http: stubHttp(400, { error: "slow_down" }), now: () => NOW },
     );
     throw new Error("expected throw");
   } catch (e) {
@@ -10225,7 +11524,7 @@ test("a denied authorization is a terminal AUTH error", async () => {
   try {
     await kimiOAuth.exchange(
       { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "dc-1" } },
-      { fetch: stubFetch(400, { error: "access_denied" }), now: () => NOW },
+      { http: stubHttp(400, { error: "access_denied" }), now: () => NOW },
     );
     throw new Error("expected throw");
   } catch (e) {
@@ -10238,18 +11537,26 @@ test("exchange without a device code is a programming error", async () => {
   expect(
     kimiOAuth.exchange(
       { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
-      { fetch: stubFetch(200, {}), now: () => NOW },
+      { http: stubHttp(200, {}), now: () => NOW },
     ),
   ).rejects.toThrow();
 });
 
-test("refresh returns a new access token", async () => {
-  const result = await kimiOAuth.refresh("test-token-2", {
-    fetch: stubFetch(200, { access_token: "test-token-3", expires_in: 60 }),
-    now: () => NOW,
-  });
+test("refresh returns a new access token and reuses the stored device", async () => {
+  const stored = {
+    deviceId: "11111111-2222-3333-4444-555555555555",
+    deviceName: "MacBook-Pro",
+    deviceModel: "MacBookPro18,3",
+    osVersion: "15.3.1",
+  };
+  const http = stubHttp(200, { access_token: "test-token-3", expires_in: 60 });
+  const result = await kimiOAuth.refresh("test-token-2", { http, now: () => NOW }, stored);
   expect(result.secrets.accessToken).toBe("test-token-3");
   expect(result.secrets.refreshToken).toBe("test-token-2");
+  // The identity must survive a refresh, not be reminted.
+  expect(result.providerData).toEqual(stored);
+  const sent = new Map(http.last().headers);
+  expect(sent.get("X-Msh-Device-Id")).toBe(stored.deviceId);
 });
 
 test("the registry exposes one flow per provider", () => {
@@ -10281,9 +11588,9 @@ Modify `apps/gateway/src/oauth/types.ts` — add to the `OAuthProvider` type, af
 
 ```ts
 import { GatewayError } from "@omni/ir";
-import { USER_AGENT } from "@omni/providers";
+import { kimiDeviceHeaders, type KimiDevice, mintKimiDevice, PROFILES } from "@omni/providers";
 import type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider } from "./types.ts";
-import { tokenErrorMessage } from "./types.ts";
+import { postJson, tokenErrorMessage } from "./types.ts";
 
 /** Public client ID of the Kimi CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "kimi-cli";
@@ -10318,32 +11625,49 @@ type TokenResponse = {
   email?: string;
 };
 
-/** Stable per-credential identity sent by the Kimi adapter on every request. */
-function newDeviceId(): string {
-  return crypto.randomUUID();
-}
-
-async function post(url: string, body: Record<string, string>, deps: OAuthDeps): Promise<unknown> {
-  const res = await deps.fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", "user-agent": USER_AGENT },
+async function post(
+  url: string,
+  body: Record<string, string>,
+  device: KimiDevice,
+  deps: OAuthDeps,
+): Promise<unknown> {
+  // The device headers go on the token calls too. Authenticating as one device
+  // and then inferring as another is exactly the mismatch worth avoiding.
+  const { status, parsed } = await postJson(deps, url, PROFILES.kimi, {
+    contentType: "application/json",
     body: JSON.stringify({ ...body, client_id: CLIENT_ID }),
+    extraHeaders: kimiDeviceHeaders({ ...device }),
   });
 
-  const parsed: unknown = await res.json().catch(() => null);
-  if (res.ok) return parsed;
+  if (status >= 200 && status < 300) return parsed;
 
   const code =
     typeof parsed === "object" && parsed !== null && typeof (parsed as { error?: unknown }).error === "string"
       ? (parsed as { error: string }).error
-      : `http_${res.status}`;
+      : `http_${status}`;
+
   if (PENDING_ERRORS.has(code)) throw pendingError(code);
-  throw new GatewayError("AUTH", tokenErrorMessage(res.status, parsed));
+  throw new GatewayError("AUTH", tokenErrorMessage(status, parsed));
+}
+
+/** Reads a persisted identity back, minting a fresh one if it is absent. */
+function deviceFrom(source: Record<string, unknown> | undefined): KimiDevice {
+  if (typeof source?.deviceId === "string" && source.deviceId.length > 0) {
+    const fresh = mintKimiDevice();
+    const str = (v: unknown, d: string): string => (typeof v === "string" && v.length > 0 ? v : d);
+    return {
+      deviceId: source.deviceId,
+      deviceName: str(source.deviceName, fresh.deviceName),
+      deviceModel: str(source.deviceModel, fresh.deviceModel),
+      osVersion: str(source.osVersion, fresh.osVersion),
+    };
+  }
+  return mintKimiDevice();
 }
 
 function toResult(
   token: TokenResponse,
-  deviceId: string,
+  device: KimiDevice,
   fallbackRefresh: string | null,
   deps: OAuthDeps,
 ): FlowResult {
@@ -10359,7 +11683,9 @@ function toResult(
     },
     expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
     accountEmail: token.email ?? null,
-    providerData: { deviceId },
+    // All four fields persist. The adapter sends every one on every request,
+    // and they must not drift after the credential is created.
+    providerData: { ...device },
   };
 }
 
@@ -10373,10 +11699,10 @@ export const kimiOAuth: OAuthProvider = {
    * placeholder carrying only the freshly minted device id.
    */
   start() {
-    const deviceId = newDeviceId();
+    const device = mintKimiDevice();
     return {
       authorizeUrl: "https://www.kimi.com/device",
-      pending: { verifier: "", challenge: "", state: "", redirectUri: "", extra: { deviceId } },
+      pending: { verifier: "", challenge: "", state: "", redirectUri: "", extra: { ...device } },
     };
   },
 
@@ -10402,7 +11728,7 @@ export const kimiOAuth: OAuthProvider = {
         redirectUri: "",
         deviceCode: body.device_code,
         interval: body.interval ?? DEFAULT_INTERVAL_SECONDS,
-        extra: { deviceId },
+        extra: { ...device },
       },
     };
   },
@@ -10412,29 +11738,32 @@ export const kimiOAuth: OAuthProvider = {
     if (pending.deviceCode === undefined) {
       throw new Error("kimi exchange requires a pending flow produced by begin()");
     }
-    const deviceId = (pending.extra?.deviceId as string | undefined) ?? newDeviceId();
+    const device = deviceFrom(pending.extra);
     const token = (await post(
       TOKEN_URL,
       {
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
         device_code: pending.deviceCode,
-        device_id: deviceId,
+        device_id: device.deviceId,
       },
+      device,
       deps,
     )) as TokenResponse;
 
-    return toResult(token, deviceId, null, deps);
+    return toResult(token, device, null, deps);
   },
 
-  async refresh(refreshToken, deps) {
+  // Refresh reuses the credential's own identity. Minting a new one here would
+  // make a long-lived credential look like a new machine on every refresh.
+  async refresh(refreshToken, deps, providerData) {
+    const device = deviceFrom(providerData);
     const token = (await post(
       TOKEN_URL,
-      { grant_type: "refresh_token", refresh_token: refreshToken },
+      { grant_type: "refresh_token", refresh_token: refreshToken, device_id: device.deviceId },
+      device,
       deps,
     )) as TokenResponse;
-    // The device id lives in providerData and is preserved by the caller when
-    // it merges this result; refresh has no reason to mint a new one.
-    return toResult(token, "", refreshToken, deps);
+    return toResult(token, device, refreshToken, deps);
   },
 };
 ```
@@ -10463,7 +11792,7 @@ export type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider, PendingFlow 
 - [ ] **Step 6: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 178 pass, 0 fail.
+Expected: 179 pass, 0 fail.
 
 - [ ] **Step 7: Commit**
 
@@ -10497,6 +11826,7 @@ This closes the last hole in dispatch. Two properties matter:
 ```ts
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
+import { nodeHttpClient } from "@omni/providers";
 import type { CredentialView, Store } from "@omni/store";
 import { createRefresher } from "../../src/oauth/refresh.ts";
 import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
@@ -10546,7 +11876,7 @@ test("refreshes and returns the new secrets", async () => {
   const refresh = createRefresher({
     store,
     providers: fakeProvider(async () => result("test-token-3")),
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
   });
 
@@ -10558,7 +11888,7 @@ test("persists the new tokens and expiry", async () => {
   const refresh = createRefresher({
     store,
     providers: fakeProvider(async () => result("test-token-3")),
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
   });
   await refresh(view);
@@ -10584,7 +11914,7 @@ test("merges returned provider data without dropping existing keys", async () =>
   const refresh = createRefresher({
     store,
     providers: fakeProvider(async () => result("test-token-3")),
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
   });
   await refresh(view);
@@ -10603,7 +11933,7 @@ test("collapses concurrent refreshes of the same credential into one call", asyn
       await Bun.sleep(5);
       return result("test-token-3");
     }),
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
   });
 
@@ -10625,7 +11955,7 @@ test("allows a later refresh once the in-flight one settles", async () => {
       calls += 1;
       return result(`test-token-${calls}`);
     }),
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
   });
 
@@ -10642,7 +11972,7 @@ test("throws when the credential has no refresh token", async () => {
   const refresh = createRefresher({
     store,
     providers: fakeProvider(async () => result("x")),
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
   });
   expect(refresh(view)).rejects.toThrow(GatewayError);
@@ -10655,7 +11985,7 @@ test("disables the credential when the provider rejects the refresh token", asyn
     providers: fakeProvider(async () => {
       throw new GatewayError("AUTH", "token endpoint rejected the request: invalid_grant");
     }),
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
   });
 
@@ -10671,7 +12001,7 @@ test("a network failure does not disable the credential", async () => {
     providers: fakeProvider(async () => {
       throw new GatewayError("NETWORK", "connection reset");
     }),
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
   });
 
@@ -10690,7 +12020,7 @@ test("a failed refresh is not cached — the next call retries", async () => {
       if (calls === 1) throw new GatewayError("NETWORK", "connection reset");
       return result("test-token-3");
     }),
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
   });
 
@@ -10711,13 +12041,14 @@ Expected: FAIL — cannot resolve `../../src/oauth/refresh.ts`.
 
 ```ts
 import { GatewayError } from "@omni/ir";
+import type { HttpClient } from "@omni/providers";
 import type { CredentialSecrets, CredentialView, ProviderId, Store } from "@omni/store";
 import type { OAuthProvider } from "./types.ts";
 
 export type RefreshDeps = {
   store: Store;
   providers: Readonly<Record<ProviderId, OAuthProvider>>;
-  fetch: typeof fetch;
+  http: HttpClient;
   now: () => number;
 };
 
@@ -10744,10 +12075,11 @@ export function createRefresher(deps: RefreshDeps): Refresher {
 
     let result;
     try {
-      result = await provider.refresh(secrets.refreshToken, {
-        fetch: deps.fetch,
-        now: deps.now,
-      });
+      result = await provider.refresh(
+        secrets.refreshToken,
+        { http: deps.http, now: deps.now },
+        credential.providerData,
+      );
     } catch (error) {
       // AUTH means the provider repudiated the refresh token: retrying cannot
       // help, and leaving the credential enabled burns one attempt on every
@@ -10789,7 +12121,7 @@ export function createRefresher(deps: RefreshDeps): Refresher {
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 187 pass, 0 fail.
+Expected: 188 pass, 0 fail.
 
 - [ ] **Step 5: Commit**
 
@@ -10936,7 +12268,7 @@ async function harness(provider: OAuthProvider = pkceProvider(async () => RESULT
     store,
     admin,
     providers: { anthropic: provider, openai: provider, kimi: provider },
-    fetch: globalThis.fetch,
+    http: nodeHttpClient(),
     now: () => NOW,
     baseUrl: "http://localhost:8787",
   });
@@ -11195,6 +12527,7 @@ export function createPendingFlows(opts: PendingFlowsOptions): PendingFlows {
 
 ```ts
 import { GatewayError, HTTP_STATUS } from "@omni/ir";
+import type { HttpClient } from "@omni/providers";
 import type { ProviderId, Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ADMIN_COOKIE, type AdminAuth } from "../auth/admin.ts";
@@ -11209,7 +12542,7 @@ export type ConnectDeps = {
   store: Store;
   admin: AdminAuth;
   providers: Readonly<Record<ProviderId, OAuthProvider>>;
-  fetch: typeof fetch;
+  http: HttpClient;
   now: () => number;
   /** Origin the provider redirects back to, e.g. `http://localhost:8787`. */
   baseUrl: string;
@@ -11256,7 +12589,7 @@ export function connectRoutes(deps: ConnectDeps): Elysia {
     const provider = deps.providers[flow.provider];
     const result = await provider.exchange(
       { code, pending: flow.pending },
-      { fetch: deps.fetch, now: deps.now },
+      { http: deps.http, now: deps.now },
     );
 
     const id = crypto.randomUUID();
@@ -11295,7 +12628,7 @@ export function connectRoutes(deps: ConnectDeps): Elysia {
           ? provider.start({ redirectUri })
           : await provider.begin(
               { deviceId: (provider.start({ redirectUri }).pending.extra?.deviceId as string) ?? crypto.randomUUID() },
-              { fetch: deps.fetch, now: deps.now },
+              { http: deps.http, now: deps.now },
             );
 
       const flowId = flows.put({
@@ -11403,7 +12736,7 @@ export function connectRoutes(deps: ConnectDeps): Elysia {
 - [ ] **Step 6: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 206 pass, 0 fail.
+Expected: 207 pass, 0 fail.
 
 - [ ] **Step 7: Commit**
 
@@ -11991,7 +13324,7 @@ export function adminRoutes(deps: AdminDeps): Elysia {
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test apps/gateway`
-Expected: 225 pass, 0 fail.
+Expected: 226 pass, 0 fail.
 
 - [ ] **Step 5: Commit**
 
@@ -12237,7 +13570,7 @@ export function startMaintenance(deps: MaintenanceDeps): () => void {
 `apps/gateway/src/app.ts`:
 
 ```ts
-import { ADAPTERS, type ProviderAdapter } from "@omni/providers";
+import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from "@omni/providers";
 import type { ProviderId, Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { createAdminAuth } from "./auth/admin.ts";
@@ -12252,7 +13585,8 @@ export type AppDeps = {
   baseUrl: string;
   now?: () => number;
   rand?: () => number;
-  fetch?: typeof fetch;
+  /** Overridden by the e2e tests to capture upstream bytes. */
+  http?: HttpClient;
   adapters?: Readonly<Record<ProviderId, ProviderAdapter>>;
   requestId?: () => string;
 };
@@ -12262,7 +13596,7 @@ const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 export function createApp(deps: AppDeps): Elysia {
   const now = deps.now ?? (() => Date.now());
   const rand = deps.rand ?? Math.random;
-  const doFetch = deps.fetch ?? globalThis.fetch;
+  const http = deps.http ?? nodeHttpClient();
   const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
 
@@ -12270,20 +13604,20 @@ export function createApp(deps: AppDeps): Elysia {
   const refresh = createRefresher({
     store: deps.store,
     providers: OAUTH_PROVIDERS,
-    fetch: doFetch,
+    http,
     now,
   });
 
   return new Elysia()
     .get("/health", () => ({ ok: true }))
-    .use(proxyRoutes({ store: deps.store, adapters, now, rand, refresh, requestId }))
+    .use(proxyRoutes({ store: deps.store, adapters, http, now, rand, refresh, requestId }))
     .use(adminRoutes({ store: deps.store, admin, now }))
     .use(
       connectRoutes({
         store: deps.store,
         admin,
         providers: OAUTH_PROVIDERS,
-        fetch: doFetch,
+        http,
         now,
         baseUrl: deps.baseUrl,
       }),
@@ -12425,7 +13759,7 @@ has been added.
 - [ ] **Step 12: Run the tests and the type check**
 
 Run: `bun test && bunx tsc --noEmit`
-Expected: 320 pass, 0 fail; no type errors.
+Expected: 354 pass, 0 fail; no type errors.
 
 - [ ] **Step 13: Commit**
 
@@ -12444,9 +13778,11 @@ git commit -m "feat(gateway): add configuration, app assembly, maintenance loop 
 
 **Interfaces:**
 - Consumes: `createApp` (Task 26); the real `ADAPTERS` (Task 11); `createStore` (Task 7).
-- Produces: `createStubUpstream(): StubUpstream` — a `fetch` implementation the real adapters talk to.
+- Produces: `createStubUpstream(): StubUpstream` — an `HttpClient` implementation the real adapters talk to, plus the `header()` and `headerNames()` readers over a captured call.
 
-Every test so far stubbed at the adapter boundary. These run the real adapters, so they exercise the layer no unit test covers: adapter `toWire` output actually being parsed back, real SSE bytes flowing through `parseSse` into the IR and back out as client-facing SSE. The stub replaces `fetch`, not the adapters.
+Every test so far stubbed at the adapter boundary. These run the real adapters, so they exercise the layer no unit test covers: adapter `toWire` output actually being parsed back, real SSE bytes flowing through `parseSse` into the IR and back out as client-facing SSE. The stub replaces the `HttpClient`, not the adapters.
+
+Because the stub sits at the `HttpClient` seam it sees exactly the bytes and exactly the header sequence that would have gone on the wire. `UpstreamCall.headers` keeps the ordered `HeaderPair[]` verbatim — casing and position intact — and `rawBody` keeps the serialized string, so the client identity profile and the `cch=` token are both checkable without re-serializing anything.
 
 Three behaviours are only observable end to end: failover picking a second credential after the first returns 429, the commit point preventing failover once bytes have been sent, and a `401` triggering a refresh and a retry on the same credential.
 
@@ -12455,6 +13791,8 @@ Three behaviours are only observable end to end: failover picking a second crede
 `apps/gateway/test/e2e/upstream.ts`:
 
 ```ts
+import type { HeaderPair, HttpClient, HttpResponse } from "@omni/providers";
+
 /** One scripted upstream response. */
 export type StubResponse =
   | { kind: "sse"; events: { event: string; data: unknown }[] }
@@ -12464,64 +13802,82 @@ export type StubResponse =
 export type UpstreamCall = {
   url: string;
   authorization: string | null;
-  headers: Record<string, string>;
+  /** Ordered and cased exactly as the adapter emitted them. */
+  headers: readonly HeaderPair[];
+  /** The serialized body, byte for byte. `cch=` is verified against this. */
+  rawBody: string;
   body: unknown;
 };
 
 export type StubUpstream = {
-  fetch: typeof fetch;
+  http: HttpClient;
   /** Queue a response. Consumed in order; the last one repeats. */
   queue(response: StubResponse): void;
   calls: UpstreamCall[];
 };
 
+/** Case-insensitive lookup over the ordered pairs. */
+export function header(call: UpstreamCall, name: string): string | null {
+  const found = call.headers.find(([k]) => k.toLowerCase() === name.toLowerCase());
+  return found === undefined ? null : found[1];
+}
+
+/** Header names in wire order, cased as sent. */
+export function headerNames(call: UpstreamCall): string[] {
+  return call.headers.map(([k]) => k);
+}
+
 function sseBody(events: { event: string; data: unknown }[]): string {
   return events.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`).join("");
+}
+
+function respond(status: number, body: string, headers: Record<string, string>): HttpResponse {
+  return {
+    status,
+    headers: new Headers(headers),
+    body: new Response(body).body,
+    text: async () => body,
+  };
 }
 
 export function createStubUpstream(): StubUpstream {
   const queued: StubResponse[] = [];
   const calls: UpstreamCall[] = [];
 
-  const stub = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-
-    const rawBody = init?.body;
+  const http: HttpClient = async (req) => {
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(req.body);
+    } catch {
+      parsed = null;
+    }
+    const auth = req.headers.find(([k]) => k.toLowerCase() === "authorization");
     calls.push({
-      url,
-      authorization: headers.get("authorization"),
-      headers: Object.fromEntries(headers.entries()),
-      body: typeof rawBody === "string" ? JSON.parse(rawBody) : null,
+      url: req.url,
+      authorization: auth === undefined ? null : auth[1],
+      headers: req.headers,
+      rawBody: req.body,
+      body: parsed,
     });
 
     const response = queued.length > 1 ? (queued.shift() as StubResponse) : queued[0];
     if (response === undefined) throw new Error("stub upstream received an unexpected call");
 
     if (response.kind === "sse") {
-      return new Response(sseBody(response.events), {
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-      });
+      return respond(200, sseBody(response.events), { "content-type": "text/event-stream" });
     }
-
     if (response.kind === "json") {
-      return new Response(JSON.stringify(response.body), {
-        status: response.status,
-        headers: { "content-type": "application/json" },
+      return respond(response.status, JSON.stringify(response.body), {
+        "content-type": "application/json",
       });
     }
-
-    return new Response(JSON.stringify(response.body), {
-      status: response.status,
-      headers: {
-        "content-type": "application/json",
-        ...(response.retryAfter === undefined ? {} : { "retry-after": response.retryAfter }),
-      },
+    return respond(response.status, JSON.stringify(response.body), {
+      "content-type": "application/json",
+      ...(response.retryAfter === undefined ? {} : { "retry-after": response.retryAfter }),
     });
   };
 
-  return { fetch: stub as unknown as typeof fetch, queue: (r) => queued.push(r), calls };
+  return { http, queue: (r) => queued.push(r), calls };
 }
 
 /** A complete Anthropic streaming response in the provider's own wire format. */
@@ -12572,6 +13928,7 @@ export const ANTHROPIC_STREAM: StubResponse = {
 ```ts
 import { expect, test } from "bun:test";
 import type { Store } from "@omni/store";
+import { computeCch } from "@omni/providers";
 import { createApp } from "../../src/app.ts";
 import {
   memoryStore,
@@ -12580,7 +13937,13 @@ import {
   target,
   virtualModel,
 } from "../helpers/fixtures.ts";
-import { ANTHROPIC_STREAM, createStubUpstream, type StubUpstream } from "./upstream.ts";
+import {
+  ANTHROPIC_STREAM,
+  createStubUpstream,
+  header,
+  headerNames,
+  type StubUpstream,
+} from "./upstream.ts";
 
 const NOW = 1_000_000;
 
@@ -12618,7 +13981,7 @@ async function harness(): Promise<{
     baseUrl: "http://localhost:8787",
     now: () => NOW,
     rand: () => 0.5,
-    fetch: upstream.fetch,
+    http: upstream.http,
     requestId: () => `req_${++n}`,
   });
 
@@ -12653,18 +14016,57 @@ test("a request travels through the real adapter to the stub upstream and back",
   expect(body.usage).toEqual({ input_tokens: 12, output_tokens: 3 });
 });
 
-test("the upstream request identifies this gateway and carries no stainless headers", async () => {
+test("the upstream request carries the claude-cli client identity", async () => {
   const { call, upstream, store } = await harness();
   await seedCredential(store, "c1", 1, "test-token-a");
   upstream.queue(ANTHROPIC_STREAM);
   await call(REQUEST);
 
   const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
-  expect(sent.headers["user-agent"]).toMatch(/^omnigateway\//);
-  for (const header of Object.keys(sent.headers)) {
-    expect(header.toLowerCase().startsWith("x-stainless-")).toBe(false);
+  expect(header(sent, "user-agent")).toMatch(/^claude-cli\/[\d.]+ \(external, cli\)$/);
+  expect(header(sent, "x-app")).toBe("cli");
+  expect(header(sent, "X-Stainless-Lang")).toBe("js");
+  expect(header(sent, "X-Stainless-Runtime")).toBe("node");
+  expect(header(sent, "anthropic-version")).toBe("2023-06-01");
+  // No header names the gateway. That is the point of the profile.
+  for (const name of headerNames(sent)) {
+    expect(name.toLowerCase()).not.toBe("x-omni-gateway");
   }
-  expect(sent.headers["anthropic-version"]).toBe("2023-06-01");
+  expect(JSON.stringify(sent.headers)).not.toContain("omnigateway");
+});
+
+test("the upstream headers arrive in the profile order with the profile casing", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(ANTHROPIC_STREAM);
+  await call(REQUEST);
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  const names = headerNames(sent);
+  // Exact casing, not a lowercase match — Bun's fetch would have destroyed both.
+  expect(names).toContain("X-Stainless-Lang");
+  const at = (name: string) => names.indexOf(name);
+  expect(at("Accept")).toBeLessThan(at("X-Stainless-Lang"));
+  expect(at("X-Stainless-Lang")).toBeLessThan(at("anthropic-version"));
+  expect(at("anthropic-version")).toBeLessThan(at("x-app"));
+});
+
+test("the body carries the billing block with a cch token valid over the sent bytes", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(ANTHROPIC_STREAM);
+  await call(REQUEST);
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  const system = (sent.body as { system: { text: string }[] }).system;
+  expect(system[0]?.text).toContain("x-anthropic-billing-header:");
+  const token = /cch=([0-9a-f]{5});/.exec(system[0]?.text ?? "")?.[1];
+  expect(token).toBeDefined();
+  // Recompute over the bytes with the token reset to the placeholder. The
+  // substitution is length-preserving, so these are the bytes that were hashed.
+  expect(computeCch(sent.rawBody.replace(`cch=${token};`, "cch=00000;"))).toBe(token);
+  // The pinned body order survived serialization.
+  expect(Object.keys(sent.body as object).slice(0, 3)).toEqual(["model", "messages", "system"]);
 });
 
 test("a streaming request produces client-facing sse", async () => {
@@ -12780,7 +14182,7 @@ test("a request for an unconfigured model is a clean 404-class error", async () 
 
 test("the health endpoint needs no credentials", async () => {
   const store = await memoryStore();
-  const app = createApp({ store, baseUrl: "http://localhost:8787", fetch: createStubUpstream().fetch });
+  const app = createApp({ store, baseUrl: "http://localhost:8787", http: createStubUpstream().http });
   const res = await app.handle(new Request("http://localhost/health"));
   expect(res.status).toBe(200);
   expect((await res.json()).ok).toBe(true);
@@ -12806,14 +14208,14 @@ test("no request or response text ever reaches the log table", async () => {
 - [ ] **Step 3: Run the e2e tests**
 
 Run: `bun test apps/gateway/test/e2e`
-Expected: 10 pass, 0 fail.
+Expected: 12 pass, 0 fail.
 
 If the "401 refreshes and retries" test fails with an unexpected call to the stub, check the order the stub consumes its queue: the refresh POST to the token endpoint sits between the two `/v1/messages` calls, which is why three responses are queued for what looks like two requests.
 
 - [ ] **Step 4: Run the whole suite and the type check**
 
 Run: `bun test && bunx tsc --noEmit`
-Expected: 330 pass, 0 fail; no type errors.
+Expected: 366 pass, 0 fail; no type errors.
 
 - [ ] **Step 5: Commit**
 
@@ -12870,10 +14272,18 @@ Expected: `ok` twice. The router must not know providers exist; adapters must no
 - [ ] **Step 5: Confirm no secret is in the repository**
 
 ```bash
-grep -rn "sk-ant\|sk-proj\|X-Stainless" --include='*.ts' packages apps && echo "VIOLATION" || echo "ok"
+grep -rn "sk-ant-[A-Za-z0-9]\|sk-proj-[A-Za-z0-9]" --include='*.ts' packages apps && echo "VIOLATION" || echo "ok"
 ```
 
-Expected: `ok`.
+Expected: `ok`. The pattern matches a real key prefix followed by key material, not the bare literal — `X-Stainless-*` header names are expected in `profile.ts` and its test, and a bare `sk-ant` appears in the key-format documentation.
+
+- [ ] **Step 6: Confirm nothing on the upstream path calls `fetch`**
+
+```bash
+grep -rn "fetch(" --include='*.ts' packages/providers/src apps/gateway/src/oauth && echo "VIOLATION" || echo "ok"
+```
+
+Expected: `ok`. Bun's `fetch` sorts request headers alphabetically, which destroys the pinned order — see Global Constraints and Task 8A.
 
 ---
 
