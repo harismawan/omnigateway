@@ -37,7 +37,7 @@ Three carried forward from the core plan, one new to this plan. Each is a decisi
 1. **`/api/*` instead of `/admin/*`** — inherited from the core plan. Non-negotiable: the routes the gateway actually serves are the ones listed above.
 2. **No `packages/shared`** — inherited. This plan imports from `@omni/store` and declares wire-only types in `src/api/types.ts` (Task 2).
 3. **Logs poll instead of streaming over a WebSocket** — inherited. `refetchInterval: 3000` on the logs query, pausable from the UI.
-4. **The dry-run panel requires a control route the core plan does not have.** Resolved in **Task 8** by specifying `POST /api/models/:id/dry-run` as a gateway addition. See that task's preamble for the full rationale and the exact server-side contract the gateway must implement.
+4. **The dry-run panel requires a control route the core plan does not have.** Resolved in **Task 9** by specifying `POST /api/models/:id/dry-run` as a gateway addition. See that task's preamble for the full rationale and the exact server-side contract the gateway must implement.
 
 ---
 
@@ -306,7 +306,7 @@ Run, from `apps/dashboard`:
 
 ```bash
 bun install
-bunx shadcn@latest add button input label card badge dialog table select switch tabs progress separator
+bunx shadcn@latest add button input label card badge dialog table select switch tabs progress separator textarea
 ```
 
 Expected: files appear under `src/components/ui/`, and `src/index.css` gains the shadcn theme variable block above the `@theme` block already there.
@@ -1944,7 +1944,7 @@ git commit -m "feat(dashboard): add the app shell and the authenticated layout g
   - `CredentialsScreen({ now })` — the screen body, exported for testing
 - Task 7 mounts its connect dialog into `CredentialsScreen`.
 
-**Health and quota are not on `GET /api/credentials`.** The core plan's credential projection carries only the `Credential` fields; `CredentialHealth` and `QuotaWindow` rows live behind `store.credentials.listHealth()` and `listQuota()`, which no `/api/*` route exposes. This task therefore ships the health and quota **rendering** driven by props, with the screen passing empty collections, and **Task 12** adds the single control route (`GET /api/credentials/health`) that fills them. Splitting it this way keeps the two independently reviewable: a reviewer can reject the server addition without rejecting the card layout.
+**Health and quota are not on `GET /api/credentials`.** The core plan's credential projection carries only the `Credential` fields; `CredentialHealth` and `QuotaWindow` rows live behind `store.credentials.listHealth()` and `listQuota()`, which no `/api/*` route exposes. This task therefore ships the health and quota **rendering** driven by props, with the screen passing empty collections, and **Task 13** adds the single control route (`GET /api/credentials/health`) that fills them. Splitting it this way keeps the two independently reviewable: a reviewer can reject the server addition without rejecting the card layout.
 
 The gateway's `credentialPatchSchema` is `.strict()` and accepts exactly `label`, `enabled`, `tier`, `weight`. Sending anything else is a 400, so `CredentialPatch` (Task 2) mirrors it exactly.
 
@@ -2600,7 +2600,7 @@ Append to `apps/dashboard/src/api/queries.ts`, and add `CredentialHealthResponse
 /**
  * Health and quota for every credential.
  *
- * Served by `GET /api/credentials/health`, which Task 12 adds to the gateway.
+ * Served by `GET /api/credentials/health`, which Task 13 adds to the gateway.
  * Until then this 501s against the stub and the screen renders accounts with
  * no health pill detail — deliberately degraded rather than broken.
  */
@@ -2624,7 +2624,7 @@ Add to `qk` in the same file:
 Add to `apps/dashboard/src/api/types.ts`:
 
 ```ts
-/** `GET /api/credentials/health` — added to the gateway in Task 12. */
+/** `GET /api/credentials/health` — added to the gateway in Task 13. */
 export type CredentialHealthResponse = { health: CredentialHealth[]; quota: QuotaWindow[] };
 ```
 
@@ -3878,7 +3878,7 @@ git commit -m "feat(dashboard): add the virtual model editor with targets, strat
 - Test (dashboard): `apps/dashboard/test/features/dryrun.test.tsx`
 
 **Interfaces:**
-- Consumes (gateway): `buildSnapshot`, `resolveModel`, `rank`, `Candidate`, `Excluded` from `apps/gateway/src/router/index.ts` (core plan Tasks 12–13); `AdminDeps`, `requireAdmin` (core plan Task 25); `GatewayError` from `@omni/ir`.
+- Consumes (gateway): `buildSnapshot` and `rank` from `apps/gateway/src/router/index.ts` (core plan Tasks 12–13); `AdminDeps`, `requireAdmin`, `parseOrThrow` (core plan Task 25); `GatewayError`, `ChatRequest` from `@omni/ir`.
 - Consumes (dashboard): `api` (Task 2); `qk` (Task 3); `ErrorState` (Task 4); `ModelsScreen` (Task 8).
 - Produces:
   - Gateway: `POST /api/models/:id/dry-run` returning `DryRunResponse`
@@ -4026,7 +4026,7 @@ In `apps/gateway/src/routes/admin.ts`, add these imports:
 
 ```ts
 import { buildSnapshot, rank } from "../router/index.ts";
-import type { ChatRequest } from "@omni/ir";
+import { GatewayError, type ChatRequest } from "@omni/ir";
 ```
 
 Add this schema next to the others:
@@ -4051,7 +4051,7 @@ const dryRunSchema = z
 Add this route to the chain, after `.delete("/api/models/:id", ...)`:
 
 ```ts
-    .post("/api/models/:id/dry-run", async ({ request, params, set }) => {
+    .post("/api/models/:id/dry-run", async ({ request, params }) => {
       await requireAdmin(request);
       const need = parseOrThrow(dryRunSchema, await request.json());
       const now = deps.now();
@@ -4061,8 +4061,9 @@ Add this route to the chain, after `.delete("/api/models/:id", ...)`:
       if (model === undefined) {
         // Not resolveModel(): synthesizing an alias for a name the operator
         // typo'd would rank an imaginary model and report it as real.
-        set.status = 404;
-        return { error: { code: "MODEL_UNAVAILABLE", message: `no virtual model "${params.id}"` } };
+        // Thrown, not hand-statused, so the app's onError writes the envelope
+        // and HTTP_STATUS maps MODEL_UNAVAILABLE to 404.
+        throw new GatewayError("MODEL_UNAVAILABLE", `no virtual model "${params.id}"`);
       }
 
       // The minimum shape that makes `requiredCapabilities` return `need`.
@@ -4622,7 +4623,7 @@ test("switching the range moves the since boundary", async () => {
 
 test("the rate limit figure is labelled as a log-tail sample, not a period rate", async () => {
   stubUsage(ROWS, [
-    logFixture({ id: "a", status: 429, errorCode: "RATE_LIMITED" }),
+    logFixture({ id: "a", status: 429, errorCode: "RATE_LIMIT" }),
     logFixture({ id: "b", status: 200, errorCode: null }),
     logFixture({ id: "c", status: 200, errorCode: null }),
     logFixture({ id: "d", status: 200, errorCode: null }),
@@ -4831,7 +4832,7 @@ export function UsageScreen({ now }: { now: number }) {
   // Polling off: this is a sample for one stat card, not a live tail.
   const logs = useQuery({ ...logsQuery(RATE_LIMIT_SAMPLE, 0), refetchInterval: false });
 
-  const rateLimited = (logs.data ?? []).filter((l) => l.errorCode === "RATE_LIMITED").length;
+  const rateLimited = (logs.data ?? []).filter((l) => l.errorCode === "RATE_LIMIT").length;
   const rateLimitedShare = formatRate(rateLimited, logs.data?.length ?? 0);
 
   return (
@@ -5920,8 +5921,21 @@ Append to `apps/gateway/test/routes/admin.test.ts`:
 test("credential health returns the health and quota rows the dashboard renders", async () => {
   const { store, get } = await harness();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
-  await store.credentials.recordSuccess("c1", "claude-opus-4", { latencyMs: 400, at: NOW });
-  await store.credentials.recordQuota("c1", { windowType: "fiveHour", used: 250, limit: 1_000, startsAt: NOW });
+  await store.credentials.saveHealth([
+    {
+      credentialId: "c1",
+      model: "claude-opus-4",
+      breakerState: "closed",
+      consecutiveFailures: 0,
+      openedAt: null,
+      rateLimitedUntil: null,
+      ewmaTtftMs: 400,
+      lastUsedAt: NOW,
+    },
+  ]);
+  await store.credentials.saveQuota([
+    { credentialId: "c1", windowType: "fiveHour", startsAt: NOW, used: 250, limit: 1_000 },
+  ]);
 
   const body = (await (await get("/api/credentials/health")).json()) as {
     health: Array<{ credentialId: string; model: string; consecutiveFailures: number }>;
@@ -5993,14 +6007,14 @@ test("the screen fetches health and passes it to the cards", async () => {
       credentials: [credentialFixture({ id: "c1", label: "work" })],
     }),
     "GET /api/credentials/health": () => ({
-      health: [healthFixture({ credentialId: "c1", consecutiveFailures: 4, breakerOpenUntil: NOW + 30_000 })],
+      health: [healthFixture({ credentialId: "c1", breakerState: "open", consecutiveFailures: 4, openedAt: NOW - 5_000 })],
       quota: [quotaFixture({ credentialId: "c1", used: 900, limit: 1_000 })],
     }),
   });
   renderWithProviders(<CredentialsScreen now={NOW} />);
 
   const card = await screen.findByRole("group", { name: /work/i });
-  expect(within(card).getByText(/circuit open/i)).toBeDefined();
+  expect(within(card).getByText(/breaker open/i)).toBeDefined();
   expect(within(card).getByRole("progressbar")).toBeDefined();
 });
 
@@ -6061,11 +6075,11 @@ git commit -m "feat(dashboard): render live credential health and quota from the
 
 **Files:**
 - Modify: `apps/dashboard/vite.config.ts`, root `package.json`
-- Modify (gateway): `apps/gateway/src/server.ts`
+- Modify (gateway): `apps/gateway/src/app.ts`
 - Test (gateway): `apps/gateway/test/static.test.ts`
 
 **Interfaces:**
-- Consumes: the gateway's Elysia app (core plan Task 26).
+- Consumes: `createApp` and `AppDeps` from `apps/gateway/src/app.ts` (core plan Task 26).
 - Produces: `bun run build:dashboard`; a gateway that serves `apps/dashboard/dist` at `/` with SPA fallback.
 
 The dashboard is a client-routed SPA, so a deep link like `/logs` must return `index.html` rather than a 404 — but only for navigations. An unknown `/api/*` path must stay a 404, otherwise a typo'd control call returns HTML with a 200 and the client parses it as JSON.
@@ -6076,11 +6090,15 @@ The dashboard is a client-routed SPA, so a deep link like `/logs` must return `i
 
 ```ts
 import { expect, test } from "bun:test";
-import { createServer } from "../src/server.ts";
+import { createApp } from "../src/app.ts";
 import { memoryStore } from "./helpers/fixtures.ts";
 
 async function app() {
-  return createServer({ store: await memoryStore(), staticDir: `${import.meta.dir}/fixtures/dist` });
+  return createApp({
+    store: await memoryStore(),
+    baseUrl: "http://localhost",
+    staticDir: `${import.meta.dir}/fixtures/dist`,
+  });
 }
 
 test("the index is served at the root", async () => {
@@ -6122,15 +6140,15 @@ Create `apps/gateway/test/fixtures/dist/index.html` containing `<div id="root"><
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `bun test apps/gateway/test/static.test.ts`
-Expected: FAIL — `createServer` takes no `staticDir` and returns 404 at `/`.
+Expected: FAIL — `AppDeps` has no `staticDir` and the app 404s at `/`.
 
 - [ ] **Step 3: Serve the bundle from the gateway**
 
-In `apps/gateway/src/server.ts`, add `staticDir?: string` to the options and register this **last**, after the proxy and admin routes:
+In `apps/gateway/src/app.ts`, add `staticDir?: string` to `AppDeps` and chain this **last**, after the proxy, admin and connect routes. `createApp` currently returns the chain directly, so assign it to a local `app` first and return it at the end:
 
 ```ts
-  if (options.staticDir !== undefined) {
-    const root = options.staticDir;
+  if (deps.staticDir !== undefined) {
+    const root = deps.staticDir;
     app.get("*", async ({ request, set }) => {
       const path = new URL(request.url).pathname;
 
@@ -6138,6 +6156,9 @@ In `apps/gateway/src/server.ts`, add `staticDir?: string` to the options and reg
       // here would hand the client a 200 with a body it parses as JSON.
       if (path.startsWith("/api/") || path.startsWith("/v1/") || path.startsWith("/oauth/")) {
         set.status = 404;
+        // "NOT_FOUND" is deliberately outside the ErrorCode union: no gateway
+        // operation failed, the path simply does not route. The envelope shape
+        // still matches so one client parser handles every error.
         return { error: { code: "NOT_FOUND", message: `no route for ${path}` } };
       }
 
@@ -6202,7 +6223,7 @@ git commit -m "feat(gateway): serve the dashboard bundle with an spa fallback"
 
 After Task 14:
 
-- `bun test` passes across the workspace — 109 dashboard tests plus the gateway's, including the 9 gateway tests Tasks 9, 13 and 14 add.
+- `bun test` passes across the workspace — 105 dashboard tests plus the gateway's, including the 15 gateway tests Tasks 9, 13 and 14 add (6, 3 and 6 respectively).
 - `bunx tsc --noEmit -p apps/dashboard` is clean under `strict` with `noUncheckedIndexedAccess`.
 - `bunx biome check apps/dashboard` is clean.
 - `grep -rn "any" apps/dashboard/src apps/dashboard/test` finds no bare `any`.
