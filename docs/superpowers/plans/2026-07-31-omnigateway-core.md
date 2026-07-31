@@ -10035,3 +10035,944 @@ git commit -m "feat(gateway): add the kimi device code flow and the oauth regist
 ```
 
 ---
+
+## Task 23: Token refresh with a per-credential mutex
+
+**Files:**
+- Create: `apps/gateway/src/oauth/refresh.ts`
+- Test: `apps/gateway/test/oauth/refresh.test.ts`
+
+**Interfaces:**
+- Consumes: `OAUTH_PROVIDERS` (Task 22); `Store`, `CredentialView`, `CredentialSecrets` (Tasks 5-6).
+- Produces: `createRefresher(deps): (credential: CredentialView) => Promise<CredentialSecrets>` — exactly the `refresh` member of `DispatchDeps` (Task 15).
+
+This closes the last hole in dispatch. Two properties matter:
+
+**One refresh per credential at a time.** Under load, ten concurrent requests can pick the same credential microseconds after it expires. Without a mutex all ten call the token endpoint, and a provider that rotates refresh tokens invalidates nine of them — the credential is then permanently broken. An in-flight map keyed by credential ID collapses them into one call whose promise all ten await.
+
+**A rejected refresh disables the credential.** If the provider says `invalid_grant`, no amount of retrying helps; the operator must reconnect the account. Leaving it enabled means every subsequent request wastes an attempt on it.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/gateway/test/oauth/refresh.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import type { CredentialView } from "@omni/store";
+import { createRefresher } from "../../src/oauth/refresh.ts";
+import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
+import { credential, memoryStore } from "../helpers/fixtures.ts";
+
+const NOW = 1_000_000;
+
+function fakeProvider(
+  impl: (refreshToken: string) => Promise<FlowResult>,
+): Readonly<Record<string, OAuthProvider>> {
+  const provider = {
+    id: "anthropic",
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: () => {
+      throw new Error("unused");
+    },
+    exchange: async () => {
+      throw new Error("unused");
+    },
+    refresh: async (token: string) => impl(token),
+  } as unknown as OAuthProvider;
+  return { anthropic: provider, openai: provider, kimi: provider };
+}
+
+async function seed(): Promise<{ store: Awaited<ReturnType<typeof memoryStore>>; view: CredentialView }> {
+  const store = await memoryStore();
+  await store.credentials.create({
+    ...credential({ id: "c1", provider: "anthropic", expiresAt: NOW - 1 }),
+    accessToken: "test-token-1",
+    refreshToken: "test-token-2",
+    apiKey: null,
+  });
+  const view = (await store.credentials.get("c1")) as CredentialView;
+  return { store, view };
+}
+
+const result = (accessToken: string): FlowResult => ({
+  secrets: { accessToken, refreshToken: "test-token-9", apiKey: null },
+  expiresAt: NOW + 3_600_000,
+  accountEmail: "user@example.com",
+  providerData: { accountId: "acct_1" },
+});
+
+test("refreshes and returns the new secrets", async () => {
+  const { store, view } = await seed();
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => result("test-token-3")),
+    fetch: globalThis.fetch,
+    now: () => NOW,
+  });
+
+  expect((await refresh(view)).accessToken).toBe("test-token-3");
+});
+
+test("persists the new tokens and expiry", async () => {
+  const { store, view } = await seed();
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => result("test-token-3")),
+    fetch: globalThis.fetch,
+    now: () => NOW,
+  });
+  await refresh(view);
+
+  const reloaded = (await store.credentials.get("c1")) as CredentialView;
+  expect(reloaded.expiresAt).toBe(NOW + 3_600_000);
+  expect((await reloaded.secrets()).accessToken).toBe("test-token-3");
+  expect((await reloaded.secrets()).refreshToken).toBe("test-token-9");
+});
+
+test("merges returned provider data without dropping existing keys", async () => {
+  const store = await memoryStore();
+  await store.credentials.create({
+    ...credential({ id: "c1", provider: "openai", expiresAt: NOW - 1, providerData: { deviceId: "dev-1" } }),
+    accessToken: "test-token-1",
+    refreshToken: "test-token-2",
+    apiKey: null,
+  });
+  const view = (await store.credentials.get("c1")) as CredentialView;
+
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => result("test-token-3")),
+    fetch: globalThis.fetch,
+    now: () => NOW,
+  });
+  await refresh(view);
+
+  const reloaded = (await store.credentials.get("c1")) as CredentialView;
+  expect(reloaded.providerData).toEqual({ deviceId: "dev-1", accountId: "acct_1" });
+});
+
+test("collapses concurrent refreshes of the same credential into one call", async () => {
+  const { store, view } = await seed();
+  let calls = 0;
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => {
+      calls += 1;
+      await Bun.sleep(5);
+      return result("test-token-3");
+    }),
+    fetch: globalThis.fetch,
+    now: () => NOW,
+  });
+
+  const results = await Promise.all([refresh(view), refresh(view), refresh(view)]);
+  expect(calls).toBe(1);
+  expect(results.map((r) => r.accessToken)).toEqual([
+    "test-token-3",
+    "test-token-3",
+    "test-token-3",
+  ]);
+});
+
+test("allows a later refresh once the in-flight one settles", async () => {
+  const { store, view } = await seed();
+  let calls = 0;
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => {
+      calls += 1;
+      return result(`test-token-${calls}`);
+    }),
+    fetch: globalThis.fetch,
+    now: () => NOW,
+  });
+
+  await refresh(view);
+  await refresh(view);
+  expect(calls).toBe(2);
+});
+
+test("throws when the credential has no refresh token", async () => {
+  const store = await memoryStore();
+  await store.credentials.create({
+    ...credential({ id: "c2", provider: "anthropic" }),
+    accessToken: "test-token-1",
+    refreshToken: null,
+    apiKey: null,
+  });
+  const view = (await store.credentials.get("c2")) as CredentialView;
+
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => result("x")),
+    fetch: globalThis.fetch,
+    now: () => NOW,
+  });
+  expect(refresh(view)).rejects.toThrow(GatewayError);
+});
+
+test("disables the credential when the provider rejects the refresh token", async () => {
+  const { store, view } = await seed();
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => {
+      throw new GatewayError("AUTH", "token endpoint rejected the request: invalid_grant");
+    }),
+    fetch: globalThis.fetch,
+    now: () => NOW,
+  });
+
+  expect(refresh(view)).rejects.toThrow(GatewayError);
+  await Bun.sleep(1);
+  expect((await store.credentials.get("c1"))?.enabled).toBe(false);
+});
+
+test("a network failure does not disable the credential", async () => {
+  const { store, view } = await seed();
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => {
+      throw new GatewayError("NETWORK", "connection reset");
+    }),
+    fetch: globalThis.fetch,
+    now: () => NOW,
+  });
+
+  expect(refresh(view)).rejects.toThrow(GatewayError);
+  await Bun.sleep(1);
+  expect((await store.credentials.get("c1"))?.enabled).toBe(true);
+});
+
+test("a failed refresh is not cached — the next call retries", async () => {
+  const { store, view } = await seed();
+  let calls = 0;
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => {
+      calls += 1;
+      if (calls === 1) throw new GatewayError("NETWORK", "connection reset");
+      return result("test-token-3");
+    }),
+    fetch: globalThis.fetch,
+    now: () => NOW,
+  });
+
+  expect(refresh(view)).rejects.toThrow(GatewayError);
+  await Bun.sleep(1);
+  expect((await refresh(view)).accessToken).toBe("test-token-3");
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/gateway/test/oauth/refresh.test.ts`
+Expected: FAIL — cannot resolve `../../src/oauth/refresh.ts`.
+
+- [ ] **Step 3: Write the refresher**
+
+`apps/gateway/src/oauth/refresh.ts`:
+
+```ts
+import { GatewayError } from "@omni/ir";
+import type { CredentialSecrets, CredentialView, ProviderId, Store } from "@omni/store";
+import type { OAuthProvider } from "./types.ts";
+
+export type RefreshDeps = {
+  store: Store;
+  providers: Readonly<Record<ProviderId, OAuthProvider>>;
+  fetch: typeof fetch;
+  now: () => number;
+};
+
+export type Refresher = (credential: CredentialView) => Promise<CredentialSecrets>;
+
+export function createRefresher(deps: RefreshDeps): Refresher {
+  /**
+   * One in-flight refresh per credential.
+   *
+   * Concurrent requests routinely pick the same credential in the instant it
+   * expires. If each ran its own refresh, a provider that rotates refresh
+   * tokens would invalidate every rotation but the last, permanently breaking
+   * the credential. Callers share one promise instead.
+   */
+  const inFlight = new Map<string, Promise<CredentialSecrets>>();
+
+  async function run(credential: CredentialView): Promise<CredentialSecrets> {
+    const secrets = await credential.secrets();
+    if (secrets.refreshToken === null) {
+      throw new GatewayError("AUTH", `credential ${credential.id} has no refresh token`);
+    }
+
+    const provider = deps.providers[credential.provider];
+
+    let result;
+    try {
+      result = await provider.refresh(secrets.refreshToken, {
+        fetch: deps.fetch,
+        now: deps.now,
+      });
+    } catch (error) {
+      // AUTH means the provider repudiated the refresh token: retrying cannot
+      // help, and leaving the credential enabled burns one attempt on every
+      // subsequent request. Anything else (network, timeout) is transient.
+      if (error instanceof GatewayError && error.code === "AUTH") {
+        await deps.store.credentials.update(credential.id, { enabled: false });
+      }
+      throw error;
+    }
+
+    await deps.store.credentials.update(credential.id, {
+      secrets: result.secrets,
+      expiresAt: result.expiresAt,
+      accountEmail: result.accountEmail ?? credential.accountEmail,
+      // Merge: a refresh response may omit fields the connect flow captured,
+      // such as the Kimi device id.
+      providerData: { ...credential.providerData, ...result.providerData },
+    });
+
+    return result.secrets;
+  }
+
+  return function refresh(credential) {
+    const existing = inFlight.get(credential.id);
+    if (existing !== undefined) return existing;
+
+    const promise = run(credential).finally(() => {
+      // Cleared on both paths: caching a rejection would make one transient
+      // network error stick to the credential forever.
+      inFlight.delete(credential.id);
+    });
+
+    inFlight.set(credential.id, promise);
+    return promise;
+  };
+}
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 180 pass, 0 fail.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add token refresh with a per-credential mutex"
+```
+
+---
+
+## Task 24: The connect flow — starting and completing an OAuth authorization
+
+**Files:**
+- Create: `apps/gateway/src/oauth/pending.ts`, `apps/gateway/src/routes/connect.ts`
+- Test: `apps/gateway/test/oauth/pending.test.ts`, `apps/gateway/test/routes/connect.test.ts`
+
+**Interfaces:**
+- Consumes: `OAUTH_PROVIDERS`, `isAuthorizationPending`, `PendingFlow` (Task 22); `AdminAuth` (Task 18); `Store` (Task 7).
+- Produces:
+  - `createPendingFlows(opts): PendingFlows` with `put`, `take`, `byState`, `sweep`
+  - `connectRoutes(deps): Elysia` mounting `POST /api/connect/start`, `POST /api/connect/finish`, `POST /api/connect/poll`, `GET /oauth/callback`
+
+Pending flows live in memory with a TTL. They contain a PKCE verifier, which is a live secret for the duration of the flow — writing it to SQLite would put it on disk unencrypted for no benefit, since an authorization the operator abandoned should not survive a restart anyway.
+
+`/oauth/callback` is deliberately unauthenticated: the provider redirects a browser there, and that browser carries no admin cookie in the general case. The `state` parameter is what authenticates the callback — it was minted by this process and is single-use.
+
+- [ ] **Step 1: Write the failing pending-flow test**
+
+`apps/gateway/test/oauth/pending.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { createPendingFlows } from "../../src/oauth/pending.ts";
+
+let clock = 1_000_000;
+const flows = () => createPendingFlows({ now: () => clock, ttlMs: 600_000 });
+
+const flow = (state: string) => ({
+  provider: "anthropic" as const,
+  label: "work",
+  pending: { verifier: "v", challenge: "c", state, redirectUri: "r" },
+});
+
+test("stores and takes a flow by id", () => {
+  const p = flows();
+  const id = p.put(flow("s1"));
+  expect(p.take(id)?.label).toBe("work");
+});
+
+test("take is single-use", () => {
+  const p = flows();
+  const id = p.put(flow("s1"));
+  p.take(id);
+  expect(p.take(id)).toBeNull();
+});
+
+test("finds a flow by its state parameter", () => {
+  const p = flows();
+  p.put(flow("s1"));
+  expect(p.byState("s1")?.label).toBe("work");
+});
+
+test("byState does not consume the flow", () => {
+  const p = flows();
+  p.put(flow("s1"));
+  p.byState("s1");
+  expect(p.byState("s1")).not.toBeNull();
+});
+
+test("returns null for an unknown state", () => {
+  expect(flows().byState("nope")).toBeNull();
+});
+
+test("expires a flow after the ttl", () => {
+  const p = flows();
+  const id = p.put(flow("s1"));
+  clock += 600_001;
+  expect(p.take(id)).toBeNull();
+  expect(p.byState("s1")).toBeNull();
+});
+
+test("sweep drops expired flows", () => {
+  const p = flows();
+  p.put(flow("s1"));
+  expect(p.size()).toBe(1);
+  clock += 600_001;
+  p.sweep();
+  expect(p.size()).toBe(0);
+});
+
+test("ids are unguessable", () => {
+  const p = flows();
+  expect(p.put(flow("s1"))).toMatch(/^[A-Za-z0-9_-]{43}$/);
+});
+```
+
+- [ ] **Step 2: Write the failing connect route test**
+
+`apps/gateway/test/routes/connect.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { connectRoutes } from "../../src/routes/connect.ts";
+import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
+import { memoryStore } from "../helpers/fixtures.ts";
+import { createAdminAuth } from "../../src/auth/admin.ts";
+
+const NOW = 1_000_000;
+
+const RESULT: FlowResult = {
+  secrets: { accessToken: "test-token-1", refreshToken: "test-token-2", apiKey: null },
+  expiresAt: NOW + 3_600_000,
+  accountEmail: "user@example.com",
+  providerData: { accountId: "acct_1" },
+};
+
+function pkceProvider(exchange: () => Promise<FlowResult>): OAuthProvider {
+  return {
+    id: "anthropic",
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: ({ redirectUri }) => ({
+      authorizeUrl: `https://example.com/authorize?state=the-state&redirect_uri=${redirectUri}`,
+      pending: { verifier: "v", challenge: "c", state: "the-state", redirectUri },
+    }),
+    exchange,
+    refresh: async () => RESULT,
+  };
+}
+
+async function harness(provider: OAuthProvider = pkceProvider(async () => RESULT)) {
+  const store = await memoryStore();
+  const admin = createAdminAuth(store, { now: () => NOW, sessionTtlMs: 60_000 });
+  await admin.setPassword("hunter2hunter2");
+  const token = (await admin.login("hunter2hunter2")) as string;
+
+  const app = connectRoutes({
+    store,
+    admin,
+    providers: { anthropic: provider, openai: provider, kimi: provider },
+    fetch: globalThis.fetch,
+    now: () => NOW,
+    baseUrl: "http://localhost:8787",
+  });
+
+  const post = (path: string, body: unknown, auth = true) =>
+    app.handle(
+      new Request(`http://localhost${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(auth ? { cookie: `omni_admin=${token}` } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+
+  return { store, app, post, token };
+}
+
+test("start returns an authorize url and a flow id", async () => {
+  const { post } = await harness();
+  const res = await post("/api/connect/start", { provider: "anthropic", label: "work" });
+  const body = (await res.json()) as Record<string, any>;
+  expect(res.status).toBe(200);
+  expect(body.authorizeUrl).toContain("https://example.com/authorize");
+  expect(typeof body.flowId).toBe("string");
+});
+
+test("start requires an admin session", async () => {
+  const { post } = await harness();
+  const res = await post("/api/connect/start", { provider: "anthropic", label: "x" }, false);
+  expect(res.status).toBe(401);
+});
+
+test("start rejects an unknown provider", async () => {
+  const { post } = await harness();
+  expect((await post("/api/connect/start", { provider: "nope", label: "x" })).status).toBe(400);
+});
+
+test("finish exchanges the code and stores an enabled credential", async () => {
+  const { post, store } = await harness();
+  const { flowId } = (await (await post("/api/connect/start", { provider: "anthropic", label: "work" })).json()) as {
+    flowId: string;
+  };
+
+  const res = await post("/api/connect/finish", { flowId, code: "auth-code" });
+  expect(res.status).toBe(200);
+
+  const credentials = await store.credentials.list();
+  expect(credentials).toHaveLength(1);
+  expect(credentials[0]?.label).toBe("work");
+  expect(credentials[0]?.enabled).toBe(true);
+  expect(credentials[0]?.accountEmail).toBe("user@example.com");
+  expect(credentials[0]?.providerData).toEqual({ accountId: "acct_1" });
+  expect(credentials[0]?.hasRefreshToken).toBe(true);
+});
+
+test("the finish response never contains the tokens", async () => {
+  const { post } = await harness();
+  const { flowId } = (await (await post("/api/connect/start", { provider: "anthropic", label: "w" })).json()) as {
+    flowId: string;
+  };
+  const text = await (await post("/api/connect/finish", { flowId, code: "auth-code" })).text();
+  expect(text).not.toContain("test-token-1");
+  expect(text).not.toContain("test-token-2");
+});
+
+test("a flow id cannot be reused", async () => {
+  const { post } = await harness();
+  const { flowId } = (await (await post("/api/connect/start", { provider: "anthropic", label: "w" })).json()) as {
+    flowId: string;
+  };
+  await post("/api/connect/finish", { flowId, code: "auth-code" });
+  expect((await post("/api/connect/finish", { flowId, code: "auth-code" })).status).toBe(400);
+});
+
+test("a failed exchange surfaces as an error and stores nothing", async () => {
+  const { post, store } = await harness(
+    pkceProvider(async () => {
+      throw new GatewayError("AUTH", "token endpoint rejected the request: invalid_grant");
+    }),
+  );
+  const { flowId } = (await (await post("/api/connect/start", { provider: "anthropic", label: "w" })).json()) as {
+    flowId: string;
+  };
+
+  const res = await post("/api/connect/finish", { flowId, code: "bad" });
+  expect(res.status).toBe(401);
+  expect(await store.credentials.list()).toHaveLength(0);
+});
+
+test("the browser callback completes the flow by state", async () => {
+  const { post, app, store } = await harness();
+  await post("/api/connect/start", { provider: "anthropic", label: "work" });
+
+  const res = await app.handle(
+    new Request("http://localhost/oauth/callback?code=auth-code&state=the-state"),
+  );
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/html");
+  expect(await store.credentials.list()).toHaveLength(1);
+});
+
+test("the callback rejects an unknown state", async () => {
+  const { app } = await harness();
+  const res = await app.handle(
+    new Request("http://localhost/oauth/callback?code=c&state=forged"),
+  );
+  expect(res.status).toBe(400);
+});
+
+test("the callback surfaces a provider error without exchanging", async () => {
+  const { app, store } = await harness();
+  const res = await app.handle(
+    new Request("http://localhost/oauth/callback?error=access_denied&state=the-state"),
+  );
+  expect(res.status).toBe(400);
+  expect(await store.credentials.list()).toHaveLength(0);
+});
+
+test("poll reports pending for a device flow that is not yet approved", async () => {
+  const deviceProvider: OAuthProvider = {
+    id: "kimi",
+    kind: "device",
+    supportsManualPaste: false,
+    start: () => ({
+      authorizeUrl: "https://kimi.example/device",
+      pending: { verifier: "", challenge: "", state: "", redirectUri: "", extra: { deviceId: "dev-1" } },
+    }),
+    begin: async () => ({
+      authorizeUrl: "https://kimi.example/device",
+      userCode: "WDJB-MJHT",
+      pending: {
+        verifier: "",
+        challenge: "",
+        state: "",
+        redirectUri: "",
+        deviceCode: "dc-1",
+        interval: 5,
+        extra: { deviceId: "dev-1" },
+      },
+    }),
+    exchange: async () => {
+      const { isAuthorizationPending } = await import("../../src/oauth/kimi.ts");
+      void isAuthorizationPending;
+      const { kimiOAuth } = await import("../../src/oauth/kimi.ts");
+      void kimiOAuth;
+      const error = new GatewayError("AUTH", "authorization not yet complete") as GatewayError & {
+        __omni_authorization_pending?: boolean;
+      };
+      error.__omni_authorization_pending = true;
+      throw error;
+    },
+    refresh: async () => RESULT,
+  };
+
+  const { post } = await harness(deviceProvider);
+  const start = (await (await post("/api/connect/start", { provider: "kimi", label: "kimi" })).json()) as {
+    flowId: string;
+    userCode: string;
+  };
+  expect(start.userCode).toBe("WDJB-MJHT");
+
+  const res = await post("/api/connect/poll", { flowId: start.flowId });
+  expect(res.status).toBe(202);
+  expect((await res.json()).status).toBe("pending");
+});
+```
+
+- [ ] **Step 3: Run both tests to verify they fail**
+
+Run: `bun test apps/gateway/test/oauth/pending.test.ts apps/gateway/test/routes/connect.test.ts`
+Expected: FAIL — cannot resolve `../../src/oauth/pending.ts`.
+
+- [ ] **Step 4: Write the pending-flow store**
+
+`apps/gateway/src/oauth/pending.ts`:
+
+```ts
+import type { ProviderId } from "@omni/store";
+import type { PendingFlow } from "./types.ts";
+
+export type StoredFlow = {
+  provider: ProviderId;
+  label: string;
+  pending: PendingFlow;
+  userCode?: string;
+};
+
+export type PendingFlows = {
+  put(flow: StoredFlow): string;
+  take(id: string): StoredFlow | null;
+  /** Read without consuming — used by the browser callback to find its flow. */
+  byState(state: string): (StoredFlow & { id: string }) | null;
+  peek(id: string): StoredFlow | null;
+  sweep(): void;
+  size(): number;
+};
+
+export type PendingFlowsOptions = { now: () => number; ttlMs: number };
+
+/**
+ * In-memory only, with a TTL.
+ *
+ * A pending flow holds a live PKCE verifier. Persisting it would write a secret
+ * to disk to protect against a restart mid-authorization — a case where the
+ * right answer is for the operator to start over anyway.
+ */
+export function createPendingFlows(opts: PendingFlowsOptions): PendingFlows {
+  const flows = new Map<string, { flow: StoredFlow; expiresAt: number }>();
+
+  const expired = (entry: { expiresAt: number }): boolean => entry.expiresAt <= opts.now();
+
+  return {
+    put(flow) {
+      const id = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+      flows.set(id, { flow, expiresAt: opts.now() + opts.ttlMs });
+      return id;
+    },
+
+    take(id) {
+      const entry = flows.get(id);
+      if (entry === undefined) return null;
+      flows.delete(id);
+      return expired(entry) ? null : entry.flow;
+    },
+
+    peek(id) {
+      const entry = flows.get(id);
+      if (entry === undefined || expired(entry)) return null;
+      return entry.flow;
+    },
+
+    byState(state) {
+      for (const [id, entry] of flows) {
+        if (entry.flow.pending.state === state) {
+          return expired(entry) ? null : { ...entry.flow, id };
+        }
+      }
+      return null;
+    },
+
+    sweep() {
+      for (const [id, entry] of flows) {
+        if (expired(entry)) flows.delete(id);
+      }
+    },
+
+    size() {
+      return flows.size;
+    },
+  };
+}
+```
+
+- [ ] **Step 5: Write the connect routes**
+
+`apps/gateway/src/routes/connect.ts`:
+
+```ts
+import { GatewayError, HTTP_STATUS } from "@omni/ir";
+import type { ProviderId, Store } from "@omni/store";
+import { Elysia } from "elysia";
+import { ADMIN_COOKIE, type AdminAuth } from "../auth/admin.ts";
+import { isAuthorizationPending } from "../oauth/kimi.ts";
+import { createPendingFlows, type StoredFlow } from "../oauth/pending.ts";
+import type { OAuthProvider } from "../oauth/types.ts";
+
+const PROVIDER_IDS: readonly ProviderId[] = ["anthropic", "openai", "kimi"];
+const FLOW_TTL_MS = 600_000;
+
+export type ConnectDeps = {
+  store: Store;
+  admin: AdminAuth;
+  providers: Readonly<Record<ProviderId, OAuthProvider>>;
+  fetch: typeof fetch;
+  now: () => number;
+  /** Origin the provider redirects back to, e.g. `http://localhost:8787`. */
+  baseUrl: string;
+};
+
+function readCookie(request: Request, name: string): string | null {
+  const header = request.headers.get("cookie");
+  if (header === null) return null;
+  for (const part of header.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return rest.join("=");
+  }
+  return null;
+}
+
+function isProviderId(value: unknown): value is ProviderId {
+  return typeof value === "string" && PROVIDER_IDS.includes(value as ProviderId);
+}
+
+const json = (body: unknown, status: number): Response =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+const page = (title: string, message: string, status: number): Response =>
+  new Response(
+    `<!doctype html><meta charset="utf-8"><title>${title}</title>` +
+      `<body style="font:16px system-ui;padding:3rem;max-width:34rem">` +
+      `<h1>${title}</h1><p>${message}</p></body>`,
+    { status, headers: { "content-type": "text/html; charset=utf-8" } },
+  );
+
+export function connectRoutes(deps: ConnectDeps): Elysia {
+  const flows = createPendingFlows({ now: deps.now, ttlMs: FLOW_TTL_MS });
+  const redirectUri = `${deps.baseUrl}/oauth/callback`;
+
+  async function requireAdmin(request: Request): Promise<void> {
+    const token = readCookie(request, ADMIN_COOKIE);
+    if (token === null || !(await deps.admin.verify(token))) {
+      throw new GatewayError("AUTH", "admin session required");
+    }
+  }
+
+  /** Runs the exchange and persists the resulting credential. */
+  async function complete(flow: StoredFlow, code: string): Promise<{ id: string }> {
+    const provider = deps.providers[flow.provider];
+    const result = await provider.exchange(
+      { code, pending: flow.pending },
+      { fetch: deps.fetch, now: deps.now },
+    );
+
+    const id = crypto.randomUUID();
+    await deps.store.credentials.create({
+      id,
+      provider: flow.provider,
+      label: flow.label,
+      authType: "oauth",
+      enabled: true,
+      tier: 1,
+      weight: 1,
+      expiresAt: result.expiresAt,
+      accountEmail: result.accountEmail,
+      providerData: result.providerData,
+      ...result.secrets,
+    });
+    return { id };
+  }
+
+  return new Elysia()
+    .post("/api/connect/start", async ({ request }) => {
+      await requireAdmin(request);
+      flows.sweep();
+
+      const body = (await request.json()) as { provider?: unknown; label?: unknown };
+      if (!isProviderId(body.provider)) {
+        throw new GatewayError("BAD_REQUEST", "provider must be one of anthropic, openai, kimi");
+      }
+      const label = typeof body.label === "string" && body.label.trim().length > 0
+        ? body.label.trim()
+        : body.provider;
+
+      const provider = deps.providers[body.provider];
+      const start =
+        provider.begin === undefined
+          ? provider.start({ redirectUri })
+          : await provider.begin(
+              { deviceId: (provider.start({ redirectUri }).pending.extra?.deviceId as string) ?? crypto.randomUUID() },
+              { fetch: deps.fetch, now: deps.now },
+            );
+
+      const flowId = flows.put({
+        provider: body.provider,
+        label,
+        pending: start.pending,
+        userCode: start.userCode,
+      });
+
+      return {
+        flowId,
+        authorizeUrl: start.authorizeUrl,
+        userCode: start.userCode ?? null,
+        kind: provider.kind,
+        supportsManualPaste: provider.supportsManualPaste,
+        pollIntervalMs: (start.pending.interval ?? 5) * 1000,
+      };
+    })
+
+    .post("/api/connect/finish", async ({ request }) => {
+      await requireAdmin(request);
+
+      const body = (await request.json()) as { flowId?: unknown; code?: unknown };
+      if (typeof body.flowId !== "string" || typeof body.code !== "string") {
+        throw new GatewayError("BAD_REQUEST", "flowId and code are required");
+      }
+
+      const flow = flows.take(body.flowId);
+      if (flow === null) throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
+
+      // The response carries an id and nothing else. Tokens stay in the store.
+      return complete(flow, body.code);
+    })
+
+    .post("/api/connect/poll", async ({ request, set }) => {
+      await requireAdmin(request);
+
+      const body = (await request.json()) as { flowId?: unknown };
+      if (typeof body.flowId !== "string") {
+        throw new GatewayError("BAD_REQUEST", "flowId is required");
+      }
+
+      const flow = flows.peek(body.flowId);
+      if (flow === null) throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
+
+      try {
+        const created = await complete(flow, "");
+        flows.take(body.flowId);
+        return { status: "complete", ...created };
+      } catch (error) {
+        if (isAuthorizationPending(error)) {
+          set.status = 202;
+          return { status: "pending" };
+        }
+        flows.take(body.flowId);
+        throw error;
+      }
+    })
+
+    /**
+     * Unauthenticated by design: the provider redirects a browser here, and
+     * that browser may not carry the admin cookie. The single-use `state`
+     * parameter — minted by this process moments earlier — is the credential.
+     */
+    .get("/oauth/callback", async ({ query }) => {
+      const state = typeof query.state === "string" ? query.state : "";
+      const found = flows.byState(state);
+      if (found === null) {
+        return page("Authorization failed", "This authorization link is unknown or has expired.", 400);
+      }
+
+      if (typeof query.error === "string") {
+        flows.take(found.id);
+        return page("Authorization declined", `The provider reported: ${query.error}.`, 400);
+      }
+
+      const code = typeof query.code === "string" ? query.code : "";
+      if (code.length === 0) {
+        flows.take(found.id);
+        return page("Authorization failed", "The provider returned no authorization code.", 400);
+      }
+
+      try {
+        await complete(found, code);
+        flows.take(found.id);
+        return page("Account connected", "You can close this tab and return to OmniGateway.", 200);
+      } catch (error) {
+        flows.take(found.id);
+        const message = error instanceof GatewayError ? error.message : "the exchange failed";
+        return page("Authorization failed", message, 400);
+      }
+    })
+
+    .onError(({ error, set }) => {
+      const gatewayError =
+        error instanceof GatewayError
+          ? error
+          : new GatewayError("INTERNAL", error instanceof Error ? error.message : "internal error");
+      set.status = HTTP_STATUS[gatewayError.code];
+      return { error: { code: gatewayError.code, message: gatewayError.message } };
+    });
+}
+```
+
+- [ ] **Step 6: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 200 pass, 0 fail.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add the oauth connect flow and browser callback"
+```
+
+---
