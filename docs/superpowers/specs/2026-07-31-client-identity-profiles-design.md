@@ -11,8 +11,10 @@ The gateway sends, on every upstream request, the header set and header order of
 the official CLI for that provider — `claude-cli` for Anthropic, `codex-cli` for
 OpenAI, `kimi-code-cli` for Kimi — instead of a single `omnigateway/<version>`
 User-Agent. Header values, header name casing, and header wire order are all
-per-provider. Operators can override the version-bearing values and the order
-through environment variables.
+per-provider. JSON request bodies are serialized in the CLI's field order, and
+Anthropic requests additionally carry the `x-anthropic-billing-header` system
+block with a valid `cch=` body-integrity token. Operators can override the
+version-bearing values and the header order through environment variables.
 
 This reverses the previous "identify honestly" decision. See § Relationship to
 the core design.
@@ -172,7 +174,7 @@ export type HttpRequest = {
   url: string;
   method: string;
   headers: readonly HeaderPair[];   // ordered; sent verbatim
-  body: string;
+  body: string;                     // already ordered and signed; sent verbatim
   signal: AbortSignal;
 };
 
@@ -224,6 +226,91 @@ Existing credentials hold only `deviceId`. Missing values fall back to the same
 defaults a fresh credential would generate, so a credential connected before
 this change keeps working and keeps its device id.
 
+### JSON body field order
+
+The CLIs emit top-level body fields in a fixed order. `JSON.stringify` follows
+object insertion order for string keys, so an ordering pass before serialization
+is sufficient — verified under Bun. `orderFields(body, order)` rebuilds the
+object with listed keys first and unlisted keys appended in their original
+order, mirroring OmniRoute's function of the same name.
+
+Field orders, from `CLI_FINGERPRINTS`:
+
+- **Anthropic** — `model`, `messages`, `system`, `tools`, `tool_choice`,
+  `metadata`, `max_tokens`, `temperature`, `thinking`, `context_management`,
+  `output_config`, `stream`.
+- **OpenAI** — `model`, `stream`, `input`, `instructions`, `store`, `reasoning`,
+  `prompt_cache_key`, `tools`, `tool_choice`, `include`, `service_tier`,
+  `client_metadata`, `parallel_tool_calls`, `metadata`.
+- **Kimi** — no captured fingerprint. Ours: `model`, `messages`, `tools`,
+  `tool_choice`, `max_tokens`, `temperature`, `stream`. Marked as
+  non-capture-derived in a comment, same as its header order.
+
+One V8 detail constrains this: integer-like string keys are always emitted
+first regardless of insertion order (`{b, "2", a}` serializes as `{"2", b, a}`).
+No field in any of these orders is integer-like, so the ordering holds — but a
+provider that later adds a numeric field name would silently break it. The
+ordering helper is documented accordingly.
+
+Ordering happens after the adapter's `toWire` produces the body and before
+serialization, so `toWire` stays free to build its object in whatever order
+reads best.
+
+### Anthropic body integrity (`cch=`)
+
+Real Claude Code prepends a system block carrying a billing header and an
+integrity token over the request body:
+
+```
+system[0] = "x-anthropic-billing-header: cc_version=2.1.219.250; cc_entrypoint=cli; cch=<5 hex>;"
+```
+
+The token is `xxHash64(serialized_body, 0x6e52736ac806831e) & 0xFFFFF`, rendered
+as 5 zero-padded lowercase hex characters, computed over the body that already
+contains a `cch=00000` placeholder, then substituted back in. Substitution is
+length-preserving — 5 hex characters replacing 5 — so the hash stays valid over
+the bytes actually sent. Verified: a 204-byte body signs to 204 bytes.
+
+`Bun.hash.xxHash64(bytes, seed)` is native and returns a `bigint`. Verified
+against canonical XXH64 vectors: `""` → `ef46db3751d8e999`, `"a"` →
+`d24ec4f1a98c6e5b`, `"abc"` → `44bc2cf5ad770999`. No wasm dependency is needed;
+OmniRoute's `xxhash-wasm` import exists because Node has no built-in.
+
+`cc_version` is `2.1.219.250` — the CLI version plus the build revision captured
+from the signed binary. OmniRoute also implements two per-request suffix
+algorithms (an "ex-machina" hash over characters 4, 7, and 20 of the first user
+message, and a daystamp hash it labels as its own construction). Neither is
+used here: a static build revision is what a real CLI build sends, and the
+alternatives are inferences about an algorithm we cannot verify.
+
+`cc_entrypoint` is `cli`, matching the `(external, cli)` User-Agent.
+
+**System block pipeline.** Because the billing block joins the caller's system
+prompt, the caller's blocks are sanitized first so a third-party agent's
+identity does not travel inside a request claiming to be Claude Code. In order:
+
+1. Drop paragraphs containing third-party agent URLs:
+   `github.com/anomalyco/opencode`, `opencode.ai/docs`, `github.com/cline/cline`,
+   `github.com/getcursor/cursor`, `continue.dev`.
+2. Drop paragraphs starting with `You are OpenCode`.
+3. Replace `if OpenCode honestly` → `if the assistant honestly`, and
+   `Here is some useful information about the environment you are running in:` →
+   `Environment context you are running in:`. All occurrences.
+4. Prepend `You are a Claude agent, built on Anthropic's Claude Agent SDK.`
+5. Prepend the billing header block, which lands at index 0.
+
+Steps 1–3 rewrite the operator's own prompt text. This is a real cost and is
+stated plainly: a system prompt mentioning `continue.dev` in passing loses that
+paragraph. The rules are narrow and literal — no regex over user content — and
+the transformed body is what both the model and the `cch` token see.
+
+The pipeline runs on every Anthropic request, on both the OAuth and API-key
+paths, with no kill switch. Ordering within the adapter is: `toWire` → system
+pipeline → `orderFields` → `JSON.stringify` → `cch` substitution → transport.
+
+The pipeline is Anthropic-only. OpenAI and Kimi get field ordering and nothing
+else.
+
 ### Environment overrides
 
 Per-header variables, validated against `/^[\x20-\x7E]{1,200}$/` — OmniRoute's
@@ -250,6 +337,8 @@ OMNI_ORDER_OPENAI=
 OMNI_UA_KIMI=
 OMNI_KIMI_CLI_VERSION=0.26.0
 OMNI_ORDER_KIMI=
+
+OMNI_ANTHROPIC_BUILD_REVISION=250            # cc_version suffix
 ```
 
 `OMNI_UA_*` replaces the User-Agent outright and so can drift from the version
@@ -271,6 +360,20 @@ Unit tests, `packages/providers/test/profile.test.ts`:
   pattern, and falls back to the built-in order for a malformed order list.
 - The merge helper cannot be made to drop or displace an auth header.
 
+Body tests, `packages/providers/test/body.test.ts`:
+
+- `orderFields` places listed fields first, appends unlisted ones, and survives
+  a `JSON.stringify` round trip in the expected order.
+- `computeCch` reproduces the canonical XXH64 vectors and masks to 5 hex
+  characters.
+- `signBody` substitutes the placeholder without changing the byte length, and
+  is a no-op on a body with no placeholder.
+- The system pipeline drops each anchor URL paragraph and the `You are OpenCode`
+  prefix, applies both replacements at every occurrence, and produces the
+  block layout `[billing, sdk-identity, ...caller]`.
+- The pipeline is idempotent: running it twice does not stack two billing blocks
+  or two identity blocks.
+
 Transport test, `packages/providers/test/http-client.test.ts`: `nodeHttpClient`
 writes headers to a raw `Bun.listen` socket in the exact order and casing given.
 This is the only test that can catch a regression to `fetch`, since every
@@ -278,10 +381,13 @@ higher-level assertion reads through a `Headers` object that has already
 normalised both.
 
 End-to-end, Task 27: the stub upstream implements `HttpClient` rather than
-`fetch`, and so receives the ordered pair list. Its existing assertion that the
-User-Agent matches `/^omnigateway\//` and that no `X-Stainless-*` header is
-present inverts: it now asserts the Anthropic profile is present, in order,
-with `Authorization` unclobbered.
+`fetch`, and so receives the ordered pair list and the raw body string. Its
+existing assertion that the User-Agent matches `/^omnigateway\//` and that no
+`X-Stainless-*` header is present inverts: it now asserts the Anthropic profile
+is present, in order, with `Authorization` unclobbered. Two assertions are
+added: the serialized body's top-level keys are in fingerprint order, and
+recomputing the `cch` token over the received body reproduces the value it
+carries.
 
 ## Limits
 
@@ -291,15 +397,23 @@ Stated rather than solved.
   OmniRoute addresses this with `tls-client-node` and `wreq-js` impersonation
   for providers behind Cloudflare; that is a separate and much larger piece of
   work.
-- **Body field order.** OmniRoute pins JSON top-level field order per provider
-  (`bodyFieldOrder`). Not implemented here.
-- **Anthropic body integrity token.** Real Claude Code embeds a `cch=` xxHash64
-  token over the serialized body, which the server can verify. Not implemented
-  here; requests are separable from genuine CLI traffic on this alone.
+- **Nested field order.** Only top-level body fields are ordered. Key order
+  inside `messages`, `tools`, and `system` blocks is whatever `toWire` produced.
+- **Unverified `cch` algorithm.** The seed, mask, and placeholder convention come
+  from OmniRoute's reading of the Claude Code binary. If the algorithm is wrong
+  or changes, every Anthropic request carries a token that fails verification —
+  which is a stronger signal than sending no token at all. There is no kill
+  switch, by decision; disabling it means a release.
+- **Prompt rewriting.** The system pipeline modifies the operator's own prompt
+  text (§ Anthropic body integrity). Requests are not byte-faithful to what the
+  client sent.
 - **Missing session headers.** `X-Claude-Code-Session-Id` and
   `x-client-request-id` are absent, as described above.
+- **Kimi has no capture.** Its header order, body field order, and device header
+  block are constructed rather than observed.
 - **Version drift.** Pinned versions age. The environment overrides exist so an
-  operator can bump them without a release, but the defaults will go stale.
+  operator can bump them without a release, but the defaults will go stale. The
+  `cc_version` build revision is pinned to a single captured build.
 
-Header mimicry raises the cost of separating this traffic. It does not make it
-indistinguishable, and the design should not be read as claiming it does.
+Header and body mimicry raises the cost of separating this traffic. It does not
+make it indistinguishable, and the design should not be read as claiming it does.
