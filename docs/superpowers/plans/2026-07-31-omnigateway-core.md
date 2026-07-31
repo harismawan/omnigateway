@@ -11599,3 +11599,816 @@ git commit -m "feat(gateway): add the admin api for credentials, models, keys an
 ```
 
 ---
+
+## Task 26: Configuration, boot, and the maintenance loop
+
+**Files:**
+- Create: `apps/gateway/src/config.ts`, `apps/gateway/src/app.ts`, `apps/gateway/src/index.ts`, `apps/gateway/src/maintenance.ts`, `.env.example`
+- Test: `apps/gateway/test/config.test.ts`, `apps/gateway/test/maintenance.test.ts`
+- Modify: root `package.json` (add the `dev` and `start` scripts)
+
+**Interfaces:**
+- Consumes: everything above.
+- Produces:
+  - `loadConfig(env: Record<string, string | undefined>): Config`
+  - `createApp(deps: AppDeps): Elysia` — the three route groups mounted together
+  - `startMaintenance(deps): () => void` — returns a stop function
+  - `src/index.ts` — the executable entry point
+
+`loadConfig` is a pure function of an env object so it is testable without touching `process.env`. The one hard requirement is `OMNI_ENCRYPTION_KEY`: without it the store cannot decrypt anything, and defaulting it would mean shipping a gateway whose credentials are encrypted with a publicly known key. Refusing to boot is the correct behaviour.
+
+- [ ] **Step 1: Write the failing config test**
+
+`apps/gateway/test/config.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { loadConfig } from "../src/config.ts";
+
+const base = { OMNI_ENCRYPTION_KEY: "a-key-that-is-long-enough-000000" };
+
+test("applies defaults for everything but the encryption key", () => {
+  const config = loadConfig(base);
+  expect(config.port).toBe(8787);
+  expect(config.host).toBe("127.0.0.1");
+  expect(config.databasePath).toBe("./omnigateway.db");
+  expect(config.baseUrl).toBe("http://127.0.0.1:8787");
+});
+
+test("refuses to boot without an encryption key", () => {
+  expect(() => loadConfig({})).toThrow(/OMNI_ENCRYPTION_KEY/);
+});
+
+test("refuses a short encryption key", () => {
+  expect(() => loadConfig({ OMNI_ENCRYPTION_KEY: "short" })).toThrow(/OMNI_ENCRYPTION_KEY/);
+});
+
+test("reads overrides from the environment", () => {
+  const config = loadConfig({
+    ...base,
+    OMNI_PORT: "9000",
+    OMNI_HOST: "0.0.0.0",
+    OMNI_DB_PATH: "/data/omni.db",
+    OMNI_BASE_URL: "https://gw.example.com",
+  });
+  expect(config.port).toBe(9000);
+  expect(config.host).toBe("0.0.0.0");
+  expect(config.databasePath).toBe("/data/omni.db");
+  expect(config.baseUrl).toBe("https://gw.example.com");
+});
+
+test("rejects a non-numeric port", () => {
+  expect(() => loadConfig({ ...base, OMNI_PORT: "http" })).toThrow(/OMNI_PORT/);
+});
+
+test("derives the base url from host and port when not set", () => {
+  expect(loadConfig({ ...base, OMNI_HOST: "0.0.0.0", OMNI_PORT: "9000" }).baseUrl).toBe(
+    "http://0.0.0.0:9000",
+  );
+});
+
+test("strips a trailing slash from an explicit base url", () => {
+  expect(loadConfig({ ...base, OMNI_BASE_URL: "https://gw.example.com/" }).baseUrl).toBe(
+    "https://gw.example.com",
+  );
+});
+```
+
+- [ ] **Step 2: Write the failing maintenance test**
+
+`apps/gateway/test/maintenance.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { pruneLogs } from "../src/maintenance.ts";
+import { memoryStore } from "./helpers/fixtures.ts";
+
+const NOW = 30 * 24 * 60 * 60 * 1000;
+
+async function log(store: Awaited<ReturnType<typeof memoryStore>>, id: string, startedAt: number) {
+  await store.usage.appendLog({
+    id,
+    apiKeyId: null,
+    startedAt,
+    durationMs: 1,
+    surface: "anthropic",
+    requestedModel: "fast",
+    credentialId: "c1",
+    provider: "anthropic",
+    upstreamModel: "claude-opus-4",
+    status: "ok",
+    errorCode: null,
+    attempts: 1,
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: null,
+    streamed: false,
+    degradations: [],
+  });
+}
+
+test("deletes logs older than the retention window", async () => {
+  const store = await memoryStore();
+  await log(store, "old", NOW - 31 * 24 * 60 * 60 * 1000);
+  await log(store, "new", NOW - 1000);
+
+  await pruneLogs(store, NOW);
+
+  const remaining = await store.usage.listLogs({ limit: 10 });
+  expect(remaining.map((l) => l.id)).toEqual(["new"]);
+});
+
+test("honours a changed retention setting", async () => {
+  const store = await memoryStore();
+  const settings = (await store.config.getSettings()) ?? undefined;
+  await store.config.putSettings({ ...(settings as never), logRetentionDays: 1 });
+  await log(store, "old", NOW - 2 * 24 * 60 * 60 * 1000);
+  await log(store, "new", NOW - 1000);
+
+  await pruneLogs(store, NOW);
+  expect((await store.usage.listLogs({ limit: 10 })).map((l) => l.id)).toEqual(["new"]);
+});
+
+test("pruning an empty log table is a no-op", async () => {
+  const store = await memoryStore();
+  await pruneLogs(store, NOW);
+  expect(await store.usage.listLogs({ limit: 10 })).toHaveLength(0);
+});
+```
+
+- [ ] **Step 3: Run both tests to verify they fail**
+
+Run: `bun test apps/gateway/test/config.test.ts apps/gateway/test/maintenance.test.ts`
+Expected: FAIL — cannot resolve `../src/config.ts`.
+
+- [ ] **Step 4: Write the config loader**
+
+`apps/gateway/src/config.ts`:
+
+```ts
+export type Config = {
+  port: number;
+  host: string;
+  databasePath: string;
+  encryptionKey: string;
+  /** Origin the OAuth callback is registered under. */
+  baseUrl: string;
+};
+
+const MIN_KEY_LENGTH = 16;
+
+/**
+ * Pure function of an env object so boot configuration is testable.
+ *
+ * The encryption key has no default on purpose. A default would mean every
+ * deployment that forgets to set it encrypts its credentials with a key printed
+ * in this repository, which is worse than not booting.
+ */
+export function loadConfig(env: Record<string, string | undefined>): Config {
+  const encryptionKey = env.OMNI_ENCRYPTION_KEY;
+  if (typeof encryptionKey !== "string" || encryptionKey.length < MIN_KEY_LENGTH) {
+    throw new Error(
+      `OMNI_ENCRYPTION_KEY must be set to at least ${MIN_KEY_LENGTH} characters. ` +
+        "Generate one with: openssl rand -base64 32",
+    );
+  }
+
+  const host = env.OMNI_HOST ?? "127.0.0.1";
+
+  const rawPort = env.OMNI_PORT ?? "8787";
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`OMNI_PORT must be an integer between 1 and 65535, got "${rawPort}"`);
+  }
+
+  const baseUrl = (env.OMNI_BASE_URL ?? `http://${host}:${port}`).replace(/\/+$/, "");
+
+  return {
+    port,
+    host,
+    databasePath: env.OMNI_DB_PATH ?? "./omnigateway.db",
+    encryptionKey,
+    baseUrl,
+  };
+}
+```
+
+- [ ] **Step 5: Write `.env.example`**
+
+`.env.example`:
+
+```bash
+# Required. Encrypts credential tokens at rest. Generate with:
+#   openssl rand -base64 32
+# Changing this makes every stored credential unreadable.
+OMNI_ENCRYPTION_KEY=
+
+# Optional.
+OMNI_HOST=127.0.0.1
+OMNI_PORT=8787
+OMNI_DB_PATH=./omnigateway.db
+
+# Origin providers redirect back to during OAuth. Derived from host and port
+# when unset. Set this if the gateway sits behind a reverse proxy.
+# OMNI_BASE_URL=https://gateway.example.com
+```
+
+- [ ] **Step 6: Write the maintenance loop**
+
+`apps/gateway/src/maintenance.ts`:
+
+```ts
+import { DEFAULT_SETTINGS, type Store } from "@omni/store";
+
+const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/** Deletes request logs past the configured retention window. */
+export async function pruneLogs(store: Store, now: number): Promise<void> {
+  const settings = (await store.config.getSettings()) ?? DEFAULT_SETTINGS;
+  const cutoff = now - settings.logRetentionDays * 24 * 60 * 60 * 1000;
+  await store.usage.deleteLogsBefore(cutoff);
+}
+
+export type MaintenanceDeps = { store: Store; now: () => number };
+
+/** Starts the hourly sweep. Returns a function that stops it. */
+export function startMaintenance(deps: MaintenanceDeps): () => void {
+  const timer = setInterval(() => {
+    void pruneLogs(deps.store, deps.now()).catch((error: unknown) => {
+      console.error("log pruning failed", {
+        reason: error instanceof Error ? error.message : "unknown",
+      });
+    });
+  }, SWEEP_INTERVAL_MS);
+
+  // Do not hold the process open for a maintenance timer.
+  timer.unref?.();
+
+  return () => clearInterval(timer);
+}
+```
+
+- [ ] **Step 7: Write the app assembly**
+
+`apps/gateway/src/app.ts`:
+
+```ts
+import { ADAPTERS, type ProviderAdapter } from "@omni/providers";
+import type { ProviderId, Store } from "@omni/store";
+import { Elysia } from "elysia";
+import { createAdminAuth } from "./auth/admin.ts";
+import { OAUTH_PROVIDERS } from "./oauth/index.ts";
+import { createRefresher } from "./oauth/refresh.ts";
+import { adminRoutes } from "./routes/admin.ts";
+import { connectRoutes } from "./routes/connect.ts";
+import { proxyRoutes } from "./routes/proxy.ts";
+
+export type AppDeps = {
+  store: Store;
+  baseUrl: string;
+  now?: () => number;
+  rand?: () => number;
+  fetch?: typeof fetch;
+  adapters?: Readonly<Record<ProviderId, ProviderAdapter>>;
+  requestId?: () => string;
+};
+
+const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+export function createApp(deps: AppDeps): Elysia {
+  const now = deps.now ?? (() => Date.now());
+  const rand = deps.rand ?? Math.random;
+  const doFetch = deps.fetch ?? globalThis.fetch;
+  const adapters = deps.adapters ?? ADAPTERS;
+  const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
+
+  const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS });
+  const refresh = createRefresher({
+    store: deps.store,
+    providers: OAUTH_PROVIDERS,
+    fetch: doFetch,
+    now,
+  });
+
+  return new Elysia()
+    .get("/health", () => ({ ok: true }))
+    .use(proxyRoutes({ store: deps.store, adapters, now, rand, refresh, requestId }))
+    .use(adminRoutes({ store: deps.store, admin, now }))
+    .use(
+      connectRoutes({
+        store: deps.store,
+        admin,
+        providers: OAUTH_PROVIDERS,
+        fetch: doFetch,
+        now,
+        baseUrl: deps.baseUrl,
+      }),
+    );
+}
+```
+
+- [ ] **Step 8: Write the entry point**
+
+`apps/gateway/src/index.ts`:
+
+```ts
+import { createStore } from "@omni/store";
+import { createApp } from "./app.ts";
+import { loadConfig } from "./config.ts";
+import { startMaintenance } from "./maintenance.ts";
+
+const config = loadConfig(process.env);
+
+const store = await createStore({
+  path: config.databasePath,
+  encryptionKey: config.encryptionKey,
+});
+
+const app = createApp({ store, baseUrl: config.baseUrl });
+const stopMaintenance = startMaintenance({ store, now: () => Date.now() });
+
+app.listen({ port: config.port, hostname: config.host });
+
+console.log(`omnigateway listening on http://${config.host}:${config.port}`);
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    stopMaintenance();
+    void app.stop().then(() => process.exit(0));
+  });
+}
+```
+
+- [ ] **Step 9: Add the root scripts**
+
+Modify the root `package.json` `scripts` block:
+
+```json
+  "scripts": {
+    "dev": "bun --watch apps/gateway/src/index.ts",
+    "start": "bun apps/gateway/src/index.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  }
+```
+
+- [ ] **Step 10: Run the tests and the type check**
+
+Run: `bun test && bunx tsc --noEmit`
+Expected: 229 pass, 0 fail; no type errors.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add apps/gateway package.json .env.example
+git commit -m "feat(gateway): add configuration, app assembly and the maintenance loop"
+```
+
+---
+
+## Task 27: End-to-end tests against a stub upstream
+
+**Files:**
+- Create: `apps/gateway/test/e2e/upstream.ts`, `apps/gateway/test/e2e/gateway.test.ts`
+- Test: the same files
+
+**Interfaces:**
+- Consumes: `createApp` (Task 26); the real `ADAPTERS` (Task 11); `createStore` (Task 7).
+- Produces: `createStubUpstream(): StubUpstream` — a `fetch` implementation the real adapters talk to.
+
+Every test so far stubbed at the adapter boundary. These run the real adapters, so they exercise the layer no unit test covers: adapter `toWire` output actually being parsed back, real SSE bytes flowing through `parseSse` into the IR and back out as client-facing SSE. The stub replaces `fetch`, not the adapters.
+
+Three behaviours are only observable end to end: failover picking a second credential after the first returns 429, the commit point preventing failover once bytes have been sent, and a `401` triggering a refresh and a retry on the same credential.
+
+- [ ] **Step 1: Write the stub upstream**
+
+`apps/gateway/test/e2e/upstream.ts`:
+
+```ts
+/** One scripted upstream response. */
+export type StubResponse =
+  | { kind: "sse"; events: { event: string; data: unknown }[] }
+  | { kind: "json"; status: number; body: unknown }
+  | { kind: "error"; status: number; body: unknown; retryAfter?: string };
+
+export type UpstreamCall = {
+  url: string;
+  authorization: string | null;
+  headers: Record<string, string>;
+  body: unknown;
+};
+
+export type StubUpstream = {
+  fetch: typeof fetch;
+  /** Queue a response. Consumed in order; the last one repeats. */
+  queue(response: StubResponse): void;
+  calls: UpstreamCall[];
+};
+
+function sseBody(events: { event: string; data: unknown }[]): string {
+  return events.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`).join("");
+}
+
+export function createStubUpstream(): StubUpstream {
+  const queued: StubResponse[] = [];
+  const calls: UpstreamCall[] = [];
+
+  const stub = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+
+    const rawBody = init?.body;
+    calls.push({
+      url,
+      authorization: headers.get("authorization"),
+      headers: Object.fromEntries(headers.entries()),
+      body: typeof rawBody === "string" ? JSON.parse(rawBody) : null,
+    });
+
+    const response = queued.length > 1 ? (queued.shift() as StubResponse) : queued[0];
+    if (response === undefined) throw new Error("stub upstream received an unexpected call");
+
+    if (response.kind === "sse") {
+      return new Response(sseBody(response.events), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+
+    if (response.kind === "json") {
+      return new Response(JSON.stringify(response.body), {
+        status: response.status,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify(response.body), {
+      status: response.status,
+      headers: {
+        "content-type": "application/json",
+        ...(response.retryAfter === undefined ? {} : { "retry-after": response.retryAfter }),
+      },
+    });
+  };
+
+  return { fetch: stub as unknown as typeof fetch, queue: (r) => queued.push(r), calls };
+}
+
+/** A complete Anthropic streaming response in the provider's own wire format. */
+export const ANTHROPIC_STREAM: StubResponse = {
+  kind: "sse",
+  events: [
+    {
+      event: "message_start",
+      data: {
+        type: "message_start",
+        message: {
+          id: "msg_upstream",
+          model: "claude-opus-4",
+          usage: { input_tokens: 12, output_tokens: 0 },
+        },
+      },
+    },
+    {
+      event: "content_block_start",
+      data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    },
+    {
+      event: "content_block_delta",
+      data: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "Hello" },
+      },
+    },
+    { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+    {
+      event: "message_delta",
+      data: {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 3 },
+      },
+    },
+    { event: "message_stop", data: { type: "message_stop" } },
+  ],
+};
+```
+
+- [ ] **Step 2: Write the failing e2e test**
+
+`apps/gateway/test/e2e/gateway.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { generateApiKey, type Store } from "@omni/store";
+import { createApp } from "../../src/app.ts";
+import { memoryStore, virtualModel } from "../helpers/fixtures.ts";
+import { ANTHROPIC_STREAM, createStubUpstream, type StubUpstream } from "./upstream.ts";
+
+const NOW = 1_000_000;
+
+async function seedCredential(store: Store, id: string, tier: number, token: string) {
+  await store.credentials.create({
+    id,
+    provider: "anthropic",
+    label: id,
+    authType: "oauth",
+    enabled: true,
+    tier,
+    weight: 1,
+    expiresAt: NOW + 3_600_000,
+    accountEmail: null,
+    providerData: {},
+    accessToken: token,
+    refreshToken: "test-token-refresh",
+    apiKey: null,
+  });
+}
+
+async function harness(): Promise<{
+  store: Store;
+  upstream: StubUpstream;
+  call: (body: unknown) => Promise<Response>;
+}> {
+  const store = await memoryStore();
+  await store.config.putModel(
+    virtualModel({
+      name: "fast",
+      strategy: "priority",
+      targets: [{ provider: "anthropic", model: "claude-opus-4", weight: 1 }],
+    }),
+  );
+
+  const raw = generateApiKey();
+  await store.keys.create({ label: "e2e", raw, enabled: true });
+
+  const upstream = createStubUpstream();
+  let n = 0;
+  const app = createApp({
+    store,
+    baseUrl: "http://localhost:8787",
+    now: () => NOW,
+    rand: () => 0.5,
+    fetch: upstream.fetch,
+    requestId: () => `req_${++n}`,
+  });
+
+  const call = (body: unknown) =>
+    app.handle(
+      new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+        body: JSON.stringify(body),
+      }),
+    );
+
+  return { store, upstream, call };
+}
+
+const REQUEST = {
+  model: "fast",
+  max_tokens: 100,
+  messages: [{ role: "user", content: "hi" }],
+};
+
+test("a request travels through the real adapter to the stub upstream and back", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(ANTHROPIC_STREAM);
+
+  const res = await call(REQUEST);
+
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as Record<string, any>;
+  expect(body.content).toEqual([{ type: "text", text: "Hello" }]);
+  expect(body.usage).toEqual({ input_tokens: 12, output_tokens: 3 });
+});
+
+test("the upstream request identifies this gateway and carries no stainless headers", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(ANTHROPIC_STREAM);
+  await call(REQUEST);
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  expect(sent.headers["user-agent"]).toMatch(/^omnigateway\//);
+  for (const header of Object.keys(sent.headers)) {
+    expect(header.toLowerCase().startsWith("x-stainless-")).toBe(false);
+  }
+  expect(sent.headers["anthropic-version"]).toBe("2023-06-01");
+});
+
+test("a streaming request produces client-facing sse", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(ANTHROPIC_STREAM);
+  const res = await call({ ...REQUEST, stream: true });
+
+  const text = await res.text();
+  expect(text).toContain("event: message_start");
+  expect(text).toContain('"text":"Hello"');
+  expect(text).toContain("event: message_stop");
+});
+
+test("a 429 on the first credential fails over to the second", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  await seedCredential(store, "c2", 2, "test-token-b");
+
+  upstream.queue({ kind: "error", status: 429, body: { error: { message: "rate limited" } } });
+  upstream.queue(ANTHROPIC_STREAM);
+
+  const res = await call(REQUEST);
+  expect(res.status).toBe(200);
+  expect(upstream.calls).toHaveLength(2);
+  expect(upstream.calls[0]?.authorization).toContain("test-token-a");
+  expect(upstream.calls[1]?.authorization).toContain("test-token-b");
+
+  const logs = await store.usage.listLogs({ limit: 1 });
+  expect(logs[0]?.attempts).toBe(2);
+  expect(logs[0]?.credentialId).toBe("c2");
+});
+
+test("all credentials failing produces one error response and one log", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  await seedCredential(store, "c2", 2, "test-token-b");
+
+  upstream.queue({ kind: "error", status: 429, body: { error: { message: "rate limited" } } });
+
+  const res = await call(REQUEST);
+  expect(res.status).toBe(429);
+  expect((await res.json()).error.type).toBe("rate_limit_error");
+
+  const logs = await store.usage.listLogs({ limit: 10 });
+  expect(logs).toHaveLength(1);
+  expect(logs[0]?.status).toBe("error");
+});
+
+test("a failure after the commit point is forwarded in-stream, not failed over", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  await seedCredential(store, "c2", 2, "test-token-b");
+
+  // 200, real content, then an in-stream error — the classic mid-stream failure.
+  upstream.queue({
+    kind: "sse",
+    events: [
+      {
+        event: "message_start",
+        data: {
+          type: "message_start",
+          message: { id: "m", model: "claude-opus-4", usage: { input_tokens: 1, output_tokens: 0 } },
+        },
+      },
+      {
+        event: "content_block_start",
+        data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      },
+      {
+        event: "content_block_delta",
+        data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Par" } },
+      },
+      { event: "error", data: { type: "error", error: { type: "overloaded_error", message: "boom" } } },
+    ],
+  });
+  upstream.queue(ANTHROPIC_STREAM);
+
+  const res = await call({ ...REQUEST, stream: true });
+  const text = await res.text();
+
+  expect(text).toContain('"text":"Par"');
+  expect(text).toContain("event: error");
+  // The second credential was never tried: bytes had already been sent.
+  expect(upstream.calls).toHaveLength(1);
+});
+
+test("a 401 refreshes the credential and retries it", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+
+  upstream.queue({ kind: "error", status: 401, body: { error: { message: "expired" } } });
+  upstream.queue({ kind: "json", status: 200, body: { access_token: "test-token-new", expires_in: 3600 } });
+  upstream.queue(ANTHROPIC_STREAM);
+
+  const res = await call(REQUEST);
+  expect(res.status).toBe(200);
+
+  const reloaded = await store.credentials.get("c1");
+  expect((await reloaded?.secrets())?.accessToken).toBe("test-token-new");
+});
+
+test("a request for an unconfigured model is a clean 404-class error", async () => {
+  const { call } = await harness();
+  const res = await call({ ...REQUEST, model: "no-such-model-anywhere" });
+  expect(res.status).toBe(503);
+  expect((await res.json()).error.message).toBeTruthy();
+});
+
+test("the health endpoint needs no credentials", async () => {
+  const store = await memoryStore();
+  const app = createApp({ store, baseUrl: "http://localhost:8787", fetch: createStubUpstream().fetch });
+  const res = await app.handle(new Request("http://localhost/health"));
+  expect(res.status).toBe(200);
+  expect((await res.json()).ok).toBe(true);
+});
+
+test("no request or response text ever reaches the log table", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(ANTHROPIC_STREAM);
+
+  await call({
+    ...REQUEST,
+    messages: [{ role: "user", content: "sensitive-prompt-text" }],
+  });
+
+  const serialized = JSON.stringify(await store.usage.listLogs({ limit: 10 }));
+  expect(serialized).not.toContain("sensitive-prompt-text");
+  expect(serialized).not.toContain("Hello");
+  expect(serialized).not.toContain("test-token-a");
+});
+```
+
+- [ ] **Step 3: Run the e2e tests**
+
+Run: `bun test apps/gateway/test/e2e`
+Expected: 10 pass, 0 fail.
+
+If the "401 refreshes and retries" test fails with an unexpected call to the stub, check the order the stub consumes its queue: the refresh POST to the token endpoint sits between the two `/v1/messages` calls, which is why three responses are queued for what looks like two requests.
+
+- [ ] **Step 4: Run the whole suite and the type check**
+
+Run: `bun test && bunx tsc --noEmit`
+Expected: 239 pass, 0 fail; no type errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "test(gateway): add end-to-end tests against a stub upstream"
+```
+
+---
+
+## Verification
+
+After Task 27 the gateway is complete and runnable. Confirm it:
+
+- [ ] **Step 1: Full suite and type check**
+
+```bash
+bun test
+bunx tsc --noEmit
+```
+
+Expected: all tests pass, no type errors.
+
+- [ ] **Step 2: Boot it**
+
+```bash
+OMNI_ENCRYPTION_KEY="$(openssl rand -base64 32)" bun start
+```
+
+Expected: `omnigateway listening on http://127.0.0.1:8787`.
+
+- [ ] **Step 3: Walk the setup path by hand**
+
+```bash
+curl -s localhost:8787/api/status
+curl -s -X POST localhost:8787/api/setup \
+  -H 'content-type: application/json' \
+  -d '{"password":"a-long-enough-password"}' -c /tmp/omni-cookies
+curl -s -X POST localhost:8787/api/keys \
+  -H 'content-type: application/json' -b /tmp/omni-cookies -d '{"label":"local"}'
+```
+
+Expected: `configured: false` initially, then a `set-cookie`, then a `sk-omni-…` key returned exactly once.
+
+- [ ] **Step 4: Confirm the module boundaries hold**
+
+```bash
+grep -rn "@omni/store" packages/providers/src && echo "VIOLATION" || echo "ok"
+grep -rn "@omni/providers" apps/gateway/src/router && echo "VIOLATION" || echo "ok"
+```
+
+Expected: `ok` twice. The router must not know providers exist; adapters must not know the store exists.
+
+- [ ] **Step 5: Confirm no secret is in the repository**
+
+```bash
+grep -rn "sk-ant\|sk-proj\|X-Stainless" --include='*.ts' packages apps && echo "VIOLATION" || echo "ok"
+```
+
+Expected: `ok`.
+
+---
+
+## What this plan does not build
+
+The gateway ships headless. The React + Vite dashboard — credential management, the routing config editor, the usage dashboard, and the live request log — consumes the `/api/*` surface built in Tasks 24 and 25 and is planned separately in `docs/superpowers/plans/2026-07-31-omnigateway-dashboard.md`.
+
+Everything the dashboard needs exists after Task 27: the admin API is complete, session auth works, and the OAuth connect flow is drivable from a browser.
