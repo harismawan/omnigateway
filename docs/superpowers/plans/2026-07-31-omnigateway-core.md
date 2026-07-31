@@ -9016,3 +9016,1022 @@ git commit -m "feat(gateway): add proxy routes with sse streaming and request lo
 ```
 
 ---
+
+## Task 20: OAuth foundation — PKCE, the provider interface, and the Anthropic flow
+
+**Files:**
+- Create: `apps/gateway/src/oauth/pkce.ts`, `apps/gateway/src/oauth/types.ts`, `apps/gateway/src/oauth/anthropic.ts`
+- Test: `apps/gateway/test/oauth/pkce.test.ts`, `apps/gateway/test/oauth/anthropic.test.ts`
+
+**Interfaces:**
+- Consumes: `CredentialSecrets`, `ProviderId` (Tasks 4-5); `GatewayError` (Task 2).
+- Produces:
+  - `createPkce(rand): { verifier: string; challenge: string }` and `randomState(rand): string`
+  - `type OAuthProvider` — the single shape all three flows implement
+  - `type AuthorizeStart`, `type FlowResult`
+  - `anthropicOAuth: OAuthProvider`
+
+**A note on client IDs.** Each provider flow embeds the public OAuth client ID of that provider's official CLI. These are not secrets: a public OAuth client cannot hold one, which is why PKCE exists, and each ID ships inside a publicly distributed binary. The gateway uses them because there is no other way to obtain a token for a subscription account.
+
+What the gateway does *not* do is disguise itself. It sends `User-Agent: omnigateway/<version>` and no `X-Stainless-*` telemetry headers, so a provider that wants to identify this traffic can. Whether using a subscription credential through a gateway is permitted by a given provider's terms is the operator's decision, and the UI says so at the point of connecting an account (Task 24).
+
+- [ ] **Step 1: Write the failing PKCE test**
+
+`apps/gateway/test/oauth/pkce.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { createPkce, randomState } from "../../src/oauth/pkce.ts";
+
+test("produces a verifier in the rfc 7636 length range", () => {
+  const { verifier } = createPkce();
+  expect(verifier.length).toBeGreaterThanOrEqual(43);
+  expect(verifier.length).toBeLessThanOrEqual(128);
+});
+
+test("produces url-safe base64 with no padding", () => {
+  const { verifier, challenge } = createPkce();
+  expect(verifier).toMatch(/^[A-Za-z0-9_-]+$/);
+  expect(challenge).toMatch(/^[A-Za-z0-9_-]+$/);
+});
+
+test("challenge is the base64url sha-256 of the verifier", async () => {
+  const { verifier, challenge } = createPkce();
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  expect(challenge).toBe(Buffer.from(digest).toString("base64url"));
+});
+
+test("successive calls differ", () => {
+  expect(createPkce().verifier).not.toBe(createPkce().verifier);
+});
+
+test("state is a 32-byte url-safe token", () => {
+  const state = randomState();
+  expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(state).not.toBe(randomState());
+});
+```
+
+- [ ] **Step 2: Write the failing Anthropic OAuth test**
+
+`apps/gateway/test/oauth/anthropic.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { anthropicOAuth } from "../../src/oauth/anthropic.ts";
+
+const NOW = 1_000_000;
+
+function stubFetch(status: number, body: unknown): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch;
+}
+
+test("builds an authorize url with pkce and state", () => {
+  const start = anthropicOAuth.start({ redirectUri: "http://localhost:8787/oauth/callback" });
+  const url = new URL(start.authorizeUrl);
+  expect(url.origin + url.pathname).toBe("https://claude.ai/oauth/authorize");
+  expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+  expect(url.searchParams.get("code_challenge")).toBe(start.pending.challenge);
+  expect(url.searchParams.get("state")).toBe(start.pending.state);
+  expect(url.searchParams.get("response_type")).toBe("code");
+  expect(url.searchParams.get("redirect_uri")).toBe("http://localhost:8787/oauth/callback");
+});
+
+test("declares that it supports the manual paste flow", () => {
+  expect(anthropicOAuth.kind).toBe("pkce");
+  expect(anthropicOAuth.supportsManualPaste).toBe(true);
+});
+
+test("exchanges a code for tokens", async () => {
+  const result = await anthropicOAuth.exchange(
+    { code: "auth-code", pending: { verifier: "v", challenge: "c", state: "s", redirectUri: "r" } },
+    {
+      fetch: stubFetch(200, {
+        access_token: "test-token-1",
+        refresh_token: "test-token-2",
+        expires_in: 3600,
+        account: { email_address: "user@example.com" },
+      }),
+      now: () => NOW,
+    },
+  );
+  expect(result.secrets.accessToken).toBe("test-token-1");
+  expect(result.secrets.refreshToken).toBe("test-token-2");
+  expect(result.expiresAt).toBe(NOW + 3_600_000);
+  expect(result.accountEmail).toBe("user@example.com");
+});
+
+test("splits a code#state paste and validates the state", async () => {
+  const pending = { verifier: "v", challenge: "c", state: "the-state", redirectUri: "r" };
+  const result = await anthropicOAuth.exchange(
+    { code: "auth-code#the-state", pending },
+    { fetch: stubFetch(200, { access_token: "test-token-1", expires_in: 60 }), now: () => NOW },
+  );
+  expect(result.secrets.accessToken).toBe("test-token-1");
+});
+
+test("rejects a pasted code whose state does not match", async () => {
+  const pending = { verifier: "v", challenge: "c", state: "the-state", redirectUri: "r" };
+  expect(
+    anthropicOAuth.exchange(
+      { code: "auth-code#wrong-state", pending },
+      { fetch: stubFetch(200, { access_token: "x" }), now: () => NOW },
+    ),
+  ).rejects.toThrow(GatewayError);
+});
+
+test("maps a token endpoint failure to an AUTH error without echoing the body", async () => {
+  try {
+    await anthropicOAuth.exchange(
+      { code: "c", pending: { verifier: "v", challenge: "c", state: "s", redirectUri: "r" } },
+      {
+        fetch: stubFetch(400, { error: "invalid_grant", secret_field: "test-token-9" }),
+        now: () => NOW,
+      },
+    );
+    throw new Error("expected throw");
+  } catch (e) {
+    expect((e as GatewayError).code).toBe("AUTH");
+    expect((e as GatewayError).message).toContain("invalid_grant");
+    expect((e as GatewayError).message).not.toContain("test-token-9");
+  }
+});
+
+test("refreshes an access token and keeps the old refresh token when none is returned", async () => {
+  const result = await anthropicOAuth.refresh("test-token-2", {
+    fetch: stubFetch(200, { access_token: "test-token-3", expires_in: 60 }),
+    now: () => NOW,
+  });
+  expect(result.secrets.accessToken).toBe("test-token-3");
+  expect(result.secrets.refreshToken).toBe("test-token-2");
+  expect(result.expiresAt).toBe(NOW + 60_000);
+});
+
+test("rotates the refresh token when the provider returns a new one", async () => {
+  const result = await anthropicOAuth.refresh("test-token-2", {
+    fetch: stubFetch(200, { access_token: "test-token-3", refresh_token: "test-token-4", expires_in: 60 }),
+    now: () => NOW,
+  });
+  expect(result.secrets.refreshToken).toBe("test-token-4");
+});
+
+test("surfaces a rejected refresh as AUTH so the credential is disabled", async () => {
+  expect(
+    anthropicOAuth.refresh("test-token-2", {
+      fetch: stubFetch(400, { error: "invalid_grant" }),
+      now: () => NOW,
+    }),
+  ).rejects.toThrow(GatewayError);
+});
+```
+
+- [ ] **Step 3: Run both tests to verify they fail**
+
+Run: `bun test apps/gateway/test/oauth`
+Expected: FAIL — cannot resolve `../../src/oauth/pkce.ts`.
+
+- [ ] **Step 4: Write the PKCE helpers**
+
+`apps/gateway/src/oauth/pkce.ts`:
+
+```ts
+/** 32 CSPRNG bytes rendered as unpadded base64url — 43 characters. */
+function randomToken(): string {
+  return Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+}
+
+export type Pkce = { verifier: string; challenge: string };
+
+/**
+ * RFC 7636 S256. The verifier is the secret held by the gateway; the challenge
+ * is its hash, which is all the authorization server ever sees before the
+ * exchange. This is what makes a public client ID safe to embed.
+ */
+export function createPkce(): Pkce {
+  const verifier = randomToken();
+  const digest = Bun.SHA256.hash(verifier);
+  return { verifier, challenge: Buffer.from(digest).toString("base64url") };
+}
+
+/** CSRF token binding an authorize redirect to the flow that started it. */
+export function randomState(): string {
+  return randomToken();
+}
+```
+
+- [ ] **Step 5: Write the OAuth provider interface**
+
+`apps/gateway/src/oauth/types.ts`:
+
+```ts
+import type { CredentialSecrets, ProviderId } from "@omni/store";
+
+/** Injected so tests never touch the network or the clock. */
+export type OAuthDeps = {
+  fetch: typeof fetch;
+  now: () => number;
+};
+
+/** The gateway-side half of an in-flight authorization, held until it completes. */
+export type PendingFlow = {
+  verifier: string;
+  challenge: string;
+  state: string;
+  redirectUri: string;
+  /** Device-code flows carry their poll handle here instead of a redirect. */
+  deviceCode?: string;
+  interval?: number;
+  /** Anything a provider needs to remember between start and finish. */
+  extra?: Record<string, unknown>;
+};
+
+export type AuthorizeStart = {
+  /** Open in a browser (PKCE) or show to the operator (device code). */
+  authorizeUrl: string;
+  /** Shown alongside the URL by device-code providers. */
+  userCode?: string;
+  pending: PendingFlow;
+};
+
+export type FlowResult = {
+  secrets: CredentialSecrets;
+  expiresAt: number | null;
+  accountEmail: string | null;
+  /** Merged into `credential.providerData` — account ids, device ids, endpoints. */
+  providerData: Record<string, unknown>;
+};
+
+export type OAuthProvider = {
+  readonly id: ProviderId;
+  readonly kind: "pkce" | "device";
+  /** Whether the operator can paste a code by hand instead of using a redirect. */
+  readonly supportsManualPaste: boolean;
+
+  start(opts: { redirectUri: string }): AuthorizeStart;
+
+  /** PKCE: exchange an authorization code. Device: poll once for a token. */
+  exchange(
+    input: { code: string; pending: PendingFlow },
+    deps: OAuthDeps,
+  ): Promise<FlowResult>;
+
+  refresh(refreshToken: string, deps: OAuthDeps): Promise<FlowResult>;
+};
+
+/** Reads an error identifier out of a token response without leaking the body. */
+export function tokenErrorMessage(status: number, body: unknown): string {
+  const code =
+    typeof body === "object" && body !== null && typeof (body as { error?: unknown }).error === "string"
+      ? (body as { error: string }).error
+      : `http_${status}`;
+  return `token endpoint rejected the request: ${code}`;
+}
+```
+
+- [ ] **Step 6: Write the Anthropic flow**
+
+`apps/gateway/src/oauth/anthropic.ts`:
+
+```ts
+import { GatewayError } from "@omni/ir";
+import { USER_AGENT } from "@omni/providers";
+import { createPkce, randomState } from "./pkce.ts";
+import { tokenErrorMessage, type FlowResult, type OAuthDeps, type OAuthProvider } from "./types.ts";
+
+/**
+ * The public OAuth client ID of the Claude CLI. Public clients cannot hold a
+ * secret — this ships in a distributed binary and is protected by PKCE, not by
+ * being unknown. See the note at the head of Task 20.
+ */
+const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
+const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
+const SCOPES = "org:create_api_key user:profile user:inference";
+
+type TokenResponse = {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  account?: { email_address?: string };
+};
+
+async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise<TokenResponse> {
+  const res = await deps.fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json", "user-agent": USER_AGENT },
+    body: JSON.stringify({ ...body, client_id: CLIENT_ID }),
+  });
+
+  const parsed: unknown = await res.json().catch(() => null);
+  if (!res.ok) throw new GatewayError("AUTH", tokenErrorMessage(res.status, parsed));
+
+  const token = parsed as TokenResponse;
+  if (typeof token.access_token !== "string") {
+    throw new GatewayError("AUTH", "token endpoint returned no access_token");
+  }
+  return token;
+}
+
+function toResult(token: TokenResponse, fallbackRefresh: string | null, deps: OAuthDeps): FlowResult {
+  return {
+    secrets: {
+      accessToken: token.access_token as string,
+      // Anthropic rotates refresh tokens on some exchanges and not others.
+      refreshToken: token.refresh_token ?? fallbackRefresh,
+      apiKey: null,
+    },
+    expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
+    accountEmail: token.account?.email_address ?? null,
+    providerData: {},
+  };
+}
+
+export const anthropicOAuth: OAuthProvider = {
+  id: "anthropic",
+  kind: "pkce",
+  supportsManualPaste: true,
+
+  start({ redirectUri }) {
+    const { verifier, challenge } = createPkce();
+    const state = randomState();
+
+    const url = new URL(AUTHORIZE_URL);
+    url.searchParams.set("code", "true");
+    url.searchParams.set("client_id", CLIENT_ID);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("redirect_uri", redirectUri);
+    url.searchParams.set("scope", SCOPES);
+    url.searchParams.set("code_challenge", challenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    url.searchParams.set("state", state);
+
+    return { authorizeUrl: url.toString(), pending: { verifier, challenge, state, redirectUri } };
+  },
+
+  async exchange({ code, pending }, deps) {
+    // A manually pasted code arrives as `<code>#<state>`.
+    const [rawCode, pastedState] = code.split("#");
+    if (pastedState !== undefined && pastedState !== pending.state) {
+      throw new GatewayError("AUTH", "authorization state mismatch");
+    }
+
+    const token = await postToken(
+      {
+        grant_type: "authorization_code",
+        code: (rawCode ?? "").trim(),
+        redirect_uri: pending.redirectUri,
+        code_verifier: pending.verifier,
+        state: pending.state,
+      },
+      deps,
+    );
+
+    return toResult(token, null, deps);
+  },
+
+  async refresh(refreshToken, deps) {
+    const token = await postToken({ grant_type: "refresh_token", refresh_token: refreshToken }, deps);
+    return toResult(token, refreshToken, deps);
+  },
+};
+```
+
+- [ ] **Step 7: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 155 pass, 0 fail.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add pkce helpers and the anthropic oauth flow"
+```
+
+---
+
+## Task 21: The OpenAI OAuth flow
+
+**Files:**
+- Create: `apps/gateway/src/oauth/openai.ts`
+- Test: `apps/gateway/test/oauth/openai.test.ts`
+
+**Interfaces:**
+- Consumes: `OAuthProvider`, `OAuthDeps`, `FlowResult`, `tokenErrorMessage` (Task 20); `createPkce`, `randomState` (Task 20).
+- Produces: `openaiOAuth: OAuthProvider`, which populates `providerData.accountId` — the value the OpenAI adapter sends as the `chatgpt-account-id` header (Task 10).
+
+The one structural difference from Anthropic: the account ID is not in the token response body. It is a claim inside the ID token JWT, so the flow decodes that payload. Only the payload — the signature is not verified, because the token came directly from the provider's token endpoint over TLS in response to a request the gateway itself made, so there is no third party to authenticate.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/gateway/test/oauth/openai.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { openaiOAuth } from "../../src/oauth/openai.ts";
+
+const NOW = 1_000_000;
+
+function idToken(payload: Record<string, unknown>): string {
+  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  return `${b64({ alg: "RS256" })}.${b64(payload)}.signature`;
+}
+
+function stubFetch(status: number, body: unknown): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch;
+}
+
+const pending = { verifier: "v", challenge: "c", state: "s", redirectUri: "http://localhost/cb" };
+
+test("builds an authorize url against the openai auth host", () => {
+  const start = openaiOAuth.start({ redirectUri: "http://localhost:8787/oauth/callback" });
+  const url = new URL(start.authorizeUrl);
+  expect(url.origin + url.pathname).toBe("https://auth.openai.com/oauth/authorize");
+  expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+  expect(url.searchParams.get("scope")).toContain("openid");
+});
+
+test("extracts the account id from the id token claims", async () => {
+  const result = await openaiOAuth.exchange(
+    { code: "auth-code", pending },
+    {
+      fetch: stubFetch(200, {
+        access_token: "test-token-1",
+        refresh_token: "test-token-2",
+        expires_in: 3600,
+        id_token: idToken({
+          email: "user@example.com",
+          "https://api.openai.com/auth": { chatgpt_account_id: "acct_123" },
+        }),
+      }),
+      now: () => NOW,
+    },
+  );
+  expect(result.providerData.accountId).toBe("acct_123");
+  expect(result.accountEmail).toBe("user@example.com");
+  expect(result.expiresAt).toBe(NOW + 3_600_000);
+});
+
+test("tolerates a token response with no id token", async () => {
+  const result = await openaiOAuth.exchange(
+    { code: "auth-code", pending },
+    { fetch: stubFetch(200, { access_token: "test-token-1", expires_in: 60 }), now: () => NOW },
+  );
+  expect(result.providerData.accountId).toBeNull();
+  expect(result.accountEmail).toBeNull();
+});
+
+test("tolerates a malformed id token rather than failing the flow", async () => {
+  const result = await openaiOAuth.exchange(
+    { code: "auth-code", pending },
+    {
+      fetch: stubFetch(200, { access_token: "test-token-1", id_token: "not.a.jwt" }),
+      now: () => NOW,
+    },
+  );
+  expect(result.providerData.accountId).toBeNull();
+});
+
+test("maps a rejected exchange to AUTH", async () => {
+  expect(
+    openaiOAuth.exchange(
+      { code: "bad", pending },
+      { fetch: stubFetch(400, { error: "invalid_grant" }), now: () => NOW },
+    ),
+  ).rejects.toThrow(GatewayError);
+});
+
+test("refresh preserves the account id from the new id token", async () => {
+  const result = await openaiOAuth.refresh("test-token-2", {
+    fetch: stubFetch(200, {
+      access_token: "test-token-3",
+      expires_in: 60,
+      id_token: idToken({ "https://api.openai.com/auth": { chatgpt_account_id: "acct_123" } }),
+    }),
+    now: () => NOW,
+  });
+  expect(result.secrets.accessToken).toBe("test-token-3");
+  expect(result.secrets.refreshToken).toBe("test-token-2");
+  expect(result.providerData.accountId).toBe("acct_123");
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/gateway/test/oauth/openai.test.ts`
+Expected: FAIL — cannot resolve `../../src/oauth/openai.ts`.
+
+- [ ] **Step 3: Write the flow**
+
+`apps/gateway/src/oauth/openai.ts`:
+
+```ts
+import { GatewayError } from "@omni/ir";
+import { USER_AGENT } from "@omni/providers";
+import { createPkce, randomState } from "./pkce.ts";
+import { tokenErrorMessage, type FlowResult, type OAuthDeps, type OAuthProvider } from "./types.ts";
+
+/** Public client ID of the Codex CLI. See the note at the head of Task 20. */
+const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
+const TOKEN_URL = "https://auth.openai.com/oauth/token";
+const SCOPES = "openid profile email offline_access";
+
+type TokenResponse = {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  id_token?: string;
+};
+
+type IdClaims = {
+  email?: string;
+  "https://api.openai.com/auth"?: { chatgpt_account_id?: string };
+};
+
+/**
+ * Reads the claims out of an ID token.
+ *
+ * The signature is not verified. This token was returned over TLS by the token
+ * endpoint, in response to a request this process made, so there is no third
+ * party whose authorship needs proving. A malformed token degrades to no
+ * claims rather than failing the connection.
+ */
+function decodeClaims(idToken: string | undefined): IdClaims {
+  if (typeof idToken !== "string") return {};
+  const payload = idToken.split(".")[1];
+  if (payload === undefined) return {};
+  try {
+    const json: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof json === "object" && json !== null ? (json as IdClaims) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise<TokenResponse> {
+  const res = await deps.fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": USER_AGENT },
+    body: new URLSearchParams({ ...body, client_id: CLIENT_ID }).toString(),
+  });
+
+  const parsed: unknown = await res.json().catch(() => null);
+  if (!res.ok) throw new GatewayError("AUTH", tokenErrorMessage(res.status, parsed));
+
+  const token = parsed as TokenResponse;
+  if (typeof token.access_token !== "string") {
+    throw new GatewayError("AUTH", "token endpoint returned no access_token");
+  }
+  return token;
+}
+
+function toResult(token: TokenResponse, fallbackRefresh: string | null, deps: OAuthDeps): FlowResult {
+  const claims = decodeClaims(token.id_token);
+  return {
+    secrets: {
+      accessToken: token.access_token as string,
+      refreshToken: token.refresh_token ?? fallbackRefresh,
+      apiKey: null,
+    },
+    expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
+    accountEmail: claims.email ?? null,
+    // Consumed by the OpenAI adapter as the chatgpt-account-id header (Task 10).
+    providerData: {
+      accountId: claims["https://api.openai.com/auth"]?.chatgpt_account_id ?? null,
+    },
+  };
+}
+
+export const openaiOAuth: OAuthProvider = {
+  id: "openai",
+  kind: "pkce",
+  supportsManualPaste: true,
+
+  start({ redirectUri }) {
+    const { verifier, challenge } = createPkce();
+    const state = randomState();
+
+    const url = new URL(AUTHORIZE_URL);
+    url.searchParams.set("client_id", CLIENT_ID);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("redirect_uri", redirectUri);
+    url.searchParams.set("scope", SCOPES);
+    url.searchParams.set("code_challenge", challenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    url.searchParams.set("state", state);
+    url.searchParams.set("prompt", "login");
+
+    return { authorizeUrl: url.toString(), pending: { verifier, challenge, state, redirectUri } };
+  },
+
+  async exchange({ code, pending }, deps) {
+    const [rawCode, pastedState] = code.split("#");
+    if (pastedState !== undefined && pastedState !== pending.state) {
+      throw new GatewayError("AUTH", "authorization state mismatch");
+    }
+
+    const token = await postToken(
+      {
+        grant_type: "authorization_code",
+        code: (rawCode ?? "").trim(),
+        redirect_uri: pending.redirectUri,
+        code_verifier: pending.verifier,
+      },
+      deps,
+    );
+
+    return toResult(token, null, deps);
+  },
+
+  async refresh(refreshToken, deps) {
+    const token = await postToken(
+      { grant_type: "refresh_token", refresh_token: refreshToken, scope: SCOPES },
+      deps,
+    );
+    return toResult(token, refreshToken, deps);
+  },
+};
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 161 pass, 0 fail.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add the openai oauth flow with account id extraction"
+```
+
+---
+
+## Task 22: The Kimi device-code flow and the OAuth registry
+
+**Files:**
+- Create: `apps/gateway/src/oauth/kimi.ts`, `apps/gateway/src/oauth/index.ts`
+- Test: `apps/gateway/test/oauth/kimi.test.ts`
+
+**Interfaces:**
+- Consumes: `OAuthProvider`, `OAuthDeps`, `FlowResult` (Task 20).
+- Produces:
+  - `kimiOAuth: OAuthProvider` — `kind: "device"`, populating `providerData.deviceId`
+  - `OAUTH_PROVIDERS: Readonly<Record<ProviderId, OAuthProvider>>`
+
+Device code inverts the flow: the gateway asks for a code first, shows it to the operator, and then polls. `exchange` performs exactly one poll and reports `authorization_pending` as a distinguishable error, so the caller owns the polling loop and its deadline rather than this function blocking for minutes.
+
+The device ID is generated once here and stored in `providerData`. The Kimi adapter (Task 11) sends it on every request, and it must stay stable for the life of the credential — a device ID that changed per request would look like a new device on every call.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/gateway/test/oauth/kimi.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { isAuthorizationPending, kimiOAuth } from "../../src/oauth/kimi.ts";
+import { OAUTH_PROVIDERS } from "../../src/oauth/index.ts";
+
+const NOW = 1_000_000;
+
+function stubFetch(status: number, body: unknown): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch;
+}
+
+test("is registered as a device flow that cannot be pasted", () => {
+  expect(kimiOAuth.kind).toBe("device");
+  expect(kimiOAuth.supportsManualPaste).toBe(false);
+});
+
+test("start returns a verification url and a stable device id", () => {
+  const start = kimiOAuth.start({ redirectUri: "" });
+  expect(start.authorizeUrl).toContain("https://");
+  expect(typeof start.pending.extra?.deviceId).toBe("string");
+});
+
+test("begin requests a device code and surfaces the user code", async () => {
+  const started = await kimiOAuth.begin(
+    { deviceId: "dev-1" },
+    {
+      fetch: stubFetch(200, {
+        device_code: "dc-1",
+        user_code: "WDJB-MJHT",
+        verification_uri: "https://kimi.example/device",
+        interval: 5,
+      }),
+      now: () => NOW,
+    },
+  );
+  expect(started.userCode).toBe("WDJB-MJHT");
+  expect(started.authorizeUrl).toBe("https://kimi.example/device");
+  expect(started.pending.deviceCode).toBe("dc-1");
+  expect(started.pending.interval).toBe(5);
+});
+
+test("a single poll returns tokens once the user approves", async () => {
+  const result = await kimiOAuth.exchange(
+    {
+      code: "",
+      pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "dc-1", extra: { deviceId: "dev-1" } },
+    },
+    {
+      fetch: stubFetch(200, { access_token: "test-token-1", refresh_token: "test-token-2", expires_in: 3600 }),
+      now: () => NOW,
+    },
+  );
+  expect(result.secrets.accessToken).toBe("test-token-1");
+  expect(result.providerData.deviceId).toBe("dev-1");
+  expect(result.expiresAt).toBe(NOW + 3_600_000);
+});
+
+test("a pending authorization is a distinguishable error, not a failure", async () => {
+  try {
+    await kimiOAuth.exchange(
+      { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "dc-1" } },
+      { fetch: stubFetch(400, { error: "authorization_pending" }), now: () => NOW },
+    );
+    throw new Error("expected throw");
+  } catch (e) {
+    expect(isAuthorizationPending(e)).toBe(true);
+  }
+});
+
+test("slow_down is also treated as pending", async () => {
+  try {
+    await kimiOAuth.exchange(
+      { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "dc-1" } },
+      { fetch: stubFetch(400, { error: "slow_down" }), now: () => NOW },
+    );
+    throw new Error("expected throw");
+  } catch (e) {
+    expect(isAuthorizationPending(e)).toBe(true);
+  }
+});
+
+test("a denied authorization is a terminal AUTH error", async () => {
+  try {
+    await kimiOAuth.exchange(
+      { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "dc-1" } },
+      { fetch: stubFetch(400, { error: "access_denied" }), now: () => NOW },
+    );
+    throw new Error("expected throw");
+  } catch (e) {
+    expect(e).toBeInstanceOf(GatewayError);
+    expect(isAuthorizationPending(e)).toBe(false);
+  }
+});
+
+test("exchange without a device code is a programming error", async () => {
+  expect(
+    kimiOAuth.exchange(
+      { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
+      { fetch: stubFetch(200, {}), now: () => NOW },
+    ),
+  ).rejects.toThrow();
+});
+
+test("refresh returns a new access token", async () => {
+  const result = await kimiOAuth.refresh("test-token-2", {
+    fetch: stubFetch(200, { access_token: "test-token-3", expires_in: 60 }),
+    now: () => NOW,
+  });
+  expect(result.secrets.accessToken).toBe("test-token-3");
+  expect(result.secrets.refreshToken).toBe("test-token-2");
+});
+
+test("the registry exposes one flow per provider", () => {
+  expect(Object.keys(OAUTH_PROVIDERS).sort()).toEqual(["anthropic", "kimi", "openai"]);
+  expect(OAUTH_PROVIDERS.kimi.id).toBe("kimi");
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/gateway/test/oauth/kimi.test.ts`
+Expected: FAIL — cannot resolve `../../src/oauth/kimi.ts`.
+
+- [ ] **Step 3: Extend the provider interface with the device-flow entry point**
+
+Modify `apps/gateway/src/oauth/types.ts` — add to the `OAuthProvider` type, after `start`:
+
+```ts
+  /**
+   * Device flows only: requests a device code before the operator is shown
+   * anything. PKCE providers leave this undefined and use `start` alone.
+   */
+  begin?(opts: { deviceId: string }, deps: OAuthDeps): Promise<AuthorizeStart>;
+```
+
+- [ ] **Step 4: Write the Kimi flow**
+
+`apps/gateway/src/oauth/kimi.ts`:
+
+```ts
+import { GatewayError } from "@omni/ir";
+import { USER_AGENT } from "@omni/providers";
+import type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider } from "./types.ts";
+import { tokenErrorMessage } from "./types.ts";
+
+/** Public client ID of the Kimi CLI. See the note at the head of Task 20. */
+const CLIENT_ID = "kimi-cli";
+const DEVICE_CODE_URL = "https://www.kimi.com/api/device/code";
+const TOKEN_URL = "https://www.kimi.com/api/device/token";
+const DEFAULT_INTERVAL_SECONDS = 5;
+
+/** Errors that mean "keep polling" rather than "this flow failed". */
+const PENDING_ERRORS = new Set(["authorization_pending", "slow_down"]);
+
+const PENDING_MARKER = "__omni_authorization_pending";
+
+export function isAuthorizationPending(error: unknown): boolean {
+  return (
+    error instanceof GatewayError &&
+    (error as GatewayError & { [PENDING_MARKER]?: boolean })[PENDING_MARKER] === true
+  );
+}
+
+function pendingError(code: string): GatewayError {
+  const error = new GatewayError("AUTH", `authorization not yet complete: ${code}`) as GatewayError & {
+    [PENDING_MARKER]?: boolean;
+  };
+  error[PENDING_MARKER] = true;
+  return error;
+}
+
+type TokenResponse = {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  email?: string;
+};
+
+/** Stable per-credential identity sent by the Kimi adapter on every request. */
+function newDeviceId(): string {
+  return crypto.randomUUID();
+}
+
+async function post(url: string, body: Record<string, string>, deps: OAuthDeps): Promise<unknown> {
+  const res = await deps.fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", "user-agent": USER_AGENT },
+    body: JSON.stringify({ ...body, client_id: CLIENT_ID }),
+  });
+
+  const parsed: unknown = await res.json().catch(() => null);
+  if (res.ok) return parsed;
+
+  const code =
+    typeof parsed === "object" && parsed !== null && typeof (parsed as { error?: unknown }).error === "string"
+      ? (parsed as { error: string }).error
+      : `http_${res.status}`;
+  if (PENDING_ERRORS.has(code)) throw pendingError(code);
+  throw new GatewayError("AUTH", tokenErrorMessage(res.status, parsed));
+}
+
+function toResult(
+  token: TokenResponse,
+  deviceId: string,
+  fallbackRefresh: string | null,
+  deps: OAuthDeps,
+): FlowResult {
+  if (typeof token.access_token !== "string") {
+    throw new GatewayError("AUTH", "token endpoint returned no access_token");
+  }
+  return {
+    secrets: {
+      accessToken: token.access_token,
+      refreshToken: token.refresh_token ?? fallbackRefresh,
+      apiKey: null,
+    },
+    expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
+    accountEmail: token.email ?? null,
+    providerData: { deviceId },
+  };
+}
+
+export const kimiOAuth: OAuthProvider = {
+  id: "kimi",
+  kind: "device",
+  supportsManualPaste: false,
+
+  /**
+   * Device flows have nothing to show until `begin` has run, so this returns a
+   * placeholder carrying only the freshly minted device id.
+   */
+  start() {
+    const deviceId = newDeviceId();
+    return {
+      authorizeUrl: "https://www.kimi.com/device",
+      pending: { verifier: "", challenge: "", state: "", redirectUri: "", extra: { deviceId } },
+    };
+  },
+
+  async begin({ deviceId }, deps): Promise<AuthorizeStart> {
+    const body = (await post(DEVICE_CODE_URL, { device_id: deviceId }, deps)) as {
+      device_code?: string;
+      user_code?: string;
+      verification_uri?: string;
+      interval?: number;
+    };
+
+    if (typeof body.device_code !== "string" || typeof body.user_code !== "string") {
+      throw new GatewayError("AUTH", "device code endpoint returned an unusable response");
+    }
+
+    return {
+      authorizeUrl: body.verification_uri ?? "https://www.kimi.com/device",
+      userCode: body.user_code,
+      pending: {
+        verifier: "",
+        challenge: "",
+        state: "",
+        redirectUri: "",
+        deviceCode: body.device_code,
+        interval: body.interval ?? DEFAULT_INTERVAL_SECONDS,
+        extra: { deviceId },
+      },
+    };
+  },
+
+  /** One poll. The caller owns the loop and the deadline. */
+  async exchange({ pending }, deps) {
+    if (pending.deviceCode === undefined) {
+      throw new Error("kimi exchange requires a pending flow produced by begin()");
+    }
+    const deviceId = (pending.extra?.deviceId as string | undefined) ?? newDeviceId();
+    const token = (await post(
+      TOKEN_URL,
+      {
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: pending.deviceCode,
+        device_id: deviceId,
+      },
+      deps,
+    )) as TokenResponse;
+
+    return toResult(token, deviceId, null, deps);
+  },
+
+  async refresh(refreshToken, deps) {
+    const token = (await post(
+      TOKEN_URL,
+      { grant_type: "refresh_token", refresh_token: refreshToken },
+      deps,
+    )) as TokenResponse;
+    // The device id lives in providerData and is preserved by the caller when
+    // it merges this result; refresh has no reason to mint a new one.
+    return toResult(token, "", refreshToken, deps);
+  },
+};
+```
+
+- [ ] **Step 5: Write the registry**
+
+`apps/gateway/src/oauth/index.ts`:
+
+```ts
+import type { ProviderId } from "@omni/store";
+import { anthropicOAuth } from "./anthropic.ts";
+import { kimiOAuth } from "./kimi.ts";
+import { openaiOAuth } from "./openai.ts";
+import type { OAuthProvider } from "./types.ts";
+
+export const OAUTH_PROVIDERS: Readonly<Record<ProviderId, OAuthProvider>> = {
+  anthropic: anthropicOAuth,
+  openai: openaiOAuth,
+  kimi: kimiOAuth,
+};
+
+export { isAuthorizationPending } from "./kimi.ts";
+export type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider, PendingFlow } from "./types.ts";
+```
+
+- [ ] **Step 6: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 171 pass, 0 fail.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add the kimi device code flow and the oauth registry"
+```
+
+---
