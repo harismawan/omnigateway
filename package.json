@@ -1,0 +1,21 @@
+{
+  "name": "omnigateway",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "lint": "biome check .",
+    "fmt": "biome format --write .",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.6",
+    "@types/bun": "latest",
+    "bun-types": "latest",
+    "typescript": "^5.7.0"
+  }
+}
