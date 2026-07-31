@@ -8249,3 +8249,770 @@ git commit -m "feat(gateway): add anthropic and openai egress renderers"
 ```
 
 ---
+
+## Task 18: Authentication — proxy API keys and the admin session
+
+**Files:**
+- Create: `apps/gateway/src/auth/apiKey.ts`, `apps/gateway/src/auth/admin.ts`
+- Test: `apps/gateway/test/auth/apiKey.test.ts`, `apps/gateway/test/auth/admin.test.ts`
+- Modify: `apps/gateway/package.json` (add the `@node-rs/argon2` dependency)
+
+**Interfaces:**
+- Consumes: `Store`, `ApiKey`, `hashApiKey` (Task 7); `GatewayError` (Task 2).
+- Produces:
+  - `authenticateApiKey(store, header: string | undefined | null): Promise<ApiKey>` — throws `GatewayError("AUTH", …)`
+  - `createAdminAuth(store, opts): AdminAuth` with `login(password)`, `verify(token)`, `logout(token)`, `isConfigured()`, `setPassword(password)`
+  - `ADMIN_COOKIE = "omni_admin"`
+
+Two different authentication problems that must not share an implementation. A proxy API key is machine-generated high-entropy and checked on every request, so its hash is fast (SHA-256, Task 7). The admin password is human-chosen and checked rarely, so it uses Argon2id. Sessions are opaque random tokens held in memory — restarting the gateway logs the operator out, which is correct for a single-node admin surface.
+
+- [ ] **Step 1: Write the failing API key test**
+
+`apps/gateway/test/auth/apiKey.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { generateApiKey, type Store } from "@omni/store";
+import { authenticateApiKey } from "../../src/auth/apiKey.ts";
+import { memoryStore } from "../helpers/fixtures.ts";
+
+async function seed(): Promise<{ store: Store; raw: string }> {
+  const store = await memoryStore();
+  const raw = generateApiKey();
+  await store.keys.create({ label: "test", raw, enabled: true });
+  return { store, raw };
+}
+
+test("accepts a bearer token", async () => {
+  const { store, raw } = await seed();
+  const key = await authenticateApiKey(store, `Bearer ${raw}`);
+  expect(key.label).toBe("test");
+});
+
+test("accepts a bare token with no bearer prefix", async () => {
+  const { store, raw } = await seed();
+  expect((await authenticateApiKey(store, raw)).label).toBe("test");
+});
+
+test("rejects a missing header", async () => {
+  const { store } = await seed();
+  expect(authenticateApiKey(store, undefined)).rejects.toThrow(GatewayError);
+});
+
+test("rejects an unknown key", async () => {
+  const { store } = await seed();
+  expect(authenticateApiKey(store, "Bearer sk-omni-nope")).rejects.toThrow(GatewayError);
+});
+
+test("rejects a disabled key", async () => {
+  const { store, raw } = await seed();
+  const key = await authenticateApiKey(store, raw);
+  await store.keys.update(key.id, { enabled: false });
+  expect(authenticateApiKey(store, raw)).rejects.toThrow(GatewayError);
+});
+
+test("rejects an expired key", async () => {
+  const store = await memoryStore();
+  const raw = generateApiKey();
+  await store.keys.create({ label: "old", raw, enabled: true, expiresAt: 1 });
+  expect(authenticateApiKey(store, raw)).rejects.toThrow(GatewayError);
+});
+
+test("error messages never contain the presented key", async () => {
+  const { store } = await seed();
+  try {
+    await authenticateApiKey(store, "Bearer sk-omni-secret-value");
+    throw new Error("expected throw");
+  } catch (e) {
+    expect((e as GatewayError).message).not.toContain("secret-value");
+  }
+});
+```
+
+- [ ] **Step 2: Write the failing admin auth test**
+
+`apps/gateway/test/auth/admin.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { createAdminAuth } from "../../src/auth/admin.ts";
+import { memoryStore } from "../helpers/fixtures.ts";
+
+let clock = 1_000_000;
+const opts = { now: () => clock, sessionTtlMs: 60_000 };
+
+test("reports unconfigured until a password is set", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  expect(await auth.isConfigured()).toBe(false);
+  await auth.setPassword("hunter2hunter2");
+  expect(await auth.isConfigured()).toBe(true);
+});
+
+test("issues a session token for the right password", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  await auth.setPassword("hunter2hunter2");
+  const token = await auth.login("hunter2hunter2");
+  expect(token).not.toBeNull();
+  expect(await auth.verify(token as string)).toBe(true);
+});
+
+test("returns null for the wrong password", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  await auth.setPassword("hunter2hunter2");
+  expect(await auth.login("wrong-password-x")).toBeNull();
+});
+
+test("returns null when no password is configured", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  expect(await auth.login("anything")).toBeNull();
+});
+
+test("rejects a short password", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  expect(auth.setPassword("short")).rejects.toThrow();
+});
+
+test("expires a session after its ttl", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  await auth.setPassword("hunter2hunter2");
+  const token = (await auth.login("hunter2hunter2")) as string;
+  clock += 60_001;
+  expect(await auth.verify(token)).toBe(false);
+});
+
+test("logout invalidates a session immediately", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  await auth.setPassword("hunter2hunter2");
+  const token = (await auth.login("hunter2hunter2")) as string;
+  auth.logout(token);
+  expect(await auth.verify(token)).toBe(false);
+});
+
+test("changing the password invalidates existing sessions", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  await auth.setPassword("hunter2hunter2");
+  const token = (await auth.login("hunter2hunter2")) as string;
+  await auth.setPassword("correct-horse-battery");
+  expect(await auth.verify(token)).toBe(false);
+});
+
+test("verify rejects an unknown token", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  expect(await auth.verify("not-a-token")).toBe(false);
+});
+```
+
+- [ ] **Step 3: Add the `memoryStore` helper to the fixtures**
+
+Append to `apps/gateway/test/helpers/fixtures.ts`:
+
+```ts
+import { createStore, type Store } from "@omni/store";
+
+/** A throwaway in-memory store with a fixed test encryption key. */
+export async function memoryStore(): Promise<Store> {
+  return createStore({ path: ":memory:", encryptionKey: "test-encryption-key-0123456789" });
+}
+```
+
+- [ ] **Step 4: Add the Argon2 dependency**
+
+Run: `bun add --cwd apps/gateway @node-rs/argon2@2.0.2`
+
+Native Argon2 rather than a pure-JS implementation, because a JS Argon2 either runs too fast to be a real work factor or blocks the event loop for hundreds of milliseconds. `@node-rs/argon2` is a native addon that releases the loop while hashing.
+
+- [ ] **Step 5: Run both tests to verify they fail**
+
+Run: `bun test apps/gateway/test/auth`
+Expected: FAIL — cannot resolve `../../src/auth/apiKey.ts`.
+
+- [ ] **Step 6: Write the API key authenticator**
+
+`apps/gateway/src/auth/apiKey.ts`:
+
+```ts
+import { GatewayError } from "@omni/ir";
+import type { ApiKey, Store } from "@omni/store";
+
+/**
+ * Resolves an Authorization header to an API key record.
+ *
+ * Every failure raises the same message. Distinguishing "no such key" from
+ * "key disabled" would let a caller probe which keys exist.
+ */
+export async function authenticateApiKey(
+  store: Store,
+  header: string | undefined | null,
+): Promise<ApiKey> {
+  const raw = extractToken(header);
+  if (raw === null) throw new GatewayError("AUTH", "missing or malformed Authorization header");
+
+  const key = await store.keys.findByRaw(raw);
+  if (key === null || !key.enabled) throw new GatewayError("AUTH", "invalid API key");
+  if (key.expiresAt !== null && key.expiresAt <= Date.now()) {
+    throw new GatewayError("AUTH", "invalid API key");
+  }
+
+  return key;
+}
+
+/** Accepts `Bearer <token>`, `x-api-key`-style bare tokens, or nothing. */
+function extractToken(header: string | undefined | null): string | null {
+  if (typeof header !== "string") return null;
+  const value = header.trim();
+  if (value.length === 0) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(value);
+  return match === null ? value : (match[1] as string).trim();
+}
+```
+
+- [ ] **Step 7: Write the admin authenticator**
+
+`apps/gateway/src/auth/admin.ts`:
+
+```ts
+import { hash, verify } from "@node-rs/argon2";
+import type { Store } from "@omni/store";
+
+export const ADMIN_COOKIE = "omni_admin";
+const PASSWORD_CONFIG_KEY = "admin.passwordHash";
+const MIN_PASSWORD_LENGTH = 12;
+
+export type AdminAuth = {
+  isConfigured(): Promise<boolean>;
+  setPassword(password: string): Promise<void>;
+  login(password: string): Promise<string | null>;
+  verify(token: string): Promise<boolean>;
+  logout(token: string): void;
+};
+
+export type AdminAuthOptions = {
+  now: () => number;
+  sessionTtlMs: number;
+};
+
+/**
+ * Argon2id, not SHA-256.
+ *
+ * This is the one secret in the system a human chooses, so it is the one place
+ * where a slow hash buys anything. Parameters are the OWASP baseline: 19 MiB of
+ * memory, 2 passes, 1 lane.
+ */
+const ARGON2 = { memoryCost: 19_456, timeCost: 2, parallelism: 1 } as const;
+
+export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth {
+  // Sessions live in memory only: a restart logs the operator out, and there is
+  // nothing on disk for an attacker with the database file to replay.
+  const sessions = new Map<string, number>();
+
+  async function currentHash(): Promise<string | null> {
+    return store.config.get(PASSWORD_CONFIG_KEY);
+  }
+
+  return {
+    async isConfigured() {
+      return (await currentHash()) !== null;
+    },
+
+    async setPassword(password) {
+      if (password.length < MIN_PASSWORD_LENGTH) {
+        throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+      }
+      await store.config.set(PASSWORD_CONFIG_KEY, await hash(password, ARGON2));
+      // A password change is also a "log everyone out" event.
+      sessions.clear();
+    },
+
+    async login(password) {
+      const stored = await currentHash();
+      if (stored === null) return null;
+
+      let ok = false;
+      try {
+        ok = await verify(stored, password);
+      } catch {
+        ok = false;
+      }
+      if (!ok) return null;
+
+      const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+      sessions.set(token, opts.now() + opts.sessionTtlMs);
+      return token;
+    },
+
+    async verify(token) {
+      const expiresAt = sessions.get(token);
+      if (expiresAt === undefined) return false;
+      if (expiresAt <= opts.now()) {
+        sessions.delete(token);
+        return false;
+      }
+      return true;
+    },
+
+    logout(token) {
+      sessions.delete(token);
+    },
+  };
+}
+```
+
+- [ ] **Step 8: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 129 pass, 0 fail.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add api key and admin authentication"
+```
+
+---
+
+## Task 19: Proxy routes and request logging
+
+**Files:**
+- Create: `apps/gateway/src/routes/proxy.ts`, `apps/gateway/src/logging.ts`
+- Test: `apps/gateway/test/routes/proxy.test.ts`
+- Modify: `apps/gateway/package.json` (add the `elysia` dependency)
+
+**Interfaces:**
+- Consumes: `dispatch`, `DispatchDeps`, `DispatchOutcome` (Task 15); ingress parsers (Task 16); egress renderers (Task 17); `authenticateApiKey` (Task 18); `collect`, `HTTP_STATUS` (Tasks 2-3).
+- Produces:
+  - `proxyRoutes(deps: ProxyDeps): Elysia` mounting `POST /v1/messages`, `POST /v1/chat/completions`, and `GET /v1/models`
+  - `type ProxyDeps = DispatchDeps & { store: Store; requestId: () => string }`
+  - `finishLog(store, log, keyId): Promise<void>` in `logging.ts`
+
+This is the seam where HTTP meets the pipeline. It holds no routing intelligence — parse, dispatch, render, log. The only real decision is that the log is written in a `finally`, after the stream has fully drained, so a client that disconnects mid-stream still leaves a record.
+
+- [ ] **Step 1: Write the failing proxy route test**
+
+`apps/gateway/test/routes/proxy.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import type { StreamEvent } from "@omni/ir";
+import { generateApiKey } from "@omni/store";
+import { proxyRoutes } from "../../src/routes/proxy.ts";
+import { credential, memoryStore, stubAdapters, virtualModel } from "../helpers/fixtures.ts";
+
+const EVENTS: StreamEvent[] = [
+  { type: "start", id: "upstream_1", model: "claude-opus-4" },
+  { type: "blockStart", index: 0, block: { type: "text" } },
+  { type: "blockDelta", index: 0, delta: { type: "text", text: "Hi" } },
+  { type: "blockEnd", index: 0 },
+  {
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  },
+];
+
+async function harness(events: StreamEvent[] = EVENTS) {
+  const store = await memoryStore();
+  await store.credentials.create(credential({ id: "c1", provider: "anthropic" }));
+  await store.config.putModel(virtualModel({ name: "fast", targets: [{ provider: "anthropic", model: "claude-opus-4", weight: 1 }] }));
+  const raw = generateApiKey();
+  await store.keys.create({ label: "test", raw, enabled: true });
+
+  let n = 0;
+  const app = proxyRoutes({
+    store,
+    adapters: stubAdapters(events),
+    now: () => 1_000_000,
+    rand: () => 0.5,
+    refresh: async (c) => (await c.secrets()),
+    requestId: () => `req_${++n}`,
+  });
+
+  const call = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    app.handle(
+      new Request(`http://localhost${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${raw}`, ...headers },
+        body: JSON.stringify(body),
+      }),
+    );
+
+  return { store, app, raw, call };
+}
+
+test("proxies a non-streaming anthropic request", async () => {
+  const { call } = await harness();
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as Record<string, any>;
+  expect(body.content).toEqual([{ type: "text", text: "Hi" }]);
+  expect(body.id).toBe("req_1");
+});
+
+test("proxies a streaming anthropic request as sse", async () => {
+  const { call } = await harness();
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(res.headers.get("content-type")).toContain("text/event-stream");
+  const text = await res.text();
+  expect(text).toContain("event: message_start");
+  expect(text).toContain("event: message_stop");
+  expect(text).toContain('"text":"Hi"');
+});
+
+test("proxies a non-streaming openai request", async () => {
+  const { call } = await harness();
+  const res = await call("/v1/chat/completions", {
+    model: "fast",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  const body = (await res.json()) as Record<string, any>;
+  expect(body.object).toBe("chat.completion");
+  expect(body.choices[0].message.content).toBe("Hi");
+});
+
+test("proxies a streaming openai request and terminates with [DONE]", async () => {
+  const { call } = await harness();
+  const res = await call("/v1/chat/completions", {
+    model: "fast",
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(await res.text()).toContain("data: [DONE]");
+});
+
+test("rejects a request with no api key", async () => {
+  const { app } = await harness();
+  const res = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "fast", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+    }),
+  );
+  expect(res.status).toBe(401);
+  expect((await res.json()).error.type).toBe("authentication_error");
+});
+
+test("returns a 400 with the anthropic error shape for a malformed body", async () => {
+  const { call } = await harness();
+  const res = await call("/v1/messages", { max_tokens: 1, messages: [] });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error.type).toBe("invalid_request_error");
+});
+
+test("returns a 400 with the openai error shape on the openai surface", async () => {
+  const { call } = await harness();
+  const res = await call("/v1/chat/completions", { model: "fast", messages: [] });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error.type).toBe("invalid_request_error");
+});
+
+test("writes a request log with usage and the resolved credential", async () => {
+  const { call, store } = await harness();
+  await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  const logs = await store.usage.listLogs({ limit: 10 });
+  expect(logs).toHaveLength(1);
+  expect(logs[0]?.credentialId).toBe("c1");
+  expect(logs[0]?.outputTokens).toBe(2);
+  expect(logs[0]?.status).toBe("ok");
+});
+
+test("logs a streaming request after the stream drains", async () => {
+  const { call, store } = await harness();
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  await res.text();
+  const logs = await store.usage.listLogs({ limit: 10 });
+  expect(logs[0]?.status).toBe("ok");
+  expect(logs[0]?.outputTokens).toBe(2);
+});
+
+test("lists the configured virtual models", async () => {
+  const { app, raw } = await harness();
+  const res = await app.handle(
+    new Request("http://localhost/v1/models", { headers: { authorization: `Bearer ${raw}` } }),
+  );
+  const body = (await res.json()) as Record<string, any>;
+  expect(body.data.map((m: { id: string }) => m.id)).toContain("fast");
+});
+
+test("never echoes the request body into the log", async () => {
+  const { call, store } = await harness();
+  await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "sensitive-prompt-text" }],
+  });
+  const logs = await store.usage.listLogs({ limit: 10 });
+  expect(JSON.stringify(logs)).not.toContain("sensitive-prompt-text");
+});
+```
+
+- [ ] **Step 2: Add the `stubAdapters` and `virtualModel` helpers to the fixtures**
+
+Append to `apps/gateway/test/helpers/fixtures.ts`:
+
+```ts
+import type { ProviderId, StreamEvent, VirtualModel } from "@omni/ir";
+import type { ProviderAdapter } from "@omni/providers";
+
+/** An adapter set where every provider replays a fixed event list. */
+export function stubAdapters(events: StreamEvent[]): Readonly<Record<ProviderId, ProviderAdapter>> {
+  const make = (id: ProviderId): ProviderAdapter => ({
+    id,
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send() {
+      return {
+        events: (async function* () {
+          for (const e of events) yield e;
+        })(),
+      };
+    },
+  });
+  return { anthropic: make("anthropic"), openai: make("openai"), kimi: make("kimi") };
+}
+
+export function virtualModel(overrides: Partial<VirtualModel> & { name: string }): VirtualModel {
+  return {
+    strategy: "score",
+    targets: [],
+    enabled: true,
+    ...overrides,
+  };
+}
+```
+
+- [ ] **Step 3: Add Elysia**
+
+Run: `bun add --cwd apps/gateway elysia@1.4.29`
+
+- [ ] **Step 4: Run the test to verify it fails**
+
+Run: `bun test apps/gateway/test/routes`
+Expected: FAIL — cannot resolve `../../src/routes/proxy.ts`.
+
+- [ ] **Step 5: Write the logging helper**
+
+`apps/gateway/src/logging.ts`:
+
+```ts
+import type { RequestLog, Store } from "@omni/store";
+
+/**
+ * Persists a finished request log.
+ *
+ * Never throws: a failure to write a log line must not turn a successful
+ * proxied request into an error the client sees.
+ */
+export async function finishLog(
+  store: Store,
+  log: RequestLog,
+  keyId: string | null,
+): Promise<void> {
+  try {
+    await store.usage.appendLog({ ...log, apiKeyId: keyId });
+  } catch (error) {
+    console.error("failed to persist request log", {
+      requestId: log.id,
+      // The message only; a store error must not drag a row's contents into stdout.
+      reason: error instanceof Error ? error.message : "unknown",
+    });
+  }
+}
+```
+
+- [ ] **Step 6: Write the proxy routes**
+
+`apps/gateway/src/routes/proxy.ts`:
+
+```ts
+import { collect, GatewayError, HTTP_STATUS, type ErrorCode, type StreamEvent } from "@omni/ir";
+import type { Store } from "@omni/store";
+import { Elysia } from "elysia";
+import { authenticateApiKey } from "../auth/apiKey.ts";
+import { dispatch, type DispatchDeps } from "../dispatch/index.ts";
+import { anthropicErrorBody, anthropicResponse, anthropicStream } from "../egress/anthropic.ts";
+import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.ts";
+import { parseAnthropicRequest } from "../ingress/anthropic.ts";
+import { parseOpenAIRequest } from "../ingress/openai.ts";
+import { finishLog } from "../logging.ts";
+
+export type ProxyDeps = DispatchDeps & { requestId: () => string };
+
+type Surface = "anthropic" | "openai";
+
+const SSE_HEADERS = {
+  "content-type": "text/event-stream; charset=utf-8",
+  "cache-control": "no-cache, no-transform",
+  connection: "keep-alive",
+  "x-accel-buffering": "no",
+} as const;
+
+function errorResponse(surface: Surface, code: ErrorCode, message: string): Response {
+  const body = surface === "anthropic" ? anthropicErrorBody(code, message) : openaiErrorBody(code, message);
+  return new Response(JSON.stringify(body), {
+    status: HTTP_STATUS[code],
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function asGatewayError(error: unknown): GatewayError {
+  if (error instanceof GatewayError) return error;
+  return new GatewayError("INTERNAL", error instanceof Error ? error.message : "internal error");
+}
+
+/** Serializes SSE frames and drains the stream, logging once it is done. */
+function sseResponse(
+  frames: AsyncGenerator<{ event: string; data: string }, void, undefined>,
+  onDone: () => Promise<void>,
+): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await frames.next();
+        if (next.done === true) {
+          controller.close();
+          await onDone();
+          return;
+        }
+        const { event, data } = next.value;
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${data}\n\n`));
+      } catch (error) {
+        controller.error(error);
+        await onDone();
+      }
+    },
+    async cancel() {
+      // The client hung up. Close the upstream generator so the provider
+      // connection is released, then still write the log.
+      await frames.return(undefined);
+      await onDone();
+    },
+  });
+
+  return new Response(stream, { headers: SSE_HEADERS });
+}
+
+async function handle(deps: ProxyDeps, surface: Surface, request: Request): Promise<Response> {
+  const requestId = deps.requestId();
+  let keyId: string | null = null;
+
+  try {
+    const key = await authenticateApiKey(deps.store, request.headers.get("authorization"));
+    keyId = key.id;
+
+    const body: unknown = await request.json();
+    const chatRequest =
+      surface === "anthropic" ? parseAnthropicRequest(body) : parseOpenAIRequest(body);
+
+    const outcome = await dispatch(chatRequest, deps);
+    const log = () => finishLog(deps.store, { ...outcome.log(), id: requestId }, keyId);
+
+    if (chatRequest.stream) {
+      const frames =
+        surface === "anthropic"
+          ? anthropicStream(outcome.events, requestId)
+          : openaiStream(outcome.events, requestId, Math.floor(deps.now() / 1000));
+      return sseResponse(frames, log);
+    }
+
+    const events: StreamEvent[] = [];
+    for await (const event of outcome.events) events.push(event);
+    await log();
+
+    const failure = events.find((e): e is Extract<StreamEvent, { type: "error" }> => e.type === "error");
+    if (failure !== undefined) return errorResponse(surface, failure.code, failure.message);
+
+    const collected = collect(events);
+    const responseBody =
+      surface === "anthropic"
+        ? anthropicResponse(collected, requestId)
+        : openaiResponse(collected, requestId, Math.floor(deps.now() / 1000));
+
+    return new Response(JSON.stringify(responseBody), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  } catch (error) {
+    const gatewayError = asGatewayError(error);
+    await finishLog(
+      deps.store,
+      {
+        id: requestId,
+        startedAt: deps.now(),
+        durationMs: 0,
+        surface,
+        requestedModel: "",
+        credentialId: null,
+        provider: null,
+        upstreamModel: null,
+        status: "error",
+        errorCode: gatewayError.code,
+        attempts: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        ttftMs: null,
+        streamed: false,
+        degradations: [],
+      },
+      keyId,
+    );
+    return errorResponse(surface, gatewayError.code, gatewayError.message);
+  }
+}
+
+export function proxyRoutes(deps: ProxyDeps): Elysia {
+  return new Elysia()
+    .post("/v1/messages", ({ request }) => handle(deps, "anthropic", request))
+    .post("/v1/chat/completions", ({ request }) => handle(deps, "openai", request))
+    .get("/v1/models", async ({ request }) => {
+      await authenticateApiKey(deps.store, request.headers.get("authorization"));
+      const models = await deps.store.config.listModels();
+      return {
+        object: "list",
+        data: models
+          .filter((m) => m.enabled)
+          .map((m) => ({ id: m.name, object: "model", created: 0, owned_by: "omnigateway" })),
+      };
+    })
+    .onError(({ error, set }) => {
+      const gatewayError = asGatewayError(error);
+      set.status = HTTP_STATUS[gatewayError.code];
+      return anthropicErrorBody(gatewayError.code, gatewayError.message);
+    });
+}
+```
+
+- [ ] **Step 7: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 140 pass, 0 fail.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add proxy routes with sse streaming and request logging"
+```
+
+---
