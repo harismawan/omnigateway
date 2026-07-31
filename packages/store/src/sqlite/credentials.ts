@@ -1,0 +1,249 @@
+import type { Database } from "bun:sqlite";
+import type { ProviderId } from "@omni/ir";
+import { decrypt, encrypt } from "../encryption.ts";
+import type {
+  AuthType,
+  BreakerState,
+  Credential,
+  CredentialHealth,
+  CredentialRepo,
+  CredentialSecrets,
+  CredentialView,
+  QuotaWindow,
+  WindowType,
+} from "../types.ts";
+
+type Row = {
+  id: string;
+  provider: string;
+  label: string;
+  auth_type: string;
+  enabled: number;
+  tier: number;
+  weight: number;
+  expires_at: number | null;
+  account_email: string | null;
+  provider_data: string;
+  access_token: string | null;
+  refresh_token: string | null;
+  api_key: string | null;
+  id_token: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRepo {
+  /** Decrypts lazily, so ranking N candidates costs zero decryptions. */
+  const view = (row: Row): CredentialView => ({
+    id: row.id,
+    provider: row.provider as ProviderId,
+    label: row.label,
+    authType: row.auth_type as AuthType,
+    enabled: row.enabled === 1,
+    tier: row.tier,
+    weight: row.weight,
+    expiresAt: row.expires_at,
+    accountEmail: row.account_email,
+    providerData: JSON.parse(row.provider_data) as Record<string, unknown>,
+    hasRefreshToken: row.refresh_token !== null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    secrets: async (): Promise<CredentialSecrets> => ({
+      accessToken: await open(row.access_token),
+      refreshToken: await open(row.refresh_token),
+      apiKey: await open(row.api_key),
+      idToken: await open(row.id_token),
+    }),
+  });
+
+  const open = async (v: string | null): Promise<string | null> =>
+    v === null ? null : decrypt(key, v);
+  const seal = async (v: string | null | undefined): Promise<string | null> =>
+    v === null || v === undefined ? null : encrypt(key, v);
+
+  return {
+    async list() {
+      return db.query<Row, []>("SELECT * FROM credentials ORDER BY tier, label").all().map(view);
+    },
+
+    async get(id) {
+      const row = db.query<Row, [string]>("SELECT * FROM credentials WHERE id = ?").get(id);
+      return row ? view(row) : null;
+    },
+
+    async create(input) {
+      const now = Date.now();
+      db.run(
+        `INSERT INTO credentials
+           (id, provider, label, auth_type, enabled, tier, weight, expires_at, account_email,
+            provider_data, access_token, refresh_token, api_key, id_token, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          input.id,
+          input.provider,
+          input.label,
+          input.authType,
+          input.enabled ? 1 : 0,
+          input.tier,
+          input.weight,
+          input.expiresAt,
+          input.accountEmail,
+          JSON.stringify(input.providerData),
+          await seal(input.accessToken),
+          await seal(input.refreshToken),
+          await seal(input.apiKey),
+          await seal(input.idToken),
+          now,
+          now,
+        ],
+      );
+      const { accessToken, refreshToken, apiKey, idToken, ...meta } = input;
+      return {
+        ...meta,
+        hasRefreshToken: refreshToken !== null,
+        createdAt: now,
+        updatedAt: now,
+      } satisfies Credential;
+    },
+
+    async update(id, patch) {
+      const sets: string[] = [];
+      const vals: (string | number | null)[] = [];
+      const put = (col: string, v: string | number | null) => {
+        sets.push(`${col} = ?`);
+        vals.push(v);
+      };
+      if (patch.label !== undefined) put("label", patch.label);
+      if (patch.enabled !== undefined) put("enabled", patch.enabled ? 1 : 0);
+      if (patch.tier !== undefined) put("tier", patch.tier);
+      if (patch.weight !== undefined) put("weight", patch.weight);
+      if (patch.expiresAt !== undefined) put("expires_at", patch.expiresAt);
+      if (patch.accountEmail !== undefined) put("account_email", patch.accountEmail);
+      if (patch.providerData !== undefined)
+        put("provider_data", JSON.stringify(patch.providerData));
+      if (sets.length === 0) return;
+      put("updated_at", Date.now());
+      db.run(`UPDATE credentials SET ${sets.join(", ")} WHERE id = ?`, [...vals, id]);
+    },
+
+    async updateSecrets(id, secrets, expiresAt) {
+      const sets: string[] = [];
+      const vals: (string | number | null)[] = [];
+      if (secrets.accessToken !== undefined) {
+        sets.push("access_token = ?");
+        vals.push(await seal(secrets.accessToken));
+      }
+      if (secrets.refreshToken !== undefined) {
+        sets.push("refresh_token = ?");
+        vals.push(await seal(secrets.refreshToken));
+      }
+      if (secrets.apiKey !== undefined) {
+        sets.push("api_key = ?");
+        vals.push(await seal(secrets.apiKey));
+      }
+      if (secrets.idToken !== undefined) {
+        sets.push("id_token = ?");
+        vals.push(await seal(secrets.idToken));
+      }
+      sets.push("expires_at = ?", "updated_at = ?");
+      vals.push(expiresAt, Date.now());
+      db.run(`UPDATE credentials SET ${sets.join(", ")} WHERE id = ?`, [...vals, id]);
+    },
+
+    async remove(id) {
+      db.run("DELETE FROM credentials WHERE id = ?", [id]);
+    },
+
+    async listHealth() {
+      type H = {
+        credential_id: string;
+        model: string;
+        breaker_state: string;
+        consecutive_failures: number;
+        opened_at: number | null;
+        rate_limited_until: number | null;
+        ewma_ttft_ms: number | null;
+        last_used_at: number | null;
+      };
+      return db
+        .query<H, []>("SELECT * FROM credential_health")
+        .all()
+        .map((r) => ({
+          credentialId: r.credential_id,
+          model: r.model,
+          breakerState: r.breaker_state as BreakerState,
+          consecutiveFailures: r.consecutive_failures,
+          openedAt: r.opened_at,
+          rateLimitedUntil: r.rate_limited_until,
+          ewmaTtftMs: r.ewma_ttft_ms,
+          lastUsedAt: r.last_used_at,
+        }));
+    },
+
+    async saveHealth(rows: CredentialHealth[]) {
+      const stmt = db.prepare(
+        `INSERT INTO credential_health
+           (credential_id, model, breaker_state, consecutive_failures, opened_at,
+            rate_limited_until, ewma_ttft_ms, last_used_at)
+         VALUES (?,?,?,?,?,?,?,?)
+         ON CONFLICT (credential_id, model) DO UPDATE SET
+           breaker_state = excluded.breaker_state,
+           consecutive_failures = excluded.consecutive_failures,
+           opened_at = excluded.opened_at,
+           rate_limited_until = excluded.rate_limited_until,
+           ewma_ttft_ms = excluded.ewma_ttft_ms,
+           last_used_at = excluded.last_used_at`,
+      );
+      db.transaction(() => {
+        for (const r of rows) {
+          stmt.run(
+            r.credentialId,
+            r.model,
+            r.breakerState,
+            r.consecutiveFailures,
+            r.openedAt,
+            r.rateLimitedUntil,
+            r.ewmaTtftMs,
+            r.lastUsedAt,
+          );
+        }
+      })();
+    },
+
+    async listQuota() {
+      type Q = {
+        credential_id: string;
+        window_type: string;
+        starts_at: number;
+        used: number;
+        limit_value: number | null;
+      };
+      return db
+        .query<Q, []>("SELECT * FROM quota_windows")
+        .all()
+        .map((r) => ({
+          credentialId: r.credential_id,
+          windowType: r.window_type as WindowType,
+          startsAt: r.starts_at,
+          used: r.used,
+          limit: r.limit_value,
+        }));
+    },
+
+    async saveQuota(rows: QuotaWindow[]) {
+      const stmt = db.prepare(
+        `INSERT INTO quota_windows (credential_id, window_type, starts_at, used, limit_value)
+         VALUES (?,?,?,?,?)
+         ON CONFLICT (credential_id, window_type) DO UPDATE SET
+           starts_at = excluded.starts_at,
+           used = excluded.used,
+           limit_value = excluded.limit_value`,
+      );
+      db.transaction(() => {
+        for (const r of rows) {
+          stmt.run(r.credentialId, r.windowType, r.startsAt, r.used, r.limit);
+        }
+      })();
+    },
+  };
+}
