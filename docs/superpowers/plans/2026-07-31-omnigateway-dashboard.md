@@ -4485,3 +4485,1728 @@ git commit -m "feat(dashboard): add the dry-run panel with score breakdowns and 
 ```
 
 ---
+
+## Task 10: Usage screen — requests, tokens and cost over time
+
+**Files:**
+- Create: `apps/dashboard/src/features/usage/StatCards.tsx`, `apps/dashboard/src/features/usage/UsageChart.tsx`, `apps/dashboard/src/routes/_app.usage.tsx`
+- Test: `apps/dashboard/test/features/usage.test.tsx`
+
+**Interfaces:**
+- Consumes: `usageQuery`, `qk` (Task 3); `UsageBucket`, `UsageGroupBy`, `USAGE_GROUP_BY` (Task 2); `formatTokens`, `formatUsd` (Task 3); `ErrorState` (Task 4).
+- Produces:
+  - `totals(rows: UsageBucket[]): UsageTotals` — summed across buckets
+  - `RANGES: readonly UsageRange[]` and `UsageRange = { id: string; label: string; ms: number }`
+  - `StatCards({ rows })`
+  - `UsageChart({ rows, metric })`
+  - `UsageScreen({ now })` — `now` injected so range boundaries are deterministic under test
+
+**The spec's rate-limit rate is not in this endpoint.** `GET /api/usage` returns `UsageBucket`, which counts `requests` and `errors` and nothing finer — the store aggregates by a single `errors` column, so a 429 and a 500 are indistinguishable in it. The error rate is therefore computed here as `errors / requests`, and the **rate-limit rate is sourced from the log tail instead**, where `RequestLog.errorCode` distinguishes them. That makes the rate-limit figure window-limited to the retained log rows, which the UI labels honestly ("last 200 requests") rather than presenting as a period rate. Widening `UsageBucket` with a `rateLimited` column would be the clean fix and belongs in the gateway plan's store task, not in a dashboard plan that would then own a migration.
+
+**Charts under happy-dom.** `ResponsiveContainer` measures its parent, which is always 0×0 in happy-dom, so it renders nothing and any assertion against the SVG is a false negative waiting to happen. `UsageChart` therefore takes explicit `width`/`height` props with a measured default, and the tests assert the numbers in `StatCards` and the table. The chart is presentation over the same `rows` the table already proves.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/dashboard/test/features/usage.test.tsx`:
+
+```tsx
+import { afterEach, expect, test } from "bun:test";
+import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { totals, UsageScreen } from "../../src/routes/_app.usage.tsx";
+import { createFetchStub } from "../helpers/fetchStub.ts";
+import { bucketFixture, logFixture, NOW } from "../helpers/fixtures.ts";
+import { renderWithProviders } from "../helpers/render.tsx";
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+const ROWS = [
+  bucketFixture({ key: "claude-opus-4", requests: 100, inputTokens: 900_000, outputTokens: 100_000, costUsd: 21, errors: 4 }),
+  bucketFixture({ key: "gpt-5", requests: 50, inputTokens: 100_000, outputTokens: 20_000, costUsd: 3, errors: 0 }),
+];
+
+function stubUsage(rows = ROWS, logs = [logFixture()]) {
+  return createFetchStub({
+    "GET /api/usage": () => ({ rows }),
+    "GET /api/logs": () => ({ logs }),
+  });
+}
+
+test("totals sums every bucket", () => {
+  expect(totals(ROWS)).toEqual({
+    requests: 150,
+    inputTokens: 1_000_000,
+    outputTokens: 120_000,
+    costUsd: 24,
+    errors: 4,
+  });
+});
+
+test("totals of nothing is zero, not NaN", () => {
+  expect(totals([])).toEqual({
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+    errors: 0,
+  });
+});
+
+test("the stat cards show requests, tokens, cost and error rate", async () => {
+  stubUsage();
+  renderWithProviders(<UsageScreen now={NOW} />);
+
+  const requests = await screen.findByRole("group", { name: /requests/i });
+  expect(within(requests).getByText("150")).toBeDefined();
+  expect(within(screen.getByRole("group", { name: /^cost/i })).getByText("$24.00")).toBeDefined();
+  expect(within(screen.getByRole("group", { name: /tokens/i })).getByText("1.1M")).toBeDefined();
+  // 4 of 150.
+  expect(within(screen.getByRole("group", { name: /error rate/i })).getByText("2.7%")).toBeDefined();
+});
+
+test("the error rate of an idle window is a dash, not a division by zero", async () => {
+  stubUsage([]);
+  renderWithProviders(<UsageScreen now={NOW} />);
+  const card = await screen.findByRole("group", { name: /error rate/i });
+  expect(within(card).getByText("—")).toBeDefined();
+});
+
+test("each bucket is a table row with its share of the cost", async () => {
+  stubUsage();
+  renderWithProviders(<UsageScreen now={NOW} />);
+  const row = await screen.findByRole("row", { name: /claude-opus-4/ });
+  expect(within(row).getByText("100")).toBeDefined();
+  expect(within(row).getByText("$21.00")).toBeDefined();
+});
+
+test("rows are ordered by cost so the expensive slice is first", async () => {
+  stubUsage([
+    bucketFixture({ key: "cheap", costUsd: 1 }),
+    bucketFixture({ key: "pricey", costUsd: 99 }),
+  ]);
+  renderWithProviders(<UsageScreen now={NOW} />);
+  await screen.findByRole("row", { name: /pricey/ });
+  const keys = screen.getAllByRole("cell", { name: /cheap|pricey/ }).map((c) => c.textContent);
+  expect(keys).toEqual(["pricey", "cheap"]);
+});
+
+test("switching the grouping refetches with the new groupBy", async () => {
+  const stub = stubUsage();
+  renderWithProviders(<UsageScreen now={NOW} />);
+  await screen.findByRole("row", { name: /claude-opus-4/ });
+
+  await (await userEvent.setup()).selectOptions(screen.getByLabelText(/group by/i), "credential");
+
+  const urls = stub.calls.map((c) => c.url).filter((u) => u.startsWith("/api/usage"));
+  expect(urls.some((u) => u.includes("groupBy=model"))).toBe(true);
+  expect(urls.some((u) => u.includes("groupBy=credential"))).toBe(true);
+});
+
+test("switching the range moves the since boundary", async () => {
+  const stub = stubUsage();
+  renderWithProviders(<UsageScreen now={NOW} />);
+  await screen.findByRole("row", { name: /claude-opus-4/ });
+
+  await (await userEvent.setup()).selectOptions(screen.getByLabelText(/range/i), "7d");
+
+  const since = stub.calls
+    .map((c) => c.url)
+    .filter((u) => u.startsWith("/api/usage"))
+    .map((u) => Number(new URL(u, "http://x").searchParams.get("since")));
+  expect(since).toContain(NOW - 86_400_000);
+  expect(since).toContain(NOW - 7 * 86_400_000);
+});
+
+test("the rate limit figure is labelled as a log-tail sample, not a period rate", async () => {
+  stubUsage(ROWS, [
+    logFixture({ id: "a", status: 429, errorCode: "RATE_LIMITED" }),
+    logFixture({ id: "b", status: 200, errorCode: null }),
+    logFixture({ id: "c", status: 200, errorCode: null }),
+    logFixture({ id: "d", status: 200, errorCode: null }),
+  ]);
+  renderWithProviders(<UsageScreen now={NOW} />);
+
+  const card = await screen.findByRole("group", { name: /rate limited/i });
+  expect(within(card).getByText("25.0%")).toBeDefined();
+  expect(within(card).getByText(/last 200 requests/i)).toBeDefined();
+});
+
+test("a failed load offers a retry instead of an empty chart", async () => {
+  createFetchStub({
+    "GET /api/usage": () => ({ status: 500, body: { error: { code: "INTERNAL", message: "boom" } } }),
+    "GET /api/logs": () => ({ logs: [] }),
+  });
+  renderWithProviders(<UsageScreen now={NOW} />);
+  expect(await screen.findByText("boom")).toBeDefined();
+  expect(screen.getByRole("button", { name: /retry/i })).toBeDefined();
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/dashboard/test/features/usage.test.tsx`
+Expected: FAIL — cannot resolve `../../src/routes/_app.usage.tsx`.
+
+- [ ] **Step 3: Write the stat cards**
+
+`apps/dashboard/src/features/usage/StatCards.tsx`:
+
+```tsx
+import type { ReactNode } from "react";
+import type { UsageBucket } from "@/api/types.ts";
+import { formatTokens, formatUsd } from "@/lib/format.ts";
+import { Card } from "@/components/ui/card.tsx";
+
+export type UsageTotals = {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  errors: number;
+};
+
+export function totals(rows: readonly UsageBucket[]): UsageTotals {
+  return rows.reduce<UsageTotals>(
+    (acc, row) => ({
+      requests: acc.requests + row.requests,
+      inputTokens: acc.inputTokens + row.inputTokens,
+      outputTokens: acc.outputTokens + row.outputTokens,
+      costUsd: acc.costUsd + row.costUsd,
+      errors: acc.errors + row.errors,
+    }),
+    { requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, errors: 0 },
+  );
+}
+
+/** A rate over zero requests is "—", not 0% — an idle window is not a healthy one. */
+export function formatRate(numerator: number, denominator: number): string {
+  if (denominator === 0) return "—";
+  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+}
+
+function Stat({ label, value, note }: { label: string; value: string; note?: ReactNode }) {
+  return (
+    <Card role="group" aria-label={label} className="p-4">
+      <p className="text-xs uppercase tracking-wide opacity-60">{label}</p>
+      <p className="mt-1 text-2xl font-semibold tabular-nums">{value}</p>
+      {note !== undefined && <p className="mt-1 text-xs opacity-60">{note}</p>}
+    </Card>
+  );
+}
+
+export function StatCards({
+  rows,
+  rateLimitedShare,
+  logSampleSize,
+}: {
+  rows: readonly UsageBucket[];
+  rateLimitedShare: string;
+  logSampleSize: number;
+}) {
+  const t = totals(rows);
+  return (
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <Stat label="Requests" value={t.requests.toLocaleString()} />
+      <Stat
+        label="Tokens"
+        value={formatTokens(t.inputTokens + t.outputTokens)}
+        note={`${formatTokens(t.inputTokens)} in · ${formatTokens(t.outputTokens)} out`}
+      />
+      <Stat label="Cost" value={formatUsd(t.costUsd)} />
+      <Stat label="Error rate" value={formatRate(t.errors, t.requests)} />
+      <Stat
+        label="Rate limited"
+        value={rateLimitedShare}
+        // Sourced from the log tail, not the aggregate: UsageBucket counts all
+        // errors in one column and cannot separate a 429 from a 500.
+        note={`last ${logSampleSize} requests`}
+      />
+    </div>
+  );
+}
+```
+
+- [ ] **Step 4: Write the chart**
+
+`apps/dashboard/src/features/usage/UsageChart.tsx`:
+
+```tsx
+import { Bar, BarChart, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts";
+import type { UsageBucket } from "@/api/types.ts";
+import { formatUsd } from "@/lib/format.ts";
+
+export type UsageMetric = "requests" | "costUsd" | "tokens";
+
+const LABEL: Readonly<Record<UsageMetric, string>> = {
+  requests: "Requests",
+  costUsd: "Cost",
+  tokens: "Tokens",
+};
+
+/**
+ * Explicit width and height, deliberately not ResponsiveContainer: it measures
+ * its parent, which is 0x0 under happy-dom, so a responsive chart renders
+ * nothing at all in tests. The page passes a measured width.
+ */
+export function UsageChart({
+  rows,
+  metric,
+  width = 720,
+  height = 240,
+}: {
+  rows: readonly UsageBucket[];
+  metric: UsageMetric;
+  width?: number;
+  height?: number;
+}) {
+  const data = rows.map((row) => ({
+    key: row.key,
+    value:
+      metric === "tokens"
+        ? row.inputTokens + row.outputTokens
+        : metric === "costUsd"
+          ? row.costUsd
+          : row.requests,
+  }));
+
+  return (
+    <BarChart data={data} width={width} height={height} aria-label={`${LABEL[metric]} by bucket`}>
+      <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+      <XAxis dataKey="key" tick={{ fontSize: 11 }} interval={0} angle={-20} textAnchor="end" height={56} />
+      <YAxis tick={{ fontSize: 11 }} width={64} />
+      <Tooltip formatter={(v: number) => (metric === "costUsd" ? formatUsd(v) : v.toLocaleString())} />
+      <Bar dataKey="value" name={LABEL[metric]} radius={[3, 3, 0, 0]} />
+    </BarChart>
+  );
+}
+```
+
+- [ ] **Step 5: Write the screen and its route**
+
+`apps/dashboard/src/routes/_app.usage.tsx`:
+
+```tsx
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
+import { logsQuery, usageQuery } from "@/api/queries.ts";
+import type { UsageGroupBy } from "@/api/types.ts";
+import { USAGE_GROUP_BY } from "@/api/types.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { formatRate, StatCards, totals } from "@/features/usage/StatCards.tsx";
+import { UsageChart, type UsageMetric } from "@/features/usage/UsageChart.tsx";
+import { formatTokens, formatUsd } from "@/lib/format.ts";
+import { Label } from "@/components/ui/label.tsx";
+
+export { totals } from "@/features/usage/StatCards.tsx";
+
+export type UsageRange = { id: string; label: string; ms: number };
+
+export const RANGES: readonly UsageRange[] = [
+  { id: "24h", label: "Last 24 hours", ms: 86_400_000 },
+  { id: "7d", label: "Last 7 days", ms: 7 * 86_400_000 },
+  { id: "30d", label: "Last 30 days", ms: 30 * 86_400_000 },
+];
+
+const GROUP_LABEL: Readonly<Record<UsageGroupBy, string>> = {
+  model: "Model",
+  credential: "Credential",
+  apiKey: "API key",
+  hour: "Hour",
+};
+
+/** The log tail this screen samples for the rate-limit share. */
+const RATE_LIMIT_SAMPLE = 200;
+
+export function UsageScreen({ now }: { now: number }) {
+  const [groupBy, setGroupBy] = useState<UsageGroupBy>("model");
+  const [rangeId, setRangeId] = useState("24h");
+  const [metric, setMetric] = useState<UsageMetric>("requests");
+
+  const range = RANGES.find((r) => r.id === rangeId) ?? (RANGES[0] as UsageRange);
+  const usage = useQuery(usageQuery(groupBy, now - range.ms));
+  // Polling off: this is a sample for one stat card, not a live tail.
+  const logs = useQuery({ ...logsQuery(RATE_LIMIT_SAMPLE, 0), refetchInterval: false });
+
+  const rateLimited = (logs.data ?? []).filter((l) => l.errorCode === "RATE_LIMITED").length;
+  const rateLimitedShare = formatRate(rateLimited, logs.data?.length ?? 0);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <h1 className="text-lg font-semibold tracking-tight">Usage</h1>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="usage-range">Range</Label>
+            <select
+              id="usage-range"
+              className="h-9 rounded-md border bg-transparent px-2 text-sm"
+              value={rangeId}
+              onChange={(e) => setRangeId(e.target.value)}
+            >
+              {RANGES.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="usage-group">Group by</Label>
+            <select
+              id="usage-group"
+              className="h-9 rounded-md border bg-transparent px-2 text-sm"
+              value={groupBy}
+              onChange={(e) => setGroupBy(e.target.value as UsageGroupBy)}
+            >
+              {USAGE_GROUP_BY.map((g) => (
+                <option key={g} value={g}>
+                  {GROUP_LABEL[g]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="usage-metric">Metric</Label>
+            <select
+              id="usage-metric"
+              className="h-9 rounded-md border bg-transparent px-2 text-sm"
+              value={metric}
+              onChange={(e) => setMetric(e.target.value as UsageMetric)}
+            >
+              <option value="requests">Requests</option>
+              <option value="tokens">Tokens</option>
+              <option value="costUsd">Cost</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {usage.isError && <ErrorState error={usage.error} onRetry={() => usage.refetch()} />}
+      {usage.isPending && <p className="text-sm opacity-70">Loading usage…</p>}
+
+      {usage.data !== undefined && (
+        <>
+          <StatCards
+            rows={usage.data}
+            rateLimitedShare={rateLimitedShare}
+            logSampleSize={RATE_LIMIT_SAMPLE}
+          />
+
+          {usage.data.length === 0 ? (
+            <p className="text-sm opacity-70">No requests in this window.</p>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <UsageChart rows={sortByCost(usage.data)} metric={metric} />
+              </div>
+
+              <table className="w-full text-sm">
+                <thead className="text-left text-xs opacity-60">
+                  <tr>
+                    <th className="py-1">{GROUP_LABEL[groupBy]}</th>
+                    <th className="text-right">Requests</th>
+                    <th className="text-right">Input</th>
+                    <th className="text-right">Output</th>
+                    <th className="text-right">Cost</th>
+                    <th className="text-right">Errors</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortByCost(usage.data).map((row) => (
+                    <tr key={row.key} className="border-t">
+                      <td className="py-1.5">{row.key}</td>
+                      <td className="text-right tabular-nums">{row.requests.toLocaleString()}</td>
+                      <td className="text-right tabular-nums">{formatTokens(row.inputTokens)}</td>
+                      <td className="text-right tabular-nums">{formatTokens(row.outputTokens)}</td>
+                      <td className="text-right tabular-nums">{formatUsd(row.costUsd)}</td>
+                      <td className="text-right tabular-nums">
+                        {row.errors === 0 ? "0" : formatRate(row.errors, row.requests)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t font-medium">
+                    <td className="py-1.5">Total</td>
+                    <td className="text-right tabular-nums">
+                      {totals(usage.data).requests.toLocaleString()}
+                    </td>
+                    <td colSpan={2} />
+                    <td className="text-right tabular-nums">{formatUsd(totals(usage.data).costUsd)}</td>
+                    <td />
+                  </tr>
+                </tfoot>
+              </table>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Cost first: the expensive slice is the one an operator opened this screen for. */
+function sortByCost(rows: readonly UsageBucket[]): UsageBucket[] {
+  return [...rows].sort((a, b) => b.costUsd - a.costUsd);
+}
+
+export const Route = createFileRoute("/_app/usage")({
+  component: () => <UsageScreen now={Date.now()} />,
+});
+```
+
+Add the missing `import type { UsageBucket } from "@/api/types.ts";` alongside the `UsageGroupBy` import — `sortByCost` needs it.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `bun test apps/dashboard`
+Expected: 79 pass, 0 fail.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/dashboard
+git commit -m "feat(dashboard): add the usage screen with totals, grouping and a cost chart"
+```
+
+---
+
+## Task 11: Logs screen — a polled live tail
+
+**Files:**
+- Create: `apps/dashboard/src/features/logs/LogRow.tsx`, `apps/dashboard/src/routes/_app.logs.tsx`
+- Test: `apps/dashboard/test/features/logs.test.tsx`
+
+**Interfaces:**
+- Consumes: `logsQuery` (Task 3); `RequestLog` (Task 2); `formatMs`, `formatRelative`, `formatTokens`, `formatUsd` (Task 3); `ErrorState` (Task 4).
+- Produces:
+  - `POLL_MS = 3_000`
+  - `LOG_LIMITS: readonly number[]`
+  - `LogRow({ log, now, expanded, onToggle })`
+  - `LogsScreen({ now })`
+
+**The per-attempt trace the spec asks for does not exist in the data.** The spec wants each row expandable to "the failover trace". `RequestLog` records `attempts: number` — a count — plus the credential and model that *won*, the `errorCode`, and `degradations[]`. The losing attempts are not persisted anywhere; the store writes one row per client request. So the expansion shows everything that was actually recorded, and says plainly when a request took more than one attempt that the earlier ones are not retained. A real trace needs a `request_attempts` table in the gateway's schema, which is a store change and belongs in the gateway plan, not here. This is a **visible reduction against the spec** and is called out in the UI rather than papered over.
+
+Polling, not a socket, per the core plan's third deviation. `logsQuery` already sets `refetchInterval` with `staleTime: 0`; this screen only chooses the interval and lets the operator pause it — a tail that reorders under the cursor while you are reading a row is worse than a stale one.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/dashboard/test/features/logs.test.tsx`:
+
+```tsx
+import { afterEach, expect, test } from "bun:test";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { LogsScreen, POLL_MS } from "../../src/routes/_app.logs.tsx";
+import { createFetchStub } from "../helpers/fetchStub.ts";
+import { logFixture, NOW } from "../helpers/fixtures.ts";
+import { renderWithProviders } from "../helpers/render.tsx";
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+test("each recent request is a row naming the model that served it", async () => {
+  createFetchStub({
+    "GET /api/logs": () => ({
+      logs: [
+        logFixture({ id: "r1", requestedModel: "fast", resolvedModel: "claude-haiku-4" }),
+        logFixture({ id: "r2", requestedModel: "smart", resolvedModel: "gpt-5" }),
+      ],
+    }),
+  });
+  renderWithProviders(<LogsScreen now={NOW} />);
+
+  const row = await screen.findByRole("row", { name: /claude-haiku-4/ });
+  expect(within(row).getByText("fast")).toBeDefined();
+  expect(screen.getByRole("row", { name: /gpt-5/ })).toBeDefined();
+});
+
+test("a failed request shows its status and error code", async () => {
+  createFetchStub({
+    "GET /api/logs": () => ({
+      logs: [logFixture({ status: 503, errorCode: "NO_CANDIDATES", resolvedModel: null })],
+    }),
+  });
+  renderWithProviders(<LogsScreen now={NOW} />);
+
+  const row = await screen.findByRole("row", { name: /NO_CANDIDATES/ });
+  expect(within(row).getByText("503")).toBeDefined();
+});
+
+test("expanding a row shows the recorded detail", async () => {
+  createFetchStub({
+    "GET /api/logs": () => ({
+      logs: [logFixture({ ttftMs: 410, durationMs: 2_100, costUsd: 0.0435, attempts: 1 })],
+    }),
+  });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await (await userEvent.setup()).click(await screen.findByRole("button", { name: /details for r1/i }));
+
+  expect(screen.getByText("410ms")).toBeDefined();
+  expect(screen.getByText("2.1s")).toBeDefined();
+  expect(screen.getByText("$0.0435")).toBeDefined();
+});
+
+test("a multi-attempt request says the earlier attempts are not retained", async () => {
+  createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture({ attempts: 3 })] }) });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await (await userEvent.setup()).click(await screen.findByRole("button", { name: /details for r1/i }));
+
+  expect(screen.getByText(/3 attempts/i)).toBeDefined();
+  expect(screen.getByText(/earlier attempts are not retained/i)).toBeDefined();
+});
+
+test("a single-attempt request does not show the retention caveat", async () => {
+  createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture({ attempts: 1 })] }) });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await (await userEvent.setup()).click(await screen.findByRole("button", { name: /details for r1/i }));
+
+  expect(screen.queryByText(/earlier attempts are not retained/i)).toBeNull();
+});
+
+test("degradations are listed so a silently downgraded request is visible", async () => {
+  createFetchStub({
+    "GET /api/logs": () => ({ logs: [logFixture({ degradations: ["droppedThinking"] })] }),
+  });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await (await userEvent.setup()).click(await screen.findByRole("button", { name: /details for r1/i }));
+
+  expect(screen.getByText("droppedThinking")).toBeDefined();
+});
+
+test("the tail polls on the interval", async () => {
+  let call = 0;
+  const stub = createFetchStub({
+    "GET /api/logs": () => ({ logs: [logFixture({ id: `r${++call}` })] }),
+  });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await screen.findByRole("row", { name: /r1/ });
+
+  await waitFor(
+    () => expect(stub.calls.filter((c) => c.url.startsWith("/api/logs")).length).toBeGreaterThan(1),
+    { timeout: POLL_MS * 3 },
+  );
+});
+
+test("pausing stops the polling", async () => {
+  const stub = createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture()] }) });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await screen.findByRole("row", { name: /r1/ });
+  await (await userEvent.setup()).click(screen.getByRole("button", { name: /pause/i }));
+
+  const after = stub.calls.length;
+  await new Promise((resolve) => setTimeout(resolve, POLL_MS * 1.5));
+  expect(stub.calls.length).toBe(after);
+  expect(screen.getByRole("button", { name: /resume/i })).toBeDefined();
+});
+
+test("changing the limit refetches with the new limit", async () => {
+  const stub = createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture()] }) });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await screen.findByRole("row", { name: /r1/ });
+
+  await (await userEvent.setup()).selectOptions(screen.getByLabelText(/rows/i), "500");
+  await waitFor(() => expect(stub.calls.some((c) => c.url.includes("limit=500"))).toBe(true));
+});
+
+test("an empty tail says so rather than showing a bare header", async () => {
+  createFetchStub({ "GET /api/logs": () => ({ logs: [] }) });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  expect(await screen.findByText(/no requests yet/i)).toBeDefined();
+});
+
+test("a failed poll surfaces the error and keeps the last rows on screen", async () => {
+  let fail = false;
+  createFetchStub({
+    "GET /api/logs": () =>
+      fail
+        ? { status: 500, body: { error: { code: "INTERNAL", message: "db locked" } } }
+        : { logs: [logFixture()] },
+  });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await screen.findByRole("row", { name: /r1/ });
+
+  fail = true;
+  expect(await screen.findByText("db locked", {}, { timeout: POLL_MS * 3 })).toBeDefined();
+  // The tail is still readable; a transient poll failure must not blank it.
+  expect(screen.getByRole("row", { name: /r1/ })).toBeDefined();
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/dashboard/test/features/logs.test.tsx`
+Expected: FAIL — cannot resolve `../../src/routes/_app.logs.tsx`.
+
+- [ ] **Step 3: Write the row**
+
+`apps/dashboard/src/features/logs/LogRow.tsx`:
+
+```tsx
+import type { RequestLog } from "@/api/types.ts";
+import { formatMs, formatRelative, formatTokens, formatUsd } from "@/lib/format.ts";
+import { Button } from "@/components/ui/button.tsx";
+
+function statusClass(status: number): string {
+  if (status >= 500) return "text-bad";
+  if (status >= 400) return "text-warn";
+  return "text-good";
+}
+
+function Detail({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="opacity-60">{label}</dt>
+      <dd className="tabular-nums">{value}</dd>
+    </div>
+  );
+}
+
+export function LogRow({
+  log,
+  now,
+  expanded,
+  onToggle,
+}: {
+  log: RequestLog;
+  now: number;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <>
+      <tr className="border-t">
+        <td className="py-1.5 whitespace-nowrap opacity-70">{formatRelative(log.at, now)}</td>
+        <td>{log.requestedModel}</td>
+        <td className="opacity-70">{log.resolvedModel ?? "—"}</td>
+        <td className="opacity-70">{log.resolvedProvider ?? "—"}</td>
+        <td className={`tabular-nums ${statusClass(log.status)}`}>{log.status}</td>
+        <td className="text-warn">{log.errorCode ?? ""}</td>
+        <td className="text-right tabular-nums">{formatMs(log.durationMs)}</td>
+        <td className="text-right tabular-nums">{formatUsd(log.costUsd)}</td>
+        <td className="text-right">
+          <Button size="sm" variant="ghost" aria-label={`Details for ${log.id}`} onClick={onToggle}>
+            {expanded ? "Hide" : "Details"}
+          </Button>
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={9} className="pb-3">
+            <dl className="grid grid-cols-2 gap-3 rounded-md bg-muted p-3 text-xs sm:grid-cols-4">
+              <Detail label="Request" value={log.id} />
+              <Detail label="API key" value={log.apiKeyId ?? "—"} />
+              <Detail label="Credential" value={log.credentialId ?? "—"} />
+              <Detail label="Attempts" value={String(log.attempts)} />
+              <Detail label="Time to first token" value={formatMs(log.ttftMs)} />
+              <Detail label="Duration" value={formatMs(log.durationMs)} />
+              <Detail
+                label="Tokens"
+                value={`${formatTokens(log.inputTokens)} in · ${formatTokens(log.outputTokens)} out`}
+              />
+              <Detail
+                label="Cache"
+                value={`${formatTokens(log.cacheReadTokens)} read · ${formatTokens(log.cacheWriteTokens)} write`}
+              />
+              <Detail label="Cost" value={formatUsd(log.costUsd)} />
+            </dl>
+
+            {log.degradations.length > 0 && (
+              <p className="mt-2 text-xs">
+                <span className="opacity-60">Degradations: </span>
+                {log.degradations.map((d) => (
+                  <span key={d} className="mr-2 rounded bg-warn/15 px-1.5 py-0.5 text-warn">
+                    {d}
+                  </span>
+                ))}
+              </p>
+            )}
+
+            {log.attempts > 1 && (
+              // The spec asks for a per-attempt trace. The store keeps one row
+              // per client request, so the losing attempts are a count and
+              // nothing more. Saying so beats implying the winner was the only try.
+              <p className="mt-2 text-xs opacity-60">
+                {`Served after ${log.attempts} attempts. The earlier attempts are not retained; only
+                 the credential that ultimately answered is recorded.`}
+              </p>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+```
+
+- [ ] **Step 4: Write the screen and its route**
+
+`apps/dashboard/src/routes/_app.logs.tsx`:
+
+```tsx
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
+import { logsQuery } from "@/api/queries.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { LogRow } from "@/features/logs/LogRow.tsx";
+import { Button } from "@/components/ui/button.tsx";
+import { Label } from "@/components/ui/label.tsx";
+
+/** The core plan has no WebSocket; three seconds is the live tail. */
+export const POLL_MS = 3_000;
+
+export const LOG_LIMITS: readonly number[] = [100, 200, 500];
+
+export function LogsScreen({ now }: { now: number }) {
+  const [limit, setLimit] = useState<number>(100);
+  const [paused, setPaused] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const logs = useQuery({
+    ...logsQuery(limit, POLL_MS),
+    refetchInterval: paused ? false : POLL_MS,
+  });
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-lg font-semibold tracking-tight">Logs</h1>
+          <p className="text-xs opacity-60">
+            {paused ? "Paused." : `Refreshing every ${POLL_MS / 1000}s.`}
+          </p>
+        </div>
+        <div className="flex items-end gap-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="log-limit">Rows</Label>
+            <select
+              id="log-limit"
+              className="h-9 rounded-md border bg-transparent px-2 text-sm"
+              value={String(limit)}
+              onChange={(e) => setLimit(Number(e.target.value))}
+            >
+              {LOG_LIMITS.map((n) => (
+                <option key={n} value={String(n)}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => setPaused(!paused)}>
+            {paused ? "Resume" : "Pause"}
+          </Button>
+        </div>
+      </div>
+
+      {/* Rendered above the table, not instead of it: a failed poll must not
+          blank rows the operator is still reading. */}
+      {logs.isError && <ErrorState error={logs.error} onRetry={() => logs.refetch()} />}
+
+      {logs.isPending && <p className="text-sm opacity-70">Loading logs…</p>}
+
+      {logs.data !== undefined &&
+        (logs.data.length === 0 ? (
+          <p className="text-sm opacity-70">No requests yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left text-xs opacity-60">
+                <tr>
+                  <th className="py-1">When</th>
+                  <th>Requested</th>
+                  <th>Served</th>
+                  <th>Provider</th>
+                  <th>Status</th>
+                  <th>Error</th>
+                  <th className="text-right">Duration</th>
+                  <th className="text-right">Cost</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {logs.data.map((log) => (
+                  <LogRow
+                    key={log.id}
+                    log={log}
+                    now={now}
+                    expanded={expanded === log.id}
+                    onToggle={() => setExpanded(expanded === log.id ? null : log.id)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+export const Route = createFileRoute("/_app/logs")({
+  component: () => <LogsScreen now={Date.now()} />,
+});
+```
+
+`now` is a prop rather than a `Date.now()` call inside `LogRow` so the relative timestamps are deterministic under test. It goes slightly stale between polls, which is invisible at this granularity.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `bun test apps/dashboard`
+Expected: 90 pass, 0 fail.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/dashboard
+git commit -m "feat(dashboard): add the polled log tail with expandable request detail"
+```
+
+---
+
+## Task 12: Keys screen — mint, scope, revoke
+
+**Files:**
+- Create: `apps/dashboard/src/features/keys/MintKeyDialog.tsx`, `apps/dashboard/src/features/keys/KeyRow.tsx`, `apps/dashboard/src/routes/_app.keys.tsx`
+- Test: `apps/dashboard/test/features/keys.test.tsx`
+
+**Interfaces:**
+- Consumes: `api` (Task 2); `WireApiKey`, `MintedKey`, `MintKeyInput`, `OkResponse` (Task 2); `keysQuery`, `modelsQuery`, `qk`, `useInvalidate` (Task 3); `formatRelative` (Task 3); `ErrorState` (Task 4).
+- Produces:
+  - `parseAllowlist(raw: string, known: readonly string[]): { models: string[] | null; unknown: string[] }`
+  - `MintKeyDialog({ open, onClose })`
+  - `KeyRow({ apiKey, now, onRevoked })`
+  - `KeysScreen({ now })`
+
+**The plaintext key exists for one render.** `POST /api/keys` returns `key` once; the store holds only a hash. The dialog therefore keeps it in component state, never in the query cache — putting it in the cache would persist it across screens and into any devtools inspection of the cache — and the list refetch that follows returns rows without it. The reveal panel says the value cannot be shown again, and closing the dialog drops it.
+
+`modelAllowlist: null` means unrestricted, and an empty array means *no model is permitted*, which is a key that can do nothing. The parser maps an empty input to `null` and never to `[]`.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/dashboard/test/features/keys.test.tsx`:
+
+```tsx
+import { afterEach, expect, test } from "bun:test";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { KeysScreen, parseAllowlist } from "../../src/routes/_app.keys.tsx";
+import { createFetchStub } from "../helpers/fetchStub.ts";
+import { keyFixture, modelFixture, NOW } from "../helpers/fixtures.ts";
+import { renderWithProviders } from "../helpers/render.tsx";
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+const MINTED = {
+  id: "k9",
+  label: "ci",
+  prefix: "omni_sk_wxyz",
+  key: "omni_sk_wxyz_test-key-1",
+};
+
+function stubKeys(keys = [keyFixture()]) {
+  return createFetchStub({
+    "GET /api/keys": () => ({ keys }),
+    "GET /api/models": () => ({ models: [modelFixture({ id: "fast" }), modelFixture({ id: "smart" })] }),
+    "POST /api/keys": () => MINTED,
+    "DELETE /api/keys/k1": () => ({ ok: true }),
+  });
+}
+
+test("an empty allowlist means unrestricted, not a key that permits nothing", () => {
+  expect(parseAllowlist("   ", ["fast"])).toEqual({ models: null, unknown: [] });
+});
+
+test("the allowlist splits on commas and newlines and drops blanks", () => {
+  expect(parseAllowlist("fast, smart\n\n fast ", ["fast", "smart"])).toEqual({
+    models: ["fast", "smart"],
+    unknown: [],
+  });
+});
+
+test("a model that is not configured is reported back", () => {
+  expect(parseAllowlist("fast, nope", ["fast"])).toEqual({
+    models: ["fast", "nope"],
+    unknown: ["nope"],
+  });
+});
+
+test("existing keys are listed by label and prefix, never in full", async () => {
+  stubKeys([keyFixture({ label: "laptop", prefix: "omni_sk_abcd" })]);
+  renderWithProviders(<KeysScreen now={NOW} />);
+
+  const row = await screen.findByRole("row", { name: /laptop/ });
+  expect(within(row).getByText(/omni_sk_abcd/)).toBeDefined();
+  expect(within(row).getByText(/…/)).toBeDefined();
+});
+
+test("an unrestricted key says so instead of showing an empty cell", async () => {
+  stubKeys([keyFixture({ modelAllowlist: null, rateLimitPerMin: null })]);
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const row = await screen.findByRole("row", { name: /laptop/ });
+  expect(within(row).getByText(/all models/i)).toBeDefined();
+  expect(within(row).getByText(/no limit/i)).toBeDefined();
+});
+
+test("a revoked key is marked and cannot be revoked again", async () => {
+  stubKeys([keyFixture({ revokedAt: NOW - 1_000 })]);
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const row = await screen.findByRole("row", { name: /laptop/ });
+  expect(within(row).getByText(/revoked/i)).toBeDefined();
+  expect(within(row).queryByRole("button", { name: /^revoke$/i })).toBeNull();
+});
+
+test("minting posts the label, allowlist and rate limit", async () => {
+  const stub = stubKeys();
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.type(screen.getByLabelText(/label/i), "ci");
+  await user.type(screen.getByLabelText(/allowed models/i), "fast");
+  await user.type(screen.getByLabelText(/requests per minute/i), "60");
+  await user.click(screen.getByRole("button", { name: /create key/i }));
+
+  await waitFor(() => expect(stub.calls.some((c) => c.url === "/api/keys" && c.init?.method === "POST")).toBe(true));
+  const post = stub.calls.find((c) => c.url === "/api/keys" && c.init?.method === "POST");
+  expect(JSON.parse(String(post?.init?.body))).toEqual({
+    label: "ci",
+    modelAllowlist: ["fast"],
+    rateLimitPerMin: 60,
+  });
+});
+
+test("the plaintext key is shown once with a warning that it will not be shown again", async () => {
+  stubKeys();
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.type(screen.getByLabelText(/label/i), "ci");
+  await user.click(screen.getByRole("button", { name: /create key/i }));
+
+  expect(await screen.findByText(MINTED.key)).toBeDefined();
+  expect(screen.getByText(/will not be shown again/i)).toBeDefined();
+});
+
+test("dismissing the reveal drops the plaintext key from the screen", async () => {
+  stubKeys();
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.type(screen.getByLabelText(/label/i), "ci");
+  await user.click(screen.getByRole("button", { name: /create key/i }));
+  await screen.findByText(MINTED.key);
+  await user.click(screen.getByRole("button", { name: /done/i }));
+
+  expect(screen.queryByText(MINTED.key)).toBeNull();
+});
+
+test("an unknown model in the allowlist warns before minting", async () => {
+  const stub = stubKeys();
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.type(screen.getByLabelText(/label/i), "ci");
+  await user.type(screen.getByLabelText(/allowed models/i), "typo");
+  await user.click(screen.getByRole("button", { name: /create key/i }));
+
+  expect(await screen.findByText(/typo/)).toBeDefined();
+  expect(screen.getByText(/not configured/i)).toBeDefined();
+  expect(stub.calls.some((c) => c.init?.method === "POST")).toBe(false);
+});
+
+test("minting is refused without a label", async () => {
+  stubKeys();
+  renderWithProviders(<KeysScreen now={NOW} />);
+  await (await userEvent.setup()).click(await screen.findByRole("button", { name: /new key/i }));
+  expect(screen.getByRole("button", { name: /create key/i }).hasAttribute("disabled")).toBe(true);
+});
+
+test("revoking asks for confirmation, then calls delete", async () => {
+  const stub = stubKeys();
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /^revoke$/i }));
+  await user.click(screen.getByRole("button", { name: /revoke “laptop”/i }));
+
+  await waitFor(() =>
+    expect(stub.calls.some((c) => c.url === "/api/keys/k1" && c.init?.method === "DELETE")).toBe(true),
+  );
+});
+
+test("a failed mint surfaces the gateway message and keeps the form open", async () => {
+  createFetchStub({
+    "GET /api/keys": () => ({ keys: [] }),
+    "GET /api/models": () => ({ models: [] }),
+    "POST /api/keys": () => ({
+      status: 400,
+      body: { error: { code: "BAD_REQUEST", message: "label is required" } },
+    }),
+  });
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.type(screen.getByLabelText(/label/i), "ci");
+  await user.click(screen.getByRole("button", { name: /create key/i }));
+
+  expect(await screen.findByText("label is required")).toBeDefined();
+  expect(screen.getByLabelText(/label/i)).toBeDefined();
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/dashboard/test/features/keys.test.tsx`
+Expected: FAIL — cannot resolve `../../src/routes/_app.keys.tsx`.
+
+- [ ] **Step 3: Write the mint dialog**
+
+`apps/dashboard/src/features/keys/MintKeyDialog.tsx`:
+
+```tsx
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { api } from "@/api/client.ts";
+import { modelsQuery, qk, useInvalidate } from "@/api/queries.ts";
+import type { MintedKey, MintKeyInput } from "@/api/types.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { Button } from "@/components/ui/button.tsx";
+import { Input } from "@/components/ui/input.tsx";
+import { Label } from "@/components/ui/label.tsx";
+import { Textarea } from "@/components/ui/textarea.tsx";
+
+/**
+ * `null` means unrestricted. An empty array would mean "no model is permitted",
+ * a key that can do nothing, which is never what an empty box meant.
+ */
+export function parseAllowlist(
+  raw: string,
+  known: readonly string[],
+): { models: string[] | null; unknown: string[] } {
+  const parts = [...new Set(raw.split(/[\n,]/).map((s) => s.trim()).filter((s) => s.length > 0))];
+  if (parts.length === 0) return { models: null, unknown: [] };
+  return { models: parts, unknown: parts.filter((p) => !known.includes(p)) };
+}
+
+export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const invalidate = useInvalidate();
+  const models = useQuery(modelsQuery());
+  const [label, setLabel] = useState("");
+  const [allowlist, setAllowlist] = useState("");
+  const [rateLimit, setRateLimit] = useState("");
+  const [unknownModels, setUnknownModels] = useState<string[]>([]);
+  // Held here, never in the query cache: the cache outlives this dialog and
+  // would keep a live secret readable from every other screen.
+  const [minted, setMinted] = useState<MintedKey | null>(null);
+
+  const mint = useMutation({
+    mutationFn: (input: MintKeyInput) => api.post<MintedKey>("/api/keys", input),
+    onSuccess: async (key) => {
+      setMinted(key);
+      await invalidate([qk.keys()]);
+    },
+  });
+
+  if (!open) return null;
+
+  const knownModels = (models.data ?? []).map((m) => m.id);
+
+  function submit(): void {
+    const parsed = parseAllowlist(allowlist, knownModels);
+    if (parsed.unknown.length > 0) {
+      setUnknownModels(parsed.unknown);
+      return;
+    }
+    setUnknownModels([]);
+    const rpm = rateLimit.trim() === "" ? null : Number(rateLimit);
+    mint.mutate({
+      label: label.trim(),
+      modelAllowlist: parsed.models,
+      rateLimitPerMin: rpm !== null && Number.isFinite(rpm) ? rpm : null,
+    });
+  }
+
+  function finish(): void {
+    setMinted(null);
+    setLabel("");
+    setAllowlist("");
+    setRateLimit("");
+    setUnknownModels([]);
+    onClose();
+  }
+
+  return (
+    <div role="dialog" aria-label="New API key" className="rounded-lg border p-5">
+      {minted === null ? (
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="key-label">Label</Label>
+            <Input
+              id="key-label"
+              value={label}
+              placeholder="laptop"
+              onChange={(e) => setLabel(e.target.value)}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="key-allowlist">Allowed models</Label>
+            <Textarea
+              id="key-allowlist"
+              rows={2}
+              value={allowlist}
+              placeholder="Leave empty for all models"
+              onChange={(e) => setAllowlist(e.target.value)}
+            />
+            <p className="text-xs opacity-60">
+              {knownModels.length > 0 ? `Configured: ${knownModels.join(", ")}` : "No models configured yet."}
+            </p>
+          </div>
+
+          <div className="w-48 space-y-1.5">
+            <Label htmlFor="key-rpm">Requests per minute</Label>
+            <Input
+              id="key-rpm"
+              type="number"
+              min={1}
+              value={rateLimit}
+              placeholder="No limit"
+              onChange={(e) => setRateLimit(e.target.value)}
+            />
+          </div>
+
+          {unknownModels.length > 0 && (
+            <p role="alert" className="text-sm text-warn">
+              {`${unknownModels.join(", ")} is not configured as a virtual model. Fix the list, or
+               create the model first.`}
+            </p>
+          )}
+          {mint.isError && <ErrorState error={mint.error} />}
+
+          <div className="flex gap-2">
+            <Button size="sm" disabled={label.trim().length === 0 || mint.isPending} onClick={submit}>
+              Create key
+            </Button>
+            <Button size="sm" variant="ghost" onClick={finish}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-sm font-medium">{`Key “${minted.label}” created.`}</p>
+          <code className="block break-all rounded-md bg-muted p-3 font-mono text-sm">
+            {minted.key}
+          </code>
+          <p className="text-sm text-warn">
+            Copy it now. Only a hash is stored, so this value will not be shown again.
+          </p>
+          <Button size="sm" onClick={finish}>
+            Done
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 4: Write the row**
+
+`apps/dashboard/src/features/keys/KeyRow.tsx`:
+
+```tsx
+import { useMutation } from "@tanstack/react-query";
+import { useState } from "react";
+import { api } from "@/api/client.ts";
+import { qk, useInvalidate } from "@/api/queries.ts";
+import type { OkResponse, WireApiKey } from "@/api/types.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { formatRelative } from "@/lib/format.ts";
+import { Button } from "@/components/ui/button.tsx";
+
+export function KeyRow({ apiKey, now }: { apiKey: WireApiKey; now: number }) {
+  const invalidate = useInvalidate();
+  const [confirming, setConfirming] = useState(false);
+
+  const revoke = useMutation({
+    mutationFn: () => api.del<OkResponse>(`/api/keys/${encodeURIComponent(apiKey.id)}`),
+    onSuccess: async () => {
+      setConfirming(false);
+      await invalidate([qk.keys()]);
+    },
+  });
+
+  const revoked = apiKey.revokedAt !== null;
+
+  return (
+    <>
+      <tr className={`border-t ${revoked ? "opacity-50" : ""}`}>
+        <td className="py-1.5">{apiKey.label}</td>
+        <td className="font-mono text-xs">{`${apiKey.prefix}…`}</td>
+        <td className="text-xs">
+          {apiKey.modelAllowlist === null ? (
+            <span className="opacity-60">All models</span>
+          ) : (
+            apiKey.modelAllowlist.join(", ")
+          )}
+        </td>
+        <td className="text-xs tabular-nums">
+          {apiKey.rateLimitPerMin === null ? (
+            <span className="opacity-60">No limit</span>
+          ) : (
+            `${apiKey.rateLimitPerMin}/min`
+          )}
+        </td>
+        <td className="text-xs opacity-70">{formatRelative(apiKey.createdAt, now)}</td>
+        <td className="text-right">
+          {revoked ? (
+            <span className="text-xs text-bad">
+              {`Revoked ${formatRelative(apiKey.revokedAt as number, now)}`}
+            </span>
+          ) : (
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+              Revoke
+            </Button>
+          )}
+        </td>
+      </tr>
+      {confirming && (
+        <tr>
+          <td colSpan={6} className="pb-3">
+            <div role="alertdialog" className="rounded-md border border-bad/40 p-3 text-sm">
+              <p>Anything using this key stops working immediately. This cannot be undone.</p>
+              {revoke.isError && <ErrorState error={revoke.error} />}
+              <div className="mt-3 flex gap-2">
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={revoke.isPending}
+                  onClick={() => revoke.mutate()}
+                >
+                  {`Revoke “${apiKey.label}”`}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+```
+
+- [ ] **Step 5: Write the screen and its route**
+
+`apps/dashboard/src/routes/_app.keys.tsx`:
+
+```tsx
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
+import { keysQuery } from "@/api/queries.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { KeyRow } from "@/features/keys/KeyRow.tsx";
+import { MintKeyDialog } from "@/features/keys/MintKeyDialog.tsx";
+import { Button } from "@/components/ui/button.tsx";
+
+export { parseAllowlist } from "@/features/keys/MintKeyDialog.tsx";
+
+export function KeysScreen({ now }: { now: number }) {
+  const keys = useQuery(keysQuery());
+  const [minting, setMinting] = useState(false);
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold tracking-tight">API keys</h1>
+          <p className="text-xs opacity-60">
+            The credentials your clients send to this gateway. Provider credentials live on the
+            Credentials screen.
+          </p>
+        </div>
+        <Button size="sm" onClick={() => setMinting(true)}>
+          New key
+        </Button>
+      </div>
+
+      <MintKeyDialog open={minting} onClose={() => setMinting(false)} />
+
+      {keys.isPending && <p className="text-sm opacity-70">Loading keys…</p>}
+      {keys.isError && <ErrorState error={keys.error} onRetry={() => keys.refetch()} />}
+
+      {keys.data !== undefined &&
+        (keys.data.length === 0 ? (
+          <p className="text-sm opacity-70">No API keys yet. Mint one to start sending requests.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="text-left text-xs opacity-60">
+              <tr>
+                <th className="py-1">Label</th>
+                <th>Key</th>
+                <th>Models</th>
+                <th>Rate limit</th>
+                <th>Created</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {keys.data.map((apiKey) => (
+                <KeyRow key={apiKey.id} apiKey={apiKey} now={now} />
+              ))}
+            </tbody>
+          </table>
+        ))}
+    </div>
+  );
+}
+
+export const Route = createFileRoute("/_app/keys")({
+  component: () => <KeysScreen now={Date.now()} />,
+});
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `bun test apps/dashboard`
+Expected: 103 pass, 0 fail.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/dashboard
+git commit -m "feat(dashboard): add the api key screen with one-time reveal and revocation"
+```
+
+---
+
+## Task 13: `GET /api/credentials/health` — filling in the health pills and quota bars
+
+> **This task modifies the gateway**, like Task 9 and for the same kind of
+> reason: Task 6 built the health pill and the quota bar against props, and no
+> `/api/*` route can supply them. `CredentialHealth` and `QuotaWindow` rows
+> exist in the store behind `listHealth()` and `listQuota()`; the core plan's
+> `GET /api/credentials` projects only the `Credential` fields. This adds one
+> read-only route and wires the Credentials screen to it.
+
+**Files:**
+- Modify (gateway): `apps/gateway/src/routes/admin.ts`
+- Test (gateway): `apps/gateway/test/routes/admin.test.ts`
+- Modify (dashboard): `apps/dashboard/src/routes/_app.credentials.tsx`
+- Test (dashboard): `apps/dashboard/test/features/credentials.test.tsx`
+
+**Interfaces:**
+- Consumes: `credentialHealthQuery`, `qk.credentialHealth` and `CredentialHealthResponse` (declared in Task 6); `AdminDeps`, `requireAdmin` (core plan Task 25).
+- Produces: `GET /api/credentials/health` → `{ health: CredentialHealth[]; quota: QuotaWindow[] }`.
+
+Both collections are returned whole rather than per credential. The Credentials screen renders every credential at once, so one request beats N, and both tables are small — one health row per (credential, model) pair actually used, and one quota row per active window.
+
+- [ ] **Step 1: Add the failing gateway test**
+
+Append to `apps/gateway/test/routes/admin.test.ts`:
+
+```ts
+test("credential health returns the health and quota rows the dashboard renders", async () => {
+  const { store, get } = await harness();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await store.credentials.recordSuccess("c1", "claude-opus-4", { latencyMs: 400, at: NOW });
+  await store.credentials.recordQuota("c1", { windowType: "fiveHour", used: 250, limit: 1_000, startsAt: NOW });
+
+  const body = (await (await get("/api/credentials/health")).json()) as {
+    health: Array<{ credentialId: string; model: string; consecutiveFailures: number }>;
+    quota: Array<{ credentialId: string; windowType: string; used: number; limit: number | null }>;
+  };
+
+  expect(body.health).toHaveLength(1);
+  expect(body.health[0]?.credentialId).toBe("c1");
+  expect(body.health[0]?.consecutiveFailures).toBe(0);
+  expect(body.quota[0]).toMatchObject({ credentialId: "c1", windowType: "fiveHour", used: 250 });
+});
+
+test("credential health carries no token material", async () => {
+  const { store, get } = await harness();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  const text = await (await get("/api/credentials/health")).text();
+  expect(text).not.toContain("token");
+  expect(text).not.toContain("secret");
+});
+
+test("credential health requires an admin session", async () => {
+  const { get } = await harness();
+  expect((await get("/api/credentials/health", false)).status).toBe(401);
+});
+```
+
+- [ ] **Step 2: Run the gateway test to verify it fails**
+
+Run: `bun test apps/gateway/test/routes/admin.test.ts`
+Expected: FAIL — 404, no such route.
+
+- [ ] **Step 3: Add the gateway route**
+
+In `apps/gateway/src/routes/admin.ts`, add this **before** `.get("/api/credentials/:id", ...)` if such a route exists, and in any case before any `/api/credentials/:id` pattern — otherwise Elysia matches `health` as an `:id`:
+
+```ts
+    // Registered ahead of any /api/credentials/:id route: "health" would
+    // otherwise be captured as a credential id.
+    .get("/api/credentials/health", async ({ request }) => {
+      await requireAdmin(request);
+      const [health, quota] = await Promise.all([
+        deps.store.credentials.listHealth(),
+        deps.store.credentials.listQuota(),
+      ]);
+      return { health, quota };
+    })
+```
+
+- [ ] **Step 4: Run the gateway tests to verify they pass**
+
+Run: `bun test apps/gateway`
+Expected: all pass, including the three new ones.
+
+- [ ] **Step 5: Commit the gateway half**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): expose credential health and quota rows to the dashboard"
+```
+
+- [ ] **Step 6: Add the failing dashboard test**
+
+Append to `apps/dashboard/test/features/credentials.test.tsx`:
+
+```tsx
+test("the screen fetches health and passes it to the cards", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({
+      credentials: [credentialFixture({ id: "c1", label: "work" })],
+    }),
+    "GET /api/credentials/health": () => ({
+      health: [healthFixture({ credentialId: "c1", consecutiveFailures: 4, breakerOpenUntil: NOW + 30_000 })],
+      quota: [quotaFixture({ credentialId: "c1", used: 900, limit: 1_000 })],
+    }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  const card = await screen.findByRole("group", { name: /work/i });
+  expect(within(card).getByText(/circuit open/i)).toBeDefined();
+  expect(within(card).getByRole("progressbar")).toBeDefined();
+});
+
+test("a failed health fetch degrades the card instead of hiding the credential", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [credentialFixture({ label: "work" })] }),
+    "GET /api/credentials/health": () => ({
+      status: 500,
+      body: { error: { code: "INTERNAL", message: "db locked" } },
+    }),
+  });
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  const card = await screen.findByRole("group", { name: /work/i });
+  expect(within(card).getByText(/health unavailable/i)).toBeDefined();
+  // The credential itself is still editable.
+  expect(within(card).getByLabelText(/tier/i)).toBeDefined();
+});
+```
+
+- [ ] **Step 7: Run the dashboard test to verify it fails**
+
+Run: `bun test apps/dashboard/test/features/credentials.test.tsx`
+Expected: FAIL — the screen passes empty collections, so no pill and no bar render.
+
+- [ ] **Step 8: Wire the screen to the query**
+
+In `apps/dashboard/src/routes/_app.credentials.tsx`, replace the placeholder empty collections with the query added in Task 6:
+
+```tsx
+  const credentials = useQuery(credentialsQuery());
+  const health = useQuery(credentialHealthQuery());
+
+  // Health is supplementary. A failure here must not hide the credentials or
+  // block editing them, so it degrades to a note on each card.
+  const healthRows = health.data?.health ?? [];
+  const quotaRows = health.data?.quota ?? [];
+  const healthUnavailable = health.isError;
+```
+
+and pass `healthUnavailable` through to `CredentialCard`, which renders `Health unavailable` in place of the pill when it is true.
+
+- [ ] **Step 9: Run the tests to verify they pass**
+
+Run: `bun test apps/dashboard`
+Expected: 105 pass, 0 fail.
+
+- [ ] **Step 10: Commit the dashboard half**
+
+```bash
+git add apps/dashboard
+git commit -m "feat(dashboard): render live credential health and quota from the new route"
+```
+
+---
+
+## Task 14: Production build and static serving
+
+**Files:**
+- Modify: `apps/dashboard/vite.config.ts`, root `package.json`
+- Modify (gateway): `apps/gateway/src/server.ts`
+- Test (gateway): `apps/gateway/test/static.test.ts`
+
+**Interfaces:**
+- Consumes: the gateway's Elysia app (core plan Task 26).
+- Produces: `bun run build:dashboard`; a gateway that serves `apps/dashboard/dist` at `/` with SPA fallback.
+
+The dashboard is a client-routed SPA, so a deep link like `/logs` must return `index.html` rather than a 404 — but only for navigations. An unknown `/api/*` path must stay a 404, otherwise a typo'd control call returns HTML with a 200 and the client parses it as JSON.
+
+- [ ] **Step 1: Write the failing gateway test**
+
+`apps/gateway/test/static.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { createServer } from "../src/server.ts";
+import { memoryStore } from "./helpers/fixtures.ts";
+
+async function app() {
+  return createServer({ store: await memoryStore(), staticDir: `${import.meta.dir}/fixtures/dist` });
+}
+
+test("the index is served at the root", async () => {
+  const res = await (await app()).handle(new Request("http://localhost/"));
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/html");
+});
+
+test("a client route falls back to the index so deep links work", async () => {
+  const res = await (await app()).handle(new Request("http://localhost/logs"));
+  expect(res.status).toBe(200);
+  expect(await res.text()).toContain("<div id=\"root\">");
+});
+
+test("an unknown api path stays a 404 and never falls back to html", async () => {
+  const res = await (await app()).handle(new Request("http://localhost/api/nope"));
+  expect(res.status).toBe(404);
+  expect(res.headers.get("content-type") ?? "").not.toContain("text/html");
+});
+
+test("an unknown proxy path stays a 404", async () => {
+  const res = await (await app()).handle(new Request("http://localhost/v1/nope"));
+  expect(res.status).toBe(404);
+});
+
+test("hashed assets are served with a long cache lifetime", async () => {
+  const res = await (await app()).handle(new Request("http://localhost/assets/app-abc123.js"));
+  expect(res.headers.get("cache-control")).toContain("immutable");
+});
+
+test("the index is never cached, so a deploy is picked up immediately", async () => {
+  const res = await (await app()).handle(new Request("http://localhost/"));
+  expect(res.headers.get("cache-control")).toContain("no-cache");
+});
+```
+
+Create `apps/gateway/test/fixtures/dist/index.html` containing `<div id="root"></div>` and `apps/gateway/test/fixtures/dist/assets/app-abc123.js` containing `export {};`.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/gateway/test/static.test.ts`
+Expected: FAIL — `createServer` takes no `staticDir` and returns 404 at `/`.
+
+- [ ] **Step 3: Serve the bundle from the gateway**
+
+In `apps/gateway/src/server.ts`, add `staticDir?: string` to the options and register this **last**, after the proxy and admin routes:
+
+```ts
+  if (options.staticDir !== undefined) {
+    const root = options.staticDir;
+    app.get("*", async ({ request, set }) => {
+      const path = new URL(request.url).pathname;
+
+      // A typo'd control or proxy path must stay a 404. Falling back to HTML
+      // here would hand the client a 200 with a body it parses as JSON.
+      if (path.startsWith("/api/") || path.startsWith("/v1/") || path.startsWith("/oauth/")) {
+        set.status = 404;
+        return { error: { code: "NOT_FOUND", message: `no route for ${path}` } };
+      }
+
+      const file = Bun.file(`${root}${path === "/" ? "/index.html" : path}`);
+      if (await file.exists()) {
+        // Vite hashes asset filenames, so anything under /assets is immutable.
+        set.headers["cache-control"] = path.startsWith("/assets/")
+          ? "public, max-age=31536000, immutable"
+          : "no-cache";
+        return new Response(file);
+      }
+
+      // Client-side route: hand back the shell and let the router resolve it.
+      set.headers["cache-control"] = "no-cache";
+      return new Response(Bun.file(`${root}/index.html`), {
+        headers: { "content-type": "text/html" },
+      });
+    });
+  }
+```
+
+- [ ] **Step 4: Add the build script and the dev proxy**
+
+In the root `package.json` scripts:
+
+```json
+    "build:dashboard": "cd apps/dashboard && bun run build",
+    "dev:dashboard": "cd apps/dashboard && bun run dev"
+```
+
+In `apps/dashboard/vite.config.ts`, add the dev proxy so the dev server's `/api/*` calls reach the gateway with the session cookie intact:
+
+```ts
+  server: {
+    proxy: {
+      // Same-origin in production; in dev this keeps the HttpOnly cookie on the
+      // Vite origin instead of asking for a cross-origin credentialed request.
+      "/api": { target: "http://localhost:8787", changeOrigin: false },
+      "/oauth": { target: "http://localhost:8787", changeOrigin: false },
+    },
+  },
+```
+
+- [ ] **Step 5: Run everything**
+
+Run: `bun test`
+Expected: the full workspace passes, including the six new static-serving tests.
+
+Run: `bun run build:dashboard`
+Expected: a `dist/` with a hashed asset bundle and an `index.html`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/gateway apps/dashboard package.json
+git commit -m "feat(gateway): serve the dashboard bundle with an spa fallback"
+```
+
+---
+
+## Verification
+
+After Task 14:
+
+- `bun test` passes across the workspace — 109 dashboard tests plus the gateway's, including the 9 gateway tests Tasks 9, 13 and 14 add.
+- `bunx tsc --noEmit -p apps/dashboard` is clean under `strict` with `noUncheckedIndexedAccess`.
+- `bunx biome check apps/dashboard` is clean.
+- `grep -rn "any" apps/dashboard/src apps/dashboard/test` finds no bare `any`.
+- `grep -rn "/admin/" apps/dashboard/src` finds nothing — the control surface is `/api/*`.
+- `grep -rni "websocket\|new WebSocket" apps/dashboard/src` finds nothing.
+- `grep -rn "Authorization" apps/dashboard/src` finds nothing — auth is the cookie.
+- A manual pass against a running gateway: first run forces a password, login lands on Credentials, each of the five screens loads, the dry-run panel explains a routing decision, and the log tail advances on its own.
