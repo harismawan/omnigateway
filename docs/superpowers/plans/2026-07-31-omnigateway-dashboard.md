@@ -3088,3 +3088,1400 @@ git commit -m "feat(dashboard): add the oauth connect dialog for pkce, paste and
 ```
 
 ---
+
+## Task 8: Models screen — the virtual model editor
+
+**Files:**
+- Create: `apps/dashboard/src/features/models/TargetRow.tsx`, `apps/dashboard/src/features/models/ModelEditor.tsx`, `apps/dashboard/src/routes/_app.models.tsx`
+- Test: `apps/dashboard/test/features/models.test.tsx`
+
+**Interfaces:**
+- Consumes: `api` (Task 2); `VirtualModel`, `Target`, `Strategy`, `STRATEGIES`, `ProviderId`, `PROVIDER_IDS`, `PROVIDER_LABELS`, `OkResponse` (Task 2); `modelsQuery`, `qk`, `useInvalidate` (Task 3); `ErrorState` (Task 4).
+- Produces:
+  - `TargetRow({ target, index, onChange, onRemove })` — one draggable target
+  - `ModelEditor({ model, onSaved })` — the full editor for one virtual model
+  - `ModelsScreen()` — list plus editor, exported for testing
+  - `emptyTarget(provider: ProviderId): Target` — a new target with the store's defaults
+- Task 9 mounts the dry-run panel inside `ModelsScreen`.
+
+`PUT /api/models/:id` takes the whole `VirtualModel` and rejects a body whose `id` differs from the path. Its Zod schema requires at least one target and full `costPerMTok` and `capabilities` objects, so the editor must send complete targets — a partial target is a 400, not a merge.
+
+Drag reordering uses `@dnd-kit/sortable`. Order is semantically meaningful for the `priority` strategy, where the router sorts by tier and the operator's ordering within a tier is the tiebreak they see.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/dashboard/test/features/models.test.tsx`:
+
+```tsx
+import { afterEach, expect, test } from "bun:test";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { ModelsScreen } from "../../src/routes/_app.models.tsx";
+import { emptyTarget } from "../../src/features/models/ModelEditor.tsx";
+import { createFetchStub } from "../helpers/fetchStub.ts";
+import { modelFixture, targetFixture } from "../helpers/fixtures.ts";
+import { renderWithProviders } from "../helpers/render.tsx";
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+function stubModels(models = [modelFixture()]) {
+  return createFetchStub({
+    "GET /api/models": () => ({ models }),
+    "PUT /api/models/fast": () => ({ ok: true }),
+    "DELETE /api/models/fast": () => ({ ok: true }),
+    "GET /api/credentials": () => ({ credentials: [] }),
+  });
+}
+
+test("every configured model is listed", async () => {
+  stubModels([modelFixture({ id: "fast" }), modelFixture({ id: "smart" })]);
+  renderWithProviders(<ModelsScreen />);
+  expect(await screen.findByRole("button", { name: "fast" })).toBeDefined();
+  expect(screen.getByRole("button", { name: "smart" })).toBeDefined();
+});
+
+test("an alias is marked so the operator knows it was synthesized", async () => {
+  stubModels([modelFixture({ id: "claude-opus-4", isAlias: true })]);
+  renderWithProviders(<ModelsScreen />);
+  await screen.findByRole("button", { name: "claude-opus-4" });
+  expect(screen.getByText(/alias/i)).toBeDefined();
+});
+
+test("selecting a model loads its targets into the editor", async () => {
+  stubModels([
+    modelFixture({
+      id: "fast",
+      targets: [
+        targetFixture({ provider: "anthropic", model: "claude-haiku-4", tier: 1 }),
+        targetFixture({ provider: "openai", model: "gpt-5-mini", tier: 2 }),
+      ],
+    }),
+  ]);
+  renderWithProviders(<ModelsScreen />);
+  await (await userEvent.setup()).click(await screen.findByRole("button", { name: "fast" }));
+
+  expect(screen.getByDisplayValue("claude-haiku-4")).toBeDefined();
+  expect(screen.getByDisplayValue("gpt-5-mini")).toBeDefined();
+});
+
+test("the strategy picker offers exactly the four router strategies", async () => {
+  stubModels();
+  renderWithProviders(<ModelsScreen />);
+  await (await userEvent.setup()).click(await screen.findByRole("button", { name: "fast" }));
+
+  const picker = screen.getByLabelText(/strategy/i);
+  const values = Array.from(picker.querySelectorAll("option")).map((o) => o.getAttribute("value"));
+  expect(values).toEqual(["score", "priority", "roundRobin", "weighted"]);
+});
+
+test("saving puts the whole model back with a matching id", async () => {
+  const stub = stubModels();
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "fast" }));
+
+  const tier = screen.getByLabelText(/target 1 tier/i);
+  await user.clear(tier);
+  await user.type(tier, "2");
+  await user.click(screen.getByRole("button", { name: /save model/i }));
+
+  await waitFor(() => expect(stub.calls.some((c) => c.url === "/api/models/fast")).toBe(true));
+  const put = stub.calls.find((c) => c.url === "/api/models/fast");
+  expect(put?.init?.method).toBe("PUT");
+  const body = JSON.parse(String(put?.init?.body)) as {
+    id: string;
+    strategy: string;
+    isAlias: boolean;
+    targets: Array<{ tier: number; costPerMTok: { input: number }; capabilities: { tools: boolean } }>;
+  };
+  expect(body.id).toBe("fast");
+  expect(body.targets[0]?.tier).toBe(2);
+  // The gateway's schema is strict: a partial target is a 400, not a merge.
+  expect(body.targets[0]?.costPerMTok.input).toBe(15);
+  expect(body.targets[0]?.capabilities.tools).toBe(true);
+});
+
+test("adding a target seeds it with complete cost and capability objects", async () => {
+  const stub = stubModels();
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "fast" }));
+  await user.click(screen.getByRole("button", { name: /add target/i }));
+  await user.type(screen.getByLabelText(/target 2 model/i), "claude-sonnet-4");
+  await user.click(screen.getByRole("button", { name: /save model/i }));
+
+  await waitFor(() => expect(stub.calls.some((c) => c.url === "/api/models/fast")).toBe(true));
+  const body = JSON.parse(String(stub.calls.find((c) => c.url === "/api/models/fast")?.init?.body)) as {
+    targets: Array<{ model: string; costPerMTok: Record<string, number>; capabilities: Record<string, boolean> }>;
+  };
+  expect(body.targets).toHaveLength(2);
+  expect(body.targets[1]?.model).toBe("claude-sonnet-4");
+  expect(body.targets[1]?.costPerMTok).toEqual({ input: 0, output: 0 });
+  expect(body.targets[1]?.capabilities).toEqual({ tools: true, images: false, reasoning: false });
+});
+
+test("emptyTarget produces a target the gateway schema accepts", () => {
+  const target = emptyTarget("openai");
+  expect(target.provider).toBe("openai");
+  expect(target.tier).toBe(1);
+  expect(target.weight).toBe(1);
+  expect(target.costPerMTok).toEqual({ input: 0, output: 0 });
+  expect(target.capabilities).toEqual({ tools: true, images: false, reasoning: false });
+});
+
+test("removing the last target is refused, because the gateway requires one", async () => {
+  stubModels();
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "fast" }));
+  await user.click(screen.getByRole("button", { name: /remove target 1/i }));
+
+  expect(await screen.findByText(/a virtual model needs at least one target/i)).toBeDefined();
+  expect(screen.getByLabelText(/target 1 model/i)).toBeDefined();
+});
+
+test("moving a target down reorders the saved array", async () => {
+  const stub = stubModels([
+    modelFixture({
+      id: "fast",
+      targets: [
+        targetFixture({ model: "first", tier: 1 }),
+        targetFixture({ model: "second", tier: 2 }),
+      ],
+    }),
+  ]);
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "fast" }));
+  await user.click(screen.getByRole("button", { name: /move target 1 down/i }));
+  await user.click(screen.getByRole("button", { name: /save model/i }));
+
+  await waitFor(() => expect(stub.calls.some((c) => c.url === "/api/models/fast")).toBe(true));
+  const body = JSON.parse(String(stub.calls.find((c) => c.url === "/api/models/fast")?.init?.body)) as {
+    targets: Array<{ model: string }>;
+  };
+  expect(body.targets.map((t) => t.model)).toEqual(["second", "first"]);
+});
+
+test("deleting a model calls delete and clears the editor", async () => {
+  const stub = stubModels();
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "fast" }));
+  await user.click(screen.getByRole("button", { name: /delete model/i }));
+  await user.click(screen.getByRole("button", { name: /^delete “fast”$/i }));
+
+  await waitFor(() =>
+    expect(stub.calls.some((c) => c.url === "/api/models/fast" && c.init?.method === "DELETE")).toBe(true),
+  );
+});
+
+test("a rejected save shows the gateway's validation message", async () => {
+  createFetchStub({
+    "GET /api/models": () => ({ models: [modelFixture()] }),
+    "GET /api/credentials": () => ({ credentials: [] }),
+    "PUT /api/models/fast": () => ({
+      status: 400,
+      body: { error: { code: "BAD_REQUEST", message: "a virtual model needs at least one target" } },
+    }),
+  });
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "fast" }));
+  await user.click(screen.getByRole("button", { name: /save model/i }));
+
+  expect(await screen.findByText(/needs at least one target/i)).toBeDefined();
+});
+
+test("creating a model puts it under the id the operator typed", async () => {
+  const stub = createFetchStub({
+    "GET /api/models": () => ({ models: [] }),
+    "GET /api/credentials": () => ({ credentials: [] }),
+    "PUT /api/models/cheap": () => ({ ok: true }),
+  });
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /new model/i }));
+  await user.type(screen.getByLabelText(/model id/i), "cheap");
+  await user.type(screen.getByLabelText(/target 1 model/i), "kimi-k2");
+  await user.click(screen.getByRole("button", { name: /save model/i }));
+
+  await waitFor(() => expect(stub.calls.some((c) => c.url === "/api/models/cheap")).toBe(true));
+  const body = JSON.parse(String(stub.calls.find((c) => c.url === "/api/models/cheap")?.init?.body)) as {
+    id: string;
+    isAlias: boolean;
+  };
+  expect(body.id).toBe("cheap");
+  expect(body.isAlias).toBe(false);
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `bun test apps/dashboard/test/features/models.test.tsx`
+Expected: FAIL — cannot resolve `../../src/routes/_app.models.tsx`.
+
+- [ ] **Step 3: Write the target row**
+
+`apps/dashboard/src/features/models/TargetRow.tsx`:
+
+```tsx
+import type { ProviderId, Target } from "@/api/types.ts";
+import { PROVIDER_IDS, PROVIDER_LABELS } from "@/api/types.ts";
+import { Button } from "@/components/ui/button.tsx";
+import { Input } from "@/components/ui/input.tsx";
+import { Label } from "@/components/ui/label.tsx";
+
+export function TargetRow({
+  target,
+  index,
+  isFirst,
+  isLast,
+  onChange,
+  onRemove,
+  onMove,
+}: {
+  target: Target;
+  index: number;
+  isFirst: boolean;
+  isLast: boolean;
+  onChange: (next: Target) => void;
+  onRemove: () => void;
+  onMove: (direction: -1 | 1) => void;
+}) {
+  const n = index + 1;
+  const id = (field: string) => `target-${index}-${field}`;
+
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="w-36 space-y-1.5">
+          <Label htmlFor={id("provider")}>{`Target ${n} provider`}</Label>
+          <select
+            id={id("provider")}
+            className="h-9 w-full rounded-md border bg-transparent px-2 text-sm"
+            value={target.provider}
+            onChange={(e) => onChange({ ...target, provider: e.target.value as ProviderId })}
+          >
+            {PROVIDER_IDS.map((p) => (
+              <option key={p} value={p}>
+                {PROVIDER_LABELS[p]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="min-w-40 flex-1 space-y-1.5">
+          <Label htmlFor={id("model")}>{`Target ${n} model`}</Label>
+          <Input
+            id={id("model")}
+            value={target.model}
+            onChange={(e) => onChange({ ...target, model: e.target.value })}
+          />
+        </div>
+
+        <div className="w-20 space-y-1.5">
+          <Label htmlFor={id("tier")}>{`Target ${n} tier`}</Label>
+          <Input
+            id={id("tier")}
+            type="number"
+            min={1}
+            step={1}
+            value={String(target.tier)}
+            onChange={(e) => onChange({ ...target, tier: Number(e.target.value) })}
+          />
+        </div>
+
+        <div className="w-24 space-y-1.5">
+          <Label htmlFor={id("weight")}>{`Target ${n} weight`}</Label>
+          <Input
+            id={id("weight")}
+            type="number"
+            min={0.1}
+            step={0.1}
+            value={String(target.weight)}
+            onChange={(e) => onChange({ ...target, weight: Number(e.target.value) })}
+          />
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-end gap-3">
+        <div className="w-32 space-y-1.5">
+          <Label htmlFor={id("cost-in")}>{`Target ${n} input $/MTok`}</Label>
+          <Input
+            id={id("cost-in")}
+            type="number"
+            min={0}
+            step={0.01}
+            value={String(target.costPerMTok.input)}
+            onChange={(e) =>
+              onChange({
+                ...target,
+                costPerMTok: { ...target.costPerMTok, input: Number(e.target.value) },
+              })
+            }
+          />
+        </div>
+        <div className="w-32 space-y-1.5">
+          <Label htmlFor={id("cost-out")}>{`Target ${n} output $/MTok`}</Label>
+          <Input
+            id={id("cost-out")}
+            type="number"
+            min={0}
+            step={0.01}
+            value={String(target.costPerMTok.output)}
+            onChange={(e) =>
+              onChange({
+                ...target,
+                costPerMTok: { ...target.costPerMTok, output: Number(e.target.value) },
+              })
+            }
+          />
+        </div>
+
+        {(["tools", "images", "reasoning"] as const).map((cap) => (
+          <label key={cap} className="flex items-center gap-2 pb-2 text-sm capitalize">
+            <input
+              type="checkbox"
+              aria-label={`Target ${n} ${cap}`}
+              checked={target.capabilities[cap]}
+              onChange={(e) =>
+                onChange({
+                  ...target,
+                  capabilities: { ...target.capabilities, [cap]: e.target.checked },
+                })
+              }
+            />
+            {cap}
+          </label>
+        ))}
+
+        <div className="ml-auto flex gap-1 pb-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isFirst}
+            aria-label={`Move target ${n} up`}
+            onClick={() => onMove(-1)}
+          >
+            ↑
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isLast}
+            aria-label={`Move target ${n} down`}
+            onClick={() => onMove(1)}
+          >
+            ↓
+          </Button>
+          <Button size="sm" variant="ghost" aria-label={`Remove target ${n}`} onClick={onRemove}>
+            Remove
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+The arrow buttons are the keyboard-accessible path; `@dnd-kit` pointer dragging is layered on the same `onMove` in Step 6 and needs no separate state.
+
+- [ ] **Step 4: Write the model editor**
+
+`apps/dashboard/src/features/models/ModelEditor.tsx`:
+
+```tsx
+import { useMutation } from "@tanstack/react-query";
+import { useState } from "react";
+import { api } from "@/api/client.ts";
+import { qk, useInvalidate } from "@/api/queries.ts";
+import type { OkResponse, ProviderId, Strategy, Target, VirtualModel } from "@/api/types.ts";
+import { STRATEGIES } from "@/api/types.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { Button } from "@/components/ui/button.tsx";
+import { Card } from "@/components/ui/card.tsx";
+import { Input } from "@/components/ui/input.tsx";
+import { Label } from "@/components/ui/label.tsx";
+import { TargetRow } from "./TargetRow.tsx";
+
+const STRATEGY_HELP: Readonly<Record<Strategy, string>> = {
+  score: "Rank by the weighted score. Tier dominates; recency breaks ties.",
+  priority: "Strict tier order. Score only breaks ties inside a tier.",
+  roundRobin: "Least recently used first. Ignores score entirely.",
+  weighted: "Weighted random pick among the scored candidates.",
+};
+
+/** A new target with every field the gateway's strict schema requires. */
+export function emptyTarget(provider: ProviderId): Target {
+  return {
+    provider,
+    model: "",
+    tier: 1,
+    weight: 1,
+    costPerMTok: { input: 0, output: 0 },
+    // Tools on by default: every provider in v1 supports them, and a target
+    // that silently cannot serve a tool-using request is a confusing default.
+    capabilities: { tools: true, images: false, reasoning: false },
+  };
+}
+
+export function ModelEditor({
+  model,
+  isNew,
+  onSaved,
+  onDeleted,
+}: {
+  model: VirtualModel;
+  isNew: boolean;
+  onSaved: (id: string) => void;
+  onDeleted: () => void;
+}) {
+  const invalidate = useInvalidate();
+  const [id, setId] = useState(model.id);
+  const [strategy, setStrategy] = useState<Strategy>(model.strategy);
+  const [targets, setTargets] = useState<Target[]>(model.targets);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  const draft: VirtualModel = { id: id.trim(), targets, strategy, isAlias: model.isAlias };
+
+  const save = useMutation({
+    mutationFn: () => api.put<OkResponse>(`/api/models/${encodeURIComponent(draft.id)}`, draft),
+    onSuccess: async () => {
+      await invalidate([qk.models(), qk.dryRun(draft.id)]);
+      onSaved(draft.id);
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: () => api.del<OkResponse>(`/api/models/${encodeURIComponent(model.id)}`),
+    onSuccess: async () => {
+      await invalidate([qk.models()]);
+      onDeleted();
+    },
+  });
+
+  function updateTarget(index: number, next: Target): void {
+    setTargets(targets.map((t, i) => (i === index ? next : t)));
+  }
+
+  function removeTarget(index: number): void {
+    if (targets.length === 1) {
+      setLocalError("A virtual model needs at least one target.");
+      return;
+    }
+    setLocalError(null);
+    setTargets(targets.filter((_, i) => i !== index));
+  }
+
+  function moveTarget(index: number, direction: -1 | 1): void {
+    const to = index + direction;
+    if (to < 0 || to >= targets.length) return;
+    const next = [...targets];
+    const moved = next[index] as Target;
+    next[index] = next[to] as Target;
+    next[to] = moved;
+    setTargets(next);
+  }
+
+  return (
+    <Card className="p-5">
+      <div className="flex flex-wrap items-end gap-4">
+        <div className="w-48 space-y-1.5">
+          <Label htmlFor="model-id">Model id</Label>
+          <Input
+            id="model-id"
+            value={id}
+            // The id is the PUT path; renaming an existing model would create a
+            // second row rather than move one, so it is fixed after creation.
+            disabled={!isNew}
+            onChange={(e) => setId(e.target.value)}
+          />
+        </div>
+
+        <div className="w-44 space-y-1.5">
+          <Label htmlFor="model-strategy">Strategy</Label>
+          <select
+            id="model-strategy"
+            className="h-9 w-full rounded-md border bg-transparent px-2 text-sm"
+            value={strategy}
+            onChange={(e) => setStrategy(e.target.value as Strategy)}
+          >
+            {STRATEGIES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {model.isAlias && <span className="pb-2 text-xs opacity-60">alias</span>}
+      </div>
+
+      <p className="mt-2 text-xs opacity-70">{STRATEGY_HELP[strategy]}</p>
+
+      <div className="mt-4 space-y-3">
+        {targets.map((target, index) => (
+          <TargetRow
+            key={`${target.provider}-${index}`}
+            target={target}
+            index={index}
+            isFirst={index === 0}
+            isLast={index === targets.length - 1}
+            onChange={(next) => updateTarget(index, next)}
+            onRemove={() => removeTarget(index)}
+            onMove={(direction) => moveTarget(index, direction)}
+          />
+        ))}
+      </div>
+
+      {localError !== null && (
+        <p role="alert" className="mt-3 text-sm text-bad">
+          {localError}
+        </p>
+      )}
+      {save.isError && <ErrorState error={save.error} />}
+      {remove.isError && <ErrorState error={remove.error} />}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setTargets([...targets, emptyTarget("anthropic")])}
+        >
+          Add target
+        </Button>
+        <Button
+          size="sm"
+          disabled={draft.id.length === 0 || save.isPending}
+          onClick={() => save.mutate()}
+        >
+          Save model
+        </Button>
+        {!isNew && (
+          <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+            Delete model
+          </Button>
+        )}
+      </div>
+
+      {confirming && (
+        <div role="alertdialog" className="mt-4 rounded-md border border-bad/40 p-3 text-sm">
+          <p>Requests naming this model will fail until another one claims the name.</p>
+          <div className="mt-3 flex gap-2">
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={remove.isPending}
+              onClick={() => remove.mutate()}
+            >
+              {`Delete “${model.id}”`}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+```
+
+- [ ] **Step 5: Write the screen and its route**
+
+`apps/dashboard/src/routes/_app.models.tsx`:
+
+```tsx
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
+import { modelsQuery } from "@/api/queries.ts";
+import type { VirtualModel } from "@/api/types.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { emptyTarget, ModelEditor } from "@/features/models/ModelEditor.tsx";
+import { Button } from "@/components/ui/button.tsx";
+
+function blankModel(): VirtualModel {
+  return { id: "", targets: [emptyTarget("anthropic")], strategy: "score", isAlias: false };
+}
+
+export function ModelsScreen() {
+  const models = useQuery(modelsQuery());
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  if (models.isPending) return <p className="text-sm opacity-70">Loading models…</p>;
+  if (models.isError) return <ErrorState error={models.error} onRetry={() => models.refetch()} />;
+
+  const selected = models.data.find((m) => m.id === selectedId) ?? null;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold tracking-tight">Models</h1>
+        <Button
+          size="sm"
+          onClick={() => {
+            setCreating(true);
+            setSelectedId(null);
+          }}
+        >
+          New model
+        </Button>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {models.data.map((model) => (
+          <Button
+            key={model.id}
+            size="sm"
+            variant={model.id === selectedId ? "default" : "outline"}
+            onClick={() => {
+              setCreating(false);
+              setSelectedId(model.id);
+            }}
+          >
+            {model.id}
+          </Button>
+        ))}
+        {models.data.length === 0 && !creating && (
+          <p className="text-sm opacity-60">No virtual models configured.</p>
+        )}
+      </div>
+
+      {creating && (
+        <ModelEditor
+          key="new"
+          model={blankModel()}
+          isNew
+          onSaved={(id) => {
+            setCreating(false);
+            setSelectedId(id);
+          }}
+          onDeleted={() => setCreating(false)}
+        />
+      )}
+
+      {selected !== null && (
+        <ModelEditor
+          key={selected.id}
+          model={selected}
+          isNew={false}
+          onSaved={(id) => setSelectedId(id)}
+          onDeleted={() => setSelectedId(null)}
+        />
+      )}
+
+      {/* Task 9 mounts <DryRunPanel modelId={selectedId} /> here. */}
+    </div>
+  );
+}
+
+export const Route = createFileRoute("/_app/models")({
+  component: ModelsScreen,
+});
+```
+
+- [ ] **Step 6: Layer pointer dragging onto the same reorder**
+
+Wrap the target list in `ModelEditor` with `@dnd-kit`, reusing `moveTarget` so the two input paths share one code path. Add to the imports:
+
+```tsx
+import { closestCenter, DndContext, type DragEndEvent } from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+```
+
+Add to `ModelEditor`, above the return:
+
+```tsx
+  function handleDragEnd(event: DragEndEvent): void {
+    const from = Number(event.active.id);
+    const to = event.over === null ? from : Number(event.over.id);
+    if (from === to) return;
+    // Reuse the arrow-key path so both inputs produce identical orderings.
+    const next = [...targets];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved as Target);
+    setTargets(next);
+  }
+```
+
+Wrap the `targets.map(...)` block:
+
+```tsx
+        <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext
+            items={targets.map((_, i) => String(i))}
+            strategy={verticalListSortingStrategy}
+          >
+            {targets.map((target, index) => (
+              /* unchanged TargetRow element */
+            ))}
+          </SortableContext>
+        </DndContext>
+```
+
+`TargetRow` opts in by calling `useSortable({ id: String(index) })` and spreading `attributes` and `listeners` onto a drag handle span; the arrow buttons keep working untouched. Pointer dragging is not asserted in tests — happy-dom has no real pointer events, and the reorder behavior it drives is already covered through `moveTarget`.
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `bun test apps/dashboard`
+Expected: 61 pass, 0 fail.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/dashboard
+git commit -m "feat(dashboard): add the virtual model editor with targets, strategy and reordering"
+```
+
+---
+
+## Task 9: The dry-run panel, and the gateway route it requires
+
+> **Decision — read before implementing.** The spec makes the dry-run panel a
+> success criterion: *"The dry-run panel explains the routing decision for a
+> given model, including the reason each excluded candidate was excluded."*
+> The core plan's `/api/*` surface has no endpoint for it — `rank()` is a pure
+> function inside `apps/gateway/src/router`, reachable only through a live
+> proxy request, which has the side effect of actually spending a token.
+>
+> **Resolution: add the route.** This task specifies
+> `POST /api/models/:id/dry-run` and implements it **in the gateway**, then
+> builds the panel against it. Deferring the panel was the alternative and was
+> rejected: it is a named success criterion, the routing engine is the most
+> opaque part of this system, and every ingredient already exists server-side —
+> `buildSnapshot`, `resolveModel`, and `rank` are all exported, and `rank`
+> returns `{ candidates, excluded }` with the per-term `reasons` record the
+> panel needs. Building it costs one route handler; not building it leaves
+> operators guessing why traffic went where it went.
+>
+> **This task modifies the gateway.** It is the only task in this plan that
+> does. The gateway plan is not edited; the addition is specified here in full
+> and lands in `apps/gateway/src/routes/admin.ts` alongside the routes that plan
+> created.
+
+**Files:**
+- Modify (gateway): `apps/gateway/src/routes/admin.ts`
+- Test (gateway): `apps/gateway/test/routes/dryrun.test.ts`
+- Create (dashboard): `apps/dashboard/src/features/models/DryRunPanel.tsx`
+- Modify (dashboard): `apps/dashboard/src/api/types.ts`, `apps/dashboard/src/api/queries.ts`, `apps/dashboard/src/routes/_app.models.tsx`
+- Test (dashboard): `apps/dashboard/test/features/dryrun.test.tsx`
+
+**Interfaces:**
+- Consumes (gateway): `buildSnapshot`, `resolveModel`, `rank`, `Candidate`, `Excluded` from `apps/gateway/src/router/index.ts` (core plan Tasks 12–13); `AdminDeps`, `requireAdmin` (core plan Task 25); `GatewayError` from `@omni/ir`.
+- Consumes (dashboard): `api` (Task 2); `qk` (Task 3); `ErrorState` (Task 4); `ModelsScreen` (Task 8).
+- Produces:
+  - Gateway: `POST /api/models/:id/dry-run` returning `DryRunResponse`
+  - Dashboard: `DryRunResponse`, `DryRunCandidate`, `DryRunExcluded`, `DryRunRequest` types; `dryRunMutation`-shaped `dryRunQuery(modelId, request)`; `DryRunPanel({ modelId })`
+
+The request body describes a hypothetical request — which capabilities it needs — because the hard filters depend on it: a request with tools excludes targets whose `capabilities.tools` is false. The gateway builds a minimal `ChatRequest` from those flags rather than accepting a full request body, so the panel cannot be used to smuggle a prompt into the control API.
+
+`rand` is fixed at `0` so a `weighted` model's dry run is reproducible; the response says so, because a weighted model's live ordering will differ.
+
+### Gateway side
+
+- [ ] **Step 1: Write the failing gateway test**
+
+`apps/gateway/test/routes/dryrun.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { createAdminAuth } from "../../src/auth/admin.ts";
+import { adminRoutes } from "../../src/routes/admin.ts";
+import { memoryStore, seedCredential, target, virtualModel } from "../helpers/fixtures.ts";
+
+const NOW = 1_000_000;
+
+async function harness() {
+  const store = await memoryStore();
+  const admin = createAdminAuth(store, { now: () => NOW, sessionTtlMs: 60_000 });
+  await admin.setPassword("hunter2hunter2");
+  const cookie = `omni_admin=${(await admin.login("hunter2hunter2")) as string}`;
+  const app = adminRoutes({ store, admin, now: () => NOW });
+
+  const post = (path: string, body: unknown, auth = true) =>
+    app.handle(
+      new Request(`http://localhost${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(auth ? { cookie } : {}) },
+        body: JSON.stringify(body),
+      }),
+    );
+  return { store, post };
+}
+
+test("dry-run ranks the healthy candidates and names their score terms", async () => {
+  const { store, post } = await harness();
+  await seedCredential(store, { id: "a", provider: "anthropic", tier: 1 });
+  await seedCredential(store, { id: "b", provider: "anthropic", tier: 1 });
+  await store.config.putModel(
+    virtualModel({ id: "fast", targets: [target({ provider: "anthropic", model: "claude-opus-4" })] }),
+  );
+
+  const body = (await (await post("/api/models/fast/dry-run", {})).json()) as {
+    candidates: Array<{ credentialId: string; model: string; score: number; reasons: Record<string, number> }>;
+    excluded: Array<{ credentialId: string; reason: string }>;
+    strategy: string;
+    deterministic: boolean;
+  };
+
+  expect(body.candidates).toHaveLength(2);
+  expect(body.candidates.map((c) => c.credentialId).sort()).toEqual(["a", "b"]);
+  expect(Object.keys(body.candidates[0]?.reasons ?? {}).sort()).toEqual([
+    "cost",
+    "health",
+    "latency",
+    "quota",
+    "recency",
+    "tier",
+  ]);
+  expect(body.excluded).toEqual([]);
+  expect(body.strategy).toBe("score");
+});
+
+test("a disabled credential appears in excluded with its reason", async () => {
+  const { store, post } = await harness();
+  await seedCredential(store, { id: "a", provider: "anthropic", enabled: false });
+  await store.config.putModel(
+    virtualModel({ id: "fast", targets: [target({ provider: "anthropic", model: "claude-opus-4" })] }),
+  );
+
+  const body = (await (await post("/api/models/fast/dry-run", {})).json()) as {
+    candidates: unknown[];
+    excluded: Array<{ credentialId: string; model: string; reason: string }>;
+  };
+  expect(body.candidates).toHaveLength(0);
+  expect(body.excluded).toEqual([
+    { credentialId: "a", model: "claude-opus-4", reason: "disabled" },
+  ]);
+});
+
+test("requesting tools excludes a target that cannot serve them", async () => {
+  const { store, post } = await harness();
+  await seedCredential(store, { id: "a", provider: "anthropic" });
+  await store.config.putModel(
+    virtualModel({
+      id: "fast",
+      targets: [
+        target({
+          provider: "anthropic",
+          model: "claude-opus-4",
+          capabilities: { tools: false, images: true, reasoning: true },
+        }),
+      ],
+    }),
+  );
+
+  const body = (await (await post("/api/models/fast/dry-run", { tools: true })).json()) as {
+    excluded: Array<{ reason: string }>;
+  };
+  expect(body.excluded[0]?.reason).toBe("capability:tools");
+});
+
+test("an unknown model is a 404 rather than a synthesized alias", async () => {
+  const { post } = await harness();
+  expect((await post("/api/models/nope/dry-run", {})).status).toBe(404);
+});
+
+test("dry-run requires an admin session", async () => {
+  const { post } = await harness();
+  expect((await post("/api/models/fast/dry-run", {}, false)).status).toBe(401);
+});
+
+test("a weighted model reports that its live ordering is not deterministic", async () => {
+  const { store, post } = await harness();
+  await seedCredential(store, { id: "a", provider: "anthropic" });
+  await store.config.putModel(
+    virtualModel({
+      id: "fast",
+      strategy: "weighted",
+      targets: [target({ provider: "anthropic", model: "claude-opus-4" })],
+    }),
+  );
+  const body = (await (await post("/api/models/fast/dry-run", {})).json()) as {
+    deterministic: boolean;
+  };
+  expect(body.deterministic).toBe(false);
+});
+```
+
+- [ ] **Step 2: Run the gateway test to verify it fails**
+
+Run: `bun test apps/gateway/test/routes/dryrun.test.ts`
+Expected: FAIL — 404 from Elysia, because no `/api/models/:id/dry-run` route exists.
+
+- [ ] **Step 3: Add the gateway route**
+
+In `apps/gateway/src/routes/admin.ts`, add these imports:
+
+```ts
+import { buildSnapshot, rank } from "../router/index.ts";
+import type { ChatRequest } from "@omni/ir";
+```
+
+Add this schema next to the others:
+
+```ts
+/**
+ * A hypothetical request, described by the capabilities it would need.
+ *
+ * Deliberately not a real `ChatRequest`: the hard filters only read
+ * capabilities, and accepting a full body would turn the control API into a
+ * second path for prompt content to arrive on.
+ */
+const dryRunSchema = z
+  .object({
+    tools: z.boolean().default(false),
+    images: z.boolean().default(false),
+    reasoning: z.boolean().default(false),
+  })
+  .strict();
+```
+
+Add this route to the chain, after `.delete("/api/models/:id", ...)`:
+
+```ts
+    .post("/api/models/:id/dry-run", async ({ request, params, set }) => {
+      await requireAdmin(request);
+      const need = parseOrThrow(dryRunSchema, await request.json());
+      const now = deps.now();
+
+      const snapshot = await buildSnapshot(deps.store, now);
+      const model = snapshot.models.get(params.id);
+      if (model === undefined) {
+        // Not resolveModel(): synthesizing an alias for a name the operator
+        // typo'd would rank an imaginary model and report it as real.
+        set.status = 404;
+        return { error: { code: "MODEL_UNAVAILABLE", message: `no virtual model "${params.id}"` } };
+      }
+
+      // The minimum shape that makes `requiredCapabilities` return `need`.
+      const probe: ChatRequest = {
+        model: params.id,
+        messages: [
+          {
+            role: "user",
+            content: need.images
+              ? [{ type: "image", mediaType: "image/png", data: "" }]
+              : [{ type: "text", text: "" }],
+          },
+        ],
+        stream: false,
+        ...(need.tools
+          ? { tools: [{ name: "probe", description: "", inputSchema: { type: "object" } }] }
+          : {}),
+        ...(need.reasoning ? { reasoning: { effort: "medium" } } : {}),
+      };
+
+      // rand is pinned so a weighted model's dry run is reproducible. The
+      // response flags that its live ordering will differ.
+      const result = rank({ request: probe, model, snapshot, now, rand: 0 });
+
+      return {
+        modelId: model.id,
+        strategy: model.strategy,
+        deterministic: model.strategy !== "weighted",
+        rankedAt: now,
+        candidates: result.candidates.map((c) => ({
+          credentialId: c.credential.id,
+          credentialLabel: c.credential.label,
+          provider: c.credential.provider,
+          model: c.target.model,
+          tier: c.target.tier,
+          score: c.score,
+          reasons: c.reasons,
+        })),
+        excluded: result.excluded,
+      };
+    })
+```
+
+- [ ] **Step 4: Run the gateway tests to verify they pass**
+
+Run: `bun test apps/gateway`
+Expected: the six new tests pass, and every pre-existing gateway test still passes.
+
+- [ ] **Step 5: Commit the gateway half**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): expose rank() through a dry-run route for the dashboard"
+```
+
+### Dashboard side
+
+- [ ] **Step 6: Write the failing dashboard test**
+
+`apps/dashboard/test/features/dryrun.test.tsx`:
+
+```tsx
+import { afterEach, expect, test } from "bun:test";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { DryRunPanel } from "../../src/features/models/DryRunPanel.tsx";
+import { createFetchStub } from "../helpers/fetchStub.ts";
+import { renderWithProviders } from "../helpers/render.tsx";
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+const RESULT = {
+  modelId: "fast",
+  strategy: "score",
+  deterministic: true,
+  rankedAt: 1_700_000_000_000,
+  candidates: [
+    {
+      credentialId: "a",
+      credentialLabel: "work",
+      provider: "anthropic",
+      model: "claude-opus-4",
+      tier: 1,
+      score: 12.5,
+      reasons: { tier: 1, health: 1, quota: 0.75, cost: 0.5, latency: 0.9, recency: 0.2 },
+    },
+    {
+      credentialId: "b",
+      credentialLabel: "personal",
+      provider: "anthropic",
+      model: "claude-opus-4",
+      tier: 1,
+      score: 11.1,
+      reasons: { tier: 1, health: 0.5, quota: 1, cost: 0.5, latency: 0.4, recency: 1 },
+    },
+  ],
+  excluded: [
+    { credentialId: "c", model: "claude-opus-4", reason: "breaker:open" },
+    { credentialId: "d", model: "gpt-5", reason: "capability:images" },
+  ],
+};
+
+test("the panel does not rank until the operator asks", async () => {
+  const stub = createFetchStub({ "POST /api/models/fast/dry-run": () => RESULT });
+  renderWithProviders(<DryRunPanel modelId="fast" />);
+  expect(screen.getByRole("button", { name: /run/i })).toBeDefined();
+  expect(stub.calls).toHaveLength(0);
+});
+
+test("running shows the candidates best first with their scores", async () => {
+  createFetchStub({ "POST /api/models/fast/dry-run": () => RESULT });
+  renderWithProviders(<DryRunPanel modelId="fast" />);
+  await (await userEvent.setup()).click(screen.getByRole("button", { name: /run/i }));
+
+  const rows = await screen.findAllByRole("row", { name: /claude-opus-4/i });
+  expect(within(rows[0] as HTMLElement).getByText("work")).toBeDefined();
+  expect(within(rows[0] as HTMLElement).getByText("12.50")).toBeDefined();
+  expect(within(rows[1] as HTMLElement).getByText("personal")).toBeDefined();
+});
+
+test("expanding a candidate breaks its score into the six weighted terms", async () => {
+  createFetchStub({ "POST /api/models/fast/dry-run": () => RESULT });
+  renderWithProviders(<DryRunPanel modelId="fast" />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: /run/i }));
+  await screen.findAllByRole("row", { name: /claude-opus-4/i });
+
+  await user.click(screen.getByRole("button", { name: /score breakdown for work/i }));
+  for (const term of ["tier", "health", "quota", "cost", "latency", "recency"]) {
+    expect(screen.getByText(new RegExp(`^${term}$`, "i"))).toBeDefined();
+  }
+  expect(screen.getByText("0.75")).toBeDefined();
+});
+
+test("excluded candidates are listed with the reason each was dropped", async () => {
+  createFetchStub({ "POST /api/models/fast/dry-run": () => RESULT });
+  renderWithProviders(<DryRunPanel modelId="fast" />);
+  await (await userEvent.setup()).click(screen.getByRole("button", { name: /run/i }));
+
+  const excluded = await screen.findByRole("region", { name: /excluded/i });
+  expect(within(excluded).getByText(/breaker:open/i)).toBeDefined();
+  expect(within(excluded).getByText(/capability:images/i)).toBeDefined();
+});
+
+test("the capability toggles are sent in the dry-run body", async () => {
+  const stub = createFetchStub({ "POST /api/models/fast/dry-run": () => RESULT });
+  renderWithProviders(<DryRunPanel modelId="fast" />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("checkbox", { name: /needs tools/i }));
+  await user.click(screen.getByRole("checkbox", { name: /needs images/i }));
+  await user.click(screen.getByRole("button", { name: /run/i }));
+
+  await waitFor(() => expect(stub.calls).toHaveLength(1));
+  expect(stub.calls[0]?.init?.body).toBe(
+    JSON.stringify({ tools: true, images: true, reasoning: false }),
+  );
+});
+
+test("a weighted model warns that the live ordering will differ", async () => {
+  createFetchStub({
+    "POST /api/models/fast/dry-run": () => ({ ...RESULT, strategy: "weighted", deterministic: false }),
+  });
+  renderWithProviders(<DryRunPanel modelId="fast" />);
+  await (await userEvent.setup()).click(screen.getByRole("button", { name: /run/i }));
+  expect(await screen.findByText(/live ordering will differ/i)).toBeDefined();
+});
+
+test("no eligible candidate is stated plainly rather than as an empty table", async () => {
+  createFetchStub({
+    "POST /api/models/fast/dry-run": () => ({ ...RESULT, candidates: [] }),
+  });
+  renderWithProviders(<DryRunPanel modelId="fast" />);
+  await (await userEvent.setup()).click(screen.getByRole("button", { name: /run/i }));
+  expect(await screen.findByText(/no candidate would be eligible/i)).toBeDefined();
+});
+
+test("a failed dry run surfaces the gateway's message", async () => {
+  createFetchStub({
+    "POST /api/models/fast/dry-run": () => ({
+      status: 404,
+      body: { error: { code: "MODEL_UNAVAILABLE", message: 'no virtual model "fast"' } },
+    }),
+  });
+  renderWithProviders(<DryRunPanel modelId="fast" />);
+  await (await userEvent.setup()).click(screen.getByRole("button", { name: /run/i }));
+  expect(await screen.findByText(/no virtual model "fast"/i)).toBeDefined();
+});
+```
+
+- [ ] **Step 7: Run the dashboard test to verify it fails**
+
+Run: `bun test apps/dashboard/test/features/dryrun.test.tsx`
+Expected: FAIL — cannot resolve `../../src/features/models/DryRunPanel.tsx`.
+
+- [ ] **Step 8: Add the dry-run types**
+
+Append to `apps/dashboard/src/api/types.ts`:
+
+```ts
+/** `POST /api/models/:id/dry-run` — the request body. */
+export type DryRunRequest = { tools: boolean; images: boolean; reasoning: boolean };
+
+/** One ranked candidate. `reasons` holds the six normalized score terms. */
+export type DryRunCandidate = {
+  credentialId: string;
+  credentialLabel: string;
+  provider: ProviderId;
+  model: string;
+  tier: number;
+  score: number;
+  reasons: Record<string, number>;
+};
+
+/** Matches the router's `Excluded`. */
+export type DryRunExcluded = { credentialId: string; model: string; reason: string };
+
+export type DryRunResponse = {
+  modelId: string;
+  strategy: Strategy;
+  /** False for `weighted`, whose live ordering depends on a random draw. */
+  deterministic: boolean;
+  rankedAt: number;
+  candidates: DryRunCandidate[];
+  excluded: DryRunExcluded[];
+};
+
+/** The six score terms, in the order the spec's formula lists them. */
+export const SCORE_TERMS = ["tier", "health", "quota", "cost", "latency", "recency"] as const;
+```
+
+- [ ] **Step 9: Write the panel**
+
+`apps/dashboard/src/features/models/DryRunPanel.tsx`:
+
+```tsx
+import { useMutation } from "@tanstack/react-query";
+import { useState } from "react";
+import { api } from "@/api/client.ts";
+import type { DryRunRequest, DryRunResponse } from "@/api/types.ts";
+import { SCORE_TERMS } from "@/api/types.ts";
+import { ErrorState } from "@/components/ErrorState.tsx";
+import { Button } from "@/components/ui/button.tsx";
+import { Card } from "@/components/ui/card.tsx";
+
+export function DryRunPanel({ modelId }: { modelId: string }) {
+  const [need, setNeed] = useState<DryRunRequest>({
+    tools: false,
+    images: false,
+    reasoning: false,
+  });
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  // A mutation rather than a query: ranking is an explicit operator action, and
+  // a query would re-rank on every window focus and mount.
+  const run = useMutation({
+    mutationFn: () =>
+      api.post<DryRunResponse>(`/api/models/${encodeURIComponent(modelId)}/dry-run`, need),
+  });
+
+  const result = run.data;
+
+  return (
+    <Card className="p-5">
+      <h2 className="text-sm font-semibold">Dry run</h2>
+      <p className="mt-1 text-xs opacity-70">
+        Ranks “{modelId}” against the current pool without sending a request upstream.
+      </p>
+
+      <div className="mt-4 flex flex-wrap items-center gap-4">
+        {(["tools", "images", "reasoning"] as const).map((cap) => (
+          <label key={cap} className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              aria-label={`Needs ${cap}`}
+              checked={need[cap]}
+              onChange={(e) => setNeed({ ...need, [cap]: e.target.checked })}
+            />
+            {`Needs ${cap}`}
+          </label>
+        ))}
+        <Button size="sm" disabled={run.isPending} onClick={() => run.mutate()}>
+          Run
+        </Button>
+      </div>
+
+      {run.isError && <ErrorState error={run.error} />}
+
+      {result !== undefined && (
+        <div className="mt-5 space-y-5">
+          {!result.deterministic && (
+            <p className="text-xs text-warn">
+              This model uses the weighted strategy; the live ordering will differ from this run,
+              which pins the random draw so it is reproducible.
+            </p>
+          )}
+
+          {result.candidates.length === 0 ? (
+            <p className="text-sm">No candidate would be eligible for this request.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="text-left text-xs opacity-60">
+                <tr>
+                  <th className="py-1">Credential</th>
+                  <th>Provider</th>
+                  <th>Model</th>
+                  <th>Tier</th>
+                  <th className="text-right">Score</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {result.candidates.map((candidate) => (
+                  <>
+                    <tr key={candidate.credentialId} className="border-t">
+                      <td className="py-1.5">{candidate.credentialLabel}</td>
+                      <td>{candidate.provider}</td>
+                      <td>{candidate.model}</td>
+                      <td>{candidate.tier}</td>
+                      <td className="text-right tabular-nums">{candidate.score.toFixed(2)}</td>
+                      <td className="text-right">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Score breakdown for ${candidate.credentialLabel}`}
+                          onClick={() =>
+                            setExpanded(
+                              expanded === candidate.credentialId ? null : candidate.credentialId,
+                            )
+                          }
+                        >
+                          {expanded === candidate.credentialId ? "Hide" : "Why"}
+                        </Button>
+                      </td>
+                    </tr>
+                    {expanded === candidate.credentialId && (
+                      <tr key={`${candidate.credentialId}-terms`}>
+                        <td colSpan={6} className="pb-3">
+                          <dl className="grid grid-cols-3 gap-2 rounded-md bg-muted p-3 text-xs sm:grid-cols-6">
+                            {SCORE_TERMS.map((term) => (
+                              <div key={term}>
+                                <dt className="opacity-60">{term}</dt>
+                                <dd className="tabular-nums">
+                                  {(candidate.reasons[term] ?? 0).toFixed(2)}
+                                </dd>
+                              </div>
+                            ))}
+                          </dl>
+                          <p className="mt-2 text-xs opacity-60">
+                            Each term is normalized to 0–1 and multiplied by its configured weight
+                            on the Settings panel; the score is their sum, scaled by the credential
+                            and target weights.
+                          </p>
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <section aria-label="Excluded candidates">
+            <h3 className="text-xs font-semibold uppercase tracking-wide opacity-60">Excluded</h3>
+            {result.excluded.length === 0 ? (
+              <p className="mt-1 text-sm opacity-70">Nothing was filtered out.</p>
+            ) : (
+              <ul className="mt-2 space-y-1 text-sm">
+                {result.excluded.map((row) => (
+                  <li key={`${row.credentialId}-${row.model}-${row.reason}`}>
+                    <span className="font-mono text-xs">{row.credentialId}</span>
+                    <span className="opacity-60"> · {row.model} · </span>
+                    <span className="text-warn">{row.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+      )}
+    </Card>
+  );
+}
+```
+
+The `reasons[term] ?? 0` guard is required, not defensive noise: `noUncheckedIndexedAccess` types a `Record<string, number>` lookup as `number | undefined`.
+
+- [ ] **Step 10: Mount the panel on the models screen**
+
+In `apps/dashboard/src/routes/_app.models.tsx`, replace:
+
+```tsx
+      {/* Task 9 mounts <DryRunPanel modelId={selectedId} /> here. */}
+```
+
+with:
+
+```tsx
+      {selected !== null && <DryRunPanel modelId={selected.id} />}
+```
+
+and add the import:
+
+```tsx
+import { DryRunPanel } from "@/features/models/DryRunPanel.tsx";
+```
+
+- [ ] **Step 11: Run the tests to verify they pass**
+
+Run: `bun test apps/dashboard`
+Expected: 69 pass, 0 fail.
+
+- [ ] **Step 12: Commit the dashboard half**
+
+```bash
+git add apps/dashboard
+git commit -m "feat(dashboard): add the dry-run panel with score breakdowns and exclusions"
+```
+
+---
