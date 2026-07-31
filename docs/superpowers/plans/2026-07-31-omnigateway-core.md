@@ -8273,14 +8273,13 @@ Two different authentication problems that must not share an implementation. A p
 ```ts
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
-import { generateApiKey, type Store } from "@omni/store";
+import type { Store } from "@omni/store";
 import { authenticateApiKey } from "../../src/auth/apiKey.ts";
-import { memoryStore } from "../helpers/fixtures.ts";
+import { memoryStore, seedApiKey } from "../helpers/fixtures.ts";
 
 async function seed(): Promise<{ store: Store; raw: string }> {
   const store = await memoryStore();
-  const raw = generateApiKey();
-  await store.keys.create({ label: "test", raw, enabled: true });
+  const { raw } = await seedApiKey(store, { label: "test" });
   return { store, raw };
 }
 
@@ -8305,17 +8304,10 @@ test("rejects an unknown key", async () => {
   expect(authenticateApiKey(store, "Bearer sk-omni-nope")).rejects.toThrow(GatewayError);
 });
 
-test("rejects a disabled key", async () => {
+test("rejects a revoked key", async () => {
   const { store, raw } = await seed();
   const key = await authenticateApiKey(store, raw);
-  await store.keys.update(key.id, { enabled: false });
-  expect(authenticateApiKey(store, raw)).rejects.toThrow(GatewayError);
-});
-
-test("rejects an expired key", async () => {
-  const store = await memoryStore();
-  const raw = generateApiKey();
-  await store.keys.create({ label: "old", raw, enabled: true, expiresAt: 1 });
+  await store.keys.revoke(key.id);
   expect(authenticateApiKey(store, raw)).rejects.toThrow(GatewayError);
 });
 
@@ -8403,16 +8395,98 @@ test("verify rejects an unknown token", async () => {
 });
 ```
 
-- [ ] **Step 3: Add the `memoryStore` helper to the fixtures**
+- [ ] **Step 3: Add the `memoryStore`, `seedApiKey`, `seedCredential` and `requestLog` helpers to the fixtures**
 
 Append to `apps/gateway/test/helpers/fixtures.ts`:
 
 ```ts
-import { createStore, type Store } from "@omni/store";
+import type { ApiKey, Credential, CredentialSecrets, RequestLog } from "@omni/store";
+import { createStore, generateApiKey, hashApiKey, type Store } from "@omni/store";
 
 /** A throwaway in-memory store with a fixed test encryption key. */
 export async function memoryStore(): Promise<Store> {
   return createStore({ path: ":memory:", encryptionKey: "test-encryption-key-0123456789" });
+}
+
+type SeedCredentialInput = Partial<
+  Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken"> & CredentialSecrets
+> & { id: string };
+
+/**
+ * Writes a credential through the real store, so it is really encrypted.
+ *
+ * Distinct from `credential()` above, which builds an in-memory `CredentialView`
+ * for router tests that never touch a database.
+ */
+export async function seedCredential(store: Store, overrides: SeedCredentialInput): Promise<void> {
+  await store.credentials.create({
+    provider: "anthropic",
+    label: overrides.id,
+    authType: "oauth",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    accessToken: `test-token-${overrides.id}`,
+    refreshToken: `test-refresh-${overrides.id}`,
+    apiKey: null,
+    idToken: null,
+    ...overrides,
+  });
+}
+
+/**
+ * Mints a gateway API key and stores it the way the admin route does.
+ *
+ * Returns the raw value, which exists only here — the store keeps the hash.
+ */
+export async function seedApiKey(
+  store: Store,
+  overrides: Partial<Omit<ApiKey, "createdAt" | "revokedAt">> = {},
+): Promise<{ raw: string; key: ApiKey }> {
+  const raw = generateApiKey();
+  const key = await store.keys.create({
+    id: crypto.randomUUID(),
+    label: "test",
+    prefix: raw.slice(0, 12),
+    hash: await hashApiKey(raw),
+    modelAllowlist: null,
+    rateLimitPerMin: null,
+    ...overrides,
+  });
+  return { raw, key };
+}
+
+/**
+ * A complete `RequestLog` row.
+ *
+ * Every field carries a value, so a test that cares about one of them says so
+ * by overriding it, and a schema change breaks here once rather than in ten
+ * separate literals.
+ */
+export function requestLog(overrides: Partial<RequestLog> & { id: string }): RequestLog {
+  return {
+    at: 1_000_000,
+    apiKeyId: null,
+    requestedModel: "fast",
+    resolvedProvider: "anthropic",
+    resolvedModel: "claude-opus-4",
+    credentialId: "c1",
+    attempts: 1,
+    status: 200,
+    errorCode: null,
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: null,
+    durationMs: 1,
+    costUsd: 0,
+    degradations: [],
+    ...overrides,
+  };
 }
 ```
 
@@ -8433,13 +8507,16 @@ Expected: FAIL — cannot resolve `../../src/auth/apiKey.ts`.
 
 ```ts
 import { GatewayError } from "@omni/ir";
-import type { ApiKey, Store } from "@omni/store";
+import { type ApiKey, hashApiKey, type Store } from "@omni/store";
 
 /**
  * Resolves an Authorization header to an API key record.
  *
  * Every failure raises the same message. Distinguishing "no such key" from
- * "key disabled" would let a caller probe which keys exist.
+ * "key revoked" would let a caller probe which keys exist.
+ *
+ * The store is queried by hash, never by raw value, so a presented key that
+ * does not exist leaves no trace of itself anywhere in the query path.
  */
 export async function authenticateApiKey(
   store: Store,
@@ -8448,9 +8525,8 @@ export async function authenticateApiKey(
   const raw = extractToken(header);
   if (raw === null) throw new GatewayError("AUTH", "missing or malformed Authorization header");
 
-  const key = await store.keys.findByRaw(raw);
-  if (key === null || !key.enabled) throw new GatewayError("AUTH", "invalid API key");
-  if (key.expiresAt !== null && key.expiresAt <= Date.now()) {
+  const key = await store.keys.findByHash(await hashApiKey(raw));
+  if (key === null || key.revokedAt !== null) {
     throw new GatewayError("AUTH", "invalid API key");
   }
 
@@ -8476,7 +8552,6 @@ import { hash, verify } from "@node-rs/argon2";
 import type { Store } from "@omni/store";
 
 export const ADMIN_COOKIE = "omni_admin";
-const PASSWORD_CONFIG_KEY = "admin.passwordHash";
 const MIN_PASSWORD_LENGTH = 12;
 
 export type AdminAuth = {
@@ -8507,7 +8582,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
   const sessions = new Map<string, number>();
 
   async function currentHash(): Promise<string | null> {
-    return store.config.get(PASSWORD_CONFIG_KEY);
+    return store.config.getAdminPasswordHash();
   }
 
   return {
@@ -8519,7 +8594,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
       if (password.length < MIN_PASSWORD_LENGTH) {
         throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
       }
-      await store.config.set(PASSWORD_CONFIG_KEY, await hash(password, ARGON2));
+      await store.config.setAdminPasswordHash(await hash(password, ARGON2));
       // A password change is also a "log everyone out" event.
       sessions.clear();
     },
@@ -8595,9 +8670,15 @@ This is the seam where HTTP meets the pipeline. It holds no routing intelligence
 ```ts
 import { expect, test } from "bun:test";
 import type { StreamEvent } from "@omni/ir";
-import { generateApiKey } from "@omni/store";
 import { proxyRoutes } from "../../src/routes/proxy.ts";
-import { credential, memoryStore, stubAdapters, virtualModel } from "../helpers/fixtures.ts";
+import {
+  memoryStore,
+  seedApiKey,
+  seedCredential,
+  stubAdapters,
+  target,
+  virtualModel,
+} from "../helpers/fixtures.ts";
 
 const EVENTS: StreamEvent[] = [
   { type: "start", id: "upstream_1", model: "claude-opus-4" },
@@ -8613,10 +8694,11 @@ const EVENTS: StreamEvent[] = [
 
 async function harness(events: StreamEvent[] = EVENTS) {
   const store = await memoryStore();
-  await store.credentials.create(credential({ id: "c1", provider: "anthropic" }));
-  await store.config.putModel(virtualModel({ name: "fast", targets: [{ provider: "anthropic", model: "claude-opus-4", weight: 1 }] }));
-  const raw = generateApiKey();
-  await store.keys.create({ label: "test", raw, enabled: true });
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await store.config.putModel(
+    virtualModel({ id: "fast", targets: [target({ provider: "anthropic", model: "claude-opus-4" })] }),
+  );
+  const { raw } = await seedApiKey(store, { label: "test" });
 
   let n = 0;
   const app = proxyRoutes({
@@ -8723,11 +8805,11 @@ test("writes a request log with usage and the resolved credential", async () => 
     max_tokens: 100,
     messages: [{ role: "user", content: "hi" }],
   });
-  const logs = await store.usage.listLogs({ limit: 10 });
+  const logs = await store.usage.recent(10);
   expect(logs).toHaveLength(1);
   expect(logs[0]?.credentialId).toBe("c1");
   expect(logs[0]?.outputTokens).toBe(2);
-  expect(logs[0]?.status).toBe("ok");
+  expect(logs[0]?.status).toBe(200);
 });
 
 test("logs a streaming request after the stream drains", async () => {
@@ -8739,8 +8821,8 @@ test("logs a streaming request after the stream drains", async () => {
     messages: [{ role: "user", content: "hi" }],
   });
   await res.text();
-  const logs = await store.usage.listLogs({ limit: 10 });
-  expect(logs[0]?.status).toBe("ok");
+  const logs = await store.usage.recent(10);
+  expect(logs[0]?.status).toBe(200);
   expect(logs[0]?.outputTokens).toBe(2);
 });
 
@@ -8760,7 +8842,7 @@ test("never echoes the request body into the log", async () => {
     max_tokens: 100,
     messages: [{ role: "user", content: "sensitive-prompt-text" }],
   });
-  const logs = await store.usage.listLogs({ limit: 10 });
+  const logs = await store.usage.recent(10);
   expect(JSON.stringify(logs)).not.toContain("sensitive-prompt-text");
 });
 ```
@@ -8789,11 +8871,11 @@ export function stubAdapters(events: StreamEvent[]): Readonly<Record<ProviderId,
   return { anthropic: make("anthropic"), openai: make("openai"), kimi: make("kimi") };
 }
 
-export function virtualModel(overrides: Partial<VirtualModel> & { name: string }): VirtualModel {
+export function virtualModel(overrides: Partial<VirtualModel> & { id: string }): VirtualModel {
   return {
     strategy: "score",
     targets: [],
-    enabled: true,
+    isAlias: false,
     ...overrides,
   };
 }
@@ -8827,7 +8909,7 @@ export async function finishLog(
   keyId: string | null,
 ): Promise<void> {
   try {
-    await store.usage.appendLog({ ...log, apiKeyId: keyId });
+    await store.usage.append({ ...log, apiKeyId: keyId });
   } catch (error) {
     console.error("failed to persist request log", {
       requestId: log.id,
@@ -8957,22 +9039,22 @@ async function handle(deps: ProxyDeps, surface: Surface, request: Request): Prom
       deps.store,
       {
         id: requestId,
-        startedAt: deps.now(),
-        durationMs: 0,
-        surface,
+        at: deps.now(),
+        apiKeyId: keyId,
         requestedModel: "",
+        resolvedProvider: null,
+        resolvedModel: null,
         credentialId: null,
-        provider: null,
-        upstreamModel: null,
-        status: "error",
-        errorCode: gatewayError.code,
         attempts: 0,
+        status: HTTP_STATUS[gatewayError.code],
+        errorCode: gatewayError.code,
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
         ttftMs: null,
-        streamed: false,
+        durationMs: 0,
+        costUsd: 0,
         degradations: [],
       },
       keyId,
@@ -9344,6 +9426,7 @@ function toResult(token: TokenResponse, fallbackRefresh: string | null, deps: OA
       // Anthropic rotates refresh tokens on some exchanges and not others.
       refreshToken: token.refresh_token ?? fallbackRefresh,
       apiKey: null,
+      idToken: null,
     },
     expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
     accountEmail: token.account?.email_address ?? null,
@@ -9603,6 +9686,9 @@ function toResult(token: TokenResponse, fallbackRefresh: string | null, deps: OA
       accessToken: token.access_token as string,
       refreshToken: token.refresh_token ?? fallbackRefresh,
       apiKey: null,
+      // Kept because a later refresh may return no new id token, and the
+      // account id claim is the only way to address the right workspace.
+      idToken: token.id_token ?? null,
     },
     expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
     accountEmail: claims.email ?? null,
@@ -9918,6 +10004,7 @@ function toResult(
       accessToken: token.access_token,
       refreshToken: token.refresh_token ?? fallbackRefresh,
       apiKey: null,
+      idToken: null,
     },
     expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
     accountEmail: token.email ?? null,
@@ -10059,10 +10146,10 @@ This closes the last hole in dispatch. Two properties matter:
 ```ts
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
-import type { CredentialView } from "@omni/store";
+import type { CredentialView, Store } from "@omni/store";
 import { createRefresher } from "../../src/oauth/refresh.ts";
 import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
-import { credential, memoryStore } from "../helpers/fixtures.ts";
+import { memoryStore, seedCredential } from "../helpers/fixtures.ts";
 
 const NOW = 1_000_000;
 
@@ -10084,20 +10171,20 @@ function fakeProvider(
   return { anthropic: provider, openai: provider, kimi: provider };
 }
 
-async function seed(): Promise<{ store: Awaited<ReturnType<typeof memoryStore>>; view: CredentialView }> {
+async function seed(): Promise<{ store: Store; view: CredentialView }> {
   const store = await memoryStore();
-  await store.credentials.create({
-    ...credential({ id: "c1", provider: "anthropic", expiresAt: NOW - 1 }),
+  await seedCredential(store, {
+    id: "c1",
+    expiresAt: NOW - 1,
     accessToken: "test-token-1",
     refreshToken: "test-token-2",
-    apiKey: null,
   });
   const view = (await store.credentials.get("c1")) as CredentialView;
   return { store, view };
 }
 
 const result = (accessToken: string): FlowResult => ({
-  secrets: { accessToken, refreshToken: "test-token-9", apiKey: null },
+  secrets: { accessToken, refreshToken: "test-token-9", apiKey: null, idToken: null },
   expiresAt: NOW + 3_600_000,
   accountEmail: "user@example.com",
   providerData: { accountId: "acct_1" },
@@ -10133,11 +10220,13 @@ test("persists the new tokens and expiry", async () => {
 
 test("merges returned provider data without dropping existing keys", async () => {
   const store = await memoryStore();
-  await store.credentials.create({
-    ...credential({ id: "c1", provider: "openai", expiresAt: NOW - 1, providerData: { deviceId: "dev-1" } }),
+  await seedCredential(store, {
+    id: "c1",
+    provider: "openai",
+    expiresAt: NOW - 1,
+    providerData: { deviceId: "dev-1" },
     accessToken: "test-token-1",
     refreshToken: "test-token-2",
-    apiKey: null,
   });
   const view = (await store.credentials.get("c1")) as CredentialView;
 
@@ -10196,12 +10285,7 @@ test("allows a later refresh once the in-flight one settles", async () => {
 
 test("throws when the credential has no refresh token", async () => {
   const store = await memoryStore();
-  await store.credentials.create({
-    ...credential({ id: "c2", provider: "anthropic" }),
-    accessToken: "test-token-1",
-    refreshToken: null,
-    apiKey: null,
-  });
+  await seedCredential(store, { id: "c2", accessToken: "test-token-1", refreshToken: null });
   const view = (await store.credentials.get("c2")) as CredentialView;
 
   const refresh = createRefresher({
@@ -10466,7 +10550,12 @@ import { createAdminAuth } from "../../src/auth/admin.ts";
 const NOW = 1_000_000;
 
 const RESULT: FlowResult = {
-  secrets: { accessToken: "test-token-1", refreshToken: "test-token-2", apiKey: null },
+  secrets: {
+    accessToken: "test-token-1",
+    refreshToken: "test-token-2",
+    apiKey: null,
+    idToken: null,
+  },
   expiresAt: NOW + 3_600_000,
   accountEmail: "user@example.com",
   providerData: { accountId: "acct_1" },
@@ -10981,7 +11070,7 @@ git commit -m "feat(gateway): add the oauth connect flow and browser callback"
 - Test: `apps/gateway/test/routes/admin.test.ts`
 
 **Interfaces:**
-- Consumes: `Store` (Task 7); `AdminAuth`, `ADMIN_COOKIE` (Task 18); `generateApiKey` (Task 7); `DEFAULT_SETTINGS` (Task 5).
+- Consumes: `Store` (Task 7); `AdminAuth`, `ADMIN_COOKIE` (Task 18); `generateApiKey`, `hashApiKey` (Task 7); `parseOrThrow` (Task 16).
 - Produces: `adminRoutes(deps: AdminDeps): Elysia` mounting the `/api/*` surface the dashboard consumes.
 
 Routes:
@@ -10992,8 +11081,8 @@ Routes:
 | `POST` | `/api/setup` | set the initial admin password (only when unconfigured) |
 | `POST` | `/api/login` / `/api/logout` | session cookie lifecycle |
 | `GET` `PATCH` `DELETE` | `/api/credentials[/:id]` | list, adjust tier/weight/enabled/label, delete |
-| `GET` `PUT` `DELETE` | `/api/models[/:name]` | virtual model CRUD |
-| `GET` `POST` `PATCH` `DELETE` | `/api/keys[/:id]` | proxy API key lifecycle |
+| `GET` `PUT` `DELETE` | `/api/models[/:id]` | virtual model CRUD |
+| `GET` `POST` `DELETE` | `/api/keys[/:id]` | proxy API key issue and revoke |
 | `GET` `PUT` | `/api/settings` | routing weights and limits |
 | `GET` | `/api/usage` | aggregated usage for the dashboard |
 | `GET` | `/api/logs` | recent request log rows |
@@ -11006,10 +11095,15 @@ The invariant threaded through every handler: **no secret ever crosses this boun
 
 ```ts
 import { expect, test } from "bun:test";
-import { generateApiKey } from "@omni/store";
 import { createAdminAuth } from "../../src/auth/admin.ts";
 import { adminRoutes } from "../../src/routes/admin.ts";
-import { credential, memoryStore, virtualModel } from "../helpers/fixtures.ts";
+import {
+  memoryStore,
+  requestLog,
+  seedCredential,
+  target,
+  virtualModel,
+} from "../helpers/fixtures.ts";
 
 const NOW = 1_000_000;
 
@@ -11077,11 +11171,11 @@ test("every data route requires a session", async () => {
 
 test("credentials are listed without their secrets", async () => {
   const { call, store } = await harness();
-  await store.credentials.create({
-    ...credential({ id: "c1", provider: "anthropic", label: "work" }),
+  await seedCredential(store, {
+    id: "c1",
+    label: "work",
     accessToken: "test-token-1",
     refreshToken: "test-token-2",
-    apiKey: null,
   });
 
   const res = await call("GET", "/api/credentials");
@@ -11095,12 +11189,7 @@ test("credentials are listed without their secrets", async () => {
 
 test("patching a credential updates tier, weight and enabled", async () => {
   const { call, store } = await harness();
-  await store.credentials.create({
-    ...credential({ id: "c1", provider: "anthropic" }),
-    accessToken: "test-token-1",
-    refreshToken: null,
-    apiKey: null,
-  });
+  await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
 
   expect((await call("PATCH", "/api/credentials/c1", { tier: 2, weight: 0.5, enabled: false })).status).toBe(200);
   const reloaded = await store.credentials.get("c1");
@@ -11111,12 +11200,7 @@ test("patching a credential updates tier, weight and enabled", async () => {
 
 test("patching a credential cannot inject a token", async () => {
   const { call, store } = await harness();
-  await store.credentials.create({
-    ...credential({ id: "c1", provider: "anthropic" }),
-    accessToken: "test-token-1",
-    refreshToken: null,
-    apiKey: null,
-  });
+  await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
 
   await call("PATCH", "/api/credentials/c1", { accessToken: "attacker-token" });
   const view = await store.credentials.get("c1");
@@ -11125,12 +11209,7 @@ test("patching a credential cannot inject a token", async () => {
 
 test("deleting a credential removes it", async () => {
   const { call, store } = await harness();
-  await store.credentials.create({
-    ...credential({ id: "c1", provider: "anthropic" }),
-    accessToken: "test-token-1",
-    refreshToken: null,
-    apiKey: null,
-  });
+  await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
 
   expect((await call("DELETE", "/api/credentials/c1")).status).toBe(200);
   expect(await store.credentials.get("c1")).toBeNull();
@@ -11138,29 +11217,23 @@ test("deleting a credential removes it", async () => {
 
 test("models can be created, listed and deleted", async () => {
   const { call } = await harness();
-  const model = virtualModel({
-    name: "fast",
-    targets: [{ provider: "anthropic", model: "claude-opus-4", weight: 1 }],
-  });
+  const model = virtualModel({ id: "fast", targets: [target()] });
 
   expect((await call("PUT", "/api/models/fast", model)).status).toBe(200);
   const body = (await (await call("GET", "/api/models")).json()) as Record<string, any>;
-  expect(body.models.map((m: { name: string }) => m.name)).toEqual(["fast"]);
+  expect(body.models.map((m: { id: string }) => m.id)).toEqual(["fast"]);
   expect((await call("DELETE", "/api/models/fast")).status).toBe(200);
   expect(((await (await call("GET", "/api/models")).json()) as any).models).toHaveLength(0);
 });
 
 test("a model with no targets is rejected", async () => {
   const { call } = await harness();
-  expect((await call("PUT", "/api/models/empty", virtualModel({ name: "empty" }))).status).toBe(400);
+  expect((await call("PUT", "/api/models/empty", virtualModel({ id: "empty" }))).status).toBe(400);
 });
 
-test("a model whose path name and body name disagree is rejected", async () => {
+test("a model whose path id and body id disagree is rejected", async () => {
   const { call } = await harness();
-  const model = virtualModel({
-    name: "other",
-    targets: [{ provider: "anthropic", model: "claude-opus-4", weight: 1 }],
-  });
+  const model = virtualModel({ id: "other", targets: [target()] });
   expect((await call("PUT", "/api/models/fast", model)).status).toBe(400);
 });
 
@@ -11172,18 +11245,19 @@ test("creating an api key returns the raw value exactly once", async () => {
   const listed = (await (await call("GET", "/api/keys")).json()) as Record<string, any>;
   expect(listed.keys[0].label).toBe("cli");
   expect(listed.keys[0].key).toBeUndefined();
+  expect(listed.keys[0].hash).toBeUndefined();
+  expect(listed.keys[0].prefix).toBe(created.key.slice(0, 12));
   expect(JSON.stringify(listed)).not.toContain(created.key);
 });
 
-test("an api key can be disabled and deleted", async () => {
+test("an api key is revoked rather than deleted, so usage keeps its attribution", async () => {
   const { call, store } = await harness();
   const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as { id: string };
 
-  expect((await call("PATCH", `/api/keys/${created.id}`, { enabled: false })).status).toBe(200);
-  expect((await store.keys.list()).find((k) => k.id === created.id)?.enabled).toBe(false);
-
   expect((await call("DELETE", `/api/keys/${created.id}`)).status).toBe(200);
-  expect(await store.keys.list()).toHaveLength(0);
+  const listed = await store.keys.list();
+  expect(listed).toHaveLength(1);
+  expect(listed[0]?.revokedAt).not.toBeNull();
 });
 
 test("settings round-trip and reject an unknown weight", async () => {
@@ -11202,30 +11276,12 @@ test("settings round-trip and reject an unknown weight", async () => {
 
 test("usage aggregates by the requested dimension", async () => {
   const { call, store } = await harness();
-  await store.usage.appendLog({
-    id: "r1",
-    apiKeyId: null,
-    startedAt: NOW,
-    durationMs: 100,
-    surface: "anthropic",
-    requestedModel: "fast",
-    credentialId: "c1",
-    provider: "anthropic",
-    upstreamModel: "claude-opus-4",
-    status: "ok",
-    errorCode: null,
-    attempts: 1,
-    inputTokens: 10,
-    outputTokens: 5,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    ttftMs: 40,
-    streamed: false,
-    degradations: [],
-  });
+  await store.usage.append(
+    requestLog({ id: "r1", at: NOW, inputTokens: 10, outputTokens: 5, ttftMs: 40 }),
+  );
 
-  const body = (await (await call("GET", "/api/usage?groupBy=provider")).json()) as Record<string, any>;
-  expect(body.rows[0]).toMatchObject({ key: "anthropic", requests: 1, outputTokens: 5 });
+  const body = (await (await call("GET", "/api/usage?groupBy=model")).json()) as Record<string, any>;
+  expect(body.rows[0]).toMatchObject({ key: "claude-opus-4", requests: 1, outputTokens: 5 });
 });
 
 test("usage rejects an unknown groupBy rather than passing it to sql", async () => {
@@ -11236,27 +11292,7 @@ test("usage rejects an unknown groupBy rather than passing it to sql", async () 
 test("logs are returned newest first and capped", async () => {
   const { call, store } = await harness();
   for (let i = 0; i < 3; i += 1) {
-    await store.usage.appendLog({
-      id: `r${i}`,
-      apiKeyId: null,
-      startedAt: NOW + i,
-      durationMs: 1,
-      surface: "anthropic",
-      requestedModel: "fast",
-      credentialId: "c1",
-      provider: "anthropic",
-      upstreamModel: "claude-opus-4",
-      status: "ok",
-      errorCode: null,
-      attempts: 1,
-      inputTokens: 1,
-      outputTokens: 1,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      ttftMs: null,
-      streamed: false,
-      degradations: [],
-    });
+    await store.usage.append(requestLog({ id: `r${i}`, at: NOW + i }));
   }
 
   const body = (await (await call("GET", "/api/logs?limit=2")).json()) as Record<string, any>;
@@ -11283,8 +11319,8 @@ Expected: FAIL — cannot resolve `../../src/routes/admin.ts`.
 ```ts
 import { GatewayError, HTTP_STATUS } from "@omni/ir";
 import {
-  DEFAULT_SETTINGS,
   generateApiKey,
+  hashApiKey,
   type Settings,
   type Store,
   type VirtualModel,
@@ -11306,19 +11342,39 @@ const MAX_LOG_LIMIT = 500;
 const providerId = z.enum(["anthropic", "openai", "kimi"]);
 
 const modelSchema = z.object({
-  name: z.string().min(1),
+  id: z.string().min(1),
   strategy: z.enum(["score", "priority", "roundRobin", "weighted"]),
-  enabled: z.boolean(),
+  isAlias: z.boolean(),
   targets: z
     .array(
       z.object({
         provider: providerId,
         model: z.string().min(1),
+        tier: z.number().int().min(1),
         weight: z.number().positive(),
+        costPerMTok: z.object({
+          input: z.number().min(0),
+          output: z.number().min(0),
+          cacheRead: z.number().min(0).optional(),
+        }),
+        capabilities: z.object({
+          tools: z.boolean(),
+          images: z.boolean(),
+          reasoning: z.boolean(),
+        }),
       }),
     )
     .min(1, "a virtual model needs at least one target"),
 });
+
+const keyCreateSchema = z
+  .object({
+    label: z.string().min(1).default("api key"),
+    /** Null means every configured model. An empty array would mean none. */
+    modelAllowlist: z.array(z.string().min(1)).nullable().default(null),
+    rateLimitPerMin: z.number().int().positive().nullable().default(null),
+  })
+  .strict();
 
 const settingsSchema = z.object({
   weights: z
@@ -11348,7 +11404,8 @@ const credentialPatchSchema = z
   })
   .strict();
 
-const groupBySchema = z.enum(["provider", "credential", "model", "day", "apiKey"]);
+/** Mirrors `UsageQuery["groupBy"]` exactly; the store whitelists the column. */
+const groupBySchema = z.enum(["credential", "model", "apiKey", "hour"]);
 
 function sessionCookie(token: string): string {
   return [
@@ -11463,7 +11520,7 @@ export function adminRoutes(deps: AdminDeps): Elysia {
 
     .delete("/api/credentials/:id", async ({ request, params }) => {
       await requireAdmin(request);
-      await deps.store.credentials.delete(params.id);
+      await deps.store.credentials.remove(params.id);
       return { ok: true };
     })
 
@@ -11472,19 +11529,19 @@ export function adminRoutes(deps: AdminDeps): Elysia {
       return { models: await deps.store.config.listModels() };
     })
 
-    .put("/api/models/:name", async ({ request, params }) => {
+    .put("/api/models/:id", async ({ request, params }) => {
       await requireAdmin(request);
       const model: VirtualModel = parseOrThrow(modelSchema, await request.json());
-      if (model.name !== params.name) {
-        throw new GatewayError("BAD_REQUEST", "model name in the path and body must match");
+      if (model.id !== params.id) {
+        throw new GatewayError("BAD_REQUEST", "model id in the path and body must match");
       }
       await deps.store.config.putModel(model);
       return { ok: true };
     })
 
-    .delete("/api/models/:name", async ({ request, params }) => {
+    .delete("/api/models/:id", async ({ request, params }) => {
       await requireAdmin(request);
-      await deps.store.config.deleteModel(params.name);
+      await deps.store.config.removeModel(params.id);
       return { ok: true };
     })
 
@@ -11497,53 +11554,47 @@ export function adminRoutes(deps: AdminDeps): Elysia {
         keys: keys.map((k) => ({
           id: k.id,
           label: k.label,
-          enabled: k.enabled,
-          expiresAt: k.expiresAt,
-          lastUsedAt: k.lastUsedAt,
+          // The display prefix, never the key. `hash` is deliberately absent:
+          // it is not a secret, but publishing it invites offline guessing.
+          prefix: k.prefix,
+          modelAllowlist: k.modelAllowlist,
+          rateLimitPerMin: k.rateLimitPerMin,
           createdAt: k.createdAt,
+          revokedAt: k.revokedAt,
         })),
       };
     })
 
     .post("/api/keys", async ({ request }) => {
       await requireAdmin(request);
-      const body = (await request.json()) as { label?: unknown; expiresAt?: unknown };
-      const label = typeof body.label === "string" && body.label.trim().length > 0
-        ? body.label.trim()
-        : "api key";
+      const body = parseOrThrow(keyCreateSchema, await request.json());
 
       const raw = generateApiKey();
       const created = await deps.store.keys.create({
-        label,
-        raw,
-        enabled: true,
-        expiresAt: typeof body.expiresAt === "number" ? body.expiresAt : null,
+        id: crypto.randomUUID(),
+        label: body.label,
+        prefix: raw.slice(0, 12),
+        hash: await hashApiKey(raw),
+        modelAllowlist: body.modelAllowlist,
+        rateLimitPerMin: body.rateLimitPerMin,
       });
 
       // The only response that ever contains a key. It exists in plaintext
       // nowhere else, so an operator who loses it must issue a new one.
-      return { id: created.id, label: created.label, key: raw };
-    })
-
-    .patch("/api/keys/:id", async ({ request, params }) => {
-      await requireAdmin(request);
-      const body = (await request.json()) as { enabled?: unknown; label?: unknown };
-      const patch: { enabled?: boolean; label?: string } = {};
-      if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
-      if (typeof body.label === "string") patch.label = body.label;
-      await deps.store.keys.update(params.id, patch);
-      return { ok: true };
+      return { id: created.id, label: created.label, prefix: created.prefix, key: raw };
     })
 
     .delete("/api/keys/:id", async ({ request, params }) => {
       await requireAdmin(request);
-      await deps.store.keys.delete(params.id);
+      // Revoke, not delete. The usage rows reference this id, and a report that
+      // silently loses its attribution is worse than one naming a dead key.
+      await deps.store.keys.revoke(params.id);
       return { ok: true };
     })
 
     .get("/api/settings", async ({ request }) => {
       await requireAdmin(request);
-      return { settings: (await deps.store.config.getSettings()) ?? DEFAULT_SETTINGS };
+      return { settings: await deps.store.config.getSettings() };
     })
 
     .put("/api/settings", async ({ request }) => {
@@ -11555,7 +11606,7 @@ export function adminRoutes(deps: AdminDeps): Elysia {
 
     .get("/api/usage", async ({ request, query }) => {
       await requireAdmin(request);
-      const groupBy = parseOrThrow(groupBySchema, query.groupBy ?? "provider");
+      const groupBy = parseOrThrow(groupBySchema, query.groupBy ?? "model");
       const since = typeof query.since === "string" ? Number(query.since) : 0;
       const until = typeof query.until === "string" ? Number(query.until) : deps.now();
 
@@ -11572,7 +11623,7 @@ export function adminRoutes(deps: AdminDeps): Elysia {
       await requireAdmin(request);
       const requested = typeof query.limit === "string" ? Number(query.limit) : 100;
       const limit = Number.isFinite(requested) ? Math.min(Math.max(1, requested), MAX_LOG_LIMIT) : 100;
-      return { logs: await deps.store.usage.listLogs({ limit }) };
+      return { logs: await deps.store.usage.recent(limit) };
     })
 
     .onError(({ error, set }) => {
@@ -11680,33 +11731,14 @@ test("strips a trailing slash from an explicit base url", () => {
 
 ```ts
 import { expect, test } from "bun:test";
+import type { Store } from "@omni/store";
 import { pruneLogs } from "../src/maintenance.ts";
-import { memoryStore } from "./helpers/fixtures.ts";
+import { memoryStore, requestLog } from "./helpers/fixtures.ts";
 
 const NOW = 30 * 24 * 60 * 60 * 1000;
 
-async function log(store: Awaited<ReturnType<typeof memoryStore>>, id: string, startedAt: number) {
-  await store.usage.appendLog({
-    id,
-    apiKeyId: null,
-    startedAt,
-    durationMs: 1,
-    surface: "anthropic",
-    requestedModel: "fast",
-    credentialId: "c1",
-    provider: "anthropic",
-    upstreamModel: "claude-opus-4",
-    status: "ok",
-    errorCode: null,
-    attempts: 1,
-    inputTokens: 1,
-    outputTokens: 1,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    ttftMs: null,
-    streamed: false,
-    degradations: [],
-  });
+async function log(store: Store, id: string, at: number) {
+  await store.usage.append(requestLog({ id, at }));
 }
 
 test("deletes logs older than the retention window", async () => {
@@ -11716,25 +11748,24 @@ test("deletes logs older than the retention window", async () => {
 
   await pruneLogs(store, NOW);
 
-  const remaining = await store.usage.listLogs({ limit: 10 });
+  const remaining = await store.usage.recent(10);
   expect(remaining.map((l) => l.id)).toEqual(["new"]);
 });
 
 test("honours a changed retention setting", async () => {
   const store = await memoryStore();
-  const settings = (await store.config.getSettings()) ?? undefined;
-  await store.config.putSettings({ ...(settings as never), logRetentionDays: 1 });
+  await store.config.putSettings({ logRetentionDays: 1 });
   await log(store, "old", NOW - 2 * 24 * 60 * 60 * 1000);
   await log(store, "new", NOW - 1000);
 
   await pruneLogs(store, NOW);
-  expect((await store.usage.listLogs({ limit: 10 })).map((l) => l.id)).toEqual(["new"]);
+  expect((await store.usage.recent(10)).map((l) => l.id)).toEqual(["new"]);
 });
 
 test("pruning an empty log table is a no-op", async () => {
   const store = await memoryStore();
   await pruneLogs(store, NOW);
-  expect(await store.usage.listLogs({ limit: 10 })).toHaveLength(0);
+  expect(await store.usage.recent(10)).toHaveLength(0);
 });
 ```
 
@@ -11820,15 +11851,15 @@ OMNI_DB_PATH=./omnigateway.db
 `apps/gateway/src/maintenance.ts`:
 
 ```ts
-import { DEFAULT_SETTINGS, type Store } from "@omni/store";
+import type { Store } from "@omni/store";
 
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 /** Deletes request logs past the configured retention window. */
 export async function pruneLogs(store: Store, now: number): Promise<void> {
-  const settings = (await store.config.getSettings()) ?? DEFAULT_SETTINGS;
+  const settings = await store.config.getSettings();
   const cutoff = now - settings.logRetentionDays * 24 * 60 * 60 * 1000;
-  await store.usage.deleteLogsBefore(cutoff);
+  await store.usage.prune(cutoff);
 }
 
 export type MaintenanceDeps = { store: Store; now: () => number };
@@ -12103,28 +12134,27 @@ export const ANTHROPIC_STREAM: StubResponse = {
 
 ```ts
 import { expect, test } from "bun:test";
-import { generateApiKey, type Store } from "@omni/store";
+import type { Store } from "@omni/store";
 import { createApp } from "../../src/app.ts";
-import { memoryStore, virtualModel } from "../helpers/fixtures.ts";
+import {
+  memoryStore,
+  seedApiKey,
+  seedCredential as seedCredentialRow,
+  target,
+  virtualModel,
+} from "../helpers/fixtures.ts";
 import { ANTHROPIC_STREAM, createStubUpstream, type StubUpstream } from "./upstream.ts";
 
 const NOW = 1_000_000;
 
+/** Positional wrapper so each test reads as one line. */
 async function seedCredential(store: Store, id: string, tier: number, token: string) {
-  await store.credentials.create({
+  await seedCredentialRow(store, {
     id,
-    provider: "anthropic",
-    label: id,
-    authType: "oauth",
-    enabled: true,
     tier,
-    weight: 1,
     expiresAt: NOW + 3_600_000,
-    accountEmail: null,
-    providerData: {},
     accessToken: token,
     refreshToken: "test-token-refresh",
-    apiKey: null,
   });
 }
 
@@ -12136,14 +12166,13 @@ async function harness(): Promise<{
   const store = await memoryStore();
   await store.config.putModel(
     virtualModel({
-      name: "fast",
+      id: "fast",
       strategy: "priority",
-      targets: [{ provider: "anthropic", model: "claude-opus-4", weight: 1 }],
+      targets: [target({ provider: "anthropic", model: "claude-opus-4" })],
     }),
   );
 
-  const raw = generateApiKey();
-  await store.keys.create({ label: "e2e", raw, enabled: true });
+  const { raw } = await seedApiKey(store, { label: "e2e" });
 
   const upstream = createStubUpstream();
   let n = 0;
@@ -12227,7 +12256,7 @@ test("a 429 on the first credential fails over to the second", async () => {
   expect(upstream.calls[0]?.authorization).toContain("test-token-a");
   expect(upstream.calls[1]?.authorization).toContain("test-token-b");
 
-  const logs = await store.usage.listLogs({ limit: 1 });
+  const logs = await store.usage.recent(1);
   expect(logs[0]?.attempts).toBe(2);
   expect(logs[0]?.credentialId).toBe("c2");
 });
@@ -12243,9 +12272,9 @@ test("all credentials failing produces one error response and one log", async ()
   expect(res.status).toBe(429);
   expect((await res.json()).error.type).toBe("rate_limit_error");
 
-  const logs = await store.usage.listLogs({ limit: 10 });
+  const logs = await store.usage.recent(10);
   expect(logs).toHaveLength(1);
-  expect(logs[0]?.status).toBe("error");
+  expect(logs[0]?.status).toBe(429);
 });
 
 test("a failure after the commit point is forwarded in-stream, not failed over", async () => {
@@ -12326,7 +12355,7 @@ test("no request or response text ever reaches the log table", async () => {
     messages: [{ role: "user", content: "sensitive-prompt-text" }],
   });
 
-  const serialized = JSON.stringify(await store.usage.listLogs({ limit: 10 }));
+  const serialized = JSON.stringify(await store.usage.recent(10));
   expect(serialized).not.toContain("sensitive-prompt-text");
   expect(serialized).not.toContain("Hello");
   expect(serialized).not.toContain("test-token-a");
