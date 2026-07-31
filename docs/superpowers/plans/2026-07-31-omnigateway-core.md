@@ -1128,6 +1128,11 @@ export type Credential = {
   accountEmail: string | null;
   /** Provider-specific durable state, e.g. Kimi device identity, Codex workspace id. */
   providerData: Record<string, unknown>;
+  /**
+   * Derived at read time, never written. Lets the router decide whether an
+   * expired credential can be revived without decrypting anything.
+   */
+  hasRefreshToken: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -1241,7 +1246,9 @@ export type Settings = {
 export interface CredentialRepo {
   list(): Promise<CredentialView[]>;
   get(id: string): Promise<CredentialView | null>;
-  create(input: Omit<Credential, "createdAt" | "updatedAt"> & CredentialSecrets): Promise<Credential>;
+  create(
+    input: Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken"> & CredentialSecrets,
+  ): Promise<Credential>;
   update(id: string, patch: Partial<Credential>): Promise<void>;
   updateSecrets(id: string, secrets: Partial<CredentialSecrets>, expiresAt: number | null): Promise<void>;
   remove(id: string): Promise<void>;
@@ -1693,6 +1700,7 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
     expiresAt: row.expires_at,
     accountEmail: row.account_email,
     providerData: JSON.parse(row.provider_data) as Record<string, unknown>,
+    hasRefreshToken: row.refresh_token !== null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     secrets: async (): Promise<CredentialSecrets> => ({
@@ -4596,6 +4604,1258 @@ Expected: 42 pass, 0 fail.
 ```bash
 git add packages/providers
 git commit -m "feat(providers): add kimi adapter and provider registry"
+```
+
+---
+
+## Task 12: Gateway app scaffold, routing snapshot, and model resolution
+
+**Files:**
+- Create: `apps/gateway/package.json`, `apps/gateway/tsconfig.json`, `apps/gateway/src/router/types.ts`, `apps/gateway/src/router/snapshot.ts`, `apps/gateway/src/router/resolve.ts`, `apps/gateway/test/helpers/fixtures.ts`
+- Test: `apps/gateway/test/router/resolve.test.ts`
+
+**Interfaces:**
+- Consumes: `Store`, `CredentialView`, `CredentialHealth`, `QuotaWindow`, `VirtualModel`, `Settings`, `Target` (Tasks 5, 7); `ChatRequest`, `GatewayError` (Task 2).
+- Produces:
+  - `Snapshot`, `Candidate`, `Excluded`, `RankInput`, `RankResult` in `router/types.ts`
+  - `buildSnapshot(store, now): Promise<Snapshot>` and `healthKey(credentialId, model): string`
+  - `resolveModel(name, snapshot): VirtualModel` — throws `NO_CANDIDATES` when unresolvable
+  - `credential(overrides?)`, `target(overrides?)`, `health(overrides?)`, `snapshot(parts?)` test factories in `test/helpers/fixtures.ts`, used by Tasks 13-15
+
+**Why a snapshot.** The router is a pure function so it can be tested exhaustively without a database or a clock. Everything it needs — credentials, health, quota, models, settings, the current time — is gathered once per request into an immutable `Snapshot` and passed in. `buildSnapshot` is the only part that touches I/O.
+
+- [ ] **Step 1: Write the failing test**
+
+`apps/gateway/test/router/resolve.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { resolveModel } from "../../src/router/resolve.ts";
+import { snapshot, target } from "../helpers/fixtures.ts";
+
+test("resolves a configured virtual model by id", () => {
+  const vm = {
+    id: "fast",
+    strategy: "score" as const,
+    isAlias: false,
+    targets: [target({ model: "claude-opus-4" })],
+  };
+  const resolved = resolveModel("fast", snapshot({ models: [vm] }));
+  expect(resolved.id).toBe("fast");
+  expect(resolved.targets).toHaveLength(1);
+});
+
+test("synthesises a single-target model from provider/model syntax", () => {
+  const resolved = resolveModel("anthropic/claude-opus-4", snapshot({}));
+  expect(resolved.isAlias).toBe(true);
+  expect(resolved.strategy).toBe("score");
+  expect(resolved.targets).toEqual([
+    {
+      provider: "anthropic",
+      model: "claude-opus-4",
+      tier: 1,
+      weight: 1,
+      costPerMTok: { input: 0, output: 0 },
+      capabilities: { tools: true, images: true, reasoning: true },
+    },
+  ]);
+});
+
+test("accepts a colon separator as well as a slash", () => {
+  expect(resolveModel("kimi:kimi-k2", snapshot({})).targets[0]?.model).toBe("kimi-k2");
+});
+
+test("keeps slashes inside the model portion intact", () => {
+  const resolved = resolveModel("openai/org/gpt-5", snapshot({}));
+  expect(resolved.targets[0]?.provider).toBe("openai");
+  expect(resolved.targets[0]?.model).toBe("org/gpt-5");
+});
+
+test("takes capabilities from the registry for a synthesised target", () => {
+  const resolved = resolveModel("kimi/kimi-k2", snapshot({}));
+  expect(resolved.targets[0]?.capabilities).toEqual({
+    tools: true,
+    images: false,
+    reasoning: false,
+  });
+});
+
+test("infers the provider for a bare well-known model name", () => {
+  const resolved = resolveModel("claude-sonnet-4-5", snapshot({}));
+  expect(resolved.targets[0]?.provider).toBe("anthropic");
+  expect(resolved.targets[0]?.model).toBe("claude-sonnet-4-5");
+});
+
+test("a configured virtual model wins over prefix inference", () => {
+  const vm = {
+    id: "claude-opus-4",
+    strategy: "priority" as const,
+    isAlias: false,
+    targets: [target({ provider: "kimi" as const, model: "kimi-k2" })],
+  };
+  expect(resolveModel("claude-opus-4", snapshot({ models: [vm] })).targets[0]?.provider).toBe("kimi");
+});
+
+test("throws NO_CANDIDATES for an unresolvable name", () => {
+  try {
+    resolveModel("does-not-exist", snapshot({}));
+    throw new Error("expected throw");
+  } catch (e) {
+    expect(e).toBeInstanceOf(GatewayError);
+    expect((e as GatewayError).code).toBe("NO_CANDIDATES");
+  }
+});
+
+test("rejects an unknown provider prefix rather than guessing", () => {
+  expect(() => resolveModel("bedrock/claude", snapshot({}))).toThrow(GatewayError);
+});
+```
+
+- [ ] **Step 2: Create the app package and run the test to see it fail**
+
+`apps/gateway/package.json`:
+
+```json
+{
+  "name": "@omni/gateway",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "@omni/ir": "workspace:*",
+    "@omni/providers": "workspace:*",
+    "@omni/store": "workspace:*",
+    "elysia": "1.4.29",
+    "zod": "4.4.3"
+  }
+}
+```
+
+`apps/gateway/tsconfig.json`:
+
+```json
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["src", "test"]
+}
+```
+
+Run: `bun install && bun test apps/gateway`
+Expected: FAIL — cannot resolve `../../src/router/resolve.ts`.
+
+- [ ] **Step 3: Write the router types**
+
+`apps/gateway/src/router/types.ts`:
+
+```ts
+import type { ChatRequest } from "@omni/ir";
+import type {
+  CredentialHealth,
+  CredentialView,
+  QuotaWindow,
+  Settings,
+  Target,
+  VirtualModel,
+} from "@omni/store";
+
+/**
+ * Everything the router needs, gathered once per request.
+ *
+ * Held immutable for the life of a request so that two candidates ranked in the
+ * same request see identical health and quota, and so ranking is reproducible
+ * from its inputs alone.
+ */
+export type Snapshot = {
+  credentials: CredentialView[];
+  /** Keyed by `healthKey(credentialId, model)`. */
+  health: ReadonlyMap<string, CredentialHealth>;
+  /** Keyed by credential id. */
+  quota: ReadonlyMap<string, QuotaWindow[]>;
+  models: ReadonlyMap<string, VirtualModel>;
+  settings: Settings;
+  builtAt: number;
+};
+
+export type Candidate = {
+  credential: CredentialView;
+  target: Target;
+  score: number;
+  /** Per-term contributions, surfaced in the request log for debugging. */
+  reasons: Record<string, number>;
+};
+
+export type Excluded = {
+  credentialId: string;
+  model: string;
+  reason: string;
+};
+
+export type RankInput = {
+  request: ChatRequest;
+  model: VirtualModel;
+  snapshot: Snapshot;
+  now: number;
+  /** Injected so weighted selection stays a pure function. Range [0, 1). */
+  rand: number;
+};
+
+export type RankResult = {
+  /** Best first. Dispatch walks this list on retryable failure. */
+  candidates: Candidate[];
+  excluded: Excluded[];
+};
+```
+
+- [ ] **Step 4: Write the snapshot builder**
+
+`apps/gateway/src/router/snapshot.ts`:
+
+```ts
+import type { QuotaWindow, Store } from "@omni/store";
+import type { Snapshot } from "./types.ts";
+
+/** Health is per (credential, model); this is the composite key. */
+export function healthKey(credentialId: string, model: string): string {
+  return `${credentialId} ${model}`;
+}
+
+export async function buildSnapshot(store: Store, now: number): Promise<Snapshot> {
+  const [credentials, healthRows, quotaRows, models, settings] = await Promise.all([
+    store.credentials.list(),
+    store.credentials.listHealth(),
+    store.credentials.listQuota(),
+    store.config.listModels(),
+    store.config.getSettings(),
+  ]);
+
+  const health = new Map(healthRows.map((h) => [healthKey(h.credentialId, h.model), h]));
+
+  const quota = new Map<string, QuotaWindow[]>();
+  for (const row of quotaRows) {
+    const list = quota.get(row.credentialId);
+    if (list === undefined) quota.set(row.credentialId, [row]);
+    else list.push(row);
+  }
+
+  return {
+    credentials,
+    health,
+    quota,
+    models: new Map(models.map((m) => [m.id, m])),
+    settings,
+    builtAt: now,
+  };
+}
+```
+
+- [ ] **Step 5: Write model resolution**
+
+`apps/gateway/src/router/resolve.ts`:
+
+```ts
+import { GatewayError, type ProviderId } from "@omni/ir";
+import { ADAPTERS } from "@omni/providers";
+import type { Target, VirtualModel } from "@omni/store";
+import type { Snapshot } from "./types.ts";
+
+const PROVIDERS = new Set<string>(Object.keys(ADAPTERS));
+
+/**
+ * Prefixes for bare model names, so a client can pass a concrete upstream model
+ * without configuring a virtual model first. Longest match wins.
+ */
+const PREFIX_PROVIDER: ReadonlyArray<readonly [string, ProviderId]> = [
+  ["claude-", "anthropic"],
+  ["gpt-", "openai"],
+  ["o1", "openai"],
+  ["o3", "openai"],
+  ["o4", "openai"],
+  ["kimi-", "kimi"],
+  ["moonshot", "kimi"],
+];
+
+function synthesize(provider: ProviderId, model: string): VirtualModel {
+  const target: Target = {
+    provider,
+    model,
+    tier: 1,
+    weight: 1,
+    // Unknown to the operator, so cost scoring contributes nothing and the
+    // remaining terms decide. Configure a virtual model to price it.
+    costPerMTok: { input: 0, output: 0 },
+    capabilities: ADAPTERS[provider].capabilities,
+  };
+  return { id: `${provider}/${model}`, targets: [target], strategy: "score", isAlias: true };
+}
+
+/**
+ * Turns a client-supplied model name into a virtual model.
+ *
+ * Concrete names become single-target virtual models so that routing has one
+ * code path: a direct passthrough is just a degenerate load-balancing pool.
+ */
+export function resolveModel(name: string, snapshot: Snapshot): VirtualModel {
+  const configured = snapshot.models.get(name);
+  if (configured !== undefined) return configured;
+
+  const sep = name.search(/[/:]/);
+  if (sep > 0) {
+    const prefix = name.slice(0, sep);
+    const rest = name.slice(sep + 1);
+    if (PROVIDERS.has(prefix) && rest.length > 0) {
+      return synthesize(prefix as ProviderId, rest);
+    }
+    throw new GatewayError("NO_CANDIDATES", `unknown provider "${prefix}" in model "${name}"`);
+  }
+
+  for (const [prefix, provider] of PREFIX_PROVIDER) {
+    if (name.startsWith(prefix)) return synthesize(provider, name);
+  }
+
+  throw new GatewayError(
+    "NO_CANDIDATES",
+    `model "${name}" is not a configured virtual model and its provider could not be inferred`,
+  );
+}
+```
+
+- [ ] **Step 6: Write the shared test fixtures**
+
+`apps/gateway/test/helpers/fixtures.ts`:
+
+```ts
+import type {
+  CredentialHealth,
+  CredentialView,
+  QuotaWindow,
+  Settings,
+  Target,
+  VirtualModel,
+} from "@omni/store";
+import { DEFAULT_SETTINGS } from "@omni/store";
+import { healthKey } from "../../src/router/snapshot.ts";
+import type { Snapshot } from "../../src/router/types.ts";
+
+let seq = 0;
+
+/**
+ * Secrets are synthetic. No test in this repo carries a real token, and the
+ * thunk records whether ranking touched it.
+ */
+export function credential(overrides: Partial<CredentialView> = {}): CredentialView {
+  const id = overrides.id ?? `cred-${++seq}`;
+  return {
+    id,
+    provider: "anthropic",
+    label: id,
+    authType: "oauth",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    hasRefreshToken: true,
+    createdAt: 0,
+    updatedAt: 0,
+    secrets: async () => ({
+      accessToken: `test-token-${id}`,
+      refreshToken: `test-refresh-${id}`,
+      apiKey: null,
+      idToken: null,
+    }),
+    ...overrides,
+  };
+}
+
+export function target(overrides: Partial<Target> = {}): Target {
+  return {
+    provider: "anthropic",
+    model: "claude-opus-4",
+    tier: 1,
+    weight: 1,
+    costPerMTok: { input: 15, output: 75 },
+    capabilities: { tools: true, images: true, reasoning: true },
+    ...overrides,
+  };
+}
+
+export function health(overrides: Partial<CredentialHealth> = {}): CredentialHealth {
+  return {
+    credentialId: "cred-1",
+    model: "claude-opus-4",
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+    rateLimitedUntil: null,
+    ewmaTtftMs: null,
+    lastUsedAt: null,
+    ...overrides,
+  };
+}
+
+export function quota(overrides: Partial<QuotaWindow> = {}): QuotaWindow {
+  return {
+    credentialId: "cred-1",
+    windowType: "fiveHour",
+    startsAt: 0,
+    used: 0,
+    limit: null,
+    ...overrides,
+  };
+}
+
+export function snapshot(parts: {
+  credentials?: CredentialView[];
+  health?: CredentialHealth[];
+  quota?: QuotaWindow[];
+  models?: VirtualModel[];
+  settings?: Partial<Settings>;
+  builtAt?: number;
+}): Snapshot {
+  const quotaMap = new Map<string, QuotaWindow[]>();
+  for (const row of parts.quota ?? []) {
+    const list = quotaMap.get(row.credentialId);
+    if (list === undefined) quotaMap.set(row.credentialId, [row]);
+    else list.push(row);
+  }
+
+  return {
+    credentials: parts.credentials ?? [],
+    health: new Map((parts.health ?? []).map((h) => [healthKey(h.credentialId, h.model), h])),
+    quota: quotaMap,
+    models: new Map((parts.models ?? []).map((m) => [m.id, m])),
+    settings: {
+      ...DEFAULT_SETTINGS,
+      ...parts.settings,
+      weights: { ...DEFAULT_SETTINGS.weights, ...parts.settings?.weights },
+    },
+    builtAt: parts.builtAt ?? 1_000_000,
+  };
+}
+```
+
+- [ ] **Step 7: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 9 pass, 0 fail.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add routing snapshot and model resolution"
+```
+
+---
+
+## Task 13: Candidate filters and scoring
+
+**Files:**
+- Create: `apps/gateway/src/router/filters.ts`, `apps/gateway/src/router/score.ts`, `apps/gateway/src/router/index.ts`
+- Test: `apps/gateway/test/router/filters.test.ts`, `apps/gateway/test/router/rank.test.ts`
+
+**Interfaces:**
+- Consumes: `Snapshot`, `Candidate`, `Excluded`, `RankInput`, `RankResult` (Task 12); `healthKey`; fixtures.
+- Produces:
+  - `requiredCapabilities(request): Capabilities`
+  - `eligible(input): { pairs: { credential; target }[]; excluded: Excluded[] }`
+  - `score(pairs, input): Candidate[]`
+  - `rank(input: RankInput): RankResult` — the router's whole public surface, re-exported from `router/index.ts` along with `buildSnapshot`, `healthKey`, and `resolveModel`
+
+**Scoring model.** Each term is normalized to `0..1` where 1 is best, multiplied by its configured weight, and summed. Terms that cannot be computed contribute a neutral `0.5` rather than 0, so an unmeasured credential is not punished relative to a measured one. The final sum is multiplied by `credential.weight * target.weight`, which is how an operator biases traffic without editing weights that affect every model.
+
+- [ ] **Step 1: Write the failing filter test**
+
+`apps/gateway/test/router/filters.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import type { ChatRequest } from "@omni/ir";
+import { eligible, requiredCapabilities } from "../../src/router/filters.ts";
+import { credential, health, quota, snapshot, target } from "../helpers/fixtures.ts";
+
+const NOW = 1_000_000;
+
+const req: ChatRequest = {
+  model: "fast",
+  messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  stream: true,
+};
+
+const model = (targets = [target()]) => ({
+  id: "fast",
+  strategy: "score" as const,
+  isAlias: false,
+  targets,
+});
+
+test("derives required capabilities from the request", () => {
+  expect(requiredCapabilities(req)).toEqual({ tools: false, images: false, reasoning: false });
+  expect(
+    requiredCapabilities({ ...req, tools: [{ name: "f", inputSchema: {} }] }).tools,
+  ).toBe(true);
+  expect(requiredCapabilities({ ...req, reasoning: { effort: "low" } }).reasoning).toBe(true);
+  expect(
+    requiredCapabilities({
+      ...req,
+      messages: [
+        { role: "user", content: [{ type: "image", mediaType: "image/png", data: "A" }] },
+      ],
+    }).images,
+  ).toBe(true);
+});
+
+test("pairs each target with every credential of its provider", () => {
+  const a = credential({ id: "a", provider: "anthropic" });
+  const k = credential({ id: "k", provider: "kimi" });
+  const { pairs } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({ credentials: [a, k] }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(pairs).toHaveLength(1);
+  expect(pairs[0]?.credential.id).toBe("a");
+});
+
+test("excludes disabled credentials", () => {
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({ credentials: [credential({ id: "a", enabled: false })] }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(pairs).toHaveLength(0);
+  expect(excluded[0]).toEqual({ credentialId: "a", model: "claude-opus-4", reason: "disabled" });
+});
+
+test("excludes targets that lack a required capability", () => {
+  const { pairs, excluded } = eligible({
+    request: { ...req, tools: [{ name: "f", inputSchema: {} }] },
+    model: model([target({ capabilities: { tools: false, images: true, reasoning: true } })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(pairs).toHaveLength(0);
+  expect(excluded[0]?.reason).toBe("capability:tools");
+});
+
+test("excludes an open breaker inside its cooldown", () => {
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      health: [
+        health({
+          credentialId: "a",
+          breakerState: "open",
+          openedAt: NOW - 1_000,
+          consecutiveFailures: 3,
+        }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(pairs).toHaveLength(0);
+  expect(excluded[0]?.reason).toBe("breaker:open");
+});
+
+test("admits an open breaker whose cooldown has elapsed as a half-open probe", () => {
+  const { pairs } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      health: [
+        health({
+          credentialId: "a",
+          breakerState: "open",
+          openedAt: NOW - 60_000,
+          consecutiveFailures: 3,
+        }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(pairs).toHaveLength(1);
+});
+
+test("cooldown grows exponentially with consecutive failures", () => {
+  // threshold 3, base cooldown 30s. At 5 failures the backoff is 30s * 2^2.
+  const openedAt = NOW - 100_000;
+  const build = (failures: number) =>
+    eligible({
+      request: req,
+      model: model(),
+      snapshot: snapshot({
+        credentials: [credential({ id: "a" })],
+        health: [
+          health({
+            credentialId: "a",
+            breakerState: "open",
+            openedAt,
+            consecutiveFailures: failures,
+          }),
+        ],
+      }),
+      now: NOW,
+      rand: 0,
+    });
+  expect(build(3).pairs).toHaveLength(1);
+  expect(build(8).pairs).toHaveLength(0);
+});
+
+test("excludes a credential inside an observed rate-limit window", () => {
+  const { excluded } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      health: [health({ credentialId: "a", rateLimitedUntil: NOW + 5_000 })],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(excluded[0]?.reason).toBe("rateLimited");
+});
+
+test("an expired rate-limit window no longer excludes", () => {
+  const { pairs } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      health: [health({ credentialId: "a", rateLimitedUntil: NOW - 1 })],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(pairs).toHaveLength(1);
+});
+
+test("excludes a credential whose configured quota is spent", () => {
+  const { excluded } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      quota: [quota({ credentialId: "a", used: 100, limit: 100 })],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(excluded[0]?.reason).toBe("quota:fiveHour");
+});
+
+test("a quota window with no configured limit never excludes", () => {
+  const { pairs } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      quota: [quota({ credentialId: "a", used: 10_000, limit: null })],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(pairs).toHaveLength(1);
+});
+
+test("excludes an expired credential that cannot be refreshed", () => {
+  const dead = credential({ id: "a", expiresAt: NOW - 1, hasRefreshToken: false });
+  const { excluded } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({ credentials: [dead] }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(excluded[0]?.reason).toBe("expired");
+});
+
+test("keeps an expired credential that has a refresh token", () => {
+  const { pairs } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({ credentials: [credential({ id: "a", expiresAt: NOW - 1 })] }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(pairs).toHaveLength(1);
+});
+
+test("api-key credentials are never treated as expired", () => {
+  const key = credential({
+    id: "a",
+    authType: "apiKey",
+    expiresAt: NOW - 1,
+    hasRefreshToken: false,
+    secrets: async () => ({ accessToken: null, refreshToken: null, apiKey: "k", idToken: null }),
+  });
+  expect(
+    eligible({
+      request: req,
+      model: model(),
+      snapshot: snapshot({ credentials: [key] }),
+      now: NOW,
+      rand: 0,
+    }).pairs,
+  ).toHaveLength(1);
+});
+```
+
+- [ ] **Step 2: Write the failing rank test**
+
+`apps/gateway/test/router/rank.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import type { ChatRequest } from "@omni/ir";
+import { rank } from "../../src/router/index.ts";
+import { credential, health, quota, snapshot, target } from "../helpers/fixtures.ts";
+
+const NOW = 1_000_000;
+
+const req: ChatRequest = {
+  model: "fast",
+  messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  stream: true,
+};
+
+const model = (targets = [target()], strategy: "score" | "priority" | "roundRobin" | "weighted" = "score") => ({
+  id: "fast",
+  strategy,
+  isAlias: false,
+  targets,
+});
+
+test("ranking never decrypts a credential", async () => {
+  let opened = 0;
+  const spy = credential({
+    id: "a",
+    secrets: async () => {
+      opened++;
+      return { accessToken: "t", refreshToken: "r", apiKey: null, idToken: null };
+    },
+  });
+  rank({ request: req, model: model(), snapshot: snapshot({ credentials: [spy] }), now: NOW, rand: 0 });
+  expect(opened).toBe(0);
+});
+
+test("prefers the lower tier when everything else is equal", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model([target({ model: "cheap", tier: 2 }), target({ model: "premium", tier: 1 })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates[0]?.target.model).toBe("premium");
+});
+
+test("prefers the healthier credential at the same tier", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "sick" }), credential({ id: "well" })],
+      health: [health({ credentialId: "sick", consecutiveFailures: 2 })],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates[0]?.credential.id).toBe("well");
+});
+
+test("prefers the cheaper target when cost is the only weighted term", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model([
+      target({ model: "pricey", costPerMTok: { input: 15, output: 75 } }),
+      target({ model: "thrifty", costPerMTok: { input: 1, output: 3 } }),
+    ]),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      settings: { weights: { tier: 0, health: 0, quota: 0, cost: 1, latency: 0, recency: 0 } },
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates[0]?.target.model).toBe("thrifty");
+});
+
+test("prefers the faster credential when latency is the only weighted term", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "slow" }), credential({ id: "quick" })],
+      health: [
+        health({ credentialId: "slow", ewmaTtftMs: 3000 }),
+        health({ credentialId: "quick", ewmaTtftMs: 200 }),
+      ],
+      settings: { weights: { tier: 0, health: 0, quota: 0, cost: 0, latency: 1, recency: 0 } },
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates[0]?.credential.id).toBe("quick");
+});
+
+test("prefers the credential with more quota headroom", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "drained" }), credential({ id: "fresh" })],
+      quota: [
+        quota({ credentialId: "drained", used: 90, limit: 100 }),
+        quota({ credentialId: "fresh", used: 10, limit: 100 }),
+      ],
+      settings: { weights: { tier: 0, health: 0, quota: 1, cost: 0, latency: 0, recency: 0 } },
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates[0]?.credential.id).toBe("fresh");
+});
+
+test("recency spreads load toward the least recently used credential", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "hot" }), credential({ id: "cold" })],
+      health: [
+        health({ credentialId: "hot", lastUsedAt: NOW - 1_000 }),
+        health({ credentialId: "cold", lastUsedAt: NOW - 600_000 }),
+      ],
+      settings: { weights: { tier: 0, health: 0, quota: 0, cost: 0, latency: 0, recency: 1 } },
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates[0]?.credential.id).toBe("cold");
+});
+
+test("credential weight multiplies the final score", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "light", weight: 1 }), credential({ id: "heavy", weight: 5 })],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates[0]?.credential.id).toBe("heavy");
+});
+
+test("priority strategy sorts by tier and ignores other terms", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model(
+      [target({ model: "tier2", tier: 2, costPerMTok: { input: 0, output: 0 } }), target({ model: "tier1", tier: 1 })],
+      "priority",
+    ),
+    snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates.map((c) => c.target.model)).toEqual(["tier1", "tier2"]);
+});
+
+test("roundRobin puts the least recently used credential first", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model([target()], "roundRobin"),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" }), credential({ id: "b" })],
+      health: [
+        health({ credentialId: "a", lastUsedAt: NOW }),
+        health({ credentialId: "b", lastUsedAt: NOW - 10 }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates[0]?.credential.id).toBe("b");
+});
+
+test("weighted selection is deterministic in the injected random value", () => {
+  const snap = snapshot({
+    credentials: [credential({ id: "a", weight: 1 }), credential({ id: "b", weight: 9 })],
+  });
+  const pick = (rand: number) =>
+    rank({ request: req, model: model([target()], "weighted"), snapshot: snap, now: NOW, rand })
+      .candidates[0]?.credential.id;
+  expect(pick(0.05)).toBe("a");
+  expect(pick(0.5)).toBe("b");
+  expect(pick(0.05)).toBe("a");
+});
+
+test("weighted ranking still returns every candidate for failover", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model([target()], "weighted"),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" }), credential({ id: "b" }), credential({ id: "c" })],
+    }),
+    now: NOW,
+    rand: 0.5,
+  });
+  expect(candidates).toHaveLength(3);
+  expect(new Set(candidates.map((c) => c.credential.id)).size).toBe(3);
+});
+
+test("returns an empty list with reasons when nothing is eligible", () => {
+  const { candidates, excluded } = rank({
+    request: req,
+    model: model(),
+    snapshot: snapshot({ credentials: [credential({ id: "a", enabled: false })] }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates).toEqual([]);
+  expect(excluded).toHaveLength(1);
+});
+
+test("candidates carry their per-term reasons", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model(),
+    snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(Object.keys(candidates[0]?.reasons ?? {}).sort()).toEqual([
+    "cost",
+    "health",
+    "latency",
+    "quota",
+    "recency",
+    "tier",
+  ]);
+});
+
+test("ranking is stable for identical inputs", () => {
+  const snap = snapshot({
+    credentials: [credential({ id: "a" }), credential({ id: "b" }), credential({ id: "c" })],
+  });
+  const ids = () =>
+    rank({ request: req, model: model(), snapshot: snap, now: NOW, rand: 0 }).candidates.map(
+      (c) => c.credential.id,
+    );
+  expect(ids()).toEqual(ids());
+});
+```
+
+- [ ] **Step 3: Run both tests to verify they fail**
+
+Run: `bun test apps/gateway/test/router`
+Expected: FAIL — cannot resolve `../../src/router/filters.ts`.
+
+- [ ] **Step 4: Write the filters**
+
+`apps/gateway/src/router/filters.ts`:
+
+```ts
+import type { ChatRequest } from "@omni/ir";
+import type { Capabilities } from "@omni/providers";
+import type { CredentialView, Target } from "@omni/store";
+import { healthKey } from "./snapshot.ts";
+import type { Excluded, RankInput } from "./types.ts";
+
+export type Pair = { credential: CredentialView; target: Target };
+
+/** What the request actually needs, so targets can be filtered on it. */
+export function requiredCapabilities(request: ChatRequest): Capabilities {
+  const images = request.messages.some((m) => m.content.some((b) => b.type === "image"));
+  return {
+    tools: (request.tools?.length ?? 0) > 0,
+    images,
+    reasoning: request.reasoning !== undefined,
+  };
+}
+
+/**
+ * Backoff for an open breaker: base cooldown doubled per failure past the
+ * threshold, capped so a long-dead credential is still probed hourly.
+ */
+function cooldownMs(failures: number, threshold: number, base: number): number {
+  const over = Math.max(0, failures - threshold);
+  return Math.min(base * 2 ** over, 3_600_000);
+}
+
+export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[] } {
+  const { request, model, snapshot, now } = input;
+  const { breakerThreshold, breakerCooldownMs } = snapshot.settings;
+  const need = requiredCapabilities(request);
+
+  const pairs: Pair[] = [];
+  const excluded: Excluded[] = [];
+
+  for (const target of model.targets) {
+    const missing = (["tools", "images", "reasoning"] as const).find(
+      (cap) => need[cap] && !target.capabilities[cap],
+    );
+
+    for (const credential of snapshot.credentials) {
+      if (credential.provider !== target.provider) continue;
+
+      const drop = (reason: string): void => {
+        excluded.push({ credentialId: credential.id, model: target.model, reason });
+      };
+
+      if (missing !== undefined) {
+        drop(`capability:${missing}`);
+        continue;
+      }
+      if (!credential.enabled) {
+        drop("disabled");
+        continue;
+      }
+
+      // An OAuth credential past expiry is usable only if it can be refreshed;
+      // dispatch performs the refresh before the call.
+      if (
+        credential.authType === "oauth" &&
+        credential.expiresAt !== null &&
+        credential.expiresAt <= now &&
+        !credential.hasRefreshToken
+      ) {
+        drop("expired");
+        continue;
+      }
+
+      const h = snapshot.health.get(healthKey(credential.id, target.model));
+      if (h !== undefined) {
+        if (h.rateLimitedUntil !== null && h.rateLimitedUntil > now) {
+          drop("rateLimited");
+          continue;
+        }
+        if (h.breakerState === "open") {
+          const elapsed = now - (h.openedAt ?? now);
+          if (elapsed < cooldownMs(h.consecutiveFailures, breakerThreshold, breakerCooldownMs)) {
+            drop("breaker:open");
+            continue;
+          }
+          // Cooldown elapsed: admitted as a half-open probe.
+        }
+      }
+
+      const spent = (snapshot.quota.get(credential.id) ?? []).find(
+        (w) => w.limit !== null && w.used >= w.limit,
+      );
+      if (spent !== undefined) {
+        drop(`quota:${spent.windowType}`);
+        continue;
+      }
+
+      pairs.push({ credential, target });
+    }
+  }
+
+  return { pairs, excluded };
+}
+```
+
+`hasRefreshToken` comes from `Credential` (Task 5) and is derived from the stored column at read time, so this check costs no decryption.
+
+- [ ] **Step 5: Write the scorer**
+
+`apps/gateway/src/router/score.ts`:
+
+```ts
+import { healthKey } from "./snapshot.ts";
+import type { Pair } from "./filters.ts";
+import type { Candidate, RankInput } from "./types.ts";
+
+/** Neutral value for a term with no data — neither rewarded nor punished. */
+const UNKNOWN = 0.5;
+
+/** Maps a raw value into 0..1 where the minimum observed scores 1. */
+function lowerIsBetter(value: number, min: number, max: number): number {
+  if (max === min) return 1;
+  return (max - value) / (max - min);
+}
+
+/**
+ * Blends input and output price into one number. Output dominates real spend on
+ * chat workloads, so it carries three quarters of the weight.
+ */
+function blendedCost(input: number, output: number): number {
+  return input * 0.25 + output * 0.75;
+}
+
+export function score(pairs: Pair[], input: RankInput): Candidate[] {
+  const { snapshot, now } = input;
+  const w = snapshot.settings.weights;
+
+  const tiers = pairs.map((p) => p.target.tier);
+  const minTier = Math.min(...tiers);
+  const maxTier = Math.max(...tiers);
+
+  const costs = pairs.map((p) => blendedCost(p.target.costPerMTok.input, p.target.costPerMTok.output));
+  const minCost = Math.min(...costs);
+  const maxCost = Math.max(...costs);
+
+  const latencies = pairs.flatMap((p) => {
+    const h = snapshot.health.get(healthKey(p.credential.id, p.target.model));
+    return h?.ewmaTtftMs != null ? [h.ewmaTtftMs] : [];
+  });
+  const minLatency = latencies.length > 0 ? Math.min(...latencies) : 0;
+  const maxLatency = latencies.length > 0 ? Math.max(...latencies) : 0;
+
+  const idleTimes = pairs.map((p) => {
+    const h = snapshot.health.get(healthKey(p.credential.id, p.target.model));
+    return h?.lastUsedAt == null ? Number.POSITIVE_INFINITY : now - h.lastUsedAt;
+  });
+  const finiteIdle = idleTimes.filter(Number.isFinite);
+  const maxIdle = finiteIdle.length > 0 ? Math.max(...finiteIdle) : 1;
+
+  return pairs.map((pair, i) => {
+    const h = snapshot.health.get(healthKey(pair.credential.id, pair.target.model));
+
+    const tier = lowerIsBetter(pair.target.tier, minTier, maxTier);
+
+    // A half-open probe is worth trying but should lose to a healthy peer.
+    let health = 1 / (1 + (h?.consecutiveFailures ?? 0));
+    if (h?.breakerState === "open" || h?.breakerState === "halfOpen") health *= 0.5;
+
+    const windows = snapshot.quota.get(pair.credential.id) ?? [];
+    const limited = windows.filter((q) => q.limit !== null);
+    const quota =
+      limited.length === 0
+        ? 1
+        : Math.min(...limited.map((q) => Math.max(0, 1 - q.used / (q.limit as number))));
+
+    // A zero-priced target means "unpriced", not "free"; treat it as unknown.
+    const cost =
+      maxCost === 0 ? UNKNOWN : lowerIsBetter(costs[i] as number, minCost, maxCost);
+
+    const latency =
+      h?.ewmaTtftMs == null ? UNKNOWN : lowerIsBetter(h.ewmaTtftMs, minLatency, maxLatency);
+
+    const idle = idleTimes[i] as number;
+    const recency = Number.isFinite(idle) ? Math.min(1, idle / (maxIdle || 1)) : 1;
+
+    const reasons = { tier, health, quota, cost, latency, recency };
+    const base =
+      tier * w.tier +
+      health * w.health +
+      quota * w.quota +
+      cost * w.cost +
+      latency * w.latency +
+      recency * w.recency;
+
+    return {
+      credential: pair.credential,
+      target: pair.target,
+      score: base * pair.credential.weight * pair.target.weight,
+      reasons,
+    };
+  });
+}
+```
+
+- [ ] **Step 6: Write the router entry point**
+
+`apps/gateway/src/router/index.ts`:
+
+```ts
+import { eligible } from "./filters.ts";
+import { score } from "./score.ts";
+import { healthKey } from "./snapshot.ts";
+import type { Candidate, RankInput, RankResult } from "./types.ts";
+
+/**
+ * Reorders candidates by a weighted lottery.
+ *
+ * Only the head is drawn by weight; the tail keeps score order so failover
+ * still walks the best remaining options. `rand` is injected, so the whole
+ * router stays pure and a test can pin the draw.
+ */
+function weightedShuffle(candidates: Candidate[], rand: number): Candidate[] {
+  const total = candidates.reduce((sum, c) => sum + c.credential.weight * c.target.weight, 0);
+  if (total <= 0) return candidates;
+
+  let cursor = rand * total;
+  let chosen = candidates.length - 1;
+  for (let i = 0; i < candidates.length; i++) {
+    cursor -= (candidates[i] as Candidate).credential.weight * (candidates[i] as Candidate).target.weight;
+    if (cursor < 0) {
+      chosen = i;
+      break;
+    }
+  }
+
+  const head = candidates[chosen] as Candidate;
+  return [head, ...candidates.filter((_, i) => i !== chosen)];
+}
+
+export function rank(input: RankInput): RankResult {
+  const { pairs, excluded } = eligible(input);
+  if (pairs.length === 0) return { candidates: [], excluded };
+
+  const scored = score(pairs, input);
+
+  switch (input.model.strategy) {
+    case "priority":
+      // Tier is the only signal; score breaks ties within a tier.
+      scored.sort((a, b) => a.target.tier - b.target.tier || b.score - a.score);
+      break;
+
+    case "roundRobin": {
+      const idle = (c: Candidate): number => {
+        const h = input.snapshot.health.get(healthKey(c.credential.id, c.target.model));
+        return h?.lastUsedAt == null ? Number.POSITIVE_INFINITY : input.now - h.lastUsedAt;
+      };
+      scored.sort((a, b) => idle(b) - idle(a));
+      break;
+    }
+
+    case "weighted":
+      scored.sort((a, b) => b.score - a.score);
+      return { candidates: weightedShuffle(scored, input.rand), excluded };
+
+    case "score":
+      scored.sort((a, b) => b.score - a.score);
+      break;
+  }
+
+  return { candidates: scored, excluded };
+}
+
+export { buildSnapshot, healthKey } from "./snapshot.ts";
+export { resolveModel } from "./resolve.ts";
+export { requiredCapabilities } from "./filters.ts";
+export type { Candidate, Excluded, RankInput, RankResult, Snapshot } from "./types.ts";
+```
+
+- [ ] **Step 7: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 39 pass, 0 fail.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add candidate filtering and weighted scoring"
 ```
 
 ---
