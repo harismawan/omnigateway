@@ -112,35 +112,54 @@ omnigateway/
           index.ts                   retry loop, commit point
           attempt.ts                 single attempt lifecycle
           classify.ts                error -> ErrorCode + snapshot effect
-        credentials/
-          oauth/
-            types.ts                 OAuthProvider interface
-            pkce.ts                  verifier/challenge helpers
-            anthropic.ts
-            openai.ts
-            kimi.ts
-            pending.ts               server-held pending handle store
-          refresh.ts                 proactive refresh + per-credential mutex
-        control/
-          auth.ts                    admin session middleware
-          credentials.ts             /admin/credentials routes
-          models.ts                  /admin/models routes
-          keys.ts                    /admin/keys routes
-          usage.ts                   /admin/usage routes
-          stream.ts                  /admin/stream websocket
-        middleware/
+        oauth/
+          types.ts                   OAuthProvider interface
+          pkce.ts                    verifier/challenge helpers
+          anthropic.ts
+          openai.ts
+          kimi.ts
+          registry.ts                OAUTH_PROVIDERS
+          pending.ts                 server-held pending handle store
+          refresh.ts                 refresh + per-credential mutex
+        auth/
           apiKey.ts                  gateway API key verification
-        logging.ts                   structured stdout logger
+          admin.ts                   admin password + session store
+        routes/
+          proxy.ts                   /v1/messages, /v1/chat/completions
+          admin.ts                   the /api/* control surface
+          connect.ts                 /api/connect/*, /oauth/callback
+        app.ts                       route composition
+        maintenance.ts               hourly log pruning
+        logging.ts                   request log persistence
       test/
-        ingress.test.ts
-        egress.test.ts
-        router.test.ts
-        dispatch.test.ts
-        oauth.test.ts
+        helpers/fixtures.ts
+        ingress/                     anthropic.test.ts, openai.test.ts
+        egress/                      anthropic.test.ts, openai.test.ts
+        router/                      resolve, filters, score, breaker
+        auth/                        apiKey.test.ts, admin.test.ts
+        oauth/                       pkce, per-provider, refresh, pending
+        routes/                      proxy.test.ts, admin.test.ts, connect.test.ts
         e2e/
-          stub-upstream.ts
-          gateway.e2e.test.ts
+          upstream.ts                stub provider, real adapters
+          gateway.test.ts
 ```
+
+The control surface is mounted at `/api/*` rather than the `/admin/*` the design
+sketched. One prefix, chosen once: `/admin` reads like a page the dashboard
+serves, and the dashboard is a static bundle that will eventually be served from
+`/`. `/api/*` leaves that route free.
+
+There is no `packages/shared`. Contract types would be worth their weight if the
+dashboard were being built alongside the gateway, but it is a separate plan, and
+a package with one consumer and no implementation is a place for types to drift
+rather than a place for them to be shared. The dashboard plan imports response
+types from `@omni/store` directly, or declares its own if the shapes diverge.
+
+There is no live-update WebSocket. `WS /admin/stream` in the design buys a live
+log tail; `GET /api/logs` polled every few seconds buys the same thing for a
+single-operator admin page, without an upgrade handshake that needs its own
+authentication path. If polling proves visibly laggy in the dashboard, adding the
+socket later is additive — the log rows it would push already exist.
 
 ---
 
@@ -460,27 +479,54 @@ export type ChatRequest = {
 `packages/ir/src/errors.ts`:
 
 ```ts
+import type { ProviderId } from "./request.ts";
+
+/**
+ * Every way a request can fail, named once.
+ *
+ * The set is closed on purpose: the breaker (Task 14) and both error renderers
+ * (Task 17) key exhaustive `Record<ErrorCode, ...>` tables off it, so adding a
+ * code without deciding its penalty and its wire shape is a type error rather
+ * than a silent default.
+ *
+ * The three groups: the upstream refused (`AUTH` through `MODEL_UNAVAILABLE`),
+ * the transport failed (`UPSTREAM`, `TIMEOUT`, `NETWORK`), or the gateway
+ * itself has nothing to offer (`NO_CANDIDATES` onward).
+ */
 export type ErrorCode =
+  | "AUTH"
   | "RATE_LIMIT"
   | "QUOTA_EXHAUSTED"
-  | "AUTH_FAILED"
-  | "UPSTREAM_5XX"
-  | "TIMEOUT"
-  | "CAPABILITY_MISMATCH"
+  | "OVERLOADED"
   | "BAD_REQUEST"
   | "CONTENT_FILTER"
+  | "CAPABILITY_MISMATCH"
+  | "MODEL_UNAVAILABLE"
+  | "UPSTREAM"
+  | "TIMEOUT"
+  | "NETWORK"
   | "NO_CANDIDATES"
   | "ALL_CANDIDATES_FAILED"
   | "INTERNAL";
 
-/** Whether dispatch should advance to the next candidate. */
+/**
+ * Whether dispatch should advance to the next candidate.
+ *
+ * `AUTH` is retryable because it blames one credential, not the request — the
+ * next credential in the pool may well work. `BAD_REQUEST` and `CONTENT_FILTER`
+ * are not, because every candidate would reject the same body, and walking the
+ * whole pool to prove it just multiplies the latency.
+ */
 export const RETRYABLE: Readonly<Record<ErrorCode, boolean>> = {
+  AUTH: true,
   RATE_LIMIT: true,
   QUOTA_EXHAUSTED: true,
-  AUTH_FAILED: true,
-  UPSTREAM_5XX: true,
-  TIMEOUT: true,
+  OVERLOADED: true,
+  MODEL_UNAVAILABLE: true,
   CAPABILITY_MISMATCH: true,
+  UPSTREAM: true,
+  TIMEOUT: true,
+  NETWORK: true,
   BAD_REQUEST: false,
   CONTENT_FILTER: false,
   NO_CANDIDATES: false,
@@ -488,16 +534,26 @@ export const RETRYABLE: Readonly<Record<ErrorCode, boolean>> = {
   INTERNAL: false,
 };
 
-/** HTTP status the client sees. */
+/**
+ * HTTP status the client sees.
+ *
+ * `AUTH` is 401 because the only `AUTH` that reaches a client uncommitted is
+ * the gateway's own API-key check (Task 18). An upstream `AUTH` is retryable,
+ * so an exhausted pool surfaces as `ALL_CANDIDATES_FAILED`, and the client is
+ * never told to go fix a key that was fine.
+ */
 export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
+  AUTH: 401,
   RATE_LIMIT: 429,
   QUOTA_EXHAUSTED: 429,
-  AUTH_FAILED: 502,
-  UPSTREAM_5XX: 502,
-  TIMEOUT: 504,
-  CAPABILITY_MISMATCH: 400,
+  OVERLOADED: 503,
   BAD_REQUEST: 400,
   CONTENT_FILTER: 400,
+  CAPABILITY_MISMATCH: 400,
+  MODEL_UNAVAILABLE: 404,
+  UPSTREAM: 502,
+  TIMEOUT: 504,
+  NETWORK: 502,
   NO_CANDIDATES: 503,
   ALL_CANDIDATES_FAILED: 503,
   INTERNAL: 500,
@@ -506,17 +562,30 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
 export class GatewayError extends Error {
   readonly code: ErrorCode;
   readonly retryable: boolean;
-  readonly status: number;
-  /** Seconds, when the upstream sent a Retry-After header. */
-  readonly retryAfterSec: number | undefined;
+  /** Which upstream failed, when the failure came from one. */
+  readonly provider: ProviderId | undefined;
+  /** The upstream's own HTTP status, kept for logs — not what the client sees. */
+  readonly upstreamStatus: number | undefined;
+  /** Milliseconds, when the upstream sent a Retry-After header. */
+  readonly retryAfterMs: number | undefined;
 
-  constructor(code: ErrorCode, message: string, opts?: { retryAfterSec?: number; cause?: unknown }) {
+  constructor(
+    code: ErrorCode,
+    message: string,
+    opts?: {
+      provider?: ProviderId;
+      status?: number;
+      retryAfterMs?: number;
+      cause?: unknown;
+    },
+  ) {
     super(message, opts?.cause === undefined ? undefined : { cause: opts.cause });
     this.name = "GatewayError";
     this.code = code;
     this.retryable = RETRYABLE[code];
-    this.status = HTTP_STATUS[code];
-    this.retryAfterSec = opts?.retryAfterSec;
+    this.provider = opts?.provider;
+    this.upstreamStatus = opts?.status;
+    this.retryAfterMs = opts?.retryAfterMs;
   }
 }
 ```
@@ -12269,12 +12338,16 @@ test("all credentials failing produces one error response and one log", async ()
   upstream.queue({ kind: "error", status: 429, body: { error: { message: "rate limited" } } });
 
   const res = await call(REQUEST);
-  expect(res.status).toBe(429);
-  expect((await res.json()).error.type).toBe("rate_limit_error");
+  // Not 429. Every credential was rate limited, but the client did nothing
+  // wrong and has nothing to slow down — the pool is what ran out, so dispatch
+  // reports ALL_CANDIDATES_FAILED and the client sees a 503.
+  expect(res.status).toBe(503);
+  expect((await res.json()).error.type).toBe("api_error");
 
   const logs = await store.usage.recent(10);
   expect(logs).toHaveLength(1);
-  expect(logs[0]?.status).toBe(429);
+  expect(logs[0]?.status).toBe(503);
+  expect(logs[0]?.errorCode).toBe("ALL_CANDIDATES_FAILED");
 });
 
 test("a failure after the commit point is forwarded in-stream, not failed over", async () => {
