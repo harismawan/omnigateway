@@ -6826,3 +6826,1426 @@ git commit -m "feat(gateway): add dispatch with failover and commit-point handli
 ```
 
 ---
+
+## Task 16: Ingress — parsing client requests into the IR
+
+**Files:**
+- Create: `apps/gateway/src/ingress/schemas.ts`, `apps/gateway/src/ingress/anthropic.ts`, `apps/gateway/src/ingress/openai.ts`
+- Test: `apps/gateway/test/ingress/anthropic.test.ts`, `apps/gateway/test/ingress/openai.test.ts`
+
+**Interfaces:**
+- Consumes: `ChatRequest`, `validateRequest`, `GatewayError` (Task 2); Zod 4.4.3.
+- Produces:
+  - `parseAnthropicRequest(body: unknown): ChatRequest`
+  - `parseOpenAIRequest(body: unknown): ChatRequest`
+  Both throw `GatewayError("BAD_REQUEST", …)` with the Zod issue path on invalid input, and run `validateRequest` before returning.
+
+These are the mirror image of the provider `toWire` functions: same two wire formats, decoded rather than encoded. Ingress is where untrusted input is validated — after this point everything downstream can assume a well-formed `ChatRequest`.
+
+- [ ] **Step 1: Write the failing Anthropic ingress test**
+
+`apps/gateway/test/ingress/anthropic.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { parseAnthropicRequest } from "../../src/ingress/anthropic.ts";
+
+const minimal = {
+  model: "claude-opus-4",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "hi" }],
+};
+
+test("parses a minimal request and defaults stream to false", () => {
+  const req = parseAnthropicRequest(minimal);
+  expect(req.model).toBe("claude-opus-4");
+  expect(req.maxTokens).toBe(1024);
+  expect(req.stream).toBe(false);
+  expect(req.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
+});
+
+test("normalises a string system prompt to blocks", () => {
+  expect(parseAnthropicRequest({ ...minimal, system: "be terse" }).system).toEqual([
+    { type: "text", text: "be terse" },
+  ]);
+});
+
+test("accepts a block-array system prompt", () => {
+  expect(
+    parseAnthropicRequest({ ...minimal, system: [{ type: "text", text: "a" }] }).system,
+  ).toEqual([{ type: "text", text: "a" }]);
+});
+
+test("parses image blocks", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+        ],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content[0]).toEqual({
+    type: "image",
+    mediaType: "image/png",
+    data: "AAAA",
+  });
+});
+
+test("parses tool use and tool result blocks", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tu_1", name: "f", input: { a: 1 } }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "tu_1", content: "ok" }],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content[0]).toEqual({
+    type: "toolUse",
+    id: "tu_1",
+    name: "f",
+    input: { a: 1 },
+  });
+  expect(req.messages[1]?.content[0]).toEqual({
+    type: "toolResult",
+    toolUseId: "tu_1",
+    content: "ok",
+    isError: false,
+  });
+});
+
+test("stringifies structured tool result content", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t", content: [{ type: "text", text: "one" }] },
+        ],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content[0]).toMatchObject({ type: "toolResult", content: "one" });
+});
+
+test("parses tools and tool choice", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    tools: [{ name: "f", description: "d", input_schema: { type: "object" } }],
+    tool_choice: { type: "tool", name: "f" },
+  });
+  expect(req.tools).toEqual([{ name: "f", description: "d", inputSchema: { type: "object" } }]);
+  expect(req.toolChoice).toEqual({ type: "tool", name: "f" });
+});
+
+test("maps a thinking block onto the reasoning config", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    thinking: { type: "enabled", budget_tokens: 8000 },
+  });
+  expect(req.reasoning).toEqual({ effort: "medium", budgetTokens: 8000 });
+});
+
+test("ignores disabled thinking", () => {
+  expect(parseAnthropicRequest({ ...minimal, thinking: { type: "disabled" } }).reasoning).toBeUndefined();
+});
+
+test("passes unknown top-level fields through as vendor extras", () => {
+  expect(parseAnthropicRequest({ ...minimal, top_k: 40 }).vendor?.anthropic).toEqual({ top_k: 40 });
+});
+
+test("applies IR validation to the parsed request", () => {
+  // An orphaned tool result is dropped by validateRequest, leaving an empty
+  // message that is then removed.
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "nope", content: "x" }] },
+    ],
+  });
+  expect(req.messages).toHaveLength(1);
+});
+
+test("rejects a request with no messages", () => {
+  expect(() => parseAnthropicRequest({ ...minimal, messages: [] })).toThrow(GatewayError);
+});
+
+test("rejects a missing model with a field path in the message", () => {
+  try {
+    parseAnthropicRequest({ max_tokens: 1, messages: [{ role: "user", content: "hi" }] });
+    throw new Error("expected throw");
+  } catch (e) {
+    expect((e as GatewayError).code).toBe("BAD_REQUEST");
+    expect((e as GatewayError).message).toContain("model");
+  }
+});
+
+test("rejects an unknown role", () => {
+  expect(() =>
+    parseAnthropicRequest({ ...minimal, messages: [{ role: "system", content: "x" }] }),
+  ).toThrow(GatewayError);
+});
+```
+
+- [ ] **Step 2: Write the failing OpenAI ingress test**
+
+`apps/gateway/test/ingress/openai.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { parseOpenAIRequest } from "../../src/ingress/openai.ts";
+
+const minimal = { model: "gpt-5", messages: [{ role: "user", content: "hi" }] };
+
+test("parses a minimal chat completions request", () => {
+  const req = parseOpenAIRequest(minimal);
+  expect(req.model).toBe("gpt-5");
+  expect(req.stream).toBe(false);
+  expect(req.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
+});
+
+test("lifts system and developer messages out of the message list", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      { role: "system", content: "be terse" },
+      { role: "developer", content: "and precise" },
+      { role: "user", content: "hi" },
+    ],
+  });
+  expect(req.system).toEqual([
+    { type: "text", text: "be terse" },
+    { type: "text", text: "and precise" },
+  ]);
+  expect(req.messages).toHaveLength(1);
+});
+
+test("parses multi-part content with image urls", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+        ],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "look" },
+    { type: "image", mediaType: "image/png", data: "AAAA" },
+  ]);
+});
+
+test("rejects a non-data image url rather than fetching it", () => {
+  expect(() =>
+    parseOpenAIRequest({
+      ...minimal,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image_url", image_url: { url: "https://example.com/a.png" } }],
+        },
+      ],
+    }),
+  ).toThrow(GatewayError);
+});
+
+test("parses assistant tool calls and tool result messages", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "c1", type: "function", function: { name: "f", arguments: '{"a":1}' } },
+        ],
+      },
+      { role: "tool", tool_call_id: "c1", content: "ok" },
+    ],
+  });
+  expect(req.messages[0]?.content[0]).toEqual({
+    type: "toolUse",
+    id: "c1",
+    name: "f",
+    input: { a: 1 },
+  });
+  expect(req.messages[1]).toEqual({
+    role: "user",
+    content: [{ type: "toolResult", toolUseId: "c1", content: "ok", isError: false }],
+  });
+});
+
+test("tolerates malformed tool call arguments", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: "{oops" } }],
+      },
+      { role: "tool", tool_call_id: "c1", content: "ok" },
+    ],
+  });
+  expect(req.messages[0]?.content[0]).toMatchObject({ type: "toolUse", input: {} });
+});
+
+test("parses tools and the required tool choice", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
+    tool_choice: "required",
+  });
+  expect(req.tools).toEqual([{ name: "f", description: undefined, inputSchema: { type: "object" } }]);
+  expect(req.toolChoice).toEqual({ type: "any" });
+});
+
+test("parses a named tool choice", () => {
+  expect(
+    parseOpenAIRequest({ ...minimal, tool_choice: { type: "function", function: { name: "f" } } })
+      .toolChoice,
+  ).toEqual({ type: "tool", name: "f" });
+});
+
+test("maps reasoning_effort onto the reasoning config", () => {
+  expect(parseOpenAIRequest({ ...minimal, reasoning_effort: "high" }).reasoning).toEqual({
+    effort: "high",
+  });
+});
+
+test("accepts both max_tokens and max_completion_tokens", () => {
+  expect(parseOpenAIRequest({ ...minimal, max_tokens: 100 }).maxTokens).toBe(100);
+  expect(parseOpenAIRequest({ ...minimal, max_completion_tokens: 200 }).maxTokens).toBe(200);
+});
+
+test("normalises a string stop value to an array", () => {
+  expect(parseOpenAIRequest({ ...minimal, stop: "END" }).stopSequences).toEqual(["END"]);
+});
+
+test("passes unknown fields through as vendor extras", () => {
+  expect(parseOpenAIRequest({ ...minimal, top_p: 0.5 }).vendor?.openai).toEqual({ top_p: 0.5 });
+});
+
+test("rejects a request with no messages", () => {
+  expect(() => parseOpenAIRequest({ ...minimal, messages: [] })).toThrow(GatewayError);
+});
+
+test("rejects a request that is only a system message", () => {
+  expect(() =>
+    parseOpenAIRequest({ ...minimal, messages: [{ role: "system", content: "x" }] }),
+  ).toThrow(GatewayError);
+});
+```
+
+- [ ] **Step 3: Run both tests to verify they fail**
+
+Run: `bun test apps/gateway/test/ingress`
+Expected: FAIL — cannot resolve `../../src/ingress/anthropic.ts`.
+
+- [ ] **Step 4: Write the shared schemas**
+
+`apps/gateway/src/ingress/schemas.ts`:
+
+```ts
+import { GatewayError } from "@omni/ir";
+import { z } from "zod";
+
+/**
+ * Runs a schema and converts a Zod failure into a BAD_REQUEST carrying the
+ * offending field path, so a client can see which field it got wrong.
+ */
+export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
+  const result = schema.safeParse(body);
+  if (result.success) return result.data;
+
+  const issue = result.error.issues[0];
+  const path = issue?.path.join(".") ?? "(root)";
+  throw new GatewayError("BAD_REQUEST", `${path}: ${issue?.message ?? "invalid request"}`);
+}
+
+/** Anything the schema does not name is preserved for vendor passthrough. */
+export function extraFields(
+  body: Record<string, unknown>,
+  known: readonly string[],
+): Record<string, unknown> | undefined {
+  const extras: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (!known.includes(key)) extras[key] = value;
+  }
+  return Object.keys(extras).length > 0 ? extras : undefined;
+}
+
+/** Splits `data:image/png;base64,AAAA` into its media type and payload. */
+export function parseDataUrl(url: string): { mediaType: string; data: string } {
+  const match = /^data:([^;,]+);base64,(.*)$/s.exec(url);
+  if (match === null) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      "image_url must be a base64 data URL; the gateway does not fetch remote images",
+    );
+  }
+  return { mediaType: match[1] as string, data: match[2] as string };
+}
+
+export const jsonValue: z.ZodType<unknown> = z.unknown();
+```
+
+**Why remote image URLs are rejected.** Fetching a client-supplied URL would make the gateway an open request proxy reachable from any API key — a server-side request forgery vector against whatever the gateway can reach on its network. Clients inline their images; every provider SDK already does this.
+
+- [ ] **Step 5: Write the Anthropic ingress parser**
+
+`apps/gateway/src/ingress/anthropic.ts`:
+
+```ts
+import type { ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
+import { GatewayError, validateRequest } from "@omni/ir";
+import { z } from "zod";
+import { extraFields, parseOrThrow } from "./schemas.ts";
+
+const textBlock = z.object({ type: z.literal("text"), text: z.string() });
+
+const imageBlock = z.object({
+  type: z.literal("image"),
+  source: z.object({
+    type: z.literal("base64"),
+    media_type: z.string(),
+    data: z.string(),
+  }),
+});
+
+const thinkingBlock = z.object({
+  type: z.literal("thinking"),
+  thinking: z.string(),
+  signature: z.string().optional(),
+});
+
+const toolUseBlock = z.object({
+  type: z.literal("tool_use"),
+  id: z.string(),
+  name: z.string(),
+  input: z.record(z.string(), z.unknown()).default({}),
+});
+
+const toolResultBlock = z.object({
+  type: z.literal("tool_result"),
+  tool_use_id: z.string(),
+  content: z.union([z.string(), z.array(z.unknown())]).optional(),
+  is_error: z.boolean().optional(),
+});
+
+const block = z.discriminatedUnion("type", [
+  textBlock,
+  imageBlock,
+  thinkingBlock,
+  toolUseBlock,
+  toolResultBlock,
+]);
+
+const message = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.union([z.string(), z.array(block)]),
+});
+
+const schema = z.object({
+  model: z.string().min(1),
+  messages: z.array(message).min(1),
+  system: z.union([z.string(), z.array(textBlock)]).optional(),
+  max_tokens: z.number().int().positive().optional(),
+  temperature: z.number().optional(),
+  stop_sequences: z.array(z.string()).optional(),
+  stream: z.boolean().optional(),
+  tools: z
+    .array(
+      z.object({
+        name: z.string(),
+        description: z.string().optional(),
+        input_schema: z.unknown(),
+      }),
+    )
+    .optional(),
+  tool_choice: z
+    .union([
+      z.object({ type: z.enum(["auto", "any", "none"]) }),
+      z.object({ type: z.literal("tool"), name: z.string() }),
+    ])
+    .optional(),
+  thinking: z
+    .union([
+      z.object({ type: z.literal("enabled"), budget_tokens: z.number().int().positive() }),
+      z.object({ type: z.literal("disabled") }),
+    ])
+    .optional(),
+});
+
+const KNOWN = [
+  "model",
+  "messages",
+  "system",
+  "max_tokens",
+  "temperature",
+  "stop_sequences",
+  "stream",
+  "tools",
+  "tool_choice",
+  "thinking",
+  "metadata",
+] as const;
+
+/** Tool result content may be blocks; flatten to the text the model will see. */
+function flattenToolResult(content: string | unknown[] | undefined): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      const p = part as { type?: string; text?: string };
+      return p.type === "text" && typeof p.text === "string" ? p.text : JSON.stringify(part);
+    })
+    .join("\n");
+}
+
+function toIrBlock(b: z.infer<typeof block>): ContentBlock {
+  switch (b.type) {
+    case "text":
+      return { type: "text", text: b.text };
+    case "image":
+      return { type: "image", mediaType: b.source.media_type, data: b.source.data };
+    case "thinking":
+      return { type: "thinking", text: b.thinking, signature: b.signature };
+    case "tool_use":
+      return { type: "toolUse", id: b.id, name: b.name, input: b.input };
+    case "tool_result":
+      return {
+        type: "toolResult",
+        toolUseId: b.tool_use_id,
+        content: flattenToolResult(b.content),
+        isError: b.is_error ?? false,
+      };
+  }
+}
+
+function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): ToolChoice {
+  return c.type === "tool" ? { type: "tool", name: c.name } : { type: c.type };
+}
+
+export function parseAnthropicRequest(body: unknown): ChatRequest {
+  if (typeof body !== "object" || body === null) {
+    throw new GatewayError("BAD_REQUEST", "request body must be a JSON object");
+  }
+
+  const parsed = parseOrThrow(schema, body);
+
+  const messages: Message[] = parsed.messages.map((m) => ({
+    role: m.role,
+    content: typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content.map(toIrBlock),
+  }));
+
+  const system =
+    parsed.system === undefined
+      ? undefined
+      : typeof parsed.system === "string"
+        ? [{ type: "text" as const, text: parsed.system }]
+        : parsed.system.map((b) => ({ type: "text" as const, text: b.text }));
+
+  const request: ChatRequest = {
+    model: parsed.model,
+    messages,
+    stream: parsed.stream ?? false,
+  };
+
+  if (system !== undefined) request.system = system;
+  if (parsed.max_tokens !== undefined) request.maxTokens = parsed.max_tokens;
+  if (parsed.temperature !== undefined) request.temperature = parsed.temperature;
+  if (parsed.stop_sequences !== undefined) request.stopSequences = parsed.stop_sequences;
+  if (parsed.tools !== undefined) {
+    request.tools = parsed.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.input_schema,
+    }));
+  }
+  if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);
+  if (parsed.thinking?.type === "enabled") {
+    // The wire format carries a budget, not an effort level; medium is the
+    // neutral mapping for providers that only understand effort.
+    request.reasoning = { effort: "medium", budgetTokens: parsed.thinking.budget_tokens };
+  }
+
+  const extras = extraFields(body as Record<string, unknown>, KNOWN);
+  if (extras !== undefined) request.vendor = { anthropic: extras };
+
+  return validateRequest(request);
+}
+```
+
+- [ ] **Step 6: Write the OpenAI ingress parser**
+
+`apps/gateway/src/ingress/openai.ts`:
+
+```ts
+import type { ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
+import { GatewayError, validateRequest } from "@omni/ir";
+import { z } from "zod";
+import { extraFields, parseDataUrl, parseOrThrow } from "./schemas.ts";
+
+const part = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("text"), text: z.string() }),
+  z.object({ type: z.literal("image_url"), image_url: z.object({ url: z.string() }) }),
+]);
+
+const toolCall = z.object({
+  id: z.string(),
+  type: z.literal("function"),
+  function: z.object({ name: z.string(), arguments: z.string() }),
+});
+
+const message = z.object({
+  role: z.enum(["system", "developer", "user", "assistant", "tool"]),
+  content: z.union([z.string(), z.array(part), z.null()]).optional(),
+  tool_calls: z.array(toolCall).optional(),
+  tool_call_id: z.string().optional(),
+});
+
+const schema = z.object({
+  model: z.string().min(1),
+  messages: z.array(message).min(1),
+  max_tokens: z.number().int().positive().optional(),
+  max_completion_tokens: z.number().int().positive().optional(),
+  temperature: z.number().optional(),
+  stop: z.union([z.string(), z.array(z.string())]).optional(),
+  stream: z.boolean().optional(),
+  tools: z
+    .array(
+      z.object({
+        type: z.literal("function"),
+        function: z.object({
+          name: z.string(),
+          description: z.string().optional(),
+          parameters: z.unknown().optional(),
+        }),
+      }),
+    )
+    .optional(),
+  tool_choice: z
+    .union([
+      z.enum(["auto", "none", "required"]),
+      z.object({ type: z.literal("function"), function: z.object({ name: z.string() }) }),
+    ])
+    .optional(),
+  reasoning_effort: z.enum(["low", "medium", "high"]).optional(),
+});
+
+const KNOWN = [
+  "model",
+  "messages",
+  "max_tokens",
+  "max_completion_tokens",
+  "temperature",
+  "stop",
+  "stream",
+  "tools",
+  "tool_choice",
+  "reasoning_effort",
+  "stream_options",
+  "user",
+  "n",
+] as const;
+
+/** Tool arguments arrive as a JSON string; a malformed one becomes `{}`. */
+function parseArguments(raw: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function contentBlocks(content: z.infer<typeof message>["content"]): ContentBlock[] {
+  if (typeof content === "string") return content.length > 0 ? [{ type: "text", text: content }] : [];
+  if (!Array.isArray(content)) return [];
+  return content.map((p): ContentBlock => {
+    if (p.type === "text") return { type: "text", text: p.text };
+    const { mediaType, data } = parseDataUrl(p.image_url.url);
+    return { type: "image", mediaType, data };
+  });
+}
+
+function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): ToolChoice {
+  if (typeof c === "string") {
+    if (c === "required") return { type: "any" };
+    return { type: c };
+  }
+  return { type: "tool", name: c.function.name };
+}
+
+export function parseOpenAIRequest(body: unknown): ChatRequest {
+  if (typeof body !== "object" || body === null) {
+    throw new GatewayError("BAD_REQUEST", "request body must be a JSON object");
+  }
+
+  const parsed = parseOrThrow(schema, body);
+
+  const system: ContentBlock[] = [];
+  const messages: Message[] = [];
+
+  for (const m of parsed.messages) {
+    if (m.role === "system" || m.role === "developer") {
+      // Both map to the IR system prompt; developer is the newer spelling.
+      system.push(...contentBlocks(m.content));
+      continue;
+    }
+
+    if (m.role === "tool") {
+      if (m.tool_call_id === undefined) {
+        throw new GatewayError("BAD_REQUEST", "messages: tool message requires tool_call_id");
+      }
+      // The IR follows Anthropic: a tool result is user-turn content.
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: m.tool_call_id,
+            content: typeof m.content === "string" ? m.content : "",
+            isError: false,
+          },
+        ],
+      });
+      continue;
+    }
+
+    const content = contentBlocks(m.content);
+    for (const call of m.tool_calls ?? []) {
+      content.push({
+        type: "toolUse",
+        id: call.id,
+        name: call.function.name,
+        input: parseArguments(call.function.arguments),
+      });
+    }
+    if (content.length > 0) messages.push({ role: m.role, content });
+  }
+
+  if (messages.length === 0) {
+    throw new GatewayError("BAD_REQUEST", "messages: at least one non-system message is required");
+  }
+
+  const request: ChatRequest = {
+    model: parsed.model,
+    messages,
+    stream: parsed.stream ?? false,
+  };
+
+  if (system.length > 0) request.system = system;
+  const maxTokens = parsed.max_completion_tokens ?? parsed.max_tokens;
+  if (maxTokens !== undefined) request.maxTokens = maxTokens;
+  if (parsed.temperature !== undefined) request.temperature = parsed.temperature;
+  if (parsed.stop !== undefined) {
+    request.stopSequences = typeof parsed.stop === "string" ? [parsed.stop] : parsed.stop;
+  }
+  if (parsed.tools !== undefined) {
+    request.tools = parsed.tools.map((t) => ({
+      name: t.function.name,
+      description: t.function.description,
+      inputSchema: t.function.parameters ?? { type: "object" },
+    }));
+  }
+  if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);
+  if (parsed.reasoning_effort !== undefined) request.reasoning = { effort: parsed.reasoning_effort };
+
+  const extras = extraFields(body as Record<string, unknown>, KNOWN);
+  if (extras !== undefined) request.vendor = { openai: extras };
+
+  return validateRequest(request);
+}
+```
+
+- [ ] **Step 7: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 100 pass, 0 fail.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add anthropic and openai ingress parsers"
+```
+
+---
+
+## Task 17: Egress — rendering IR events back onto both wire formats
+
+**Files:**
+- Create: `apps/gateway/src/egress/anthropic.ts`, `apps/gateway/src/egress/openai.ts`
+- Test: `apps/gateway/test/egress/anthropic.test.ts`, `apps/gateway/test/egress/openai.test.ts`
+
+**Interfaces:**
+- Consumes: `StreamEvent`, `collect`, `CollectedResponse`, `HTTP_STATUS` (Tasks 2-3).
+- Produces:
+  - `anthropicStream(events, requestId): AsyncGenerator<{ event: string; data: string }>`
+  - `anthropicResponse(collected, requestId): unknown`
+  - `openaiStream(events, requestId, created): AsyncGenerator<{ event: string; data: string }>`
+  - `openaiResponse(collected, requestId, created): unknown`
+  Streaming yields SSE frames for the route to serialize; non-streaming takes the already-collected response.
+
+Non-streaming and streaming share the same upstream path: dispatch always produces events, and a non-streaming request is folded with `collect()` before rendering. `created` and `requestId` are parameters rather than generated here, so responses are deterministic under test.
+
+- [ ] **Step 1: Write the failing Anthropic egress test**
+
+`apps/gateway/test/egress/anthropic.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { collect, type StreamEvent } from "@omni/ir";
+import { anthropicResponse, anthropicStream } from "../../src/egress/anthropic.ts";
+
+async function* src(...events: StreamEvent[]): AsyncGenerator<StreamEvent> {
+  for (const e of events) yield e;
+}
+
+const TEXT: StreamEvent[] = [
+  { type: "start", id: "msg_1", model: "claude-opus-4" },
+  { type: "blockStart", index: 0, block: { type: "text" } },
+  { type: "blockDelta", index: 0, delta: { type: "text", text: "Hi" } },
+  { type: "blockEnd", index: 0 },
+  {
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  },
+];
+
+async function frames(g: AsyncGenerator<{ event: string; data: string }>) {
+  const out = [];
+  for await (const f of g) out.push({ event: f.event, data: JSON.parse(f.data) });
+  return out;
+}
+
+test("emits the full anthropic sse sequence", async () => {
+  const f = await frames(anthropicStream(src(...TEXT), "msg_1"));
+  expect(f.map((x) => x.event)).toEqual([
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "message_delta",
+    "message_stop",
+  ]);
+  expect(f[0]?.data.message.id).toBe("msg_1");
+  expect(f[0]?.data.message.usage.input_tokens).toBe(10);
+  expect(f[2]?.data.delta).toEqual({ type: "text_delta", text: "Hi" });
+  expect(f[4]?.data.delta.stop_reason).toBe("end_turn");
+  expect(f[4]?.data.usage.output_tokens).toBe(2);
+});
+
+test("renders tool use blocks with input_json_delta", async () => {
+  const f = await frames(
+    anthropicStream(
+      src(
+        { type: "blockStart", index: 0, block: { type: "toolUse", id: "tu", name: "f" } },
+        { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '{"a":1}' } },
+        { type: "blockEnd", index: 0 },
+      ),
+      "msg_1",
+    ),
+  );
+  expect(f[0]?.data.content_block).toEqual({ type: "tool_use", id: "tu", name: "f", input: {} });
+  expect(f[1]?.data.delta).toEqual({ type: "input_json_delta", partial_json: '{"a":1}' });
+});
+
+test("renders thinking deltas and signatures", async () => {
+  const f = await frames(
+    anthropicStream(
+      src(
+        { type: "blockStart", index: 0, block: { type: "thinking" } },
+        { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hm" } },
+        { type: "blockDelta", index: 0, delta: { type: "thinkingSignature", signature: "s" } },
+      ),
+      "msg_1",
+    ),
+  );
+  expect(f[1]?.data.delta).toEqual({ type: "thinking_delta", thinking: "hm" });
+  expect(f[2]?.data.delta).toEqual({ type: "signature_delta", signature: "s" });
+});
+
+test("renders an error event as an anthropic error frame", async () => {
+  const f = await frames(
+    anthropicStream(
+      src({ type: "error", code: "RATE_LIMIT", message: "slow", retryable: true }),
+      "msg_1",
+    ),
+  );
+  expect(f[0]?.event).toBe("error");
+  expect(f[0]?.data.error).toEqual({ type: "rate_limit_error", message: "slow" });
+});
+
+test("builds a non-streaming response body", () => {
+  const body = anthropicResponse(collect(TEXT), "msg_1") as Record<string, any>;
+  expect(body.id).toBe("msg_1");
+  expect(body.type).toBe("message");
+  expect(body.role).toBe("assistant");
+  expect(body.content).toEqual([{ type: "text", text: "Hi" }]);
+  expect(body.stop_reason).toBe("end_turn");
+  expect(body.usage).toEqual({ input_tokens: 10, output_tokens: 2 });
+});
+
+test("renders collected tool use with parsed input", () => {
+  const body = anthropicResponse(
+    collect([
+      { type: "blockStart", index: 0, block: { type: "toolUse", id: "tu", name: "f" } },
+      { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '{"a":1}' } },
+      { type: "blockEnd", index: 0 },
+      {
+        type: "end",
+        stopReason: "toolUse",
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    ]),
+    "msg_1",
+  ) as Record<string, any>;
+  expect(body.content[0]).toEqual({ type: "tool_use", id: "tu", name: "f", input: { a: 1 } });
+  expect(body.stop_reason).toBe("tool_use");
+});
+```
+
+- [ ] **Step 2: Write the failing OpenAI egress test**
+
+`apps/gateway/test/egress/openai.test.ts`:
+
+```ts
+import { expect, test } from "bun:test";
+import { collect, type StreamEvent } from "@omni/ir";
+import { openaiResponse, openaiStream } from "../../src/egress/openai.ts";
+
+async function* src(...events: StreamEvent[]): AsyncGenerator<StreamEvent> {
+  for (const e of events) yield e;
+}
+
+const TEXT: StreamEvent[] = [
+  { type: "start", id: "msg_1", model: "gpt-5" },
+  { type: "blockStart", index: 0, block: { type: "text" } },
+  { type: "blockDelta", index: 0, delta: { type: "text", text: "Hi" } },
+  { type: "blockEnd", index: 0 },
+  {
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  },
+];
+
+async function frames(g: AsyncGenerator<{ event: string; data: string }>) {
+  const out: { data: string }[] = [];
+  for await (const f of g) out.push({ data: f.data });
+  return out;
+}
+
+test("emits chat completion chunks terminated by [DONE]", async () => {
+  const f = await frames(openaiStream(src(...TEXT), "chatcmpl-1", 1000));
+  expect(f.at(-1)?.data).toBe("[DONE]");
+
+  const first = JSON.parse(f[0]?.data as string);
+  expect(first.object).toBe("chat.completion.chunk");
+  expect(first.id).toBe("chatcmpl-1");
+  expect(first.created).toBe(1000);
+  expect(first.choices[0].delta).toEqual({ role: "assistant", content: "" });
+
+  const content = JSON.parse(f[1]?.data as string);
+  expect(content.choices[0].delta).toEqual({ content: "Hi" });
+
+  const last = JSON.parse(f[f.length - 2]?.data as string);
+  expect(last.choices[0].finish_reason).toBe("stop");
+  expect(last.usage).toEqual({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 });
+});
+
+test("streams tool calls with index and argument deltas", async () => {
+  const f = await frames(
+    openaiStream(
+      src(
+        { type: "blockStart", index: 0, block: { type: "toolUse", id: "c1", name: "f" } },
+        { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '{"a"' } },
+      ),
+      "chatcmpl-1",
+      1000,
+    ),
+  );
+  const start = JSON.parse(f[0]?.data as string);
+  expect(start.choices[0].delta.tool_calls[0]).toEqual({
+    index: 0,
+    id: "c1",
+    type: "function",
+    function: { name: "f", arguments: "" },
+  });
+  const delta = JSON.parse(f[1]?.data as string);
+  expect(delta.choices[0].delta.tool_calls[0]).toEqual({
+    index: 0,
+    function: { arguments: '{"a"' },
+  });
+});
+
+test("maps a tool-use stop reason onto tool_calls", async () => {
+  const f = await frames(
+    openaiStream(
+      src({
+        type: "end",
+        stopReason: "toolUse",
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      }),
+      "chatcmpl-1",
+      1000,
+    ),
+  );
+  expect(JSON.parse(f[0]?.data as string).choices[0].finish_reason).toBe("tool_calls");
+});
+
+test("thinking content is not emitted on the chat completions surface", async () => {
+  const f = await frames(
+    openaiStream(
+      src(
+        { type: "blockStart", index: 0, block: { type: "thinking" } },
+        { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hm" } },
+      ),
+      "chatcmpl-1",
+      1000,
+    ),
+  );
+  expect(f.filter((x) => x.data !== "[DONE]")).toHaveLength(0);
+});
+
+test("renders an error event as an openai error frame", async () => {
+  const f = await frames(
+    openaiStream(
+      src({ type: "error", code: "RATE_LIMIT", message: "slow", retryable: true }),
+      "chatcmpl-1",
+      1000,
+    ),
+  );
+  const body = JSON.parse(f[0]?.data as string);
+  expect(body.error).toEqual({
+    message: "slow",
+    type: "rate_limit_error",
+    code: "rate_limit_exceeded",
+  });
+});
+
+test("builds a non-streaming chat completion body", () => {
+  const body = openaiResponse(collect(TEXT), "chatcmpl-1", 1000) as Record<string, any>;
+  expect(body.object).toBe("chat.completion");
+  expect(body.choices[0].message).toEqual({ role: "assistant", content: "Hi" });
+  expect(body.choices[0].finish_reason).toBe("stop");
+  expect(body.usage.total_tokens).toBe(12);
+});
+
+test("renders collected tool calls in a non-streaming body", () => {
+  const body = openaiResponse(
+    collect([
+      { type: "blockStart", index: 0, block: { type: "toolUse", id: "c1", name: "f" } },
+      { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '{"a":1}' } },
+      { type: "blockEnd", index: 0 },
+      {
+        type: "end",
+        stopReason: "toolUse",
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    ]),
+    "chatcmpl-1",
+    1000,
+  ) as Record<string, any>;
+  expect(body.choices[0].message.content).toBeNull();
+  expect(body.choices[0].message.tool_calls[0]).toEqual({
+    id: "c1",
+    type: "function",
+    function: { name: "f", arguments: '{"a":1}' },
+  });
+});
+```
+
+- [ ] **Step 3: Run both tests to verify they fail**
+
+Run: `bun test apps/gateway/test/egress`
+Expected: FAIL — cannot resolve `../../src/egress/anthropic.ts`.
+
+- [ ] **Step 4: Write the Anthropic egress renderer**
+
+`apps/gateway/src/egress/anthropic.ts`:
+
+```ts
+import type { CollectedResponse, ErrorCode, StopReason, StreamEvent } from "@omni/ir";
+
+export type SseFrame = { event: string; data: string };
+
+const STOP_REASON: Readonly<Record<StopReason, string>> = {
+  endTurn: "end_turn",
+  maxTokens: "max_tokens",
+  stopSequence: "stop_sequence",
+  toolUse: "tool_use",
+  contentFilter: "refusal",
+};
+
+const ERROR_TYPE: Readonly<Record<ErrorCode, string>> = {
+  AUTH: "authentication_error",
+  RATE_LIMIT: "rate_limit_error",
+  QUOTA_EXHAUSTED: "rate_limit_error",
+  OVERLOADED: "overloaded_error",
+  BAD_REQUEST: "invalid_request_error",
+  CONTENT_FILTER: "invalid_request_error",
+  CAPABILITY_MISMATCH: "invalid_request_error",
+  MODEL_UNAVAILABLE: "not_found_error",
+  UPSTREAM: "api_error",
+  TIMEOUT: "api_error",
+  NETWORK: "api_error",
+  NO_CANDIDATES: "overloaded_error",
+  ALL_CANDIDATES_FAILED: "api_error",
+  INTERNAL: "api_error",
+};
+
+const frame = (event: string, data: unknown): SseFrame => ({
+  event,
+  data: JSON.stringify(data),
+});
+
+export async function* anthropicStream(
+  events: AsyncGenerator<StreamEvent> | AsyncIterable<StreamEvent>,
+  requestId: string,
+): AsyncGenerator<SseFrame, void, undefined> {
+  let model = "";
+  let inputTokens = 0;
+
+  for await (const event of events) {
+    switch (event.type) {
+      case "start":
+        model = event.model;
+        yield frame("message_start", {
+          type: "message_start",
+          message: {
+            id: requestId,
+            type: "message",
+            role: "assistant",
+            model,
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: inputTokens, output_tokens: 0 },
+          },
+        });
+        break;
+
+      case "blockStart": {
+        const b = event.block;
+        const content_block =
+          b.type === "text"
+            ? { type: "text", text: "" }
+            : b.type === "thinking"
+              ? { type: "thinking", thinking: "" }
+              : { type: "tool_use", id: b.id, name: b.name, input: {} };
+        yield frame("content_block_start", {
+          type: "content_block_start",
+          index: event.index,
+          content_block,
+        });
+        break;
+      }
+
+      case "blockDelta": {
+        const d = event.delta;
+        const delta =
+          d.type === "text"
+            ? { type: "text_delta", text: d.text }
+            : d.type === "thinking"
+              ? { type: "thinking_delta", thinking: d.text }
+              : d.type === "thinkingSignature"
+                ? { type: "signature_delta", signature: d.signature }
+                : { type: "input_json_delta", partial_json: d.partial };
+        yield frame("content_block_delta", {
+          type: "content_block_delta",
+          index: event.index,
+          delta,
+        });
+        break;
+      }
+
+      case "blockEnd":
+        yield frame("content_block_stop", { type: "content_block_stop", index: event.index });
+        break;
+
+      case "end":
+        yield frame("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: STOP_REASON[event.stopReason], stop_sequence: null },
+          usage: { output_tokens: event.usage.outputTokens },
+        });
+        yield frame("message_stop", { type: "message_stop" });
+        break;
+
+      case "error":
+        yield frame("error", {
+          type: "error",
+          error: { type: ERROR_TYPE[event.code], message: event.message },
+        });
+        break;
+    }
+  }
+}
+
+export function anthropicResponse(collected: CollectedResponse, requestId: string): unknown {
+  return {
+    id: requestId,
+    type: "message",
+    role: "assistant",
+    model: collected.model,
+    content: collected.content.map((b) => {
+      switch (b.type) {
+        case "text":
+          return { type: "text", text: b.text };
+        case "thinking":
+          return { type: "thinking", thinking: b.text, signature: b.signature };
+        case "toolUse":
+          return { type: "tool_use", id: b.id, name: b.name, input: b.input };
+        default:
+          return { type: "text", text: "" };
+      }
+    }),
+    stop_reason: STOP_REASON[collected.stopReason],
+    stop_sequence: null,
+    usage: {
+      input_tokens: collected.usage.inputTokens,
+      output_tokens: collected.usage.outputTokens,
+    },
+  };
+}
+
+export function anthropicErrorBody(code: ErrorCode, message: string): unknown {
+  return { type: "error", error: { type: ERROR_TYPE[code], message } };
+}
+```
+
+- [ ] **Step 5: Write the OpenAI egress renderer**
+
+`apps/gateway/src/egress/openai.ts`:
+
+```ts
+import type { CollectedResponse, ErrorCode, StopReason, StreamEvent } from "@omni/ir";
+import type { SseFrame } from "./anthropic.ts";
+
+const FINISH: Readonly<Record<StopReason, string>> = {
+  endTurn: "stop",
+  maxTokens: "length",
+  stopSequence: "stop",
+  toolUse: "tool_calls",
+  contentFilter: "content_filter",
+};
+
+const ERROR_TYPE: Readonly<Record<ErrorCode, { type: string; code: string }>> = {
+  AUTH: { type: "invalid_request_error", code: "invalid_api_key" },
+  RATE_LIMIT: { type: "rate_limit_error", code: "rate_limit_exceeded" },
+  QUOTA_EXHAUSTED: { type: "insufficient_quota", code: "insufficient_quota" },
+  OVERLOADED: { type: "server_error", code: "server_error" },
+  BAD_REQUEST: { type: "invalid_request_error", code: "invalid_request" },
+  CONTENT_FILTER: { type: "invalid_request_error", code: "content_policy_violation" },
+  CAPABILITY_MISMATCH: { type: "invalid_request_error", code: "invalid_request" },
+  MODEL_UNAVAILABLE: { type: "invalid_request_error", code: "model_not_found" },
+  UPSTREAM: { type: "server_error", code: "server_error" },
+  TIMEOUT: { type: "server_error", code: "timeout" },
+  NETWORK: { type: "server_error", code: "server_error" },
+  NO_CANDIDATES: { type: "server_error", code: "service_unavailable" },
+  ALL_CANDIDATES_FAILED: { type: "server_error", code: "server_error" },
+  INTERNAL: { type: "server_error", code: "server_error" },
+};
+
+const chunk = (id: string, created: number, model: string, choice: unknown, usage?: unknown) => ({
+  id,
+  object: "chat.completion.chunk",
+  created,
+  model,
+  choices: [choice],
+  ...(usage === undefined ? {} : { usage }),
+});
+
+export async function* openaiStream(
+  events: AsyncGenerator<StreamEvent> | AsyncIterable<StreamEvent>,
+  requestId: string,
+  created: number,
+): AsyncGenerator<SseFrame, void, undefined> {
+  let model = "";
+  let roleSent = false;
+  // Chat Completions numbers tool calls independently of content blocks.
+  const toolIndex = new Map<number, number>();
+
+  const emit = (data: unknown): SseFrame => ({ event: "message", data: JSON.stringify(data) });
+
+  for await (const event of events) {
+    switch (event.type) {
+      case "start":
+        model = event.model;
+        break;
+
+      case "blockStart": {
+        if (event.block.type === "text") {
+          if (!roleSent) {
+            roleSent = true;
+            yield emit(
+              chunk(requestId, created, model, {
+                index: 0,
+                delta: { role: "assistant", content: "" },
+                finish_reason: null,
+              }),
+            );
+          }
+        } else if (event.block.type === "toolUse") {
+          const index = toolIndex.size;
+          toolIndex.set(event.index, index);
+          yield emit(
+            chunk(requestId, created, model, {
+              index: 0,
+              delta: {
+                tool_calls: [
+                  {
+                    index,
+                    id: event.block.id,
+                    type: "function",
+                    function: { name: event.block.name, arguments: "" },
+                  },
+                ],
+              },
+              finish_reason: null,
+            }),
+          );
+        }
+        // Thinking blocks have no representation on this surface.
+        break;
+      }
+
+      case "blockDelta": {
+        const d = event.delta;
+        if (d.type === "text") {
+          yield emit(
+            chunk(requestId, created, model, {
+              index: 0,
+              delta: { content: d.text },
+              finish_reason: null,
+            }),
+          );
+        } else if (d.type === "toolJson") {
+          const index = toolIndex.get(event.index) ?? 0;
+          yield emit(
+            chunk(requestId, created, model, {
+              index: 0,
+              delta: { tool_calls: [{ index, function: { arguments: d.partial } }] },
+              finish_reason: null,
+            }),
+          );
+        }
+        break;
+      }
+
+      case "blockEnd":
+        break;
+
+      case "end":
+        yield emit(
+          chunk(
+            requestId,
+            created,
+            model,
+            { index: 0, delta: {}, finish_reason: FINISH[event.stopReason] },
+            {
+              prompt_tokens: event.usage.inputTokens,
+              completion_tokens: event.usage.outputTokens,
+              total_tokens: event.usage.inputTokens + event.usage.outputTokens,
+            },
+          ),
+        );
+        break;
+
+      case "error": {
+        const e = ERROR_TYPE[event.code];
+        yield emit({ error: { message: event.message, type: e.type, code: e.code } });
+        break;
+      }
+    }
+  }
+
+  yield { event: "message", data: "[DONE]" };
+}
+
+export function openaiResponse(
+  collected: CollectedResponse,
+  requestId: string,
+  created: number,
+): unknown {
+  const text = collected.content
+    .flatMap((b) => (b.type === "text" ? [b.text] : []))
+    .join("");
+  const toolCalls = collected.content.flatMap((b) =>
+    b.type === "toolUse"
+      ? [
+          {
+            id: b.id,
+            type: "function" as const,
+            function: { name: b.name, arguments: JSON.stringify(b.input) },
+          },
+        ]
+      : [],
+  );
+
+  return {
+    id: requestId,
+    object: "chat.completion",
+    created,
+    model: collected.model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: toolCalls.length > 0 && text.length === 0 ? null : text,
+          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        },
+        finish_reason: FINISH[collected.stopReason],
+      },
+    ],
+    usage: {
+      prompt_tokens: collected.usage.inputTokens,
+      completion_tokens: collected.usage.outputTokens,
+      total_tokens: collected.usage.inputTokens + collected.usage.outputTokens,
+    },
+  };
+}
+
+export function openaiErrorBody(code: ErrorCode, message: string): unknown {
+  const e = ERROR_TYPE[code];
+  return { error: { message, type: e.type, code: e.code } };
+}
+```
+
+- [ ] **Step 6: Run the tests**
+
+Run: `bun test apps/gateway`
+Expected: 113 pass, 0 fail.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/gateway
+git commit -m "feat(gateway): add anthropic and openai egress renderers"
+```
+
+---
