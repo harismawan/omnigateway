@@ -47,6 +47,19 @@ test("start returns a verification url and a stable device id", () => {
   expect(typeof start.pending.extra?.deviceId).toBe("string");
 });
 
+test("begin rejects a blank device id before making an HTTP request", async () => {
+  let calls = 0;
+  const http = (async () => {
+    calls += 1;
+    throw new Error("begin should reject before calling HttpClient");
+  }) as HttpClient;
+
+  await expect(kimiOAuth.begin?.({ deviceId: "  " }, { http, now: () => NOW })).rejects.toThrow(
+    "kimi begin requires a non-blank deviceId",
+  );
+  expect(calls).toBe(0);
+});
+
 test("begin requests a device code and surfaces the user code", async () => {
   const http = stubHttp(200, {
     device_code: "dc-1",
@@ -99,6 +112,36 @@ test("a single poll returns tokens once the user approves", async () => {
   expect(result.secrets.accessToken).toBe("test-token-1");
   expect(result.providerData.deviceId).toBe("11111111-2222-3333-4444-555555555555");
   expect(result.expiresAt).toBe(NOW + 3_600_000);
+});
+
+test("rejects a successful token response with a blank access token", async () => {
+  await expect(
+    kimiOAuth.exchange(
+      {
+        code: "",
+        pending: {
+          verifier: "",
+          challenge: "",
+          state: "",
+          redirectUri: "",
+          deviceCode: "dc-1",
+        },
+      },
+      { http: stubHttp(200, { access_token: "" }), now: () => NOW },
+    ),
+  ).rejects.toThrow("token endpoint returned no access_token");
+});
+
+test("rejects a device-code response with a blank required field", async () => {
+  await expect(
+    kimiOAuth.begin?.(
+      { deviceId: "11111111-2222-3333-4444-555555555555" },
+      {
+        http: stubHttp(200, { device_code: "", user_code: "WDJB-MJHT" }),
+        now: () => NOW,
+      },
+    ),
+  ).rejects.toThrow("device code endpoint returned an unusable response");
 });
 
 test("a pending authorization is a distinguishable error, not a failure", async () => {
@@ -172,6 +215,20 @@ test("refresh returns a new access token and reuses the stored device", async ()
   expect(http.last().body).toBe(
     '{"grant_type":"refresh_token","refresh_token":"test-token-2","device_id":"11111111-2222-3333-4444-555555555555","client_id":"kimi-cli"}',
   );
+});
+
+test("refresh preserves the stored token when the new refresh token is blank", async () => {
+  const result = await kimiOAuth.refresh(
+    "test-token-2",
+    { http: stubHttp(200, { access_token: "test-token-3", refresh_token: "" }), now: () => NOW },
+    {
+      deviceId: "11111111-2222-3333-4444-555555555555",
+      deviceName: "MacBook-Pro",
+      deviceModel: "MacBookPro18,3",
+      osVersion: "15.3.1",
+    },
+  );
+  expect(result.secrets.refreshToken).toBe("test-token-2");
 });
 
 test("the registry exposes one flow per provider", () => {

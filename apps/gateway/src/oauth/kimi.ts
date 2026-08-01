@@ -51,7 +51,7 @@ function recordFrom(value: unknown): Record<string, unknown> | null {
 
 function stringFrom(value: Record<string, unknown>, field: string): string | null {
   const candidate = value[field];
-  return typeof candidate === "string" ? candidate : null;
+  return typeof candidate === "string" && candidate.trim().length > 0 ? candidate : null;
 }
 
 function positiveNumberFrom(value: Record<string, unknown>, field: string): number | null {
@@ -172,9 +172,12 @@ export const kimiOAuth: OAuthProvider = {
   },
 
   async begin({ deviceId }, deps): Promise<AuthorizeStart> {
+    if (deviceId.trim().length === 0) {
+      throw new Error("kimi begin requires a non-blank deviceId");
+    }
     const device = deviceForBegin(deviceId);
     const response = deviceCodeFrom(
-      await post(DEVICE_CODE_URL, { device_id: deviceId }, device, deps),
+      await post(DEVICE_CODE_URL, { device_id: device.deviceId }, device, deps),
     );
     return {
       authorizeUrl: response.verificationUri,
