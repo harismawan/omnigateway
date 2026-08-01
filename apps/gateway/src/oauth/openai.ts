@@ -16,10 +16,10 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const SCOPES = "openid profile email offline_access";
 
 type TokenResponse = {
-  access_token?: string;
-  refresh_token?: string;
-  expires_in?: number;
-  id_token?: string;
+  accessToken: string;
+  refreshToken: string | null;
+  expiresIn: number | null;
+  idToken: string | null;
 };
 
 type IdClaims = {
@@ -31,12 +31,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function stringOrNull(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
+function nonBlankStringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 function accountIdFromProviderData(providerData: Record<string, unknown>): string | null {
-  return stringOrNull(providerData.accountId);
+  return nonBlankStringOrNull(providerData.accountId);
 }
 
 /**
@@ -47,21 +47,41 @@ function accountIdFromProviderData(providerData: Record<string, unknown>): strin
  * party whose authorship needs proving. A malformed token degrades to no
  * claims rather than failing the connection.
  */
-function decodeClaims(idToken: string | undefined): IdClaims {
-  if (typeof idToken !== "string") return { email: null, accountId: null };
-  const payload = idToken.split(".")[1];
-  if (payload === undefined) return { email: null, accountId: null };
+function decodeClaims(idToken: string | null): IdClaims {
+  const parts = typeof idToken === "string" ? idToken.split(".") : [];
+  const [header, payload, signature] = parts;
+  if (
+    parts.length !== 3 ||
+    header === undefined ||
+    payload === undefined ||
+    signature === undefined ||
+    header.length === 0 ||
+    payload.length === 0 ||
+    signature.length === 0
+  ) {
+    return { email: null, accountId: null };
+  }
   try {
     const json: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
     if (!isRecord(json)) return { email: null, accountId: null };
     const auth = json["https://api.openai.com/auth"];
     return {
-      email: stringOrNull(json.email),
-      accountId: isRecord(auth) ? stringOrNull(auth.chatgpt_account_id) : null,
+      email: typeof json.email === "string" ? json.email : null,
+      accountId: isRecord(auth) ? nonBlankStringOrNull(auth.chatgpt_account_id) : null,
     };
   } catch {
     return { email: null, accountId: null };
   }
+}
+
+function parseTokenResponse(value: unknown): TokenResponse | null {
+  if (!isRecord(value) || typeof value.access_token !== "string") return null;
+  return {
+    accessToken: value.access_token,
+    refreshToken: typeof value.refresh_token === "string" ? value.refresh_token : null,
+    expiresIn: typeof value.expires_in === "number" ? value.expires_in : null,
+    idToken: typeof value.id_token === "string" ? value.id_token : null,
+  };
 }
 
 async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise<TokenResponse> {
@@ -74,14 +94,11 @@ async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise
     throw new GatewayError("AUTH", tokenErrorMessage(status, parsed));
   }
 
-  if (!isTokenResponse(parsed) || typeof parsed.access_token !== "string") {
+  const token = parseTokenResponse(parsed);
+  if (token === null) {
     throw new GatewayError("AUTH", "token endpoint returned no access_token");
   }
-  return parsed;
-}
-
-function isTokenResponse(value: unknown): value is TokenResponse {
-  return typeof value === "object" && value !== null;
+  return token;
 }
 
 function toResult(
@@ -90,17 +107,17 @@ function toResult(
   deps: OAuthDeps,
   fallbackAccountId: string | null = null,
 ): FlowResult {
-  const claims = decodeClaims(token.id_token);
+  const claims = decodeClaims(token.idToken);
   return {
     secrets: {
-      accessToken: token.access_token ?? null,
-      refreshToken: token.refresh_token ?? fallbackRefresh,
+      accessToken: token.accessToken,
+      refreshToken: token.refreshToken ?? fallbackRefresh,
       apiKey: null,
       // Kept because a later refresh may return no new id token, and the
       // account id claim is the only way to address the right workspace.
-      idToken: token.id_token ?? null,
+      idToken: token.idToken,
     },
-    expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
+    expiresAt: token.expiresIn === null ? null : deps.now() + token.expiresIn * 1000,
     accountEmail: claims.email,
     // Consumed by the OpenAI adapter as the chatgpt-account-id header (Task 10).
     providerData: { accountId: claims.accountId ?? fallbackAccountId },

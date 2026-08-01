@@ -112,6 +112,45 @@ test("tolerates a malformed id token rather than failing the flow", async () => 
   expect(result.providerData.accountId).toBeNull();
 });
 
+test("discards claims from a truncated id token", async () => {
+  const payload = Buffer.from(
+    JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct_123" } }),
+  ).toString("base64url");
+  const result = await openaiOAuth.exchange(
+    { code: "auth-code", pending },
+    {
+      http: stubHttp(200, { access_token: "test-token-1", id_token: `header.${payload}` }),
+      now: () => NOW,
+    },
+  );
+  expect(result.providerData.accountId).toBeNull();
+});
+
+test("discards claims from an id token with an invalid base64url payload", async () => {
+  const result = await openaiOAuth.exchange(
+    { code: "auth-code", pending },
+    {
+      http: stubHttp(200, { access_token: "test-token-1", id_token: "header.@@@.signature" }),
+      now: () => NOW,
+    },
+  );
+  expect(result.providerData.accountId).toBeNull();
+});
+
+test.each(["", "   "])("discards a blank account claim", async (accountId) => {
+  const result = await openaiOAuth.exchange(
+    { code: "auth-code", pending },
+    {
+      http: stubHttp(200, {
+        access_token: "test-token-1",
+        id_token: idToken({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
+      }),
+      now: () => NOW,
+    },
+  );
+  expect(result.providerData.accountId).toBeNull();
+});
+
 test("discards non-string account claims", async () => {
   const result = await openaiOAuth.exchange(
     { code: "auth-code", pending },
@@ -164,4 +203,35 @@ test("refresh keeps the prior account id when no id token is returned", async ()
     { accountId: "acct_123" },
   );
   expect(result.providerData.accountId).toBe("acct_123");
+});
+
+test.each(["", "   "])("refresh discards a blank prior account id", async (accountId) => {
+  const result = await openaiOAuth.refresh(
+    "test-token-2",
+    { http: stubHttp(200, { access_token: "test-token-3", expires_in: 60 }), now: () => NOW },
+    { accountId },
+  );
+  expect(result.providerData.accountId).toBeNull();
+});
+
+test("discards a non-string refresh token", async () => {
+  const result = await openaiOAuth.exchange(
+    { code: "auth-code", pending },
+    {
+      http: stubHttp(200, { access_token: "test-token-1", refresh_token: 42 }),
+      now: () => NOW,
+    },
+  );
+  expect(result.secrets.refreshToken).toBeNull();
+});
+
+test("discards a non-string id token", async () => {
+  const result = await openaiOAuth.exchange(
+    { code: "auth-code", pending },
+    {
+      http: stubHttp(200, { access_token: "test-token-1", id_token: { unexpected: true } }),
+      now: () => NOW,
+    },
+  );
+  expect(result.secrets.idToken).toBeNull();
 });
