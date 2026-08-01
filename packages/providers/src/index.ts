@@ -4,8 +4,10 @@ export { anthropicAdapter, decodeAnthropic, toWire as toAnthropicWire } from "./
 export * from "./body.ts";
 export { httpError, parseRetryAfter } from "./http.ts";
 export * from "./http-client.ts";
+export { decodeChat, kimiAdapter, toChatWire } from "./kimi/index.ts";
 export * from "./kimi-device.ts";
 export { decodeResponses, openaiAdapter, toResponsesWire } from "./openai/index.ts";
 export * from "./profile.ts";
+export { ADAPTERS } from "./registry.ts";
 export * from "./sse.ts";
 export * from "./types.ts";
