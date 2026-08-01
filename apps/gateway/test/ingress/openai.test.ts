@@ -109,6 +109,15 @@ test("parses tools and the required tool choice", () => {
   expect(req.toolChoice).toEqual({ type: "any" });
 });
 
+test("rejects a non-object tool parameters", () => {
+  expect(() =>
+    parseOpenAIRequest({
+      ...minimal,
+      tools: [{ type: "function", function: { name: "f", parameters: 42 } }],
+    }),
+  ).toThrow(GatewayError);
+});
+
 test("parses a named tool choice", () => {
   expect(
     parseOpenAIRequest({ ...minimal, tool_choice: { type: "function", function: { name: "f" } } })

@@ -36,7 +36,7 @@ const schema = z.object({
         function: z.object({
           name: z.string(),
           description: z.string().optional(),
-          parameters: z.unknown().optional(),
+          parameters: z.record(z.string(), z.unknown()).optional(),
         }),
       }),
     )
@@ -164,7 +164,7 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
     request.tools = parsed.tools.map((t) => ({
       name: t.function.name,
       ...(t.function.description !== undefined && { description: t.function.description }),
-      inputSchema: (t.function.parameters ?? { type: "object" }) as Record<string, unknown>,
+      inputSchema: t.function.parameters ?? { type: "object" },
     }));
   }
   if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);

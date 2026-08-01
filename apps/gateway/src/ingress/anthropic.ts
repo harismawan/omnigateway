@@ -60,7 +60,7 @@ const schema = z.object({
       z.object({
         name: z.string(),
         description: z.string().optional(),
-        input_schema: z.unknown(),
+        input_schema: z.record(z.string(), z.unknown()),
       }),
     )
     .optional(),
@@ -99,8 +99,11 @@ function flattenToolResult(content: string | unknown[] | undefined): string {
   return content
     .map((part) => {
       if (typeof part === "string") return part;
-      const p = part as { type?: string; text?: string };
-      return p.type === "text" && typeof p.text === "string" ? p.text : JSON.stringify(part);
+      const p =
+        part !== null && typeof part === "object"
+          ? (part as { type?: string; text?: string })
+          : undefined;
+      return p?.type === "text" && typeof p.text === "string" ? p.text : JSON.stringify(part);
     })
     .join("\n");
 }
@@ -169,7 +172,7 @@ export function parseAnthropicRequest(body: unknown): ChatRequest {
     request.tools = parsed.tools.map((t) => ({
       name: t.name,
       ...(t.description !== undefined && { description: t.description }),
-      inputSchema: t.input_schema as Record<string, unknown>,
+      inputSchema: t.input_schema,
     }));
   }
   if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);

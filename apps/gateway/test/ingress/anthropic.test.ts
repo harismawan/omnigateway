@@ -94,6 +94,27 @@ test("stringifies structured tool result content", () => {
   expect(req.messages[1]?.content[0]).toMatchObject({ type: "toolResult", content: "one" });
 });
 
+test("stringifies non-text tool result parts without throwing", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t", name: "f", input: {} }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "t", content: [42, null, { foo: "bar" }] }],
+      },
+    ],
+  });
+  const result = req.messages[1]?.content[0];
+  expect(result).toMatchObject({ type: "toolResult" });
+  if (result?.type === "toolResult") {
+    expect(result.content).toBe(["42", "null", '{"foo":"bar"}'].join("\n"));
+  }
+});
+
 test("parses tools and tool choice", () => {
   const req = parseAnthropicRequest({
     ...minimal,
@@ -102,6 +123,15 @@ test("parses tools and tool choice", () => {
   });
   expect(req.tools).toEqual([{ name: "f", description: "d", inputSchema: { type: "object" } }]);
   expect(req.toolChoice).toEqual({ type: "tool", name: "f" });
+});
+
+test("rejects a non-object tool input_schema", () => {
+  expect(() =>
+    parseAnthropicRequest({
+      ...minimal,
+      tools: [{ name: "f", input_schema: "not-an-object" }],
+    }),
+  ).toThrow(GatewayError);
 });
 
 test("maps a thinking block onto the reasoning config", () => {

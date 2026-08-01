@@ -1,5 +1,5 @@
 import { GatewayError } from "@omni/ir";
-import { z } from "zod";
+import type { z } from "zod";
 
 /**
  * Runs a schema and converts a Zod failure into a BAD_REQUEST carrying the
@@ -37,5 +37,3 @@ export function parseDataUrl(url: string): { mediaType: string; data: string } {
   }
   return { mediaType: match[1] as string, data: match[2] as string };
 }
-
-export const jsonValue: z.ZodType<unknown> = z.unknown();
