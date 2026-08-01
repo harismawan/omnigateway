@@ -39,7 +39,7 @@ type AnthropicEvent = {
     partial_json?: string;
     stop_reason?: string;
   };
-  usage?: { output_tokens?: number };
+  usage?: { input_tokens?: number; output_tokens?: number };
   error?: { type?: string; message?: string };
 };
 
@@ -124,6 +124,7 @@ export async function* decodeAnthropic(
       case "message_delta": {
         const reason = d.delta?.stop_reason;
         if (typeof reason === "string") stopReason = STOP_REASON[reason] ?? "endTurn";
+        inputTokens = d.usage?.input_tokens ?? inputTokens;
         outputTokens = d.usage?.output_tokens ?? outputTokens;
         break;
       }
