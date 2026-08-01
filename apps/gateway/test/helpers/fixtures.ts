@@ -1,3 +1,5 @@
+import type { ProviderId, StreamEvent } from "@omni/ir";
+import type { ProviderAdapter } from "@omni/providers";
 import type {
   ApiKey,
   Credential,
@@ -199,5 +201,31 @@ export function snapshot(parts: {
       weights: { ...DEFAULT_SETTINGS.weights, ...parts.settings?.weights },
     },
     builtAt: parts.builtAt ?? 1_000_000,
+  };
+}
+
+/** An adapter set where every provider replays a fixed event list. */
+export function stubAdapters(events: StreamEvent[]): Readonly<Record<ProviderId, ProviderAdapter>> {
+  const make = (id: ProviderId): ProviderAdapter => ({
+    id,
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send() {
+      return {
+        events: (async function* () {
+          for (const e of events) yield e;
+        })(),
+        degradations: [],
+      };
+    },
+  });
+  return { anthropic: make("anthropic"), openai: make("openai"), kimi: make("kimi") };
+}
+
+export function virtualModel(overrides: Partial<VirtualModel> & { id: string }): VirtualModel {
+  return {
+    strategy: "score",
+    targets: [],
+    isAlias: false,
+    ...overrides,
   };
 }
