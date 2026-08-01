@@ -1,12 +1,17 @@
 import type {
+  ApiKey,
+  Credential,
   CredentialHealth,
+  CredentialSecrets,
   CredentialView,
   QuotaWindow,
+  RequestLog,
   Settings,
+  Store,
   Target,
   VirtualModel,
 } from "@omni/store";
-import { DEFAULT_SETTINGS } from "@omni/store";
+import { createStore, DEFAULT_SETTINGS, deriveKey, generateApiKey, hashApiKey } from "@omni/store";
 import { healthKey } from "../../src/router/snapshot.ts";
 import type { Snapshot } from "../../src/router/types.ts";
 
@@ -75,6 +80,95 @@ export function quota(overrides: Partial<QuotaWindow> = {}): QuotaWindow {
     startsAt: 0,
     used: 0,
     limit: null,
+    ...overrides,
+  };
+}
+
+/** A throwaway in-memory store with a fixed test encryption key. */
+export async function memoryStore(): Promise<Store> {
+  return createStore({
+    path: ":memory:",
+    encryptionKey: await deriveKey("test-encryption-key-0123456789"),
+  });
+}
+
+type SeedCredentialInput = Partial<
+  Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken"> & CredentialSecrets
+> & { id: string };
+
+/**
+ * Writes a credential through the real store, so it is really encrypted.
+ *
+ * Distinct from `credential()` above, which builds an in-memory `CredentialView`
+ * for router tests that never touch a database.
+ */
+export async function seedCredential(store: Store, overrides: SeedCredentialInput): Promise<void> {
+  await store.credentials.create({
+    provider: "anthropic",
+    label: overrides.id,
+    authType: "oauth",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    accessToken: `test-token-${overrides.id}`,
+    refreshToken: `test-refresh-${overrides.id}`,
+    apiKey: null,
+    idToken: null,
+    ...overrides,
+  });
+}
+
+/**
+ * Mints a gateway API key and stores it the way the admin route does.
+ *
+ * Returns the raw value, which exists only here — the store keeps the hash.
+ */
+export async function seedApiKey(
+  store: Store,
+  overrides: Partial<Omit<ApiKey, "createdAt" | "revokedAt">> = {},
+): Promise<{ raw: string; key: ApiKey }> {
+  const raw = generateApiKey();
+  const key = await store.keys.create({
+    id: crypto.randomUUID(),
+    label: "test",
+    prefix: raw.slice(0, 12),
+    hash: await hashApiKey(raw),
+    modelAllowlist: null,
+    rateLimitPerMin: null,
+    ...overrides,
+  });
+  return { raw, key };
+}
+
+/**
+ * A complete `RequestLog` row.
+ *
+ * Every field carries a value, so a test that cares about one of them says so
+ * by overriding it, and a schema change breaks here once rather than in ten
+ * separate literals.
+ */
+export function requestLog(overrides: Partial<RequestLog> & { id: string }): RequestLog {
+  return {
+    at: 1_000_000,
+    apiKeyId: null,
+    requestedModel: "fast",
+    resolvedProvider: "anthropic",
+    resolvedModel: "claude-opus-4",
+    credentialId: "c1",
+    attempts: 1,
+    status: 200,
+    errorCode: null,
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: null,
+    durationMs: 1,
+    costUsd: 0,
+    degradations: [],
     ...overrides,
   };
 }
