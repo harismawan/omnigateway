@@ -1,4 +1,4 @@
-import type { ProviderId } from "@omni/ir";
+import type { ErrorCode, ProviderId } from "@omni/ir";
 import {
   type ClientProfile,
   type HeaderPair,
@@ -113,6 +113,26 @@ export async function postJson(
     // Non-JSON error bodies are real; the caller falls back to the status.
   }
   return { status: res.status, parsed };
+}
+
+/**
+ * Classifies a failed token-endpoint status.
+ *
+ * Only a repudiation should be `AUTH`, because `createRefresher` disables the
+ * credential on exactly that code. A 5xx or a 429 means the provider had a bad
+ * minute, not that the refresh token is dead — classifying those as `AUTH`
+ * would permanently disable healthy credentials during an outage and force the
+ * operator to reconnect every account by hand.
+ *
+ * Codes match `codeForStatus` in `@omni/providers` so token failures and
+ * inference failures speak the same vocabulary.
+ */
+export function tokenErrorCode(status: number): ErrorCode {
+  // 429 is 4xx but is the clearest "try again later" there is.
+  if (status === 429) return "RATE_LIMIT";
+  // The provider looked at the request and refused it.
+  if (status >= 400 && status < 500) return "AUTH";
+  return "UPSTREAM";
 }
 
 /** Reads an error identifier out of a token response without leaking the body. */

@@ -199,6 +199,46 @@ test("exchange without a device code is a programming error", async () => {
   ).rejects.toThrow();
 });
 
+async function refreshCode(status: number, body: unknown): Promise<string> {
+  try {
+    await kimiOAuth.refresh("test-token-2", { http: stubHttp(status, body), now: () => NOW }, {});
+  } catch (e) {
+    return (e as GatewayError).code;
+  }
+  throw new Error("expected throw");
+}
+
+test("classifies a token endpoint 5xx as transient, not as a repudiation", async () => {
+  // A provider having a bad minute must not disable a healthy credential:
+  // createRefresher disables only on AUTH.
+  expect(await refreshCode(500, { error: "internal_error" })).toBe("UPSTREAM");
+  expect(await refreshCode(503, {})).toBe("UPSTREAM");
+  expect(await refreshCode(400, { error: "invalid_grant" })).toBe("AUTH");
+});
+
+test("classifies a token endpoint 429 as rate limited, not as a repudiation", async () => {
+  expect(await refreshCode(429, { error: "rate_limited" })).toBe("RATE_LIMIT");
+});
+
+test("the pending check still runs before status classification", async () => {
+  // authorization_pending and slow_down arrive as 400s; they are the device
+  // flow working, not a repudiation, so they must not be reclassified.
+  for (const code of ["authorization_pending", "slow_down"]) {
+    try {
+      await kimiOAuth.exchange(
+        {
+          code: "c",
+          pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "d" },
+        },
+        { http: stubHttp(400, { error: code }), now: () => NOW },
+      );
+      throw new Error("expected throw");
+    } catch (e) {
+      expect(isAuthorizationPending(e)).toBe(true);
+    }
+  }
+});
+
 test("refresh returns a new access token and reuses the stored device", async () => {
   const stored = {
     deviceId: "11111111-2222-3333-4444-555555555555",

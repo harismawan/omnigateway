@@ -1,7 +1,7 @@
 import { GatewayError } from "@omni/ir";
 import { type KimiDevice, kimiDeviceHeaders, mintKimiDevice, PROFILES } from "@omni/providers";
 import type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider } from "./types.ts";
-import { postJson, tokenErrorMessage } from "./types.ts";
+import { postJson, tokenErrorCode, tokenErrorMessage } from "./types.ts";
 
 /** Public client ID of the Kimi CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "kimi-cli";
@@ -114,7 +114,7 @@ async function post(
   const code =
     record === null ? `http_${status}` : (stringFrom(record, "error") ?? `http_${status}`);
   if (PENDING_ERRORS.has(code)) throw pendingError(code);
-  throw new GatewayError("AUTH", tokenErrorMessage(status, parsed));
+  throw new GatewayError(tokenErrorCode(status), tokenErrorMessage(status, parsed));
 }
 
 /** Reads a persisted identity back, minting a fresh one if it is absent. */

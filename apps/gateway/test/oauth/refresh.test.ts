@@ -218,6 +218,36 @@ test("a network failure does not disable the credential", async () => {
   expect((await store.credentials.get("c1"))?.enabled).toBe(true);
 });
 
+test("a provider 5xx does not disable the credential", async () => {
+  const { store, view } = await seed();
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => {
+      throw new GatewayError("UPSTREAM", "token endpoint rejected the request: http_500");
+    }),
+    http: nodeHttpClient(),
+    now: () => NOW,
+  });
+
+  await expect(refresh(view)).rejects.toThrow(GatewayError);
+  expect((await store.credentials.get("c1"))?.enabled).toBe(true);
+});
+
+test("a rate-limited refresh does not disable the credential", async () => {
+  const { store, view } = await seed();
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => {
+      throw new GatewayError("RATE_LIMIT", "token endpoint rejected the request: http_429");
+    }),
+    http: nodeHttpClient(),
+    now: () => NOW,
+  });
+
+  await expect(refresh(view)).rejects.toThrow(GatewayError);
+  expect((await store.credentials.get("c1"))?.enabled).toBe(true);
+});
+
 test("a failed refresh is not cached — the next call retries", async () => {
   const { store, view } = await seed();
   let calls = 0;

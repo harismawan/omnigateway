@@ -178,6 +178,27 @@ test("maps a rejected exchange to AUTH", async () => {
   ).rejects.toThrow(GatewayError);
 });
 
+async function refreshCode(status: number, body: unknown): Promise<string> {
+  try {
+    await openaiOAuth.refresh("test-token-2", { http: stubHttp(status, body), now: () => NOW }, {});
+  } catch (e) {
+    return (e as GatewayError).code;
+  }
+  throw new Error("expected throw");
+}
+
+test("classifies a token endpoint 5xx as transient, not as a repudiation", async () => {
+  // A provider having a bad minute must not disable a healthy credential:
+  // createRefresher disables only on AUTH.
+  expect(await refreshCode(500, { error: "internal_error" })).toBe("UPSTREAM");
+  expect(await refreshCode(503, {})).toBe("UPSTREAM");
+  expect(await refreshCode(400, { error: "invalid_grant" })).toBe("AUTH");
+});
+
+test("classifies a token endpoint 429 as rate limited, not as a repudiation", async () => {
+  expect(await refreshCode(429, { error: "rate_limited" })).toBe("RATE_LIMIT");
+});
+
 test("refresh preserves the account id from the new id token", async () => {
   const result = await openaiOAuth.refresh(
     "test-token-2",

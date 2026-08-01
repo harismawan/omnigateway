@@ -6,6 +6,7 @@ import {
   type OAuthDeps,
   type OAuthProvider,
   postJson,
+  tokenErrorCode,
   tokenErrorMessage,
 } from "./types.ts";
 
@@ -33,7 +34,7 @@ async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise
   });
 
   if (status < 200 || status >= 300) {
-    throw new GatewayError("AUTH", tokenErrorMessage(status, parsed));
+    throw new GatewayError(tokenErrorCode(status), tokenErrorMessage(status, parsed));
   }
 
   if (!isTokenResponse(parsed) || typeof parsed.access_token !== "string") {
