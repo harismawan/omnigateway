@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
-import type { HttpClient, HttpRequest } from "@omni/providers";
+import { type HttpClient, type HttpRequest, stainlessHost } from "@omni/providers";
 import { anthropicOAuth } from "../../src/oauth/anthropic.ts";
 
 const NOW = 1_000_000;
@@ -40,19 +40,44 @@ test("declares that it supports the manual paste flow", () => {
   expect(anthropicOAuth.supportsManualPaste).toBe(true);
 });
 
-test("the token call carries the same client identity as inference", async () => {
+const ANTHROPIC_TOKEN_HEADERS = [
+  ["Accept", "application/json"],
+  ["Content-Type", "application/json"],
+  ["User-Agent", "claude-cli/2.1.219 (external, cli)"],
+  ["X-Stainless-Arch", stainlessHost(process.platform, process.arch).arch],
+  ["X-Stainless-Lang", "js"],
+  ["X-Stainless-OS", stainlessHost(process.platform, process.arch).os],
+  ["X-Stainless-Package-Version", "0.94.0"],
+  ["X-Stainless-Retry-Count", "0"],
+  ["X-Stainless-Runtime", "node"],
+  ["X-Stainless-Runtime-Version", "v26.3.0"],
+  ["anthropic-dangerous-direct-browser-access", "true"],
+  ["x-app", "cli"],
+] as const;
+
+test("sends exchange with the Anthropic CLI header and JSON field order", async () => {
   const http = stubHttp(200, { access_token: "test-token-1", expires_in: 60 });
   await anthropicOAuth.exchange(
     { code: "auth-code", pending: { verifier: "v", challenge: "c", state: "s", redirectUri: "r" } },
     { http, now: () => NOW },
   );
 
-  const sent = new Map(http.last().headers);
-  expect(sent.get("User-Agent")).toMatch(/^claude-cli\//);
-  expect(sent.get("X-Stainless-Lang")).toBe("js");
-  // Authenticating as one client and inferring as another is a louder signal
-  // than either alone, so the token endpoint sees the same profile.
-  expect(sent.get("x-app")).toBe("cli");
+  const sent = http.last();
+  expect(sent.headers).toEqual(ANTHROPIC_TOKEN_HEADERS);
+  expect(sent.body).toBe(
+    '{"grant_type":"authorization_code","code":"auth-code","redirect_uri":"r","code_verifier":"v","state":"s","client_id":"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}',
+  );
+});
+
+test("sends refresh with the Anthropic CLI header and JSON field order", async () => {
+  const http = stubHttp(200, { access_token: "test-token-3", expires_in: 60 });
+  await anthropicOAuth.refresh("test-token-2", { http, now: () => NOW }, {});
+
+  const sent = http.last();
+  expect(sent.headers).toEqual(ANTHROPIC_TOKEN_HEADERS);
+  expect(sent.body).toBe(
+    '{"grant_type":"refresh_token","refresh_token":"test-token-2","client_id":"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}',
+  );
 });
 
 test("exchanges a code for tokens", async () => {
