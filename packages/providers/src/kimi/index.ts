@@ -1,4 +1,4 @@
-import { GatewayError } from "@omni/ir";
+import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
 import { BODY_ORDER, orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
 import { kimiDeviceHeaders } from "../kimi-device.ts";
@@ -12,7 +12,7 @@ const BASE_URL = "https://api.moonshot.ai/v1/chat/completions";
 
 export const kimiAdapter: ProviderAdapter = {
   id: "kimi",
-  capabilities: { tools: true, images: false, reasoning: false },
+  capabilities: PROVIDER_CAPABILITIES.kimi,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const { body, degradations } = toChatWire(req.request, req.model);

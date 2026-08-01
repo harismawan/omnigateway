@@ -1,4 +1,4 @@
-import { GatewayError } from "@omni/ir";
+import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
 import { applyAnthropicSystem, BODY_ORDER, orderFields, signAnthropicBody } from "../body.ts";
 import { httpError } from "../http.ts";
 import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
@@ -13,7 +13,7 @@ const OAUTH_BETA = "oauth-2025-04-20";
 
 export const anthropicAdapter: ProviderAdapter = {
   id: "anthropic",
-  capabilities: { tools: true, images: true, reasoning: true },
+  capabilities: PROVIDER_CAPABILITIES.anthropic,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const oauth = req.credentials.accessToken !== null;

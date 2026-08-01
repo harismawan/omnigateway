@@ -1,4 +1,4 @@
-import { GatewayError } from "@omni/ir";
+import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
 import { BODY_ORDER, orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
 import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
@@ -12,7 +12,7 @@ const API_URL = "https://api.openai.com/v1/responses";
 
 export const openaiAdapter: ProviderAdapter = {
   id: "openai",
-  capabilities: { tools: true, images: true, reasoning: true },
+  capabilities: PROVIDER_CAPABILITIES.openai,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const oauth = req.credentials.accessToken !== null;

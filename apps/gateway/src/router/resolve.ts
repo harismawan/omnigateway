@@ -1,22 +1,6 @@
-import { GatewayError, type ProviderId } from "@omni/ir";
+import { GatewayError, PROVIDER_CAPABILITIES, type ProviderId } from "@omni/ir";
 import type { Target, VirtualModel } from "@omni/store";
 import type { Snapshot } from "./types.ts";
-
-/**
- * Capabilities per provider, for synthesised (non-configured) targets.
- *
- * Mirrors each adapter's capabilities in the provider registry, duplicated
- * here because the router never imports the providers package (see module
- * boundaries) — dispatch is the only layer allowed to import both. Configure
- * a virtual model to override these.
- */
-const PROVIDER_CAPABILITIES: Readonly<
-  Record<ProviderId, { tools: boolean; images: boolean; reasoning: boolean }>
-> = {
-  anthropic: { tools: true, images: true, reasoning: true },
-  openai: { tools: true, images: true, reasoning: true },
-  kimi: { tools: true, images: false, reasoning: false },
-};
 
 const PROVIDERS = new Set<string>(Object.keys(PROVIDER_CAPABILITIES));
 
