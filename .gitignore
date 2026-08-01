@@ -6,3 +6,6 @@ dist/
 .env
 .env.local
 *.tsbuildinfo
+
+# SDD scratch workspace (briefs, reports, review packages)
+.superpowers/
