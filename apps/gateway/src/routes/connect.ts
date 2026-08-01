@@ -62,6 +62,15 @@ function deviceIdFrom(start: ReturnType<OAuthProvider["start"]>): string {
   return deviceId;
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 const page = (title: string, message: string, status: number): Response =>
   new Response(
     `<!doctype html><meta charset="utf-8"><title>${title}</title>` +
@@ -72,6 +81,7 @@ const page = (title: string, message: string, status: number): Response =>
 
 export function connectRoutes(deps: ConnectDeps) {
   const flows = createPendingFlows({ now: deps.now, ttlMs: FLOW_TTL_MS });
+  const pollsInFlight = new Map<string, Promise<{ id: string }>>();
   const redirectUri = `${deps.baseUrl}/oauth/callback`;
 
   async function requireAdmin(request: Request): Promise<void> {
@@ -193,12 +203,23 @@ export function connectRoutes(deps: ConnectDeps) {
             throw new GatewayError("BAD_REQUEST", "flowId is required");
           }
 
+          const existing = pollsInFlight.get(flowId);
+          if (existing !== undefined) {
+            const created = await existing;
+            return { status: "complete", ...created };
+          }
+
           const flow = flows.peek(flowId);
           if (flow === null)
             throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
 
+          const poll = complete(flow, "").finally(() => {
+            pollsInFlight.delete(flowId);
+          });
+          pollsInFlight.set(flowId, poll);
+
           try {
-            const created = await complete(flow, "");
+            const created = await poll;
             flows.take(flowId);
             return { status: "complete", ...created };
           } catch (error) {
@@ -220,7 +241,15 @@ export function connectRoutes(deps: ConnectDeps) {
        * parameter — minted by this process moments earlier — is the credential.
        */
       .get("/oauth/callback", async ({ query }) => {
-        const state = typeof query.state === "string" ? query.state : "";
+        const state = typeof query.state === "string" ? query.state.trim() : "";
+        if (state.length === 0) {
+          return page(
+            "Authorization failed",
+            "This authorization link is unknown or has expired.",
+            400,
+          );
+        }
+
         const found = flows.byState(state);
         if (found === null) {
           return page(
@@ -242,7 +271,11 @@ export function connectRoutes(deps: ConnectDeps) {
         }
 
         if (typeof query.error === "string") {
-          return page("Authorization declined", `The provider reported: ${query.error}.`, 400);
+          return page(
+            "Authorization declined",
+            `The provider reported: ${escapeHtml(query.error)}.`,
+            400,
+          );
         }
 
         const code = typeof query.code === "string" ? query.code : "";
@@ -261,7 +294,7 @@ export function connectRoutes(deps: ConnectDeps) {
           const message = error instanceof GatewayError ? error.message : "the exchange failed";
           return page(
             "Authorization failed",
-            `The provider could not finish authorization: ${message}.`,
+            `The provider could not finish authorization: ${escapeHtml(message)}.`,
             400,
           );
         }

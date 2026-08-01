@@ -172,6 +172,72 @@ test("the callback surfaces a provider error without exchanging", async () => {
   expect(await store.credentials.list()).toHaveLength(0);
 });
 
+test("a callback without state leaves a device flow pollable", async () => {
+  let polls = 0;
+  const deviceProvider: OAuthProvider = {
+    id: "kimi",
+    kind: "device",
+    supportsManualPaste: false,
+    start: () => ({
+      authorizeUrl: "https://kimi.example/device",
+      pending: {
+        verifier: "",
+        challenge: "",
+        state: "",
+        redirectUri: "",
+        extra: { deviceId: "dev-1" },
+      },
+    }),
+    begin: async () => ({
+      authorizeUrl: "https://kimi.example/device",
+      userCode: "WDJB-MJHT",
+      pending: {
+        verifier: "",
+        challenge: "",
+        state: "",
+        redirectUri: "",
+        deviceCode: "dc-1",
+        interval: 5,
+        extra: { deviceId: "dev-1" },
+      },
+    }),
+    exchange: async () => {
+      polls += 1;
+      const error = new GatewayError("AUTH", "authorization not yet complete") as GatewayError & {
+        __omni_authorization_pending?: boolean;
+      };
+      error.__omni_authorization_pending = true;
+      throw error;
+    },
+    refresh: async () => RESULT,
+  };
+  const { app, post } = await harness(deviceProvider);
+  const start = (await (
+    await post("/api/connect/start", { provider: "kimi", label: "kimi" })
+  ).json()) as { flowId: string };
+
+  const callback = await app.handle(
+    new Request("http://localhost/oauth/callback?error=access_denied"),
+  );
+  expect(callback.status).toBe(400);
+
+  const poll = await post("/api/connect/poll", { flowId: start.flowId });
+  expect(poll.status).toBe(202);
+  expect(polls).toBe(1);
+});
+
+test("the callback escapes a provider error", async () => {
+  const { app, post } = await harness();
+  await post("/api/connect/start", { provider: "anthropic", label: "work" });
+  const error = "<img src=x onerror=alert(1)>";
+  const query = new URLSearchParams({ error, state: "the-state" });
+
+  const res = await app.handle(new Request(`http://localhost/oauth/callback?${query}`));
+  const body = await res.text();
+  expect(body).not.toContain(error);
+  expect(body).toContain("&lt;img src=x onerror=alert(1)&gt;");
+});
+
 test("the callback consumes a matched state before the exchange", async () => {
   let resolveExchange: ((result: FlowResult) => void) | undefined;
   const exchange = new Promise<FlowResult>((resolve) => {
@@ -191,6 +257,62 @@ test("the callback consumes a matched state before the exchange", async () => {
   expect(second.status).toBe(400);
   resolveExchange?.(RESULT);
   expect((await first).status).toBe(200);
+  expect(await store.credentials.list()).toHaveLength(1);
+});
+
+test("concurrent polls share one device exchange", async () => {
+  let exchangeCalls = 0;
+  let resolveExchange: ((result: FlowResult) => void) | undefined;
+  const exchange = new Promise<FlowResult>((resolve) => {
+    resolveExchange = resolve;
+  });
+  const deviceProvider: OAuthProvider = {
+    id: "kimi",
+    kind: "device",
+    supportsManualPaste: false,
+    start: () => ({
+      authorizeUrl: "https://kimi.example/device",
+      pending: {
+        verifier: "",
+        challenge: "",
+        state: "",
+        redirectUri: "",
+        extra: { deviceId: "dev-1" },
+      },
+    }),
+    begin: async () => ({
+      authorizeUrl: "https://kimi.example/device",
+      userCode: "WDJB-MJHT",
+      pending: {
+        verifier: "",
+        challenge: "",
+        state: "",
+        redirectUri: "",
+        deviceCode: "dc-1",
+        interval: 5,
+        extra: { deviceId: "dev-1" },
+      },
+    }),
+    exchange: async () => {
+      exchangeCalls += 1;
+      return exchange;
+    },
+    refresh: async () => RESULT,
+  };
+  const { post, store } = await harness(deviceProvider);
+  const start = (await (
+    await post("/api/connect/start", { provider: "kimi", label: "kimi" })
+  ).json()) as { flowId: string };
+
+  const first = post("/api/connect/poll", { flowId: start.flowId });
+  while (exchangeCalls === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  const second = post("/api/connect/poll", { flowId: start.flowId });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(exchangeCalls).toBe(1);
+  resolveExchange?.(RESULT);
+  expect((await first).status).toBe(200);
+  expect((await second).status).toBe(200);
   expect(await store.credentials.list()).toHaveLength(1);
 });
 

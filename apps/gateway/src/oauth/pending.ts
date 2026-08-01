@@ -53,6 +53,7 @@ export function createPendingFlows(opts: PendingFlowsOptions): PendingFlows {
     },
 
     byState(state) {
+      if (state.trim().length === 0) return null;
       for (const [id, entry] of flows) {
         if (entry.flow.pending.state === state) {
           return expired(entry) ? null : { ...entry.flow, id };

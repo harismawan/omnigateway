@@ -40,6 +40,12 @@ test("returns null for an unknown state", () => {
   expect(flows().byState("nope")).toBeNull();
 });
 
+test("never finds a blank state", () => {
+  const p = flows();
+  p.put(flow(""));
+  expect(p.byState("")).toBeNull();
+});
+
 test("expires a flow after the ttl", () => {
   const p = flows();
   const id = p.put(flow("s1"));
