@@ -56,6 +56,12 @@ export type OAuthProvider = {
 
   start(opts: { redirectUri: string }): AuthorizeStart;
 
+  /**
+   * Device flows only: requests a device code before the operator is shown
+   * anything. PKCE providers leave this undefined and use `start` alone.
+   */
+  begin?(opts: { deviceId: string }, deps: OAuthDeps): Promise<AuthorizeStart>;
+
   /** PKCE: exchange an authorization code. Device: poll once for a token. */
   exchange(input: { code: string; pending: PendingFlow }, deps: OAuthDeps): Promise<FlowResult>;
 
