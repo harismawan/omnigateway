@@ -1,0 +1,291 @@
+import { expect, test } from "bun:test";
+import { ADMIN_COOKIE, createAdminAuth } from "../../src/auth/admin.ts";
+import { adminRoutes } from "../../src/routes/admin.ts";
+import {
+  memoryStore,
+  requestLog,
+  seedCredential,
+  target,
+  virtualModel,
+} from "../helpers/fixtures.ts";
+
+const NOW = 1_000_000;
+const SESSION_TTL_MS = 60_000;
+
+type HarnessOptions = { configured?: boolean };
+
+async function harness({ configured = true }: HarnessOptions = {}) {
+  const store = await memoryStore();
+  const admin = createAdminAuth(store, { now: () => NOW, sessionTtlMs: SESSION_TTL_MS });
+
+  let cookie = "";
+  if (configured) {
+    await admin.setPassword("hunter2hunter2");
+    const token = await admin.login("hunter2hunter2");
+    if (token === null) throw new Error("test admin login failed");
+    cookie = `${ADMIN_COOKIE}=${token}`;
+  }
+
+  const app = adminRoutes({ store, admin, now: () => NOW, sessionTtlMs: SESSION_TTL_MS });
+
+  const call = (
+    method: string,
+    path: string,
+    body?: unknown,
+    auth = true,
+    protocol: "http" | "https" = "http",
+  ) =>
+    app.handle(
+      new Request(`${protocol}://localhost${path}`, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(auth && cookie.length > 0 ? { cookie } : {}),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
+
+  return { store, app, admin, call };
+}
+
+test("status reports an unconfigured gateway without a session", async () => {
+  const { call } = await harness({ configured: false });
+  const body = (await (await call("GET", "/api/status", undefined, false)).json()) as {
+    configured: boolean;
+    authenticated: boolean;
+  };
+  expect(body.configured).toBe(false);
+  expect(body.authenticated).toBe(false);
+});
+
+test("setup sets the first password and refuses a second time", async () => {
+  const { call } = await harness({ configured: false });
+  expect((await call("POST", "/api/setup", { password: "hunter2hunter2" }, false)).status).toBe(
+    200,
+  );
+  expect((await call("POST", "/api/setup", { password: "another-password" }, false)).status).toBe(
+    409,
+  );
+});
+
+test("login sets a secure session cookie only over https", async () => {
+  const { call } = await harness();
+  const httpResponse = await call("POST", "/api/login", { password: "hunter2hunter2" }, false);
+  expect(httpResponse.status).toBe(200);
+  const httpCookie = httpResponse.headers.get("set-cookie") ?? "";
+  expect(httpCookie).toContain(`${ADMIN_COOKIE}=`);
+  expect(httpCookie.toLowerCase()).toContain("httponly");
+  expect(httpCookie.toLowerCase()).toContain("samesite=strict");
+  expect(httpCookie.toLowerCase()).not.toContain("secure");
+
+  const httpsResponse = await call(
+    "POST",
+    "/api/login",
+    { password: "hunter2hunter2" },
+    false,
+    "https",
+  );
+  expect(httpsResponse.status).toBe(200);
+  const httpsCookie = httpsResponse.headers.get("set-cookie") ?? "";
+  expect(httpsCookie.toLowerCase()).toContain("httponly");
+  expect(httpsCookie.toLowerCase()).toContain("samesite=strict");
+  expect(httpsCookie.toLowerCase()).toContain("secure");
+});
+
+test("login rejects the wrong password", async () => {
+  const { call } = await harness();
+  expect((await call("POST", "/api/login", { password: "wrong-password-x" }, false)).status).toBe(
+    401,
+  );
+});
+
+test("every data route requires a session", async () => {
+  const { call } = await harness();
+  for (const path of [
+    "/api/credentials",
+    "/api/models",
+    "/api/keys",
+    "/api/settings",
+    "/api/usage",
+    "/api/logs",
+  ]) {
+    expect((await call("GET", path, undefined, false)).status).toBe(401);
+  }
+});
+
+test("credentials are listed without their secrets", async () => {
+  const { call, store } = await harness();
+  await seedCredential(store, {
+    id: "c1",
+    label: "work",
+    accessToken: "test-token-1",
+    refreshToken: "test-token-2",
+  });
+
+  const res = await call("GET", "/api/credentials");
+  const text = await res.text();
+  expect(text).not.toContain("test-token-1");
+  expect(text).not.toContain("secrets");
+  const body = JSON.parse(text) as {
+    credentials: Array<{ label: string; hasRefreshToken: boolean }>;
+  };
+  expect(body.credentials[0]?.label).toBe("work");
+  expect(body.credentials[0]?.hasRefreshToken).toBe(true);
+});
+
+test("patching a credential updates tier, weight and enabled", async () => {
+  const { call, store } = await harness();
+  await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
+
+  expect(
+    (await call("PATCH", "/api/credentials/c1", { tier: 2, weight: 0.5, enabled: false })).status,
+  ).toBe(200);
+  const reloaded = await store.credentials.get("c1");
+  expect(reloaded?.tier).toBe(2);
+  expect(reloaded?.weight).toBe(0.5);
+  expect(reloaded?.enabled).toBe(false);
+});
+
+test("patching a credential cannot inject a token", async () => {
+  const { call, store } = await harness();
+  await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
+
+  await call("PATCH", "/api/credentials/c1", { accessToken: "attacker-token" });
+  const view = await store.credentials.get("c1");
+  expect((await view?.secrets())?.accessToken).toBe("test-token-1");
+});
+
+test("deleting a credential removes it", async () => {
+  const { call, store } = await harness();
+  await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
+
+  expect((await call("DELETE", "/api/credentials/c1")).status).toBe(200);
+  expect(await store.credentials.get("c1")).toBeNull();
+});
+
+test("models can be created, listed and deleted", async () => {
+  const { call } = await harness();
+  const model = virtualModel({ id: "fast", targets: [target()] });
+
+  expect((await call("PUT", "/api/models/fast", model)).status).toBe(200);
+  const body = (await (await call("GET", "/api/models")).json()) as {
+    models: Array<{ id: string }>;
+  };
+  expect(body.models.map((model) => model.id)).toEqual(["fast"]);
+  expect((await call("DELETE", "/api/models/fast")).status).toBe(200);
+  const deleted = (await (await call("GET", "/api/models")).json()) as { models: unknown[] };
+  expect(deleted.models).toHaveLength(0);
+});
+
+test("a model with no targets is rejected", async () => {
+  const { call } = await harness();
+  expect((await call("PUT", "/api/models/empty", virtualModel({ id: "empty" }))).status).toBe(400);
+});
+
+test("a model whose path id and body id disagree is rejected", async () => {
+  const { call } = await harness();
+  const model = virtualModel({ id: "other", targets: [target()] });
+  expect((await call("PUT", "/api/models/fast", model)).status).toBe(400);
+});
+
+test("creating an api key returns the raw value exactly once", async () => {
+  const { call } = await harness();
+  const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as {
+    key: string;
+  };
+  expect(created.key).toMatch(/^sk-omni-/);
+
+  const listed = (await (await call("GET", "/api/keys")).json()) as {
+    keys: Array<{ label: string; key?: string; hash?: string; prefix: string }>;
+  };
+  expect(listed.keys[0]?.label).toBe("cli");
+  expect(listed.keys[0]?.key).toBeUndefined();
+  expect(listed.keys[0]?.hash).toBeUndefined();
+  expect(listed.keys[0]?.prefix).toBe(created.key.slice(0, 12));
+  expect(JSON.stringify(listed)).not.toContain(created.key);
+});
+
+test("an api key is revoked rather than deleted, so usage keeps its attribution", async () => {
+  const { call, store } = await harness();
+  const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as {
+    id: string;
+  };
+
+  expect((await call("DELETE", `/api/keys/${created.id}`)).status).toBe(200);
+  const listed = await store.keys.list();
+  expect(listed).toHaveLength(1);
+  expect(listed[0]?.revokedAt).not.toBeNull();
+});
+
+test("settings round-trip and reject an unknown weight", async () => {
+  const { call } = await harness();
+  const current = (await (await call("GET", "/api/settings")).json()) as {
+    settings: { weights: { tier: number } } & Record<string, unknown>;
+  };
+  expect(current.settings.weights.tier).toBe(10);
+
+  const next = { ...current.settings, weights: { ...current.settings.weights, tier: 20 } };
+  expect((await call("PUT", "/api/settings", next)).status).toBe(200);
+  const updated = (await (await call("GET", "/api/settings")).json()) as {
+    settings: { weights: { tier: number } };
+  };
+  expect(updated.settings.weights.tier).toBe(20);
+
+  expect(
+    (await call("PUT", "/api/settings", { ...next, weights: { ...next.weights, bogus: 1 } }))
+      .status,
+  ).toBe(400);
+});
+
+test("usage aggregates by the requested dimension", async () => {
+  const { call, store } = await harness();
+  await store.usage.append(
+    requestLog({ id: "r1", at: NOW, inputTokens: 10, outputTokens: 5, ttftMs: 40 }),
+  );
+
+  const body = (await (await call("GET", "/api/usage?groupBy=model")).json()) as {
+    rows: Array<{ key: string; requests: number; outputTokens: number }>;
+  };
+  expect(body.rows[0]).toMatchObject({ key: "claude-opus-4", requests: 1, outputTokens: 5 });
+});
+
+test("usage rejects an unknown groupBy rather than passing it to sql", async () => {
+  const { call } = await harness();
+  expect((await call("GET", "/api/usage?groupBy=1;DROP+TABLE+usage")).status).toBe(400);
+});
+
+test("logs are returned newest first and capped", async () => {
+  const { call, store } = await harness();
+  for (let i = 0; i < 3; i += 1) {
+    await store.usage.append(requestLog({ id: `r${i}`, at: NOW + i }));
+  }
+
+  const body = (await (await call("GET", "/api/logs?limit=2")).json()) as {
+    logs: Array<{ id: string }>;
+  };
+  expect(body.logs).toHaveLength(2);
+  expect(body.logs[0]?.id).toBe("r2");
+});
+
+test("logout clears the session cookie with matching http flags and invalidates it", async () => {
+  const { call } = await harness();
+  const response = await call("POST", "/api/logout");
+  expect(response.status).toBe(200);
+  const cookie = response.headers.get("set-cookie") ?? "";
+  expect(cookie).toContain(`${ADMIN_COOKIE}=`);
+  expect(cookie.toLowerCase()).toContain("httponly");
+  expect(cookie.toLowerCase()).toContain("samesite=strict");
+  expect(cookie.toLowerCase()).not.toContain("secure");
+  expect((await call("GET", "/api/credentials")).status).toBe(401);
+});
+
+test("logout clears the session cookie with secure over https", async () => {
+  const { call } = await harness();
+  const response = await call("POST", "/api/logout", undefined, true, "https");
+  expect(response.status).toBe(200);
+  const cookie = response.headers.get("set-cookie") ?? "";
+  expect(cookie.toLowerCase()).toContain("httponly");
+  expect(cookie.toLowerCase()).toContain("samesite=strict");
+  expect(cookie.toLowerCase()).toContain("secure");
+});
