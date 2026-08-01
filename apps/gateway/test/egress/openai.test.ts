@@ -67,6 +67,31 @@ test("streams tool calls with index and argument deltas", async () => {
   });
 });
 
+test("sends role: assistant on the first frame of a tool-only response", async () => {
+  const f = await frames(
+    openaiStream(
+      src(
+        { type: "start", id: "msg_1", model: "gpt-5" },
+        { type: "blockStart", index: 0, block: { type: "toolUse", id: "c1", name: "f" } },
+        { type: "blockDelta", index: 0, delta: { type: "toolJson", partial: '{"a"' } },
+        { type: "blockEnd", index: 0 },
+        {
+          type: "end",
+          stopReason: "toolUse",
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      ),
+      "chatcmpl-1",
+      1000,
+    ),
+  );
+  const nonDone = f.filter((x) => x.data !== "[DONE]").map((x) => JSON.parse(x.data));
+  expect(nonDone[0]?.choices[0].delta.role).toBe("assistant");
+  for (const chunk of nonDone.slice(1)) {
+    expect(chunk.choices[0].delta.role).toBeUndefined();
+  }
+});
+
 test("maps a tool-use stop reason onto tool_calls", async () => {
   const f = await frames(
     openaiStream(

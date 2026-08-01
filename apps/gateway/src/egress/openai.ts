@@ -68,10 +68,13 @@ export async function* openaiStream(
         } else if (event.block.type === "toolUse") {
           const index = toolIndex.size;
           toolIndex.set(event.index, index);
+          const firstRole = roleSent ? {} : { role: "assistant" as const };
+          roleSent = true;
           yield emit(
             chunk(requestId, created, model, {
               index: 0,
               delta: {
+                ...firstRole,
                 tool_calls: [
                   {
                     index,
