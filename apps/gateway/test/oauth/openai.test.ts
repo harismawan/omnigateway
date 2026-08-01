@@ -112,6 +112,24 @@ test("tolerates a malformed id token rather than failing the flow", async () => 
   expect(result.providerData.accountId).toBeNull();
 });
 
+test("discards non-string account claims", async () => {
+  const result = await openaiOAuth.exchange(
+    { code: "auth-code", pending },
+    {
+      http: stubHttp(200, {
+        access_token: "test-token-1",
+        id_token: idToken({
+          email: 42,
+          "https://api.openai.com/auth": { chatgpt_account_id: { value: "acct_123" } },
+        }),
+      }),
+      now: () => NOW,
+    },
+  );
+  expect(result.accountEmail).toBeNull();
+  expect(result.providerData.accountId).toBeNull();
+});
+
 test("maps a rejected exchange to AUTH", async () => {
   expect(
     openaiOAuth.exchange(
@@ -136,5 +154,14 @@ test("refresh preserves the account id from the new id token", async () => {
   );
   expect(result.secrets.accessToken).toBe("test-token-3");
   expect(result.secrets.refreshToken).toBe("test-token-2");
+  expect(result.providerData.accountId).toBe("acct_123");
+});
+
+test("refresh keeps the prior account id when no id token is returned", async () => {
+  const result = await openaiOAuth.refresh(
+    "test-token-2",
+    { http: stubHttp(200, { access_token: "test-token-3", expires_in: 60 }), now: () => NOW },
+    { accountId: "acct_123" },
+  );
   expect(result.providerData.accountId).toBe("acct_123");
 });

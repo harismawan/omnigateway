@@ -23,9 +23,21 @@ type TokenResponse = {
 };
 
 type IdClaims = {
-  email?: string;
-  "https://api.openai.com/auth"?: { chatgpt_account_id?: string };
+  email: string | null;
+  accountId: string | null;
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function accountIdFromProviderData(providerData: Record<string, unknown>): string | null {
+  return stringOrNull(providerData.accountId);
+}
 
 /**
  * Reads the claims out of an ID token.
@@ -36,14 +48,19 @@ type IdClaims = {
  * claims rather than failing the connection.
  */
 function decodeClaims(idToken: string | undefined): IdClaims {
-  if (typeof idToken !== "string") return {};
+  if (typeof idToken !== "string") return { email: null, accountId: null };
   const payload = idToken.split(".")[1];
-  if (payload === undefined) return {};
+  if (payload === undefined) return { email: null, accountId: null };
   try {
     const json: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return typeof json === "object" && json !== null ? (json as IdClaims) : {};
+    if (!isRecord(json)) return { email: null, accountId: null };
+    const auth = json["https://api.openai.com/auth"];
+    return {
+      email: stringOrNull(json.email),
+      accountId: isRecord(auth) ? stringOrNull(auth.chatgpt_account_id) : null,
+    };
   } catch {
-    return {};
+    return { email: null, accountId: null };
   }
 }
 
@@ -71,6 +88,7 @@ function toResult(
   token: TokenResponse,
   fallbackRefresh: string | null,
   deps: OAuthDeps,
+  fallbackAccountId: string | null = null,
 ): FlowResult {
   const claims = decodeClaims(token.id_token);
   return {
@@ -83,11 +101,9 @@ function toResult(
       idToken: token.id_token ?? null,
     },
     expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
-    accountEmail: claims.email ?? null,
+    accountEmail: claims.email,
     // Consumed by the OpenAI adapter as the chatgpt-account-id header (Task 10).
-    providerData: {
-      accountId: claims["https://api.openai.com/auth"]?.chatgpt_account_id ?? null,
-    },
+    providerData: { accountId: claims.accountId ?? fallbackAccountId },
   };
 }
 
@@ -132,11 +148,11 @@ export const openaiOAuth: OAuthProvider = {
     return toResult(token, null, deps);
   },
 
-  async refresh(refreshToken, deps) {
+  async refresh(refreshToken, deps, providerData) {
     const token = await postToken(
       { grant_type: "refresh_token", refresh_token: refreshToken, scope: SCOPES },
       deps,
     );
-    return toResult(token, refreshToken, deps);
+    return toResult(token, refreshToken, deps, accountIdFromProviderData(providerData));
   },
 };
