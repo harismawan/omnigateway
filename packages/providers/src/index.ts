@@ -5,6 +5,7 @@ export * from "./body.ts";
 export { httpError, parseRetryAfter } from "./http.ts";
 export * from "./http-client.ts";
 export * from "./kimi-device.ts";
+export { decodeResponses, openaiAdapter, toResponsesWire } from "./openai/index.ts";
 export * from "./profile.ts";
 export * from "./sse.ts";
 export * from "./types.ts";
