@@ -39,27 +39,38 @@ function sseResponse(
   onDone: () => Promise<void>,
 ): Response {
   const encoder = new TextEncoder();
+
+  // `pull`'s catch and `cancel` can both fire for the same disconnect (an
+  // in-flight read rejects with AbortError at the same moment the stream is
+  // cancelled), so the log write is latched to run exactly once regardless
+  // of which path gets there first.
+  let done: Promise<void> | null = null;
+  const runOnce = (): Promise<void> => {
+    if (done === null) done = onDone();
+    return done;
+  };
+
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const next = await frames.next();
         if (next.done === true) {
           controller.close();
-          await onDone();
+          await runOnce();
           return;
         }
         const { event, data } = next.value;
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${data}\n\n`));
       } catch (error) {
         controller.error(error);
-        await onDone();
+        await runOnce();
       }
     },
     async cancel() {
       // The client hung up. Close the upstream generator so the provider
-      // connection is released, then still write the log.
+      // connection is released, then still write the log (exactly once).
       await frames.return(undefined);
-      await onDone();
+      await runOnce();
     },
   });
 
@@ -79,6 +90,8 @@ async function handle(deps: ProxyDeps, surface: Surface, request: Request): Prom
       surface === "anthropic" ? parseAnthropicRequest(body) : parseOpenAIRequest(body);
 
     const outcome = await dispatch(chatRequest, deps, request.signal);
+    // Overrides dispatch's internally generated id with the route-level
+    // requestId so the client-visible response id and the log row id match.
     const log = () => finishLog(deps.store, { ...outcome.log(), id: requestId }, keyId);
 
     if (chatRequest.stream) {
