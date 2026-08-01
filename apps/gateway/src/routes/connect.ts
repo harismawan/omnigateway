@@ -116,6 +116,25 @@ export function connectRoutes(deps: ConnectDeps) {
     return { id };
   }
 
+  async function pollOutcome(
+    flowId: string,
+    poll: Promise<{ id: string }>,
+    set: { status?: number | string },
+  ) {
+    try {
+      const created = await poll;
+      flows.take(flowId);
+      return { status: "complete", ...created };
+    } catch (error) {
+      if (isAuthorizationPending(error)) {
+        set.status = 202;
+        return { status: "pending" };
+      }
+      flows.take(flowId);
+      throw error;
+    }
+  }
+
   return (
     new Elysia()
       .post("/api/connect/start", async ({ request }) => {
@@ -204,10 +223,7 @@ export function connectRoutes(deps: ConnectDeps) {
           }
 
           const existing = pollsInFlight.get(flowId);
-          if (existing !== undefined) {
-            const created = await existing;
-            return { status: "complete", ...created };
-          }
+          if (existing !== undefined) return pollOutcome(flowId, existing, set);
 
           const flow = flows.peek(flowId);
           if (flow === null)
@@ -217,19 +233,7 @@ export function connectRoutes(deps: ConnectDeps) {
             pollsInFlight.delete(flowId);
           });
           pollsInFlight.set(flowId, poll);
-
-          try {
-            const created = await poll;
-            flows.take(flowId);
-            return { status: "complete", ...created };
-          } catch (error) {
-            if (isAuthorizationPending(error)) {
-              set.status = 202;
-              return { status: "pending" };
-            }
-            flows.take(flowId);
-            throw error;
-          }
+          return pollOutcome(flowId, poll, set);
         } catch (error) {
           return errorResponse(error);
         }

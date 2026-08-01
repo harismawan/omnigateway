@@ -316,6 +316,73 @@ test("concurrent polls share one device exchange", async () => {
   expect(await store.credentials.list()).toHaveLength(1);
 });
 
+test("concurrent pending polls share the pending result and keep the flow", async () => {
+  let exchangeCalls = 0;
+  let rejectExchange: ((error: GatewayError) => void) | undefined;
+  const exchange = new Promise<FlowResult>((_resolve, reject) => {
+    rejectExchange = reject;
+  });
+  const pendingError = new GatewayError(
+    "AUTH",
+    "authorization not yet complete",
+  ) as GatewayError & {
+    __omni_authorization_pending?: boolean;
+  };
+  pendingError.__omni_authorization_pending = true;
+  const deviceProvider: OAuthProvider = {
+    id: "kimi",
+    kind: "device",
+    supportsManualPaste: false,
+    start: () => ({
+      authorizeUrl: "https://kimi.example/device",
+      pending: {
+        verifier: "",
+        challenge: "",
+        state: "",
+        redirectUri: "",
+        extra: { deviceId: "dev-1" },
+      },
+    }),
+    begin: async () => ({
+      authorizeUrl: "https://kimi.example/device",
+      userCode: "WDJB-MJHT",
+      pending: {
+        verifier: "",
+        challenge: "",
+        state: "",
+        redirectUri: "",
+        deviceCode: "dc-1",
+        interval: 5,
+        extra: { deviceId: "dev-1" },
+      },
+    }),
+    exchange: async () => {
+      exchangeCalls += 1;
+      return exchange;
+    },
+    refresh: async () => RESULT,
+  };
+  const { post } = await harness(deviceProvider);
+  const start = (await (
+    await post("/api/connect/start", { provider: "kimi", label: "kimi" })
+  ).json()) as { flowId: string };
+
+  const first = post("/api/connect/poll", { flowId: start.flowId });
+  while (exchangeCalls === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  const second = post("/api/connect/poll", { flowId: start.flowId });
+  rejectExchange?.(pendingError);
+
+  for (const response of [await first, await second]) {
+    expect(response.status).toBe(202);
+    expect(((await response.json()) as { status: string }).status).toBe("pending");
+  }
+  expect(exchangeCalls).toBe(1);
+
+  const next = await post("/api/connect/poll", { flowId: start.flowId });
+  expect(next.status).toBe(202);
+  expect(exchangeCalls).toBe(2);
+});
+
 test("poll reports pending for a device flow that is not yet approved", async () => {
   const deviceProvider: OAuthProvider = {
     id: "kimi",
