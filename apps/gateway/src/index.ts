@@ -30,10 +30,7 @@ function exitAfterClosingStore(code: number): never {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    if (shuttingDown) {
-      process.exit(1);
-      return;
-    }
+    if (shuttingDown) exitAfterClosingStore(1);
 
     shuttingDown = true;
     stopMaintenance();
