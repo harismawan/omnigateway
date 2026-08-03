@@ -69,17 +69,36 @@ test("setup sets the first password and refuses a second time", async () => {
   );
 });
 
-test("concurrent setup permits exactly one winning password", async () => {
+test("concurrent setup permits only the response winner to log in", async () => {
   const { admin, call } = await harness({ configured: false });
-  const first = call("POST", "/api/setup", { password: "first-password" }, false);
-  const second = call("POST", "/api/setup", { password: "second-password" }, false);
-  const responses = await Promise.all([first, second]);
-  expect(responses.filter((response) => response.status === 200)).toHaveLength(1);
-  expect(responses.filter((response) => response.status === 409)).toHaveLength(1);
+  const attempts = [
+    {
+      password: "first-password",
+      response: call("POST", "/api/setup", { password: "first-password" }, false),
+    },
+    {
+      password: "second-password",
+      response: call("POST", "/api/setup", { password: "second-password" }, false),
+    },
+  ];
+  const results = await Promise.all(
+    attempts.map(async ({ password, response }) => ({ password, response: await response })),
+  );
+  const winner = results.find(({ response }) => response.status === 200);
+  const loser = results.find(({ response }) => response.status === 409);
+  expect(winner).toBeDefined();
+  expect(loser).toBeDefined();
+  expect(await admin.login(winner?.password ?? "")).not.toBeNull();
+  expect(await admin.login(loser?.password ?? "")).toBeNull();
+});
 
-  const firstToken = await admin.login("first-password");
-  const secondToken = await admin.login("second-password");
-  expect([firstToken, secondToken].filter((token) => token !== null)).toHaveLength(1);
+test("configured setup returns identical conflicts before checking the password", async () => {
+  const { call } = await harness();
+  const valid = await call("POST", "/api/setup", { password: "another-password" }, false);
+  const tooShort = await call("POST", "/api/setup", { password: "short" }, false);
+  expect(valid.status).toBe(409);
+  expect(tooShort.status).toBe(409);
+  expect(await tooShort.text()).toBe(await valid.text());
 });
 
 test("setup rejects null and malformed bodies as bad requests", async () => {

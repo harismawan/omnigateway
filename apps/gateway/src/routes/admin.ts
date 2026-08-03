@@ -164,6 +164,11 @@ export function adminRoutes(deps: AdminDeps) {
     })
 
     .post("/api/setup", async ({ request, set }) => {
+      if (await deps.admin.isConfigured()) {
+        set.status = 409;
+        return { error: { code: "CONFLICT", message: "an admin password is already configured" } };
+      }
+
       const body = await jsonRecord(request);
       if (typeof body?.password !== "string") {
         throw new GatewayError("BAD_REQUEST", "password is required");
