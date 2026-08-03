@@ -61,12 +61,57 @@ test("status reports an unconfigured gateway without a session", async () => {
 
 test("setup sets the first password and refuses a second time", async () => {
   const { call } = await harness({ configured: false });
-  expect((await call("POST", "/api/setup", { password: "hunter2hunter2" }, false)).status).toBe(
-    200,
-  );
+  const created = await call("POST", "/api/setup", { password: "hunter2hunter2" }, false);
+  expect(created.status).toBe(200);
+  expect(created.headers.get("set-cookie")).toContain("Max-Age=60");
   expect((await call("POST", "/api/setup", { password: "another-password" }, false)).status).toBe(
     409,
   );
+});
+
+test("concurrent setup permits exactly one winning password", async () => {
+  const { admin, call } = await harness({ configured: false });
+  const first = call("POST", "/api/setup", { password: "first-password" }, false);
+  const second = call("POST", "/api/setup", { password: "second-password" }, false);
+  const responses = await Promise.all([first, second]);
+  expect(responses.filter((response) => response.status === 200)).toHaveLength(1);
+  expect(responses.filter((response) => response.status === 409)).toHaveLength(1);
+
+  const firstToken = await admin.login("first-password");
+  const secondToken = await admin.login("second-password");
+  expect([firstToken, secondToken].filter((token) => token !== null)).toHaveLength(1);
+});
+
+test("setup rejects null and malformed bodies as bad requests", async () => {
+  const { app, call } = await harness({ configured: false });
+  expect((await call("POST", "/api/setup", null, false)).status).toBe(400);
+  expect(
+    (
+      await app.handle(
+        new Request("http://localhost/api/setup", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "not json",
+        }),
+      )
+    ).status,
+  ).toBe(400);
+});
+
+test("login rejects null and malformed bodies as invalid passwords", async () => {
+  const { app, call } = await harness();
+  expect((await call("POST", "/api/login", null, false)).status).toBe(401);
+  expect(
+    (
+      await app.handle(
+        new Request("http://localhost/api/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "not json",
+        }),
+      )
+    ).status,
+  ).toBe(401);
 });
 
 test("login sets a secure session cookie only over https", async () => {
@@ -78,6 +123,7 @@ test("login sets a secure session cookie only over https", async () => {
   expect(httpCookie.toLowerCase()).toContain("httponly");
   expect(httpCookie.toLowerCase()).toContain("samesite=strict");
   expect(httpCookie.toLowerCase()).not.toContain("secure");
+  expect(httpCookie).toContain("Max-Age=60");
 
   const httpsResponse = await call(
     "POST",
@@ -91,6 +137,7 @@ test("login sets a secure session cookie only over https", async () => {
   expect(httpsCookie.toLowerCase()).toContain("httponly");
   expect(httpsCookie.toLowerCase()).toContain("samesite=strict");
   expect(httpsCookie.toLowerCase()).toContain("secure");
+  expect(httpsCookie).toContain("Max-Age=60");
 });
 
 test("login rejects the wrong password", async () => {
@@ -126,7 +173,10 @@ test("credentials are listed without their secrets", async () => {
   const res = await call("GET", "/api/credentials");
   const text = await res.text();
   expect(text).not.toContain("test-token-1");
+  expect(text).not.toContain("test-token-2");
   expect(text).not.toContain("secrets");
+  expect(text).not.toContain("accessToken");
+  expect(text).not.toContain("refreshToken");
   const body = JSON.parse(text) as {
     credentials: Array<{ label: string; hasRefreshToken: boolean }>;
   };
@@ -151,7 +201,14 @@ test("patching a credential cannot inject a token", async () => {
   const { call, store } = await harness();
   await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
 
-  await call("PATCH", "/api/credentials/c1", { accessToken: "attacker-token" });
+  const rejected = await call("PATCH", "/api/credentials/c1", { accessToken: "test-token-2" });
+  expect(rejected.status).toBe(400);
+  expect((await rejected.json()) as { error: { code: string; message: string } }).toEqual({
+    error: {
+      code: "BAD_REQUEST",
+      message: ': Unrecognized key: "accessToken"',
+    },
+  });
   const view = await store.credentials.get("c1");
   expect((await view?.secrets())?.accessToken).toBe("test-token-1");
 });
@@ -255,7 +312,7 @@ test("usage rejects an unknown groupBy rather than passing it to sql", async () 
   expect((await call("GET", "/api/usage?groupBy=1;DROP+TABLE+usage")).status).toBe(400);
 });
 
-test("logs are returned newest first and capped", async () => {
+test("logs are returned newest first, capped, and normalize fractional limits", async () => {
   const { call, store } = await harness();
   for (let i = 0; i < 3; i += 1) {
     await store.usage.append(requestLog({ id: `r${i}`, at: NOW + i }));
@@ -266,6 +323,11 @@ test("logs are returned newest first and capped", async () => {
   };
   expect(body.logs).toHaveLength(2);
   expect(body.logs[0]?.id).toBe("r2");
+
+  const fractional = await call("GET", "/api/logs?limit=2.5");
+  expect(fractional.status).toBe(200);
+  const fractionalBody = (await fractional.json()) as { logs: Array<{ id: string }> };
+  expect(fractionalBody.logs).toHaveLength(2);
 });
 
 test("logout clears the session cookie with matching http flags and invalidates it", async () => {
@@ -277,6 +339,7 @@ test("logout clears the session cookie with matching http flags and invalidates 
   expect(cookie.toLowerCase()).toContain("httponly");
   expect(cookie.toLowerCase()).toContain("samesite=strict");
   expect(cookie.toLowerCase()).not.toContain("secure");
+  expect(cookie).toContain("Max-Age=0");
   expect((await call("GET", "/api/credentials")).status).toBe(401);
 });
 
@@ -288,4 +351,5 @@ test("logout clears the session cookie with secure over https", async () => {
   expect(cookie.toLowerCase()).toContain("httponly");
   expect(cookie.toLowerCase()).toContain("samesite=strict");
   expect(cookie.toLowerCase()).toContain("secure");
+  expect(cookie).toContain("Max-Age=0");
 });

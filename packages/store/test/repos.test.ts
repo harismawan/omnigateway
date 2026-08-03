@@ -11,6 +11,17 @@ async function store(): Promise<Store> {
   });
 }
 
+test("admin password initialization only writes when absent", async () => {
+  const s = await store();
+  expect(await s.config.setAdminPasswordHashIfAbsent("first-hash")).toBe(true);
+  expect(await s.config.setAdminPasswordHashIfAbsent("second-hash")).toBe(false);
+  expect(await s.config.getAdminPasswordHash()).toBe("first-hash");
+
+  await s.config.setAdminPasswordHash("replacement-hash");
+  expect(await s.config.getAdminPasswordHash()).toBe("replacement-hash");
+  s.close();
+});
+
 test("settings return defaults then persist patches", async () => {
   const s = await store();
   const defaults = await s.config.getSettings();

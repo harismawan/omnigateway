@@ -9,7 +9,7 @@ import {
 import { Elysia } from "elysia";
 import { z } from "zod";
 import { ADMIN_COOKIE, type AdminAuth } from "../auth/admin.ts";
-import { parseOrThrow } from "../ingress/schemas.ts";
+import { isRecord, parseOrThrow } from "../ingress/schemas.ts";
 
 export type AdminDeps = {
   store: Store;
@@ -128,6 +128,15 @@ function readCookie(request: Request, name: string): string | null {
   return null;
 }
 
+async function jsonRecord(request: Request): Promise<Record<string, unknown> | null> {
+  try {
+    const body: unknown = await request.json();
+    return isRecord(body) ? body : null;
+  } catch {
+    return null;
+  }
+}
+
 export function adminRoutes(deps: AdminDeps) {
   const app = new Elysia().onError(({ error, set }) => {
     const gatewayError =
@@ -155,23 +164,23 @@ export function adminRoutes(deps: AdminDeps) {
     })
 
     .post("/api/setup", async ({ request, set }) => {
-      if (await deps.admin.isConfigured()) {
-        set.status = 409;
-        return { error: { code: "CONFLICT", message: "an admin password is already configured" } };
-      }
-
-      const body = (await request.json()) as { password?: unknown };
-      if (typeof body.password !== "string") {
+      const body = await jsonRecord(request);
+      if (typeof body?.password !== "string") {
         throw new GatewayError("BAD_REQUEST", "password is required");
       }
 
+      let created: boolean;
       try {
-        await deps.admin.setPassword(body.password);
+        created = await deps.admin.setInitialPassword(body.password);
       } catch (error) {
         throw new GatewayError(
           "BAD_REQUEST",
           error instanceof Error ? error.message : "invalid password",
         );
+      }
+      if (!created) {
+        set.status = 409;
+        return { error: { code: "CONFLICT", message: "an admin password is already configured" } };
       }
 
       const token = await deps.admin.login(body.password);
@@ -185,9 +194,9 @@ export function adminRoutes(deps: AdminDeps) {
     })
 
     .post("/api/login", async ({ request, set }) => {
-      const body = (await request.json()) as { password?: unknown };
+      const body = await jsonRecord(request);
       const token =
-        typeof body.password === "string" ? await deps.admin.login(body.password) : null;
+        typeof body?.password === "string" ? await deps.admin.login(body.password) : null;
       if (token === null) throw new GatewayError("AUTH", "invalid password");
 
       set.headers["set-cookie"] = sessionCookie(
@@ -349,7 +358,7 @@ export function adminRoutes(deps: AdminDeps) {
       await requireAdmin(request);
       const requested = typeof query.limit === "string" ? Number(query.limit) : 100;
       const limit = Number.isFinite(requested)
-        ? Math.min(Math.max(1, requested), MAX_LOG_LIMIT)
+        ? Math.floor(Math.min(Math.max(1, requested), MAX_LOG_LIMIT))
         : 100;
       return { logs: await deps.store.usage.recent(limit) };
     });

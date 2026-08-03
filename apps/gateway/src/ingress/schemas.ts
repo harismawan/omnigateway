@@ -14,6 +14,10 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
   throw new GatewayError("BAD_REQUEST", `${path}: ${issue?.message ?? "invalid request"}`);
 }
 
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 /** Anything the schema does not name is preserved for vendor passthrough. */
 export function extraFields(
   body: Record<string, unknown>,

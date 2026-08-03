@@ -3,6 +3,7 @@ import type { HttpClient } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ADMIN_COOKIE, type AdminAuth } from "../auth/admin.ts";
+import { isRecord } from "../ingress/schemas.ts";
 import { isAuthorizationPending } from "../oauth/kimi.ts";
 import { createPendingFlows, type StoredFlow } from "../oauth/pending.ts";
 import type { OAuthProvider } from "../oauth/types.ts";
@@ -48,10 +49,6 @@ function readCookie(request: Request, name: string): string | null {
 
 function isProviderId(value: unknown): value is ProviderId {
   return typeof value === "string" && PROVIDER_IDS.includes(value as ProviderId);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function deviceIdFrom(start: ReturnType<OAuthProvider["start"]>): string {

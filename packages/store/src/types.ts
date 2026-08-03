@@ -158,6 +158,9 @@ export interface ConfigRepo {
   getSettings(): Promise<Settings>;
   putSettings(patch: Partial<Settings>): Promise<Settings>;
   getAdminPasswordHash(): Promise<string | null>;
+  /** Writes only if no admin hash exists; reports whether this call won. */
+  setAdminPasswordHashIfAbsent(hash: string): Promise<boolean>;
+  /** Replaces an existing password hash for the authenticated password-change path. */
   setAdminPasswordHash(hash: string): Promise<void>;
 }
 

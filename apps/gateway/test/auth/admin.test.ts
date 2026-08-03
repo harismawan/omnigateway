@@ -12,6 +12,14 @@ test("reports unconfigured until a password is set", async () => {
   expect(await auth.isConfigured()).toBe(true);
 });
 
+test("initial password creation reports whether it won", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  expect(await auth.setInitialPassword("hunter2hunter2")).toBe(true);
+  expect(await auth.setInitialPassword("another-password")).toBe(false);
+  expect(await auth.login("hunter2hunter2")).not.toBeNull();
+  expect(await auth.login("another-password")).toBeNull();
+});
+
 test("issues a session token for the right password", async () => {
   const auth = createAdminAuth(await memoryStore(), opts);
   await auth.setPassword("hunter2hunter2");

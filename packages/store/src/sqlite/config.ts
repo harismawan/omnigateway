@@ -74,6 +74,14 @@ export function createConfigRepo(db: Database): ConfigRepo {
       return readRaw(ADMIN_HASH_KEY);
     },
 
+    async setAdminPasswordHashIfAbsent(hash: string) {
+      const result = db.run(
+        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
+        [ADMIN_HASH_KEY, hash],
+      );
+      return result.changes === 1;
+    },
+
     async setAdminPasswordHash(hash: string) {
       writeRaw(ADMIN_HASH_KEY, hash);
     },

@@ -7,6 +7,7 @@ const MIN_PASSWORD_LENGTH = 12;
 export type AdminAuth = {
   isConfigured(): Promise<boolean>;
   setPassword(password: string): Promise<void>;
+  setInitialPassword(password: string): Promise<boolean>;
   login(password: string): Promise<string | null>;
   verify(token: string): Promise<boolean>;
   logout(token: string): void;
@@ -47,6 +48,13 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
       await store.config.setAdminPasswordHash(await hash(password, ARGON2));
       // A password change is also a "log everyone out" event.
       sessions.clear();
+    },
+
+    async setInitialPassword(password) {
+      if (password.length < MIN_PASSWORD_LENGTH) {
+        throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+      }
+      return store.config.setAdminPasswordHashIfAbsent(await hash(password, ARGON2));
     },
 
     async login(password) {
