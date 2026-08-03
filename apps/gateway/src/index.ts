@@ -18,9 +18,28 @@ app.listen({ port: config.port, hostname: config.host });
 
 console.log(`omnigateway listening on http://${config.host}:${config.port}`);
 
+let shuttingDown = false;
+
+function exitAfterClosingStore(code: number): never {
+  try {
+    store.close();
+  } finally {
+    process.exit(code);
+  }
+}
+
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    if (shuttingDown) {
+      process.exit(1);
+      return;
+    }
+
+    shuttingDown = true;
     stopMaintenance();
-    void app.stop().then(() => process.exit(0));
+    void app.stop().then(
+      () => exitAfterClosingStore(0),
+      () => exitAfterClosingStore(1),
+    );
   });
 }

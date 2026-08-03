@@ -8,6 +8,11 @@ export type Config = {
 };
 
 const MIN_KEY_LENGTH = 16;
+const DECIMAL_INTEGER = /^\d+$/;
+
+function optionalText(value: string | undefined, fallback: string): string {
+  return value?.trim() || fallback;
+}
 
 /**
  * Pure function of an env object so boot configuration is testable.
@@ -25,20 +30,22 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     );
   }
 
-  const host = env.OMNI_HOST ?? "127.0.0.1";
+  const host = optionalText(env.OMNI_HOST, "127.0.0.1");
 
   const rawPort = env.OMNI_PORT ?? "8787";
   const port = Number(rawPort);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+  if (!DECIMAL_INTEGER.test(rawPort) || !Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error(`OMNI_PORT must be an integer between 1 and 65535, got "${rawPort}"`);
   }
 
-  const baseUrl = (env.OMNI_BASE_URL ?? `http://${host}:${port}`).replace(/\/+$/, "");
+  const derivedBaseUrl = `http://${host}:${port}`;
+  const baseUrl =
+    optionalText(env.OMNI_BASE_URL, derivedBaseUrl).replace(/\/+$/, "") || derivedBaseUrl;
 
   return {
     port,
     host,
-    databasePath: env.OMNI_DB_PATH ?? "./omnigateway.db",
+    databasePath: optionalText(env.OMNI_DB_PATH, "./omnigateway.db"),
     encryptionKey,
     baseUrl,
   };
