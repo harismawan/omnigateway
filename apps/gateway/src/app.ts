@@ -3,6 +3,7 @@ import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from 
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { createAdminAuth } from "./auth/admin.ts";
+import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
 import { OAUTH_PROVIDERS } from "./oauth/index.ts";
 import { createRefresher } from "./oauth/refresh.ts";
 import { adminRoutes } from "./routes/admin.ts";
@@ -28,6 +29,7 @@ export function createApp(deps: AppDeps) {
   const http = deps.http ?? nodeHttpClient();
   const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
+  const rateLimiter = new ApiKeyRateLimiter(now);
 
   const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS });
   const refresh = createRefresher({
@@ -39,7 +41,18 @@ export function createApp(deps: AppDeps) {
 
   return new Elysia()
     .get("/health", () => ({ ok: true }))
-    .use(proxyRoutes({ store: deps.store, adapters, http, now, rand, refresh, requestId }))
+    .use(
+      proxyRoutes({
+        store: deps.store,
+        adapters,
+        http,
+        now,
+        rand,
+        refresh,
+        requestId,
+        rateLimiter,
+      }),
+    )
     .use(adminRoutes({ store: deps.store, admin, now, sessionTtlMs: ADMIN_SESSION_TTL_MS }))
     .use(
       connectRoutes({

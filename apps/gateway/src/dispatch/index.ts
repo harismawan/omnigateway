@@ -45,6 +45,7 @@ export async function dispatch(
 ): Promise<DispatchOutcome> {
   const startedAt = deps.now();
   const snapshot = await buildSnapshot(deps.store, startedAt);
+  const deadlineAt = startedAt + snapshot.settings.requestDeadlineMs;
 
   const log: RequestLog = {
     id: crypto.randomUUID(),
@@ -79,11 +80,32 @@ export async function dispatch(
     };
   };
 
+  const deadlineController = new AbortController();
+  const abortFromClient = () => deadlineController.abort(signal.reason);
+  if (signal.aborted) abortFromClient();
+  else signal.addEventListener("abort", abortFromClient, { once: true });
+  const deadlineTimer = setTimeout(
+    () => deadlineController.abort(new GatewayError("TIMEOUT", "request deadline exceeded")),
+    Math.max(0, deadlineAt - deps.now()),
+  );
+  const dispatchSignal = deadlineController.signal;
+  const clearDeadline = () => {
+    clearTimeout(deadlineTimer);
+    signal.removeEventListener("abort", abortFromClient);
+  };
+  const checkCancellation = () => {
+    if (!dispatchSignal.aborted) return;
+    if (signal.aborted) throw signal.reason;
+    throw new GatewayError("TIMEOUT", "request deadline exceeded");
+  };
+
   let model: VirtualModel;
   try {
+    checkCancellation();
     model = resolveModel(request.model, snapshot);
   } catch (error) {
     const { code } = classify(error);
+    clearDeadline();
     return fail(code, error instanceof Error ? error.message : "unresolvable model");
   }
 
@@ -100,6 +122,7 @@ export async function dispatch(
   }
 
   if (candidates.length === 0) {
+    clearDeadline();
     return fail("NO_CANDIDATES", `no eligible credential for model "${request.model}"`);
   }
 
@@ -114,181 +137,213 @@ export async function dispatch(
     blankHealth(candidate.credential.id, candidate.target.model);
 
   async function* run(): AsyncGenerator<StreamEvent, void, undefined> {
-    let lastError: GatewayError | null = null;
+    try {
+      let lastError: GatewayError | null = null;
 
-    candidateLoop: for (let i = 0; i < maxAttempts; i++) {
-      const candidate = candidates[i] as Candidate;
-      log.attempts = i + 1;
-      log.credentialId = candidate.credential.id;
-      log.resolvedProvider = candidate.target.provider;
-      log.resolvedModel = candidate.target.model;
+      candidateLoop: for (let i = 0; i < maxAttempts; i++) {
+        if (dispatchSignal.aborted && !signal.aborted) {
+          lastError = new GatewayError("TIMEOUT", "request deadline exceeded");
+          break;
+        }
+        checkCancellation();
+        const candidate = candidates[i] as Candidate;
+        log.attempts = i + 1;
+        log.credentialId = candidate.credential.id;
+        log.resolvedProvider = candidate.target.provider;
+        log.resolvedModel = candidate.target.model;
 
-      // Reset per-attempt: a failed attempt's partial usage must not leak into
-      // the next one's log.
-      log.inputTokens = 0;
-      log.outputTokens = 0;
-      log.cacheReadTokens = 0;
-      log.cacheWriteTokens = 0;
-      log.ttftMs = null;
+        // Reset per-attempt: a failed attempt's partial usage must not leak into
+        // the next one's log.
+        log.inputTokens = 0;
+        log.outputTokens = 0;
+        log.cacheReadTokens = 0;
+        log.cacheWriteTokens = 0;
+        log.ttftMs = null;
 
-      let committed = false;
-      let authRefreshRetried = false;
-      let retrySecrets: CredentialSecrets | undefined;
-      const attemptNow = deps.now();
-      const preemptiveRefreshRequired =
-        candidate.credential.authType === "oauth" &&
-        candidate.credential.expiresAt !== null &&
-        candidate.credential.expiresAt - REFRESH_LEAD_MS <= attemptNow;
+        let committed = false;
+        let authRefreshRetried = false;
+        let retrySecrets: CredentialSecrets | undefined;
+        const attemptNow = deps.now();
+        const preemptiveRefreshRequired =
+          candidate.credential.authType === "oauth" &&
+          candidate.credential.expiresAt !== null &&
+          candidate.credential.expiresAt - REFRESH_LEAD_MS <= attemptNow;
 
-      while (true) {
-        try {
-          const result = await attempt({
-            candidate,
-            request,
-            adapter: deps.adapters[candidate.target.provider],
-            http: deps.http,
-            now: attemptNow,
-            signal,
-            refresh: deps.refresh,
-            refreshLeadMs: REFRESH_LEAD_MS,
-            ...(retrySecrets === undefined ? {} : { secrets: retrySecrets }),
-          });
+        while (true) {
+          try {
+            const result = await waitForCancellation(
+              attempt({
+                candidate,
+                request,
+                adapter: deps.adapters[candidate.target.provider],
+                http: deps.http,
+                now: attemptNow,
+                signal: dispatchSignal,
+                refresh: (credential) =>
+                  waitForCancellation(deps.refresh(credential), dispatchSignal),
+                refreshLeadMs: REFRESH_LEAD_MS,
+                ...(retrySecrets === undefined ? {} : { secrets: retrySecrets }),
+              }),
+              dispatchSignal,
+            );
 
-          for (const d of result.degradations) log.degradations.push(d);
+            for (const d of result.degradations) log.degradations.push(d);
 
-          for await (const event of result.events) {
-            if (event.type === "blockDelta" && !committed) {
-              // Commit point: the client is about to see bytes, so from here on
-              // failover is impossible and errors must be forwarded in-stream.
-              committed = true;
-              log.ttftMs = deps.now() - startedAt;
-            }
-
-            if (event.type === "end") {
-              log.inputTokens = event.usage.inputTokens;
-              log.outputTokens = event.usage.outputTokens;
-              log.cacheReadTokens = event.usage.cacheReadTokens;
-              log.cacheWriteTokens = event.usage.cacheWriteTokens;
-              log.costUsd = priceOf(candidate, event.usage);
-            }
-
-            if (event.type === "error") {
-              // An in-stream error before commit is retryable like a thrown one.
-              if (!committed && RETRYABLE[event.code]) {
-                throw new GatewayError(event.code, event.message);
+            for await (const event of result.events) {
+              if (event.type === "blockDelta" && !committed) {
+                // Commit point: the client is about to see bytes, so from here on
+                // failover is impossible and errors must be forwarded in-stream.
+                committed = true;
+                log.ttftMs = deps.now() - startedAt;
               }
-              // Not retried, so this attempt is terminal: yield the event, then
-              // record it as a failure and stop. Without this, an in-stream
-              // error that isn't thrown (this is how a decoder reports an
-              // error frame — see e.g. anthropic/decode.ts's "error" case)
-              // would fall through to the success path below once the
-              // generator ends, misreporting a failed request as a 200.
-              committed = true;
+
+              if (event.type === "end") {
+                log.inputTokens = event.usage.inputTokens;
+                log.outputTokens = event.usage.outputTokens;
+                log.cacheReadTokens = event.usage.cacheReadTokens;
+                log.cacheWriteTokens = event.usage.cacheWriteTokens;
+                log.costUsd = priceOf(candidate, event.usage);
+              }
+
+              if (event.type === "error") {
+                // An in-stream error before commit is retryable like a thrown one.
+                if (!committed && RETRYABLE[event.code]) {
+                  throw new GatewayError(event.code, event.message);
+                }
+                // Not retried, so this attempt is terminal: yield the event, then
+                // record it as a failure and stop. Without this, an in-stream
+                // error that isn't thrown (this is how a decoder reports an
+                // error frame — see e.g. anthropic/decode.ts's "error" case)
+                // would fall through to the success path below once the
+                // generator ends, misreporting a failed request as a 200.
+                committed = true;
+                yield event;
+                await persistHealth(
+                  recordFailure(healthFor(candidate), {
+                    settings: snapshot.settings,
+                    now: deps.now(),
+                    code: event.code,
+                    jitter: deps.rand(),
+                  }),
+                );
+                log.status = HTTP_STATUS[event.code];
+                log.errorCode = event.code;
+                log.durationMs = deps.now() - startedAt;
+                return;
+              }
+
               yield event;
-              await persistHealth(
-                recordFailure(healthFor(candidate), {
-                  settings: snapshot.settings,
-                  now: deps.now(),
-                  code: event.code,
-                  jitter: deps.rand(),
-                }),
-              );
-              log.status = HTTP_STATUS[event.code];
-              log.errorCode = event.code;
+            }
+
+            await persistHealth(
+              recordSuccess(healthFor(candidate), {
+                settings: snapshot.settings,
+                now: deps.now(),
+                ttftMs: log.ttftMs,
+              }),
+            );
+            log.status = 200;
+            log.errorCode = null;
+            log.durationMs = deps.now() - startedAt;
+            return;
+          } catch (error) {
+            if (signal.aborted) throw signal.reason;
+            const classifiedError = dispatchSignal.aborted
+              ? { code: "TIMEOUT" as const }
+              : classify(error);
+            const { code, retryAfterMs } = classifiedError;
+            const message = error instanceof Error ? error.message : "attempt failed";
+            lastError =
+              retryAfterMs === undefined
+                ? new GatewayError(code, message)
+                : new GatewayError(code, message, { retryAfterMs });
+
+            if (
+              code === "AUTH" &&
+              !committed &&
+              !authRefreshRetried &&
+              !preemptiveRefreshRequired &&
+              candidate.credential.authType === "oauth" &&
+              candidate.credential.hasRefreshToken
+            ) {
+              authRefreshRetried = true;
+              try {
+                retrySecrets = await waitForCancellation(
+                  deps.refresh(candidate.credential),
+                  dispatchSignal,
+                );
+                continue;
+              } catch (refreshError) {
+                if (signal.aborted) throw signal.reason;
+                const classified = dispatchSignal.aborted
+                  ? { code: "TIMEOUT" as const }
+                  : classify(refreshError);
+                const refreshMessage =
+                  refreshError instanceof Error
+                    ? refreshError.message
+                    : "credential refresh failed";
+                lastError =
+                  classified.retryAfterMs === undefined
+                    ? new GatewayError(classified.code, refreshMessage)
+                    : new GatewayError(classified.code, refreshMessage, {
+                        retryAfterMs: classified.retryAfterMs,
+                      });
+              }
+            }
+
+            const failure = lastError as GatewayError;
+            await persistHealth(
+              recordFailure(healthFor(candidate), {
+                settings: snapshot.settings,
+                now: deps.now(),
+                code: failure.code,
+                ...(failure.retryAfterMs === undefined
+                  ? {}
+                  : { retryAfterMs: failure.retryAfterMs }),
+                jitter: deps.rand(),
+              }),
+            );
+
+            if (committed) {
+              // Bytes already went out; the client gets an in-band error and the
+              // stream ends there.
+              log.status = HTTP_STATUS[failure.code];
+              log.errorCode = failure.code;
               log.durationMs = deps.now() - startedAt;
+              yield {
+                type: "error",
+                code: failure.code,
+                message: failure.message,
+                retryable: false,
+              };
               return;
             }
 
-            yield event;
+            if (!RETRYABLE[failure.code]) break candidateLoop;
+            continue candidateLoop;
           }
-
-          await persistHealth(
-            recordSuccess(healthFor(candidate), {
-              settings: snapshot.settings,
-              now: deps.now(),
-              ttftMs: log.ttftMs,
-            }),
-          );
-          log.status = 200;
-          log.errorCode = null;
-          log.durationMs = deps.now() - startedAt;
-          return;
-        } catch (error) {
-          const { code, retryAfterMs } = classify(error);
-          const message = error instanceof Error ? error.message : "attempt failed";
-          lastError =
-            retryAfterMs === undefined
-              ? new GatewayError(code, message)
-              : new GatewayError(code, message, { retryAfterMs });
-
-          if (
-            code === "AUTH" &&
-            !committed &&
-            !authRefreshRetried &&
-            !preemptiveRefreshRequired &&
-            candidate.credential.authType === "oauth" &&
-            candidate.credential.hasRefreshToken
-          ) {
-            authRefreshRetried = true;
-            try {
-              retrySecrets = await deps.refresh(candidate.credential);
-              continue;
-            } catch (refreshError) {
-              const classified = classify(refreshError);
-              const refreshMessage =
-                refreshError instanceof Error ? refreshError.message : "credential refresh failed";
-              lastError =
-                classified.retryAfterMs === undefined
-                  ? new GatewayError(classified.code, refreshMessage)
-                  : new GatewayError(classified.code, refreshMessage, {
-                      retryAfterMs: classified.retryAfterMs,
-                    });
-            }
-          }
-
-          const failure = lastError as GatewayError;
-          await persistHealth(
-            recordFailure(healthFor(candidate), {
-              settings: snapshot.settings,
-              now: deps.now(),
-              code: failure.code,
-              ...(failure.retryAfterMs === undefined ? {} : { retryAfterMs: failure.retryAfterMs }),
-              jitter: deps.rand(),
-            }),
-          );
-
-          if (committed) {
-            // Bytes already went out; the client gets an in-band error and the
-            // stream ends there.
-            log.status = HTTP_STATUS[failure.code];
-            log.errorCode = failure.code;
-            log.durationMs = deps.now() - startedAt;
-            yield {
-              type: "error",
-              code: failure.code,
-              message: failure.message,
-              retryable: false,
-            };
-            return;
-          }
-
-          if (!RETRYABLE[failure.code]) break candidateLoop;
-          continue candidateLoop;
         }
       }
-    }
 
-    const code =
-      lastError !== null && !RETRYABLE[lastError.code] ? lastError.code : "ALL_CANDIDATES_FAILED";
-    log.status = HTTP_STATUS[code];
-    log.errorCode = code;
-    log.durationMs = deps.now() - startedAt;
-    yield {
-      type: "error",
-      code,
-      message: lastError?.message ?? "all candidates failed",
-      retryable: false,
-    };
+      const code =
+        lastError?.code === "TIMEOUT"
+          ? "TIMEOUT"
+          : lastError !== null && !RETRYABLE[lastError.code]
+            ? lastError.code
+            : "ALL_CANDIDATES_FAILED";
+      log.status = HTTP_STATUS[code];
+      log.errorCode = code;
+      log.durationMs = deps.now() - startedAt;
+      yield {
+        type: "error",
+        code,
+        message: lastError?.message ?? "all candidates failed",
+        retryable: false,
+      };
+    } finally {
+      clearDeadline();
+      if (!deadlineController.signal.aborted) deadlineController.abort();
+    }
   }
 
   return { events: run(), log: () => log };
@@ -306,4 +361,22 @@ function priceOf(
       usage.cacheReadTokens * cacheRate) /
     1_000_000
   );
+}
+
+function waitForCancellation<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
 }

@@ -25,6 +25,21 @@ export async function authenticateApiKey(
   return key;
 }
 
+/** Resolves the two supported API-key headers and rejects ambiguous credentials. */
+export function apiKeyHeader(headers: Headers): string | null {
+  const authorization = headers.get("authorization");
+  const xApiKey = headers.get("x-api-key");
+  if (authorization === null) return xApiKey;
+  if (xApiKey === null) return authorization;
+
+  const authorizationToken = extractToken(authorization);
+  const xApiKeyToken = extractToken(xApiKey);
+  if (authorizationToken === null || xApiKeyToken === null || authorizationToken !== xApiKeyToken) {
+    throw new GatewayError("AUTH", "conflicting API key headers");
+  }
+  return authorizationToken;
+}
+
 /** Accepts `Bearer <token>`, `x-api-key`-style bare tokens, or nothing. */
 function extractToken(header: string | undefined | null): string | null {
   if (typeof header !== "string") return null;

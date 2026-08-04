@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ProviderId, StreamEvent } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
+import { authenticateApiKey } from "../../src/auth/apiKey.ts";
 import { proxyRoutes } from "../../src/routes/proxy.ts";
 import {
   memoryStore,
@@ -295,4 +296,173 @@ test("writes exactly one log row when the client disconnects mid-stream after th
   } finally {
     server.stop(true);
   }
+});
+
+test("accepts x-api-key on proxy and models routes", async () => {
+  const { app, raw } = await harness();
+  const proxy = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": raw },
+      body: JSON.stringify({
+        model: "fast",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    }),
+  );
+  expect(proxy.status).toBe(200);
+
+  const models = await app.handle(
+    new Request("http://localhost/v1/models", { headers: { "x-api-key": raw } }),
+  );
+  expect(models.status).toBe(200);
+});
+
+test("rejects conflicting API key headers on proxy and models routes", async () => {
+  const { app, raw } = await harness();
+  const headers = { authorization: `Bearer ${raw}`, "x-api-key": "sk-omni-conflict" };
+  const proxy = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({
+        model: "fast",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    }),
+  );
+  expect(proxy.status).toBe(401);
+  const models = await app.handle(new Request("http://localhost/v1/models", { headers }));
+  expect(models.status).toBe(401);
+});
+
+test("enforces exact model allowlists before dispatch", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await store.config.putModel(
+    virtualModel({
+      id: "fast",
+      targets: [target({ provider: "anthropic", model: "claude-opus-4" })],
+    }),
+  );
+  let sends = 0;
+  const adapters = stubAdapters(EVENTS);
+  const anthropic = adapters.anthropic;
+  const counting: ProviderAdapter = {
+    ...anthropic,
+    async send(request) {
+      sends++;
+      return anthropic.send(request);
+    },
+  };
+  const { raw } = await seedApiKey(store, { label: "limited", modelAllowlist: [] });
+  const app = proxyRoutes({
+    store,
+    adapters: { ...adapters, anthropic: counting },
+    http: (() => {
+      throw new Error("transport should not run");
+    }) as HttpClient,
+    now: () => 1_000_000,
+    rand: () => 0,
+    refresh: async (credential) => await credential.secrets(),
+    requestId: () => crypto.randomUUID(),
+  });
+  const denied = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({
+        model: "fast",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    }),
+  );
+  expect(denied.status).toBe(401);
+  expect(sends).toBe(0);
+
+  const key = await authenticateApiKey(store, raw);
+  await store.keys.revoke(key.id);
+  const allowedKey = await seedApiKey(store, { modelAllowlist: ["fast"] });
+  const allowed = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${allowedKey.raw}`,
+      },
+      body: JSON.stringify({
+        model: "fast",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    }),
+  );
+  expect(allowed.status).toBe(200);
+  expect(sends).toBe(1);
+});
+
+test("fixed-window rate limits are atomic, per-key, and roll over at the boundary", async () => {
+  let now = 59_999;
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await store.config.putModel(
+    virtualModel({
+      id: "fast",
+      targets: [target({ provider: "anthropic", model: "claude-opus-4" })],
+    }),
+  );
+  const first = await seedApiKey(store, { rateLimitPerMin: 2 });
+  const second = await seedApiKey(store, { rateLimitPerMin: 1 });
+  let sends = 0;
+  const adapters = stubAdapters(EVENTS);
+  const anthropic = adapters.anthropic;
+  const app = proxyRoutes({
+    store,
+    adapters: {
+      ...adapters,
+      anthropic: {
+        ...anthropic,
+        async send(request) {
+          sends++;
+          return anthropic.send(request);
+        },
+      },
+    },
+    http: (() => {
+      throw new Error("transport should not run");
+    }) as HttpClient,
+    now: () => now,
+    rand: () => 0,
+    refresh: async (credential) => await credential.secrets(),
+    requestId: () => crypto.randomUUID(),
+  });
+  const request = (raw: string) =>
+    app.handle(
+      new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+        body: JSON.stringify({
+          model: "fast",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      }),
+    );
+
+  const concurrent = await Promise.all([
+    request(first.raw),
+    request(first.raw),
+    request(first.raw),
+  ]);
+  expect(concurrent.map((response) => response.status).sort()).toEqual([200, 200, 429]);
+  expect((await request(second.raw)).status).toBe(200);
+  expect((await request(second.raw)).status).toBe(429);
+  expect(sends).toBe(3);
+
+  now = 60_000;
+  expect((await request(first.raw)).status).toBe(200);
+  expect((await request(second.raw)).status).toBe(200);
 });

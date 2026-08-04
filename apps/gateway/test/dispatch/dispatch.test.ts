@@ -397,3 +397,93 @@ test("the log records the excluded candidates and their reasons", async () => {
   expect(outcome.log().degradations).toContain("excluded:c1:disabled");
   store.close();
 });
+
+test("request deadline is absolute across candidates", async () => {
+  const store = await seeded(2);
+  await store.config.putSettings({ requestDeadlineMs: 20 });
+  let aborted = 0;
+  const adapter: ProviderAdapter = {
+    id: "anthropic",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send(request) {
+      return {
+        events: (async function* () {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, 1_000);
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                aborted++;
+                reject(request.signal.reason);
+              },
+              { once: true },
+            );
+          });
+          yield* textStream("late");
+        })(),
+        degradations: [],
+      };
+    },
+  };
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), now: () => Date.now() },
+    new AbortController().signal,
+  );
+  const events = await drain(outcome.events);
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "TIMEOUT" });
+  expect(outcome.log().attempts).toBe(1);
+  expect(aborted).toBe(1);
+  store.close();
+});
+
+test("request deadline covers credential refresh", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 20 });
+  await store.credentials.update("c1", { expiresAt: 0 });
+  let sends = 0;
+  const adapter = stubAdapter(() => {
+    sends++;
+    return textStream("unexpected");
+  });
+  const configured = { ...deps(store, adapter), now: () => Date.now() };
+  configured.refresh = async () => await new Promise(() => {});
+  const outcome = await dispatch(req, configured, new AbortController().signal);
+  const events = await drain(outcome.events);
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "TIMEOUT" });
+  expect(sends).toBe(0);
+  store.close();
+});
+
+test("client abort remains distinct from request deadline", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 60_000 });
+  const adapter: ProviderAdapter = {
+    id: "anthropic",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send(request) {
+      return {
+        events: (async function* () {
+          await new Promise<void>((_resolve, reject) =>
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), {
+              once: true,
+            }),
+          );
+        })(),
+        degradations: [],
+      };
+    },
+  };
+  const controller = new AbortController();
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), now: () => Date.now() },
+    controller.signal,
+  );
+  const reason = new DOMException("client disconnected", "AbortError");
+  const draining = drain(outcome.events);
+  controller.abort(reason);
+  await expect(draining).rejects.toBe(reason);
+  store.close();
+});

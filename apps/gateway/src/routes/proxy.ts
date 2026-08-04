@@ -1,6 +1,7 @@
 import { collect, type ErrorCode, GatewayError, HTTP_STATUS, type StreamEvent } from "@omni/ir";
 import { Elysia } from "elysia";
-import { authenticateApiKey } from "../auth/apiKey.ts";
+import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
+import { ApiKeyRateLimiter } from "../auth/rateLimit.ts";
 import { type DispatchDeps, dispatch } from "../dispatch/index.ts";
 import { anthropicErrorBody, anthropicResponse, anthropicStream } from "../egress/anthropic.ts";
 import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.ts";
@@ -8,7 +9,10 @@ import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
 import { finishLog } from "../logging.ts";
 
-export type ProxyDeps = DispatchDeps & { requestId: () => string };
+export type ProxyDeps = DispatchDeps & {
+  requestId: () => string;
+  rateLimiter?: ApiKeyRateLimiter;
+};
 
 type Surface = "anthropic" | "openai";
 
@@ -77,17 +81,29 @@ function sseResponse(
   return new Response(stream, { headers: SSE_HEADERS });
 }
 
-async function handle(deps: ProxyDeps, surface: Surface, request: Request): Promise<Response> {
+async function handle(
+  deps: ProxyDeps,
+  rateLimiter: ApiKeyRateLimiter,
+  surface: Surface,
+  request: Request,
+): Promise<Response> {
   const requestId = deps.requestId();
   let keyId: string | null = null;
 
   try {
-    const key = await authenticateApiKey(deps.store, request.headers.get("authorization"));
+    const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
     keyId = key.id;
+    rateLimiter.consume(key.id, key.rateLimitPerMin);
 
     const body: unknown = await request.json();
     const chatRequest =
       surface === "anthropic" ? parseAnthropicRequest(body) : parseOpenAIRequest(body);
+    if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {
+      throw new GatewayError(
+        "AUTH",
+        `model "${chatRequest.model}" is not allowed for this API key`,
+      );
+    }
 
     const outcome = await dispatch(chatRequest, deps, request.signal);
     // Overrides dispatch's internally generated id with the route-level
@@ -152,25 +168,30 @@ async function handle(deps: ProxyDeps, surface: Surface, request: Request): Prom
 }
 
 export function proxyRoutes(deps: ProxyDeps) {
+  const rateLimiter = deps.rateLimiter ?? new ApiKeyRateLimiter(deps.now);
   return new Elysia()
-    .post("/v1/messages", ({ request }) => handle(deps, "anthropic", request))
-    .post("/v1/chat/completions", ({ request }) => handle(deps, "openai", request))
+    .post("/v1/messages", ({ request }) => handle(deps, rateLimiter, "anthropic", request))
+    .post("/v1/chat/completions", ({ request }) => handle(deps, rateLimiter, "openai", request))
     .get("/v1/models", async ({ request }) => {
-      await authenticateApiKey(deps.store, request.headers.get("authorization"));
-      const models = await deps.store.config.listModels();
-      return {
-        object: "list",
-        data: models.map((m) => ({
-          id: m.id,
-          object: "model",
-          created: 0,
-          owned_by: "omnigateway",
-        })),
-      };
+      try {
+        await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
+        const models = await deps.store.config.listModels();
+        return Response.json({
+          object: "list",
+          data: models.map((m) => ({
+            id: m.id,
+            object: "model",
+            created: 0,
+            owned_by: "omnigateway",
+          })),
+        });
+      } catch (error) {
+        const gatewayError = asGatewayError(error);
+        return errorResponse("anthropic", gatewayError.code, gatewayError.message);
+      }
     })
-    .onError(({ error, set }) => {
+    .onError(({ error }) => {
       const gatewayError = asGatewayError(error);
-      set.status = HTTP_STATUS[gatewayError.code];
-      return anthropicErrorBody(gatewayError.code, gatewayError.message);
+      return errorResponse("anthropic", gatewayError.code, gatewayError.message);
     });
 }
