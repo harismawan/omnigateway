@@ -4,9 +4,9 @@ import type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider } from "./typ
 import { postJson, tokenErrorCode, tokenErrorMessage } from "./types.ts";
 
 /** Public client ID of the Kimi CLI. See the note at the head of Task 20. */
-const CLIENT_ID = "kimi-cli";
-const DEVICE_CODE_URL = "https://www.kimi.com/api/device/code";
-const TOKEN_URL = "https://www.kimi.com/api/device/token";
+const CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
+const DEVICE_CODE_URL = "https://auth.kimi.com/api/oauth/device_authorization";
+const TOKEN_URL = "https://auth.kimi.com/api/oauth/token";
 const DEFAULT_INTERVAL_SECONDS = 5;
 
 /** Errors that mean "keep polling" rather than "this flow failed". */
@@ -91,7 +91,10 @@ function deviceCodeFrom(value: unknown): DeviceCodeResponse {
   return {
     deviceCode,
     userCode,
-    verificationUri: stringFrom(record, "verification_uri") ?? "https://www.kimi.com/device",
+    verificationUri:
+      stringFrom(record, "verification_uri_complete") ??
+      stringFrom(record, "verification_uri") ??
+      "https://www.kimi.com/device",
     interval: positiveNumberFrom(record, "interval") ?? DEFAULT_INTERVAL_SECONDS,
   };
 }
@@ -103,8 +106,8 @@ async function post(
   deps: OAuthDeps,
 ): Promise<unknown> {
   const { status, parsed } = await postJson(deps, url, PROFILES.kimi, {
-    contentType: "application/json",
-    body: JSON.stringify({ ...body, client_id: CLIENT_ID }),
+    contentType: "application/x-www-form-urlencoded",
+    body: new URLSearchParams({ ...body, client_id: CLIENT_ID }).toString(),
     extraHeaders: kimiDeviceHeaders(device),
   });
 
@@ -176,9 +179,7 @@ export const kimiOAuth: OAuthProvider = {
       throw new Error("kimi begin requires a non-blank deviceId");
     }
     const device = deviceForBegin(deviceId);
-    const response = deviceCodeFrom(
-      await post(DEVICE_CODE_URL, { device_id: device.deviceId }, device, deps),
-    );
+    const response = deviceCodeFrom(await post(DEVICE_CODE_URL, {}, device, deps));
     return {
       authorizeUrl: response.verificationUri,
       userCode: response.userCode,

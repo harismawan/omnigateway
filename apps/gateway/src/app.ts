@@ -61,7 +61,6 @@ export function createApp(deps: AppDeps) {
         providers: OAUTH_PROVIDERS,
         http,
         now,
-        baseUrl: deps.baseUrl,
       }),
     );
 }

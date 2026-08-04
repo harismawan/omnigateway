@@ -6,7 +6,7 @@ import { isAuthorizationPending, kimiOAuth } from "../../src/oauth/kimi.ts";
 
 const NOW = 1_000_000;
 const KIMI_HEADERS = [
-  ["Content-Type", "application/json"],
+  ["Content-Type", "application/x-www-form-urlencoded"],
   ["X-Msh-Platform", "kimi_code_cli"],
   ["X-Msh-Version", "0.26.0"],
   ["X-Msh-Device-Id", "11111111-2222-3333-4444-555555555555"],
@@ -65,6 +65,7 @@ test("begin requests a device code and surfaces the user code", async () => {
     device_code: "dc-1",
     user_code: "WDJB-MJHT",
     verification_uri: "https://kimi.example/device",
+    verification_uri_complete: "https://kimi.example/device?user_code=WDJB-MJHT",
     interval: 5,
   });
   const started = await kimiOAuth.begin?.(
@@ -73,16 +74,20 @@ test("begin requests a device code and surfaces the user code", async () => {
   );
 
   expect(started?.userCode).toBe("WDJB-MJHT");
-  expect(started?.authorizeUrl).toBe("https://kimi.example/device");
+  expect(started?.authorizeUrl).toBe("https://kimi.example/device?user_code=WDJB-MJHT");
   expect(started?.pending.deviceCode).toBe("dc-1");
   expect(started?.pending.interval).toBe(5);
+  expect(http.last().url).toBe("https://auth.kimi.com/api/oauth/device_authorization");
   expect(http.last().headers).toEqual(KIMI_HEADERS);
-  expect(http.last().body).toBe(
-    '{"device_id":"11111111-2222-3333-4444-555555555555","client_id":"kimi-cli"}',
-  );
+  expect(http.last().body).toBe("client_id=17e5f671-d194-4dfb-9706-5516cb48c098");
 });
 
 test("a single poll returns tokens once the user approves", async () => {
+  const http = stubHttp(200, {
+    access_token: "test-token-1",
+    refresh_token: "test-token-2",
+    expires_in: 3600,
+  });
   const result = await kimiOAuth.exchange(
     {
       code: "",
@@ -100,14 +105,11 @@ test("a single poll returns tokens once the user approves", async () => {
         },
       },
     },
-    {
-      http: stubHttp(200, {
-        access_token: "test-token-1",
-        refresh_token: "test-token-2",
-        expires_in: 3600,
-      }),
-      now: () => NOW,
-    },
+    { http, now: () => NOW },
+  );
+  expect(http.last().url).toBe("https://auth.kimi.com/api/oauth/token");
+  expect(http.last().body).toBe(
+    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=dc-1&device_id=11111111-2222-3333-4444-555555555555&client_id=17e5f671-d194-4dfb-9706-5516cb48c098",
   );
   expect(result.secrets.accessToken).toBe("test-token-1");
   expect(result.providerData.deviceId).toBe("11111111-2222-3333-4444-555555555555");
@@ -253,7 +255,7 @@ test("refresh returns a new access token and reuses the stored device", async ()
   expect(result.providerData).toEqual(stored);
   expect(http.last().headers).toEqual(KIMI_HEADERS);
   expect(http.last().body).toBe(
-    '{"grant_type":"refresh_token","refresh_token":"test-token-2","device_id":"11111111-2222-3333-4444-555555555555","client_id":"kimi-cli"}',
+    "grant_type=refresh_token&refresh_token=test-token-2&device_id=11111111-2222-3333-4444-555555555555&client_id=17e5f671-d194-4dfb-9706-5516cb48c098",
   );
 });
 

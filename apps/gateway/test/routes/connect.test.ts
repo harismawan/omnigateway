@@ -46,7 +46,6 @@ async function harness(provider: OAuthProvider = pkceProvider(async () => RESULT
     providers: { anthropic: provider, openai: provider, kimi: provider },
     http: nodeHttpClient(),
     now: () => NOW,
-    baseUrl: "http://localhost:8787",
   });
 
   const post = (path: string, body: unknown, auth = true) =>
@@ -71,6 +70,15 @@ test("start returns an authorize url and a flow id", async () => {
   expect(res.status).toBe(200);
   expect(body.authorizeUrl).toContain("https://example.com/authorize");
   expect(typeof body.flowId).toBe("string");
+});
+
+test("openai uses the Codex callback path", async () => {
+  const provider = { ...pkceProvider(async () => RESULT), id: "openai" as const };
+  const { post } = await harness(provider);
+  const res = await post("/api/connect/start", { provider: "openai", label: "work" });
+  const body = (await res.json()) as { authorizeUrl: string };
+  const authorizeUrl = new URL(body.authorizeUrl);
+  expect(authorizeUrl.searchParams.get("redirect_uri")).toBe("http://localhost:1455/auth/callback");
 });
 
 test("start requires an admin session", async () => {
@@ -102,6 +110,45 @@ test("finish exchanges the code and stores an enabled credential", async () => {
   expect(credentials[0]?.accountEmail).toBe("user@example.com");
   expect(credentials[0]?.providerData).toEqual({ accountId: "acct_1" });
   expect(credentials[0]?.hasRefreshToken).toBe(true);
+});
+
+test("finish accepts a pasted OpenAI callback URL", async () => {
+  let exchangedCode = "";
+  const provider = {
+    ...pkceProvider(async () => RESULT),
+    id: "openai" as const,
+    exchange: async ({ code }: { code: string }) => {
+      exchangedCode = code;
+      return RESULT;
+    },
+  };
+  const { post, store } = await harness(provider);
+  const { flowId } = (await (
+    await post("/api/connect/start", { provider: "openai", label: "work" })
+  ).json()) as { flowId: string };
+  const callbackUrl = "http://localhost:1455/auth/callback?code=auth-code&state=the-state";
+
+  const res = await post("/api/connect/finish", { flowId, code: callbackUrl });
+
+  expect(res.status).toBe(200);
+  expect(exchangedCode).toBe("auth-code#the-state");
+  expect(await store.credentials.list()).toHaveLength(1);
+});
+
+test("finish rejects a pasted callback URL with a mismatched state", async () => {
+  const provider = { ...pkceProvider(async () => RESULT), id: "openai" as const };
+  const { post, store } = await harness(provider);
+  const { flowId } = (await (
+    await post("/api/connect/start", { provider: "openai", label: "work" })
+  ).json()) as { flowId: string };
+
+  const res = await post("/api/connect/finish", {
+    flowId,
+    code: "http://localhost:1455/auth/callback?code=auth-code&state=forged",
+  });
+
+  expect(res.status).toBe(401);
+  expect(await store.credentials.list()).toHaveLength(0);
 });
 
 test("the finish response never contains the tokens", async () => {
@@ -144,120 +191,14 @@ test("a failed exchange surfaces as an error and stores nothing", async () => {
   expect(await store.credentials.list()).toHaveLength(0);
 });
 
-test("the browser callback completes the flow by state", async () => {
-  const { post, app, store } = await harness();
-  await post("/api/connect/start", { provider: "anthropic", label: "work" });
-
-  const res = await app.handle(
-    new Request("http://localhost/oauth/callback?code=auth-code&state=the-state"),
-  );
-  expect(res.status).toBe(200);
-  expect(res.headers.get("content-type")).toContain("text/html");
-  expect(await store.credentials.list()).toHaveLength(1);
-});
-
-test("the callback rejects an unknown state", async () => {
+test("the gateway exposes no OAuth callback routes", async () => {
   const { app } = await harness();
-  const res = await app.handle(new Request("http://localhost/oauth/callback?code=c&state=forged"));
-  expect(res.status).toBe(400);
-});
-
-test("the callback surfaces a provider error without exchanging", async () => {
-  const { app, store, post } = await harness();
-  await post("/api/connect/start", { provider: "anthropic", label: "work" });
-  const res = await app.handle(
-    new Request("http://localhost/oauth/callback?error=access_denied&state=the-state"),
-  );
-  expect(res.status).toBe(400);
-  expect(await store.credentials.list()).toHaveLength(0);
-});
-
-test("a callback without state leaves a device flow pollable", async () => {
-  let polls = 0;
-  const deviceProvider: OAuthProvider = {
-    id: "kimi",
-    kind: "device",
-    supportsManualPaste: false,
-    start: () => ({
-      authorizeUrl: "https://kimi.example/device",
-      pending: {
-        verifier: "",
-        challenge: "",
-        state: "",
-        redirectUri: "",
-        extra: { deviceId: "dev-1" },
-      },
-    }),
-    begin: async () => ({
-      authorizeUrl: "https://kimi.example/device",
-      userCode: "WDJB-MJHT",
-      pending: {
-        verifier: "",
-        challenge: "",
-        state: "",
-        redirectUri: "",
-        deviceCode: "dc-1",
-        interval: 5,
-        extra: { deviceId: "dev-1" },
-      },
-    }),
-    exchange: async () => {
-      polls += 1;
-      const error = new GatewayError("AUTH", "authorization not yet complete") as GatewayError & {
-        __omni_authorization_pending?: boolean;
-      };
-      error.__omni_authorization_pending = true;
-      throw error;
-    },
-    refresh: async () => RESULT,
-  };
-  const { app, post } = await harness(deviceProvider);
-  const start = (await (
-    await post("/api/connect/start", { provider: "kimi", label: "kimi" })
-  ).json()) as { flowId: string };
-
-  const callback = await app.handle(
-    new Request("http://localhost/oauth/callback?error=access_denied"),
-  );
-  expect(callback.status).toBe(400);
-
-  const poll = await post("/api/connect/poll", { flowId: start.flowId });
-  expect(poll.status).toBe(202);
-  expect(polls).toBe(1);
-});
-
-test("the callback escapes a provider error", async () => {
-  const { app, post } = await harness();
-  await post("/api/connect/start", { provider: "anthropic", label: "work" });
-  const error = "<img src=x onerror=alert(1)>";
-  const query = new URLSearchParams({ error, state: "the-state" });
-
-  const res = await app.handle(new Request(`http://localhost/oauth/callback?${query}`));
-  const body = await res.text();
-  expect(body).not.toContain(error);
-  expect(body).toContain("&lt;img src=x onerror=alert(1)&gt;");
-});
-
-test("the callback consumes a matched state before the exchange", async () => {
-  let resolveExchange: ((result: FlowResult) => void) | undefined;
-  const exchange = new Promise<FlowResult>((resolve) => {
-    resolveExchange = resolve;
-  });
-  const { app, post, store } = await harness(pkceProvider(async () => exchange));
-  await post("/api/connect/start", { provider: "anthropic", label: "work" });
-
-  const first = app.handle(
-    new Request("http://localhost/oauth/callback?code=auth-code&state=the-state"),
-  );
-  await Promise.resolve();
-  const second = await app.handle(
-    new Request("http://localhost/oauth/callback?code=auth-code&state=the-state"),
-  );
-
-  expect(second.status).toBe(400);
-  resolveExchange?.(RESULT);
-  expect((await first).status).toBe(200);
-  expect(await store.credentials.list()).toHaveLength(1);
+  for (const path of ["/oauth/callback", "/auth/callback"]) {
+    const res = await app.handle(
+      new Request(`http://localhost${path}?code=auth-code&state=the-state`),
+    );
+    expect(res.status).toBe(404);
+  }
 });
 
 test("concurrent polls share one device exchange", async () => {

@@ -17,8 +17,6 @@ export type ConnectDeps = {
   providers: Readonly<Record<ProviderId, OAuthProvider>>;
   http: HttpClient;
   now: () => number;
-  /** Origin the provider redirects back to, e.g. `http://localhost:8787`. */
-  baseUrl: string;
 };
 
 function asGatewayError(error: unknown): GatewayError {
@@ -59,27 +57,36 @@ function deviceIdFrom(start: ReturnType<OAuthProvider["start"]>): string {
   return deviceId;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-const page = (title: string, message: string, status: number): Response =>
-  new Response(
-    `<!doctype html><meta charset="utf-8"><title>${title}</title>` +
-      `<body style="font:16px system-ui;padding:3rem;max-width:34rem">` +
-      `<h1>${title}</h1><p>${message}</p></body>`,
-    { status, headers: { "content-type": "text/html; charset=utf-8" } },
-  );
-
 export function connectRoutes(deps: ConnectDeps) {
   const flows = createPendingFlows({ now: deps.now, ttlMs: FLOW_TTL_MS });
   const pollsInFlight = new Map<string, Promise<{ id: string }>>();
-  const redirectUri = `${deps.baseUrl}/oauth/callback`;
+  const callbackUri = (provider: ProviderId) =>
+    provider === "openai" ? "http://localhost:1455/auth/callback" : "";
+
+  function normalizeAuthorizationCode(flow: StoredFlow, input: string): string {
+    if (flow.provider !== "openai") return input;
+
+    let url: URL;
+    try {
+      url = new URL(input);
+    } catch {
+      return input;
+    }
+
+    if (url.origin !== "http://localhost:1455" || url.pathname !== "/auth/callback") {
+      throw new GatewayError("BAD_REQUEST", "invalid OpenAI callback URL");
+    }
+
+    const code = url.searchParams.get("code")?.trim() ?? "";
+    const state = url.searchParams.get("state")?.trim() ?? "";
+    if (code.length === 0 || state.length === 0) {
+      throw new GatewayError("BAD_REQUEST", "OpenAI callback URL must contain code and state");
+    }
+    if (state !== flow.pending.state) {
+      throw new GatewayError("AUTH", "authorization state mismatch");
+    }
+    return `${code}#${state}`;
+  }
 
   async function requireAdmin(request: Request): Promise<void> {
     const token = readCookie(request, ADMIN_COOKIE);
@@ -132,173 +139,104 @@ export function connectRoutes(deps: ConnectDeps) {
     }
   }
 
-  return (
-    new Elysia()
-      .post("/api/connect/start", async ({ request }) => {
-        try {
-          await requireAdmin(request);
-          flows.sweep();
+  return new Elysia()
+    .post("/api/connect/start", async ({ request }) => {
+      try {
+        await requireAdmin(request);
+        flows.sweep();
 
-          const body: unknown = await request.json();
-          const providerId = isRecord(body) ? body.provider : undefined;
-          const inputLabel = isRecord(body) ? body.label : undefined;
-          if (!isProviderId(providerId)) {
-            throw new GatewayError(
-              "BAD_REQUEST",
-              "provider must be one of anthropic, openai, kimi",
-            );
-          }
-          const label =
-            typeof inputLabel === "string" && inputLabel.trim().length > 0
-              ? inputLabel.trim()
-              : providerId;
-
-          const provider = deps.providers[providerId];
-          const start =
-            provider.begin === undefined
-              ? provider.start({ redirectUri })
-              : await (async () => {
-                  const initial = provider.start({ redirectUri });
-                  return provider.begin?.(
-                    { deviceId: deviceIdFrom(initial) },
-                    { http: deps.http, now: deps.now },
-                  );
-                })();
-          if (start === undefined) {
-            throw new GatewayError("INTERNAL", "device authorization could not start");
-          }
-
-          const flowId = flows.put({
-            provider: providerId,
-            label,
-            pending: start.pending,
-            ...(start.userCode === undefined ? {} : { userCode: start.userCode }),
-          });
-
-          return {
-            flowId,
-            authorizeUrl: start.authorizeUrl,
-            userCode: start.userCode ?? null,
-            kind: provider.kind,
-            supportsManualPaste: provider.supportsManualPaste,
-            pollIntervalMs: (start.pending.interval ?? 5) * 1000,
-          };
-        } catch (error) {
-          return errorResponse(error);
+        const body: unknown = await request.json();
+        const providerId = isRecord(body) ? body.provider : undefined;
+        const inputLabel = isRecord(body) ? body.label : undefined;
+        if (!isProviderId(providerId)) {
+          throw new GatewayError("BAD_REQUEST", "provider must be one of anthropic, openai, kimi");
         }
-      })
+        const label =
+          typeof inputLabel === "string" && inputLabel.trim().length > 0
+            ? inputLabel.trim()
+            : providerId;
 
-      .post("/api/connect/finish", async ({ request }) => {
-        try {
-          await requireAdmin(request);
-
-          const body: unknown = await request.json();
-          const flowId = isRecord(body) ? body.flowId : undefined;
-          const code = isRecord(body) ? body.code : undefined;
-          if (typeof flowId !== "string" || typeof code !== "string") {
-            throw new GatewayError("BAD_REQUEST", "flowId and code are required");
-          }
-
-          const flow = flows.take(flowId);
-          if (flow === null)
-            throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
-
-          return await complete(flow, code);
-        } catch (error) {
-          return errorResponse(error);
-        }
-      })
-
-      .post("/api/connect/poll", async ({ request, set }) => {
-        try {
-          await requireAdmin(request);
-
-          const body: unknown = await request.json();
-          const flowId = isRecord(body) ? body.flowId : undefined;
-          if (typeof flowId !== "string") {
-            throw new GatewayError("BAD_REQUEST", "flowId is required");
-          }
-
-          const existing = pollsInFlight.get(flowId);
-          if (existing !== undefined) return pollOutcome(flowId, existing, set);
-
-          const flow = flows.peek(flowId);
-          if (flow === null)
-            throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
-
-          const poll = complete(flow, "").finally(() => {
-            pollsInFlight.delete(flowId);
-          });
-          pollsInFlight.set(flowId, poll);
-          return pollOutcome(flowId, poll, set);
-        } catch (error) {
-          return errorResponse(error);
-        }
-      })
-
-      /**
-       * Unauthenticated by design: the provider redirects a browser here, and
-       * that browser may not carry the admin cookie. The single-use `state`
-       * parameter — minted by this process moments earlier — is the credential.
-       */
-      .get("/oauth/callback", async ({ query }) => {
-        const state = typeof query.state === "string" ? query.state.trim() : "";
-        if (state.length === 0) {
-          return page(
-            "Authorization failed",
-            "This authorization link is unknown or has expired.",
-            400,
-          );
+        const provider = deps.providers[providerId];
+        const redirectUri = callbackUri(providerId);
+        const start =
+          provider.begin === undefined
+            ? provider.start({ redirectUri })
+            : await (async () => {
+                const initial = provider.start({ redirectUri });
+                return provider.begin?.(
+                  { deviceId: deviceIdFrom(initial) },
+                  { http: deps.http, now: deps.now },
+                );
+              })();
+        if (start === undefined) {
+          throw new GatewayError("INTERNAL", "device authorization could not start");
         }
 
-        const found = flows.byState(state);
-        if (found === null) {
-          return page(
-            "Authorization failed",
-            "This authorization link is unknown or has expired.",
-            400,
-          );
+        const flowId = flows.put({
+          provider: providerId,
+          label,
+          pending: start.pending,
+          ...(start.userCode === undefined ? {} : { userCode: start.userCode }),
+        });
+
+        return {
+          flowId,
+          authorizeUrl: start.authorizeUrl,
+          userCode: start.userCode ?? null,
+          kind: provider.kind,
+          supportsManualPaste: provider.supportsManualPaste,
+          pollIntervalMs: (start.pending.interval ?? 5) * 1000,
+        };
+      } catch (error) {
+        return errorResponse(error);
+      }
+    })
+
+    .post("/api/connect/finish", async ({ request }) => {
+      try {
+        await requireAdmin(request);
+
+        const body: unknown = await request.json();
+        const flowId = isRecord(body) ? body.flowId : undefined;
+        const code = isRecord(body) ? body.code : undefined;
+        if (typeof flowId !== "string" || typeof code !== "string") {
+          throw new GatewayError("BAD_REQUEST", "flowId and code are required");
         }
 
-        // Find by state only to identify the candidate; consume it immediately so
-        // concurrent callbacks cannot exchange or persist the same authorization twice.
-        const flow = flows.take(found.id);
-        if (flow === null || flow.pending.state !== state) {
-          return page(
-            "Authorization failed",
-            "This authorization link is unknown or has expired.",
-            400,
-          );
+        const flow = flows.take(flowId);
+        if (flow === null)
+          throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
+
+        return await complete(flow, normalizeAuthorizationCode(flow, code));
+      } catch (error) {
+        return errorResponse(error);
+      }
+    })
+
+    .post("/api/connect/poll", async ({ request, set }) => {
+      try {
+        await requireAdmin(request);
+
+        const body: unknown = await request.json();
+        const flowId = isRecord(body) ? body.flowId : undefined;
+        if (typeof flowId !== "string") {
+          throw new GatewayError("BAD_REQUEST", "flowId is required");
         }
 
-        if (typeof query.error === "string") {
-          return page(
-            "Authorization declined",
-            `The provider reported: ${escapeHtml(query.error)}.`,
-            400,
-          );
-        }
+        const existing = pollsInFlight.get(flowId);
+        if (existing !== undefined) return pollOutcome(flowId, existing, set);
 
-        const code = typeof query.code === "string" ? query.code : "";
-        if (code.length === 0) {
-          return page("Authorization failed", "The provider returned no authorization code.", 400);
-        }
+        const flow = flows.peek(flowId);
+        if (flow === null)
+          throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
 
-        try {
-          await complete(flow, code);
-          return page(
-            "Account connected",
-            "You can close this tab and return to OmniGateway.",
-            200,
-          );
-        } catch (error) {
-          const message = error instanceof GatewayError ? error.message : "the exchange failed";
-          return page(
-            "Authorization failed",
-            `The provider could not finish authorization: ${escapeHtml(message)}.`,
-            400,
-          );
-        }
-      })
-  );
+        const poll = complete(flow, "").finally(() => {
+          pollsInFlight.delete(flowId);
+        });
+        pollsInFlight.set(flowId, poll);
+        return pollOutcome(flowId, poll, set);
+      } catch (error) {
+        return errorResponse(error);
+      }
+    });
 }
