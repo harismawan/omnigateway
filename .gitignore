@@ -7,5 +7,6 @@ dist/
 .env.local
 *.tsbuildinfo
 
-# SDD scratch workspace (briefs, reports, review packages)
+# Claude Code and SDD scratch workspaces
+.claude/
 .superpowers/
