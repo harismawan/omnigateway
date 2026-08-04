@@ -32,7 +32,10 @@ test("builds an authorize url with pkce and state", () => {
   expect(url.searchParams.get("code_challenge")).toBe(start.pending.challenge);
   expect(url.searchParams.get("state")).toBe(start.pending.state);
   expect(url.searchParams.get("response_type")).toBe("code");
-  expect(url.searchParams.get("redirect_uri")).toBe("http://localhost:8787/oauth/callback");
+  expect(url.searchParams.get("redirect_uri")).toBe(
+    "https://platform.claude.com/oauth/code/callback",
+  );
+  expect(start.pending.redirectUri).toBe("https://platform.claude.com/oauth/code/callback");
 });
 
 test("declares that it supports the manual paste flow", () => {
@@ -63,6 +66,7 @@ test("sends exchange with the Anthropic CLI header and JSON field order", async 
   );
 
   const sent = http.last();
+  expect(sent.url).toBe("https://api.anthropic.com/v1/oauth/token");
   expect(sent.headers).toEqual(ANTHROPIC_TOKEN_HEADERS);
   expect(sent.body).toBe(
     '{"grant_type":"authorization_code","code":"auth-code","redirect_uri":"r","code_verifier":"v","state":"s","client_id":"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}',

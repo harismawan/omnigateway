@@ -141,7 +141,10 @@ export const openaiOAuth: OAuthProvider = {
     url.searchParams.set("scope", SCOPES);
     url.searchParams.set("code_challenge", challenge);
     url.searchParams.set("code_challenge_method", "S256");
+    url.searchParams.set("id_token_add_organizations", "true");
+    url.searchParams.set("codex_cli_simplified_flow", "true");
     url.searchParams.set("state", state);
+    url.searchParams.set("originator", "codex_cli_rs");
     url.searchParams.set("prompt", "login");
 
     return { authorizeUrl: url.toString(), pending: { verifier, challenge, state, redirectUri } };

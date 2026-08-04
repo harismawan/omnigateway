@@ -47,6 +47,10 @@ test("builds an authorize url against the openai auth host", () => {
   expect(url.origin + url.pathname).toBe("https://auth.openai.com/oauth/authorize");
   expect(url.searchParams.get("code_challenge_method")).toBe("S256");
   expect(url.searchParams.get("scope")).toContain("openid");
+  expect(url.searchParams.get("id_token_add_organizations")).toBe("true");
+  expect(url.searchParams.get("codex_cli_simplified_flow")).toBe("true");
+  expect(url.searchParams.get("originator")).toBe("codex_cli_rs");
+  expect(url.searchParams.get("prompt")).toBe("login");
 });
 
 test("sends exchange with the Codex CLI header and form field order", async () => {
