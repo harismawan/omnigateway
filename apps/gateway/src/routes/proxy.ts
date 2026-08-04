@@ -174,11 +174,15 @@ export function proxyRoutes(deps: ProxyDeps) {
     .post("/v1/chat/completions", ({ request }) => handle(deps, rateLimiter, "openai", request))
     .get("/v1/models", async ({ request }) => {
       try {
-        await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
+        const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
         const models = await deps.store.config.listModels();
+        const visibleModels =
+          key.modelAllowlist === null
+            ? models
+            : models.filter((model) => key.modelAllowlist?.includes(model.id));
         return Response.json({
           object: "list",
-          data: models.map((m) => ({
+          data: visibleModels.map((m) => ({
             id: m.id,
             object: "model",
             created: 0,

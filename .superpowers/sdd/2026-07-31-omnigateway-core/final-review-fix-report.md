@@ -24,3 +24,16 @@
 
 - The fixed-window limiter is intentionally process-local. Multiple gateway processes do not share counters; distributed enforcement would require a shared atomic store.
 - Limiter state is ephemeral across process restarts.
+
+## Fix Round 1
+
+- Retained the authenticated API key on `GET /v1/models` and filtered the response to models visible through its exact `modelAllowlist`. A `null` allowlist returns every model; an empty allowlist returns an empty `data` array.
+- Added route coverage for restricted, `null`, and empty model allowlists.
+
+### Exact verification results
+
+- Targeted: `bun test apps/gateway/test/routes/proxy.test.ts` — 19 pass, 0 fail, 47 assertions in 1 file.
+- Full: `bun test` — 445 pass, 0 fail, 1044 assertions across 39 files.
+- Typecheck: `bun run typecheck` — passed (`tsc -b --pretty false`).
+- Lint: `bun run lint` — passed; checked 121 files with no fixes, errors, or warnings. It emitted one pre-existing informational Biome `recommended` configuration deprecation notice.
+- Diff hygiene: `git diff --check` — passed with no output.

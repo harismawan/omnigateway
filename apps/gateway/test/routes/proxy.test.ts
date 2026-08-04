@@ -466,3 +466,44 @@ test("fixed-window rate limits are atomic, per-key, and roll over at the boundar
   expect((await request(first.raw)).status).toBe(200);
   expect((await request(second.raw)).status).toBe(200);
 });
+
+test("models route returns only models in the calling key allowlist", async () => {
+  const { app, store } = await harness();
+  await store.config.putModel(virtualModel({ id: "other" }));
+  const { raw } = await seedApiKey(store, { modelAllowlist: ["fast"] });
+  const response = await app.handle(
+    new Request("http://localhost/v1/models", {
+      headers: { authorization: `Bearer ${raw}` },
+    }),
+  );
+  const body = (await response.json()) as { data: Array<{ id: string }> };
+  expect(response.status).toBe(200);
+  expect(body.data.map((model) => model.id)).toEqual(["fast"]);
+});
+
+test("models route returns all models for a null allowlist", async () => {
+  const { app, store } = await harness();
+  await store.config.putModel(virtualModel({ id: "other" }));
+  const { raw } = await seedApiKey(store, { modelAllowlist: null });
+  const response = await app.handle(
+    new Request("http://localhost/v1/models", {
+      headers: { authorization: `Bearer ${raw}` },
+    }),
+  );
+  const body = (await response.json()) as { data: Array<{ id: string }> };
+  expect(response.status).toBe(200);
+  expect(body.data.map((model) => model.id).sort()).toEqual(["fast", "other"]);
+});
+
+test("models route returns no models for an empty allowlist", async () => {
+  const { app, store } = await harness();
+  const { raw } = await seedApiKey(store, { modelAllowlist: [] });
+  const response = await app.handle(
+    new Request("http://localhost/v1/models", {
+      headers: { authorization: `Bearer ${raw}` },
+    }),
+  );
+  const body = (await response.json()) as { data: Array<{ id: string }> };
+  expect(response.status).toBe(200);
+  expect(body.data).toEqual([]);
+});
