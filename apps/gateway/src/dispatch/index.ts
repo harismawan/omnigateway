@@ -116,7 +116,7 @@ export async function dispatch(
   async function* run(): AsyncGenerator<StreamEvent, void, undefined> {
     let lastError: GatewayError | null = null;
 
-    for (let i = 0; i < maxAttempts; i++) {
+    candidateLoop: for (let i = 0; i < maxAttempts; i++) {
       const candidate = candidates[i] as Candidate;
       log.attempts = i + 1;
       log.credentialId = candidate.credential.id;
@@ -132,107 +132,149 @@ export async function dispatch(
       log.ttftMs = null;
 
       let committed = false;
+      let authRefreshRetried = false;
+      let retrySecrets: CredentialSecrets | undefined;
+      const attemptNow = deps.now();
+      const preemptiveRefreshRequired =
+        candidate.credential.authType === "oauth" &&
+        candidate.credential.expiresAt !== null &&
+        candidate.credential.expiresAt - REFRESH_LEAD_MS <= attemptNow;
 
-      try {
-        const result = await attempt({
-          candidate,
-          request,
-          adapter: deps.adapters[candidate.target.provider],
-          http: deps.http,
-          now: deps.now(),
-          signal,
-          refresh: deps.refresh,
-          refreshLeadMs: REFRESH_LEAD_MS,
-        });
+      while (true) {
+        try {
+          const result = await attempt({
+            candidate,
+            request,
+            adapter: deps.adapters[candidate.target.provider],
+            http: deps.http,
+            now: attemptNow,
+            signal,
+            refresh: deps.refresh,
+            refreshLeadMs: REFRESH_LEAD_MS,
+            ...(retrySecrets === undefined ? {} : { secrets: retrySecrets }),
+          });
 
-        for (const d of result.degradations) log.degradations.push(d);
+          for (const d of result.degradations) log.degradations.push(d);
 
-        for await (const event of result.events) {
-          if (event.type === "blockDelta" && !committed) {
-            // Commit point: the client is about to see bytes, so from here on
-            // failover is impossible and errors must be forwarded in-stream.
-            committed = true;
-            log.ttftMs = deps.now() - startedAt;
-          }
-
-          if (event.type === "end") {
-            log.inputTokens = event.usage.inputTokens;
-            log.outputTokens = event.usage.outputTokens;
-            log.cacheReadTokens = event.usage.cacheReadTokens;
-            log.cacheWriteTokens = event.usage.cacheWriteTokens;
-            log.costUsd = priceOf(candidate, event.usage);
-          }
-
-          if (event.type === "error") {
-            // An in-stream error before commit is retryable like a thrown one.
-            if (!committed && RETRYABLE[event.code]) {
-              throw new GatewayError(event.code, event.message);
+          for await (const event of result.events) {
+            if (event.type === "blockDelta" && !committed) {
+              // Commit point: the client is about to see bytes, so from here on
+              // failover is impossible and errors must be forwarded in-stream.
+              committed = true;
+              log.ttftMs = deps.now() - startedAt;
             }
-            // Not retried, so this attempt is terminal: yield the event, then
-            // record it as a failure and stop. Without this, an in-stream
-            // error that isn't thrown (this is how a decoder reports an
-            // error frame — see e.g. anthropic/decode.ts's "error" case)
-            // would fall through to the success path below once the
-            // generator ends, misreporting a failed request as a 200.
-            committed = true;
+
+            if (event.type === "end") {
+              log.inputTokens = event.usage.inputTokens;
+              log.outputTokens = event.usage.outputTokens;
+              log.cacheReadTokens = event.usage.cacheReadTokens;
+              log.cacheWriteTokens = event.usage.cacheWriteTokens;
+              log.costUsd = priceOf(candidate, event.usage);
+            }
+
+            if (event.type === "error") {
+              // An in-stream error before commit is retryable like a thrown one.
+              if (!committed && RETRYABLE[event.code]) {
+                throw new GatewayError(event.code, event.message);
+              }
+              // Not retried, so this attempt is terminal: yield the event, then
+              // record it as a failure and stop. Without this, an in-stream
+              // error that isn't thrown (this is how a decoder reports an
+              // error frame — see e.g. anthropic/decode.ts's "error" case)
+              // would fall through to the success path below once the
+              // generator ends, misreporting a failed request as a 200.
+              committed = true;
+              yield event;
+              await persistHealth(
+                recordFailure(healthFor(candidate), {
+                  settings: snapshot.settings,
+                  now: deps.now(),
+                  code: event.code,
+                  jitter: deps.rand(),
+                }),
+              );
+              log.status = HTTP_STATUS[event.code];
+              log.errorCode = event.code;
+              log.durationMs = deps.now() - startedAt;
+              return;
+            }
+
             yield event;
-            await persistHealth(
-              recordFailure(healthFor(candidate), {
-                settings: snapshot.settings,
-                now: deps.now(),
-                code: event.code,
-                jitter: deps.rand(),
-              }),
-            );
-            log.status = HTTP_STATUS[event.code];
-            log.errorCode = event.code;
+          }
+
+          await persistHealth(
+            recordSuccess(healthFor(candidate), {
+              settings: snapshot.settings,
+              now: deps.now(),
+              ttftMs: log.ttftMs,
+            }),
+          );
+          log.status = 200;
+          log.errorCode = null;
+          log.durationMs = deps.now() - startedAt;
+          return;
+        } catch (error) {
+          const { code, retryAfterMs } = classify(error);
+          const message = error instanceof Error ? error.message : "attempt failed";
+          lastError =
+            retryAfterMs === undefined
+              ? new GatewayError(code, message)
+              : new GatewayError(code, message, { retryAfterMs });
+
+          if (
+            code === "AUTH" &&
+            !committed &&
+            !authRefreshRetried &&
+            !preemptiveRefreshRequired &&
+            candidate.credential.authType === "oauth" &&
+            candidate.credential.hasRefreshToken
+          ) {
+            authRefreshRetried = true;
+            try {
+              retrySecrets = await deps.refresh(candidate.credential);
+              continue;
+            } catch (refreshError) {
+              const classified = classify(refreshError);
+              const refreshMessage =
+                refreshError instanceof Error ? refreshError.message : "credential refresh failed";
+              lastError =
+                classified.retryAfterMs === undefined
+                  ? new GatewayError(classified.code, refreshMessage)
+                  : new GatewayError(classified.code, refreshMessage, {
+                      retryAfterMs: classified.retryAfterMs,
+                    });
+            }
+          }
+
+          const failure = lastError as GatewayError;
+          await persistHealth(
+            recordFailure(healthFor(candidate), {
+              settings: snapshot.settings,
+              now: deps.now(),
+              code: failure.code,
+              ...(failure.retryAfterMs === undefined ? {} : { retryAfterMs: failure.retryAfterMs }),
+              jitter: deps.rand(),
+            }),
+          );
+
+          if (committed) {
+            // Bytes already went out; the client gets an in-band error and the
+            // stream ends there.
+            log.status = HTTP_STATUS[failure.code];
+            log.errorCode = failure.code;
             log.durationMs = deps.now() - startedAt;
+            yield {
+              type: "error",
+              code: failure.code,
+              message: failure.message,
+              retryable: false,
+            };
             return;
           }
 
-          yield event;
+          if (!RETRYABLE[failure.code]) break candidateLoop;
+          continue candidateLoop;
         }
-
-        await persistHealth(
-          recordSuccess(healthFor(candidate), {
-            settings: snapshot.settings,
-            now: deps.now(),
-            ttftMs: log.ttftMs,
-          }),
-        );
-        log.status = 200;
-        log.errorCode = null;
-        log.durationMs = deps.now() - startedAt;
-        return;
-      } catch (error) {
-        const { code, retryAfterMs } = classify(error);
-        const message = error instanceof Error ? error.message : "attempt failed";
-        lastError =
-          retryAfterMs === undefined
-            ? new GatewayError(code, message)
-            : new GatewayError(code, message, { retryAfterMs });
-
-        await persistHealth(
-          recordFailure(healthFor(candidate), {
-            settings: snapshot.settings,
-            now: deps.now(),
-            code,
-            ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-            jitter: deps.rand(),
-          }),
-        );
-
-        if (committed) {
-          // Bytes already went out; the client gets an in-band error and the
-          // stream ends there.
-          log.status = HTTP_STATUS[code];
-          log.errorCode = code;
-          log.durationMs = deps.now() - startedAt;
-          yield { type: "error", code, message, retryable: false };
-          return;
-        }
-
-        if (!RETRYABLE[code]) break;
       }
     }
 

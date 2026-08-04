@@ -26,13 +26,16 @@ export async function attempt(opts: {
   refresh: (credential: CredentialView) => Promise<CredentialSecrets>;
   /** Refresh this far before actual expiry so a long request cannot expire mid-flight. */
   refreshLeadMs: number;
+  /** Already-refreshed secrets for an AUTH retry; avoids a second refresh. */
+  secrets?: CredentialSecrets;
 }): Promise<AttemptResult> {
   const { candidate, adapter, http, now, signal, refresh, refreshLeadMs } = opts;
   const credential = candidate.credential;
 
-  let secrets = await credential.secrets();
+  let secrets = opts.secrets ?? (await credential.secrets());
 
   const stale =
+    opts.secrets === undefined &&
     credential.authType === "oauth" &&
     credential.expiresAt !== null &&
     credential.expiresAt - refreshLeadMs <= now;

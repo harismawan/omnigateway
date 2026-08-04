@@ -124,6 +124,104 @@ test("streams a successful response and logs it", async () => {
   store.close();
 });
 
+test("an AUTH failure refreshes and retries the same OAuth credential once", async () => {
+  const store = await seeded(2);
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("AUTH", "expired") : textStream("refreshed"),
+  );
+  let refreshes = 0;
+  const configured = deps(store, adapter);
+  configured.refresh = async () => {
+    refreshes++;
+    return {
+      accessToken: "test-token-refreshed",
+      refreshToken: "test-refresh-rotated",
+      apiKey: null,
+      idToken: null,
+    };
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  expect(adapter.calls).toEqual(["test-token-1", "test-token-refreshed"]);
+  expect(refreshes).toBe(1);
+  expect(outcome.log().attempts).toBe(1);
+  expect(outcome.log().credentialId).toBe("c1");
+  store.close();
+});
+
+test("a pre-emptive refresh followed by AUTH does not refresh twice", async () => {
+  const store = await seeded(2);
+  await store.credentials.update("c1", { expiresAt: 1_120_000 });
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("AUTH", "still unauthorized") : textStream("fallback"),
+  );
+  let refreshes = 0;
+  const configured = deps(store, adapter);
+  configured.refresh = async () => {
+    refreshes++;
+    return {
+      accessToken: "test-token-refreshed",
+      refreshToken: "test-refresh-rotated",
+      apiKey: null,
+      idToken: null,
+    };
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal);
+  await drain(outcome.events);
+
+  expect(refreshes).toBe(1);
+  expect(adapter.calls.slice(0, 2)).toEqual(["test-token-refreshed", "test-token-2"]);
+  store.close();
+});
+
+test("a second AUTH after refresh falls through to the next candidate", async () => {
+  const store = await seeded(2);
+  const adapter = stubAdapter((call) =>
+    call < 3 ? new GatewayError("AUTH", "unauthorized") : textStream("fallback"),
+  );
+  let refreshes = 0;
+  const configured = deps(store, adapter);
+  configured.refresh = async () => {
+    refreshes++;
+    return {
+      accessToken: "test-token-refreshed",
+      refreshToken: "test-refresh-rotated",
+      apiKey: null,
+      idToken: null,
+    };
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal);
+  await drain(outcome.events);
+
+  expect(adapter.calls).toEqual(["test-token-1", "test-token-refreshed", "test-token-2"]);
+  expect(refreshes).toBe(1);
+  expect(outcome.log().attempts).toBe(2);
+  store.close();
+});
+
+test("a refresh failure proceeds to the next candidate", async () => {
+  const store = await seeded(2);
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("AUTH", "expired") : textStream("fallback"),
+  );
+  const configured = deps(store, adapter);
+  configured.refresh = async () => {
+    throw new GatewayError("UPSTREAM", "refresh unavailable");
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal);
+  await drain(outcome.events);
+
+  expect(adapter.calls).toEqual(["test-token-1", "test-token-2"]);
+  expect(outcome.log().attempts).toBe(2);
+  store.close();
+});
+
 test("fails over to the next credential before the commit point", async () => {
   const store = await seeded(2);
   const adapter = stubAdapter((call) =>
