@@ -8,7 +8,7 @@ import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from 
 import { decodeChat } from "./decode.ts";
 import { toChatWire } from "./wire.ts";
 
-const BASE_URL = "https://api.moonshot.ai/v1/chat/completions";
+const BASE_URL = "https://api.kimi.com/coding/v1/chat/completions";
 
 export const kimiAdapter: ProviderAdapter = {
   id: "kimi",

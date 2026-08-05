@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest, StreamEvent } from "@omni/ir";
+import type { HttpRequest } from "../src/index.ts";
 import { decodeChat } from "../src/kimi/decode.ts";
+import { kimiAdapter } from "../src/kimi/index.ts";
 import { toChatWire } from "../src/kimi/wire.ts";
 import { ADAPTERS } from "../src/registry.ts";
 import type { SseMessage } from "../src/sse.ts";
@@ -188,6 +190,32 @@ test("[DONE] with no finish_reason still terminates the stream", async () => {
     ),
   );
   expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+});
+
+test("OAuth inference uses the Kimi Coding API", async () => {
+  let sent: HttpRequest | null = null;
+  await kimiAdapter.send({
+    request: base,
+    model: "kimi-for-coding",
+    credentials: {
+      accessToken: "test-token",
+      apiKey: null,
+      providerData: { deviceId: "device-1" },
+    },
+    http: async (request) => {
+      sent = request;
+      return {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: new ReadableStream({ start: (controller) => controller.close() }),
+        text: async () => "",
+      };
+    },
+    signal: new AbortController().signal,
+  });
+
+  if (sent === null) throw new Error("adapter did not send a request");
+  expect((sent as HttpRequest).url).toBe("https://api.kimi.com/coding/v1/chat/completions");
 });
 
 test("the registry exposes exactly the three v1 providers", () => {
