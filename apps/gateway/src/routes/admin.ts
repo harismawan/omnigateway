@@ -153,9 +153,7 @@ async function jsonRecord(request: Request): Promise<Record<string, unknown> | n
 export function adminRoutes(deps: AdminDeps) {
   const app = new Elysia().onError(({ error, set }) => {
     const gatewayError =
-      error instanceof GatewayError
-        ? error
-        : new GatewayError("INTERNAL", error instanceof Error ? error.message : "internal error");
+      error instanceof GatewayError ? error : new GatewayError("INTERNAL", "internal error");
     set.status = HTTP_STATUS[gatewayError.code];
     return { error: { code: gatewayError.code, message: gatewayError.message } };
   });

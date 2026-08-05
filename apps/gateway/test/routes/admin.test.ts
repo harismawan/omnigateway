@@ -389,6 +389,22 @@ test("credential health returns the health and quota rows the dashboard renders"
   });
 });
 
+test("credential health hides unexpected repository errors", async () => {
+  const { store, call } = await harness();
+  const listHealth = store.credentials.listHealth;
+  store.credentials.listHealth = async () => {
+    throw new Error("sqlite failure leaked-secret-token");
+  };
+
+  const response = await call("GET", "/api/credentials/health");
+  store.credentials.listHealth = listHealth;
+
+  expect(response.status).toBe(500);
+  expect((await response.json()) as { error: { code: string; message: string } }).toEqual({
+    error: { code: "INTERNAL", message: "internal error" },
+  });
+});
+
 test("credential health carries no token material", async () => {
   const { store, call } = await harness();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
