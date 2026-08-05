@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import type { ProviderId } from "@omni/ir";
 import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from "@omni/providers";
@@ -43,6 +44,14 @@ export function createApp(deps: AppDeps) {
   });
 
   const staticDir = deps.staticDir ? resolve(deps.staticDir) : undefined;
+  let staticRoot: string | undefined;
+  if (staticDir) {
+    try {
+      staticRoot = realpathSync(staticDir);
+    } catch {
+      // An absent bundle is handled as an unrouted dashboard request.
+    }
+  }
 
   return new Elysia()
     .get("/health", () => ({ ok: true }))
@@ -70,15 +79,11 @@ export function createApp(deps: AppDeps) {
     )
     .get("/*", ({ path, request, set }) => {
       const rawPath = new URL(request.url).pathname;
-      const protectedPrefix = ["/api", "/v1", "/oauth"].some(
-        (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-      );
       const error = () => {
         set.status = 404;
         return { error: { code: "NOT_FOUND", message: `no route for ${path}` } };
       };
-
-      if (!staticDir || protectedPrefix || /%2e/i.test(rawPath)) return error();
+      if (!staticRoot || /%2f|%5c/i.test(rawPath)) return error();
 
       let decodedPath: string;
       try {
@@ -87,26 +92,47 @@ export function createApp(deps: AppDeps) {
         return error();
       }
 
-      const requestedPath = decodedPath === "/" ? "/index.html" : decodedPath;
-      const filePath = resolve(staticDir, `.${requestedPath}`);
-      if (filePath !== staticDir && !filePath.startsWith(`${staticDir}${sep}`)) return error();
+      const protectedPrefix = ["/api", "/v1", "/oauth"].some(
+        (prefix) => decodedPath === prefix || decodedPath.startsWith(`${prefix}/`),
+      );
+      if (protectedPrefix) return error();
 
-      const file = Bun.file(filePath);
-      if (file.size > 0) {
-        const cacheControl = path.startsWith("/assets/")
+      const requestedPath = decodedPath === "/" ? "/index.html" : decodedPath;
+      const filePath = resolve(staticRoot, `.${requestedPath}`);
+      if (filePath !== staticRoot && !filePath.startsWith(`${staticRoot}${sep}`)) return error();
+
+      let resolvedFilePath: string | undefined;
+      try {
+        resolvedFilePath = realpathSync(filePath);
+      } catch {
+        // A missing file may be a client-side navigation below.
+      }
+      if (
+        resolvedFilePath &&
+        resolvedFilePath !== staticRoot &&
+        !resolvedFilePath.startsWith(`${staticRoot}${sep}`)
+      ) {
+        return error();
+      }
+
+      const file = resolvedFilePath ? Bun.file(resolvedFilePath) : undefined;
+      if (file && file.size > 0 && resolvedFilePath) {
+        const cacheControl = decodedPath.startsWith("/assets/")
           ? "public, max-age=31536000, immutable"
           : "no-cache";
         return new Response(file, {
           headers: {
             "cache-control": cacheControl,
-            "content-type": filePath.endsWith(".html") ? "text/html" : file.type,
+            "content-type": resolvedFilePath.endsWith(".html") ? "text/html" : file.type,
           },
         });
       }
 
-      if (path.startsWith("/assets/")) return error();
+      const isNavigation = request.headers.get("accept")?.includes("text/html") ?? false;
+      if (decodedPath.startsWith("/assets/") || !isNavigation) return error();
 
-      const index = Bun.file(resolve(staticDir, "index.html"));
+      const indexPath = resolve(staticRoot, "index.html");
+      const index = Bun.file(indexPath);
       if (index.size === 0) return error();
 
       return new Response(index, {
