@@ -93,6 +93,11 @@ Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/
 
 `OMNI_ENCRYPTION_KEY` is mandatory and changing it invalidates existing encrypted credentials. `OMNI_BASE_URL` must be public origin behind reverse proxy. Provider identity environment overrides are startup configuration; validate and keep built-in defaults when absent or invalid.
 
+## Subagent workflow
+
+- For subagent-driven work, orchestrator creates implementation subagent, then separately creates review subagent; subagents must not spawn nested subagents.
+- Use `feat/*` branches for subagent implementation work; do not use worktrees.
+
 ## Known constraints
 
 - Version 1 is single-node and single-operator.
