@@ -8,12 +8,8 @@ import {
   useMemo,
   useState,
 } from "react";
-import {
-  applyTheme,
-  getStoredThemeMode,
-  resolveTheme,
-  type ThemeMode,
-} from "./theme.ts";
+import type { ThemeMode } from "./theme.ts";
+import { applyTheme, getStoredThemeMode, resolveTheme } from "./theme.ts";
 
 type ThemeContextValue = {
   mode: ThemeMode;

@@ -1,5 +1,6 @@
 import type { RequestLog } from "@/api/types.ts";
-import { StatusBadge, type StatusTone } from "@/components/StatusBadge.tsx";
+import type { StatusTone } from "@/components/StatusBadge.tsx";
+import { StatusBadge } from "@/components/StatusBadge.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { formatMs, formatRelative, formatTokens, formatUsd } from "@/lib/format.ts";
 
@@ -10,7 +11,15 @@ export function requestStatus(status: number): { label: string; tone: StatusTone
   return { label: "Unknown status", tone: "muted" };
 }
 
-function Detail({ label, monospace = false, value }: { label: string; monospace?: boolean; value: string }) {
+function Detail({
+  label,
+  monospace = false,
+  value,
+}: {
+  label: string;
+  monospace?: boolean;
+  value: string;
+}) {
   return (
     <div>
       <dt className="text-xs opacity-60">{label}</dt>

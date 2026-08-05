@@ -78,12 +78,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/health",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "health"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
             }
           },
           "response": [],
@@ -115,13 +111,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/status",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "status"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "status"]
             }
           },
           "response": [],
@@ -151,13 +142,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/setup",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "setup"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "setup"]
             },
             "body": {
               "mode": "raw",
@@ -196,13 +182,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/login",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "login"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "login"]
             },
             "body": {
               "mode": "raw",
@@ -237,13 +218,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/logout",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "logout"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "logout"]
             }
           },
           "response": [],
@@ -273,13 +249,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/credentials",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "credentials"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "credentials"]
             }
           },
           "response": [],
@@ -311,14 +282,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/credentials/{{credentialId}}",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "credentials",
-                "{{credentialId}}"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "credentials", "{{credentialId}}"]
             },
             "body": {
               "mode": "raw",
@@ -352,14 +317,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/credentials/{{credentialId}}",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "credentials",
-                "{{credentialId}}"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "credentials", "{{credentialId}}"]
             },
             "description": "Destructive: permanently removes selected provider credential."
           },
@@ -396,14 +355,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/connect/start",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "connect",
-                "start"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "connect", "start"]
             },
             "body": {
               "mode": "raw",
@@ -443,14 +396,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/connect/finish",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "connect",
-                "finish"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "connect", "finish"]
             },
             "description": "Used when Start Connection returns a manual-paste flow.",
             "body": {
@@ -490,14 +437,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/connect/poll",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "connect",
-                "poll"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "connect", "poll"]
             },
             "description": "Used for Kimi device authorization. Repeat while response is 202 pending.",
             "body": {
@@ -532,13 +473,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/oauth/callback?state={{oauthState}}&code={{oauthCode}}",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "oauth",
-                "callback"
-              ],
+              "host": ["{{baseUrl}}"],
+              "path": ["oauth", "callback"],
               "query": [
                 {
                   "key": "state",
@@ -584,13 +520,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/models",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "models"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models"]
             }
           },
           "response": [],
@@ -620,14 +551,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/models/{{modelId}}",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "models",
-                "{{modelId}}"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}"]
             },
             "body": {
               "mode": "raw",
@@ -661,14 +586,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/models/{{modelId}}",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "models",
-                "{{modelId}}"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}"]
             },
             "description": "Destructive: removes virtual model or alias."
           },
@@ -699,13 +618,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/keys",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "keys"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "keys"]
             }
           },
           "response": [],
@@ -737,13 +651,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/keys",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "keys"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "keys"]
             },
             "description": "Captures one-time raw key into gatewayApiKey collection variable.",
             "body": {
@@ -780,14 +689,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/keys/{{apiKeyId}}",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "keys",
-                "{{apiKeyId}}"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "keys", "{{apiKeyId}}"]
             },
             "description": "Destructive: revokes selected gateway API key."
           },
@@ -818,13 +721,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/settings",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "settings"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "settings"]
             }
           },
           "response": [],
@@ -854,13 +752,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/settings",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "settings"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "settings"]
             },
             "body": {
               "mode": "raw",
@@ -899,13 +792,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/usage?groupBy=model&since={{since}}&until={{until}}",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "usage"
-              ],
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "usage"],
               "query": [
                 {
                   "key": "groupBy",
@@ -945,13 +833,8 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/logs?limit=100",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "logs"
-              ],
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "logs"],
               "query": [
                 {
                   "key": "limit",
@@ -995,13 +878,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/v1/models",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "v1",
-                "models"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "models"]
             }
           },
           "response": [],
@@ -1036,13 +914,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/v1/messages",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "v1",
-                "messages"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "messages"]
             },
             "body": {
               "mode": "raw",
@@ -1086,13 +959,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/v1/messages",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "v1",
-                "messages"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "messages"]
             },
             "description": "Returns text/event-stream.",
             "body": {
@@ -1137,14 +1005,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/v1/chat/completions",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "v1",
-                "chat",
-                "completions"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "chat", "completions"]
             },
             "body": {
               "mode": "raw",
@@ -1188,14 +1050,8 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/v1/chat/completions",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "v1",
-                "chat",
-                "completions"
-              ]
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "chat", "completions"]
             },
             "description": "Returns text/event-stream ending with [DONE].",
             "body": {

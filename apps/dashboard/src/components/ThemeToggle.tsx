@@ -1,6 +1,6 @@
 import { Monitor, Moon, Sun } from "lucide-react";
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
-import { type ReactElement } from "react";
+import type { ReactElement } from "react";
 import { useTheme } from "../theme/ThemeProvider.tsx";
 import { parseThemeMode, type ThemeMode } from "../theme/theme.ts";
 import { Button } from "./ui/button.tsx";
@@ -31,7 +31,10 @@ export function ThemeToggle(): ReactElement {
         className="z-50 min-w-32 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
         sideOffset={8}
       >
-        <DropdownMenuPrimitive.RadioGroup onValueChange={(value) => setMode(parseThemeMode(value))} value={mode}>
+        <DropdownMenuPrimitive.RadioGroup
+          onValueChange={(value) => setMode(parseThemeMode(value))}
+          value={mode}
+        >
           {themeModes.map((themeMode) => (
             <DropdownMenuPrimitive.RadioItem
               className="flex w-full items-center rounded-sm px-2 py-1.5 text-left text-sm outline-none hover:bg-accent focus-visible:bg-accent"

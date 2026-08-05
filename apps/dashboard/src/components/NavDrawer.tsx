@@ -26,9 +26,9 @@ export function NavDrawer({
   renderLinks,
   signOutPending,
   onSignOut,
-}: NavDrawerProps): ReactElement {
+}: NavDrawerProps): ReactElement | null {
   if (!open) {
-    return <></>;
+    return null;
   }
 
   return (
