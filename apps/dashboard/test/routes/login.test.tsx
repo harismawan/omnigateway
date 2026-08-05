@@ -1,11 +1,17 @@
 import { afterEach, expect, test } from "bun:test";
-import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from "@tanstack/react-router";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { LoginScreen } from "../../src/routes/login.tsx";
-import { routeTree } from "../../src/routeTree.gen.ts";
+import { LoginRoute, LoginScreen } from "../../src/routes/login.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { renderWithProviders } from "../helpers/render.tsx";
+import { makeQueryClient, renderWithProviders } from "../helpers/render.tsx";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -57,11 +63,22 @@ test("successful setup navigates to credentials", async () => {
     "GET /api/status": () => ({ configured: false, authenticated: false }),
     "POST /api/setup": () => ({ ok: true }),
   });
+  const rootRoute = createRootRoute({ component: () => <Outlet /> });
+  const loginRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/login",
+    component: LoginRoute,
+  });
+  const credentialsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/credentials",
+    component: () => <p>Credentials</p>,
+  });
   const router = createRouter({
-    routeTree,
+    routeTree: rootRoute.addChildren([loginRoute, credentialsRoute]),
     history: createMemoryHistory({ initialEntries: ["/login"] }),
   });
-  renderWithProviders(<RouterProvider router={router} />);
+  renderWithProviders(<RouterProvider router={router} />, { client: makeQueryClient() });
   await screen.findByRole("heading", { name: /set an admin password/i });
 
   const user = userEvent.setup();

@@ -102,7 +102,7 @@ export const Route = createFileRoute("/login")({
   component: LoginRoute,
 });
 
-function LoginRoute() {
+export function LoginRoute() {
   const navigate = Route.useNavigate();
   return <LoginScreen onAuthenticated={() => void navigate({ to: "/credentials" as string })} />;
 }
