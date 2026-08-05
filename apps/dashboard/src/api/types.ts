@@ -13,7 +13,7 @@ import type {
   UsageBucket,
   VirtualModel,
   WindowType,
-} from "@omni/store";
+} from "@omni/store/types";
 
 export type {
   ApiKey,

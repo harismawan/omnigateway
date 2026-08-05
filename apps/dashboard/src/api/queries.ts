@@ -79,7 +79,7 @@ export function logsQuery(limit: number, pollMs: number) {
   });
 }
 
-export function useInvalidate(): (keys: readonly unknown[][]) => Promise<void> {
+export function useInvalidate(): (keys: readonly (readonly unknown[])[]) => Promise<void> {
   const queryClient = useQueryClient();
   return async (keys) => {
     await Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));

@@ -3,8 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "generate:routes": "tsr generate",
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "typecheck": "bun run generate:routes && tsc --noEmit",
+    "build": "bun run typecheck && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -27,6 +29,7 @@
     "@happy-dom/global-registrator": "^20.11.1",
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/react-query-devtools": "^5.101.4",
+    "@tanstack/router-cli": "1.167.22",
     "@tanstack/router-plugin": "^1.168.23",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

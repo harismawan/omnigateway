@@ -1,7 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import { useQuery } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
-import { credentialsQuery, logsQuery, qk, usageQuery } from "../../src/api/queries.ts";
+import {
+  credentialsQuery,
+  logsQuery,
+  qk,
+  usageQuery,
+  type useInvalidate,
+} from "../../src/api/queries.ts";
 import { formatMs, formatTokens, formatUsd } from "../../src/lib/format.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { credentialFixture } from "../helpers/fixtures.ts";
@@ -11,6 +17,11 @@ const realFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = realFetch;
 });
+
+type Invalidate = typeof useInvalidate extends () => infer Callback ? Callback : never;
+type ExpectedInvalidate = (keys: readonly (readonly unknown[])[]) => Promise<void>;
+const acceptsReadonlyQueryKeys: ExpectedInvalidate = null as unknown as Invalidate;
+void acceptsReadonlyQueryKeys;
 
 test("query keys are stable and distinguish their arguments", () => {
   expect(qk.credentials()).toEqual(["credentials"]);

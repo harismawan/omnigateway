@@ -12,7 +12,9 @@
     "test": "bun test",
     "lint": "biome check .",
     "fmt": "biome format --write .",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck:core": "tsc --noEmit --pretty false -p tsconfig.json",
+    "typecheck:dashboard": "bun run --cwd apps/dashboard typecheck",
+    "typecheck": "bun run typecheck:core && bun run typecheck:dashboard"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.6",
