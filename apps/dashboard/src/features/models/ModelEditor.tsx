@@ -1,16 +1,13 @@
+import { closestCenter, DndContext, type DragEndEvent } from "@dnd-kit/core";
+import { arrayMove, SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "@/api/client.ts";
 import { useInvalidate } from "@/api/queries.ts";
-import {
-  PROVIDER_IDS,
-  type ProviderId,
-  STRATEGIES,
-  type Target,
-  type VirtualModel,
-} from "@/api/types.ts";
+import { type ProviderId, STRATEGIES, type Target, type VirtualModel } from "@/api/types.ts";
 import { ErrorState } from "@/components/ErrorState.tsx";
 import { Button } from "@/components/ui/button.tsx";
+import { TargetRow } from "./TargetRow.tsx";
 
 export function emptyTarget(provider: ProviderId): Target {
   return {
@@ -19,10 +16,11 @@ export function emptyTarget(provider: ProviderId): Target {
     tier: 1,
     weight: 1,
     costPerMTok: { input: 0, output: 0 },
-    capabilities: { tools: false, images: false, reasoning: false },
+    capabilities: { tools: true, images: false, reasoning: false },
   };
 }
 
+type DraftTarget = { key: string; target: Target };
 type Props = {
   model: VirtualModel;
   isNew?: boolean;
@@ -30,175 +28,117 @@ type Props = {
   onDeleted: () => void;
 };
 
+function targetDrafts(targets: Target[]): DraftTarget[] {
+  return targets.map((target, index) => ({ key: `target-${index}`, target }));
+}
+
 export function ModelEditor({ model, isNew = false, onSaved, onDeleted }: Props) {
-  const [draft, setDraft] = useState(model);
+  const [id, setId] = useState(model.id);
+  const [strategy, setStrategy] = useState(model.strategy);
+  const [targets, setTargets] = useState(() => targetDrafts(model.targets));
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const invalidate = useInvalidate();
+  const current = (): VirtualModel => ({
+    ...model,
+    id,
+    strategy,
+    targets: targets.map((entry) => entry.target),
+  });
   const save = useMutation({
-    mutationFn: () => api.put(`/api/models/${draft.id}`, draft),
+    mutationFn: () => api.put(`/api/models/${encodeURIComponent(id)}`, current()),
     onSuccess: async () => {
       await invalidate([["models"]]);
-      onSaved(draft.id);
+      onSaved(id);
     },
   });
   const remove = useMutation({
-    mutationFn: () => api.del(`/api/models/${draft.id}`),
+    mutationFn: () => api.del(`/api/models/${encodeURIComponent(id)}`),
     onSuccess: async () => {
       await invalidate([["models"]]);
       onDeleted();
     },
   });
-  const updateTarget = (index: number, patch: Partial<Target>) => {
-    setDraft((current) => ({
-      ...current,
-      targets: current.targets.map((target, targetIndex) =>
-        targetIndex === index ? { ...target, ...patch } : target,
+  const updateTarget = (index: number, patch: Partial<Target>) =>
+    setTargets((currentTargets) =>
+      currentTargets.map((entry, entryIndex) =>
+        entryIndex === index ? { ...entry, target: { ...entry.target, ...patch } } : entry,
       ),
-    }));
+    );
+  const move = (from: number, to: number) =>
+    setTargets((currentTargets) => arrayMove(currentTargets, from, to));
+  const onDragEnd = (event: DragEndEvent) => {
+    if (event.over === null || event.active.id === event.over.id) return;
+    const from = targets.findIndex((entry) => entry.key === event.active.id);
+    const to = targets.findIndex((entry) => entry.key === event.over?.id);
+    if (from >= 0 && to >= 0) move(from, to);
   };
-
   return (
     <section className="space-y-4 rounded-md border p-4" aria-label="Model editor">
       <label className="block text-sm font-medium">
         Model id
         <input
           aria-label="Model id"
-          value={draft.id}
+          value={id}
           disabled={!isNew}
-          onChange={(event) => setDraft({ ...draft, id: event.target.value })}
+          onChange={(event) => setId(event.target.value)}
         />
       </label>
       <label className="block text-sm font-medium">
         Strategy
         <select
           aria-label="Strategy"
-          value={draft.strategy}
-          onChange={(event) =>
-            setDraft({ ...draft, strategy: event.target.value as VirtualModel["strategy"] })
-          }
+          value={strategy}
+          onChange={(event) => setStrategy(event.target.value as VirtualModel["strategy"])}
         >
-          {STRATEGIES.map((strategy) => (
-            <option key={strategy} value={strategy}>
-              {strategy}
+          {STRATEGIES.map((option) => (
+            <option key={option} value={option}>
+              {option}
             </option>
           ))}
         </select>
       </label>
-      <div className="space-y-3">
-        {draft.targets.map((target, index) => (
-          <div className="grid gap-2 rounded border p-3" key={`${target.provider}-${target.model}`}>
-            <strong>Target {index + 1}</strong>
-            <label>
-              Provider
-              <select
-                aria-label={`Target ${index + 1} provider`}
-                value={target.provider}
-                onChange={(event) =>
-                  updateTarget(index, { provider: event.target.value as ProviderId })
-                }
-              >
-                {PROVIDER_IDS.map((provider) => (
-                  <option key={provider} value={provider}>
-                    {provider}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Model
-              <input
-                aria-label={`Target ${index + 1} model`}
-                value={target.model}
-                onChange={(event) => updateTarget(index, { model: event.target.value })}
-              />
-            </label>
-            <label>
-              Tier
-              <input
-                aria-label={`Target ${index + 1} tier`}
-                type="number"
-                value={target.tier}
-                onChange={(event) => updateTarget(index, { tier: Number(event.target.value) })}
-              />
-            </label>
-            <label>
-              Weight
-              <input
-                aria-label={`Target ${index + 1} weight`}
-                type="number"
-                value={target.weight}
-                onChange={(event) => updateTarget(index, { weight: Number(event.target.value) })}
-              />
-            </label>
-            <label>
-              Input cost per M tokens
-              <input
-                aria-label={`Target ${index + 1} input cost`}
-                type="number"
-                value={target.costPerMTok.input}
-                onChange={(event) =>
-                  updateTarget(index, {
-                    costPerMTok: { ...target.costPerMTok, input: Number(event.target.value) },
-                  })
-                }
-              />
-            </label>
-            <label>
-              Output cost per M tokens
-              <input
-                aria-label={`Target ${index + 1} output cost`}
-                type="number"
-                value={target.costPerMTok.output}
-                onChange={(event) =>
-                  updateTarget(index, {
-                    costPerMTok: { ...target.costPerMTok, output: Number(event.target.value) },
-                  })
-                }
-              />
-            </label>
-            {(["tools", "images", "reasoning"] as const).map((capability) => (
-              <label key={capability}>
-                <input
-                  aria-label={`Target ${index + 1} supports ${capability}`}
-                  type="checkbox"
-                  checked={target.capabilities[capability]}
-                  onChange={(event) =>
-                    updateTarget(index, {
-                      capabilities: { ...target.capabilities, [capability]: event.target.checked },
-                    })
-                  }
-                />
-                Supports {capability}
-              </label>
-            ))}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                if (draft.targets.length === 1) {
-                  setError("A virtual model needs at least one target.");
-                  return;
-                }
-                setDraft({
-                  ...draft,
-                  targets: draft.targets.filter((_, targetIndex) => targetIndex !== index),
-                });
-              }}
-            >
-              Remove target {index + 1}
-            </Button>
-          </div>
-        ))}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() =>
-            setDraft({ ...draft, targets: [...draft.targets, emptyTarget("anthropic")] })
-          }
+      <DndContext collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+        <SortableContext
+          items={targets.map((entry) => entry.key)}
+          strategy={verticalListSortingStrategy}
         >
-          Add target
-        </Button>
-      </div>
+          <div className="space-y-3">
+            {targets.map((entry, index) => (
+              <TargetRow
+                key={entry.key}
+                id={entry.key}
+                target={entry.target}
+                index={index}
+                count={targets.length}
+                onChange={(patch) => updateTarget(index, patch)}
+                onMove={move}
+                onRemove={() => {
+                  if (targets.length === 1) {
+                    setError("A virtual model needs at least one target.");
+                    return;
+                  }
+                  setTargets((currentTargets) =>
+                    currentTargets.filter((_, entryIndex) => entryIndex !== index),
+                  );
+                }}
+              />
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() =>
+          setTargets((currentTargets) => [
+            ...currentTargets,
+            { key: crypto.randomUUID(), target: emptyTarget("anthropic") },
+          ])
+        }
+      >
+        Add target
+      </Button>
       {error !== null && <p role="alert">{error}</p>}
       {save.isError && <ErrorState error={save.error} />}
       {remove.isError && <ErrorState error={remove.error} />}
@@ -208,16 +148,35 @@ export function ModelEditor({ model, isNew = false, onSaved, onDeleted }: Props)
             setError(null);
             save.mutate();
           }}
-          disabled={save.isPending || draft.id.length === 0}
+          disabled={save.isPending || id.length === 0}
         >
           Save model
         </Button>
         {!isNew && (
-          <Button variant="destructive" onClick={() => remove.mutate()} disabled={remove.isPending}>
+          <Button
+            variant="destructive"
+            onClick={() => setConfirming(true)}
+            disabled={remove.isPending}
+          >
             Delete model
           </Button>
         )}
       </div>
+      {confirming && (
+        <div role="alertdialog">
+          <p>Requests naming this model will fail until another one claims the name.</p>
+          <div className="flex gap-2">
+            <Button
+              variant="destructive"
+              disabled={remove.isPending}
+              onClick={() => remove.mutate()}
+            >{`Delete “${id}”`}</Button>
+            <Button variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
