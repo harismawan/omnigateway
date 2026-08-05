@@ -26,6 +26,7 @@ function CandidateRow({ candidate }: { candidate: DryRunCandidate }) {
     <>
       <tr>
         <td>{candidate.credentialLabel}</td>
+        <td>{candidate.provider}</td>
         <td>{candidate.model}</td>
         <td>{candidate.tier}</td>
         <td className="text-right">{candidate.score.toFixed(2)}</td>
@@ -44,7 +45,7 @@ function CandidateRow({ candidate }: { candidate: DryRunCandidate }) {
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={5}>
+          <td colSpan={6}>
             <ScoreBreakdown candidate={candidate} />
           </td>
         </tr>
@@ -104,6 +105,7 @@ export function DryRunPanel({ modelId }: { modelId: string }) {
               <thead>
                 <tr>
                   <th className="text-left">Credential</th>
+                  <th className="text-left">Provider</th>
                   <th className="text-left">Model</th>
                   <th className="text-left">Tier</th>
                   <th className="text-right">Score</th>
@@ -122,9 +124,11 @@ export function DryRunPanel({ modelId }: { modelId: string }) {
               </tbody>
             </table>
           )}
-          {run.data.excluded.length > 0 && (
-            <section aria-label="Excluded candidates">
-              <h3>Excluded candidates</h3>
+          <section aria-label="Excluded candidates">
+            <h3>Excluded candidates</h3>
+            {run.data.excluded.length === 0 ? (
+              <p>Nothing was filtered out.</p>
+            ) : (
               <ul className="list-disc pl-5 text-sm">
                 {run.data.excluded.map((candidate) => (
                   <li key={`${candidate.credentialId}:${candidate.model}`}>
@@ -132,8 +136,8 @@ export function DryRunPanel({ modelId }: { modelId: string }) {
                   </li>
                 ))}
               </ul>
-            </section>
-          )}
+            )}
+          </section>
         </div>
       )}
     </section>

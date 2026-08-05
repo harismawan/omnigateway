@@ -55,6 +55,7 @@ test("running shows the candidates best first with their scores", async () => {
 
   const rows = await screen.findAllByRole("row", { name: /claude-opus-4/i });
   expect(within(rows[0] as HTMLElement).getByText("work")).toBeDefined();
+  expect(within(rows[0] as HTMLElement).getByText("anthropic")).toBeDefined();
   expect(within(rows[0] as HTMLElement).getByText("12.50")).toBeDefined();
   expect(within(rows[1] as HTMLElement).getByText("personal")).toBeDefined();
 });
@@ -108,6 +109,14 @@ test("a weighted model warns that the live ordering will differ", async () => {
   renderWithProviders(<DryRunPanel modelId="fast" />);
   await (await userEvent.setup()).click(screen.getByRole("button", { name: /run/i }));
   expect(await screen.findByText(/live ordering will differ/i)).toBeDefined();
+});
+
+test("a result without exclusions states that nothing was filtered out", async () => {
+  createFetchStub({ "POST /api/models/fast/dry-run": () => ({ ...RESULT, excluded: [] }) });
+  renderWithProviders(<DryRunPanel modelId="fast" />);
+  await (await userEvent.setup()).click(screen.getByRole("button", { name: /run/i }));
+  const excluded = await screen.findByRole("region", { name: /excluded/i });
+  expect(within(excluded).getByText("Nothing was filtered out.")).toBeDefined();
 });
 
 test("no eligible candidate is stated plainly rather than as an empty table", async () => {
