@@ -62,3 +62,37 @@ bunx biome check apps/dashboard/src/routes/_app.usage.tsx apps/dashboard/test/fe
 ```
 
 `bun run lint` still reports four repository-wide errors and one warning. Changed files pass direct Biome check.
+
+## Fix round 2
+
+- Root cause: chart metric selector, not group-by selector, used Radix `TabsTrigger` without matching `TabsContent`/`tabpanel`, leaving generated `aria-controls` IDs dangling.
+- Replaced only chart metric controls with native `fieldset`/`legend` radio inputs named `usage-chart-metric`; chart state and group-by controls remain unchanged.
+- Regression test targets Requests, Tokens, Estimated cost, and Errors. For each metric it verifies radio role, checked state after selection, matching chart accessible name, and absent `aria-controls`; it also verifies `Usage breakdown` remains present.
+
+### Evidence
+
+Passed:
+
+```bash
+bun test --cwd apps/dashboard --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts ./test/features/usage.test.tsx
+# 13 pass, 0 fail, 40 expect() calls
+
+bun run --cwd apps/dashboard typecheck
+# exit 0
+
+bun test
+# 466 pass, 0 fail, 1095 expect() calls
+
+bun run typecheck
+# exit 0
+
+bunx biome check apps/dashboard/src/routes/_app.usage.tsx apps/dashboard/test/features/usage.test.tsx
+# Checked 2 files. No fixes applied.
+
+git diff --check
+# exit 0
+```
+
+Focused usage test prints existing React `act(...)` warning from a `ForwardRef`; it exits 0. Dashboard and repository typechecks print existing route-generator circular-dependency warning; both exit 0.
+
+`bun run lint` exits 1 on pre-existing repository-wide issues outside this fix: `NavDrawer.tsx` useless fragment, `ThemeToggle.tsx` import/format findings, `ThemeProvider.tsx` format finding, and `postman/OmniGateway.postman_collection.json` format findings. Changed Task 7 files pass direct Biome check.

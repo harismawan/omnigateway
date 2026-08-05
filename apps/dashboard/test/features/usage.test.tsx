@@ -73,14 +73,28 @@ test("the stat cards show exactly requests, tokens, estimated cost, and error ra
   expect(within(screen.getByRole("group", { name: "Error rate" })).getByText("2.7%")).toBeDefined();
 });
 
-test("selecting errors updates chart name while preserving usage breakdown", async () => {
+test("chart metric radios update chart without dangling controls", async () => {
   stubUsage();
   renderWithProviders(<UsageScreen now={NOW} />);
 
-  await screen.findByLabelText("Estimated cost chart");
-  await (await userEvent.setup()).click(screen.getByRole("tab", { name: "Errors" }));
+  const group = await screen.findByRole("group", { name: "Chart metric" });
+  const metrics = [
+    ["Requests", "Requests chart"],
+    ["Tokens", "Tokens chart"],
+    ["Estimated cost", "Estimated cost chart"],
+    ["Errors", "Errors chart"],
+  ] as const;
 
-  expect(screen.getByLabelText("Errors chart")).toBeDefined();
+  const user = userEvent.setup();
+  for (const [name, chartName] of metrics) {
+    const radio = within(group).getByRole<HTMLInputElement>("radio", { name });
+    expect(radio).toBeDefined();
+    await user.click(radio);
+    expect(radio.checked).toBe(true);
+    expect(await screen.findByLabelText(chartName)).toBeDefined();
+    expect(radio.getAttribute("aria-controls")).toBeNull();
+  }
+
   expect(screen.getByRole("table", { name: "Usage breakdown" })).toBeDefined();
 });
 

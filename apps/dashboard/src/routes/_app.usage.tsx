@@ -6,7 +6,6 @@ import { USAGE_GROUP_BY, type UsageBucket, type UsageGroupBy } from "@/api/types
 import { DataTableFrame } from "@/components/DataTableFrame.tsx";
 import { ErrorState } from "@/components/ErrorState.tsx";
 import { PageHeader } from "@/components/PageHeader.tsx";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
 import { StatCards, totals } from "@/features/usage/StatCards.tsx";
 import { UsageChart, type UsageMetric } from "@/features/usage/UsageChart.tsx";
 import { formatTokens, formatUsd } from "@/lib/format.ts";
@@ -90,18 +89,34 @@ export function UsageScreen({ now }: { now: number }) {
             })}
           </div>
         </fieldset>
-        <Tabs
-          aria-label="Chart metric"
-          onValueChange={(value) => setMetric(value as UsageMetric)}
-          value={metric}
-        >
-          <TabsList aria-label="Chart metric">
-            <TabsTrigger value="cost">Estimated cost</TabsTrigger>
-            <TabsTrigger value="requests">Requests</TabsTrigger>
-            <TabsTrigger value="tokens">Tokens</TabsTrigger>
-            <TabsTrigger value="errors">Errors</TabsTrigger>
-          </TabsList>
-        </Tabs>
+        <fieldset className="grid gap-1 text-sm">
+          <legend>Chart metric</legend>
+          <div className="flex flex-wrap gap-3">
+            {(
+              [
+                ["cost", "Estimated cost"],
+                ["requests", "Requests"],
+                ["tokens", "Tokens"],
+                ["errors", "Errors"],
+              ] as const
+            ).map(([value, label]) => {
+              const id = `usage-chart-metric-${value}`;
+              return (
+                <label className="flex items-center gap-2" htmlFor={id} key={value}>
+                  <input
+                    checked={metric === value}
+                    id={id}
+                    name="usage-chart-metric"
+                    onChange={() => setMetric(value)}
+                    type="radio"
+                    value={value}
+                  />
+                  {label}
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
       </div>
       {usage.isError ? <ErrorState error={usage.error} onRetry={() => usage.refetch()} /> : null}
       {usage.isLoading ? <p className="text-sm text-muted-foreground">Loading usage…</p> : null}
