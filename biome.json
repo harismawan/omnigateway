@@ -1,6 +1,14 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.6/schema.json",
-  "files": { "includes": ["**/*.ts", "**/*.tsx", "**/*.json", "!.superpowers"] },
+  "files": {
+    "includes": [
+      "**/*.ts",
+      "**/*.tsx",
+      "**/*.json",
+      "!.superpowers",
+      "!apps/dashboard/src/routeTree.gen.ts"
+    ]
+  },
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
   "linter": {
     "enabled": true,
