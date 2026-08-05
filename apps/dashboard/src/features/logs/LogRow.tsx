@@ -1,11 +1,12 @@
 import type { RequestLog } from "@/api/types.ts";
+import { StatusBadge, type StatusTone } from "@/components/StatusBadge.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { formatMs, formatRelative, formatTokens, formatUsd } from "@/lib/format.ts";
 
-function statusClass(status: number): string {
-  if (status >= 500) return "text-bad";
-  if (status >= 400) return "text-warn";
-  return "text-good";
+export function requestStatus(status: number): { label: string; tone: StatusTone } {
+  if (status >= 500) return { label: "Server error", tone: "bad" };
+  if (status >= 400) return { label: "Client error", tone: "warn" };
+  return { label: "Success", tone: "ok" };
 }
 
 function Detail({ label, value }: { label: string; value: string }) {
@@ -35,8 +36,13 @@ export function LogRow({
         <td className="pr-3 font-mono text-xs">{log.requestedModel}</td>
         <td className="pr-3 font-mono text-xs">{log.resolvedModel ?? "—"}</td>
         <td className="pr-3">{log.resolvedProvider ?? "—"}</td>
-        <td className={statusClass(log.status)}>{log.status}</td>
-        <td className="text-warn">{log.errorCode ?? ""}</td>
+        <td className="tabular-nums">
+          <div className="flex items-center gap-2">
+            <StatusBadge {...requestStatus(log.status)} />
+            <span>{log.status}</span>
+          </div>
+        </td>
+        <td className="font-mono text-xs text-warn">{log.errorCode ?? ""}</td>
         <td className="text-right tabular-nums">{formatMs(log.durationMs)}</td>
         <td className="text-right tabular-nums">{formatUsd(log.costUsd)}</td>
         <td className="pl-3 text-right">

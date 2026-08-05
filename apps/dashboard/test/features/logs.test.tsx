@@ -27,6 +27,37 @@ test("each recent request is a row naming the model that served it", async () =>
   expect(screen.getByRole("row", { name: /gpt-5/ })).toBeDefined();
 });
 
+test("status badges classify successful, client-error, and server-error requests", async () => {
+  createFetchStub({
+    "GET /api/logs": () => ({
+      logs: [
+        logFixture({ id: "success", status: 200 }),
+        logFixture({ id: "client-error", status: 429 }),
+        logFixture({ id: "server-error", status: 500 }),
+      ],
+    }),
+  });
+  renderWithProviders(<LogsScreen now={NOW} />);
+
+  const table = await screen.findByRole("table", { name: /request logs/i });
+  expect(within(table).getByText("Success")).toBeDefined();
+  expect(within(table).getByText("Client error")).toBeDefined();
+  expect(within(table).getByText("Server error")).toBeDefined();
+  expect(within(table).getByText("200")).toBeDefined();
+  expect(within(table).getByText("429")).toBeDefined();
+  expect(within(table).getByText("500")).toBeDefined();
+});
+
+test("operational toolbar shows live state and pauses polling", async () => {
+  createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture()] }) });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await screen.findByRole("button", { name: /details for r1/i });
+
+  expect(screen.getByText("Live")).toBeDefined();
+  await (await userEvent.setup()).click(screen.getByRole("button", { name: /pause/i }));
+  expect(screen.getByText("Paused")).toBeDefined();
+});
+
 test("a failed request shows its status and error code", async () => {
   createFetchStub({
     "GET /api/logs": () => ({

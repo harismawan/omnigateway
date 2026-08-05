@@ -2,7 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { logsQuery } from "@/api/queries.ts";
+import { DataTableFrame } from "@/components/DataTableFrame.tsx";
 import { ErrorState } from "@/components/ErrorState.tsx";
+import { PageHeader } from "@/components/PageHeader.tsx";
+import { StatusBadge } from "@/components/StatusBadge.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import { LogRow } from "@/features/logs/LogRow.tsx";
@@ -22,11 +25,17 @@ export function LogsScreen({ now, pollMs = POLL_MS }: { now: number; pollMs?: nu
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">Logs</h1>
-          <p className="text-xs opacity-60">
-            {paused ? "Paused." : `Refreshing every ${POLL_MS / 1_000}s.`}
+      <PageHeader
+        actions={null}
+        description="Inspect recent gateway requests and resolve failures."
+        eyebrow="Operations"
+        title="Live request logs"
+      />
+      <div className="sticky top-0 z-10 flex flex-wrap items-end justify-between gap-4 border-y bg-background/95 py-3 backdrop-blur">
+        <div className="flex items-center gap-2">
+          <StatusBadge label={paused ? "Paused" : "Live"} tone={paused ? "muted" : "ok"} />
+          <p className="text-xs text-muted-foreground">
+            {paused ? "Polling stopped." : `Refreshing every ${POLL_MS / 1_000}s.`}
           </p>
         </div>
         <div className="flex items-end gap-3">
@@ -57,19 +66,19 @@ export function LogsScreen({ now, pollMs = POLL_MS }: { now: number; pollMs?: nu
         logs.data.length === 0 ? (
           <p className="text-sm opacity-70">No requests yet.</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs opacity-60">
+          <DataTableFrame ariaLabel="Request logs">
+            <table aria-label="Request logs" className="w-full min-w-[760px] text-sm">
+              <thead className="sticky top-0 z-[1] bg-card text-left text-xs text-muted-foreground">
                 <tr>
-                  <th className="py-1">When</th>
-                  <th>Requested</th>
-                  <th>Served</th>
-                  <th>Provider</th>
-                  <th>Status</th>
-                  <th>Error</th>
-                  <th className="text-right">Duration</th>
-                  <th className="text-right">Cost</th>
-                  <th />
+                  <th className="px-3 py-2">When</th>
+                  <th className="px-3 py-2">Requested</th>
+                  <th className="px-3 py-2">Served</th>
+                  <th className="px-3 py-2">Provider</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2">Error</th>
+                  <th className="px-3 py-2 text-right">Duration</th>
+                  <th className="px-3 py-2 text-right">Cost</th>
+                  <th className="px-3 py-2" />
                 </tr>
               </thead>
               <tbody>
@@ -84,7 +93,7 @@ export function LogsScreen({ now, pollMs = POLL_MS }: { now: number; pollMs?: nu
                 ))}
               </tbody>
             </table>
-          </div>
+          </DataTableFrame>
         )
       ) : null}
     </div>
