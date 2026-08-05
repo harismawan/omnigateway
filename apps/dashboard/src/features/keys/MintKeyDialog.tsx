@@ -40,6 +40,7 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
   const [unknown, setUnknown] = useState<string[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
   const [copyError, setCopyError] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [minted, setMinted] = useState<MintedKey | null>(null);
   const mint = useMutation({
     mutationFn: (input: MintKeyInput) => api.post<MintedKey>("/api/keys", input),
@@ -56,6 +57,7 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
     setUnknown([]);
     setLocalError(null);
     setCopyError(false);
+    setCopied(false);
     mint.reset();
     onClose();
   };
@@ -86,13 +88,16 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
   const copy = async () => {
     const clipboard = navigator.clipboard;
     if (clipboard === undefined) {
+      setCopied(false);
       setCopyError(true);
       return;
     }
     try {
       await clipboard.writeText(minted?.key ?? "");
       setCopyError(false);
+      setCopied(true);
     } catch {
+      setCopied(false);
       setCopyError(true);
     }
   };
@@ -107,16 +112,22 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
             <DialogDescription>
               This key cannot be shown again. Copy it now and store it safely.
             </DialogDescription>
-            <code className="block break-all rounded bg-muted p-3 text-sm">{minted.key}</code>
+            <Input
+              aria-label="New API key"
+              className="font-mono text-xs"
+              readOnly
+              value={minted.key}
+              onFocus={(event) => event.currentTarget.select()}
+            />
             {copyError && (
               <p role="alert" className="text-sm text-warn">
                 Could not copy key; select and copy it manually.
               </p>
             )}
             <div className="flex gap-2">
-              <Button onClick={copy}>Copy</Button>
+              <Button onClick={copy}>{copied ? "Copied" : "Copy"}</Button>
               <Button variant="secondary" onClick={close}>
-                Done
+                I saved this key
               </Button>
             </div>
           </div>

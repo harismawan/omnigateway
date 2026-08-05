@@ -53,11 +53,13 @@ test("a model that is not configured is reported back", () => {
   });
 });
 
-test("existing keys are listed by label and prefix, never in full", async () => {
+test("existing keys are listed in named table by label and prefix, never in full", async () => {
   stubKeys();
   renderWithProviders(<KeysScreen now={NOW} />);
-  expect(await screen.findByText("laptop")).toBeDefined();
+  expect(await screen.findByRole("table", { name: /api keys/i })).toBeDefined();
+  expect(screen.getByText("laptop")).toBeDefined();
   expect(screen.getByText("omni_sk_abcd…")).toBeDefined();
+  expect(screen.queryByText(/last used/i)).toBeNull();
   expect(screen.queryByText("omni_sk_wxyz_test-key-1")).toBeNull();
 });
 
@@ -65,7 +67,7 @@ test("mint sends unrestricted null and optional rate limit", async () => {
   const stub = stubKeys();
   renderWithProviders(<KeysScreen now={NOW} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.click(await screen.findByRole("button", { name: /create key/i }));
   await user.type(screen.getByLabelText(/label/i), "ci");
   await user.type(screen.getByLabelText(/rate limit/i), "60");
   await user.click(screen.getByRole("button", { name: /mint key/i }));
@@ -80,14 +82,19 @@ test("mint sends unrestricted null and optional rate limit", async () => {
     modelAllowlist: null,
     rateLimitPerMin: 60,
   });
-  expect(await screen.findByText(MINTED.key)).toBeDefined();
+  expect(await screen.findByRole("heading", { name: "Copy your API key" })).toBeDefined();
+  expect(screen.getByText(/cannot be shown again/i)).toBeDefined();
+  const mintedInput = screen.getByDisplayValue(MINTED.key) as HTMLInputElement;
+  expect(mintedInput.readOnly).toBe(true);
+  expect(mintedInput.className).toContain("font-mono");
+  expect(localStorage.getItem("api-key") ?? "").not.toContain(MINTED.key);
 });
 
 test("an empty label is rejected locally without minting", async () => {
   const stub = stubKeys();
   renderWithProviders(<KeysScreen now={NOW} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.click(await screen.findByRole("button", { name: /create key/i }));
   await user.type(screen.getByLabelText(/label/i), "   ");
   await user.click(screen.getByRole("button", { name: /mint key/i }));
   expect(await screen.findByText("Label is required.")).toBeDefined();
@@ -100,7 +107,7 @@ test("invalid rate limits are rejected locally without minting", async () => {
   const stub = stubKeys();
   renderWithProviders(<KeysScreen now={NOW} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.click(await screen.findByRole("button", { name: /create key/i }));
   await user.type(screen.getByLabelText(/label/i), "ci");
   await user.type(screen.getByLabelText(/rate limit/i), "0");
   await user.click(screen.getByRole("button", { name: /mint key/i }));
@@ -118,13 +125,17 @@ test("the minted key is only copied from local dialog state and dismissed safely
   try {
     renderWithProviders(<KeysScreen now={NOW} />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new key/i }));
+    await user.click(await screen.findByRole("button", { name: /create key/i }));
     await user.type(screen.getByLabelText(/label/i), "ci");
     await user.click(screen.getByRole("button", { name: /mint key/i }));
-    await screen.findByText(MINTED.key);
+    await screen.findByRole("heading", { name: "Copy your API key" });
     await user.click(screen.getByRole("button", { name: /copy/i }));
-    await user.click(screen.getByRole("button", { name: /done/i }));
+    expect(await screen.findByText("Copied")).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "I saved this key" }));
     expect(screen.queryByText(MINTED.key)).toBeNull();
+    await user.click(screen.getByRole("button", { name: /create key/i }));
+    expect(screen.queryByText(MINTED.key)).toBeNull();
+    expect(localStorage.getItem("api-key") ?? "").not.toContain(MINTED.key);
   } finally {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
   }
@@ -141,15 +152,15 @@ test("a clipboard rejection keeps the key visible without exposing it in the mes
   try {
     renderWithProviders(<KeysScreen now={NOW} />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new key/i }));
+    await user.click(await screen.findByRole("button", { name: /create key/i }));
     await user.type(screen.getByLabelText(/label/i), "ci");
     await user.click(screen.getByRole("button", { name: /mint key/i }));
-    await screen.findByText(MINTED.key);
+    await screen.findByRole("heading", { name: "Copy your API key" });
     await user.click(screen.getByRole("button", { name: /^copy$/i }));
     expect(
       await screen.findByText("Could not copy key; select and copy it manually."),
     ).toBeDefined();
-    expect(screen.getByText(MINTED.key)).toBeDefined();
+    expect(screen.getByDisplayValue(MINTED.key)).toBeDefined();
   } finally {
     Object.defineProperty(clipboard, "writeText", { configurable: true, value: writeText });
   }
@@ -208,7 +219,7 @@ test("a failed mint surfaces the gateway message and keeps the form open", async
   });
   renderWithProviders(<KeysScreen now={NOW} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.click(await screen.findByRole("button", { name: /create key/i }));
   await user.type(screen.getByLabelText(/label/i), "ci");
   await user.click(screen.getByRole("button", { name: /mint key/i }));
   expect(await screen.findByText("label is required")).toBeDefined();
