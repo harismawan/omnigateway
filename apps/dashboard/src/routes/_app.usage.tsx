@@ -67,20 +67,29 @@ export function UsageScreen({ now }: { now: number }) {
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-sm">
-          <span>Group by</span>
-          <select
-            value={groupBy}
-            onChange={(event) => setGroupBy(event.target.value as UsageGroupBy)}
-            className="rounded-md border bg-background px-3 py-2"
-          >
-            {USAGE_GROUP_BY.map((candidate) => (
-              <option key={candidate} value={candidate}>
-                {candidate}
-              </option>
-            ))}
-          </select>
-        </label>
+        <fieldset className="grid gap-1 text-sm">
+          <legend>Group by</legend>
+          <div className="flex flex-wrap gap-3">
+            {USAGE_GROUP_BY.map((candidate) => {
+              const id = `usage-group-by-${candidate}`;
+              return (
+                <label className="flex items-center gap-2" htmlFor={id} key={candidate}>
+                  <input
+                    checked={groupBy === candidate}
+                    id={id}
+                    name="usage-group-by"
+                    onChange={() => setGroupBy(candidate)}
+                    type="radio"
+                    value={candidate}
+                  />
+                  {candidate === "apiKey"
+                    ? "API key"
+                    : candidate.slice(0, 1).toUpperCase() + candidate.slice(1)}
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
         <Tabs
           aria-label="Chart metric"
           onValueChange={(value) => setMetric(value as UsageMetric)}

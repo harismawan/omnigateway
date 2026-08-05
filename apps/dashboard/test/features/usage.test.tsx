@@ -62,7 +62,9 @@ test("the stat cards show exactly requests, tokens, estimated cost, and error ra
   renderWithProviders(<UsageScreen now={NOW} />);
 
   await screen.findByRole("group", { name: "Requests" });
-  expect(screen.getAllByRole("group")).toHaveLength(4);
+  expect(
+    screen.getAllByRole("group").filter((group) => group.getAttribute("aria-label") !== null),
+  ).toHaveLength(4);
   expect(within(screen.getByRole("group", { name: "Requests" })).getByText("150")).toBeDefined();
   expect(
     within(screen.getByRole("group", { name: "Estimated cost" })).getByText("$24.00"),
@@ -119,11 +121,21 @@ test("rows are ordered by cost so the expensive slice is first", async () => {
   ).toEqual(["pricey", "cheap"]);
 });
 
+test("grouping uses native radio inputs in a named fieldset", async () => {
+  stubUsage();
+  renderWithProviders(<UsageScreen now={NOW} />);
+  await screen.findByRole("row", { name: /claude-opus-4/ });
+
+  const group = screen.getByRole("group", { name: "Group by" });
+  expect(within(group).getByRole("radio", { name: "Model" })).toBeDefined();
+  expect(within(group).getByRole("radio", { name: "Credential" })).toBeDefined();
+});
+
 test("switching the grouping refetches with the new groupBy", async () => {
   const stub = stubUsage();
   renderWithProviders(<UsageScreen now={NOW} />);
   await screen.findByRole("row", { name: /claude-opus-4/ });
-  await (await userEvent.setup()).selectOptions(screen.getByLabelText(/group by/i), "credential");
+  await (await userEvent.setup()).click(screen.getByRole("radio", { name: "Credential" }));
   const urls = stub.calls.map((call) => call.url).filter((url) => url.startsWith("/api/usage"));
   expect(urls.some((url) => url.includes("groupBy=model"))).toBe(true);
   expect(urls.some((url) => url.includes("groupBy=credential"))).toBe(true);
