@@ -62,8 +62,9 @@ export function ConnectDialog({
       if (flow === null) throw new Error("authorization flow has not started");
       return api.post<ConnectPoll>("/api/connect/poll", { flowId: flow.flowId });
     },
-    enabled: isDevice,
-    refetchInterval: flow?.pollIntervalMs ?? 5_000,
+    enabled: (query) => isDevice && query.state.status !== "error",
+    refetchInterval: (query) =>
+      isDevice && query.state.status !== "error" ? (flow?.pollIntervalMs ?? 5_000) : false,
     retry: false,
     staleTime: 0,
   });

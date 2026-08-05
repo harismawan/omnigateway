@@ -172,12 +172,16 @@ test("a device flow polls until it completes and then closes", async () => {
 });
 
 test("a device error stops polling and reports why", async () => {
+  let polls = 0;
   createFetchStub({
     "POST /api/connect/start": () => DEVICE_START,
-    "POST /api/connect/poll": () => ({
-      status: 400,
-      body: { error: { code: "BAD_REQUEST", message: "the device code expired" } },
-    }),
+    "POST /api/connect/poll": () => {
+      polls += 1;
+      return {
+        status: 400,
+        body: { error: { code: "BAD_REQUEST", message: "the device code expired" } },
+      };
+    },
   });
   renderWithProviders(<ConnectDialog provider="kimi" onClose={() => {}} openWindow={() => {}} />);
 
@@ -186,6 +190,9 @@ test("a device error stops polling and reports why", async () => {
   await user.click(screen.getByRole("button", { name: /start authorization/i }));
 
   expect(await screen.findByText(/the device code expired/i)).toBeDefined();
+  const pollsAfterError = polls;
+  await new Promise<void>((resolve) => setTimeout(resolve, DEVICE_START.pollIntervalMs * 2));
+  expect(polls).toBe(pollsAfterError);
 });
 
 test("a redirect-only pkce provider omits the paste field entirely", async () => {
