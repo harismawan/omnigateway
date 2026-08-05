@@ -2,6 +2,8 @@ import { queryOptions, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client.ts";
 import type {
   CredentialsResponse,
+  DryRunRequest,
+  DryRunResponse,
   KeysResponse,
   LogsResponse,
   ModelsResponse,
@@ -77,6 +79,10 @@ export function logsQuery(limit: number, pollMs: number) {
     refetchInterval: pollMs,
     staleTime: 0,
   });
+}
+
+export function dryRun(modelId: string, request: DryRunRequest): Promise<DryRunResponse> {
+  return api.post<DryRunResponse>(`/api/models/${encodeURIComponent(modelId)}/dry-run`, request);
 }
 
 export function useInvalidate(): (keys: readonly (readonly unknown[])[]) => Promise<void> {

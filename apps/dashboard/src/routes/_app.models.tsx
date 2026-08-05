@@ -5,6 +5,7 @@ import { modelsQuery } from "@/api/queries.ts";
 import type { VirtualModel } from "@/api/types.ts";
 import { ErrorState } from "@/components/ErrorState.tsx";
 import { Button } from "@/components/ui/button.tsx";
+import { DryRunPanel } from "@/features/models/DryRunPanel.tsx";
 import { emptyTarget, ModelEditor } from "@/features/models/ModelEditor.tsx";
 
 export const Route = createFileRoute("/_app/models")({ component: ModelsScreen });
@@ -65,12 +66,15 @@ export function ModelsScreen() {
         />
       )}
       {selected !== null && (
-        <ModelEditor
-          key={selected.id}
-          model={selected}
-          onSaved={(id) => setSelectedId(id)}
-          onDeleted={() => setSelectedId(null)}
-        />
+        <>
+          <ModelEditor
+            key={selected.id}
+            model={selected}
+            onSaved={(id) => setSelectedId(id)}
+            onDeleted={() => setSelectedId(null)}
+          />
+          <DryRunPanel modelId={selected.id} />
+        </>
       )}
     </div>
   );
