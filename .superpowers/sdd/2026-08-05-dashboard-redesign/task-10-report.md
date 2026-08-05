@@ -35,6 +35,31 @@ No runtime behavior changed; lint root cause was stale Biome formatting/rules in
 | `bun run --cwd apps/dashboard build` | Pass. Vite emitted existing >500 kB chunk-size advisory. |
 | `git diff --check` | Pass. |
 
+## Real-app visual inspection
+
+Launched production gateway with a temporary SQLite database and synthetic admin password. No live provider calls were made. Drove rendered dashboard through Chrome DevTools Protocol and inspected screenshots rather than relying only on DOM assertions.
+
+Inspected:
+
+- Login/setup at 1440×1000 in light and dark themes.
+- Setup at 390×844.
+- Credentials at 1440×1000 in light and dark themes.
+- Models, Usage, and API Keys at 1440×1000 in light theme.
+- Logs at 1440×1000 in dark theme.
+- Credentials and open navigation drawer at 390×844.
+
+Checks passed:
+
+- Desktop shell hierarchy, 240px navigation rail, active states, page widths, empty states, and control alignment.
+- Independent light/dark surfaces, readable borders/text, and status-tile distinction.
+- Mobile drawer overlays content without horizontal overflow; focus enters drawer; mobile page width remains 390px.
+- Mobile Credentials stacks stat tiles and provider sections without document-width overflow.
+- Models, Usage, Logs, and API Keys empty states remain readable and actions stay reachable.
+- Usage controls wrap within desktop content; table/chart region has no data in synthetic state, so automated component tests cover tooltip/table behavior.
+- No blank page, clipped primary action, or blocking responsive defect found.
+
+Temporary gateway and Chrome processes were stopped after inspection.
+
 ## Commits
 
 - `fix(dashboard): resolve responsive UI defects`
