@@ -8,6 +8,7 @@ export function ProviderGroup({
   credentials,
   health,
   quota,
+  healthUnavailable,
   now,
   onAdd,
 }: {
@@ -15,6 +16,7 @@ export function ProviderGroup({
   credentials: WireCredential[];
   health: CredentialHealth[];
   quota: QuotaWindow[];
+  healthUnavailable: boolean;
   now: number;
   onAdd: (provider: ProviderId) => void;
 }) {
@@ -34,6 +36,7 @@ export function ProviderGroup({
             credential={credential}
             health={health.filter((row) => row.credentialId === credential.id)}
             quota={quota.filter((window) => window.credentialId === credential.id)}
+            healthUnavailable={healthUnavailable}
             now={now}
           />
         ))}

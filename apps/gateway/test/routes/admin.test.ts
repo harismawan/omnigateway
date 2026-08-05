@@ -170,6 +170,7 @@ test("every data route requires a session", async () => {
   const { call } = await harness();
   for (const path of [
     "/api/credentials",
+    "/api/credentials/health",
     "/api/models",
     "/api/keys",
     "/api/settings",
@@ -347,6 +348,59 @@ test("logs are returned newest first, capped, and normalize fractional limits", 
   expect(fractional.status).toBe(200);
   const fractionalBody = (await fractional.json()) as { logs: Array<{ id: string }> };
   expect(fractionalBody.logs).toHaveLength(2);
+});
+
+test("credential health returns the health and quota rows the dashboard renders", async () => {
+  const { store, call } = await harness();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await store.credentials.saveHealth([
+    {
+      credentialId: "c1",
+      model: "claude-opus-4",
+      breakerState: "closed",
+      consecutiveFailures: 0,
+      openedAt: null,
+      rateLimitedUntil: null,
+      ewmaTtftMs: 400,
+      lastUsedAt: NOW,
+    },
+  ]);
+  await store.credentials.saveQuota([
+    { credentialId: "c1", windowType: "fiveHour", startsAt: NOW, used: 250, limit: 1_000 },
+  ]);
+
+  const response = await call("GET", "/api/credentials/health");
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as {
+    health: Array<{ credentialId: string; model: string; consecutiveFailures: number }>;
+    quota: Array<{ credentialId: string; windowType: string; used: number; limit: number | null }>;
+  };
+  expect(body.health).toHaveLength(1);
+  expect(body.health[0]).toMatchObject({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    consecutiveFailures: 0,
+  });
+  expect(body.quota[0]).toMatchObject({
+    credentialId: "c1",
+    windowType: "fiveHour",
+    used: 250,
+    limit: 1_000,
+  });
+});
+
+test("credential health carries no token material", async () => {
+  const { store, call } = await harness();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+
+  const text = await (await call("GET", "/api/credentials/health")).text();
+  expect(text).not.toContain("token");
+  expect(text).not.toContain("secret");
+});
+
+test("credential health requires an admin session", async () => {
+  const { call } = await harness();
+  expect((await call("GET", "/api/credentials/health", undefined, false)).status).toBe(401);
 });
 
 test("logout clears the session cookie with matching http flags and invalidates it", async () => {

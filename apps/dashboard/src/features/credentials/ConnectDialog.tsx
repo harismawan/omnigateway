@@ -31,7 +31,7 @@ export function ConnectDialog({
   const settle = useCallback(async (): Promise<void> => {
     if (settled.current) return;
     settled.current = true;
-    await invalidate([qk.credentials()]);
+    await invalidate([qk.credentials(), qk.credentialHealth()]);
     onClose();
   }, [invalidate, onClose]);
 

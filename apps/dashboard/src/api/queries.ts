@@ -1,6 +1,7 @@
 import { queryOptions, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client.ts";
 import type {
+  CredentialHealthResponse,
   CredentialsResponse,
   DryRunRequest,
   DryRunResponse,
@@ -22,6 +23,7 @@ import type {
 export const qk = {
   status: () => ["status"] as const,
   credentials: () => ["credentials"] as const,
+  credentialHealth: () => ["credentials", "health"] as const,
   models: () => ["models"] as const,
   settings: () => ["settings"] as const,
   keys: () => ["keys"] as const,
@@ -40,6 +42,15 @@ export function credentialsQuery() {
   return queryOptions<WireCredential[]>({
     queryKey: qk.credentials(),
     queryFn: async () => (await api.get<CredentialsResponse>("/api/credentials")).credentials,
+  });
+}
+
+export function credentialHealthQuery() {
+  return queryOptions<CredentialHealthResponse>({
+    queryKey: qk.credentialHealth(),
+    queryFn: () => api.get<CredentialHealthResponse>("/api/credentials/health"),
+    staleTime: 2_000,
+    retry: false,
   });
 }
 

@@ -46,6 +46,7 @@ export const STRATEGIES: readonly Strategy[] = ["score", "priority", "roundRobin
 export type WireCredential = Credential;
 
 export type CredentialsResponse = { credentials: WireCredential[] };
+export type CredentialHealthResponse = { health: CredentialHealth[]; quota: QuotaWindow[] };
 export type ModelsResponse = { models: VirtualModel[] };
 export type SettingsResponse = { settings: Settings };
 export type UsageResponse = { rows: UsageBucket[] };

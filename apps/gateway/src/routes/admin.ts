@@ -256,6 +256,15 @@ export function adminRoutes(deps: AdminDeps) {
       };
     })
 
+    .get("/api/credentials/health", async ({ request }) => {
+      await requireAdmin(request);
+      const [health, quota] = await Promise.all([
+        deps.store.credentials.listHealth(),
+        deps.store.credentials.listQuota(),
+      ]);
+      return { health, quota };
+    })
+
     .patch("/api/credentials/:id", async ({ request, params }) => {
       await requireAdmin(request);
       const patch = parseOrThrow(credentialPatchSchema, await request.json());

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { credentialsQuery } from "@/api/queries.ts";
+import { credentialHealthQuery, credentialsQuery } from "@/api/queries.ts";
 import type { CredentialHealth, ProviderId, QuotaWindow } from "@/api/types.ts";
 import { PROVIDER_IDS } from "@/api/types.ts";
 import { ErrorState } from "@/components/ErrorState.tsx";
@@ -21,6 +21,7 @@ export function CredentialsScreen({
 }) {
   const [pendingProvider, setPendingProvider] = useState<ProviderId | null>(null);
   const credentials = useQuery(credentialsQuery());
+  const credentialHealth = useQuery(credentialHealthQuery());
   if (credentials.isError)
     return <ErrorState error={credentials.error} onRetry={() => credentials.refetch()} />;
   if (credentials.isPending)
@@ -44,8 +45,9 @@ export function CredentialsScreen({
           key={provider}
           provider={provider}
           credentials={credentials.data.filter((credential) => credential.provider === provider)}
-          health={health}
-          quota={quota}
+          health={credentialHealth.data?.health ?? health}
+          quota={credentialHealth.data?.quota ?? quota}
+          healthUnavailable={credentialHealth.isError}
           now={now}
           onAdd={addProvider}
         />

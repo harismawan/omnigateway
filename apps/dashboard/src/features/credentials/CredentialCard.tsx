@@ -21,11 +21,13 @@ export function CredentialCard({
   credential,
   health,
   quota,
+  healthUnavailable,
   now,
 }: {
   credential: WireCredential;
   health: CredentialHealth[];
   quota: QuotaWindow[];
+  healthUnavailable: boolean;
   now: number;
 }) {
   const [enabled, setEnabled] = useState(credential.enabled);
@@ -35,11 +37,11 @@ export function CredentialCard({
   const save = useMutation({
     mutationFn: async (patch: CredentialPatch) =>
       api.patch(`/api/credentials/${credential.id}`, patch),
-    onSuccess: async () => invalidate([qk.credentials()]),
+    onSuccess: async () => invalidate([qk.credentials(), qk.credentialHealth()]),
   });
   const remove = useMutation({
     mutationFn: async () => api.del(`/api/credentials/${credential.id}`),
-    onSuccess: async () => invalidate([qk.credentials()]),
+    onSuccess: async () => invalidate([qk.credentials(), qk.credentialHealth()]),
   });
 
   const nextTier = Number(tier);
@@ -74,7 +76,11 @@ export function CredentialCard({
           </p>
           <p className="text-xs text-muted-foreground">{formatExpiry(credential.expiresAt, now)}</p>
         </div>
-        <HealthPill health={health} now={now} />
+        {healthUnavailable ? (
+          <p className="text-xs text-muted-foreground">Health unavailable</p>
+        ) : (
+          <HealthPill health={health} now={now} />
+        )}
       </div>
       {quota.map((window) => (
         <QuotaBar key={window.windowType} window={window} />

@@ -149,6 +149,47 @@ test("deleting a confirmed credential uses the delete endpoint", async () => {
   );
 });
 
+test("credential health and quota render from the supplementary endpoint", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({
+      credentials: [credentialFixture({ id: "c1", provider: "anthropic", label: "primary" })],
+    }),
+    "GET /api/credentials/health": () => ({
+      health: [
+        healthFixture({
+          credentialId: "c1",
+          breakerState: "open",
+          consecutiveFailures: 4,
+          openedAt: NOW - 5_000,
+        }),
+      ],
+      quota: [quotaFixture({ credentialId: "c1", used: 250, limit: 1_000 })],
+    }),
+  });
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  expect(await screen.findByText(/4 consecutive failures/)).toBeTruthy();
+  expect(screen.getByText(/25%/)).toBeTruthy();
+});
+
+test("a failed health fetch degrades the card instead of hiding the credential", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({
+      credentials: [credentialFixture({ id: "c1", provider: "anthropic", label: "primary" })],
+    }),
+    "GET /api/credentials/health": () => ({
+      status: 500,
+      body: { error: { code: "INTERNAL", message: "db locked" } },
+    }),
+  });
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  expect(await screen.findByText("primary")).toBeTruthy();
+  expect(screen.getByText("Health unavailable")).toBeTruthy();
+});
+
 test("a failed save renders the gateway error", async () => {
   createFetchStub({
     "GET /api/credentials": () => ({ credentials: [credentialFixture()] }),
