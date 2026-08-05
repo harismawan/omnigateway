@@ -8,14 +8,15 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError } from "../src/api/client.ts";
 import { qk } from "../src/api/queries.ts";
 import type { StatusResponse } from "../src/api/types.ts";
-import { requireSession } from "../src/components/AppShell.tsx";
+import { AppShell, requireSession } from "../src/components/AppShell.tsx";
 import { LoginScreen } from "../src/routes/login.tsx";
 import { createDashboardQueryClient } from "../src/session/queryClient.ts";
+import { ThemeProvider } from "../src/theme/ThemeProvider.tsx";
 import { createFetchStub } from "./helpers/fetchStub.ts";
 
 const realFetch = globalThis.fetch;
@@ -76,11 +77,68 @@ function renderLoginHarness(configured: boolean) {
   return { queryClient, router };
 }
 
+function renderShellHarness() {
+  const queryClient = productionLikeClient();
+  const rootRoute = createRootRouteWithContext<Ctx>()({ component: () => <Outlet /> });
+  const appRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    id: "_app",
+    component: () => (
+      <AppShell onSignOut={() => undefined}>
+        <Outlet />
+      </AppShell>
+    ),
+  });
+  const credentialsRoute = createRoute({
+    getParentRoute: () => appRoute,
+    path: "/credentials",
+    component: () => <p>credentials screen</p>,
+  });
+  const logsRoute = createRoute({
+    getParentRoute: () => appRoute,
+    path: "/logs",
+    component: () => <p>logs screen</p>,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([appRoute.addChildren([credentialsRoute, logsRoute])]),
+    history: createMemoryHistory({ initialEntries: ["/credentials"] }),
+    context: { queryClient },
+  });
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <RouterProvider router={router} />
+      </ThemeProvider>
+    </QueryClientProvider>,
+  );
+  return router;
+}
+
+test("application shell provides accessible route navigation and mobile drawer", async () => {
+  const router = renderShellHarness();
+  const user = userEvent.setup();
+
+  expect(await screen.findByRole("navigation", { name: /primary/i })).toBeDefined();
+  expect(screen.getByRole("link", { name: /credentials/i }).getAttribute("aria-current")).toBe(
+    "page",
+  );
+  expect(screen.getByRole("button", { name: /open navigation/i })).toBeDefined();
+  expect(screen.getByRole("button", { name: /theme:/i })).toBeDefined();
+
+  await user.click(screen.getByRole("button", { name: /open navigation/i }));
+  expect(screen.getByRole("dialog")).toBeDefined();
+
+  await user.click(within(screen.getByRole("dialog")).getByRole("link", { name: /logs/i }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/logs"));
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
 test.each([
   { configured: true, button: /sign in/i, endpoint: "POST /api/login" },
   { configured: false, button: /create password/i, endpoint: "POST /api/setup" },
 ])(
-  "successful $endpoint updates the cached session before guarded navigation",
+  "successful $endpoint updates cached session before guarded navigation",
   async ({ configured, button, endpoint }) => {
     const stub = createFetchStub({ [endpoint]: () => ({ ok: true }) });
     const { queryClient, router } = renderLoginHarness(configured);
@@ -149,7 +207,7 @@ test("concurrent 401 failures cause one redirect", async () => {
   finishRedirect?.();
 });
 
-test("401 on the login route preserves the error without redirecting or clearing status", async () => {
+test("401 on login route preserves error without redirecting or clearing status", async () => {
   let redirects = 0;
   const queryClient = createDashboardQueryClient({
     isLoginRoute: () => true,

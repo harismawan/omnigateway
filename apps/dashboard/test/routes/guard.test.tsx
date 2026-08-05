@@ -12,6 +12,7 @@ import {
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppShell, NAV_ITEMS, requireSession } from "../../src/components/AppShell.tsx";
+import { ThemeProvider } from "../../src/theme/ThemeProvider.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { makeQueryClient } from "../helpers/render.tsx";
 
@@ -59,7 +60,9 @@ function harness(initial: string) {
 
   render(
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <ThemeProvider>
+        <RouterProvider router={router} />
+      </ThemeProvider>
     </QueryClientProvider>,
   );
   return { router, queryClient };
