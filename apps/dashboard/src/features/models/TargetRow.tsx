@@ -25,18 +25,24 @@ export function TargetRow({ id, target, index, count, onChange, onRemove, onMove
             : `translate3d(${sortable.transform.x}px, ${sortable.transform.y}px, 0)`,
         transition: sortable.transition,
       }}
-      className="grid gap-2 rounded border p-3"
+      className="grid gap-3 rounded-lg border bg-card p-4"
     >
-      <div className="flex gap-2">
-        <button
-          type="button"
-          aria-label={`Drag target ${index + 1}`}
-          {...sortable.attributes}
-          {...sortable.listeners}
-        >
-          Drag
-        </button>
-        <strong>Target {index + 1}</strong>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <button
+            aria-label={`Drag target ${index + 1}`}
+            className="cursor-grab rounded p-1 text-muted-foreground hover:bg-muted active:cursor-grabbing"
+            type="button"
+            {...sortable.attributes}
+            {...sortable.listeners}
+          >
+            Drag
+          </button>
+          <strong>Route {index + 1}</strong>
+        </div>
+        <span className="text-sm text-muted-foreground">
+          {target.provider} / {target.model || "upstream model"} / weight {target.weight}
+        </span>
       </div>
       <label>
         Provider
