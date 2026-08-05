@@ -35,7 +35,7 @@ export function LogsScreen({ now, pollMs = POLL_MS }: { now: number; pollMs?: nu
         <div className="flex items-center gap-2">
           <StatusBadge label={paused ? "Paused" : "Live"} tone={paused ? "muted" : "ok"} />
           <p className="text-xs text-muted-foreground">
-            {paused ? "Polling stopped." : `Refreshing every ${POLL_MS / 1_000}s.`}
+            {paused ? "Polling stopped." : `Refreshing every ${pollMs / 1_000}s.`}
           </p>
         </div>
         <div className="flex items-end gap-3">
