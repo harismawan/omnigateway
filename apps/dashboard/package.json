@@ -5,6 +5,7 @@
   "scripts": {
     "generate:routes": "tsr generate",
     "dev": "vite",
+    "test": "bun test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts ./test",
     "typecheck": "bun run generate:routes && tsc --noEmit",
     "build": "bun run typecheck && vite build",
     "preview": "vite preview"

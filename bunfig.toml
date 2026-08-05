@@ -1,2 +1,2 @@
 [test]
-preload = ["./apps/dashboard/test/setup/happydom.ts", "./apps/dashboard/test/setup/cleanup.ts"]
+pathIgnorePatterns = ["apps/dashboard/test/**"]
