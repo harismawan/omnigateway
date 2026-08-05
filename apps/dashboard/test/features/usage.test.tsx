@@ -57,17 +57,29 @@ test("totals of nothing is zero, not NaN", () => {
   });
 });
 
-test("the stat cards show requests, tokens, cost and error rate", async () => {
+test("the stat cards show exactly requests, tokens, estimated cost, and error rate", async () => {
   stubUsage();
   renderWithProviders(<UsageScreen now={NOW} />);
 
-  const requests = await screen.findByRole("group", { name: /requests/i });
-  expect(within(requests).getByText("150")).toBeDefined();
-  expect(within(screen.getByRole("group", { name: /^cost/i })).getByText("$24.00")).toBeDefined();
-  expect(within(screen.getByRole("group", { name: /tokens/i })).getByText("1.1M")).toBeDefined();
+  await screen.findByRole("group", { name: "Requests" });
+  expect(screen.getAllByRole("group")).toHaveLength(4);
+  expect(within(screen.getByRole("group", { name: "Requests" })).getByText("150")).toBeDefined();
   expect(
-    within(screen.getByRole("group", { name: /error rate/i })).getByText("2.7%"),
+    within(screen.getByRole("group", { name: "Estimated cost" })).getByText("$24.00"),
   ).toBeDefined();
+  expect(within(screen.getByRole("group", { name: "Tokens" })).getByText("1.1M")).toBeDefined();
+  expect(within(screen.getByRole("group", { name: "Error rate" })).getByText("2.7%")).toBeDefined();
+});
+
+test("selecting errors updates chart name while preserving usage breakdown", async () => {
+  stubUsage();
+  renderWithProviders(<UsageScreen now={NOW} />);
+
+  await screen.findByLabelText("Estimated cost chart");
+  await (await userEvent.setup()).click(screen.getByRole("tab", { name: "Errors" }));
+
+  expect(screen.getByLabelText("Errors chart")).toBeDefined();
+  expect(screen.getByRole("table", { name: "Usage breakdown" })).toBeDefined();
 });
 
 test("the error rate of an idle window is a dash, not a division by zero", async () => {
@@ -130,7 +142,7 @@ test("switching the range moves the since boundary", async () => {
   expect(since).toContain(NOW - 7 * 86_400_000);
 });
 
-test("the rate limit figure is labelled as a log-tail sample, not a period rate", async () => {
+test("rate limit sample appears as secondary operational text", async () => {
   stubUsage(ROWS, [
     logFixture({ id: "a", status: 429, errorCode: "RATE_LIMIT" }),
     logFixture({ id: "b", status: 200, errorCode: null }),
@@ -138,9 +150,7 @@ test("the rate limit figure is labelled as a log-tail sample, not a period rate"
     logFixture({ id: "d", status: 200, errorCode: null }),
   ]);
   renderWithProviders(<UsageScreen now={NOW} />);
-  const card = await screen.findByRole("group", { name: /rate limited/i });
-  expect(within(card).getByText("25.0%")).toBeDefined();
-  expect(within(card).getByText(/last 4 requests/i)).toBeDefined();
+  expect(await screen.findByText(/rate limited: 25\.0% from last 4 requests/i)).toBeDefined();
 });
 
 test("a failed load offers a retry instead of an empty chart", async () => {

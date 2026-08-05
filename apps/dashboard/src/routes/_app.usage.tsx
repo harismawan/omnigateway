@@ -3,7 +3,10 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { logsQuery, usageQuery } from "@/api/queries.ts";
 import { USAGE_GROUP_BY, type UsageBucket, type UsageGroupBy } from "@/api/types.ts";
+import { DataTableFrame } from "@/components/DataTableFrame.tsx";
 import { ErrorState } from "@/components/ErrorState.tsx";
+import { PageHeader } from "@/components/PageHeader.tsx";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
 import { StatCards, totals } from "@/features/usage/StatCards.tsx";
 import { UsageChart, type UsageMetric } from "@/features/usage/UsageChart.tsx";
 import { formatTokens, formatUsd } from "@/lib/format.ts";
@@ -38,12 +41,17 @@ export function UsageScreen({ now }: { now: number }) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Usage</h1>
+      <PageHeader
+        actions={null}
+        description="Requests, tokens, costs, and errors by gateway dimension."
+        title="Usage"
+      />
+      {logs.data !== undefined && logs.data.length > 0 ? (
         <p className="text-sm text-muted-foreground">
-          Requests, tokens, costs, and errors by gateway dimension.
+          Rate limited: {formatRate(rateLimited, logs.data.length)} from last {logs.data.length}{" "}
+          requests.
         </p>
-      </div>
+      ) : null}
       <div className="flex flex-wrap gap-3">
         <label className="grid gap-1 text-sm">
           <span>Range</span>
@@ -73,37 +81,33 @@ export function UsageScreen({ now }: { now: number }) {
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-sm">
-          <span>Chart metric</span>
-          <select
-            value={metric}
-            onChange={(event) => setMetric(event.target.value as UsageMetric)}
-            className="rounded-md border bg-background px-3 py-2"
-          >
-            <option value="cost">Cost</option>
-            <option value="requests">Requests</option>
-            <option value="tokens">Tokens</option>
-          </select>
-        </label>
+        <Tabs
+          aria-label="Chart metric"
+          onValueChange={(value) => setMetric(value as UsageMetric)}
+          value={metric}
+        >
+          <TabsList aria-label="Chart metric">
+            <TabsTrigger value="cost">Estimated cost</TabsTrigger>
+            <TabsTrigger value="requests">Requests</TabsTrigger>
+            <TabsTrigger value="tokens">Tokens</TabsTrigger>
+            <TabsTrigger value="errors">Errors</TabsTrigger>
+          </TabsList>
+        </Tabs>
       </div>
       {usage.isError ? <ErrorState error={usage.error} onRetry={() => usage.refetch()} /> : null}
       {usage.isLoading ? <p className="text-sm text-muted-foreground">Loading usage…</p> : null}
       {usage.data === undefined ? null : (
         <>
-          <StatCards
-            rows={rows}
-            rateLimited={rateLimited}
-            logSampleSize={(logs.data ?? []).length}
-          />
+          <StatCards rows={rows} />
           {rows.length === 0 ? (
             <p className="text-sm text-muted-foreground">No requests in this window.</p>
           ) : (
             <>
               <UsageChart rows={rows} metric={metric} />
-              <section aria-label="Usage table" className="overflow-x-auto rounded-lg border">
-                <table className="w-full min-w-180 text-sm">
-                  <caption className="sr-only">Usage buckets sorted by cost, highest first</caption>
-                  <thead className="border-b bg-muted/40 text-left">
+              <DataTableFrame ariaLabel="Usage breakdown">
+                <table aria-label="Usage breakdown" className="w-full min-w-180 text-sm">
+                  <caption className="sr-only">Usage breakdown</caption>
+                  <thead className="sticky top-0 border-b bg-muted/40 text-left">
                     <tr>
                       <th className="p-3">{groupBy}</th>
                       <th className="p-3 text-right">Requests</th>
@@ -116,7 +120,7 @@ export function UsageScreen({ now }: { now: number }) {
                   <tbody>
                     {rows.map((row) => (
                       <tr key={row.key} className="border-b last:border-0">
-                        <td className="p-3 font-medium">{row.key}</td>
+                        <td className="p-3 font-mono font-medium">{row.key}</td>
                         <td className="p-3 text-right tabular-nums">
                           {row.requests.toLocaleString()}
                         </td>
@@ -147,7 +151,7 @@ export function UsageScreen({ now }: { now: number }) {
                     </tr>
                   </tfoot>
                 </table>
-              </section>
+              </DataTableFrame>
             </>
           )}
         </>
