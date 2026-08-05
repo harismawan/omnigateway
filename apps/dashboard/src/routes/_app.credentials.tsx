@@ -5,6 +5,7 @@ import { credentialsQuery } from "@/api/queries.ts";
 import type { CredentialHealth, ProviderId, QuotaWindow } from "@/api/types.ts";
 import { PROVIDER_IDS } from "@/api/types.ts";
 import { ErrorState } from "@/components/ErrorState.tsx";
+import { ConnectDialog } from "@/features/credentials/ConnectDialog.tsx";
 import { ProviderGroup } from "@/features/credentials/ProviderGroup.tsx";
 
 export function CredentialsScreen({
@@ -50,7 +51,7 @@ export function CredentialsScreen({
         />
       ))}
       {pendingProvider !== null && (
-        <span className="sr-only">Adding {pendingProvider} account</span>
+        <ConnectDialog provider={pendingProvider} onClose={() => setPendingProvider(null)} />
       )}
     </main>
   );
