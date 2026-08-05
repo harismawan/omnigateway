@@ -63,3 +63,14 @@ Task 3 changed files pass targeted Biome check.
 - Task brief requests bottom status summary only when real status data exists. Current status API test fixture exposes only `configured` and `authenticated`; no gateway-status data exists to render, so no fabricated status slot was added.
 - Full lint cannot pass until unrelated pre-existing diagnostics above are addressed.
 - Review-agent request could not run because account rate limit returned HTTP 429. Inline self-review completed instead.
+
+## Review follow-up: focus restoration
+
+- Root cause verified: `AppShell` mobile button existed outside `NavDrawer`'s `DialogPrimitive.Root`, so Radix had no trigger reference for focus restoration.
+- Fixed shared composition: `AppShell` now owns one controlled `DialogPrimitive.Root`; mobile `Button` is its `DialogPrimitive.Trigger asChild`; `NavDrawer` renders only `DialogContent` under that root.
+- Added regression test: `closing mobile drawer with Escape restores focus to navigation trigger` in `apps/dashboard/test/auth-integration.test.tsx`.
+- Red evidence: before composition fix, focused test failed at `expect(document.activeElement).toBe(trigger)` after Escape because focus did not return to trigger.
+- Green evidence: after fix, `bun --cwd apps/dashboard test test/auth-integration.test.tsx --test-name-pattern='closing mobile drawer with Escape restores focus to navigation trigger'` exited 0 with `0 fail`.
+- Required verification: `bun --cwd apps/dashboard test test/auth-integration.test.tsx test/routes/guard.test.tsx` exited 0 with `0 fail`.
+- Required verification: `bun run --cwd apps/dashboard typecheck` exited 0. Existing route-generator Node circular-dependency warning still emitted; TypeScript completed successfully.
+- `git diff --check` exited 0.

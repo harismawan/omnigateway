@@ -134,6 +134,20 @@ test("application shell provides accessible route navigation and mobile drawer",
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
+test("closing mobile drawer with Escape restores focus to navigation trigger", async () => {
+  renderShellHarness();
+  const user = userEvent.setup();
+  const trigger = await screen.findByRole("button", { name: /open navigation/i });
+
+  await user.click(trigger);
+  expect(screen.getByRole("dialog")).toBeDefined();
+
+  await user.keyboard("{Escape}");
+
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.activeElement).toBe(trigger);
+});
+
 test.each([
   { configured: true, button: /sign in/i, endpoint: "POST /api/login" },
   { configured: false, button: /create password/i, endpoint: "POST /api/setup" },

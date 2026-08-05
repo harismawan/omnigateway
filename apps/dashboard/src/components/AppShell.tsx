@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   Waypoints,
 } from "lucide-react";
+import { Dialog as DialogPrimitive } from "radix-ui";
 import { type ReactElement, type ReactNode, useState } from "react";
 import { api } from "@/api/client.ts";
 import { qk, statusQuery } from "@/api/queries.ts";
@@ -124,34 +125,37 @@ export function AppShell({
         </div>
       </aside>
 
-      <NavDrawer
-        items={NAV_ITEMS}
-        onOpenChange={setDrawerOpen}
-        onSignOut={handleSignOut}
-        open={drawerOpen}
-        renderLinks={renderLinks}
-        signOutPending={signOut.isPending}
-      />
+      <DialogPrimitive.Root onOpenChange={setDrawerOpen} open={drawerOpen}>
+        <div className="min-w-0 flex-1 md:ml-60">
+          <header className="sticky top-0 z-30 flex min-h-14 items-center gap-3 border-b border-border bg-background/95 px-4 backdrop-blur md:px-6">
+            <DialogPrimitive.Trigger asChild>
+              <Button
+                aria-label="Open navigation"
+                className="size-11 md:hidden"
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <Menu aria-hidden="true" />
+              </Button>
+            </DialogPrimitive.Trigger>
+            <p className="min-w-0 flex-1 truncate text-sm font-medium">
+              {currentItem?.label ?? "OmniGateway"}
+            </p>
+            <ThemeToggle />
+          </header>
+          <main className="min-w-0 px-4 py-6 sm:px-6 md:px-8">{children}</main>
+        </div>
 
-      <div className="min-w-0 flex-1 md:ml-60">
-        <header className="sticky top-0 z-30 flex min-h-14 items-center gap-3 border-b border-border bg-background/95 px-4 backdrop-blur md:px-6">
-          <Button
-            aria-label="Open navigation"
-            className="size-11 md:hidden"
-            onClick={() => setDrawerOpen(true)}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <Menu aria-hidden="true" />
-          </Button>
-          <p className="min-w-0 flex-1 truncate text-sm font-medium">
-            {currentItem?.label ?? "OmniGateway"}
-          </p>
-          <ThemeToggle />
-        </header>
-        <main className="min-w-0 px-4 py-6 sm:px-6 md:px-8">{children}</main>
-      </div>
+        <NavDrawer
+          items={NAV_ITEMS}
+          onOpenChange={setDrawerOpen}
+          onSignOut={handleSignOut}
+          open={drawerOpen}
+          renderLinks={renderLinks}
+          signOutPending={signOut.isPending}
+        />
+      </DialogPrimitive.Root>
     </div>
   );
 }
