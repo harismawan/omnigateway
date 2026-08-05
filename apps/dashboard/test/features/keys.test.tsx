@@ -83,6 +83,33 @@ test("mint sends unrestricted null and optional rate limit", async () => {
   expect(await screen.findByText(MINTED.key)).toBeDefined();
 });
 
+test("an empty label is rejected locally without minting", async () => {
+  const stub = stubKeys();
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.type(screen.getByLabelText(/label/i), "   ");
+  await user.click(screen.getByRole("button", { name: /mint key/i }));
+  expect(await screen.findByText("Label is required.")).toBeDefined();
+  expect(stub.calls.some((call) => call.init?.method === "POST" && call.url === "/api/keys")).toBe(
+    false,
+  );
+});
+
+test("invalid rate limits are rejected locally without minting", async () => {
+  const stub = stubKeys();
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.type(screen.getByLabelText(/label/i), "ci");
+  await user.type(screen.getByLabelText(/rate limit/i), "0");
+  await user.click(screen.getByRole("button", { name: /mint key/i }));
+  expect(await screen.findByText("Rate limit must be a positive whole number.")).toBeDefined();
+  expect(stub.calls.some((call) => call.init?.method === "POST" && call.url === "/api/keys")).toBe(
+    false,
+  );
+});
+
 test("the minted key is only copied from local dialog state and dismissed safely", async () => {
   stubKeys();
   const clipboard = navigator.clipboard;
@@ -103,6 +130,37 @@ test("the minted key is only copied from local dialog state and dismissed safely
   }
 });
 
+test("a clipboard rejection keeps the key visible without exposing it in the message", async () => {
+  stubKeys();
+  const clipboard = navigator.clipboard;
+  const writeText = clipboard.writeText;
+  Object.defineProperty(clipboard, "writeText", {
+    configurable: true,
+    value: async (_value: string) => Promise.reject(new Error("denied")),
+  });
+  try {
+    renderWithProviders(<KeysScreen now={NOW} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new key/i }));
+    await user.type(screen.getByLabelText(/label/i), "ci");
+    await user.click(screen.getByRole("button", { name: /mint key/i }));
+    await screen.findByText(MINTED.key);
+    await user.click(screen.getByRole("button", { name: /^copy$/i }));
+    expect(
+      await screen.findByText("Could not copy key; select and copy it manually."),
+    ).toBeDefined();
+    expect(screen.getByText(MINTED.key)).toBeDefined();
+  } finally {
+    Object.defineProperty(clipboard, "writeText", { configurable: true, value: writeText });
+  }
+});
+
+test("a null rate limit is displayed as No limit", async () => {
+  stubKeys();
+  renderWithProviders(<KeysScreen now={NOW} />);
+  expect(await screen.findByText("No limit")).toBeDefined();
+});
+
 test("revoking requires confirmation and invalidates the keys list", async () => {
   const stub = stubKeys();
   renderWithProviders(<KeysScreen now={NOW} />);
@@ -111,7 +169,32 @@ test("revoking requires confirmation and invalidates the keys list", async () =>
   await user.click(within(row).getByRole("button", { name: /revoke/i }));
   expect(screen.getByText(/permanently revoke/i)).toBeDefined();
   await user.click(screen.getByRole("button", { name: /^revoke key$/i }));
-  await waitFor(() => expect(stub.calls.some((call) => call.url === "/api/keys/k1")).toBe(true));
+  await waitFor(() =>
+    expect(
+      stub.calls.some((call) => call.url === "/api/keys/k1" && call.init?.method === "DELETE"),
+    ).toBe(true),
+  );
+  expect(
+    stub.calls.filter((call) => call.url === "/api/keys" && call.init?.method === "GET").length,
+  ).toBe(2);
+});
+
+test("a revoke failure is rendered without removing the key", async () => {
+  createFetchStub({
+    "GET /api/keys": () => ({ keys: [KEY] }),
+    "GET /api/models": () => ({ models: [] }),
+    "DELETE /api/keys/k1": () => ({
+      status: 500,
+      body: { error: { code: "INTERNAL", message: "revoke failed" } },
+    }),
+  });
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  const row = await screen.findByRole("row", { name: /laptop/i });
+  await user.click(within(row).getByRole("button", { name: /revoke/i }));
+  await user.click(screen.getByRole("button", { name: /^revoke key$/i }));
+  expect(await screen.findByText("revoke failed")).toBeDefined();
+  expect(screen.getByText("laptop")).toBeDefined();
 });
 
 test("a failed mint surfaces the gateway message and keeps the form open", async () => {
@@ -126,6 +209,7 @@ test("a failed mint surfaces the gateway message and keeps the form open", async
   renderWithProviders(<KeysScreen now={NOW} />);
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.type(screen.getByLabelText(/label/i), "ci");
   await user.click(screen.getByRole("button", { name: /mint key/i }));
   expect(await screen.findByText("label is required")).toBeDefined();
   expect(screen.getByRole("dialog")).toBeDefined();

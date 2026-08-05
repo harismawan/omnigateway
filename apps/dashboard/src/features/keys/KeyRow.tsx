@@ -27,7 +27,7 @@ export function KeyRow({ apiKey, now }: { apiKey: WireApiKey; now: number }) {
             ? "No models"
             : apiKey.modelAllowlist.join(", ")}
       </td>
-      <td>{apiKey.rateLimitPerMin === null ? "—" : `${apiKey.rateLimitPerMin}/min`}</td>
+      <td>{apiKey.rateLimitPerMin === null ? "No limit" : `${apiKey.rateLimitPerMin}/min`}</td>
       <td>{formatRelative(apiKey.createdAt, now)}</td>
       <td>
         {apiKey.revokedAt !== null ? (

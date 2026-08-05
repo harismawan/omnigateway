@@ -38,6 +38,8 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
   const [allowlist, setAllowlist] = useState("");
   const [rateLimit, setRateLimit] = useState("");
   const [unknown, setUnknown] = useState<string[]>([]);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState(false);
   const [minted, setMinted] = useState<MintedKey | null>(null);
   const mint = useMutation({
     mutationFn: (input: MintKeyInput) => api.post<MintedKey>("/api/keys", input),
@@ -52,10 +54,17 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
     setAllowlist("");
     setRateLimit("");
     setUnknown([]);
+    setLocalError(null);
+    setCopyError(false);
     mint.reset();
     onClose();
   };
   const submit = () => {
+    const trimmedLabel = label.trim();
+    if (trimmedLabel.length === 0) {
+      setLocalError("Label is required.");
+      return;
+    }
     const parsed = parseAllowlist(
       allowlist,
       (models.data ?? []).map((model) => model.id),
@@ -63,11 +72,29 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
     setUnknown(parsed.unknown);
     if (parsed.unknown.length > 0) return;
     const parsedRateLimit = rateLimit.trim() === "" ? null : Number(rateLimit);
+    if (parsedRateLimit !== null && (!Number.isInteger(parsedRateLimit) || parsedRateLimit < 1)) {
+      setLocalError("Rate limit must be a positive whole number.");
+      return;
+    }
+    setLocalError(null);
     mint.mutate({
-      label: label.trim(),
+      label: trimmedLabel,
       modelAllowlist: parsed.models,
       rateLimitPerMin: parsedRateLimit,
     });
+  };
+  const copy = async () => {
+    const clipboard = navigator.clipboard;
+    if (clipboard === undefined) {
+      setCopyError(true);
+      return;
+    }
+    try {
+      await clipboard.writeText(minted?.key ?? "");
+      setCopyError(false);
+    } catch {
+      setCopyError(true);
+    }
   };
   return (
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
@@ -81,8 +108,13 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
               This key cannot be shown again. Copy it now and store it safely.
             </DialogDescription>
             <code className="block break-all rounded bg-muted p-3 text-sm">{minted.key}</code>
+            {copyError && (
+              <p role="alert" className="text-sm text-warn">
+                Could not copy key; select and copy it manually.
+              </p>
+            )}
             <div className="flex gap-2">
-              <Button onClick={() => void navigator.clipboard?.writeText(minted.key)}>Copy</Button>
+              <Button onClick={copy}>Copy</Button>
               <Button variant="secondary" onClick={close}>
                 Done
               </Button>
@@ -117,11 +149,19 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
               <Label htmlFor="key-rate-limit">Rate limit per minute</Label>
               <Input
                 id="key-rate-limit"
+                type="number"
+                min={1}
+                step={1}
                 inputMode="numeric"
                 value={rateLimit}
                 onChange={(event) => setRateLimit(event.target.value)}
               />
             </div>
+            {localError !== null && (
+              <p role="alert" className="text-sm text-warn">
+                {localError}
+              </p>
+            )}
             {mint.isError && <ErrorState error={mint.error} />}
             <div className="flex gap-2">
               <Button disabled={mint.isPending} onClick={submit}>
