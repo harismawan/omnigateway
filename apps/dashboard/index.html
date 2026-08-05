@@ -9,7 +9,10 @@
     <div id="root"></div>
     <script>
       (() => {
-        const mode = localStorage.getItem("omni-theme");
+        let mode = null;
+        try {
+          mode = localStorage.getItem("omni-theme");
+        } catch {}
         const theme = mode === "light" || mode === "dark" || mode === "system" ? mode : "system";
         const resolved = theme === "system" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : theme;
         document.documentElement.classList.toggle("dark", resolved === "dark");

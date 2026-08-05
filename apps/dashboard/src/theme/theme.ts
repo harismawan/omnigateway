@@ -11,6 +11,14 @@ export function resolveTheme(mode: ThemeMode, prefersDark: boolean): ResolvedThe
   return mode === "system" ? (prefersDark ? "dark" : "light") : mode;
 }
 
+export function getStoredThemeMode(): ThemeMode {
+  try {
+    return parseThemeMode(localStorage.getItem(THEME_STORAGE_KEY));
+  } catch {
+    return "system";
+  }
+}
+
 export function applyTheme(
   mode: ThemeMode,
   prefersDark: boolean,
@@ -19,5 +27,10 @@ export function applyTheme(
   const resolved = resolveTheme(mode, prefersDark);
   root.classList.toggle("dark", resolved === "dark");
   root.dataset.theme = resolved;
-  localStorage.setItem(THEME_STORAGE_KEY, mode);
+
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, mode);
+  } catch {
+    // Storage can be unavailable in sandboxed or privacy-restricted contexts.
+  }
 }

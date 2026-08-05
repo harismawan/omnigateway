@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createElement, type ReactNode } from "react";
 import { ThemeToggle } from "../../src/components/ThemeToggle.tsx";
@@ -101,4 +101,79 @@ test("applying theme updates root without replacing unrelated classes", () => {
   expect(document.documentElement.classList.contains("test-class")).toBe(true);
   expect(document.documentElement.dataset.theme).toBe("dark");
   expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
+});
+
+test("theme menu supports keyboard navigation and Escape dismissal", async () => {
+  const user = userEvent.setup();
+  renderTheme();
+
+  const trigger = screen.getByRole("button", { name: /theme: system/i });
+  trigger.focus();
+  await user.keyboard("{ArrowDown}");
+
+  const system = screen.getByRole("menuitemradio", { name: /system/i });
+  const light = screen.getByRole("menuitemradio", { name: /light/i });
+  const dark = screen.getByRole("menuitemradio", { name: /dark/i });
+  expect(document.activeElement).toBe(system);
+  await user.keyboard("{ArrowDown}");
+  expect(document.activeElement).toBe(light);
+  await user.keyboard("{End}");
+  expect(document.activeElement).toBe(dark);
+  await user.keyboard("{Home}");
+  expect(document.activeElement).toBe(system);
+  await user.keyboard("{Escape}");
+
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
+
+test("theme menu dismisses when focus moves outside", async () => {
+  const user = userEvent.setup();
+  renderTheme(
+    createElement(
+      "div",
+      null,
+      createElement(ThemeToggle),
+      createElement("button", { type: "button" }, "Outside"),
+    ),
+  );
+
+  await user.click(screen.getByRole("button", { name: /theme: system/i }));
+  fireEvent.focusOut(screen.getByRole("menu"), { relatedTarget: document.body });
+  fireEvent.pointerDown(document.body);
+
+  expect(screen.queryByRole("menu")).toBeNull();
+});
+
+test("storage failures preserve theme application and system fallback", () => {
+  const storageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const brokenStorage = {
+    getItem: () => {
+      throw new DOMException("Storage unavailable", "SecurityError");
+    },
+    setItem: () => {
+      throw new DOMException("Storage unavailable", "SecurityError");
+    },
+  } as unknown as Storage;
+
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: brokenStorage,
+  });
+
+  try {
+    installMatchMedia(true);
+    renderTheme();
+    expect(document.documentElement.dataset.theme).toBe("dark");
+
+    applyTheme("light", true);
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.classList.contains("dark")).toBe(false);
+  } finally {
+    if (storageDescriptor === undefined) {
+      delete (globalThis as { localStorage?: Storage }).localStorage;
+    } else {
+      Object.defineProperty(globalThis, "localStorage", storageDescriptor);
+    }
+  }
 });

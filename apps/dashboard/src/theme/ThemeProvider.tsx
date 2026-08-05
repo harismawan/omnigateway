@@ -10,9 +10,8 @@ import {
 } from "react";
 import {
   applyTheme,
-  parseThemeMode,
+  getStoredThemeMode,
   resolveTheme,
-  THEME_STORAGE_KEY,
   type ThemeMode,
 } from "./theme.ts";
 
@@ -23,10 +22,6 @@ type ThemeContextValue = {
 };
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
-
-function getStoredThemeMode(): ThemeMode {
-  return parseThemeMode(localStorage.getItem(THEME_STORAGE_KEY));
-}
 
 function getSystemPreference(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;

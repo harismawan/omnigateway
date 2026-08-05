@@ -59,3 +59,25 @@ DONE_WITH_CONCERNS
 - Full repository `bun run lint` remains blocked by unrelated pre-existing formatting in `postman/OmniGateway.postman_collection.json`; no Task 1 lint findings.
 - Dashboard typecheck emits existing Node circular-dependency warning while generating routes; it exits successfully and TypeScript reports no errors.
 - User directed no subagents; self-review completed inline.
+
+## Fix Round: Review Findings
+
+### Fixed
+
+- Replaced custom theme popup with existing Radix `DropdownMenu` primitives. Radix now owns menu focus placement, Arrow/Home/End navigation, Escape dismissal with trigger focus restoration, and outside dismissal.
+- Added `getStoredThemeMode()` with guarded storage reads. `applyTheme()` now writes storage best-effort after DOM theme application. Inline startup script also catches blocked storage reads and retains system-theme resolution.
+- Added regression coverage for keyboard navigation/Escape dismissal, outside dismissal, and throwing storage reads/writes.
+
+### Test Commands and Exact Outcomes
+
+| Command | Outcome |
+| --- | --- |
+| `bun --cwd apps/dashboard test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts ./test/theme/theme.test.ts` | RED before implementation: 118 passed, 3 failed. New failures showed missing custom-menu focus behavior, missing outside dismissal, and unhandled throwing storage access. Final GREEN: 121 passed, 0 failed, 292 expectations. |
+| `bun --cwd apps/dashboard test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts ./test/smoke.test.tsx` | Passed: 0 failures. |
+| `bun run --cwd apps/dashboard typecheck` | Passed. Route generation emitted existing Node circular-dependency warning for `replaceRouteChunk`; TypeScript emitted no errors. |
+| `git diff --check` | Passed: no whitespace errors. |
+
+### Fix-Round Concerns
+
+- Dashboard typecheck still emits existing `replaceRouteChunk` Node circular-dependency warning during route generation; command exits successfully with no TypeScript errors.
+- Full-repository lint was not rerun in this fix round; prior report documents existing unrelated formatting failure in `postman/OmniGateway.postman_collection.json`.
