@@ -55,12 +55,18 @@ export function LogRow({
         <tr>
           <td className="bg-muted/30 p-3" colSpan={9}>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-4">
+              <Detail label="Request" value={log.id} />
+              <Detail label="API key" value={log.apiKeyId ?? "—"} />
               <Detail label="Credential" value={log.credentialId ?? "—"} />
               <Detail label="Attempts" value={String(log.attempts)} />
-              <Detail label="Input tokens" value={formatTokens(log.inputTokens)} />
-              <Detail label="Output tokens" value={formatTokens(log.outputTokens)} />
-              <Detail label="Cache read" value={formatTokens(log.cacheReadTokens)} />
-              <Detail label="Cache write" value={formatTokens(log.cacheWriteTokens)} />
+              <Detail
+                label="Tokens"
+                value={`${formatTokens(log.inputTokens)} in · ${formatTokens(log.outputTokens)} out`}
+              />
+              <Detail
+                label="Cache"
+                value={`${formatTokens(log.cacheReadTokens)} read · ${formatTokens(log.cacheWriteTokens)} write`}
+              />
               <Detail label="Time to first token" value={formatMs(log.ttftMs)} />
               <Detail label="Duration" value={formatMs(log.durationMs)} />
               <Detail label="Cost" value={formatUsd(log.costUsd)} />

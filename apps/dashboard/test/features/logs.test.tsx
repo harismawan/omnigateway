@@ -55,6 +55,29 @@ test("expanding a row shows the recorded detail", async () => {
   expect(screen.getAllByText("$0.04").length).toBeGreaterThan(0);
 });
 
+test("expanded detail identifies the request and its API key", async () => {
+  createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture({ apiKeyId: "key-42" })] }) });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await (await userEvent.setup()).click(
+    await screen.findByRole("button", { name: /details for r1/i }),
+  );
+
+  expect(screen.getByText("Request").nextElementSibling?.textContent).toBe("r1");
+  expect(screen.getByText("API key").nextElementSibling?.textContent).toBe("key-42");
+  expect(screen.getByText("Tokens").nextElementSibling?.textContent).toBe("1.2K in · 340 out");
+  expect(screen.getByText("Cache").nextElementSibling?.textContent).toBe("0 read · 0 write");
+});
+
+test("expanded detail falls back when its API key is unavailable", async () => {
+  createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture({ apiKeyId: null })] }) });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await (await userEvent.setup()).click(
+    await screen.findByRole("button", { name: /details for r1/i }),
+  );
+
+  expect(screen.getByText("API key").nextElementSibling?.textContent).toBe("—");
+});
+
 test("a multi-attempt request says the earlier attempts are not retained", async () => {
   createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture({ attempts: 3 })] }) });
   renderWithProviders(<LogsScreen now={NOW} />);
