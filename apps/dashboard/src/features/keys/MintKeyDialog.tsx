@@ -43,9 +43,10 @@ export function MintKeyDialog({ open, onClose }: { open: boolean; onClose: () =>
   const [copied, setCopied] = useState(false);
   const [minted, setMinted] = useState<MintedKey | null>(null);
   const mint = useMutation({
-    mutationFn: (input: MintKeyInput) => api.post<MintedKey>("/api/keys", input),
-    onSuccess: async (key) => {
-      setMinted(key);
+    mutationFn: async (input: MintKeyInput) => {
+      setMinted(await api.post<MintedKey>("/api/keys", input));
+    },
+    onSuccess: async () => {
       await invalidate([qk.keys()]);
     },
   });
