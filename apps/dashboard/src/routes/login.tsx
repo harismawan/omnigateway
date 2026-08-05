@@ -1,9 +1,9 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
 import { api } from "@/api/client.ts";
-import { statusQuery } from "@/api/queries.ts";
-import type { OkResponse } from "@/api/types.ts";
+import { qk, statusQuery } from "@/api/queries.ts";
+import type { OkResponse, StatusResponse } from "@/api/types.ts";
 import { ErrorState } from "@/components/ErrorState.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card.tsx";
@@ -15,13 +15,20 @@ const MIN_PASSWORD_LENGTH = 12;
 type LoginScreenProps = { onAuthenticated: () => void };
 
 export function LoginScreen({ onAuthenticated }: LoginScreenProps) {
+  const queryClient = useQueryClient();
   const status = useQuery(statusQuery());
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
   const submit = useMutation({
     mutationFn: (path: "/api/login" | "/api/setup") => api.post<OkResponse>(path, { password }),
-    onSuccess: () => onAuthenticated(),
+    onSuccess: () => {
+      queryClient.setQueryData<StatusResponse>(qk.status(), {
+        configured: true,
+        authenticated: true,
+      });
+      onAuthenticated();
+    },
   });
 
   if (status.isPending) return <p>Loading…</p>;
