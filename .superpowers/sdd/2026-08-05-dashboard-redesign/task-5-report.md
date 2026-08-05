@@ -70,3 +70,27 @@ Changed Task 5 files pass Biome formatting/check after applying formatter.
 Reviewed focused diff for summary semantics, health-unavailable handling, accessibility, provider actions, OAuth/mutation continuity, and formatting. Fixed one issue found: pending health query now presents as unavailable/unknown rather than allowing empty health to imply a muted usable state.
 
 Independent code-review agent launch was attempted but provider returned HTTP 429 rate-limit rejection. Manual self-review completed instead.
+
+## Review Fixes
+
+- `Connect provider` now opens an explicit Anthropic/OpenAI/Kimi Coding chooser. Selection closes chooser and flows through existing `addProvider` callback/dialog behavior.
+- `credentialSummary` now creates quota warnings only for IDs in current credentials and only for `Number.isFinite(window.limit)` values at or above 90%.
+- Credential actions now render after quota, preserving identity → health → tier/weight → quota → actions order and mutation states.
+- Added regressions for rogue credential quota rows, non-finite quota limits, chooser visibility, and selected OpenAI callback routing.
+
+## Review Fix Verification
+
+Passed on 2026-08-05:
+
+```bash
+bun run --cwd apps/dashboard test -- test/features/credentials.test.tsx test/features/connect.test.tsx
+# 0 fail
+
+bun run --cwd apps/dashboard typecheck
+# exit 0; tsr emits existing Node circular-dependency warning
+
+git diff --check
+# exit 0
+```
+
+TDD evidence: before production edits, focused credential test run failed with `Expected: 0 Received: 1` for rogue/non-finite quota warnings and no accessible `Connect provider` dialog. After fixes, focused test suite reports `0 fail`.

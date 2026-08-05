@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { credentialHealthQuery, credentialsQuery } from "@/api/queries.ts";
 import type { CredentialHealth, ProviderId, QuotaWindow, WireCredential } from "@/api/types.ts";
-import { PROVIDER_IDS } from "@/api/types.ts";
+import { PROVIDER_IDS, PROVIDER_LABELS } from "@/api/types.ts";
 import { ErrorState } from "@/components/ErrorState.tsx";
 import { LoadingSkeleton } from "@/components/LoadingSkeleton.tsx";
 import { PageHeader } from "@/components/PageHeader.tsx";
@@ -31,9 +31,16 @@ export function credentialSummary(
     rows.push(row);
     healthByCredential.set(row.credentialId, rows);
   }
+  const credentialIds = new Set(credentials.map((credential) => credential.id));
   const quotaWarnings = new Set(
     quota
-      .filter((window) => window.limit !== null && window.used / window.limit >= 0.9)
+      .filter(
+        (window) =>
+          credentialIds.has(window.credentialId) &&
+          window.limit !== null &&
+          Number.isFinite(window.limit) &&
+          window.used / window.limit >= 0.9,
+      )
       .map((window) => window.credentialId),
   );
   let healthy = 0;
@@ -52,6 +59,18 @@ export function credentialSummary(
   }
 
   return { connected: credentials.length, healthy, impaired, quotaWarnings: quotaWarnings.size };
+}
+
+function ProviderChooser({ onSelect }: { onSelect: (provider: ProviderId) => void }) {
+  return (
+    <div className="flex flex-wrap gap-2" role="dialog" aria-label="Connect provider">
+      {PROVIDER_IDS.map((provider) => (
+        <Button key={provider} variant="secondary" onClick={() => onSelect(provider)}>
+          {PROVIDER_LABELS[provider]}
+        </Button>
+      ))}
+    </div>
+  );
 }
 
 function CredentialsLoading() {
@@ -90,6 +109,7 @@ export function CredentialsScreen({
   quota?: QuotaWindow[];
   onAddProvider?: (provider: ProviderId) => void;
 }) {
+  const [providerChooserOpen, setProviderChooserOpen] = useState(false);
   const [pendingProvider, setPendingProvider] = useState<ProviderId | null>(null);
   const credentials = useQuery(credentialsQuery());
   const credentialHealth = useQuery(credentialHealthQuery());
@@ -98,6 +118,7 @@ export function CredentialsScreen({
   if (credentials.isPending) return <CredentialsLoading />;
 
   function addProvider(provider: ProviderId) {
+    setProviderChooserOpen(false);
     setPendingProvider(provider);
     onAddProvider?.(provider);
   }
@@ -111,8 +132,9 @@ export function CredentialsScreen({
       <PageHeader
         title="Credentials"
         description="Manage provider accounts used by the gateway."
-        actions={<Button onClick={() => addProvider("anthropic")}>Connect provider</Button>}
+        actions={<Button onClick={() => setProviderChooserOpen(true)}>Connect provider</Button>}
       />
+      {providerChooserOpen && <ProviderChooser onSelect={addProvider} />}
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile label="Connected accounts" value={String(summary.connected)} />
         <StatTile label="Healthy accounts" value={String(summary.healthy)} tone="ok" />

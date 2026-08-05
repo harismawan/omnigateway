@@ -114,6 +114,13 @@ export function CredentialCard({
             onChange={(event) => setWeight(event.target.value)}
           />
         </div>
+      </div>
+      <div className="grid gap-2 border-t pt-4">
+        {quota.map((window) => (
+          <QuotaBar key={window.windowType} window={window} />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2">
         <Button type="button" onClick={submit} disabled={!valid || !dirty || save.isPending}>
           Save
         </Button>
@@ -125,11 +132,6 @@ export function CredentialCard({
         >
           Delete
         </Button>
-      </div>
-      <div className="grid gap-2 border-t pt-4">
-        {quota.map((window) => (
-          <QuotaBar key={window.windowType} window={window} />
-        ))}
       </div>
       {save.isError && <ErrorState error={save.error} />}
       {remove.isError && <ErrorState error={remove.error} />}

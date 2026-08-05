@@ -39,6 +39,16 @@ test("credential summary counts connected, healthy, impaired, and quota warning 
   });
 });
 
+test("credential summary ignores quota from removed credentials and non-finite limits", () => {
+  const credentials = [credentialFixture({ id: "current" })];
+  const quota = [
+    quotaFixture({ credentialId: "removed", used: 100, limit: 100 }),
+    quotaFixture({ credentialId: "current", used: 100, limit: Number.POSITIVE_INFINITY }),
+  ];
+
+  expect(credentialSummary(credentials, [], quota, NOW).quotaWarnings).toBe(0);
+});
+
 test("credentials workspace renders summary, provider headings, and empty provider action", async () => {
   createFetchStub({
     "GET /api/credentials": () => ({
@@ -61,7 +71,9 @@ test("credentials workspace renders summary, provider headings, and empty provid
   expect(screen.getByRole("heading", { name: "OpenAI" })).toBeTruthy();
   expect(screen.getByRole("heading", { name: "Kimi Coding" })).toBeTruthy();
   expect(screen.getByText("No Anthropic accounts connected")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Connect provider" })).toBeTruthy();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Connect provider" }));
+  expect(screen.getByRole("dialog", { name: "Connect provider" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Add Anthropic account" })).toBeTruthy();
 });
 
@@ -97,6 +109,22 @@ test("renders every provider group with an add account seam", async () => {
   expect(screen.getByRole("heading", { name: "Kimi Coding" })).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Add Anthropic account" }));
   expect(added).toEqual(["anthropic"]);
+});
+
+test("provider chooser sends selected provider through existing add callback", async () => {
+  createFetchStub({ "GET /api/credentials": () => ({ credentials: [] }) });
+  const user = userEvent.setup();
+  const added: string[] = [];
+
+  renderWithProviders(
+    <CredentialsScreen now={NOW} onAddProvider={(provider) => added.push(provider)} />,
+  );
+
+  await screen.findByRole("button", { name: "Connect provider" });
+  await user.click(screen.getByRole("button", { name: "Connect provider" }));
+  await user.click(screen.getByRole("button", { name: "OpenAI" }));
+
+  expect(added).toEqual(["openai"]);
 });
 
 test("health severity prioritizes breaker open over rate limiting", () => {
