@@ -32,6 +32,21 @@ test("post sends json and sets the content type", async () => {
   expect(init?.body).toBe(JSON.stringify({ password: "synthetic-password" }));
 });
 
+test("patch and put preserve their request methods and paths", async () => {
+  const stub = createFetchStub({
+    "PATCH /api/credentials/c1": () => ({ ok: true }),
+    "PUT /api/models/fast": () => ({ ok: true }),
+  });
+
+  await api.patch("/api/credentials/c1", { tier: 2 });
+  await api.put("/api/models/fast", { id: "fast" });
+
+  expect(stub.calls.map(({ url, init }) => `${init?.method} ${url}`)).toEqual([
+    "PATCH /api/credentials/c1",
+    "PUT /api/models/fast",
+  ]);
+});
+
 test("an error body becomes an ApiError carrying the gateway code", async () => {
   createFetchStub({
     "GET /api/credentials": () => ({
