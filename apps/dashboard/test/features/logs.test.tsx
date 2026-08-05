@@ -111,31 +111,28 @@ test("degradations are listed so a silently downgraded request is visible", asyn
   expect(screen.getByText(/degradations: droppedThinking/i)).toBeDefined();
 });
 
-test("the tail polls on the interval", async () => {
+test("the tail polls every three seconds", async () => {
+  expect(POLL_MS).toBe(3_000);
   let call = 0;
   const stub = createFetchStub({
     "GET /api/logs": () => ({ logs: [logFixture({ id: `r${++call}` })] }),
   });
-  renderWithProviders(<LogsScreen now={NOW} />);
+  renderWithProviders(<LogsScreen now={NOW} pollMs={50} />);
   await screen.findByRole("button", { name: /details for r1/i });
 
-  await waitFor(
-    () =>
-      expect(stub.calls.filter((call) => call.url.startsWith("/api/logs")).length).toBeGreaterThan(
-        1,
-      ),
-    { timeout: POLL_MS * 3 },
+  await waitFor(() =>
+    expect(stub.calls.filter((call) => call.url.startsWith("/api/logs")).length).toBeGreaterThan(1),
   );
 });
 
-test("pausing stops the polling", async () => {
+test("pausing stops polling before the three-second interval", async () => {
   const stub = createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture()] }) });
-  renderWithProviders(<LogsScreen now={NOW} />);
+  renderWithProviders(<LogsScreen now={NOW} pollMs={50} />);
   await screen.findByRole("button", { name: /details for r1/i });
   await (await userEvent.setup()).click(screen.getByRole("button", { name: /pause/i }));
 
   const after = stub.calls.length;
-  await new Promise((resolve) => setTimeout(resolve, POLL_MS * 1.5));
+  await new Promise((resolve) => setTimeout(resolve, 100));
   expect(stub.calls.length).toBe(after);
   expect(screen.getByRole("button", { name: /resume/i })).toBeDefined();
 });
@@ -163,10 +160,10 @@ test("a failed poll surfaces the error and keeps the last rows on screen", async
         ? { status: 500, body: { error: { code: "INTERNAL", message: "db locked" } } }
         : { logs: [logFixture()] },
   });
-  renderWithProviders(<LogsScreen now={NOW} />);
+  renderWithProviders(<LogsScreen now={NOW} pollMs={50} />);
   await screen.findByRole("button", { name: /details for r1/i });
 
   fail = true;
-  expect(await screen.findByText("db locked", {}, { timeout: POLL_MS * 3 })).toBeDefined();
+  expect(await screen.findByText("db locked")).toBeDefined();
   expect(screen.getByRole("button", { name: /details for r1/i })).toBeDefined();
 });

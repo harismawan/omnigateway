@@ -11,13 +11,13 @@ import { LogRow } from "@/features/logs/LogRow.tsx";
 export const POLL_MS = 3_000;
 export const LOG_LIMITS: readonly number[] = [100, 200, 500];
 
-export function LogsScreen({ now }: { now: number }) {
+export function LogsScreen({ now, pollMs = POLL_MS }: { now: number; pollMs?: number }) {
   const [limit, setLimit] = useState(100);
   const [paused, setPaused] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const logs = useQuery({
-    ...logsQuery(limit, POLL_MS),
-    refetchInterval: paused ? false : POLL_MS,
+    ...logsQuery(limit, pollMs),
+    refetchInterval: paused ? false : pollMs,
   });
 
   return (
