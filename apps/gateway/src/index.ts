@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { createStore, deriveKey } from "@omni/store";
 import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
@@ -11,7 +12,11 @@ const store = await createStore({
   encryptionKey,
 });
 
-const app = createApp({ store, baseUrl: config.baseUrl });
+const app = createApp({
+  store,
+  baseUrl: config.baseUrl,
+  staticDir: resolve(import.meta.dir, "../../dashboard/dist"),
+});
 const stopMaintenance = startMaintenance({ store, now: () => Date.now() });
 
 app.listen({ port: config.port, hostname: config.host });

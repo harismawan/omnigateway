@@ -8,6 +8,8 @@
   ],
   "scripts": {
     "dev": "bun --watch apps/gateway/src/index.ts",
+    "build:dashboard": "cd apps/dashboard && bun run build",
+    "dev:dashboard": "cd apps/dashboard && bun run dev",
     "start": "bun apps/gateway/src/index.ts",
     "test": "bun test",
     "lint": "biome check .",
