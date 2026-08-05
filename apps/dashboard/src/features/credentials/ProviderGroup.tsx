@@ -1,5 +1,6 @@
 import type { CredentialHealth, ProviderId, QuotaWindow, WireCredential } from "@/api/types.ts";
 import { PROVIDER_LABELS } from "@/api/types.ts";
+import { Button } from "@/components/ui/button.tsx";
 import { CredentialCard } from "./CredentialCard.tsx";
 
 export function ProviderGroup({
@@ -8,16 +9,24 @@ export function ProviderGroup({
   health,
   quota,
   now,
+  onAdd,
 }: {
   provider: ProviderId;
   credentials: WireCredential[];
   health: CredentialHealth[];
   quota: QuotaWindow[];
   now: number;
+  onAdd: (provider: ProviderId) => void;
 }) {
+  const label = PROVIDER_LABELS[provider];
   return (
     <section className="space-y-3">
-      <h2 className="text-lg font-semibold">{PROVIDER_LABELS[provider]}</h2>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold">{label}</h2>
+        <Button type="button" variant="outline" size="sm" onClick={() => onAdd(provider)}>
+          Add {label} account
+        </Button>
+      </div>
       <div className="grid gap-3">
         {credentials.map((credential) => (
           <CredentialCard

@@ -9,8 +9,10 @@ import { credentialFixture, healthFixture, NOW, quotaFixture } from "../helpers/
 import { renderWithProviders } from "../helpers/render.tsx";
 
 const realFetch = globalThis.fetch;
+const realConfirm = globalThis.confirm;
 afterEach(() => {
   globalThis.fetch = realFetch;
+  globalThis.confirm = realConfirm;
 });
 
 test("accounts are grouped under their provider heading", async () => {
@@ -31,6 +33,22 @@ test("accounts are grouped under their provider heading", async () => {
   expect(screen.getByText("backup")).toBeTruthy();
 });
 
+test("renders every provider group with an add account seam", async () => {
+  createFetchStub({ "GET /api/credentials": () => ({ credentials: [] }) });
+  const user = userEvent.setup();
+  const added: string[] = [];
+
+  renderWithProviders(
+    <CredentialsScreen now={NOW} onAddProvider={(provider) => added.push(provider)} />,
+  );
+
+  expect(await screen.findByRole("heading", { name: "Anthropic" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "OpenAI" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Kimi Coding" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Add Anthropic account" }));
+  expect(added).toEqual(["anthropic"]);
+});
+
 test("health severity prioritizes breaker open over rate limiting", () => {
   renderWithProviders(
     <HealthPill
@@ -46,6 +64,17 @@ test("health severity prioritizes breaker open over rate limiting", () => {
   expect(screen.getByText(/3 consecutive failures/)).toBeTruthy();
 });
 
+test("health uses mean TTFT across usable rows", () => {
+  renderWithProviders(
+    <HealthPill
+      health={[healthFixture({ ewmaTtftMs: 100 }), healthFixture({ ewmaTtftMs: 300 })]}
+      now={NOW}
+    />,
+  );
+
+  expect(screen.getByText("TTFT 200ms")).toBeTruthy();
+});
+
 test("quota bar shows usage only when a limit is known", () => {
   const { rerender } = renderWithProviders(<QuotaBar window={quotaFixture()} />);
   expect(screen.getByText("five hour quota")).toBeTruthy();
@@ -55,7 +84,7 @@ test("quota bar shows usage only when a limit is known", () => {
   expect(screen.queryByText("five hour quota")).toBeNull();
 });
 
-test("saving inline tier and weight sends only the credential patch", async () => {
+test("saving changed enabled tier and weight sends the strict credential patch", async () => {
   const fetch = createFetchStub({
     "GET /api/credentials": () => ({ credentials: [credentialFixture()] }),
     "PATCH /api/credentials/c1": () => ({ ok: true }),
@@ -67,6 +96,8 @@ test("saving inline tier and weight sends only the credential patch", async () =
   const section = card.closest("section");
   if (section === null) throw new Error("credential card missing section");
 
+  expect(within(section).getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
+  await user.click(within(section).getByRole("switch", { name: "Enabled" }));
   await user.clear(within(section).getByLabelText("Tier"));
   await user.type(within(section).getByLabelText("Tier"), "2");
   await user.clear(within(section).getByLabelText("Weight"));
@@ -77,7 +108,66 @@ test("saving inline tier and weight sends only the credential patch", async () =
     expect(fetch.calls.filter((call) => call.url === "/api/credentials/c1")).toHaveLength(1),
   );
   const request = fetch.calls.find((call) => call.url === "/api/credentials/c1");
-  expect(JSON.parse(String(request?.init?.body))).toEqual({ tier: 2, weight: 3 });
+  expect(JSON.parse(String(request?.init?.body))).toEqual({ enabled: false, tier: 2, weight: 3 });
+});
+
+test("invalid tier and weight keep save disabled", async () => {
+  createFetchStub({ "GET /api/credentials": () => ({ credentials: [credentialFixture()] }) });
+  const user = userEvent.setup();
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  const card = await screen.findByText("work");
+  const section = card.closest("section");
+  if (section === null) throw new Error("credential card missing section");
+
+  await user.clear(within(section).getByLabelText("Tier"));
+  await user.type(within(section).getByLabelText("Tier"), "0.5");
+  expect(within(section).getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
+  await user.clear(within(section).getByLabelText("Tier"));
+  await user.type(within(section).getByLabelText("Tier"), "2");
+  await user.clear(within(section).getByLabelText("Weight"));
+  await user.type(within(section).getByLabelText("Weight"), "0");
+  expect(within(section).getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
+});
+
+test("deleting a confirmed credential uses the delete endpoint", async () => {
+  globalThis.confirm = () => true;
+  const fetch = createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [credentialFixture()] }),
+    "DELETE /api/credentials/c1": () => ({ ok: true }),
+  });
+  const user = userEvent.setup();
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  await user.click(await screen.findByRole("button", { name: "Delete" }));
+
+  await waitFor(() =>
+    expect(fetch.calls.filter((call) => call.url === "/api/credentials/c1")).toHaveLength(1),
+  );
+  expect(fetch.calls.find((call) => call.url === "/api/credentials/c1")?.init?.method).toBe(
+    "DELETE",
+  );
+});
+
+test("a failed save renders the gateway error", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [credentialFixture()] }),
+    "PATCH /api/credentials/c1": () => ({
+      status: 400,
+      body: { error: { code: "BAD_REQUEST", message: "tier is invalid" } },
+    }),
+  });
+  const user = userEvent.setup();
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+  const card = await screen.findByText("work");
+  const section = card.closest("section");
+  if (section === null) throw new Error("credential card missing section");
+  await user.clear(within(section).getByLabelText("Tier"));
+  await user.type(within(section).getByLabelText("Tier"), "2");
+  await user.click(within(section).getByRole("button", { name: "Save" }));
+
+  expect(await screen.findByText("tier is invalid")).toBeTruthy();
 });
 
 test("a failed list renders the gateway error rather than an empty page", async () => {

@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
 import { credentialsQuery } from "@/api/queries.ts";
-import type { CredentialHealth, ProviderId, QuotaWindow, WireCredential } from "@/api/types.ts";
+import type { CredentialHealth, ProviderId, QuotaWindow } from "@/api/types.ts";
 import { PROVIDER_IDS } from "@/api/types.ts";
 import { ErrorState } from "@/components/ErrorState.tsx";
 import { ProviderGroup } from "@/features/credentials/ProviderGroup.tsx";
@@ -10,24 +11,24 @@ export function CredentialsScreen({
   now,
   health = [],
   quota = [],
+  onAddProvider,
 }: {
   now: number;
   health?: CredentialHealth[];
   quota?: QuotaWindow[];
+  onAddProvider?: (provider: ProviderId) => void;
 }) {
+  const [pendingProvider, setPendingProvider] = useState<ProviderId | null>(null);
   const credentials = useQuery(credentialsQuery());
   if (credentials.isError)
     return <ErrorState error={credentials.error} onRetry={() => credentials.refetch()} />;
   if (credentials.isPending)
     return <p className="text-sm text-muted-foreground">Loading credentials…</p>;
 
-  const groups = PROVIDER_IDS.map(
-    (provider) =>
-      [
-        provider,
-        credentials.data.filter((credential) => credential.provider === provider),
-      ] as const,
-  ).filter((entry): entry is readonly [ProviderId, WireCredential[]] => entry[1].length > 0);
+  function addProvider(provider: ProviderId) {
+    setPendingProvider(provider);
+    onAddProvider?.(provider);
+  }
 
   return (
     <main className="space-y-6">
@@ -37,19 +38,19 @@ export function CredentialsScreen({
           Manage provider accounts used by the gateway.
         </p>
       </div>
-      {groups.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No credentials connected yet.</p>
-      ) : (
-        groups.map(([provider, rows]) => (
-          <ProviderGroup
-            key={provider}
-            provider={provider}
-            credentials={rows}
-            health={health}
-            quota={quota}
-            now={now}
-          />
-        ))
+      {PROVIDER_IDS.map((provider) => (
+        <ProviderGroup
+          key={provider}
+          provider={provider}
+          credentials={credentials.data.filter((credential) => credential.provider === provider)}
+          health={health}
+          quota={quota}
+          now={now}
+          onAdd={addProvider}
+        />
+      ))}
+      {pendingProvider !== null && (
+        <span className="sr-only">Adding {pendingProvider} account</span>
       )}
     </main>
   );

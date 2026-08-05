@@ -29,11 +29,15 @@ export function summarizeHealth(rows: CredentialHealth[], now: number): HealthSu
     };
   }
 
-  const latency = rows.find((row) => row.ewmaTtftMs !== null)?.ewmaTtftMs ?? null;
+  const latencies = rows.flatMap((row) => (row.ewmaTtftMs === null ? [] : [row.ewmaTtftMs]));
+  const meanLatency =
+    latencies.length === 0
+      ? null
+      : latencies.reduce((sum, latency) => sum + latency, 0) / latencies.length;
   return {
     label: "healthy",
     tone: "ok",
-    detail: latency === null ? null : `TTFT ${formatMs(latency)}`,
+    detail: meanLatency === null ? null : `TTFT ${formatMs(meanLatency)}`,
   };
 }
 
