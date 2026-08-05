@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HealthPill } from "../../src/components/Health.tsx";
 import { QuotaBar } from "../../src/components/QuotaBar.tsx";
-import { CredentialsScreen } from "../../src/routes/_app.credentials.tsx";
+import { CredentialsScreen, credentialSummary } from "../../src/routes/_app.credentials.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { credentialFixture, healthFixture, NOW, quotaFixture } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
@@ -13,6 +13,56 @@ const realConfirm = globalThis.confirm;
 afterEach(() => {
   globalThis.fetch = realFetch;
   globalThis.confirm = realConfirm;
+});
+
+test("credential summary counts connected, healthy, impaired, and quota warning accounts", () => {
+  const credentials = [
+    credentialFixture({ id: "healthy", provider: "anthropic" }),
+    credentialFixture({ id: "limited", provider: "openai" }),
+    credentialFixture({ id: "broken", provider: "kimi" }),
+  ];
+  const health = [
+    healthFixture({ credentialId: "healthy" }),
+    healthFixture({ credentialId: "limited", rateLimitedUntil: NOW + 60_000 }),
+    healthFixture({ credentialId: "broken", breakerState: "open", consecutiveFailures: 2 }),
+  ];
+  const quota = [
+    quotaFixture({ credentialId: "limited", used: 90, limit: 100 }),
+    quotaFixture({ credentialId: "limited", windowType: "daily", used: 95, limit: 100 }),
+  ];
+
+  expect(credentialSummary(credentials, health, quota, NOW)).toEqual({
+    connected: 3,
+    healthy: 1,
+    impaired: 2,
+    quotaWarnings: 1,
+  });
+});
+
+test("credentials workspace renders summary, provider headings, and empty provider action", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({
+      credentials: [credentialFixture({ id: "a", provider: "openai", label: "backup" })],
+    }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  for (const label of [
+    "Connected accounts",
+    "Healthy accounts",
+    "Impaired accounts",
+    "Quota warnings",
+  ]) {
+    expect(await screen.findByRole("group", { name: label })).toBeTruthy();
+  }
+  expect(screen.getByRole("heading", { name: "Anthropic" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "OpenAI" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Kimi Coding" })).toBeTruthy();
+  expect(screen.getByText("No Anthropic accounts connected")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Connect provider" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Add Anthropic account" })).toBeTruthy();
 });
 
 test("accounts are grouped under their provider heading", async () => {

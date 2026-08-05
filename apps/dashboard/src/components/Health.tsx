@@ -1,5 +1,5 @@
 import type { CredentialHealth } from "@/api/types.ts";
-import { Badge } from "@/components/ui/badge.tsx";
+import { StatusBadge } from "@/components/StatusBadge.tsx";
 import { formatMs, formatRelative } from "@/lib/format.ts";
 
 export type HealthSummary = {
@@ -41,20 +41,11 @@ export function summarizeHealth(rows: CredentialHealth[], now: number): HealthSu
   };
 }
 
-const tones: Record<HealthSummary["tone"], string> = {
-  ok: "bg-ok/15 text-ok border-ok/30",
-  warn: "bg-warn/15 text-warn border-warn/30",
-  bad: "bg-bad/15 text-bad border-bad/30",
-  muted: "bg-muted text-muted-foreground border-border",
-};
-
 export function HealthPill({ health, now }: { health: CredentialHealth[]; now: number }) {
   const summary = summarizeHealth(health, now);
   return (
     <div className="flex items-center gap-2">
-      <Badge variant="outline" className={tones[summary.tone]}>
-        {summary.label}
-      </Badge>
+      <StatusBadge label={summary.label} tone={summary.tone} />
       {summary.detail !== null && (
         <span className="text-xs text-muted-foreground">{summary.detail}</span>
       )}
