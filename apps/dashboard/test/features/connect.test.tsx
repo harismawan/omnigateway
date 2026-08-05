@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConnectDialog } from "../../src/features/credentials/ConnectDialog.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
@@ -191,7 +191,9 @@ test("a device error stops polling and reports why", async () => {
 
   expect(await screen.findByText(/the device code expired/i)).toBeDefined();
   const pollsAfterError = polls;
-  await new Promise<void>((resolve) => setTimeout(resolve, DEVICE_START.pollIntervalMs * 2));
+  await act(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, DEVICE_START.pollIntervalMs + 100));
+  });
   expect(polls).toBe(pollsAfterError);
 });
 

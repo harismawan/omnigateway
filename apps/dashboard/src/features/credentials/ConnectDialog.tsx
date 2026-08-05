@@ -25,7 +25,7 @@ export function ConnectDialog({
   const [label, setLabel] = useState("");
   const [code, setCode] = useState("");
   const [flow, setFlow] = useState<ConnectStart | null>(null);
-  const [baseline, setBaseline] = useState<number | null>(null);
+  const baseline = useRef<number | null>(null);
   const settled = useRef(false);
 
   const settle = useCallback(async (): Promise<void> => {
@@ -77,20 +77,15 @@ export function ConnectDialog({
   });
 
   useEffect(() => {
-    if (watchingRedirect && credentials.data !== undefined && baseline === null) {
-      setBaseline(credentials.data.length);
+    if (watchingRedirect && credentials.data !== undefined) {
+      if (baseline.current === null) baseline.current = credentials.data.length;
+      else if (credentials.data.length > baseline.current) void settle();
     }
-  }, [baseline, credentials.data, watchingRedirect]);
+  }, [credentials.data, settle, watchingRedirect]);
 
   useEffect(() => {
     if (poll.data?.status === "complete") void settle();
   }, [poll.data, settle]);
-
-  useEffect(() => {
-    if (watchingRedirect && baseline !== null && (credentials.data?.length ?? 0) > baseline) {
-      void settle();
-    }
-  }, [baseline, credentials.data, watchingRedirect, settle]);
 
   return (
     <div role="dialog" aria-label={`Connect ${PROVIDER_LABELS[provider]}`} className="mt-6">
