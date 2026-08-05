@@ -46,6 +46,7 @@ export const STRATEGIES: readonly Strategy[] = ["score", "priority", "roundRobin
 export type WireCredential = Credential;
 
 export type CredentialsResponse = { credentials: WireCredential[] };
+export type CredentialHealthResponse = { health: CredentialHealth[]; quota: QuotaWindow[] };
 export type ModelsResponse = { models: VirtualModel[] };
 export type SettingsResponse = { settings: Settings };
 export type UsageResponse = { rows: UsageBucket[] };
@@ -95,3 +96,31 @@ export type ConnectPoll = { status: "pending" } | { status: "complete"; id: stri
 export type UsageGroupBy = "credential" | "model" | "apiKey" | "hour";
 
 export const USAGE_GROUP_BY: readonly UsageGroupBy[] = ["model", "credential", "apiKey", "hour"];
+
+/** `POST /api/models/:id/dry-run` — the request body. */
+export type DryRunRequest = { tools: boolean; images: boolean; reasoning: boolean };
+
+/** One ranked candidate. `reasons` holds the six normalized score terms. */
+export type DryRunCandidate = {
+  credentialId: string;
+  credentialLabel: string;
+  provider: ProviderId;
+  model: string;
+  tier: number;
+  score: number;
+  reasons: Record<string, number>;
+};
+
+/** Matches the router's excluded candidate representation. */
+export type DryRunExcluded = { credentialId: string; model: string; reason: string };
+
+export type DryRunResponse = {
+  modelId: string;
+  strategy: Strategy;
+  deterministic: boolean;
+  rankedAt: number;
+  candidates: DryRunCandidate[];
+  excluded: DryRunExcluded[];
+};
+
+export const SCORE_TERMS = ["tier", "health", "quota", "cost", "latency", "recency"] as const;

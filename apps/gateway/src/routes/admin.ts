@@ -1,4 +1,4 @@
-import { GatewayError, HTTP_STATUS } from "@omni/ir";
+import { type ChatRequest, GatewayError, HTTP_STATUS } from "@omni/ir";
 import {
   generateApiKey,
   hashApiKey,
@@ -10,6 +10,7 @@ import { Elysia } from "elysia";
 import { z } from "zod";
 import { ADMIN_COOKIE, type AdminAuth } from "../auth/admin.ts";
 import { isRecord, parseOrThrow } from "../ingress/schemas.ts";
+import { buildSnapshot, rank } from "../router/index.ts";
 
 export type AdminDeps = {
   store: Store;
@@ -20,6 +21,18 @@ export type AdminDeps = {
 const MAX_LOG_LIMIT = 500;
 
 const providerId = z.enum(["anthropic", "openai", "kimi"]);
+
+/**
+ * A hypothetical request, described only by required capabilities. This keeps
+ * prompt content out of the control API while exercising router hard filters.
+ */
+const dryRunSchema = z
+  .object({
+    tools: z.boolean().default(false),
+    images: z.boolean().default(false),
+    reasoning: z.boolean().default(false),
+  })
+  .strict();
 
 const modelSchema = z.object({
   id: z.string().min(1),
@@ -140,9 +153,7 @@ async function jsonRecord(request: Request): Promise<Record<string, unknown> | n
 export function adminRoutes(deps: AdminDeps) {
   const app = new Elysia().onError(({ error, set }) => {
     const gatewayError =
-      error instanceof GatewayError
-        ? error
-        : new GatewayError("INTERNAL", error instanceof Error ? error.message : "internal error");
+      error instanceof GatewayError ? error : new GatewayError("INTERNAL", "internal error");
     set.status = HTTP_STATUS[gatewayError.code];
     return { error: { code: gatewayError.code, message: gatewayError.message } };
   });
@@ -241,6 +252,15 @@ export function adminRoutes(deps: AdminDeps) {
           updatedAt: c.updatedAt,
         })),
       };
+    })
+
+    .get("/api/credentials/health", async ({ request }) => {
+      await requireAdmin(request);
+      const [health, quota] = await Promise.all([
+        deps.store.credentials.listHealth(),
+        deps.store.credentials.listQuota(),
+      ]);
+      return { health, quota };
     })
 
     .patch("/api/credentials/:id", async ({ request, params }) => {
@@ -342,6 +362,52 @@ export function adminRoutes(deps: AdminDeps) {
       const settings: Settings = parseOrThrow(settingsSchema, await request.json());
       await deps.store.config.putSettings(settings);
       return { ok: true };
+    })
+
+    .post("/api/models/:id/dry-run", async ({ request, params }) => {
+      await requireAdmin(request);
+      const need = parseOrThrow(dryRunSchema, await request.json());
+      const now = deps.now();
+      const snapshot = await buildSnapshot(deps.store, now);
+      const model = snapshot.models.get(params.id);
+      if (model === undefined) {
+        throw new GatewayError("MODEL_UNAVAILABLE", `no virtual model "${params.id}"`);
+      }
+
+      const probe: ChatRequest = {
+        model: params.id,
+        messages: [
+          {
+            role: "user",
+            content: need.images
+              ? [{ type: "image", mediaType: "image/png", data: "" }]
+              : [{ type: "text", text: "" }],
+          },
+        ],
+        stream: false,
+        ...(need.tools
+          ? { tools: [{ name: "probe", description: "", inputSchema: { type: "object" } }] }
+          : {}),
+        ...(need.reasoning ? { reasoning: { effort: "medium" } } : {}),
+      };
+      const result = rank({ request: probe, model, snapshot, now, rand: 0 });
+
+      return {
+        modelId: model.id,
+        strategy: model.strategy,
+        deterministic: model.strategy !== "weighted",
+        rankedAt: now,
+        candidates: result.candidates.map((candidate) => ({
+          credentialId: candidate.credential.id,
+          credentialLabel: candidate.credential.label,
+          provider: candidate.credential.provider,
+          model: candidate.target.model,
+          tier: candidate.target.tier,
+          score: candidate.score,
+          reasons: candidate.reasons,
+        })),
+        excluded: result.excluded,
+      };
     })
 
     .get("/api/usage", async ({ request, query }) => {

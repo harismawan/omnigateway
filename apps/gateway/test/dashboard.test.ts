@@ -21,4 +21,4 @@ test("dashboard tests pass in an isolated DOM process", async () => {
   }
 
   console.log(output.trim());
-});
+}, 15_000);

@@ -36,7 +36,8 @@ export function createFetchStub(routes: Record<string, StubHandler>): FetchStub 
     calls.push({ url, init });
 
     const method = (init?.method ?? "GET").toUpperCase();
-    const handler = table.get(`${method} ${url}`);
+    const route = `${method} ${url}`;
+    const handler = table.get(route) ?? table.get(`${method} ${url.split("?")[0]}`);
     if (handler === undefined) {
       return new Response(
         JSON.stringify({ error: { code: "INTERNAL", message: `no stub for ${method} ${url}` } }),
