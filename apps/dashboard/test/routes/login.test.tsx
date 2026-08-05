@@ -22,14 +22,17 @@ test("an unconfigured gateway renders the first-run setup form", async () => {
   createFetchStub({ "GET /api/status": () => ({ configured: false, authenticated: false }) });
   renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
   expect(await screen.findByRole("heading", { name: /set an admin password/i })).toBeDefined();
+  expect(screen.getByText(/at least 12 characters/i)).toBeDefined();
   expect(screen.getByLabelText(/^password$/i)).toBeDefined();
   expect(screen.getByLabelText(/confirm password/i)).toBeDefined();
 });
 
-test("a configured gateway renders the login form instead", async () => {
+test("a configured gateway renders the login workspace", async () => {
   createFetchStub({ "GET /api/status": () => ({ configured: true, authenticated: false }) });
   renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
   expect(await screen.findByRole("heading", { name: /sign in/i })).toBeDefined();
+  expect(screen.getByText(/route requests across provider accounts/i)).toBeDefined();
+  expect(screen.getByLabelText("Password").getAttribute("autocomplete")).toBe("current-password");
   expect(screen.queryByLabelText(/confirm password/i)).toBeNull();
 });
 
@@ -119,7 +122,7 @@ test("setup refuses a password under twelve characters without a round trip", as
   await user.type(screen.getByLabelText(/confirm password/i), "short");
   await user.click(screen.getByRole("button", { name: /create password/i }));
 
-  expect(await screen.findByText(/at least 12 characters/i)).toBeDefined();
+  expect((await screen.findByRole("alert")).textContent).toMatch(/at least 12 characters/i);
   expect(stub.calls.some((call) => call.url === "/api/setup")).toBe(false);
 });
 
@@ -164,7 +167,8 @@ test("a rejected password surfaces the gateway's own message", async () => {
   expect(await screen.findByText(/invalid password/i)).toBeDefined();
 });
 
-test("a setup conflict tells the operator to sign in instead of retrying setup", async () => {
+test("a failed setup preserves the typed password", async () => {
+  const password = "correct-horse-battery";
   createFetchStub({
     "GET /api/status": () => ({ configured: false, authenticated: false }),
     "POST /api/setup": () => ({
@@ -176,9 +180,10 @@ test("a setup conflict tells the operator to sign in instead of retrying setup",
   await screen.findByRole("heading", { name: /set an admin password/i });
 
   const user = userEvent.setup();
-  await user.type(screen.getByLabelText(/^password$/i), "correct-horse-battery");
-  await user.type(screen.getByLabelText(/confirm password/i), "correct-horse-battery");
+  await user.type(screen.getByLabelText(/^password$/i), password);
+  await user.type(screen.getByLabelText(/confirm password/i), password);
   await user.click(screen.getByRole("button", { name: /create password/i }));
 
   expect(await screen.findByText(/already configured/i)).toBeDefined();
+  expect((screen.getByLabelText(/^password$/i) as HTMLInputElement).value).toBe(password);
 });
