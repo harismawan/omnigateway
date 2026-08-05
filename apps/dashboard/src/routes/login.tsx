@@ -104,5 +104,5 @@ export const Route = createFileRoute("/login")({
 
 function LoginRoute() {
   const navigate = Route.useNavigate();
-  return <LoginScreen onAuthenticated={() => void navigate({ to: "/" })} />;
+  return <LoginScreen onAuthenticated={() => void navigate({ to: "/credentials" as string })} />;
 }

@@ -1,7 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LoginScreen } from "../../src/routes/login.tsx";
+import { routeTree } from "../../src/routeTree.gen.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
@@ -48,6 +50,26 @@ test("setup posts the password and reports success upward", async () => {
   await waitFor(() => expect(authenticated).toBe(true));
   const setup = stub.calls.find((call) => call.url === "/api/setup");
   expect(setup?.init?.body).toBe(JSON.stringify({ password: "correct-horse-battery" }));
+});
+
+test("successful setup navigates to credentials", async () => {
+  createFetchStub({
+    "GET /api/status": () => ({ configured: false, authenticated: false }),
+    "POST /api/setup": () => ({ ok: true }),
+  });
+  const router = createRouter({
+    routeTree,
+    history: createMemoryHistory({ initialEntries: ["/login"] }),
+  });
+  renderWithProviders(<RouterProvider router={router} />);
+  await screen.findByRole("heading", { name: /set an admin password/i });
+
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText(/^password$/i), "correct-horse-battery");
+  await user.type(screen.getByLabelText(/confirm password/i), "correct-horse-battery");
+  await user.click(screen.getByRole("button", { name: /create password/i }));
+
+  await waitFor(() => expect(router.state.location.pathname).toBe("/credentials"));
 });
 
 test("setup refuses to submit when the confirmation does not match", async () => {
