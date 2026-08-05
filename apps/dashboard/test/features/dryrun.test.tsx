@@ -119,7 +119,7 @@ test("a result without exclusions states that nothing was filtered out", async (
   expect(within(excluded).getByText("Nothing was filtered out.")).toBeDefined();
 });
 
-test("collapsing dry-run results does not refetch", async () => {
+test("collapsing dry-run results does not refetch and rerunning opens them", async () => {
   const stub = createFetchStub({ "POST /api/models/fast/dry-run": () => RESULT });
   renderWithProviders(<DryRunPanel modelId="fast" />);
   const user = userEvent.setup();
@@ -132,9 +132,9 @@ test("collapsing dry-run results does not refetch", async () => {
   expect(results).toHaveProperty("open", false);
   expect(stub.calls.filter((call) => call.url === "/api/models/fast/dry-run")).toHaveLength(1);
 
-  await user.click(screen.getByText("Dry-run results"));
+  await user.click(screen.getByRole("button", { name: /run/i }));
+  await waitFor(() => expect(stub.calls).toHaveLength(2));
   expect(results).toHaveProperty("open", true);
-  expect(stub.calls.filter((call) => call.url === "/api/models/fast/dry-run")).toHaveLength(1);
 });
 
 test("no eligible candidate is stated plainly rather than as an empty table", async () => {

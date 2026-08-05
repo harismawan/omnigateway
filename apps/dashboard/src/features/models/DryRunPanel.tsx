@@ -56,7 +56,11 @@ function CandidateRow({ candidate }: { candidate: DryRunCandidate }) {
 
 export function DryRunPanel({ modelId }: { modelId: string }) {
   const [request, setRequest] = useState<DryRunRequest>(INITIAL_REQUEST);
-  const run = useMutation({ mutationFn: () => dryRun(modelId, request) });
+  const [resultsOpen, setResultsOpen] = useState(false);
+  const run = useMutation({
+    mutationFn: () => dryRun(modelId, request),
+    onSuccess: () => setResultsOpen(true),
+  });
 
   return (
     <section aria-labelledby="dry-run-heading" className="space-y-4 rounded-lg border p-4">
@@ -92,7 +96,12 @@ export function DryRunPanel({ modelId }: { modelId: string }) {
       </Button>
       {run.isError && <ErrorState error={run.error} />}
       {run.data !== undefined && (
-        <details aria-label="Dry-run results" className="space-y-4" open>
+        <details
+          aria-label="Dry-run results"
+          className="space-y-4"
+          onToggle={(event) => setResultsOpen(event.currentTarget.open)}
+          open={resultsOpen}
+        >
           <summary aria-label="Toggle dry-run results" className="cursor-pointer font-medium">
             Dry-run results
           </summary>
