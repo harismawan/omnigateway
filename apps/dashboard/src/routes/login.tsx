@@ -38,6 +38,9 @@ export function LoginScreen({ onAuthenticated }: LoginScreenProps) {
         <section className="hidden bg-[linear-gradient(145deg,var(--primary),oklch(0.35_0.12_270))] lg:block" />
         <section className="flex items-center justify-center p-6 sm:p-10">
           <div className="w-full max-w-md space-y-6">
+            <p aria-live="polite" className="sr-only" role="status">
+              Loading authentication status…
+            </p>
             <LoadingSkeleton className="h-8 w-32" />
             <LoadingSkeleton className="h-5 w-3/4" />
             <LoadingSkeleton className="h-40 w-full" />

@@ -18,6 +18,15 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
+test("authentication status loading announces progress to assistive technology", () => {
+  globalThis.fetch = (() => new Promise<Response>(() => {})) as unknown as typeof globalThis.fetch;
+  renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
+
+  const status = screen.getByRole("status");
+  expect(status.textContent).toBe("Loading authentication status…");
+  expect(status.getAttribute("aria-live")).toBe("polite");
+});
+
 test("an unconfigured gateway renders the first-run setup form", async () => {
   createFetchStub({ "GET /api/status": () => ({ configured: false, authenticated: false }) });
   renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);

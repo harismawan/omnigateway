@@ -71,3 +71,41 @@ No Task 4 changed file is listed. Global lint also emits existing `biome.json` i
 - Sign-in password keeps `autocomplete="current-password"`; setup fields keep `new-password`.
 - Existing 12-character minimum, confirmation mismatch alert, server-error rendering, status cache update, and `/credentials` redirect remain unchanged.
 - Scope limited to brief files.
+
+## Task 4 Review Finding Remediation (2026-08-05)
+
+- Added visually hidden loading feedback in `apps/dashboard/src/routes/login.tsx` while retaining decorative, `aria-hidden` `LoadingSkeleton` elements:
+
+```tsx
+<p aria-live="polite" className="sr-only" role="status">
+  Loading authentication status…
+</p>
+```
+
+- Added focused regression coverage in `apps/dashboard/test/routes/login.test.tsx` for pending authentication-status loading. It verifies `role="status"`, exact loading text, and `aria-live="polite"`.
+- Red evidence, before production change:
+
+```text
+bun run --cwd apps/dashboard test -- test/routes/login.test.tsx
+TestingLibraryElementError: Unable to find an accessible element with the role "status" and name "Loading authentication status…"
+(fail) authentication status loading announces progress to assistive technology
+130 pass
+1 fail
+```
+
+- Green evidence:
+
+```text
+bun run --cwd apps/dashboard test -- test/routes/login.test.tsx test/auth-integration.test.tsx
+0 fail
+```
+
+- Dashboard typecheck evidence:
+
+```text
+bun run --cwd apps/dashboard typecheck
+$ bun run generate:routes && tsc --noEmit
+```
+
+Exit status: `0`. Existing Node circular-dependency warning from route generation remains; TypeScript emitted no errors.
+- `git diff --check` exit status: `0`.
