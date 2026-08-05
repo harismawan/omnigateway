@@ -55,7 +55,7 @@ export function StatCards({
       <Stat
         label="Rate limited"
         value={formatRate(rateLimited, logSampleSize)}
-        detail="last 200 requests"
+        detail={`last ${logSampleSize} requests`}
       />
     </div>
   );

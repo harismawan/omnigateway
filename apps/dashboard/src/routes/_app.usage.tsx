@@ -95,49 +95,61 @@ export function UsageScreen({ now }: { now: number }) {
             rateLimited={rateLimited}
             logSampleSize={(logs.data ?? []).length}
           />
-          <UsageChart rows={rows} metric={metric} />
-          <section aria-label="Usage table" className="overflow-x-auto rounded-lg border">
-            <table className="w-full min-w-180 text-sm">
-              <caption className="sr-only">Usage buckets sorted by cost, highest first</caption>
-              <thead className="border-b bg-muted/40 text-left">
-                <tr>
-                  <th className="p-3">{groupBy}</th>
-                  <th className="p-3 text-right">Requests</th>
-                  <th className="p-3 text-right">Input tokens</th>
-                  <th className="p-3 text-right">Output tokens</th>
-                  <th className="p-3 text-right">Cost</th>
-                  <th className="p-3 text-right">Errors</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <tr key={row.key} className="border-b last:border-0">
-                    <td className="p-3 font-medium">{row.key}</td>
-                    <td className="p-3 text-right tabular-nums">{row.requests.toLocaleString()}</td>
-                    <td className="p-3 text-right tabular-nums">{formatTokens(row.inputTokens)}</td>
-                    <td className="p-3 text-right tabular-nums">
-                      {formatTokens(row.outputTokens)}
-                    </td>
-                    <td className="p-3 text-right tabular-nums">{formatUsd(row.costUsd)}</td>
-                    <td className="p-3 text-right tabular-nums">
-                      {row.errors === 0 ? "0" : formatRate(row.errors, row.requests)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot className="border-t font-medium">
-                <tr>
-                  <td className="p-3">Total</td>
-                  <td className="p-3 text-right tabular-nums">
-                    {totals(rows).requests.toLocaleString()}
-                  </td>
-                  <td colSpan={2} />
-                  <td className="p-3 text-right tabular-nums">{formatUsd(totals(rows).costUsd)}</td>
-                  <td />
-                </tr>
-              </tfoot>
-            </table>
-          </section>
+          {rows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No requests in this window.</p>
+          ) : (
+            <>
+              <UsageChart rows={rows} metric={metric} />
+              <section aria-label="Usage table" className="overflow-x-auto rounded-lg border">
+                <table className="w-full min-w-180 text-sm">
+                  <caption className="sr-only">Usage buckets sorted by cost, highest first</caption>
+                  <thead className="border-b bg-muted/40 text-left">
+                    <tr>
+                      <th className="p-3">{groupBy}</th>
+                      <th className="p-3 text-right">Requests</th>
+                      <th className="p-3 text-right">Input tokens</th>
+                      <th className="p-3 text-right">Output tokens</th>
+                      <th className="p-3 text-right">Cost</th>
+                      <th className="p-3 text-right">Errors</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <tr key={row.key} className="border-b last:border-0">
+                        <td className="p-3 font-medium">{row.key}</td>
+                        <td className="p-3 text-right tabular-nums">
+                          {row.requests.toLocaleString()}
+                        </td>
+                        <td className="p-3 text-right tabular-nums">
+                          {formatTokens(row.inputTokens)}
+                        </td>
+                        <td className="p-3 text-right tabular-nums">
+                          {formatTokens(row.outputTokens)}
+                        </td>
+                        <td className="p-3 text-right tabular-nums">{formatUsd(row.costUsd)}</td>
+                        <td className="p-3 text-right tabular-nums">
+                          {row.errors === 0 ? "0" : formatRate(row.errors, row.requests)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="border-t font-medium">
+                    <tr>
+                      <td className="p-3">Total</td>
+                      <td className="p-3 text-right tabular-nums">
+                        {totals(rows).requests.toLocaleString()}
+                      </td>
+                      <td colSpan={2} />
+                      <td className="p-3 text-right tabular-nums">
+                        {formatUsd(totals(rows).costUsd)}
+                      </td>
+                      <td />
+                    </tr>
+                  </tfoot>
+                </table>
+              </section>
+            </>
+          )}
         </>
       )}
     </div>

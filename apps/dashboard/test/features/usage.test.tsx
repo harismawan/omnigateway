@@ -78,6 +78,15 @@ test("the error rate of an idle window is a dash, not a division by zero", async
   ).toBeDefined();
 });
 
+test("an empty usage window explains that it has no requests", async () => {
+  stubUsage([]);
+  renderWithProviders(<UsageScreen now={NOW} />);
+
+  expect(await screen.findByText("No requests in this window.")).toBeDefined();
+  expect(screen.queryByLabelText("Cost chart")).toBeNull();
+  expect(screen.queryByRole("table")).toBeNull();
+});
+
 test("each bucket is a table row with its share of the cost", async () => {
   stubUsage();
   renderWithProviders(<UsageScreen now={NOW} />);
@@ -131,7 +140,7 @@ test("the rate limit figure is labelled as a log-tail sample, not a period rate"
   renderWithProviders(<UsageScreen now={NOW} />);
   const card = await screen.findByRole("group", { name: /rate limited/i });
   expect(within(card).getByText("25.0%")).toBeDefined();
-  expect(within(card).getByText(/last 200 requests/i)).toBeDefined();
+  expect(within(card).getByText(/last 4 requests/i)).toBeDefined();
 });
 
 test("a failed load offers a retry instead of an empty chart", async () => {
