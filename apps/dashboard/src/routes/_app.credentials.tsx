@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { credentialHealthQuery, credentialsQuery } from "@/api/queries.ts";
 import type { CredentialHealth, ProviderId, QuotaWindow, WireCredential } from "@/api/types.ts";
 import { PROVIDER_IDS, PROVIDER_LABELS } from "@/api/types.ts";
@@ -9,6 +9,15 @@ import { LoadingSkeleton } from "@/components/LoadingSkeleton.tsx";
 import { PageHeader } from "@/components/PageHeader.tsx";
 import { StatTile } from "@/components/StatTile.tsx";
 import { Button } from "@/components/ui/button.tsx";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog.tsx";
 import { ConnectDialog } from "@/features/credentials/ConnectDialog.tsx";
 import { ProviderGroup } from "@/features/credentials/ProviderGroup.tsx";
 
@@ -61,15 +70,31 @@ export function credentialSummary(
   return { connected: credentials.length, healthy, impaired, quotaWarnings: quotaWarnings.size };
 }
 
-function ProviderChooser({ onSelect }: { onSelect: (provider: ProviderId) => void }) {
+function ProviderChooser({
+  onSelect,
+  onCloseAutoFocus,
+}: {
+  onSelect: (provider: ProviderId) => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) {
   return (
-    <div className="flex flex-wrap gap-2" role="dialog" aria-label="Connect provider">
-      {PROVIDER_IDS.map((provider) => (
-        <Button key={provider} variant="secondary" onClick={() => onSelect(provider)}>
-          {PROVIDER_LABELS[provider]}
-        </Button>
-      ))}
-    </div>
+    <DialogContent aria-describedby={undefined} onCloseAutoFocus={onCloseAutoFocus}>
+      <DialogHeader>
+        <DialogTitle>Connect provider</DialogTitle>
+      </DialogHeader>
+      <div className="flex flex-wrap gap-2">
+        {PROVIDER_IDS.map((provider) => (
+          <Button key={provider} variant="secondary" onClick={() => onSelect(provider)}>
+            {PROVIDER_LABELS[provider]}
+          </Button>
+        ))}
+      </div>
+      <DialogFooter>
+        <DialogClose asChild>
+          <Button variant="ghost">Cancel</Button>
+        </DialogClose>
+      </DialogFooter>
+    </DialogContent>
   );
 }
 
@@ -111,6 +136,7 @@ export function CredentialsScreen({
 }) {
   const [providerChooserOpen, setProviderChooserOpen] = useState(false);
   const [pendingProvider, setPendingProvider] = useState<ProviderId | null>(null);
+  const providerChooserTrigger = useRef<HTMLButtonElement | null>(null);
   const credentials = useQuery(credentialsQuery());
   const credentialHealth = useQuery(credentialHealthQuery());
   if (credentials.isError)
@@ -128,35 +154,53 @@ export function CredentialsScreen({
   const summary = credentialSummary(credentials.data, currentHealth, currentQuota, now);
 
   return (
-    <main className="space-y-6">
-      <PageHeader
-        title="Credentials"
-        description="Manage provider accounts used by the gateway."
-        actions={<Button onClick={() => setProviderChooserOpen(true)}>Connect provider</Button>}
-      />
-      {providerChooserOpen && <ProviderChooser onSelect={addProvider} />}
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatTile label="Connected accounts" value={String(summary.connected)} />
-        <StatTile label="Healthy accounts" value={String(summary.healthy)} tone="ok" />
-        <StatTile label="Impaired accounts" value={String(summary.impaired)} tone="bad" />
-        <StatTile label="Quota warnings" value={String(summary.quotaWarnings)} tone="warn" />
-      </div>
-      {PROVIDER_IDS.map((provider) => (
-        <ProviderGroup
-          key={provider}
-          provider={provider}
-          credentials={credentials.data.filter((credential) => credential.provider === provider)}
-          health={currentHealth}
-          quota={currentQuota}
-          healthUnavailable={credentialHealth.isError || credentialHealth.data === undefined}
-          now={now}
-          onAdd={addProvider}
+    <Dialog
+      open={providerChooserOpen}
+      onOpenChange={(open) => {
+        if (open) setProviderChooserOpen(true);
+        else setProviderChooserOpen(false);
+      }}
+    >
+      <main className="space-y-6">
+        <PageHeader
+          title="Credentials"
+          description="Manage provider accounts used by the gateway."
+          actions={
+            <DialogTrigger asChild>
+              <Button ref={providerChooserTrigger}>Connect provider</Button>
+            </DialogTrigger>
+          }
         />
-      ))}
-      {pendingProvider !== null && (
-        <ConnectDialog provider={pendingProvider} onClose={() => setPendingProvider(null)} />
-      )}
-    </main>
+        <ProviderChooser
+          onSelect={addProvider}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            providerChooserTrigger.current?.focus();
+          }}
+        />
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StatTile label="Connected accounts" value={String(summary.connected)} />
+          <StatTile label="Healthy accounts" value={String(summary.healthy)} tone="ok" />
+          <StatTile label="Impaired accounts" value={String(summary.impaired)} tone="bad" />
+          <StatTile label="Quota warnings" value={String(summary.quotaWarnings)} tone="warn" />
+        </div>
+        {PROVIDER_IDS.map((provider) => (
+          <ProviderGroup
+            key={provider}
+            provider={provider}
+            credentials={credentials.data.filter((credential) => credential.provider === provider)}
+            health={currentHealth}
+            quota={currentQuota}
+            healthUnavailable={credentialHealth.isError || credentialHealth.data === undefined}
+            now={now}
+            onAdd={addProvider}
+          />
+        ))}
+        {pendingProvider !== null && (
+          <ConnectDialog provider={pendingProvider} onClose={() => setPendingProvider(null)} />
+        )}
+      </main>
+    </Dialog>
   );
 }
 

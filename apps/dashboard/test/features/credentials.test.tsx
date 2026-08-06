@@ -74,7 +74,11 @@ test("credentials workspace renders summary, provider headings, and empty provid
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Connect provider" }));
   expect(screen.getByRole("dialog", { name: "Connect provider" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Add Anthropic account" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Anthropic" })).toBeTruthy();
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Connect provider" })).toBeNull(),
+  );
 });
 
 test("accounts are grouped under their provider heading", async () => {
@@ -111,6 +115,49 @@ test("renders every provider group with an add account seam", async () => {
   expect(added).toEqual(["anthropic"]);
 });
 
+test("provider chooser focuses inside then Cancel closes and restores trigger focus", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [] }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  const user = userEvent.setup();
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  await screen.findByRole("button", { name: "Connect provider" });
+  await user.click(screen.getByRole("button", { name: "Connect provider" }));
+
+  const dialog = await screen.findByRole("dialog", { name: "Connect provider" });
+  expect(dialog.contains(document.activeElement)).toBe(true);
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Connect provider" })).toBeNull(),
+  );
+  await waitFor(() =>
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Connect provider" })),
+  );
+});
+
+test("provider chooser Escape closes and restores trigger focus", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [] }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  const user = userEvent.setup();
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  await screen.findByRole("button", { name: "Connect provider" });
+  await user.click(screen.getByRole("button", { name: "Connect provider" }));
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Connect provider" })).toBeNull(),
+  );
+  await waitFor(() =>
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Connect provider" })),
+  );
+});
+
 test("provider chooser sends selected provider through existing add callback", async () => {
   createFetchStub({ "GET /api/credentials": () => ({ credentials: [] }) });
   const user = userEvent.setup();
@@ -122,7 +169,7 @@ test("provider chooser sends selected provider through existing add callback", a
 
   await screen.findByRole("button", { name: "Connect provider" });
   await user.click(screen.getByRole("button", { name: "Connect provider" }));
-  await user.click(screen.getByRole("button", { name: "OpenAI" }));
+  await user.click(await screen.findByRole("button", { name: "OpenAI" }));
 
   expect(added).toEqual(["openai"]);
 });

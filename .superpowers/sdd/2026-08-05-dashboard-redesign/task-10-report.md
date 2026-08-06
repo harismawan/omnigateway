@@ -74,3 +74,20 @@ Temporary gateway and Chrome processes were stopped after inspection.
 - Focused GREEN: `bun run --cwd apps/dashboard test -- models.test.tsx` passed (145 pass, 0 fail, 389 assertions). `bun run --cwd apps/dashboard test -- dryrun` passed (145 pass, 0 fail, 389 assertions). Existing React `act(...)` warning from `usage.test.tsx` remains.
 - Dashboard typecheck: `bun run typecheck` passed. Existing `replaceRouteChunk` Node circular-dependency warning remains.
 - Real Chrome/DevTools Protocol verification after fix: at viewport width 900px, signed into temporary synthetic gateway, navigated to `/models`, opened **New model**, and measured `{ "scrollWidth": 900, "innerWidth": 900, "path": "/models", "hasNewModel": true }`. Temporary gateway and Chrome processes were stopped.
+
+## Provider chooser accessibility final-review fix
+
+- Finding addressed: `.superpowers/sdd/2026-08-05-dashboard-redesign/final-review.md` identified `ProviderChooser` as a plain `div` with `role="dialog"`, without dialog focus management, Escape dismissal, cancellation, or trigger-focus restoration.
+- TDD RED: before production change, `bun run --cwd apps/dashboard test -- credentials.test.tsx` failed with `Unable to find an accessible element with the role "dialog" and name "Connect provider"`.
+- Minimal fix: wrapped the header **Connect provider** action in controlled Radix `Dialog`/`DialogTrigger`, rendered chooser in `DialogContent`, added explicit **Cancel**, and restored focus through `onCloseAutoFocus`. Provider selection still closes chooser before setting `pendingProvider`, retaining established `ConnectDialog` flow without overlapping modals.
+- Regression coverage in `apps/dashboard/test/features/credentials.test.tsx`: verifies focus enters the chooser, **Cancel** closes it and restores trigger focus, and Escape closes it and restores trigger focus. Existing selection callback coverage remains.
+
+| Command | Outcome |
+| --- | --- |
+| `bun run --cwd apps/dashboard test -- credentials.test.tsx connect.test.tsx` | Pass: 148 tests, 0 failures, 398 assertions. React emitted `Presence` `act(...)` warnings in credentials tests. |
+| `bun run --cwd apps/dashboard test` | Pass: 148 tests, 0 failures, 398 assertions. Same React warnings, plus existing `ForwardRef` warning in usage test. |
+| `bun test` | Pass: 466 tests, 0 failures, 1,095 assertions. Same warnings. |
+| `bun run typecheck` | Pass. `tsr generate` emitted Node circular-dependency warning for `replaceRouteChunk`. |
+| `bun run lint` | Pass. Biome emitted informational `linter.recommended` deprecation notice. |
+| `bun run --cwd apps/dashboard build` | Pass (`vite: build ok`). |
+| `git diff --check` | Pass. |
