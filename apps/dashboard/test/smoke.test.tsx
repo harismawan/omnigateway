@@ -10,6 +10,10 @@ test("cn merges conditional classes and lets the later utility win", () => {
 test("the dashboard stylesheet defines shadcn semantic tokens", () => {
   expect(stylesheet).toContain("--background:");
   expect(stylesheet).toContain("--primary:");
+  expect(stylesheet).toContain("--surface-subtle:");
+  expect(stylesheet).toContain("--info:");
+  expect(stylesheet).toContain("color-scheme: dark;");
+  expect(stylesheet).toContain("prefers-reduced-motion: reduce");
   expect(stylesheet).toContain("--color-background: var(--background);");
   expect(stylesheet).toContain("--color-ring: var(--ring);");
 });

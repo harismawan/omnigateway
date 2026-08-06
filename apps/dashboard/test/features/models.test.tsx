@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { emptyTarget } from "../../src/features/models/ModelEditor.tsx";
-import { ModelsScreen } from "../../src/routes/_app.models.tsx";
+import { filterModels, ModelsScreen } from "../../src/routes/_app.models.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { modelFixture, targetFixture } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
@@ -20,10 +20,26 @@ function stubModels(models = [modelFixture()]) {
   });
 }
 
-test("every configured model is listed", async () => {
-  stubModels([modelFixture({ id: "fast" }), modelFixture({ id: "smart" })]);
+test("filters model IDs case-insensitively", () => {
+  const models = [modelFixture({ id: "fast" }), modelFixture({ id: "smart" })];
+  expect(filterModels(models, "SMART").map((model) => model.id)).toEqual(["smart"]);
+});
+
+test("lists models in searchable master-detail workspace", async () => {
+  stubModels([modelFixture({ id: "fast" }), modelFixture({ id: "smart", isAlias: true })]);
   renderWithProviders(<ModelsScreen />);
-  expect(await screen.findByRole("button", { name: "fast" })).toBeDefined();
+  const user = userEvent.setup();
+
+  const search = await screen.findByRole("searchbox", { name: "Search models" });
+  expect(screen.getByRole("navigation", { name: "Virtual models" })).toBeDefined();
+  expect(screen.getByRole("button", { name: "fast" })).toBeDefined();
+  expect(screen.getByText("alias")).toBeDefined();
+
+  await user.click(screen.getByRole("button", { name: "smart" }));
+  expect(screen.getByRole("main", { name: "Model smart" })).toBeDefined();
+
+  await user.type(search, "smart");
+  expect(screen.queryByRole("button", { name: "fast" })).toBeNull();
   expect(screen.getByRole("button", { name: "smart" })).toBeDefined();
 });
 
@@ -161,6 +177,19 @@ test("a rejected save displays the API error", async () => {
   expect(await screen.findByText("invalid target")).toBeDefined();
 });
 
+test("keeps Models workspace stacked until wide desktop content is available", async () => {
+  stubModels();
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+
+  await user.click(await screen.findByRole("button", { name: "New model" }));
+
+  const workspace = screen.getByRole("main", { name: "New model" }).parentElement;
+  expect(workspace).not.toBeNull();
+  expect(workspace?.className).toContain("xl:grid-cols-[17rem_minmax(0,1fr)]");
+  expect(workspace?.className).not.toContain("md:grid-cols-[17rem_minmax(0,1fr)]");
+});
+
 test("new model saves a complete virtual model", async () => {
   const stub = createFetchStub({
     "GET /api/models": () => ({ models: [] }),
@@ -168,7 +197,9 @@ test("new model saves a complete virtual model", async () => {
   });
   renderWithProviders(<ModelsScreen />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "New model" }));
+  const [newModel] = await screen.findAllByRole("button", { name: "New model" });
+  if (newModel === undefined) throw new Error("New model action did not render");
+  await user.click(newModel);
   await user.type(screen.getByLabelText("Model id"), "new");
   await user.click(screen.getByRole("button", { name: /save model/i }));
   await waitFor(() => expect(stub.calls.some((call) => call.url === "/api/models/new")).toBe(true));

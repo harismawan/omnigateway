@@ -68,7 +68,7 @@ export function CredentialCard({
 
   return (
     <section className="space-y-4 rounded-lg border bg-card p-4">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h3 className="font-medium">{credential.label}</h3>
           <p className="text-sm text-muted-foreground">
@@ -82,9 +82,6 @@ export function CredentialCard({
           <HealthPill health={health} now={now} />
         )}
       </div>
-      {quota.map((window) => (
-        <QuotaBar key={window.windowType} window={window} />
-      ))}
       <div className="flex flex-wrap items-end gap-3">
         <div className="grid gap-1">
           <Label htmlFor={`${credential.id}-enabled`}>Enabled</Label>
@@ -117,6 +114,13 @@ export function CredentialCard({
             onChange={(event) => setWeight(event.target.value)}
           />
         </div>
+      </div>
+      <div className="grid gap-2 border-t pt-4">
+        {quota.map((window) => (
+          <QuotaBar key={window.windowType} window={window} />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2">
         <Button type="button" onClick={submit} disabled={!valid || !dirty || save.isPending}>
           Save
         </Button>

@@ -6,19 +6,21 @@ import type { ConnectFinish, ConnectPoll, ConnectStart, ProviderId } from "@/api
 import { PROVIDER_LABELS } from "@/api/types.ts";
 import { ErrorState } from "@/components/ErrorState.tsx";
 import { Button } from "@/components/ui/button.tsx";
-import { Card } from "@/components/ui/card.tsx";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import { Label } from "@/components/ui/label.tsx";
 
 export function ConnectDialog({
   provider,
   onClose,
+  onCloseAutoFocus,
   openWindow = (url: string) => {
     globalThis.open(url, "_blank", "noopener,noreferrer");
   },
 }: {
   provider: ProviderId;
   onClose: () => void;
+  onCloseAutoFocus?: (event: Event) => void;
   openWindow?: (url: string) => void;
 }) {
   const invalidate = useInvalidate();
@@ -88,9 +90,11 @@ export function ConnectDialog({
   }, [poll.data, settle]);
 
   return (
-    <div role="dialog" aria-label={`Connect ${PROVIDER_LABELS[provider]}`} className="mt-6">
-      <Card className="max-w-lg p-5">
-        <h2 className="text-sm font-semibold">Connect {PROVIDER_LABELS[provider]}</h2>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent aria-describedby={undefined} onCloseAutoFocus={onCloseAutoFocus}>
+        <DialogHeader>
+          <DialogTitle>Connect {PROVIDER_LABELS[provider]}</DialogTitle>
+        </DialogHeader>
         {flow === null ? (
           <div className="mt-4 space-y-4">
             <div className="space-y-1.5">
@@ -156,7 +160,7 @@ export function ConnectDialog({
             </Button>
           </div>
         )}
-      </Card>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

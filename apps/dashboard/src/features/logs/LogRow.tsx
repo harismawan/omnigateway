@@ -1,18 +1,29 @@
 import type { RequestLog } from "@/api/types.ts";
+import type { StatusTone } from "@/components/StatusBadge.tsx";
+import { StatusBadge } from "@/components/StatusBadge.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { formatMs, formatRelative, formatTokens, formatUsd } from "@/lib/format.ts";
 
-function statusClass(status: number): string {
-  if (status >= 500) return "text-bad";
-  if (status >= 400) return "text-warn";
-  return "text-good";
+export function requestStatus(status: number): { label: string; tone: StatusTone } {
+  if (status >= 500) return { label: "Server error", tone: "bad" };
+  if (status >= 400) return { label: "Client error", tone: "warn" };
+  if (status >= 200) return { label: "Success", tone: "ok" };
+  return { label: "Unknown status", tone: "muted" };
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
+function Detail({
+  label,
+  monospace = false,
+  value,
+}: {
+  label: string;
+  monospace?: boolean;
+  value: string;
+}) {
   return (
     <div>
       <dt className="text-xs opacity-60">{label}</dt>
-      <dd>{value}</dd>
+      <dd className={monospace ? "font-mono" : undefined}>{value}</dd>
     </div>
   );
 }
@@ -35,8 +46,13 @@ export function LogRow({
         <td className="pr-3 font-mono text-xs">{log.requestedModel}</td>
         <td className="pr-3 font-mono text-xs">{log.resolvedModel ?? "—"}</td>
         <td className="pr-3">{log.resolvedProvider ?? "—"}</td>
-        <td className={statusClass(log.status)}>{log.status}</td>
-        <td className="text-warn">{log.errorCode ?? ""}</td>
+        <td className="tabular-nums">
+          <div className="flex items-center gap-2">
+            <StatusBadge {...requestStatus(log.status)} />
+            <span>{log.status}</span>
+          </div>
+        </td>
+        <td className="font-mono text-xs text-warn">{log.errorCode ?? ""}</td>
         <td className="text-right tabular-nums">{formatMs(log.durationMs)}</td>
         <td className="text-right tabular-nums">{formatUsd(log.costUsd)}</td>
         <td className="pl-3 text-right">
@@ -55,9 +71,9 @@ export function LogRow({
         <tr>
           <td className="bg-muted/30 p-3" colSpan={9}>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-4">
-              <Detail label="Request" value={log.id} />
-              <Detail label="API key" value={log.apiKeyId ?? "—"} />
-              <Detail label="Credential" value={log.credentialId ?? "—"} />
+              <Detail label="Request" monospace value={log.id} />
+              <Detail label="API key" monospace value={log.apiKeyId ?? "—"} />
+              <Detail label="Credential" monospace value={log.credentialId ?? "—"} />
               <Detail label="Attempts" value={String(log.attempts)} />
               <Detail
                 label="Tokens"

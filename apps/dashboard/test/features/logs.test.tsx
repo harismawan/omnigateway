@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { requestStatus } from "../../src/features/logs/LogRow.tsx";
 import { LogsScreen, POLL_MS } from "../../src/routes/_app.logs.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { logFixture, NOW } from "../helpers/fixtures.ts";
@@ -25,6 +26,67 @@ test("each recent request is a row naming the model that served it", async () =>
   const row = await screen.findByRole("row", { name: /claude-haiku-4/ });
   expect(within(row).getByText("fast")).toBeDefined();
   expect(screen.getByRole("row", { name: /gpt-5/ })).toBeDefined();
+});
+
+test("request status only classifies 200 through 399 as success", () => {
+  expect(requestStatus(100)).toEqual({ label: "Unknown status", tone: "muted" });
+  expect(requestStatus(200)).toEqual({ label: "Success", tone: "ok" });
+  expect(requestStatus(399)).toEqual({ label: "Success", tone: "ok" });
+  expect(requestStatus(400)).toEqual({ label: "Client error", tone: "warn" });
+});
+
+test("status badges classify successful, client-error, and server-error requests", async () => {
+  createFetchStub({
+    "GET /api/logs": () => ({
+      logs: [
+        logFixture({ id: "success", status: 200 }),
+        logFixture({ id: "client-error", status: 429 }),
+        logFixture({ id: "server-error", status: 500 }),
+      ],
+    }),
+  });
+  renderWithProviders(<LogsScreen now={NOW} />);
+
+  const table = await screen.findByRole("table", { name: /request logs/i });
+  expect(within(table).getByText("Success")).toBeDefined();
+  expect(within(table).getByText("Client error")).toBeDefined();
+  expect(within(table).getByText("Server error")).toBeDefined();
+  expect(within(table).getByText("200")).toBeDefined();
+  expect(within(table).getByText("429")).toBeDefined();
+  expect(within(table).getByText("500")).toBeDefined();
+});
+
+test("operational toolbar shows live state and pauses polling", async () => {
+  createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture()] }) });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  await screen.findByRole("button", { name: /details for r1/i });
+
+  expect(screen.getByText("Live")).toBeDefined();
+  expect(screen.getByText("Refreshing every 3s.")).toBeDefined();
+  await (await userEvent.setup()).click(screen.getByRole("button", { name: /pause/i }));
+  expect(screen.getByText("Paused")).toBeDefined();
+});
+
+test("operational toolbar reflects custom polling interval", async () => {
+  createFetchStub({ "GET /api/logs": () => ({ logs: [logFixture()] }) });
+  renderWithProviders(<LogsScreen now={NOW} pollMs={1_500} />);
+
+  expect(await screen.findByText("Refreshing every 1.5s.")).toBeDefined();
+});
+
+test("expanded identifier values use monospace text", async () => {
+  createFetchStub({
+    "GET /api/logs": () => ({
+      logs: [logFixture({ apiKeyId: "key_123", credentialId: "cred_123", id: "req_123" })],
+    }),
+  });
+  renderWithProviders(<LogsScreen now={NOW} />);
+  const user = userEvent.setup();
+
+  await user.click(await screen.findByRole("button", { name: /details for req_123/i }));
+  for (const id of ["req_123", "key_123", "cred_123"]) {
+    expect(screen.getByText(id).className).toContain("font-mono");
+  }
 });
 
 test("a failed request shows its status and error code", async () => {

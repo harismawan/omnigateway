@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import { routeTree } from "./routeTree.gen.ts";
 import { createDashboardQueryClient } from "./session/queryClient.ts";
+import { ThemeProvider } from "./theme/ThemeProvider.tsx";
 
 let router: ReturnType<typeof createRouter<typeof routeTree>>;
 const queryClient = createDashboardQueryClient({
@@ -24,8 +25,10 @@ if (rootElement === null) throw new Error("#root is missing from index.html");
 
 createRoot(rootElement).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    </ThemeProvider>
   </StrictMode>,
 );

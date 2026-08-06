@@ -17,19 +17,21 @@ export function KeyRow({ apiKey, now }: { apiKey: WireApiKey; now: number }) {
     },
   });
   return (
-    <tr className="border-t">
-      <td className="py-2">{apiKey.label}</td>
-      <td>{apiKey.prefix}…</td>
-      <td>
+    <tr className="border-t align-top">
+      <td className="px-4 py-3 font-medium">{apiKey.label}</td>
+      <td className="px-4 py-3 font-mono text-xs">{apiKey.prefix}…</td>
+      <td className="max-w-72 px-4 py-3">
         {apiKey.modelAllowlist === null
           ? "All models"
           : apiKey.modelAllowlist.length === 0
             ? "No models"
             : apiKey.modelAllowlist.join(", ")}
       </td>
-      <td>{apiKey.rateLimitPerMin === null ? "No limit" : `${apiKey.rateLimitPerMin}/min`}</td>
-      <td>{formatRelative(apiKey.createdAt, now)}</td>
-      <td>
+      <td className="px-4 py-3 tabular-nums">
+        {apiKey.rateLimitPerMin === null ? "No limit" : `${apiKey.rateLimitPerMin}/min`}
+      </td>
+      <td className="px-4 py-3 tabular-nums">{formatRelative(apiKey.createdAt, now)}</td>
+      <td className="px-4 py-3">
         {apiKey.revokedAt !== null ? (
           "Revoked"
         ) : confirming ? (

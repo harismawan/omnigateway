@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -7,6 +7,18 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (() => {
+        let mode = null;
+        try {
+          mode = localStorage.getItem("omni-theme");
+        } catch {}
+        const theme = mode === "light" || mode === "dark" || mode === "system" ? mode : "system";
+        const resolved = theme === "system" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : theme;
+        document.documentElement.classList.toggle("dark", resolved === "dark");
+        document.documentElement.dataset.theme = resolved;
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

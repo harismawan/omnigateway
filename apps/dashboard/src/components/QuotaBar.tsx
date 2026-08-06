@@ -8,7 +8,7 @@ const labels: Readonly<Record<QuotaWindow["windowType"], string>> = {
 
 export function QuotaBar({ window }: { window: QuotaWindow }) {
   if (window.limit === null) return null;
-  const percent = Math.min(100, Math.round((window.used / window.limit) * 100));
+  const percent = Math.max(0, Math.min(100, Math.round((window.used / window.limit) * 100)));
   const tone = percent >= 90 ? "bg-bad" : percent >= 70 ? "bg-warn" : "bg-ok";
 
   return (
@@ -17,7 +17,14 @@ export function QuotaBar({ window }: { window: QuotaWindow }) {
         <span>{labels[window.windowType]}</span>
         <span>{percent}% used</span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded bg-muted">
+      <div
+        aria-label={`${labels[window.windowType]}: ${percent}% used`}
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={percent}
+        className="h-1.5 overflow-hidden rounded bg-muted"
+        role="progressbar"
+      >
         <div className={`h-full ${tone}`} style={{ width: `${percent}%` }} />
       </div>
     </div>

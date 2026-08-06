@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import type { QueryClient } from "@tanstack/react-query";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { WireApiKey } from "../../src/api/types.ts";
@@ -10,6 +11,7 @@ import { renderWithProviders } from "../helpers/render.tsx";
 const realFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = realFetch;
+  localStorage.clear();
 });
 
 const KEY: WireApiKey = {
@@ -23,6 +25,30 @@ const KEY: WireApiKey = {
 };
 
 const MINTED = { id: "k9", label: "ci", prefix: "omni_sk_wxyz", key: "omni_sk_wxyz_test-key-1" };
+
+function expectNoStoredRawKey(key: string) {
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const storageKey = localStorage.key(index);
+    const value = storageKey === null ? null : localStorage.getItem(storageKey);
+    expect(value?.includes(key)).toBe(false);
+  }
+}
+
+function expectNoCachedRawKey(client: QueryClient, key: string) {
+  const hasRawKey = client
+    .getMutationCache()
+    .getAll()
+    .some((mutation) => {
+      const data = mutation.state.data;
+      return (
+        typeof data === "object" &&
+        data !== null &&
+        "key" in data &&
+        (data as { key?: unknown }).key === key
+      );
+    });
+  expect(hasRawKey).toBe(false);
+}
 
 function stubKeys(keys: WireApiKey[] = [KEY]) {
   return createFetchStub({
@@ -53,19 +79,21 @@ test("a model that is not configured is reported back", () => {
   });
 });
 
-test("existing keys are listed by label and prefix, never in full", async () => {
+test("existing keys are listed in named table by label and prefix, never in full", async () => {
   stubKeys();
   renderWithProviders(<KeysScreen now={NOW} />);
-  expect(await screen.findByText("laptop")).toBeDefined();
+  expect(await screen.findByRole("table", { name: /api keys/i })).toBeDefined();
+  expect(screen.getByText("laptop")).toBeDefined();
   expect(screen.getByText("omni_sk_abcd…")).toBeDefined();
+  expect(screen.queryByText(/last used/i)).toBeNull();
   expect(screen.queryByText("omni_sk_wxyz_test-key-1")).toBeNull();
 });
 
 test("mint sends unrestricted null and optional rate limit", async () => {
   const stub = stubKeys();
-  renderWithProviders(<KeysScreen now={NOW} />);
+  const { client } = renderWithProviders(<KeysScreen now={NOW} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.click(await screen.findByRole("button", { name: /create key/i }));
   await user.type(screen.getByLabelText(/label/i), "ci");
   await user.type(screen.getByLabelText(/rate limit/i), "60");
   await user.click(screen.getByRole("button", { name: /mint key/i }));
@@ -80,14 +108,20 @@ test("mint sends unrestricted null and optional rate limit", async () => {
     modelAllowlist: null,
     rateLimitPerMin: 60,
   });
-  expect(await screen.findByText(MINTED.key)).toBeDefined();
+  expect(await screen.findByRole("heading", { name: "Copy your API key" })).toBeDefined();
+  expect(screen.getByText(/cannot be shown again/i)).toBeDefined();
+  const mintedInput = screen.getByDisplayValue(MINTED.key) as HTMLInputElement;
+  expect(mintedInput.readOnly).toBe(true);
+  expect(mintedInput.className).toContain("font-mono");
+  expectNoStoredRawKey(MINTED.key);
+  expectNoCachedRawKey(client, MINTED.key);
 });
 
 test("an empty label is rejected locally without minting", async () => {
   const stub = stubKeys();
   renderWithProviders(<KeysScreen now={NOW} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.click(await screen.findByRole("button", { name: /create key/i }));
   await user.type(screen.getByLabelText(/label/i), "   ");
   await user.click(screen.getByRole("button", { name: /mint key/i }));
   expect(await screen.findByText("Label is required.")).toBeDefined();
@@ -100,7 +134,7 @@ test("invalid rate limits are rejected locally without minting", async () => {
   const stub = stubKeys();
   renderWithProviders(<KeysScreen now={NOW} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.click(await screen.findByRole("button", { name: /create key/i }));
   await user.type(screen.getByLabelText(/label/i), "ci");
   await user.type(screen.getByLabelText(/rate limit/i), "0");
   await user.click(screen.getByRole("button", { name: /mint key/i }));
@@ -116,15 +150,20 @@ test("the minted key is only copied from local dialog state and dismissed safely
   const writeText = async (_value: string) => undefined;
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   try {
-    renderWithProviders(<KeysScreen now={NOW} />);
+    const { client } = renderWithProviders(<KeysScreen now={NOW} />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new key/i }));
+    await user.click(await screen.findByRole("button", { name: /create key/i }));
     await user.type(screen.getByLabelText(/label/i), "ci");
     await user.click(screen.getByRole("button", { name: /mint key/i }));
-    await screen.findByText(MINTED.key);
+    await screen.findByRole("heading", { name: "Copy your API key" });
     await user.click(screen.getByRole("button", { name: /copy/i }));
-    await user.click(screen.getByRole("button", { name: /done/i }));
+    expect(await screen.findByText("Copied")).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "I saved this key" }));
     expect(screen.queryByText(MINTED.key)).toBeNull();
+    await user.click(screen.getByRole("button", { name: /create key/i }));
+    expect(screen.queryByText(MINTED.key)).toBeNull();
+    expectNoStoredRawKey(MINTED.key);
+    expectNoCachedRawKey(client, MINTED.key);
   } finally {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
   }
@@ -141,15 +180,15 @@ test("a clipboard rejection keeps the key visible without exposing it in the mes
   try {
     renderWithProviders(<KeysScreen now={NOW} />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new key/i }));
+    await user.click(await screen.findByRole("button", { name: /create key/i }));
     await user.type(screen.getByLabelText(/label/i), "ci");
     await user.click(screen.getByRole("button", { name: /mint key/i }));
-    await screen.findByText(MINTED.key);
+    await screen.findByRole("heading", { name: "Copy your API key" });
     await user.click(screen.getByRole("button", { name: /^copy$/i }));
     expect(
       await screen.findByText("Could not copy key; select and copy it manually."),
     ).toBeDefined();
-    expect(screen.getByText(MINTED.key)).toBeDefined();
+    expect(screen.getByDisplayValue(MINTED.key)).toBeDefined();
   } finally {
     Object.defineProperty(clipboard, "writeText", { configurable: true, value: writeText });
   }
@@ -208,9 +247,24 @@ test("a failed mint surfaces the gateway message and keeps the form open", async
   });
   renderWithProviders(<KeysScreen now={NOW} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: /new key/i }));
+  await user.click(await screen.findByRole("button", { name: /create key/i }));
   await user.type(screen.getByLabelText(/label/i), "ci");
   await user.click(screen.getByRole("button", { name: /mint key/i }));
   expect(await screen.findByText("label is required")).toBeDefined();
   expect(screen.getByRole("dialog")).toBeDefined();
+});
+
+test("each Create key action is a Dialog trigger", async () => {
+  stubKeys([]);
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  const triggers = await screen.findAllByRole("button", { name: "Create key" });
+
+  for (const trigger of triggers) {
+    expect(trigger.getAttribute("data-slot")).toBe("dialog-trigger");
+    await user.click(trigger);
+    expect(screen.getByRole("dialog")).toBeDefined();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  }
 });

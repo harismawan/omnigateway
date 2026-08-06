@@ -56,7 +56,11 @@ function CandidateRow({ candidate }: { candidate: DryRunCandidate }) {
 
 export function DryRunPanel({ modelId }: { modelId: string }) {
   const [request, setRequest] = useState<DryRunRequest>(INITIAL_REQUEST);
-  const run = useMutation({ mutationFn: () => dryRun(modelId, request) });
+  const [resultsOpen, setResultsOpen] = useState(false);
+  const run = useMutation({
+    mutationFn: () => dryRun(modelId, request),
+    onSuccess: () => setResultsOpen(true),
+  });
 
   return (
     <section aria-labelledby="dry-run-heading" className="space-y-4 rounded-lg border p-4">
@@ -92,53 +96,63 @@ export function DryRunPanel({ modelId }: { modelId: string }) {
       </Button>
       {run.isError && <ErrorState error={run.error} />}
       {run.data !== undefined && (
-        <div className="space-y-4">
-          {!run.data.deterministic && (
-            <p className="text-sm text-muted-foreground">
-              This uses a fixed weighted draw; live ordering will differ.
-            </p>
-          )}
-          {run.data.candidates.length === 0 ? (
-            <p>No candidate would be eligible for this request.</p>
-          ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr>
-                  <th className="text-left">Credential</th>
-                  <th className="text-left">Provider</th>
-                  <th className="text-left">Model</th>
-                  <th className="text-left">Tier</th>
-                  <th className="text-right">Score</th>
-                  <th>
-                    <span className="sr-only">Details</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {run.data.candidates.map((candidate) => (
-                  <CandidateRow
-                    candidate={candidate}
-                    key={`${candidate.credentialId}:${candidate.model}`}
-                  />
-                ))}
-              </tbody>
-            </table>
-          )}
-          <section aria-label="Excluded candidates">
-            <h3>Excluded candidates</h3>
-            {run.data.excluded.length === 0 ? (
-              <p>Nothing was filtered out.</p>
-            ) : (
-              <ul className="list-disc pl-5 text-sm">
-                {run.data.excluded.map((candidate) => (
-                  <li key={`${candidate.credentialId}:${candidate.model}`}>
-                    {candidate.credentialId} / {candidate.model}: {candidate.reason}
-                  </li>
-                ))}
-              </ul>
+        <details
+          aria-label="Dry-run results"
+          className="space-y-4"
+          onToggle={(event) => setResultsOpen(event.currentTarget.open)}
+          open={resultsOpen}
+        >
+          <summary aria-label="Toggle dry-run results" className="cursor-pointer font-medium">
+            Dry-run results
+          </summary>
+          <div className="space-y-4 pt-4">
+            {!run.data.deterministic && (
+              <p className="text-sm text-muted-foreground">
+                This uses a fixed weighted draw; live ordering will differ.
+              </p>
             )}
-          </section>
-        </div>
+            {run.data.candidates.length === 0 ? (
+              <p>No candidate would be eligible for this request.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr>
+                    <th className="text-left">Credential</th>
+                    <th className="text-left">Provider</th>
+                    <th className="text-left">Model</th>
+                    <th className="text-left">Tier</th>
+                    <th className="text-right">Score</th>
+                    <th>
+                      <span className="sr-only">Details</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {run.data.candidates.map((candidate) => (
+                    <CandidateRow
+                      candidate={candidate}
+                      key={`${candidate.credentialId}:${candidate.model}`}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <section aria-label="Excluded candidates">
+              <h3>Excluded candidates</h3>
+              {run.data.excluded.length === 0 ? (
+                <p>Nothing was filtered out.</p>
+              ) : (
+                <ul className="list-disc pl-5 text-sm">
+                  {run.data.excluded.map((candidate) => (
+                    <li key={`${candidate.credentialId}:${candidate.model}`}>
+                      {candidate.credentialId} / {candidate.model}: {candidate.reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
+        </details>
       )}
     </section>
   );
