@@ -253,3 +253,18 @@ test("a failed mint surfaces the gateway message and keeps the form open", async
   expect(await screen.findByText("label is required")).toBeDefined();
   expect(screen.getByRole("dialog")).toBeDefined();
 });
+
+test("each Create key action is a Dialog trigger", async () => {
+  stubKeys([]);
+  renderWithProviders(<KeysScreen now={NOW} />);
+  const user = userEvent.setup();
+  const triggers = await screen.findAllByRole("button", { name: "Create key" });
+
+  for (const trigger of triggers) {
+    expect(trigger.getAttribute("data-slot")).toBe("dialog-trigger");
+    await user.click(trigger);
+    expect(screen.getByRole("dialog")).toBeDefined();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  }
+});
