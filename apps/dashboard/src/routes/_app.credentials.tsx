@@ -145,10 +145,14 @@ export function CredentialsScreen({
   if (credentials.isPending) return <CredentialsLoading />;
 
   function addProvider(provider: ProviderId) {
-    providerSelected.current = true;
-    setProviderChooserOpen(false);
     setPendingProvider(provider);
     onAddProvider?.(provider);
+  }
+
+  function selectProvider(provider: ProviderId) {
+    providerSelected.current = true;
+    setProviderChooserOpen(false);
+    addProvider(provider);
   }
 
   const currentHealth = credentialHealth.data?.health ?? health;
@@ -174,7 +178,7 @@ export function CredentialsScreen({
           }
         />
         <ProviderChooser
-          onSelect={addProvider}
+          onSelect={selectProvider}
           onCloseAutoFocus={(event) => {
             if (providerSelected.current) {
               providerSelected.current = false;
