@@ -177,6 +177,19 @@ test("a rejected save displays the API error", async () => {
   expect(await screen.findByText("invalid target")).toBeDefined();
 });
 
+test("keeps Models workspace stacked until wide desktop content is available", async () => {
+  stubModels();
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+
+  await user.click(await screen.findByRole("button", { name: "New model" }));
+
+  const workspace = screen.getByRole("main", { name: "New model" }).parentElement;
+  expect(workspace).not.toBeNull();
+  expect(workspace?.className).toContain("xl:grid-cols-[17rem_minmax(0,1fr)]");
+  expect(workspace?.className).not.toContain("md:grid-cols-[17rem_minmax(0,1fr)]");
+});
+
 test("new model saves a complete virtual model", async () => {
   const stub = createFetchStub({
     "GET /api/models": () => ({ models: [] }),

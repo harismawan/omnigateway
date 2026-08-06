@@ -39,7 +39,7 @@ export function ModelsScreen() {
           description="Configure virtual models and routing targets."
           title="Models"
         />
-        <div className="grid gap-4 md:grid-cols-[17rem_minmax(0,1fr)]">
+        <div className="grid gap-4 xl:grid-cols-[17rem_minmax(0,1fr)]">
           <LoadingSkeleton className="h-72" />
           <LoadingSkeleton className="h-96" />
         </div>
@@ -69,7 +69,7 @@ export function ModelsScreen() {
           title="No virtual models configured"
         />
       ) : (
-        <div className="grid items-start gap-6 md:grid-cols-[17rem_minmax(0,1fr)]">
+        <div className="grid items-start gap-6 xl:grid-cols-[17rem_minmax(0,1fr)]">
           <nav aria-label="Virtual models" className="space-y-3 rounded-lg border p-3">
             <label className="sr-only" htmlFor="model-search">
               Search models

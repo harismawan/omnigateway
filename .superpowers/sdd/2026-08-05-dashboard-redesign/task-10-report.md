@@ -64,3 +64,13 @@ Temporary gateway and Chrome processes were stopped after inspection.
 
 - `fix(dashboard): resolve responsive UI defects`
   - Footer: `Co-Authored-By: Claude <noreply@anthropic.com>`
+
+## 900px Models overflow regression
+
+- Root cause reproduced in real Chrome at viewport width 900px after opening **New model**: application sidebar left Models content 596px wide; `md:grid-cols-[17rem_minmax(0,1fr)]` then activated its 17rem master list plus gap, while `TargetRow` retained 333px intrinsic width. Document `scrollWidth` measured 935px.
+- Regression coverage added in `apps/dashboard/test/features/models.test.tsx`: asserts Models workspace uses `xl:grid-cols-[17rem_minmax(0,1fr)]` and does not activate master-detail grid at `md`.
+- Minimal fix: changed Models loading and populated master-detail grids from `md` to `xl`; tablet remains stacked and desktop 1440px remains master-detail.
+- TDD RED: `bun run --cwd apps/dashboard test -- models.test.tsx` failed before fix with expected class-contract mismatch: expected `xl:grid-cols-[17rem_minmax(0,1fr)]`, received `md:grid-cols-[17rem_minmax(0,1fr)]`.
+- Focused GREEN: `bun run --cwd apps/dashboard test -- models.test.tsx` passed (145 pass, 0 fail, 389 assertions). `bun run --cwd apps/dashboard test -- dryrun` passed (145 pass, 0 fail, 389 assertions). Existing React `act(...)` warning from `usage.test.tsx` remains.
+- Dashboard typecheck: `bun run typecheck` passed. Existing `replaceRouteChunk` Node circular-dependency warning remains.
+- Real Chrome/DevTools Protocol verification after fix: at viewport width 900px, signed into temporary synthetic gateway, navigated to `/models`, opened **New model**, and measured `{ "scrollWidth": 900, "innerWidth": 900, "path": "/models", "hasNewModel": true }`. Temporary gateway and Chrome processes were stopped.
