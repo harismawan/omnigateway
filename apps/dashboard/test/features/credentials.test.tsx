@@ -115,7 +115,7 @@ test("renders every provider group with an add account seam", async () => {
   expect(added).toEqual(["anthropic"]);
 });
 
-test("provider chooser focuses inside then Cancel closes and restores trigger focus", async () => {
+test("selecting OpenAI replaces chooser with focused OpenAI connection dialog", async () => {
   createFetchStub({
     "GET /api/credentials": () => ({ credentials: [] }),
     "GET /api/credentials/health": () => ({ health: [], quota: [] }),
@@ -125,17 +125,38 @@ test("provider chooser focuses inside then Cancel closes and restores trigger fo
   renderWithProviders(<CredentialsScreen now={NOW} />);
 
   await screen.findByRole("button", { name: "Connect provider" });
+  const trigger = screen.getByRole("button", { name: "Connect provider" });
   await user.click(screen.getByRole("button", { name: "Connect provider" }));
+  const chooser = await screen.findByRole("dialog", { name: "Connect provider" });
+  await user.click(within(chooser).getByRole("button", { name: "OpenAI" }));
 
-  const dialog = await screen.findByRole("dialog", { name: "Connect provider" });
-  expect(dialog.contains(document.activeElement)).toBe(true);
-  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog", { name: "Connect provider" })).toBeNull();
+    expect(screen.getAllByRole("dialog", { name: "Connect OpenAI" })).toHaveLength(1);
+  });
+  const dialog = screen.getByRole("dialog", { name: "Connect OpenAI" });
+  await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+  expect(document.activeElement).not.toBe(trigger);
+});
+
+test("provider chooser Cancel closes and restores trigger focus", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [] }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  const user = userEvent.setup();
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  await screen.findByRole("button", { name: "Connect provider" });
+  const trigger = screen.getByRole("button", { name: "Connect provider" });
+  await user.click(trigger);
+  const chooser = await screen.findByRole("dialog", { name: "Connect provider" });
+  await user.click(within(chooser).getByRole("button", { name: "Cancel" }));
   await waitFor(() =>
     expect(screen.queryByRole("dialog", { name: "Connect provider" })).toBeNull(),
   );
-  await waitFor(() =>
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Connect provider" })),
-  );
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
 });
 
 test("provider chooser Escape closes and restores trigger focus", async () => {
@@ -148,14 +169,13 @@ test("provider chooser Escape closes and restores trigger focus", async () => {
   renderWithProviders(<CredentialsScreen now={NOW} />);
 
   await screen.findByRole("button", { name: "Connect provider" });
-  await user.click(screen.getByRole("button", { name: "Connect provider" }));
+  const trigger = screen.getByRole("button", { name: "Connect provider" });
+  await user.click(trigger);
   await user.keyboard("{Escape}");
   await waitFor(() =>
     expect(screen.queryByRole("dialog", { name: "Connect provider" })).toBeNull(),
   );
-  await waitFor(() =>
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Connect provider" })),
-  );
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
 });
 
 test("provider chooser sends selected provider through existing add callback", async () => {

@@ -137,6 +137,7 @@ export function CredentialsScreen({
   const [providerChooserOpen, setProviderChooserOpen] = useState(false);
   const [pendingProvider, setPendingProvider] = useState<ProviderId | null>(null);
   const providerChooserTrigger = useRef<HTMLButtonElement | null>(null);
+  const providerSelected = useRef(false);
   const credentials = useQuery(credentialsQuery());
   const credentialHealth = useQuery(credentialHealthQuery());
   if (credentials.isError)
@@ -144,6 +145,7 @@ export function CredentialsScreen({
   if (credentials.isPending) return <CredentialsLoading />;
 
   function addProvider(provider: ProviderId) {
+    providerSelected.current = true;
     setProviderChooserOpen(false);
     setPendingProvider(provider);
     onAddProvider?.(provider);
@@ -174,6 +176,11 @@ export function CredentialsScreen({
         <ProviderChooser
           onSelect={addProvider}
           onCloseAutoFocus={(event) => {
+            if (providerSelected.current) {
+              providerSelected.current = false;
+              event.preventDefault();
+              return;
+            }
             event.preventDefault();
             providerChooserTrigger.current?.focus();
           }}

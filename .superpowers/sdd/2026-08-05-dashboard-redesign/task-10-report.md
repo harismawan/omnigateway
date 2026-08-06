@@ -32,7 +32,7 @@ No runtime behavior changed; lint root cause was stale Biome formatting/rules in
 | `bun test` | Pass: 466 tests, 0 failures, 1,095 assertions. Existing React `act(...)` warning remains. |
 | `bun run typecheck` | Pass. Existing `replaceRouteChunk` circular-dependency warning remains. |
 | `bun run lint` | Pass. Existing informational Biome `linter.recommended` deprecation notice remains. |
-| `bun run --cwd apps/dashboard build` | Pass. Vite emitted existing >500 kB chunk-size advisory. |
+| `bun run --cwd apps/dashboard build` | Pass (`vite: build ok`). |
 | `git diff --check` | Pass. |
 
 ## Real-app visual inspection
@@ -80,7 +80,7 @@ Temporary gateway and Chrome processes were stopped after inspection.
 - Finding addressed: `.superpowers/sdd/2026-08-05-dashboard-redesign/final-review.md` identified `ProviderChooser` as a plain `div` with `role="dialog"`, without dialog focus management, Escape dismissal, cancellation, or trigger-focus restoration.
 - TDD RED: before production change, `bun run --cwd apps/dashboard test -- credentials.test.tsx` failed with `Unable to find an accessible element with the role "dialog" and name "Connect provider"`.
 - Minimal fix: wrapped the header **Connect provider** action in controlled Radix `Dialog`/`DialogTrigger`, rendered chooser in `DialogContent`, added explicit **Cancel**, and restored focus through `onCloseAutoFocus`. Provider selection still closes chooser before setting `pendingProvider`, retaining established `ConnectDialog` flow without overlapping modals.
-- Regression coverage in `apps/dashboard/test/features/credentials.test.tsx`: verifies focus enters the chooser, **Cancel** closes it and restores trigger focus, and Escape closes it and restores trigger focus. Existing selection callback coverage remains.
+- Regression coverage in `apps/dashboard/test/features/credentials.test.tsx`: verifies focus enters chooser, **Cancel** closes it and restores trigger focus, and Escape closes it and restores trigger focus. Existing selection callback coverage remains.
 
 | Command | Outcome |
 | --- | --- |
@@ -90,4 +90,23 @@ Temporary gateway and Chrome processes were stopped after inspection.
 | `bun run typecheck` | Pass. `tsr generate` emitted Node circular-dependency warning for `replaceRouteChunk`. |
 | `bun run lint` | Pass. Biome emitted informational `linter.recommended` deprecation notice. |
 | `bun run --cwd apps/dashboard build` | Pass (`vite: build ok`). |
+| `git diff --check` | Pass. |
+
+## Provider chooser transition focus follow-up
+
+- Root cause: selecting a provider closed chooser and mounted connection UI in same React update, but chooser `onCloseAutoFocus` restored old **Connect provider** trigger after destination mounted. Prior connection UI also was not Radix dialog, so it did not take focus.
+- TDD RED: with production files restored to `HEAD`, focused `selecting OpenAI replaces chooser with focused OpenAI connection dialog` test failed expectedly: destination dialog did not contain `document.activeElement`.
+- Minimal fix: mark selection-driven chooser closures in `CredentialsScreen`, prevent only that closure's trigger restoration, and render `ConnectDialog` through Radix `Dialog`/`DialogContent` so destination autofocus owns focus. Cancel and Escape remain trigger-restoration paths.
+- Regression coverage: chooser removal, exactly one **Connect OpenAI** dialog, focus inside destination, focus not returned to old trigger. Separate tests cover Cancel and Escape restoration.
+- Real Chrome verification: built dashboard, ran temporary gateway using synthetic credentials and temporary SQLite database, selected **OpenAI** from Credentials chooser through Chrome DevTools Protocol. Result: `{ "path": "/credentials", "dialogCount": 1, "chooserPresent": false, "destinationPresent": true, "focusInDestination": true, "focusIsTrigger": false, "activeTag": "INPUT" }`. Temporary browser and gateway stopped afterward.
+
+| Command | Outcome |
+| --- | --- |
+| `bun test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts test/features/credentials.test.tsx --test-name-pattern='selecting OpenAI'` | RED without production fix, then GREEN with fix: 1 pass, 0 fail. |
+| `bun test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts test/features/credentials.test.tsx` | Pass: 19 tests, 0 failures, 49 assertions. Existing Radix `Presence` React `act(...)` warnings remain. |
+| `bun run test` (dashboard) | Pass: 149 tests, 0 failures, 401 assertions. Existing Radix/React `act(...)` warnings remain. |
+| `bun test apps/gateway/test packages/ir/test packages/providers/test packages/store/test` (repository root) | Pass: 466 tests, 0 failures, 1,095 assertions. |
+| `bun run typecheck` | Pass. Existing `tsr generate` circular-dependency warning remains. |
+| `bun run lint` (repository root) | Pass. Existing informational Biome `linter.recommended` deprecation notice remains. |
+| `bun run build:dashboard` | Pass: `vite: build ok`. |
 | `git diff --check` | Pass. |
