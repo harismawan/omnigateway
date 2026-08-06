@@ -137,6 +137,7 @@ export function CredentialsScreen({
   const [providerChooserOpen, setProviderChooserOpen] = useState(false);
   const [pendingProvider, setPendingProvider] = useState<ProviderId | null>(null);
   const providerChooserTrigger = useRef<HTMLButtonElement | null>(null);
+  const connectionFromChooser = useRef(false);
   const providerSelected = useRef(false);
   const credentials = useQuery(credentialsQuery());
   const credentialHealth = useQuery(credentialHealthQuery());
@@ -150,6 +151,7 @@ export function CredentialsScreen({
   }
 
   function selectProvider(provider: ProviderId) {
+    connectionFromChooser.current = true;
     providerSelected.current = true;
     setProviderChooserOpen(false);
     addProvider(provider);
@@ -208,7 +210,16 @@ export function CredentialsScreen({
           />
         ))}
         {pendingProvider !== null && (
-          <ConnectDialog provider={pendingProvider} onClose={() => setPendingProvider(null)} />
+          <ConnectDialog
+            provider={pendingProvider}
+            onClose={() => setPendingProvider(null)}
+            onCloseAutoFocus={(event) => {
+              if (!connectionFromChooser.current) return;
+              connectionFromChooser.current = false;
+              event.preventDefault();
+              providerChooserTrigger.current?.focus();
+            }}
+          />
         )}
       </main>
     </Dialog>

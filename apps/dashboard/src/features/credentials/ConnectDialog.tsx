@@ -13,12 +13,14 @@ import { Label } from "@/components/ui/label.tsx";
 export function ConnectDialog({
   provider,
   onClose,
+  onCloseAutoFocus,
   openWindow = (url: string) => {
     globalThis.open(url, "_blank", "noopener,noreferrer");
   },
 }: {
   provider: ProviderId;
   onClose: () => void;
+  onCloseAutoFocus?: (event: Event) => void;
   openWindow?: (url: string) => void;
 }) {
   const invalidate = useInvalidate();
@@ -89,7 +91,7 @@ export function ConnectDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent aria-describedby={undefined}>
+      <DialogContent aria-describedby={undefined} onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>Connect {PROVIDER_LABELS[provider]}</DialogTitle>
         </DialogHeader>

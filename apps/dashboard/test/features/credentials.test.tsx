@@ -139,6 +139,48 @@ test("selecting OpenAI replaces chooser with focused OpenAI connection dialog", 
   expect(document.activeElement).not.toBe(trigger);
 });
 
+test("chooser-selected ConnectDialog close restores header trigger focus", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [] }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  const user = userEvent.setup();
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  await screen.findByRole("button", { name: "Connect provider" });
+  const trigger = screen.getByRole("button", { name: "Connect provider" });
+  await user.click(screen.getByRole("button", { name: "Connect provider" }));
+  const chooser = await screen.findByRole("dialog", { name: "Connect provider" });
+  await user.click(within(chooser).getByRole("button", { name: "OpenAI" }));
+  const dialog = await screen.findByRole("dialog", { name: "Connect OpenAI" });
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Connect OpenAI" })).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+});
+
+test("chooser-selected ConnectDialog Escape restores header trigger focus", async () => {
+  createFetchStub({
+    "GET /api/credentials": () => ({ credentials: [] }),
+    "GET /api/credentials/health": () => ({ health: [], quota: [] }),
+  });
+  const user = userEvent.setup();
+
+  renderWithProviders(<CredentialsScreen now={NOW} />);
+
+  await screen.findByRole("button", { name: "Connect provider" });
+  const trigger = screen.getByRole("button", { name: "Connect provider" });
+  await user.click(screen.getByRole("button", { name: "Connect provider" }));
+  const chooser = await screen.findByRole("dialog", { name: "Connect provider" });
+  await user.click(within(chooser).getByRole("button", { name: "OpenAI" }));
+  await screen.findByRole("dialog", { name: "Connect OpenAI" });
+  await user.keyboard("{Escape}");
+
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Connect OpenAI" })).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+});
+
 test("provider chooser Cancel closes and restores trigger focus", async () => {
   createFetchStub({
     "GET /api/credentials": () => ({ credentials: [] }),
