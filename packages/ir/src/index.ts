@@ -5,3 +5,4 @@ export * from "./errors.ts";
 export * from "./request.ts";
 export * from "./stream.ts";
 export * from "./validate.ts";
+export * from "./model-catalog.ts";
