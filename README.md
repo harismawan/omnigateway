@@ -2,7 +2,7 @@
 
 OmniGateway is a self-hosted, single-node AI gateway that presents Anthropic- and OpenAI-compatible APIs over OAuth-backed Anthropic, OpenAI, and Kimi Coding accounts. It normalizes incoming requests into a provider-neutral representation, routes virtual models across eligible credentials, handles failover and token refresh, and records operational usage without logging prompt or response bodies.
 
-> Current status: core gateway is implemented. Admin dashboard is planned separately and is not included yet.
+> Current status: core gateway and admin dashboard are both implemented. Version 1 targets a single-node, single-operator deployment.
 
 ## Features
 
@@ -15,6 +15,8 @@ OmniGateway is a self-hosted, single-node AI gateway that presents Anthropic- an
 - Per-key model allowlists and process-local rate limits
 - Streaming SSE translation between client and provider formats
 - Admin control API for setup, login, credentials, models, keys, settings, health, usage, and logs
+- Admin dashboard served from the same origin, covering every control endpoint
+- Per-provider model catalog with list pricing, used as the default when configuring targets
 - Provider-specific client identity profiles and ordered outbound headers
 
 ## Requirements
@@ -57,6 +59,28 @@ Default listener is `http://127.0.0.1:8787`. Check liveness:
 curl http://127.0.0.1:8787/health
 ```
 
+### Dashboard
+
+The gateway serves the built dashboard from `apps/dashboard/dist` at its own
+origin, so building it once makes the console available on the same port:
+
+```bash
+bun run build:dashboard
+```
+
+For dashboard development, run the gateway and Vite side by side. Vite proxies
+`/api` and `/oauth` to `127.0.0.1:8787`, so both halves work against one
+gateway:
+
+```bash
+bun run dev            # gateway on 8787
+bun run dev:dashboard  # console on 5173
+```
+
+Requests for a path the bundle does not contain fall through to `index.html`
+for client-side routing. `/api`, `/v1`, and `/oauth` are never served from
+disk.
+
 ## Configuration
 
 | Variable | Required | Default | Purpose |
@@ -71,12 +95,16 @@ curl http://127.0.0.1:8787/health
 
 ## First-run setup
 
-Dashboard is not implemented yet, so use `/api/*` control endpoints directly.
+Build the dashboard, open the gateway in a browser, and it walks the same steps:
+set an operator password, connect provider accounts, define virtual models, then
+mint a key. The key is displayed once and stored only as a hash.
+
+The same sequence over the control API directly:
 
 1. Check setup state with `GET /api/status`.
 2. Configure admin password with `POST /api/setup`.
 3. Create a session with `POST /api/login`; retain returned HTTP-only cookie.
-4. Connect provider credentials through `/api/connect/:provider/*`.
+4. Connect provider credentials through `/api/connect/*`.
 5. Configure virtual models through `/api/models`.
 6. Create gateway API keys through `/api/keys`. Raw key is returned once.
 
@@ -117,26 +145,40 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ```text
 apps/gateway/       Elysia HTTP application, auth, ingress, routing, dispatch, APIs
+apps/dashboard/     React admin console; built output is served by the gateway
 packages/ir/        Provider-neutral request, stream, error, and usage types
-packages/providers/ Provider adapters, OAuth logic, wire formats, HTTP transport
+packages/providers/ Provider adapters, OAuth logic, wire formats, model catalog
 packages/store/     Store contracts, encryption, SQLite repositories and migrations
 docs/superpowers/   Approved design specifications and implementation plans
 ```
 
 Dependency direction matters:
 
-- `@omni/ir` does not depend on provider or gateway code.
-- `@omni/providers` translates between provider wire formats and canonical IR.
+- `@omni/ir` does not depend on provider or gateway code, and holds nothing
+  provider-specific.
+- `@omni/providers` translates between provider wire formats and canonical IR,
+  and owns the per-provider model catalog. `@omni/providers/catalog` is a leaf
+  subpath the dashboard imports, so it must not pull in the HTTP client or
+  adapters.
 - Router chooses candidates; dispatch owns side effects, retries, refresh, and streaming commit.
 - Gateway composes packages and exposes client and control APIs.
+- Dashboard only calls `/api/*`; it never reaches into the store or providers
+  for anything but types and the catalog.
 
 ## Development
 
 ```bash
-bun test             # full test suite
-bun run typecheck    # TypeScript project references
+bun test             # gateway, IR, providers, and store suites
+bun run typecheck    # gateway and dashboard
 bun run lint         # Biome checks
 bun run fmt          # format files
+```
+
+Dashboard tests need a DOM and run separately; `bunfig.toml` excludes them from
+the root run so the two do not share a preload:
+
+```bash
+bun run --cwd apps/dashboard test
 ```
 
 Run one test file:
@@ -160,6 +202,11 @@ docker run --rm \
 
 Container listens on `0.0.0.0:8787` and stores SQLite data at `/data/omnigateway.db`.
 
+The image builds the gateway only. It does not include `apps/dashboard`, so a
+container serves the client and control APIs while requests for the console
+return 404. Use the control API directly, or run the dashboard separately,
+until the image builds it.
+
 ## Operational notes
 
 - Treat `OMNI_ENCRYPTION_KEY`, gateway keys, OAuth tokens, and SQLite data as secrets.
@@ -170,7 +217,21 @@ Container listens on `0.0.0.0:8787` and stores SQLite data at `/data/omnigateway
 
 ## Design documents
 
+Specifications:
+
 - `docs/superpowers/specs/2026-07-31-omnigateway-design.md`
 - `docs/superpowers/specs/2026-07-31-client-identity-profiles-design.md`
+- `docs/superpowers/specs/2026-08-05-dashboard-redesign-design.md`
+- `docs/superpowers/specs/2026-08-06-provider-chooser-focus-return-design.md`
+- `docs/superpowers/specs/2026-08-08-provider-model-catalog-design.md`
+
+Plans:
+
 - `docs/superpowers/plans/2026-07-31-omnigateway-core.md`
 - `docs/superpowers/plans/2026-07-31-omnigateway-dashboard.md`
+- `docs/superpowers/plans/2026-08-05-dashboard-redesign.md`
+- `docs/superpowers/plans/2026-08-06-provider-chooser-focus-return.md`
+- `docs/superpowers/plans/2026-08-08-provider-model-catalog.md`
+
+Verify current code before assuming a plan snippet still matches the
+implementation.
