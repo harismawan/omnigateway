@@ -102,10 +102,10 @@ test("the last target cannot be removed", async () => {
   expect(screen.getByText(/at least one target/i)).toBeDefined();
 });
 
-test("empty targets contain complete store defaults", () => {
+test("empty targets use the selected provider default model", () => {
   expect(emptyTarget("kimi")).toEqual({
     provider: "kimi",
-    model: "",
+    model: "k3-256k",
     tier: 1,
     weight: 1,
     costPerMTok: { input: 0, output: 0 },
@@ -203,4 +203,101 @@ test("new model saves a complete virtual model", async () => {
   await user.type(screen.getByLabelText("Model id"), "new");
   await user.click(screen.getByRole("button", { name: /save model/i }));
   await waitFor(() => expect(stub.calls.some((call) => call.url === "/api/models/new")).toBe(true));
+  const put = stub.calls.find((call) => call.url === "/api/models/new");
+  const body = JSON.parse(String(put?.init?.body)) as {
+    targets: { provider: string; model: string }[];
+  };
+  expect(body.targets[0]).toMatchObject({ provider: "anthropic", model: "claude-opus-5" });
+});
+
+test("new and added targets start with the Anthropic default", async () => {
+  createFetchStub({ "GET /api/models": () => ({ models: [] }) });
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  const [newModel] = await screen.findAllByRole("button", { name: "New model" });
+  if (newModel === undefined) throw new Error("New model action did not render");
+
+  await user.click(newModel);
+  expect(screen.getByRole("combobox", { name: "Target 1 model" })).toHaveProperty(
+    "value",
+    "claude-opus-5",
+  );
+
+  await user.click(screen.getByRole("button", { name: "Add target" }));
+  expect(screen.getByRole("combobox", { name: "Target 2 model" })).toHaveProperty(
+    "value",
+    "claude-opus-5",
+  );
+});
+
+test("changing provider resets model but preserves operator-managed capabilities", async () => {
+  stubModels([
+    modelFixture({
+      targets: [
+        targetFixture({
+          model: "vendor-private-model",
+          capabilities: { tools: false, images: true, reasoning: false },
+        }),
+      ],
+    }),
+  ]);
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "fast" }));
+
+  await user.selectOptions(screen.getByLabelText("Target 1 provider"), "kimi");
+
+  expect(screen.getByRole("combobox", { name: "Target 1 model" })).toHaveProperty(
+    "value",
+    "k3-256k",
+  );
+  expect(screen.getByLabelText("Target 1 supports tools")).toHaveProperty("checked", false);
+  expect(screen.getByLabelText("Target 1 supports images")).toHaveProperty("checked", true);
+  expect(screen.getByLabelText("Target 1 supports reasoning")).toHaveProperty("checked", false);
+});
+
+test("custom model IDs render and save unchanged", async () => {
+  const stub = stubModels([
+    modelFixture({ targets: [targetFixture({ model: "vendor-private-model" })] }),
+  ]);
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "fast" }));
+  const input = screen.getByRole("combobox", { name: "Target 1 model" });
+
+  expect(input).toHaveProperty("value", "vendor-private-model");
+  await user.clear(input);
+  await user.type(input, "org/custom-v2");
+  await user.click(screen.getByRole("button", { name: "Save model" }));
+
+  await waitFor(() =>
+    expect(stub.calls.some((call) => call.url === "/api/models/fast")).toBe(true),
+  );
+  const put = stub.calls.find((call) => call.url === "/api/models/fast");
+  const body = JSON.parse(String(put?.init?.body)) as { targets: { model: string }[] };
+  expect(body.targets[0]?.model).toBe("org/custom-v2");
+});
+
+test("opening and saving an existing custom target does not rewrite it", async () => {
+  const stub = stubModels([
+    modelFixture({
+      targets: [targetFixture({ provider: "openai", model: "account-deployment-name" })],
+    }),
+  ]);
+  renderWithProviders(<ModelsScreen />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "fast" }));
+  await user.click(screen.getByRole("button", { name: "Save model" }));
+
+  await waitFor(() =>
+    expect(stub.calls.some((call) => call.url === "/api/models/fast")).toBe(true),
+  );
+  const put = stub.calls.find((call) => call.url === "/api/models/fast");
+  const body = JSON.parse(String(put?.init?.body)) as {
+    targets: { provider: string; model: string }[];
+  };
+  expect(body.targets[0]).toMatchObject({
+    provider: "openai",
+    model: "account-deployment-name",
+  });
 });
