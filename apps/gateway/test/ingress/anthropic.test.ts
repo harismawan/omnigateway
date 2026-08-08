@@ -275,3 +275,37 @@ test("still rejects a role no surface defines", () => {
     }),
   ).toThrow(GatewayError);
 });
+
+test("carries the betas the client opted into", () => {
+  const req = parseAnthropicRequest(
+    minimal,
+    new Headers({ "anthropic-beta": "context-management-2025-06-27" }),
+  );
+  expect(req.betas).toEqual(["context-management-2025-06-27"]);
+});
+
+test("splits, trims and dedupes a multi-value beta header", () => {
+  const req = parseAnthropicRequest(
+    minimal,
+    new Headers({ "anthropic-beta": "a-2025-01-01, b-2025-01-01 ,, a-2025-01-01" }),
+  );
+  expect(req.betas).toEqual(["a-2025-01-01", "b-2025-01-01"]);
+});
+
+test("leaves betas unset when the client named none", () => {
+  expect(parseAnthropicRequest(minimal).betas).toBeUndefined();
+  expect(
+    parseAnthropicRequest(minimal, new Headers({ "anthropic-beta": " , " })).betas,
+  ).toBeUndefined();
+});
+
+test("keeps a beta's body field in vendor passthrough beside its name", () => {
+  const req = parseAnthropicRequest(
+    { ...minimal, context_management: { edits: [{ type: "clear_tool_uses_20250919" }] } },
+    new Headers({ "anthropic-beta": "context-management-2025-06-27" }),
+  );
+  expect(req.vendor?.anthropic?.context_management).toEqual({
+    edits: [{ type: "clear_tool_uses_20250919" }],
+  });
+  expect(req.betas).toEqual(["context-management-2025-06-27"]);
+});

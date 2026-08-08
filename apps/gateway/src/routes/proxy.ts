@@ -101,7 +101,9 @@ async function handle(
 
     const body: unknown = await request.json();
     const chatRequest =
-      surface === "anthropic" ? parseAnthropicRequest(body) : parseOpenAIRequest(body);
+      surface === "anthropic"
+        ? parseAnthropicRequest(body, request.headers)
+        : parseOpenAIRequest(body);
     if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {
       throw new GatewayError(
         "AUTH",

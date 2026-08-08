@@ -186,7 +186,26 @@ function toIrReasoning(
   }
 }
 
-export function parseAnthropicRequest(body: unknown): ChatRequest {
+/**
+ * Reads the betas the client opted into out of `anthropic-beta`.
+ *
+ * The adapter rebuilds every upstream header from the client profile, so a
+ * beta header arriving here is dropped unless it is carried on the request —
+ * while the body field it authorises survives through `vendor` and is then
+ * rejected upstream as an unknown key. Repeated headers arrive comma-joined,
+ * which is also how a single header lists more than one beta.
+ */
+function readBetas(headers: Headers | undefined): string[] {
+  const raw = headers?.get("anthropic-beta");
+  if (raw === undefined || raw === null) return [];
+  const names = raw
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  return [...new Set(names)];
+}
+
+export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatRequest {
   if (typeof body !== "object" || body === null) {
     throw new GatewayError("BAD_REQUEST", "request body must be a JSON object");
   }
@@ -238,6 +257,9 @@ export function parseAnthropicRequest(body: unknown): ChatRequest {
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { anthropic: extras };
+
+  const betas = readBetas(headers);
+  if (betas.length > 0) request.betas = betas;
 
   return validateRequest(request);
 }
