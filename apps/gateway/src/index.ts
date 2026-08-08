@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createRefresher, loadConfig, OAUTH_PROVIDERS } from "@omni/control";
 import { nodeHttpClient } from "@omni/providers";
@@ -8,6 +9,25 @@ import { startRefreshScheduler } from "./oauth/scheduler.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
 
 const config = loadConfig(process.env);
+
+/**
+ * Where the built dashboard lives.
+ *
+ * A published package ships the bundle as `public/` beside the server, while a
+ * checkout builds it into the dashboard app. Trying both means the same server
+ * file serves the console either way, with no env var to remember. An explicit
+ * `OMNI_STATIC_DIR` is taken literally: if the operator names a directory, a
+ * silent fallback to some other console would be worse than serving none.
+ */
+function dashboardDir(): string {
+  if (config.staticDir !== null) return config.staticDir;
+
+  const candidates = [
+    resolve(import.meta.dir, "./public"),
+    resolve(import.meta.dir, "../../dashboard/dist"),
+  ];
+  return candidates.find((path) => existsSync(path)) ?? (candidates[1] as string);
+}
 const encryptionKey = await deriveKey(config.encryptionKey);
 
 const store = await createStore({
@@ -31,7 +51,7 @@ const app = createApp({
   http,
   now,
   refresh,
-  staticDir: resolve(import.meta.dir, "../../dashboard/dist"),
+  staticDir: dashboardDir(),
 });
 
 const stopMaintenance = startMaintenance({ store, now });

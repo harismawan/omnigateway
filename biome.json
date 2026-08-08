@@ -5,6 +5,7 @@
       "**/*.ts",
       "**/*.tsx",
       "**/*.json",
+      "!.claude",
       "!.superpowers",
       "!apps/dashboard/src/routeTree.gen.ts"
     ]

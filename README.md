@@ -25,7 +25,33 @@ OmniGateway is a self-hosted, single-node AI gateway that presents Anthropic- an
 - A persistent filesystem location for SQLite
 - A private encryption key used to encrypt stored provider credentials
 
-## Quick start
+## Install
+
+```bash
+bun install -g omnigateway     # or: npm i -g omnigateway
+```
+
+One package carries all three halves: the `omni` CLI, the gateway server, and
+the built admin console the server hosts. Bun is the runtime, not just the
+installer — `bun:sqlite` and Bun's process APIs are load-bearing — so a Node-only
+machine cannot run it.
+
+```bash
+mkdir -p ~/.config/omnigateway && cd ~/.config/omnigateway
+printf 'OMNI_ENCRYPTION_KEY=%s\n' "$(openssl rand -base64 32)" > .env
+
+omni db migrate                # create the database
+omni admin set-password        # prompts; never pass a secret on the command line
+omni start                     # serves the API and the console
+omni connect anthropic         # authorize an account from the terminal
+```
+
+`omni doctor` reports which installation it resolved, and `omni --help` lists
+every command. Releases are published from a tag by
+[`.github/workflows/release.yml`](.github/workflows/release.yml), with npm
+provenance attesting which commit produced them.
+
+## Quick start from a checkout
 
 ```bash
 bun install

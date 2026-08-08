@@ -310,7 +310,7 @@ test("a root with no gateway to run says so instead of spawning nothing", async 
   const result = await cli(["start"], { root, service });
 
   expect(result.code).toBe(1);
-  expect(result.err).toContain("no gateway entrypoint");
+  expect(result.err).toContain("no gateway to run");
   expect(service.spawned).toHaveLength(0);
 });
 

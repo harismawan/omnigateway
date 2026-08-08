@@ -10,6 +10,7 @@
     "apps/gateway/src/**/*",
     "apps/gateway/test/**/*",
     "apps/cli/src/**/*",
-    "apps/cli/test/**/*"
+    "apps/cli/test/**/*",
+    "scripts/**/*"
   ]
 }

@@ -1,0 +1,62 @@
+name: release
+
+# The tag is both the trigger and the version. Nothing in the repo records a
+# release number — the workspace manifests stay at 0.0.0 and private — so there
+# is no second place to bump and nothing to drift out of step.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  # Required for npm provenance: the published package is signed with a
+  # statement of which workflow, commit, and repository produced it.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Everything below the publish step is unrecoverable — a bad version
+      # cannot be unpublished after 72 hours — so the whole suite runs first.
+      - name: Test
+        run: bun test
+
+      - name: Test the dashboard
+        run: bun run --cwd apps/dashboard test
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Build the dashboard
+        run: bun run build:dashboard
+
+      - name: Build the package
+        run: bun run build:npm "${GITHUB_REF_NAME}"
+
+      # npm, not bun, does the publishing: provenance and the OIDC exchange are
+      # npm CLI features.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish
+        run: npm publish --provenance --access public
+        working-directory: dist/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
