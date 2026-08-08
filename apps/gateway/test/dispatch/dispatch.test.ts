@@ -291,6 +291,31 @@ test("a failure after the commit point surfaces as an error event, not a retry",
   store.close();
 });
 
+test("stops consuming an attempt after canonical end", async () => {
+  const store = await seeded(2);
+  const adapter = stubAdapter((call) => {
+    if (call > 1) return textStream("should not be reached");
+    return (async function* () {
+      yield { type: "start", id: "m", model: "claude-opus-4" } as StreamEvent;
+      yield {
+        type: "end",
+        stopReason: "endTurn",
+        usage: { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      } as StreamEvent;
+      throw new GatewayError("UPSTREAM", "after terminal event");
+    })();
+  });
+
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(adapter.calls).toHaveLength(1);
+  expect(events.filter((event) => event.type === "end")).toHaveLength(1);
+  expect(events.some((event) => event.type === "error")).toBe(false);
+  expect(outcome.log().status).toBe(200);
+  store.close();
+});
+
 test("adapter exhaustion without end or error fails after stream commit", async () => {
   const store = await seeded(1);
   const adapter = stubAdapter(() =>

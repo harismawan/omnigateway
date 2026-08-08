@@ -254,6 +254,8 @@ export async function dispatch(
                 }
                 yield event;
               }
+
+              if (event.type === "end") break;
             }
 
             if (!terminal) {
