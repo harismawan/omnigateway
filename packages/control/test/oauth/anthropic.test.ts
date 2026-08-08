@@ -204,7 +204,7 @@ test("surfaces a rejected refresh as AUTH so the credential is disabled", async 
 test("the usage probe sends the access token and reads the reported windows", async () => {
   const http = stubHttp(200, { five_hour: { utilization: 62 } });
   const report = await anthropicOAuth.usage?.(
-    { accessToken: "test-token-1", refreshToken: null, apiKey: null, idToken: null },
+    { accessToken: "test-token-1" },
     { http, now: () => NOW },
     {},
   );
@@ -227,7 +227,7 @@ test("a rate-limited usage endpoint is reported so the poller can back off", asy
   // means stop asking — not that the account is out of quota.
   expect(
     anthropicOAuth.usage?.(
-      { accessToken: "test-token-1", refreshToken: null, apiKey: null, idToken: null },
+      { accessToken: "test-token-1" },
       { http: stubHttp(429, { error: "rate_limited" }), now: () => NOW },
       {},
     ),
@@ -239,7 +239,7 @@ test("a usage endpoint that refuses the read reports nothing rather than a verdi
   // and a 401 here is as likely to mean it moved as that the token is dead.
   for (const status of [401, 404, 500]) {
     const report = await anthropicOAuth.usage?.(
-      { accessToken: "test-token-1", refreshToken: null, apiKey: null, idToken: null },
+      { accessToken: "test-token-1" },
       { http: stubHttp(status, { error: "nope" }), now: () => NOW },
       {},
     );

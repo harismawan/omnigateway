@@ -58,14 +58,14 @@ export async function probe(
 
   // A probe with a stale token would read as an auth failure and report
   // nothing, so refresh first on the same lead the scheduler uses.
-  let secrets = await credential.secrets();
-  if (
+  const refreshed =
     credential.hasRefreshToken &&
     credential.expiresAt !== null &&
     credential.expiresAt - SCHEDULER_REFRESH_LEAD_MS <= deps.now()
-  ) {
-    secrets = await deps.refresh(credential);
-  }
+      ? await deps.refresh(credential)
+      : null;
+  const secrets =
+    refreshed === null ? await credential.openForUsage() : { accessToken: refreshed.accessToken };
 
   const report = await provider.usage(
     secrets,

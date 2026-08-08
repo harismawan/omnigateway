@@ -256,10 +256,21 @@ recent-log windows with different cache keys, preventing query deduplication.
 - Cache normalized usage aggregates slightly longer than polling interval.
 - Disable focus refetch for expensive history queries already refreshed by polling.
 
-### 4. Decrypt only secrets needed by each operation
+### 4. Decrypt only secrets needed by each operation ✅ Done
 
-Inference opens access token, refresh token, API key, and ID token serially, although adapters need
-only access token or API key.
+**Completed:** 2026-08-08
+
+Credential views now expose purpose-specific inference, refresh, and usage loaders. OAuth inference
+and quota reads decrypt only the access token, API-key inference decrypts only the API key, and token
+refresh decrypts only the refresh token. Routing views query current required ciphertext by credential
+ID, and no plaintext cache was added.
+
+Verification completed with focused tests (149 passed), `bun test` (657 passed), dashboard tests
+(180 passed), `bun run typecheck`, and `bun run lint`. Lint reports only the existing Biome
+configuration deprecation notice.
+
+Inference previously opened access token, refresh token, API key, and ID token serially, although
+adapters need only access token or API key.
 
 #### Evidence
 

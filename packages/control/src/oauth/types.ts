@@ -6,7 +6,7 @@ import {
   mergeHeaders,
   orderHeaders,
 } from "@omni/providers";
-import type { CredentialSecrets, WindowType } from "@omni/store";
+import type { CredentialSecrets, UsageSecrets, WindowType } from "@omni/store";
 
 /** Injected so tests never touch the network or the clock. */
 export type OAuthDeps = {
@@ -103,7 +103,7 @@ export type OAuthProvider = {
    * disable working accounts. That verdict belongs to token refresh alone.
    */
   usage?(
-    secrets: CredentialSecrets,
+    secrets: UsageSecrets,
     deps: OAuthDeps,
     providerData: Record<string, unknown>,
   ): Promise<UsageReport | null>;

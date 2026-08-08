@@ -32,7 +32,7 @@ export function createRefresher(deps: RefreshDeps): Refresher {
   const inFlight = new Map<string, Promise<CredentialSecrets>>();
 
   async function run(credential: CredentialView): Promise<CredentialSecrets> {
-    const secrets = await credential.secrets();
+    const secrets = await credential.openForRefresh();
     if (secrets.refreshToken === null) {
       throw new GatewayError("AUTH", `credential ${credential.id} has no refresh token`);
     }
