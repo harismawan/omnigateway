@@ -22,7 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Pinned, and it has to be: `bun.lock` is lockfileVersion 2, which Bun
+      # before 1.4 cannot parse, and setup-bun's default is older than that.
+      # The published package declares the same floor in its `engines`.
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
 
       - name: Install
         run: bun install --frozen-lockfile
