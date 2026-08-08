@@ -78,7 +78,10 @@ test("drops images with a degradation", () => {
 });
 
 test("drops reasoning config with a degradation", () => {
-  const { body, degradations } = toChatWire({ ...base, reasoning: { effort: "high" } }, "kimi-k2");
+  const { body, degradations } = toChatWire(
+    { ...base, reasoning: { mode: "adaptive", effort: "high" } },
+    "kimi-k2",
+  );
   expect(body.reasoning).toBeUndefined();
   expect(degradations).toContain("kimi:reasoning-dropped");
 });
@@ -222,4 +225,27 @@ test("the registry exposes exactly the three v1 providers", () => {
   expect(Object.keys(ADAPTERS).sort()).toEqual(["anthropic", "kimi", "openai"]);
   expect(ADAPTERS.kimi.capabilities.images).toBe(false);
   expect(ADAPTERS.anthropic.capabilities.reasoning).toBe(true);
+});
+
+test("passes a mid-conversation system turn through in position", () => {
+  const { body } = toChatWire(
+    {
+      model: "m",
+      system: [{ type: "text", text: "top-level prompt" }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "system", content: [{ type: "text", text: "Write Go." }] },
+      ],
+      stream: false,
+    },
+    "k3-256k",
+  );
+
+  // The request-level prompt is hoisted to the leading system message, and the
+  // mid-conversation turn keeps its own place after the user turn.
+  expect(body.messages).toEqual([
+    { role: "system", content: "top-level prompt" },
+    { role: "user", content: "hi" },
+    { role: "system", content: "Write Go." },
+  ]);
 });

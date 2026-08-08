@@ -36,16 +36,33 @@ function encodeToolChoice(c: ToolChoice): unknown {
 export function toResponsesWire(
   req: ChatRequest,
   model: string,
+  /**
+   * The Codex backend is a narrower surface than `api.openai.com`: it drives
+   * one product and rejects several standard Responses parameters outright.
+   * Defaults to the permissive API so only the OAuth path is constrained.
+   */
+  opts: { oauth: boolean } = { oauth: false },
 ): { body: ResponsesBody; degradations: string[] } {
   const degradations: string[] = [];
   const input: unknown[] = [];
 
+  const note = (d: string): void => {
+    if (!degradations.includes(d)) degradations.push(d);
+  };
+
   for (const message of req.messages) {
     const parts: unknown[] = [];
 
+    // The Codex backend refuses a system turn inside `input` — it supplies its
+    // own. The documented fallback is to carry the instruction in a user turn,
+    // marked, so it keeps its position even though it loses the operator role.
+    const inlined = message.role === "system";
+    if (inlined) note("openai:system-turn-inlined");
+    const role = inlined ? "user" : message.role;
+
     const flush = (): void => {
       if (parts.length === 0) return;
-      input.push({ type: "message", role: message.role, content: [...parts] });
+      input.push({ type: "message", role, content: [...parts] });
       parts.length = 0;
     };
 
@@ -53,8 +70,8 @@ export function toResponsesWire(
       switch (block.type) {
         case "text":
           parts.push({
-            type: message.role === "assistant" ? "output_text" : "input_text",
-            text: block.text,
+            type: role === "assistant" ? "output_text" : "input_text",
+            text: inlined ? `<system-reminder>\n${block.text}\n</system-reminder>` : block.text,
           });
           break;
         case "image":
@@ -67,7 +84,7 @@ export function toResponsesWire(
           // Anthropic thinking blocks carry a provider-specific signature that
           // is meaningless here. Dropping them is lossless for the model.
           if (!degradations.includes("openai:thinking-dropped")) {
-            degradations.push("openai:thinking-dropped");
+            note("openai:thinking-dropped");
           }
           break;
         case "toolUse":
@@ -97,8 +114,17 @@ export function toResponsesWire(
   const instructions = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
   if (instructions !== undefined && instructions.length > 0) body.instructions = instructions;
 
-  if (req.maxTokens !== undefined) body.max_output_tokens = req.maxTokens;
-  if (req.temperature !== undefined) body.temperature = req.temperature;
+  if (req.maxTokens !== undefined) {
+    // Rejected by the Codex backend with "Unsupported parameter".
+    if (opts.oauth) note("openai:max-tokens-dropped");
+    else body.max_output_tokens = req.maxTokens;
+  }
+  if (req.temperature !== undefined) {
+    // Same surface, and the reasoning models it serves do not take sampling
+    // parameters at all.
+    if (opts.oauth) note("openai:temperature-dropped");
+    else body.temperature = req.temperature;
+  }
   if (req.tools !== undefined) {
     body.tools = req.tools.map((t) => ({
       type: "function",
@@ -108,10 +134,19 @@ export function toResponsesWire(
     }));
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
-  if (req.reasoning !== undefined) {
-    body.reasoning = { effort: req.reasoning.effort, summary: "auto" };
+  if (req.reasoning !== undefined && req.reasoning.mode !== "off") {
+    // This API tops out at `high`; the deeper Anthropic levels clamp onto it.
+    const effort =
+      req.reasoning.mode === "adaptive" ? (req.reasoning.effort ?? "medium") : "medium";
+    if (effort === "xhigh" || effort === "max") {
+      degradations.push("openai:reasoning-effort-clamped");
+    }
+    body.reasoning = {
+      effort: effort === "xhigh" || effort === "max" ? "high" : effort,
+      summary: "auto",
+    };
     // This API takes a coarse effort level, not a token budget.
-    if (req.reasoning.budgetTokens !== undefined) {
+    if (req.reasoning.mode === "budget") {
       degradations.push("openai:reasoning-budget-dropped");
     }
   }

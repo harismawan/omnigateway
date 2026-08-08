@@ -11,7 +11,8 @@ export function requiredCapabilities(request: ChatRequest): ProviderCapabilities
   return {
     tools: (request.tools?.length ?? 0) > 0,
     images,
-    reasoning: request.reasoning !== undefined,
+    // An explicit opt-out is not a requirement for a reasoning-capable target.
+    reasoning: request.reasoning !== undefined && request.reasoning.mode !== "off",
   };
 }
 

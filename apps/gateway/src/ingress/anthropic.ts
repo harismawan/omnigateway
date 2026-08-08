@@ -1,7 +1,14 @@
-import type { ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
+import type {
+  ChatRequest,
+  ContentBlock,
+  Message,
+  ReasoningConfig,
+  ReasoningEffort,
+  ToolChoice,
+} from "@omni/ir";
 import { GatewayError, validateRequest } from "@omni/ir";
 import { z } from "zod";
-import { extraFields, parseOrThrow } from "./schemas.ts";
+import { extraFields, isRecord, parseOrThrow } from "./schemas.ts";
 
 const textBlock = z.object({ type: z.literal("text"), text: z.string() });
 
@@ -42,8 +49,14 @@ const block = z.discriminatedUnion("type", [
   toolResultBlock,
 ]);
 
+/**
+ * `system` here is Anthropic's mid-conversation system message, not the
+ * top-level `system` prompt — this surface has a separate field for that, so a
+ * system turn inside `messages` is unambiguously the mid-conversation feature
+ * and is carried through in place rather than hoisted.
+ */
 const message = z.object({
-  role: z.enum(["user", "assistant"]),
+  role: z.enum(["user", "assistant", "system"]),
   content: z.union([z.string(), z.array(block)]),
 });
 
@@ -72,6 +85,14 @@ const schema = z.object({
     .optional(),
   thinking: z
     .union([
+      // The current form: the model decides how much to think, and `effort`
+      // (in output_config) tunes the depth.
+      z.object({
+        type: z.literal("adaptive"),
+        display: z.enum(["summarized", "omitted"]).optional(),
+      }),
+      // The older fixed-budget form. Still accepted from a client that asks
+      // for it, though current models reject it upstream.
       z.object({ type: z.literal("enabled"), budget_tokens: z.number().int().positive() }),
       z.object({ type: z.literal("disabled") }),
     ])
@@ -136,6 +157,35 @@ function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): 
   return c.type === "tool" ? { type: "tool", name: c.name } : { type: c.type };
 }
 
+const EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
+/** Reads `output_config.effort` without consuming the field. */
+function readEffort(body: unknown): ReasoningEffort | undefined {
+  if (!isRecord(body)) return undefined;
+  const outputConfig = body.output_config;
+  if (!isRecord(outputConfig)) return undefined;
+  const effort = outputConfig.effort;
+  return EFFORTS.find((level) => level === effort);
+}
+
+function toIrReasoning(
+  thinking: NonNullable<z.infer<typeof schema>["thinking"]>,
+  effort: ReasoningEffort | undefined,
+): ReasoningConfig {
+  switch (thinking.type) {
+    case "adaptive":
+      return {
+        mode: "adaptive",
+        ...(effort === undefined ? {} : { effort }),
+        ...(thinking.display === undefined ? {} : { display: thinking.display }),
+      };
+    case "enabled":
+      return { mode: "budget", budgetTokens: thinking.budget_tokens };
+    case "disabled":
+      return { mode: "off" };
+  }
+}
+
 export function parseAnthropicRequest(body: unknown): ChatRequest {
   if (typeof body !== "object" || body === null) {
     throw new GatewayError("BAD_REQUEST", "request body must be a JSON object");
@@ -176,10 +226,14 @@ export function parseAnthropicRequest(body: unknown): ChatRequest {
     }));
   }
   if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);
-  if (parsed.thinking?.type === "enabled") {
-    // The wire format carries a budget, not an effort level; medium is the
-    // neutral mapping for providers that only understand effort.
-    request.reasoning = { effort: "medium", budgetTokens: parsed.thinking.budget_tokens };
+  // `output_config` stays out of KNOWN so the whole object still reaches
+  // Anthropic untouched; effort is only *read* out of it here, so that it
+  // survives when the request is routed to a different provider.
+  const effort = readEffort(body);
+  if (parsed.thinking !== undefined) {
+    request.reasoning = toIrReasoning(parsed.thinking, effort);
+  } else if (effort !== undefined) {
+    request.reasoning = { mode: "adaptive", effort };
   }
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);

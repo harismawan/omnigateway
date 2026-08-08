@@ -1,0 +1,162 @@
+import { describe, expect, test } from "bun:test";
+import {
+  bucketLogs,
+  credentialStatus,
+  groupBy,
+  isError,
+  percentile,
+  summarize,
+  tightestQuota,
+} from "../../src/lib/vitals.ts";
+import { health, log, NOW, quota } from "../helpers/fixtures.ts";
+
+describe("isError", () => {
+  test("counts a 4xx or 5xx status and any recorded error code", () => {
+    expect(isError(log())).toBe(false);
+    expect(isError(log({ status: 502 }))).toBe(true);
+    expect(isError(log({ status: 200, errorCode: "TIMEOUT" }))).toBe(true);
+  });
+});
+
+describe("summarize", () => {
+  test("derives rate, error share, and latency percentiles", () => {
+    const logs = [
+      log({ id: "a", ttftMs: 100 }),
+      log({ id: "b", ttftMs: 200 }),
+      log({ id: "c", ttftMs: 900, status: 500, errorCode: "UPSTREAM" }),
+      log({ id: "d", ttftMs: 300 }),
+    ];
+    const vitals = summarize(logs, 600_000);
+
+    expect(vitals.requests).toBe(4);
+    expect(vitals.errors).toBe(1);
+    expect(vitals.errorRate).toBeCloseTo(0.25, 5);
+    expect(vitals.ratePerMin).toBeCloseTo(0.4, 5);
+    expect(vitals.ttftP50).toBe(200);
+    expect(vitals.ttftP95).toBe(900);
+    expect(vitals.costUsd).toBeCloseTo(0.048, 5);
+  });
+
+  test("reports zeroes rather than NaN for an idle window", () => {
+    const vitals = summarize([], 600_000);
+    expect(vitals.errorRate).toBe(0);
+    expect(vitals.ratePerMin).toBe(0);
+    expect(vitals.ttftP50).toBeNull();
+  });
+});
+
+describe("bucketLogs", () => {
+  test("always returns the requested number of buckets, oldest first", () => {
+    const buckets = bucketLogs([], { now: NOW, spanMs: 600_000, count: 12 });
+    expect(buckets).toHaveLength(12);
+    expect(buckets[0]?.at).toBeLessThan(buckets[11]?.at ?? 0);
+    expect(buckets.every((bucket) => bucket.total === 0)).toBe(true);
+  });
+
+  test("places each log in its slice and splits out failures", () => {
+    const logs = [
+      log({ id: "a", at: NOW - 30_000, ttftMs: 100 }),
+      log({ id: "b", at: NOW - 25_000, ttftMs: 300 }),
+      log({ id: "c", at: NOW - 570_000, status: 503, errorCode: "OVERLOADED" }),
+    ];
+    const buckets = bucketLogs(logs, { now: NOW, spanMs: 600_000, count: 10 });
+
+    expect(buckets.reduce((sum, bucket) => sum + bucket.total, 0)).toBe(3);
+    expect(buckets.reduce((sum, bucket) => sum + bucket.errors, 0)).toBe(1);
+    expect(buckets.at(-1)?.total).toBe(2);
+    // Nearest-rank median: with two samples the lower one is the p50.
+    expect(buckets.at(-1)?.ttftMs).toBe(100);
+  });
+
+  test("ignores anything outside the window", () => {
+    const buckets = bucketLogs([log({ at: NOW - 10_000_000 })], {
+      now: NOW,
+      spanMs: 600_000,
+      count: 6,
+    });
+    expect(buckets.reduce((sum, bucket) => sum + bucket.total, 0)).toBe(0);
+  });
+});
+
+describe("credentialStatus", () => {
+  test("a disabled credential is idle, whatever its health says", () => {
+    const status = credentialStatus([health({ breakerState: "open" })], NOW, false);
+    expect(status.state).toBe("idle");
+    expect(status.note).toBe("disabled");
+  });
+
+  test("an unused credential is idle", () => {
+    expect(credentialStatus([], NOW, true).state).toBe("idle");
+  });
+
+  test("the worst row wins", () => {
+    const status = credentialStatus(
+      [health(), health({ model: "other", breakerState: "open", consecutiveFailures: 4 })],
+      NOW,
+      true,
+    );
+    expect(status.state).toBe("down");
+    expect(status.note).toBe("breaker open");
+    expect(status.consecutiveFailures).toBe(4);
+  });
+
+  test("an active rate limit warns but does not fault", () => {
+    const status = credentialStatus([health({ rateLimitedUntil: NOW + 60_000 })], NOW, true);
+    expect(status.state).toBe("warn");
+    expect(status.note).toBe("rate limited");
+  });
+
+  test("an expired rate limit is not a warning", () => {
+    const status = credentialStatus([health({ rateLimitedUntil: NOW - 1 })], NOW, true);
+    expect(status.state).toBe("ok");
+  });
+
+  test("a half-open breaker reads as probing", () => {
+    const status = credentialStatus([health({ breakerState: "halfOpen" })], NOW, true);
+    expect(status.state).toBe("warn");
+    expect(status.note).toBe("probing");
+  });
+
+  test("latency is the slowest model, not the first row", () => {
+    const status = credentialStatus(
+      [health({ ewmaTtftMs: 200 }), health({ model: "b", ewmaTtftMs: 900 })],
+      NOW,
+      true,
+    );
+    expect(status.ttftMs).toBe(900);
+  });
+});
+
+describe("tightestQuota", () => {
+  test("returns the window closest to its limit", () => {
+    const tightest = tightestQuota([
+      quota({ windowType: "fiveHour", used: 200, limit: 1_000 }),
+      quota({ windowType: "weekly", used: 950, limit: 1_000 }),
+    ]);
+    expect(tightest?.window.windowType).toBe("weekly");
+    expect(tightest?.fraction).toBeCloseTo(0.95, 5);
+  });
+
+  test("ignores windows the operator left unlimited", () => {
+    expect(tightestQuota([quota({ limit: null })])).toBeNull();
+  });
+
+  test("never reports more than fully spent", () => {
+    expect(tightestQuota([quota({ used: 5_000, limit: 1_000 })])?.fraction).toBe(1);
+  });
+});
+
+test("percentile handles single values and empty input", () => {
+  expect(percentile([], 0.5)).toBeNull();
+  expect(percentile([7], 0.95)).toBe(7);
+  expect(percentile([1, 2, 3, 4], 0.5)).toBe(2);
+});
+
+test("groupBy collects rows under their key", () => {
+  const grouped = groupBy(
+    [health(), health({ credentialId: "cred-2" }), health()],
+    (row) => row.credentialId,
+  );
+  expect(grouped.get("cred-1")).toHaveLength(2);
+  expect(grouped.get("cred-2")).toHaveLength(1);
+});

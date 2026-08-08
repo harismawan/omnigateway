@@ -1,77 +1,74 @@
-import { afterEach, expect, test } from "bun:test";
-import { ApiError, api } from "../../src/api/client.ts";
+import { describe, expect, test } from "bun:test";
+import { ApiError, del, get, post, request, withQuery } from "../../src/api/client.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 
-const realFetch = globalThis.fetch;
-afterEach(() => {
-  globalThis.fetch = realFetch;
-});
+describe("request", () => {
+  test("sends JSON bodies and carries the session cookie", async () => {
+    const stub = createFetchStub({ "POST /api/login": () => ({ ok: true }) });
+    await post("/api/login", { password: "hunter2" });
 
-test("get resolves the parsed json body", async () => {
-  createFetchStub({ "GET /api/status": () => ({ configured: true, authenticated: false }) });
-  expect(await api.get<{ configured: boolean; authenticated: boolean }>("/api/status")).toEqual({
-    configured: true,
-    authenticated: false,
+    const call = stub.calls[0];
+    expect(call?.url).toBe("/api/login");
+    expect(call?.init?.method).toBe("POST");
+    expect(call?.init?.credentials).toBe("same-origin");
+    expect(call?.init?.body).toBe(JSON.stringify({ password: "hunter2" }));
+  });
+
+  test("omits a content-type when there is no body", async () => {
+    const stub = createFetchStub({ "GET /api/status": () => ({ configured: true }) });
+    await get("/api/status");
+    expect(stub.calls[0]?.init?.headers).toEqual({});
+  });
+
+  test("raises the gateway's own error code", async () => {
+    createFetchStub({
+      "DELETE /api/keys/key-1": () => ({
+        status: 401,
+        body: { error: { code: "AUTH", message: "admin session required" } },
+      }),
+    });
+
+    const failure = await del("/api/keys/key-1").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    const apiError = failure as ApiError;
+    expect(apiError.code).toBe("AUTH");
+    expect(apiError.status).toBe(401);
+    expect(apiError.message).toBe("admin session required");
+    expect(apiError.isUnauthenticated).toBe(true);
+  });
+
+  test("falls back to the status when the body is not an error shape", async () => {
+    createFetchStub({ "GET /api/models": () => ({ status: 502, text: "<html>bad gateway" }) });
+    const failure = (await get("/api/models").catch((error: unknown) => error)) as ApiError;
+    expect(failure.code).toBe("INTERNAL");
+    expect(failure.message).toBe("request failed with status 502");
+  });
+
+  test("hands back an accepted non-OK status instead of throwing", async () => {
+    createFetchStub({
+      "POST /api/connect/poll": () => ({ status: 202, body: { status: "pending" } }),
+    });
+    const result = await request<{ status: string }>("/api/connect/poll", {
+      method: "POST",
+      body: { flowId: "f1" },
+      accept: [202],
+    });
+    expect(result.status).toBe(202);
+    expect(result.data.status).toBe("pending");
+  });
+
+  test("treats a 204 as an empty body", async () => {
+    createFetchStub({ "DELETE /api/models/fast": () => ({ status: 204 }) });
+    await expect(del("/api/models/fast")).resolves.toBeNull();
   });
 });
 
-test("every request carries the session cookie and no authorization header", async () => {
-  const stub = createFetchStub({ "GET /api/credentials": () => ({ credentials: [] }) });
-  await api.get("/api/credentials");
-  const init = stub.calls[0]?.init;
-  expect(init?.credentials).toBe("same-origin");
-  expect(new Headers(init?.headers).get("authorization")).toBeNull();
-});
-
-test("post sends json and sets the content type", async () => {
-  const stub = createFetchStub({ "POST /api/login": () => ({ ok: true }) });
-  await api.post("/api/login", { password: "synthetic-password" });
-  const init = stub.calls[0]?.init;
-  expect(init?.method).toBe("POST");
-  expect(new Headers(init?.headers).get("content-type")).toBe("application/json");
-  expect(init?.body).toBe(JSON.stringify({ password: "synthetic-password" }));
-});
-
-test("patch and put preserve their request methods and paths", async () => {
-  const stub = createFetchStub({
-    "PATCH /api/credentials/c1": () => ({ ok: true }),
-    "PUT /api/models/fast": () => ({ ok: true }),
+describe("withQuery", () => {
+  test("skips absent params and escapes the rest", () => {
+    expect(withQuery("/api/usage", { groupBy: "model", since: 10, until: undefined })).toBe(
+      "/api/usage?groupBy=model&since=10",
+    );
+    expect(withQuery("/api/logs", {})).toBe("/api/logs");
+    expect(withQuery("/api/usage", { groupBy: "a b" })).toBe("/api/usage?groupBy=a+b");
   });
-
-  await api.patch("/api/credentials/c1", { tier: 2 });
-  await api.put("/api/models/fast", { id: "fast" });
-
-  expect(stub.calls.map(({ url, init }) => `${init?.method} ${url}`)).toEqual([
-    "PATCH /api/credentials/c1",
-    "PUT /api/models/fast",
-  ]);
-});
-
-test("an error body becomes an ApiError carrying the gateway code", async () => {
-  createFetchStub({
-    "GET /api/credentials": () => ({
-      status: 401,
-      body: { error: { code: "AUTH", message: "admin session required" } },
-    }),
-  });
-  const error = (await api.get("/api/credentials").catch((value: unknown) => value)) as ApiError;
-  expect(error).toBeInstanceOf(ApiError);
-  expect(error.status).toBe(401);
-  expect(error.code).toBe("AUTH");
-  expect(error.message).toBe("admin session required");
-  expect(error.isUnauthenticated).toBe(true);
-});
-
-test("a non-json error body still produces an ApiError rather than a parse crash", async () => {
-  createFetchStub({ "GET /api/logs": () => ({ status: 502, text: "Bad Gateway" }) });
-  const error = (await api.get("/api/logs").catch((value: unknown) => value)) as ApiError;
-  expect(error).toBeInstanceOf(ApiError);
-  expect(error.status).toBe(502);
-  expect(error.code).toBe("INTERNAL");
-  expect(error.message).toBe("request failed with status 502");
-});
-
-test("a 204 resolves to null rather than failing to parse an empty body", async () => {
-  createFetchStub({ "DELETE /api/credentials/credential-1": () => ({ status: 204 }) });
-  expect(await api.del<null>("/api/credentials/credential-1")).toBeNull();
 });

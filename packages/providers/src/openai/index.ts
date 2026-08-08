@@ -16,7 +16,7 @@ export const openaiAdapter: ProviderAdapter = {
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const oauth = req.credentials.accessToken !== null;
-    const { body, degradations } = toResponsesWire(req.request, req.model);
+    const { body, degradations } = toResponsesWire(req.request, req.model, { oauth });
 
     const protocol: HeaderPair[] = [["Content-Type", "application/json"]];
 

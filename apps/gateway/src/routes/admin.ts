@@ -388,7 +388,7 @@ export function adminRoutes(deps: AdminDeps) {
         ...(need.tools
           ? { tools: [{ name: "probe", description: "", inputSchema: { type: "object" } }] }
           : {}),
-        ...(need.reasoning ? { reasoning: { effort: "medium" } } : {}),
+        ...(need.reasoning ? { reasoning: { mode: "adaptive" as const } } : {}),
       };
       const result = rank({ request: probe, model, snapshot, now, rand: 0 });
 

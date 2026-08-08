@@ -1,8 +1,9 @@
+import type { ApiErrorBody } from "./types.ts";
+
 /**
- * The one place this app talks to the gateway.
- *
- * The HttpOnly `omni_admin` cookie authenticates same-origin control-surface
- * requests. Gateway API-key authorization must never be attached here.
+ * A failed control-API call, carrying the gateway's own error code so callers
+ * can branch on it (`AUTH` drives the session redirect) without string matching
+ * on the message.
  */
 export class ApiError extends Error {
   readonly status: number;
@@ -15,47 +16,115 @@ export class ApiError extends Error {
     this.code = code;
   }
 
-  /** True when the session lapsed and the app should send the operator to /login. */
+  /** True when the session is gone and the operator must sign in again. */
   get isUnauthenticated(): boolean {
-    return this.status === 401;
+    return this.status === 401 || this.code === "AUTH";
   }
 }
 
-type ErrorBody = { error?: { code?: unknown; message?: unknown } };
-
-async function toApiError(response: Response): Promise<ApiError> {
-  let code = "INTERNAL";
-  let message = `request failed with status ${response.status}`;
-  try {
-    const body = (await response.json()) as ErrorBody;
-    if (typeof body.error?.code === "string") code = body.error.code;
-    if (typeof body.error?.message === "string") message = body.error.message;
-  } catch {
-    // A proxy or crash can return HTML. The status is still useful to callers.
-  }
-  return new ApiError(response.status, code, message);
+function isErrorBody(value: unknown): value is ApiErrorBody {
+  if (typeof value !== "object" || value === null) return false;
+  const error: unknown = (value as { error?: unknown }).error;
+  if (typeof error !== "object" || error === null) return false;
+  return typeof (error as { message?: unknown }).message === "string";
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const response = await fetch(path, {
+type RequestOptions = {
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  body?: unknown;
+  signal?: AbortSignal;
+  /** Statuses to hand back as data instead of throwing, e.g. 202 while polling. */
+  accept?: readonly number[];
+};
+
+export type ApiResult<T> = { status: number; data: T };
+
+/**
+ * One place where a control-API call is made.
+ *
+ * Session state travels in an HttpOnly cookie, so every call is same-origin and
+ * `credentials: "same-origin"`; nothing here ever reads or writes a token.
+ */
+export async function request<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<ApiResult<T>> {
+  const method = options.method ?? "GET";
+  const init: RequestInit = {
     method,
     credentials: "same-origin",
-    headers: body === undefined ? {} : { "content-type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+    headers: options.body === undefined ? {} : { "content-type": "application/json" },
+    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  };
 
-  if (!response.ok) throw await toApiError(response);
-  if (response.status === 204) return null as T;
+  const response = await fetch(path, init);
+  const accepted = options.accept ?? [];
 
-  const text = await response.text();
-  if (text.length === 0) return null as T;
-  return JSON.parse(text) as T;
+  let payload: unknown = null;
+  if (response.status !== 204) {
+    const text = await response.text();
+    if (text.length > 0) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        // A non-JSON body from a proxy or a crash: reported by status alone.
+        payload = null;
+      }
+    }
+  }
+
+  if (!response.ok && !accepted.includes(response.status)) {
+    const code = isErrorBody(payload) ? (payload.error.code ?? "INTERNAL") : "INTERNAL";
+    const message = isErrorBody(payload)
+      ? payload.error.message
+      : `request failed with status ${response.status}`;
+    throw new ApiError(response.status, String(code), message);
+  }
+
+  // A 202 that reached here was explicitly accepted, and may still be an error
+  // body; callers that opt in know the shape they asked for.
+  return { status: response.status, data: payload as T };
 }
 
-export const api = {
-  get: <T>(path: string): Promise<T> => request<T>("GET", path),
-  post: <T>(path: string, body?: unknown): Promise<T> => request<T>("POST", path, body),
-  put: <T>(path: string, body?: unknown): Promise<T> => request<T>("PUT", path, body),
-  patch: <T>(path: string, body?: unknown): Promise<T> => request<T>("PATCH", path, body),
-  del: <T>(path: string): Promise<T> => request<T>("DELETE", path),
-};
+export async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const result = await request<T>(path, signal === undefined ? {} : { signal });
+  return result.data;
+}
+
+export async function post<T>(path: string, body?: unknown): Promise<T> {
+  const result = await request<T>(path, {
+    method: "POST",
+    ...(body === undefined ? {} : { body }),
+  });
+  return result.data;
+}
+
+export async function put<T>(path: string, body: unknown): Promise<T> {
+  const result = await request<T>(path, { method: "PUT", body });
+  return result.data;
+}
+
+export async function patch<T>(path: string, body: unknown): Promise<T> {
+  const result = await request<T>(path, { method: "PATCH", body });
+  return result.data;
+}
+
+export async function del<T>(path: string): Promise<T> {
+  const result = await request<T>(path, { method: "DELETE" });
+  return result.data;
+}
+
+/** Builds `/api/usage?...` and friends without hand-rolling escaping. */
+export function withQuery(
+  path: string,
+  params: Record<string, string | number | undefined>,
+): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) continue;
+    search.set(key, String(value));
+  }
+  const query = search.toString();
+  return query.length === 0 ? path : `${path}?${query}`;
+}

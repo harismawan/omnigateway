@@ -139,13 +139,49 @@ test("maps a thinking block onto the reasoning config", () => {
     ...minimal,
     thinking: { type: "enabled", budget_tokens: 8000 },
   });
-  expect(req.reasoning).toEqual({ effort: "medium", budgetTokens: 8000 });
+  // A budget the client named is carried verbatim, not reinterpreted as an
+  // effort level — providers reject a synthesized one.
+  expect(req.reasoning).toEqual({ mode: "budget", budgetTokens: 8000 });
 });
 
-test("ignores disabled thinking", () => {
-  expect(
-    parseAnthropicRequest({ ...minimal, thinking: { type: "disabled" } }).reasoning,
-  ).toBeUndefined();
+test("accepts adaptive thinking, the current wire shape", () => {
+  const req = parseAnthropicRequest({ ...minimal, thinking: { type: "adaptive" } });
+  expect(req.reasoning).toEqual({ mode: "adaptive" });
+});
+
+test("carries the thinking display preference", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    thinking: { type: "adaptive", display: "summarized" },
+  });
+  expect(req.reasoning).toEqual({ mode: "adaptive", display: "summarized" });
+});
+
+test("reads effort out of output_config so it survives cross-provider routing", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    thinking: { type: "adaptive" },
+    output_config: { effort: "xhigh" },
+  });
+  expect(req.reasoning).toEqual({ mode: "adaptive", effort: "xhigh" });
+  // The field itself is left intact for Anthropic, alongside anything else in
+  // it that this gateway does not model.
+  expect(req.vendor?.anthropic?.output_config).toEqual({ effort: "xhigh" });
+});
+
+test("effort alone implies adaptive thinking", () => {
+  const req = parseAnthropicRequest({ ...minimal, output_config: { effort: "high" } });
+  expect(req.reasoning).toEqual({ mode: "adaptive", effort: "high" });
+});
+
+test("ignores an effort level it does not recognise", () => {
+  const req = parseAnthropicRequest({ ...minimal, output_config: { effort: "turbo" } });
+  expect(req.reasoning).toBeUndefined();
+});
+
+test("keeps an explicit opt-out rather than dropping it", () => {
+  const req = parseAnthropicRequest({ ...minimal, thinking: { type: "disabled" } });
+  expect(req.reasoning).toEqual({ mode: "off" });
 });
 
 test("passes unknown top-level fields through as vendor extras", () => {
@@ -179,8 +215,63 @@ test("rejects a missing model with a field path in the message", () => {
   }
 });
 
-test("rejects an unknown role", () => {
+test("carries a mid-conversation system message through in place", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    system: "You are a helpful assistant.",
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "system", content: "Terse mode enabled — keep responses under 40 words." },
+    ],
+  });
+
+  // The request-level prompt and the mid-conversation turn are different
+  // things: folding the turn into the prompt would move it to the front of the
+  // conversation and change when it applies.
+  expect(req.system).toEqual([{ type: "text", text: "You are a helpful assistant." }]);
+  expect(req.messages).toEqual([
+    { role: "user", content: [{ type: "text", text: "hi" }] },
+    {
+      role: "system",
+      content: [{ type: "text", text: "Terse mode enabled — keep responses under 40 words." }],
+    },
+  ]);
+});
+
+test("accepts block content on a system turn", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "system", content: [{ type: "text", text: "Use Go." }] },
+    ],
+  });
+
+  expect(req.messages.at(-1)).toEqual({
+    role: "system",
+    content: [{ type: "text", text: "Use Go." }],
+  });
+});
+
+test("keeps a system turn in position rather than reordering the conversation", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "first" },
+      { role: "system", content: "mid-flight instruction" },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "second" },
+    ],
+  });
+
+  expect(req.messages.map((m) => m.role)).toEqual(["user", "system", "assistant", "user"]);
+});
+
+test("still rejects a role no surface defines", () => {
   expect(() =>
-    parseAnthropicRequest({ ...minimal, messages: [{ role: "system", content: "x" }] }),
+    parseAnthropicRequest({
+      ...minimal,
+      messages: [{ role: "developer", content: "hi" }],
+    }),
   ).toThrow(GatewayError);
 });

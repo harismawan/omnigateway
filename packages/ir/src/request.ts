@@ -23,7 +23,22 @@ export type ToolResultBlock = {
 
 export type ContentBlock = TextBlock | ImageBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock;
 
-export type Message = { role: "user" | "assistant"; content: ContentBlock[] };
+/**
+ * `system` is a mid-conversation operator instruction, distinct from the
+ * top-level `system` prompt on `ChatRequest`.
+ *
+ * It applies from its position in the conversation forward, which is why it
+ * cannot be folded into the request-level prompt: doing so would move the
+ * instruction to the front of the history, change when it takes effect, and
+ * invalidate the provider's cached prefix. It is also the channel a caller uses
+ * when the instruction must carry operator authority — text placed in a user
+ * turn can be forged by anything that writes user-visible input.
+ *
+ * Every provider in this set accepts a system turn inside the message array, so
+ * this stays provider-neutral. Which *models* accept one is the upstream's rule
+ * to enforce, not the gateway's.
+ */
+export type Message = { role: "user" | "assistant" | "system"; content: ContentBlock[] };
 
 export type ToolDef = {
   name: string;
@@ -43,7 +58,23 @@ export type ToolChoice =
   | { type: "none" }
   | { type: "tool"; name: string };
 
-export type ReasoningConfig = { effort: "low" | "medium" | "high"; budgetTokens?: number };
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * How much the model should think, in the three shapes providers actually
+ * offer.
+ *
+ * `adaptive` lets the model decide per request and is the current form; effort
+ * tunes its depth. `budget` is the older fixed-token form, kept because a
+ * client may still ask for it — but it is never synthesized, since providers
+ * have started rejecting it outright. `off` is an explicit opt-out, which is
+ * not the same as omitting reasoning entirely: several models think by default,
+ * so silently dropping the opt-out would turn thinking back on.
+ */
+export type ReasoningConfig =
+  | { mode: "adaptive"; effort?: ReasoningEffort; display?: "summarized" | "omitted" }
+  | { mode: "budget"; budgetTokens: number }
+  | { mode: "off" };
 
 export type ChatRequest = {
   model: string;
