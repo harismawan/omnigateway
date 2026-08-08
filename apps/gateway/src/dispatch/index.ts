@@ -197,12 +197,15 @@ export async function dispatch(
             for (const d of result.degradations) log.degradations.push(d);
 
             let terminal = false;
+            const pending: StreamEvent[] = [];
             for await (const event of result.events) {
               if (event.type === "blockDelta" && !committed) {
                 // Commit point: the client is about to see bytes, so from here on
                 // failover is impossible and errors must be forwarded in-stream.
                 committed = true;
                 log.ttftMs = deps.now() - startedAt;
+                for (const buffered of pending) yield buffered;
+                pending.length = 0;
               }
 
               if (event.type === "end") {
@@ -242,7 +245,15 @@ export async function dispatch(
                 return;
               }
 
-              yield event;
+              if (!committed && event.type !== "end") {
+                pending.push(event);
+              } else {
+                if (!committed) {
+                  for (const buffered of pending) yield buffered;
+                  pending.length = 0;
+                }
+                yield event;
+              }
             }
 
             if (!terminal) {

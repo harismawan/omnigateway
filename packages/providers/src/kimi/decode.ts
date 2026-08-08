@@ -47,7 +47,6 @@ export async function* decodeChat(
   let started = false;
   let textOpen = false;
   let textIndex: number | undefined;
-  let ended = false;
   let done = false;
   let stopReason: StopReason = "endTurn";
   let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -55,11 +54,6 @@ export async function* decodeChat(
   // first — the API can stream a tool call with no accompanying text.
   const toolIndex = new Map<number, number>();
   let nextIndex = 0;
-
-  const emitEnd = (): StreamEvent => {
-    ended = true;
-    return { type: "end", stopReason, usage };
-  };
 
   for await (const msg of messages) {
     if (msg.data === "[DONE]") {
@@ -127,19 +121,16 @@ export async function* decodeChat(
 
     if (typeof choice.finish_reason === "string") {
       stopReason = FINISH[choice.finish_reason] ?? "endTurn";
-      if (textOpen) yield { type: "blockEnd", index: textIndex ?? 0 };
-      for (const index of toolIndex.values()) yield { type: "blockEnd", index };
-      yield emitEnd();
     }
   }
 
-  // A stream that reaches [DONE] without a finish_reason still needs a terminal
-  // event, or collect() would report an unterminated response.
-  if (!ended && done) {
+  // [DONE] is Kimi's transport-level success marker. A finish_reason carries
+  // stop metadata but cannot certify that the stream arrived intact.
+  if (done) {
     if (textOpen) yield { type: "blockEnd", index: textIndex ?? 0 };
     for (const index of toolIndex.values()) yield { type: "blockEnd", index };
-    yield emitEnd();
-  } else if (!ended) {
+    yield { type: "end", stopReason, usage };
+  } else {
     yield {
       type: "error",
       code: "UPSTREAM",

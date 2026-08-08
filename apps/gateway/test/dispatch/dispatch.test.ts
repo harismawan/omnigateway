@@ -321,7 +321,8 @@ test("adapter exhaustion without end or error fails over before stream commit", 
   const adapter = stubAdapter((call) =>
     call === 1
       ? (async function* () {
-          yield { type: "start", id: "m", model: "claude-opus-4" } as StreamEvent;
+          yield { type: "start", id: "failed", model: "claude-opus-4" } as StreamEvent;
+          yield { type: "blockStart", index: 0, block: { type: "text" } } as StreamEvent;
         })()
       : textStream("recovered"),
   );
@@ -330,6 +331,9 @@ test("adapter exhaustion without end or error fails over before stream commit", 
   const events = await drain(outcome.events);
 
   expect(adapter.calls).toHaveLength(2);
+  expect(events.filter((event) => event.type === "start")).toEqual([
+    { type: "start", id: "m", model: "claude-opus-4" },
+  ]);
   expect(events.at(-1)).toMatchObject({ type: "end" });
   expect(outcome.log().status).toBe(200);
   store.close();
