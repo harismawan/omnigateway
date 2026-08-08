@@ -11,6 +11,23 @@
         "typescript": "^5.7.0",
       },
     },
+    "apps/cli": {
+      "name": "@omni/cli",
+      "version": "0.0.0",
+      "bin": {
+        "omni": "./src/index.ts",
+      },
+      "dependencies": {
+        "@omni/control": "workspace:*",
+        "@omni/ir": "workspace:*",
+        "@omni/providers": "workspace:*",
+        "@omni/router": "workspace:*",
+        "@omni/store": "workspace:*",
+      },
+      "devDependencies": {
+        "@omni/testkit": "workspace:*",
+      },
+    },
     "apps/dashboard": {
       "name": "@omni/dashboard",
       "dependencies": {
@@ -249,6 +266,8 @@
     "@node-rs/argon2-win32-ia32-msvc": ["@node-rs/argon2-win32-ia32-msvc@2.0.2", "", { "os": "win32", "cpu": "ia32" }, "sha512-GsE2ezwAYwh72f9gIjbGTZOf4HxEksb5M2eCaj+Y5rGYVwAdt7C12Q2e9H5LRYxWcFvLH4m4jiSZpQQ4upnPAQ=="],
 
     "@node-rs/argon2-win32-x64-msvc": ["@node-rs/argon2-win32-x64-msvc@2.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-cJxWXanH4Ew9CfuZ4IAEiafpOBCe97bzoKowHCGk5lG/7kR4WF/eknnBlHW9m8q7t10mKq75kruPLtbSDqgRTw=="],
+
+    "@omni/cli": ["@omni/cli@workspace:apps/cli"],
 
     "@omni/control": ["@omni/control@workspace:packages/control"],
 

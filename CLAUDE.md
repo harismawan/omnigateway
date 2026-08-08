@@ -2,7 +2,7 @@
 
 ## Scope
 
-OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway. Both halves are implemented: the gateway under `apps/gateway`, and the admin console under `apps/dashboard`, whose built output the gateway serves. Treat approved documents under `docs/superpowers/specs/` and `docs/superpowers/plans/` as product requirements, but verify current code before assuming plan snippets still match implementation.
+OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway. Three front ends are implemented over one core: the gateway under `apps/gateway`, the admin console under `apps/dashboard` whose built output the gateway serves, and the `omni` CLI under `apps/cli`. Admin operations themselves live in `packages/control`, which both the gateway routes and the CLI drive. Treat approved documents under `docs/superpowers/specs/` and `docs/superpowers/plans/` as product requirements, but verify current code before assuming plan snippets still match implementation.
 
 ## Commands
 
@@ -12,7 +12,7 @@ Use Bun from repository root:
 bun install
 bun run dev              # gateway with file watching
 bun run start
-bun test                 # gateway, IR, providers, store
+bun test                 # gateway, CLI, control, router, IR, providers, store
 bun run typecheck        # core and dashboard
 bun run lint
 bun run fmt
@@ -33,18 +33,21 @@ bun run --cwd apps/dashboard test  # needs a DOM; excluded from the root run
 - `apps/gateway/src/app.ts`: dependency-injected Elysia application composition
 - `apps/gateway/src/index.ts`: production bootstrap, config, SQLite, maintenance, server lifecycle
 - `apps/gateway/src/ingress/`: Anthropic/OpenAI request parsing into canonical IR
-- `apps/gateway/src/router/`: pure candidate selection and routing state
 - `apps/gateway/src/dispatch/`: upstream attempts, refresh, failover, deadlines, stream commit
 - `apps/gateway/src/routes/`: client, admin, and OAuth control surfaces
-- `apps/gateway/src/auth/`: admin sessions and gateway API-key authentication
+- `apps/gateway/src/auth/`: gateway API-key authentication and its process-local rate limiter
 - `packages/ir/`: provider-neutral domain types and error mapping
+- `packages/router/`: pure candidate selection and routing state
+- `packages/control/`: every admin operation, the OAuth connect flow, admin auth, config parsing, and the quota probe
+- `packages/testkit/`: shared test fixtures (`@omni/testkit`), used by the gateway, router, control, and CLI suites
 - `packages/providers/`: provider adapters, OAuth, HTTP client, wire rendering/parsing
 - `packages/store/`: store interfaces, encryption, SQLite repositories, migrations
 - `packages/store/src/sqlite/rollup.ts`: the `usage_daily` rollup, written in the same transaction as each request log
 - `apps/gateway/src/oauth/scheduler.ts`: background sweep that refreshes OAuth tokens before they expire
-- `apps/gateway/src/oauth/usage.ts`: tolerant readers shared by the per-provider `parseUsage` functions
-- `apps/gateway/src/quota/poller.ts`: polls each provider for the account's remaining quota
-- `apps/gateway/src/router/quota.ts`: pure reading of a quota snapshot into a routing signal
+- `packages/control/src/oauth/usage.ts`: tolerant readers shared by the per-provider `parseUsage` functions
+- `packages/control/src/quota.ts`: one probe of a provider's reported quota, and one pass over every credential
+- `apps/gateway/src/quota/poller.ts`: the timer that runs that pass on an interval
+- `packages/router/src/quota.ts`: pure reading of a quota snapshot into a routing signal
 - `apps/gateway/test/`: gateway unit, route, integration, and end-to-end tests
 - `packages/providers/src/{anthropic,openai,kimi}/models.ts`: per-provider model catalog with list pricing
 - `packages/providers/src/catalog.ts`: assembles them; exported at `@omni/providers/catalog`
@@ -52,6 +55,10 @@ bun run --cwd apps/dashboard test  # needs a DOM; excluded from the root run
 - `apps/dashboard/src/ui/`: styled-components primitives (Panel, Table, Lamp, Meter, Sparkline)
 - `apps/dashboard/src/features/`: one directory per screen
 - `apps/dashboard/src/routes/`: TanStack Router file routes; `_app.tsx` is the session guard
+- `apps/cli/src/run.ts`: one invocation, from argv to exit code, with every side effect injectable
+- `apps/cli/src/context.ts`: installation root resolution, `.env` loading, lazily opened store
+- `apps/cli/src/service.ts`: systemd delegation and the pidfile supervisor behind it
+- `apps/cli/src/commands/`: one module per command group
 
 ## Architectural boundaries
 
@@ -59,14 +66,16 @@ Preserve these constraints:
 
 1. `packages/ir` stays provider-independent and side-effect-free.
 2. Provider-specific wire formats, headers, signing, and stream decoding stay in `packages/providers`.
-3. Router stays pure: no network, database, token refresh, or timers.
+3. `packages/router` stays pure: no network, database, token refresh, or timers.
 4. Dispatch owns side effects, retries, refresh, request deadlines, and streaming commit semantics.
-5. Gateway routes authenticate, parse, apply key policy, call dispatch, render client-compatible responses, and record metadata.
-6. Store rows and secrets remain behind `@omni/store`; never expose encrypted or raw provider secrets through control APIs.
-7. All outbound provider HTTP goes through the `HttpClient` seam. Do not add direct production `fetch` calls.
-8. The provider model catalog is provider-specific data and lives in `packages/providers`, never in `packages/ir`. `@omni/providers/catalog` is imported by the browser bundle, so it must stay a leaf: it may import the three model lists and a type, and nothing else.
-9. Catalog pricing is a source of defaults, not of truth. The router prices a request from the target the operator saved; editing the catalog changes only what a new target starts with.
-10. The dashboard calls `/api/*` only. It may import types from `@omni/store/types` and `@omni/ir`, and the catalog subpath, but must not import provider adapters, the HTTP client, or anything from `packages/store` at runtime.
+5. Gateway routes authenticate, parse, apply key policy, call dispatch or `@omni/control`, render client-compatible responses, and record metadata. An admin operation belongs in `packages/control`, not in a handler: a rule enforced only on the HTTP path is a rule the CLI does not have.
+6. `packages/control` knows nothing about how it was called — no Elysia, no cookies, no argv, no terminal, no timers. Loops that only a long-lived process wants (the refresh scheduler, the quota poll timer) stay in `apps/gateway`.
+7. Store rows and secrets remain behind `@omni/store`; never expose encrypted or raw provider secrets through control APIs.
+8. All outbound provider HTTP goes through the `HttpClient` seam. Do not add direct production `fetch` calls.
+9. The provider model catalog is provider-specific data and lives in `packages/providers`, never in `packages/ir`. `@omni/providers/catalog` is imported by the browser bundle, so it must stay a leaf: it may import the three model lists and a type, and nothing else.
+10. Catalog pricing is a source of defaults, not of truth. The router prices a request from the target the operator saved; editing the catalog changes only what a new target starts with.
+11. The CLI is a local tool: it reaches the store directly through `@omni/control` and never through `/api/*`. Every side effect it has — spawning, signalling, systemctl, `/health` probes, prompting — goes through an injected seam, so no test starts a process or writes outside a temporary directory.
+12. The dashboard calls `/api/*` only. It may import types from `@omni/store/types` and `@omni/ir`, and the catalog subpath, but must not import provider adapters, the HTTP client, or anything from `packages/store` at runtime.
 
 ## TypeScript and style
 
@@ -154,6 +163,8 @@ Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/
 - Two refresh leads exist for one reason: the background sweep (`SCHEDULER_REFRESH_LEAD_MS`, 300s, swept every 60s) should refresh before any request needs to, and dispatch's shorter lead (`DISPATCH_REFRESH_LEAD_MS`, 120s) is the safety net for a fresh boot or a short-lived token. One process-wide `Refresher` is shared by the request path and both loops; its per-credential coalescing is what protects providers that rotate refresh tokens.
 - `quotaPollIntervalMs` is read once at boot. Changing it takes effect on restart.
 - Quota steers routing by *pace*, not by raw headroom: `quotaHeadroom` divides fraction-remaining by fraction-of-window-remaining, so 5% left reads as fine minutes before a reset and as urgent with six days to run. A stale reading (older than three poll intervals), an unobserved row, or a window past its reset scores neutral rather than optimistic, and an OAuth credential with nothing reported scores neutral while an api-key credential scores unconstrained. `score`, `weighted` (draw weight scaled by headroom) and `roundRobin` (below-floor accounts demoted to the tail) all read it; `priority` deliberately keeps tier as the only primary signal.
+- The CLI manages a *local* installation: it needs the database file and `OMNI_ENCRYPTION_KEY`, and it does not administer a remote gateway. Writing while the gateway runs is safe — the gateway rebuilds its snapshot per request — but the CLI cannot see process-local state (rate-limit counters, quota-poll cooldowns, in-flight OAuth flows, admin sessions), and a password change therefore does not evict a signed-in console until the gateway restarts.
+- The CLI resolves an installation root (`--root` > `OMNI_ROOT` > cwd holding an installation > `~/.config/omnigateway`) and lets that root's `.env` win over the ambient environment. That is deliberately the opposite of the usual rule: Bun loads the *current directory's* `.env` into `process.env` before the CLI starts, so ambient-wins would make `omni --root /srv/omni` read one installation's database with another's encryption key. `omni doctor` prints the root and env file it chose.
 - The Docker image builds the gateway only. It does not include `apps/dashboard`, so a container serves the APIs and returns 404 for the console.
 - The gateway does not model which *model* accepts which request shape. Mid-conversation system messages and the several thinking forms vary by model and by platform, so an unsupported combination surfaces as an upstream 400 rather than being caught by the router.
 - The OpenAI adapter routes OAuth credentials to the Codex backend, which is a narrower surface than `api.openai.com`: it rejects several standard parameters and refuses a system turn inside `input`. Path-specific handling belongs behind the `oauth` flag already threaded into the encoder.

@@ -73,13 +73,16 @@ The admin brain. No HTTP server, no console output, no timers.
 | `dryRun.ts` | hypothetical-request ranking over a snapshot |
 | `keys.ts` | list projection, create (raw key returned once), revoke |
 | `settings.ts` | get, put |
-| `usage.ts` / `logs.ts` | aggregate queries and recent request logs |
-| `health.ts` | credential health, token expiry, quota windows |
+| `usage.ts` | aggregate queries and recent request logs |
 | `oauth/**` | move of `apps/gateway/src/oauth/` except `scheduler.ts` |
 | `connect.ts` | `createConnectFlows({ store, providers, http, now })` → `start` / `finish` / `poll` |
 | `adminAuth.ts` | move of `apps/gateway/src/auth/admin.ts` (argon2, session map) |
-| `quotaProbe.ts` | the one-shot probe extracted from `quota/poller.ts` |
+| `quota.ts` | the probe and the one-pass sweep extracted from `quota/poller.ts`; the timer stays behind |
 | `config.ts` | move of `apps/gateway/src/config.ts` |
+
+Credential health and quota windows are read through `credentials.ts` rather
+than a module of their own: they are two more projections of a credential, and
+a file per projection would say less than the four lines it cost.
 
 Each operation takes `{ store, now }`, returns plain data, and throws
 `GatewayError`. Nothing in `control` knows about Elysia, cookies, argv, or a
@@ -113,6 +116,9 @@ dependencies beyond workspace packages. Argument parsing uses `node:util`'s
 | `context.ts` | root resolution, env loading, lazy store construction |
 | `output.ts` | table and lamp rendering, colour policy, `--json` |
 | `service.ts` | systemd detection, unit generation, pidfile supervision |
+| `runtime.ts` | the real spawner, command runner, and health probe behind those seams |
+| `registry.ts` | the command table, and how a verb is picked out of an argv |
+| `prompt.ts` | echo-free secret entry and confirmations |
 | `commands/*.ts` | one module per command group |
 
 Exit codes: `0` success, `1` operator error (not found, refused, conflict), `2`
@@ -127,10 +133,18 @@ Every command resolves a **root** before doing anything, in this order:
 3. the current directory, if it contains a `.env` or an OmniGateway database
 4. `~/.config/omnigateway`
 
-The CLI loads `<root>/.env`, then lets the real process environment win over it,
-then applies `--db` as a final override of the database path. `omni doctor`
-prints the root it chose and the file it read, because a tool that silently
-reads the wrong database is worse than one that refuses to run.
+The CLI loads `<root>/.env` and lets it win over the ambient environment, then
+applies `--db` as a final override of the database path. `omni doctor` prints
+the root it chose and the file it read, because a tool that silently reads the
+wrong database is worse than one that refuses to run.
+
+Letting the file win is deliberately the opposite of the usual rule, and the
+implementation found out why: Bun loads the *current directory's* `.env` into
+`process.env` before the CLI starts. Under ambient-wins, running
+`omni --root /srv/omni` from a checkout reads /srv/omni's database with the
+checkout's encryption key, and decrypts nothing. The root is the operator's
+explicit statement of which installation this is, so it decides; everything the
+file does not name still comes from the environment.
 
 The resolved root is baked into the generated systemd unit, so the service and
 the CLI always agree on which installation they manage.
@@ -155,12 +169,14 @@ omni credentials set <id> [--label L] [--tier N] [--weight W]
 omni credentials rm <id>
 omni credentials refresh <id>
 omni credentials add-key <provider> [--label L]
+omni credentials health [--all]
 
 omni models list
 omni models show <id>
 omni models put <id> (-f model.json | --from-catalog <provider>:<model> ...)
 omni models rm <id>
 omni models dry-run <id> [--tools] [--images] [--reasoning]
+omni models catalog [--provider P]
 
 omni keys list
 omni keys create [--label L] [--allow <model> ...] [--rate-limit N]
@@ -211,7 +227,12 @@ resolved root, `EnvironmentFile` to `<root>/.env`, `ExecStart` to the resolved
 then runs `daemon-reload`, and `systemctl enable` when `--enable` is passed. An
 existing unit file is never overwritten without `--force`.
 
-`omni start` checks whether a unit is installed. If it is, start, stop, restart,
+`omni start --foreground` runs the gateway attached to the terminal, supervised
+by nothing and recorded nowhere: the operator's Ctrl-C is the stop command. That
+is the shape a container or a debugging session wants, and it deliberately
+skips both supervisors.
+
+Otherwise `omni start` checks whether a unit is installed. If it is, start, stop, restart,
 and status delegate to `systemctl` — systemd is the supervisor, and the CLI does
 not compete with it. If no unit is installed, the CLI spawns the gateway
 detached, writing a pidfile and a log file under
