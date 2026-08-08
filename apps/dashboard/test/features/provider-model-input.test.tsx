@@ -20,7 +20,12 @@ function renderInput(provider: "anthropic" | "openai" | "kimi" = "anthropic", in
       />
     );
   }
-  render(<ControlledInput />);
+  render(
+    <>
+      <ControlledInput />
+      <button type="button">After model</button>
+    </>,
+  );
   return { onChange, user: userEvent.setup() };
 }
 
@@ -94,6 +99,41 @@ test("clicking a focused combobox after selection reopens all choices", async ()
 
   expect(screen.getByRole("option", { name: "claude-fable-5" })).toBeDefined();
   expect(screen.getByRole("option", { name: "claude-opus-5" })).toBeDefined();
+});
+
+test("Tab closes the popup and skips virtual-focus options", async () => {
+  const { user } = renderInput("anthropic");
+  const input = screen.getByRole("combobox", { name: "Target 1 model" });
+
+  await user.click(input);
+  await user.keyboard("{ArrowDown}{Tab}");
+
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(input.getAttribute("aria-expanded")).toBe("false");
+  expect(input.getAttribute("aria-activedescendant")).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "After model" }));
+});
+
+test("keyboard reopening after selection shows the full provider catalog", async () => {
+  const { user } = renderInput("anthropic");
+  const input = screen.getByRole("combobox", { name: "Target 1 model" });
+
+  await user.type(input, "opus");
+  await user.keyboard("{ArrowDown}{Enter}{ArrowDown}");
+
+  expect(screen.getByRole("option", { name: "claude-fable-5" })).toBeDefined();
+  expect(screen.getByRole("option", { name: "claude-opus-5" })).toBeDefined();
+});
+
+test("custom text with no matches reports a closed popup", async () => {
+  const { user } = renderInput("anthropic");
+  const input = screen.getByRole("combobox", { name: "Target 1 model" });
+
+  await user.type(input, "vendor-private-model");
+
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(input.getAttribute("aria-expanded")).toBe("false");
+  expect(input.getAttribute("aria-controls")).toBeNull();
 });
 
 test("existing custom values render unchanged", () => {

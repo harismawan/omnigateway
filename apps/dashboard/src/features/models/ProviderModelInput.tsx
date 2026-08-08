@@ -2,12 +2,10 @@ import { PROVIDER_MODEL_CATALOG, type ProviderId, type ProviderModelChoice } fro
 import { type KeyboardEvent, useId, useState } from "react";
 import { Input } from "@/components/ui/input.tsx";
 
-function matches(choice: ProviderModelChoice, query: string): boolean {
-  const normalized = query.trim().toLowerCase();
+function matches(choice: ProviderModelChoice, normalizedQuery: string): boolean {
   return (
-    normalized === "" ||
-    choice.id.toLowerCase().includes(normalized) ||
-    choice.label.toLowerCase().includes(normalized)
+    choice.id.toLowerCase().includes(normalizedQuery) ||
+    choice.label.toLowerCase().includes(normalizedQuery)
   );
 }
 
@@ -23,12 +21,19 @@ export function ProviderModelInput({ provider, value, targetNumber, onChange }: 
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [query, setQuery] = useState("");
-  const choices = PROVIDER_MODEL_CATALOG[provider].models.filter((choice) =>
-    matches(choice, query),
-  );
-  const activeChoice = activeIndex >= 0 ? choices[activeIndex] : undefined;
+  const catalogChoices = PROVIDER_MODEL_CATALOG[provider].models;
+  const normalizedQuery = query.trim().toLowerCase();
+  const choices = open
+    ? catalogChoices.filter((choice) => matches(choice, normalizedQuery))
+    : catalogChoices;
+  const hasPopup = open && choices.length > 0;
+  const activeChoice = hasPopup && activeIndex >= 0 ? choices[activeIndex] : undefined;
   const optionName = (choice: ProviderModelChoice) =>
     choice.label === choice.id ? choice.label : `${choice.label} (${choice.id})`;
+  const closeChoices = () => {
+    setOpen(false);
+    setActiveIndex(-1);
+  };
   const openChoices = () => {
     setQuery("");
     setOpen(true);
@@ -36,22 +41,25 @@ export function ProviderModelInput({ provider, value, targetNumber, onChange }: 
   };
   const select = (choice: ProviderModelChoice) => {
     onChange(choice.id);
-    setOpen(false);
-    setActiveIndex(-1);
+    setQuery("");
+    closeChoices();
   };
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
-      setOpen(false);
-      setActiveIndex(-1);
+      closeChoices();
       return;
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
+      const keyboardChoices = open ? choices : catalogChoices;
+      if (!open) setQuery("");
       setOpen(true);
-      if (choices.length === 0) return;
+      if (keyboardChoices.length === 0) return;
       setActiveIndex((current) => {
-        if (event.key === "ArrowDown") return current >= choices.length - 1 ? 0 : current + 1;
-        return current <= 0 ? choices.length - 1 : current - 1;
+        if (event.key === "ArrowDown") {
+          return current >= keyboardChoices.length - 1 ? 0 : current + 1;
+        }
+        return current <= 0 ? keyboardChoices.length - 1 : current - 1;
       });
       return;
     }
@@ -68,11 +76,11 @@ export function ProviderModelInput({ provider, value, targetNumber, onChange }: 
           activeChoice === undefined ? undefined : `${listboxId}-option-${activeIndex}`
         }
         aria-autocomplete="list"
-        aria-controls={listboxId}
-        aria-expanded={open}
+        aria-controls={hasPopup ? listboxId : undefined}
+        aria-expanded={hasPopup}
         aria-label={`Target ${targetNumber} model`}
         onBlur={(event) => {
-          if (!event.currentTarget.parentElement?.contains(event.relatedTarget)) setOpen(false);
+          if (!event.currentTarget.parentElement?.contains(event.relatedTarget)) closeChoices();
         }}
         onChange={(event) => {
           const nextValue = event.target.value;
@@ -87,7 +95,7 @@ export function ProviderModelInput({ provider, value, targetNumber, onChange }: 
         role="combobox"
         value={value}
       />
-      {open && choices.length > 0 && (
+      {hasPopup && (
         <div
           className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md"
           id={listboxId}
@@ -103,6 +111,7 @@ export function ProviderModelInput({ provider, value, targetNumber, onChange }: 
               onClick={() => select(choice)}
               onMouseDown={(event) => event.preventDefault()}
               role="option"
+              tabIndex={-1}
               type="button"
             >
               <span>{choice.label}</span>

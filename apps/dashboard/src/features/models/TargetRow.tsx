@@ -63,16 +63,15 @@ export function TargetRow({ id, target, index, count, onChange, onRemove, onMove
           ))}
         </select>
       </label>
-      {/* biome-ignore lint/a11y/noLabelWithoutControl: ProviderModelInput renders the labeled native input. */}
-      <label>
-        Model
+      <div>
+        <span>Model</span>
         <ProviderModelInput
           onChange={(model) => onChange({ model })}
           provider={target.provider}
           targetNumber={index + 1}
           value={target.model}
         />
-      </label>
+      </div>
       <label>
         Tier
         <input
