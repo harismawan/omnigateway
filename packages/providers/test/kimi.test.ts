@@ -183,6 +183,20 @@ test("maps a length finish reason", async () => {
   expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "maxTokens" });
 });
 
+test("emits UPSTREAM when EOF arrives without [DONE]", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs({
+        event: "message",
+        data: JSON.stringify({ choices: [{ delta: { content: "partial" } }] }),
+      }),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(events.some((event) => event.type === "end")).toBe(false);
+});
+
 test("[DONE] with no finish_reason still terminates the stream", async () => {
   const events = await collect(
     decodeChat(

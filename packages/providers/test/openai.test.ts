@@ -208,6 +208,34 @@ test("decodes a text response stream", async () => {
   });
 });
 
+test("emits UPSTREAM when EOF arrives before response completion", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.created",
+          data: JSON.stringify({ response: { id: "resp_1", model: "gpt-5" } }),
+        },
+        {
+          event: "response.content_part.added",
+          data: JSON.stringify({
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text" },
+          }),
+        },
+        {
+          event: "response.output_text.delta",
+          data: JSON.stringify({ output_index: 0, content_index: 0, delta: "partial" }),
+        },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(events.some((event) => event.type === "end")).toBe(false);
+});
+
 test("assigns distinct ir indices to reasoning and message items", async () => {
   const events = await collect(
     decodeResponses(

@@ -196,6 +196,7 @@ export async function dispatch(
 
             for (const d of result.degradations) log.degradations.push(d);
 
+            let terminal = false;
             for await (const event of result.events) {
               if (event.type === "blockDelta" && !committed) {
                 // Commit point: the client is about to see bytes, so from here on
@@ -205,6 +206,7 @@ export async function dispatch(
               }
 
               if (event.type === "end") {
+                terminal = true;
                 log.inputTokens = event.usage.inputTokens;
                 log.outputTokens = event.usage.outputTokens;
                 log.cacheReadTokens = event.usage.cacheReadTokens;
@@ -213,6 +215,7 @@ export async function dispatch(
               }
 
               if (event.type === "error") {
+                terminal = true;
                 // An in-stream error before commit is retryable like a thrown one.
                 if (!committed && RETRYABLE[event.code]) {
                   throw new GatewayError(event.code, event.message);
@@ -240,6 +243,10 @@ export async function dispatch(
               }
 
               yield event;
+            }
+
+            if (!terminal) {
+              throw new GatewayError("UPSTREAM", "upstream stream ended without a terminal event");
             }
 
             await persistHealth(

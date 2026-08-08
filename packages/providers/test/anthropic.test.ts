@@ -158,6 +158,30 @@ test("decodes a text stream into canonical events", async () => {
   });
 });
 
+test("emits UPSTREAM when EOF arrives before message_stop", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs(
+        {
+          event: "message_start",
+          data: JSON.stringify({ message: { id: "msg_1", model: "claude-opus-4" } }),
+        },
+        {
+          event: "content_block_start",
+          data: JSON.stringify({ index: 0, content_block: { type: "text" } }),
+        },
+        {
+          event: "content_block_delta",
+          data: JSON.stringify({ index: 0, delta: { type: "text_delta", text: "partial" } }),
+        },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(events.some((event) => event.type === "end")).toBe(false);
+});
+
 test("decodes tool use with partial json deltas", async () => {
   const events = await collectEvents(
     decodeAnthropic(
@@ -184,6 +208,7 @@ test("decodes tool use with partial json deltas", async () => {
           }),
         },
         { event: "content_block_stop", data: JSON.stringify({ index: 1 }) },
+        { event: "message_stop", data: "{}" },
       ),
     ),
   );
@@ -198,7 +223,8 @@ test("decodes tool use with partial json deltas", async () => {
     index: 1,
     delta: { type: "toolJson", partial: '{"city":' },
   });
-  expect(events.at(-1)).toEqual({ type: "blockEnd", index: 1 });
+  expect(events.at(-2)).toEqual({ type: "blockEnd", index: 1 });
+  expect(events.at(-1)).toMatchObject({ type: "end" });
 });
 
 test("decodes thinking deltas and signatures", async () => {
@@ -249,13 +275,20 @@ test("turns a mid-stream error event into an error event", async () => {
   });
 });
 
-test("ignores ping events and unparseable payloads", async () => {
+test("ignores ping events but rejects an unparseable terminal payload", async () => {
   const events = await collectEvents(
     decodeAnthropic(
       msgs({ event: "ping", data: "{}" }, { event: "message_stop", data: "not-json" }),
     ),
   );
-  expect(events).toEqual([]);
+  expect(events).toEqual([
+    {
+      type: "error",
+      code: "UPSTREAM",
+      message: "upstream stream ended before message_stop",
+      retryable: true,
+    },
+  ]);
 });
 
 test("renders a mid-conversation system turn as the documented string form", () => {

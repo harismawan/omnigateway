@@ -60,6 +60,7 @@ export async function* decodeResponses(
   };
 
   let sawToolCall = false;
+  let terminal = false;
   // Output indices whose block was opened by `output_item.added` — reasoning
   // and function_call items. A message item is not in here: its block is opened
   // by content_part.added and closed by content_part.done, and both key the
@@ -153,6 +154,7 @@ export async function* decodeResponses(
 
       case "response.completed":
       case "response.incomplete": {
+        terminal = true;
         const r = d.response ?? {};
         const reason = r.incomplete_details?.reason;
         let stopReason: StopReason = sawToolCall ? "toolUse" : "endTurn";
@@ -173,6 +175,7 @@ export async function* decodeResponses(
 
       case "response.failed":
       case "error": {
+        terminal = true;
         const err = d.response?.error ?? d.error ?? {};
         const code = ERROR_CODE[String(err.code ?? err.type)] ?? "UPSTREAM";
         yield {
@@ -187,5 +190,14 @@ export async function* decodeResponses(
       default:
         break;
     }
+  }
+
+  if (!terminal) {
+    yield {
+      type: "error",
+      code: "UPSTREAM",
+      message: "upstream stream ended before response completion",
+      retryable: RETRYABLE.UPSTREAM,
+    };
   }
 }

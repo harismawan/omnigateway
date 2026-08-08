@@ -121,7 +121,7 @@ test("thinking content is not emitted on the chat completions surface", async ()
   expect(f.filter((x) => x.data !== "[DONE]")).toHaveLength(0);
 });
 
-test("renders an error event as an openai error frame", async () => {
+test("renders an error event without a successful [DONE] marker", async () => {
   const f = await frames(
     openaiStream(
       src({ type: "error", code: "RATE_LIMIT", message: "slow", retryable: true }),
@@ -135,6 +135,7 @@ test("renders an error event as an openai error frame", async () => {
     type: "rate_limit_error",
     code: "rate_limit_exceeded",
   });
+  expect(f.some((frame) => frame.data === "[DONE]")).toBe(false);
 });
 
 type NonStreamingBody = {

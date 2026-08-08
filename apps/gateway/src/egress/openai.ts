@@ -42,6 +42,7 @@ export async function* openaiStream(
 ): AsyncGenerator<SseFrame, void, undefined> {
   let model = "";
   let roleSent = false;
+  let completed = false;
   // Chat Completions numbers tool calls independently of content blocks.
   const toolIndex = new Map<number, number>();
 
@@ -119,6 +120,7 @@ export async function* openaiStream(
         break;
 
       case "end":
+        completed = true;
         yield emit(
           chunk(
             requestId,
@@ -142,7 +144,7 @@ export async function* openaiStream(
     }
   }
 
-  yield { event: "message", data: "[DONE]" };
+  if (completed) yield { event: "message", data: "[DONE]" };
 }
 
 export function openaiResponse(
