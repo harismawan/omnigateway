@@ -119,8 +119,11 @@ export function usageBucket(patch: Partial<UsageBucket> = {}): UsageBucket {
     requests: 42,
     inputTokens: 120_000,
     outputTokens: 30_000,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     costUsd: 3.5,
     errors: 2,
+    durationMsSum: 42_000,
     ...patch,
   };
 }

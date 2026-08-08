@@ -1,137 +1,133 @@
 import { useMemo, useState } from "react";
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import styled from "styled-components";
 import { useCredentials, useKeys, useUsage } from "../../api/queries.ts";
-import type { UsageBucket, UsageGroupBy } from "../../api/types.ts";
+import type { UsageDimension } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
-import { formatCount, formatUsd } from "../../lib/format.ts";
+import { formatCount, formatMs, formatPercent, formatUsd } from "../../lib/format.ts";
 import { useLive } from "../../session/live.tsx";
-import { Button } from "../../ui/Button.tsx";
-import { Module } from "../../ui/Panel.tsx";
-import { Legend, Row, ScrollX, Stack, Truncate } from "../../ui/primitives.ts";
-import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
-import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
+import { Grid, Stack } from "../../ui/primitives.ts";
+import { Readout } from "../../ui/Readout.tsx";
+import { Sparkline } from "../../ui/Sparkline.tsx";
+import { ActivityGrid } from "./ActivityGrid.tsx";
+import { KeyPanel } from "./KeyPanel.tsx";
+import { ProviderPanel } from "./ProviderPanel.tsx";
+import { RankPanel } from "./RankPanel.tsx";
+import { Section } from "./Section.tsx";
+import {
+  ACTIVITY_DAYS,
+  Controls,
+  keyToTime,
+  METRICS,
+  type MetricId,
+  metricOf,
+  RANGES,
+  type RangeId,
+  rangeOf,
+  Segment,
+  startOfDay,
+  timeTicks,
+  totalsOf,
+} from "./shared.ts";
+import { TokenMixPanel } from "./TokenMixPanel.tsx";
+import { TrafficPanel } from "./TrafficPanel.tsx";
 
-const RANGES = [
-  { id: "1h", label: "1 hour", ms: 3_600_000 },
-  { id: "24h", label: "24 hours", ms: 86_400_000 },
-  { id: "7d", label: "7 days", ms: 604_800_000 },
-  { id: "30d", label: "30 days", ms: 2_592_000_000 },
-] as const;
-
-type RangeId = (typeof RANGES)[number]["id"];
-
-const GROUPS: ReadonlyArray<{ id: UsageGroupBy; label: string; column: string }> = [
-  { id: "hour", label: "Over time", column: "Hour" },
-  { id: "model", label: "By upstream model", column: "Upstream model" },
-  { id: "credential", label: "By account", column: "Account" },
-  { id: "apiKey", label: "By key", column: "Key" },
-];
-
-const Controls = styled(Row)`
-  gap: ${({ theme }) => theme.space(1)};
-  flex-wrap: wrap;
+const Deck = styled.div`
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: ${({ theme }) => theme.space(3)};
 `;
 
-const Segment = styled(Button)<{ $on: boolean }>`
-  border-color: ${({ theme, $on }) => ($on ? theme.color.accent : theme.color.ruleStrong)};
-  color: ${({ theme, $on }) => ($on ? theme.color.accent : theme.color.inkDim)};
-  background: ${({ theme, $on }) => ($on ? theme.color.accentWash : theme.color.panelRaised)};
-`;
+const DAY_MS = 86_400_000;
 
-const ChartBox = styled.div`
-  height: 260px;
-  width: 100%;
-`;
+const MODEL_SCOPES = [
+  { id: "requestedModel", label: "As requested", column: "Virtual model" },
+  { id: "model", label: "As served", column: "Upstream model" },
+] as const satisfies ReadonlyArray<{ id: UsageDimension; label: string; column: string }>;
 
-const TipCard = styled.div`
-  background: ${({ theme }) => theme.color.panel};
-  border: 1px solid ${({ theme }) => theme.color.ruleStrong};
-  border-radius: ${({ theme }) => theme.radius.control};
-  padding: ${({ theme }) => theme.space(2)};
-  font-family: ${({ theme }) => theme.font.mono};
-  font-size: 11.5px;
-  box-shadow: ${({ theme }) => theme.color.shadow};
-`;
+type ModelScope = (typeof MODEL_SCOPES)[number]["id"];
 
-type Point = {
-  label: string;
-  requests: number;
-  /** Split out so the stack totals `requests` instead of double-counting it. */
-  succeeded: number;
-  errors: number;
-  costUsd: number;
-  tokens: number;
-};
-
-function hourLabel(key: string): string {
-  const at = Number(key) * 3_600_000;
-  if (!Number.isFinite(at)) return key;
-  return new Date(at).toLocaleString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    hour12: false,
-  });
-}
-
+/**
+ * The usage deck: a year of activity at the top, then the selected window
+ * broken down by provider, model, key, and token class. Every panel reads the
+ * same window, so two panels can always be compared without re-reading their
+ * headers.
+ */
 export function UsageBoard() {
   const { cadence } = useLive();
-  const [range, setRange] = useState<RangeId>("24h");
-  const [groupBy, setGroupBy] = useState<UsageGroupBy>("hour");
+  const [rangeId, setRangeId] = useState<RangeId>("24h");
+  const [metricId, setMetricId] = useState<MetricId>("tokens");
+  const [scope, setScope] = useState<ModelScope>("model");
 
-  const spanMs = RANGES.find((entry) => entry.id === range)?.ms ?? 86_400_000;
-  // Pinned per render pass so the query key does not change on every tick.
-  const since = useMemo(() => Math.floor((Date.now() - spanMs) / 60_000) * 60_000, [spanMs]);
+  const range = rangeOf(rangeId);
+  const metric = metricOf(metricId);
 
-  const usage = useUsage({ groupBy, since }, cadence(60_000));
-  const credentials = useCredentials();
-  const keys = useKeys();
+  // Pinned per range so the query key does not change on every tick: to the
+  // minute for raw windows, to the day for rollup ones.
+  const since = useMemo(
+    () =>
+      range.grain === "daily"
+        ? startOfDay(Date.now() - range.ms)
+        : Math.floor((Date.now() - range.ms) / 60_000) * 60_000,
+    [range],
+  );
+  const until = useMemo(() => since + range.ms, [since, range]);
+  const activitySince = useMemo(() => startOfDay(Date.now() - ACTIVITY_DAYS * DAY_MS), []);
 
-  const names = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const credential of credentials.data ?? []) map.set(credential.id, credential.label);
-    for (const key of keys.data ?? []) map.set(key.id, key.label);
-    return map;
-  }, [credentials.data, keys.data]);
-
-  const rows = usage.data ?? [];
-  const naming = (bucket: UsageBucket): string =>
-    groupBy === "hour" ? hourLabel(bucket.key) : (names.get(bucket.key) ?? bucket.key);
-
-  const ordered =
-    groupBy === "hour" ? [...rows].sort((a, b) => Number(a.key) - Number(b.key)) : rows;
-
-  const points: Point[] = ordered.map((bucket) => ({
-    label: naming(bucket),
-    requests: bucket.requests,
-    succeeded: Math.max(0, bucket.requests - bucket.errors),
-    errors: bucket.errors,
-    costUsd: bucket.costUsd,
-    tokens: bucket.inputTokens + bucket.outputTokens,
-  }));
-
-  const totals = rows.reduce(
-    (sum, bucket) => ({
-      requests: sum.requests + bucket.requests,
-      errors: sum.errors + bucket.errors,
-      costUsd: sum.costUsd + bucket.costUsd,
-      tokens: sum.tokens + bucket.inputTokens + bucket.outputTokens,
-    }),
-    { requests: 0, errors: 0, costUsd: 0, tokens: 0 },
+  const common = { since, grain: range.grain } as const;
+  const series = useUsage({ ...common, groupBy: range.by }, cadence(60_000));
+  const providers = useUsage(
+    { ...common, groupBy: range.by, splitBy: "provider" },
+    cadence(60_000),
+  );
+  const keyTraffic = useUsage({ ...common, groupBy: range.by, splitBy: "apiKey" }, cadence(60_000));
+  const models = useUsage({ ...common, groupBy: scope }, cadence(60_000));
+  const accounts = useUsage({ ...common, groupBy: "credential" }, cadence(60_000));
+  // A year of squares changes slowly; polling it at the panel cadence is waste.
+  const activity = useUsage(
+    { since: activitySince, grain: "daily", groupBy: "day" },
+    cadence(300_000),
   );
 
-  const groupLabel = GROUPS.find((entry) => entry.id === groupBy);
+  const keys = useKeys();
+  const credentials = useCredentials();
+  const keyNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const key of keys.data ?? []) names.set(key.id, key.label);
+    return names;
+  }, [keys.data]);
+  const accountNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const entry of credentials.data ?? []) names.set(entry.id, entry.label);
+    return names;
+  }, [credentials.data]);
+
+  const buckets = series.data ?? [];
+  const totals = totalsOf(buckets);
+  const tokens = totals.inputTokens + totals.outputTokens;
+
+  // The vitals traces share the window's ticks with the charts below them.
+  const ticks = timeTicks(since, until, range.by);
+  const byTick = new Map(buckets.map((bucket) => [keyToTime(bucket.key, range.by), bucket]));
+  const trace = (of: (at: number) => number): number[] => ticks.map(of);
+  const errorTone = (rate: number): "ok" | "warn" | "down" =>
+    rate >= 0.25 ? "down" : rate >= 0.05 ? "warn" : "ok";
+  const errorRate = totals.requests === 0 ? 0 : totals.errors / totals.requests;
+
+  const empty = {
+    legend: "Nothing recorded",
+    message:
+      "No requests landed in this window. Widen the range, or send traffic through the gateway.",
+  };
 
   return (
-    <>
+    <Stack $gap={4}>
       <PageHead
         legend="Usage"
         title="Requests, tokens, and spend"
         summary={
-          usage.isLoading
+          series.isLoading
             ? "Reading usage…"
-            : `${formatCount(totals.requests)} requests and ${formatUsd(totals.costUsd)} over the last ${RANGES.find((entry) => entry.id === range)?.label}.`
+            : `${formatCount(totals.requests)} requests and ${formatUsd(totals.costUsd)} over the last ${range.label}.`
         }
         actions={
           <Controls>
@@ -140,9 +136,9 @@ export function UsageBoard() {
                 key={entry.id}
                 type="button"
                 $size="sm"
-                $on={entry.id === range}
-                aria-pressed={entry.id === range}
-                onClick={() => setRange(entry.id)}
+                $on={entry.id === rangeId}
+                aria-pressed={entry.id === rangeId}
+                onClick={() => setRangeId(entry.id)}
               >
                 {entry.id}
               </Segment>
@@ -151,157 +147,199 @@ export function UsageBoard() {
         }
       />
 
-      <Module
-        legend="Breakdown"
-        meta={groupLabel?.label}
-        actions={
-          <Controls>
-            {GROUPS.map((entry) => (
-              <Segment
-                key={entry.id}
-                type="button"
-                $size="sm"
-                $on={entry.id === groupBy}
-                aria-pressed={entry.id === groupBy}
-                onClick={() => setGroupBy(entry.id)}
-              >
-                {entry.label}
-              </Segment>
-            ))}
-          </Controls>
-        }
-      >
-        {usage.isError ? (
-          <Failure error={usage.error} onRetry={() => void usage.refetch()} />
-        ) : usage.isLoading ? (
-          <SkeletonRows rows={6} />
-        ) : points.length === 0 ? (
-          <Empty
-            legend="Nothing recorded"
-            message="No requests landed in this window. Widen the range, or send traffic through the gateway."
-          />
-        ) : (
-          <Stack $gap={3}>
-            <ChartBox>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={points} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
-                  <CartesianGrid stroke="var(--rule)" vertical={false} />
-                  <XAxis
-                    dataKey="label"
-                    tick={{ fill: "var(--ink-faint)", fontSize: 10 }}
-                    stroke="var(--rule-strong)"
-                    interval="preserveStartEnd"
-                    minTickGap={24}
-                  />
-                  <YAxis
-                    tick={{ fill: "var(--ink-faint)", fontSize: 10 }}
-                    stroke="var(--rule-strong)"
-                    width={40}
-                  />
-                  <Tooltip
-                    cursor={{ fill: "var(--accent-wash)" }}
-                    content={({ active, payload, label }) => {
-                      if (active !== true || payload === undefined || payload.length === 0)
-                        return null;
-                      const point = payload[0]?.payload as Point | undefined;
-                      if (point === undefined) return null;
-                      return (
-                        <TipCard>
-                          <div>{String(label)}</div>
-                          <div>{formatCount(point.requests)} requests</div>
-                          <div>{formatCount(point.errors)} failed</div>
-                          <div>{formatCount(point.tokens)} tokens</div>
-                          <div>{formatUsd(point.costUsd)}</div>
-                        </TipCard>
-                      );
-                    }}
-                  />
-                  {/* Stacked, so a column's height is the request count and the
-                      red band is the share of it that failed. Animation is off:
-                      the panel re-polls, and a bar that regrows every minute
-                      reads as new traffic. */}
-                  <Bar
-                    dataKey="succeeded"
-                    stackId="requests"
-                    fill="var(--accent)"
-                    fillOpacity={0.85}
-                    isAnimationActive={false}
-                  />
-                  <Bar
-                    dataKey="errors"
-                    stackId="requests"
-                    fill="var(--down)"
-                    radius={[2, 2, 0, 0]}
-                    isAnimationActive={false}
-                  />
-                </BarChart>
-              </ResponsiveContainer>
-            </ChartBox>
+      <Deck>
+        <Readout
+          legend="Requests"
+          value={formatCount(totals.requests)}
+          unit={range.label}
+          trace={
+            <Sparkline
+              values={trace((at) => byTick.get(at)?.requests ?? 0)}
+              overlay={trace((at) => byTick.get(at)?.errors ?? 0)}
+              label={`${totals.requests} requests, ${totals.errors} of them failed`}
+            />
+          }
+        />
+        <Readout
+          legend="Error rate"
+          value={formatPercent(errorRate)}
+          unit={`${formatCount(totals.errors)} failed`}
+          tone={totals.requests === 0 ? "ink" : errorTone(errorRate)}
+          trace={
+            <Sparkline
+              values={trace((at) => byTick.get(at)?.errors ?? 0)}
+              scaleTo={Math.max(...trace((at) => byTick.get(at)?.requests ?? 0), 1)}
+              color="var(--down)"
+              label={`${totals.errors} failed requests against ${totals.requests} total`}
+            />
+          }
+        />
+        <Readout
+          legend="Tokens"
+          value={formatCount(tokens)}
+          unit={`${formatCount(totals.cacheReadTokens)} cached`}
+          trace={
+            <Sparkline
+              values={trace(
+                (at) => (byTick.get(at)?.inputTokens ?? 0) + (byTick.get(at)?.outputTokens ?? 0),
+              )}
+              label={`${tokens} tokens over the window`}
+            />
+          }
+        />
+        <Readout
+          legend="Mean duration"
+          value={formatMs(totals.requests === 0 ? null : totals.durationMsSum / totals.requests)}
+          unit="per request"
+          trace={
+            <Sparkline
+              values={trace((at) => {
+                const bucket = byTick.get(at);
+                return bucket === undefined || bucket.requests === 0
+                  ? 0
+                  : bucket.durationMsSum / bucket.requests;
+              })}
+              color="var(--ok)"
+              label="mean request duration over the window"
+            />
+          }
+        />
+        <Readout
+          legend="Spend"
+          value={formatUsd(totals.costUsd)}
+          unit={range.label}
+          trace={
+            <Sparkline
+              values={trace((at) => byTick.get(at)?.costUsd ?? 0)}
+              color="var(--warn)"
+              label={`spend over the window, ${formatUsd(totals.costUsd)} total`}
+            />
+          }
+        />
+      </Deck>
 
-            <ScrollX>
-              <Table>
-                <thead>
-                  <tr>
-                    <Th>{groupLabel?.column ?? "Key"}</Th>
-                    <Th $align="right">Requests</Th>
-                    <Th $align="right">Failed</Th>
-                    <Th $align="right">Input</Th>
-                    <Th $align="right">Output</Th>
-                    <Th $align="right">Cost</Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {ordered.map((bucket) => (
-                    <Tr key={bucket.key}>
-                      <Td>
-                        <Truncate style={{ display: "block", maxWidth: "34ch" }}>
-                          {naming(bucket)}
-                        </Truncate>
-                      </Td>
-                      <Td $align="right" $mono>
-                        {formatCount(bucket.requests)}
-                      </Td>
-                      <Td
-                        $align="right"
-                        $mono
-                        style={bucket.errors > 0 ? { color: "var(--down)" } : undefined}
-                      >
-                        {formatCount(bucket.errors)}
-                      </Td>
-                      <Td $align="right" $mono>
-                        {formatCount(bucket.inputTokens)}
-                      </Td>
-                      <Td $align="right" $mono>
-                        {formatCount(bucket.outputTokens)}
-                      </Td>
-                      <Td $align="right" $mono>
-                        {formatUsd(bucket.costUsd)}
-                      </Td>
-                    </Tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <Tr>
-                    <Td>
-                      <Legend>Total</Legend>
-                    </Td>
-                    <Td $align="right" $mono>
-                      {formatCount(totals.requests)}
-                    </Td>
-                    <Td $align="right" $mono>
-                      {formatCount(totals.errors)}
-                    </Td>
-                    <Td colSpan={2} />
-                    <Td $align="right" $mono>
-                      {formatUsd(totals.costUsd)}
-                    </Td>
-                  </Tr>
-                </tfoot>
-              </Table>
-            </ScrollX>
-          </Stack>
-        )}
-      </Module>
-    </>
+      <Section
+        legend="Traffic"
+        meta={range.by === "hour" ? "By hour" : "By day"}
+        query={series}
+        isEmpty={buckets.length === 0}
+        empty={empty}
+      >
+        <TrafficPanel buckets={buckets} by={range.by} since={since} until={until} />
+      </Section>
+
+      <Controls>
+        {METRICS.map((entry) => (
+          <Segment
+            key={entry.id}
+            type="button"
+            $size="sm"
+            $on={entry.id === metricId}
+            aria-pressed={entry.id === metricId}
+            onClick={() => setMetricId(entry.id)}
+          >
+            {`Rank by ${entry.label.toLowerCase()}`}
+          </Segment>
+        ))}
+      </Controls>
+
+      {/* Two explicit columns rather than a flowing grid: panels differ in
+          height, and an auto-placed grid leaves a hole under every short one.
+          Each column stacks flush and the pair is balanced by eye. */}
+      <Grid $min="480px" $gap={4}>
+        <Stack $gap={4}>
+          <Section
+            legend="Providers"
+            meta={metric.label}
+            query={providers}
+            isEmpty={(providers.data ?? []).length === 0}
+            empty={empty}
+          >
+            <ProviderPanel
+              buckets={providers.data ?? []}
+              by={range.by}
+              since={since}
+              until={until}
+              metric={metric}
+            />
+          </Section>
+
+          {/* The year sits among the breakdowns rather than above them: it is one
+              more way to read the same traffic, not a header for the page. */}
+          <ActivityGrid days={activity.data ?? []} now={Date.now()} />
+        </Stack>
+
+        <Stack $gap={4}>
+          <Section
+            legend="Token mix"
+            meta={formatCount(tokens + totals.cacheReadTokens + totals.cacheWriteTokens)}
+            query={series}
+            isEmpty={buckets.length === 0}
+            empty={empty}
+          >
+            <TokenMixPanel buckets={buckets} by={range.by} since={since} until={until} />
+          </Section>
+
+          <Section
+            legend="Models"
+            meta={MODEL_SCOPES.find((entry) => entry.id === scope)?.column}
+            query={models}
+            isEmpty={(models.data ?? []).length === 0}
+            empty={empty}
+            actions={
+              <Controls>
+                {MODEL_SCOPES.map((entry) => (
+                  <Segment
+                    key={entry.id}
+                    type="button"
+                    $size="sm"
+                    $on={entry.id === scope}
+                    aria-pressed={entry.id === scope}
+                    onClick={() => setScope(entry.id)}
+                  >
+                    {entry.label}
+                  </Segment>
+                ))}
+              </Controls>
+            }
+          >
+            <RankPanel buckets={models.data ?? []} metric={metric} />
+          </Section>
+
+          <Section
+            legend="Accounts"
+            meta={metric.label}
+            query={accounts}
+            isEmpty={(accounts.data ?? []).length === 0}
+            empty={empty}
+          >
+            <RankPanel
+              buckets={accounts.data ?? []}
+              metric={metric}
+              names={accountNames}
+              unknownLabel="No account"
+            />
+          </Section>
+        </Stack>
+      </Grid>
+
+      {/* Full width: seven columns and a trace per key do not fit a grid cell. */}
+      <Section
+        legend="API keys"
+        meta={metric.label}
+        query={keyTraffic}
+        isEmpty={(keyTraffic.data ?? []).length === 0}
+        empty={empty}
+      >
+        <KeyPanel
+          buckets={keyTraffic.data ?? []}
+          by={range.by}
+          since={since}
+          until={until}
+          metric={metric}
+          names={keyNames}
+        />
+      </Section>
+    </Stack>
   );
 }

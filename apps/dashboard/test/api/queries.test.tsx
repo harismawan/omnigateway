@@ -42,7 +42,9 @@ describe("query hooks", () => {
     expect(stub.calls[0]?.url).toBe("/api/usage?groupBy=hour&since=1000&until=2000");
     expect(queryKeys.usage({ groupBy: "hour", since: 1_000, until: 2_000 })).toEqual([
       "usage",
+      "raw",
       "hour",
+      null,
       1_000,
       2_000,
     ]);

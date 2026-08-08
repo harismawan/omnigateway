@@ -1,7 +1,17 @@
 import { Database } from "bun:sqlite";
 import init001 from "./migrations/001_init.sql" with { type: "text" };
+import usageDaily002 from "./migrations/002_usage_daily.sql" with { type: "text" };
+import { backfillDaily } from "./rollup.ts";
 
-const MIGRATIONS: ReadonlyArray<{ id: number; sql: string }> = [{ id: 1, sql: init001 }];
+/**
+ * `after` runs inside the migration's own transaction, for the cases where the
+ * data step needs the same day arithmetic the runtime uses rather than a SQL
+ * approximation of it.
+ */
+const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database) => void }> = [
+  { id: 1, sql: init001 },
+  { id: 2, sql: usageDaily002, after: backfillDaily },
+];
 
 /**
  * Opens the database, enables WAL and foreign keys, and applies any migrations
@@ -27,6 +37,7 @@ export function openDb(path: string): Database {
     if (done.has(m.id)) continue;
     db.transaction(() => {
       db.run(m.sql);
+      m.after?.(db);
       db.run("INSERT INTO migrations (id, applied_at) VALUES (?, ?)", [m.id, Date.now()]);
     })();
   }

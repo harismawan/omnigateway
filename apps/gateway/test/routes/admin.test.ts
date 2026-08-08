@@ -332,6 +332,39 @@ test("usage rejects an unknown groupBy rather than passing it to sql", async () 
   expect((await call("GET", "/api/usage?groupBy=1;DROP+TABLE+usage")).status).toBe(400);
 });
 
+test("usage reads the daily rollup when asked for the daily grain", async () => {
+  const { call, store } = await harness();
+  await store.usage.append(requestLog({ id: "r1", at: NOW, inputTokens: 10, outputTokens: 5 }));
+
+  const body = (await (
+    await call("GET", `/api/usage?grain=daily&groupBy=day&since=${NOW - 86_400_000}`)
+  ).json()) as { rows: Array<{ key: string; requests: number; cacheReadTokens: number }> };
+  expect(body.rows).toHaveLength(1);
+  expect(body.rows[0]?.requests).toBe(1);
+  // A field the raw endpoint never carried before this grain existed.
+  expect(body.rows[0]?.cacheReadTokens).toBe(0);
+});
+
+test("usage splits one time series into a bucket per provider", async () => {
+  const { call, store } = await harness();
+  await store.usage.append(requestLog({ id: "r1", at: NOW }));
+  await store.usage.append(requestLog({ id: "r2", at: NOW, resolvedProvider: "openai" }));
+
+  const body = (await (
+    await call("GET", "/api/usage?groupBy=hour&splitBy=provider&since=0")
+  ).json()) as { rows: Array<{ key: string; split: string }> };
+  expect(body.rows.map((row) => row.split).sort()).toEqual(["anthropic", "openai"]);
+  expect(new Set(body.rows.map((row) => row.key)).size).toBe(1);
+});
+
+test("usage refuses a dimension the grain cannot answer", async () => {
+  const { call } = await harness();
+  expect((await call("GET", "/api/usage?grain=daily&groupBy=hour")).status).toBe(400);
+  expect((await call("GET", "/api/usage?grain=raw&groupBy=day")).status).toBe(400);
+  expect((await call("GET", "/api/usage?groupBy=hour&splitBy=day")).status).toBe(400);
+  expect((await call("GET", "/api/usage?grain=weekly&groupBy=day")).status).toBe(400);
+});
+
 test("logs are returned newest first, capped, and normalize fractional limits", async () => {
   const { call, store } = await harness();
   for (let i = 0; i < 3; i += 1) {

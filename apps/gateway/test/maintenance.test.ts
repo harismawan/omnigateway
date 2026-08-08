@@ -35,3 +35,19 @@ test("pruning an empty log table is a no-op", async () => {
   await pruneLogs(store, NOW);
   expect(await store.usage.recent(10)).toHaveLength(0);
 });
+
+test("the rollup survives log pruning and is swept on its own horizon", async () => {
+  const store = await memoryStore();
+  const day = 24 * 60 * 60 * 1000;
+  const now = 500 * day;
+  await log(store, "ancient", now - 401 * day);
+  await log(store, "old", now - 31 * day);
+  await log(store, "new", now - 1000);
+
+  await pruneLogs(store, now);
+
+  // Raw logs keep the retention window; the rollup keeps a year and a margin.
+  expect((await store.usage.recent(10)).map((l) => l.id)).toEqual(["new"]);
+  const days = await store.usage.aggregate({ since: 0, grain: "daily", groupBy: "day" });
+  expect(days.map((row) => row.requests)).toEqual([1, 1]);
+});

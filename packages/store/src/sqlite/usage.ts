@@ -1,6 +1,14 @@
 import type { Database } from "bun:sqlite";
 import type { ProviderId } from "@omni/ir";
-import type { RequestLog, UsageBucket, UsageQuery, UsageRepo } from "../types.ts";
+import type {
+  RequestLog,
+  UsageBucket,
+  UsageDimension,
+  UsageGrain,
+  UsageQuery,
+  UsageRepo,
+} from "../types.ts";
+import { rollupLog, startOfLocalDay } from "./rollup.ts";
 
 type Row = {
   id: string;
@@ -44,44 +52,108 @@ const toLog = (r: Row): RequestLog => ({
   degradations: JSON.parse(r.degradations) as string[],
 });
 
-/** Whitelisted so the groupBy value can never reach SQL as raw text. */
-const GROUP_COLUMN: Readonly<Record<UsageQuery["groupBy"], string>> = {
-  credential: "credential_id",
-  model: "resolved_model",
-  apiKey: "api_key_id",
-  hour: "at / 3600000",
+/**
+ * Whitelisted so a dimension can never reach SQL as raw text. `null` marks a
+ * dimension the grain cannot answer: raw logs have no day column that agrees
+ * with the host's local midnight, and the rollup has thrown the hour away.
+ */
+const GROUP_COLUMN: Readonly<Record<UsageGrain, Readonly<Record<UsageDimension, string | null>>>> =
+  {
+    raw: {
+      credential: "credential_id",
+      model: "resolved_model",
+      requestedModel: "requested_model",
+      apiKey: "api_key_id",
+      provider: "resolved_provider",
+      hour: "at / 3600000",
+      day: null,
+    },
+    daily: {
+      credential: "credential_id",
+      model: "resolved_model",
+      requestedModel: "requested_model",
+      apiKey: "api_key_id",
+      provider: "provider",
+      hour: null,
+      day: "day",
+    },
+  };
+
+function columnFor(grain: UsageGrain, dimension: UsageDimension): string {
+  const column = GROUP_COLUMN[grain][dimension];
+  if (column === null) throw new Error(`usage grain ${grain} cannot group by ${dimension}`);
+  return column;
+}
+
+/** Raw logs count failures from the status; the rollup already stored them. */
+const MEASURES: Readonly<Record<UsageGrain, string>> = {
+  raw: `COUNT(*) AS requests,
+        COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0) AS errors,
+        COALESCE(SUM(duration_ms), 0) AS duration_ms_sum`,
+  daily: `COALESCE(SUM(requests), 0) AS requests,
+          COALESCE(SUM(errors), 0) AS errors,
+          COALESCE(SUM(duration_ms_sum), 0) AS duration_ms_sum`,
 };
 
+type Agg = {
+  key: string | number | null;
+  split: string | number | null;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  errors: number;
+  duration_ms_sum: number;
+};
+
+/** An absent credential, key, or upstream model is a bucket, not a hole. */
+function label(value: string | number | null): string {
+  if (value === null) return "unknown";
+  const text = String(value);
+  return text.length === 0 ? "unknown" : text;
+}
+
 export function createUsageRepo(db: Database): UsageRepo {
-  return {
-    async append(log: RequestLog) {
-      db.run(
-        `INSERT INTO request_logs
+  /**
+   * The raw row and its rollup are written together: a crash between the two
+   * would leave the year view quietly disagreeing with the log it summarizes.
+   */
+  const insert = db.transaction((log: RequestLog) => {
+    db.run(
+      `INSERT INTO request_logs
            (id, at, api_key_id, requested_model, resolved_provider, resolved_model, credential_id,
             attempts, status, error_code, input_tokens, output_tokens, cache_read_tokens,
             cache_write_tokens, ttft_ms, duration_ms, cost_usd, degradations)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [
-          log.id,
-          log.at,
-          log.apiKeyId,
-          log.requestedModel,
-          log.resolvedProvider,
-          log.resolvedModel,
-          log.credentialId,
-          log.attempts,
-          log.status,
-          log.errorCode,
-          log.inputTokens,
-          log.outputTokens,
-          log.cacheReadTokens,
-          log.cacheWriteTokens,
-          log.ttftMs,
-          log.durationMs,
-          log.costUsd,
-          JSON.stringify(log.degradations),
-        ],
-      );
+      [
+        log.id,
+        log.at,
+        log.apiKeyId,
+        log.requestedModel,
+        log.resolvedProvider,
+        log.resolvedModel,
+        log.credentialId,
+        log.attempts,
+        log.status,
+        log.errorCode,
+        log.inputTokens,
+        log.outputTokens,
+        log.cacheReadTokens,
+        log.cacheWriteTokens,
+        log.ttftMs,
+        log.durationMs,
+        log.costUsd,
+        JSON.stringify(log.degradations),
+      ],
+    );
+    rollupLog(db, log);
+  });
+
+  return {
+    async append(log: RequestLog) {
+      insert(log);
     },
 
     async recent(limit: number) {
@@ -92,44 +164,57 @@ export function createUsageRepo(db: Database): UsageRepo {
     },
 
     async aggregate(q: UsageQuery) {
-      const col = GROUP_COLUMN[q.groupBy];
+      const grain = q.grain ?? "raw";
+      const daily = grain === "daily";
+      const key = columnFor(grain, q.groupBy);
+      const split = q.splitBy === undefined ? null : columnFor(grain, q.splitBy);
+
+      // A daily bucket is whole: floor the lower bound so the first partial day
+      // of the window is reported in full rather than dropped.
+      const since = daily ? startOfLocalDay(q.since) : q.since;
       const until = q.until ?? Number.MAX_SAFE_INTEGER;
-      type Agg = {
-        key: string | null;
-        requests: number;
-        input_tokens: number;
-        output_tokens: number;
-        cost_usd: number;
-        errors: number;
-      };
-      return db
+      const timeColumn = daily ? "day" : "at";
+
+      const rows = db
         .query<Agg, [number, number]>(
-          `SELECT ${col} AS key,
-                  COUNT(*) AS requests,
+          `SELECT ${key} AS key,
+                  ${split ?? "NULL"} AS split,
+                  ${MEASURES[grain]},
                   COALESCE(SUM(input_tokens), 0) AS input_tokens,
                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                  COALESCE(SUM(cost_usd), 0) AS cost_usd,
-                  COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0) AS errors
-             FROM request_logs
-            WHERE at >= ? AND at <= ?
-            GROUP BY key
+                  COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                  COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                  COALESCE(SUM(cost_usd), 0) AS cost_usd
+             FROM ${daily ? "usage_daily" : "request_logs"}
+            WHERE ${timeColumn} >= ? AND ${timeColumn} <= ?
+            GROUP BY key${split === null ? "" : ", split"}
             ORDER BY requests DESC`,
         )
-        .all(q.since, until)
-        .map(
-          (r): UsageBucket => ({
-            key: r.key === null ? "unknown" : String(r.key),
-            requests: r.requests,
-            inputTokens: r.input_tokens,
-            outputTokens: r.output_tokens,
-            costUsd: r.cost_usd,
-            errors: r.errors,
-          }),
-        );
+        .all(since, until);
+
+      return rows.map((r): UsageBucket => {
+        const bucket: UsageBucket = {
+          key: label(r.key),
+          requests: r.requests,
+          inputTokens: r.input_tokens,
+          outputTokens: r.output_tokens,
+          cacheReadTokens: r.cache_read_tokens,
+          cacheWriteTokens: r.cache_write_tokens,
+          costUsd: r.cost_usd,
+          errors: r.errors,
+          durationMsSum: r.duration_ms_sum,
+        };
+        return split === null ? bucket : { ...bucket, split: label(r.split) };
+      });
     },
 
     async prune(olderThan: number) {
       db.run("DELETE FROM request_logs WHERE at < ?", [olderThan]);
+      return db.query<{ n: number }, []>("SELECT changes() AS n").get()?.n ?? 0;
+    },
+
+    async pruneDaily(olderThan: number) {
+      db.run("DELETE FROM usage_daily WHERE day < ?", [olderThan]);
       return db.query<{ n: number }, []>("SELECT changes() AS n").get()?.n ?? 0;
     },
   };

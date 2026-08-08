@@ -4,6 +4,8 @@ import {
   hashApiKey,
   type Settings,
   type Store,
+  type UsageDimension,
+  type UsageGrain,
   type VirtualModel,
 } from "@omni/store";
 import { Elysia } from "elysia";
@@ -115,8 +117,34 @@ const credentialPatchSchema = z
   })
   .strict();
 
-/** Mirrors `UsageQuery["groupBy"]` exactly; the store whitelists the column. */
-const groupBySchema = z.enum(["credential", "model", "apiKey", "hour"]);
+/** Mirrors `UsageDimension` exactly; the store whitelists the column. */
+const dimensionSchema = z.enum([
+  "credential",
+  "model",
+  "requestedModel",
+  "apiKey",
+  "provider",
+  "hour",
+  "day",
+]);
+
+const grainSchema = z.enum(["raw", "daily"]);
+
+/**
+ * `hour` exists only in the raw logs and `day` only in the rollup. Rejecting
+ * the mismatch here keeps the store's whitelist a lookup rather than a second
+ * validation layer, and turns an operator's bad query into a 400 instead of a
+ * 500 raised from SQL.
+ */
+const GRAIN_DIMENSIONS: Readonly<Record<UsageGrain, ReadonlySet<UsageDimension>>> = {
+  raw: new Set(["credential", "model", "requestedModel", "apiKey", "provider", "hour"]),
+  daily: new Set(["credential", "model", "requestedModel", "apiKey", "provider", "day"]),
+};
+
+function requireDimension(grain: UsageGrain, dimension: UsageDimension): UsageDimension {
+  if (GRAIN_DIMENSIONS[grain].has(dimension)) return dimension;
+  throw new GatewayError("BAD_REQUEST", `usage grain "${grain}" cannot group by "${dimension}"`);
+}
 
 function sessionCookie(request: Request, token: string, maxAge: number): string {
   const secure = new URL(request.url).protocol === "https:" ? ["Secure"] : [];
@@ -412,13 +440,23 @@ export function adminRoutes(deps: AdminDeps) {
 
     .get("/api/usage", async ({ request, query }) => {
       await requireAdmin(request);
-      const groupBy = parseOrThrow(groupBySchema, query.groupBy ?? "model");
+      const grain = parseOrThrow(grainSchema, query.grain ?? "raw");
+      const groupBy = requireDimension(
+        grain,
+        parseOrThrow(dimensionSchema, query.groupBy ?? "model"),
+      );
+      const splitBy =
+        query.splitBy === undefined
+          ? undefined
+          : requireDimension(grain, parseOrThrow(dimensionSchema, query.splitBy));
       const since = typeof query.since === "string" ? Number(query.since) : 0;
       const until = typeof query.until === "string" ? Number(query.until) : deps.now();
 
       return {
         rows: await deps.store.usage.aggregate({
+          grain,
           groupBy,
+          ...(splitBy === undefined ? {} : { splitBy }),
           since: Number.isFinite(since) ? since : 0,
           until: Number.isFinite(until) ? until : deps.now(),
         }),

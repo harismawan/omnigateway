@@ -9,6 +9,8 @@ import type {
   Strategy,
   Target,
   UsageBucket,
+  UsageDimension,
+  UsageGrain,
   VirtualModel,
   // The `/types` subpath is provider-neutral domain types only; the package
   // root would drag SQLite and encryption into the browser build graph.
@@ -31,6 +33,8 @@ export type {
   Strategy,
   Target,
   UsageBucket,
+  UsageDimension,
+  UsageGrain,
   VirtualModel,
 };
 
@@ -68,9 +72,14 @@ export type KeyCreateInput = {
 
 export type SettingsResponse = { settings: Settings };
 
-export type UsageGroupBy = "credential" | "model" | "apiKey" | "hour";
-
-export type UsageQuery = { groupBy: UsageGroupBy; since: number; until?: number };
+export type UsageQuery = {
+  groupBy: UsageDimension;
+  splitBy?: UsageDimension;
+  /** `raw` reads request logs; `daily` reads the rollup that outlives them. */
+  grain?: UsageGrain;
+  since: number;
+  until?: number;
+};
 
 export type UsageResponse = { rows: UsageBucket[] };
 
