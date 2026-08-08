@@ -85,16 +85,18 @@ export async function buildPackage(version: string): Promise<string> {
         description:
           "Self-hosted AI gateway with Anthropic- and OpenAI-compatible APIs, an admin console, and a CLI",
         license: "MIT",
+        author: "Harismawan <mail@harismawan.com>",
         type: "module",
         bin: { omni: "./bin/omni.js" },
-        files: ["bin", "gateway.js", "public", "README.md"],
+        files: ["bin", "gateway.js", "public", "README.md", "LICENSE"],
         dependencies: RUNTIME_DEPENDENCIES,
         // Bun is the runtime, not just the bundler: bun:sqlite, Bun.spawn and
         // Bun.file are all load-bearing. Saying so here turns a confusing
         // `env: bun: not found` into an install-time complaint.
         engines: { bun: ">=1.4.0" },
         repository: { type: "git", url: "git+https://github.com/harismawan/omnigateway.git" },
-        homepage: "https://github.com/harismawan/omnigateway",
+        homepage: "https://github.com/harismawan/omnigateway#readme",
+        bugs: "https://github.com/harismawan/omnigateway/issues",
         keywords: ["ai", "gateway", "proxy", "anthropic", "openai", "llm", "oauth"],
       },
       null,
@@ -103,6 +105,7 @@ export async function buildPackage(version: string): Promise<string> {
   );
 
   await cp(join(root, "README.md"), join(outDir, "README.md"));
+  await cp(join(root, "LICENSE"), join(outDir, "LICENSE"));
   await Bun.$`chmod +x ${join(outDir, "bin", "omni.js")}`.quiet();
 
   return outDir;
