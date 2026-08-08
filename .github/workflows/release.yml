@@ -10,8 +10,9 @@ on:
 
 permissions:
   contents: read
-  # Required for npm provenance, and for the OIDC exchange that replaces the
-  # token once `omnigateway` exists on npm and can be configured there.
+  # The whole of the publishing credential: npm exchanges this OIDC token for a
+  # short-lived one, having been told on npmjs.com to trust this workflow in
+  # this repository. There is no secret to leak, rotate, or forget.
   id-token: write
 
 jobs:
@@ -46,23 +47,19 @@ jobs:
       - name: Build the package
         run: bun run build:npm "${GITHUB_REF_NAME}"
 
-      # npm, not bun, does the publishing: provenance and the OIDC exchange are
-      # npm CLI features.
+      # npm, not bun, does the publishing: the OIDC exchange is an npm CLI
+      # feature.
       - uses: actions/setup-node@v5
         with:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
 
-      # Node 22 ships an npm older than 11.5.1, which is the floor for both
-      # provenance and the trusted-publishing exchange this will move to.
+      # Node 22 ships an npm older than 11.5.1, the floor for trusted publishing.
       - run: npm install -g npm@latest
 
-      # A token, only until the package exists. Once it does, configure a
-      # trusted publisher for it on npmjs.com, then delete the `env:` block
-      # below and the NPM_TOKEN secret: OIDC needs neither, and generates the
-      # provenance attestation on its own.
+      # No token and no `--provenance`: trusted publishing supplies the
+      # credential from the OIDC token above, and attaches the provenance
+      # attestation itself.
       - name: Publish
-        run: npm publish --provenance --access public
+        run: npm publish --access public
         working-directory: dist/npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
