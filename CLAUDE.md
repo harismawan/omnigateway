@@ -2,7 +2,7 @@
 
 ## Scope
 
-OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway. Core gateway is implemented under `apps/gateway`; dashboard remains planned work. Treat approved documents under `docs/superpowers/specs/` and `docs/superpowers/plans/` as product requirements, but verify current code before assuming plan snippets still match implementation.
+OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway. Both halves are implemented: the gateway under `apps/gateway`, and the admin console under `apps/dashboard`, whose built output the gateway serves. Treat approved documents under `docs/superpowers/specs/` and `docs/superpowers/plans/` as product requirements, but verify current code before assuming plan snippets still match implementation.
 
 ## Commands
 
@@ -10,15 +10,23 @@ Use Bun from repository root:
 
 ```bash
 bun install
-bun run dev
+bun run dev              # gateway with file watching
 bun run start
-bun test
-bun run typecheck
+bun test                 # gateway, IR, providers, store
+bun run typecheck        # core and dashboard
 bun run lint
 bun run fmt
 ```
 
-Run focused tests with `bun test <path>`. Before claiming completion, run tests covering changed behavior plus full `bun test`, `bun run typecheck`, and `bun run lint`.
+Dashboard:
+
+```bash
+bun run dev:dashboard              # Vite on 5173, proxies /api and /oauth to 8787
+bun run build:dashboard            # writes apps/dashboard/dist, which the gateway serves
+bun run --cwd apps/dashboard test  # needs a DOM; excluded from the root run
+```
+
+`bunfig.toml` excludes `apps/dashboard/test/**` from the root `bun test`, so a green root run says nothing about the dashboard. Run focused tests with `bun test <path>`. Before claiming completion, run tests covering changed behavior plus full `bun test`, the dashboard suite, `bun run typecheck`, and `bun run lint`.
 
 ## Repository map
 
@@ -33,6 +41,12 @@ Run focused tests with `bun test <path>`. Before claiming completion, run tests 
 - `packages/providers/`: provider adapters, OAuth, HTTP client, wire rendering/parsing
 - `packages/store/`: store interfaces, encryption, SQLite repositories, migrations
 - `apps/gateway/test/`: gateway unit, route, integration, and end-to-end tests
+- `packages/providers/src/{anthropic,openai,kimi}/models.ts`: per-provider model catalog with list pricing
+- `packages/providers/src/catalog.ts`: assembles them; exported at `@omni/providers/catalog`
+- `apps/dashboard/src/api/`: typed control-API client and TanStack Query hooks
+- `apps/dashboard/src/ui/`: styled-components primitives (Panel, Table, Lamp, Meter, Sparkline)
+- `apps/dashboard/src/features/`: one directory per screen
+- `apps/dashboard/src/routes/`: TanStack Router file routes; `_app.tsx` is the session guard
 
 ## Architectural boundaries
 
@@ -45,6 +59,9 @@ Preserve these constraints:
 5. Gateway routes authenticate, parse, apply key policy, call dispatch, render client-compatible responses, and record metadata.
 6. Store rows and secrets remain behind `@omni/store`; never expose encrypted or raw provider secrets through control APIs.
 7. All outbound provider HTTP goes through the `HttpClient` seam. Do not add direct production `fetch` calls.
+8. The provider model catalog is provider-specific data and lives in `packages/providers`, never in `packages/ir`. `@omni/providers/catalog` is imported by the browser bundle, so it must stay a leaf: it may import the three model lists and a type, and nothing else.
+9. Catalog pricing is a source of defaults, not of truth. The router prices a request from the target the operator saved; editing the catalog changes only what a new target starts with.
+10. The dashboard calls `/api/*` only. It may import types from `@omni/store/types` and `@omni/ir`, and the catalog subpath, but must not import provider adapters, the HTTP client, or anything from `packages/store` at runtime.
 
 ## TypeScript and style
 
@@ -56,6 +73,14 @@ Preserve these constraints:
 - Biome uses 2-space indentation and 100-column lines.
 - Avoid unrelated refactors while changing behavior.
 
+Dashboard specifics:
+
+- Styling is styled-components. There is no Tailwind and no CSS file; do not reintroduce either.
+- Palette values are CSS custom properties defined in `theme/GlobalStyle.ts`; `theme/tokens.ts` only points at them. That is what lets the light/dark switch repaint without re-rendering, and what lets the pre-paint script in `index.html` set the mode before React boots.
+- Colour carries exactly two meanings: which provider a row belongs to, and what state something is in. Do not introduce decorative colour.
+- Transient style props are prefixed `$` so they do not reach the DOM.
+- Fonts are self-hosted through `@fontsource`. Never add a CDN font or any other third-party origin: the gateway promises no phone-home.
+
 ## Testing conventions
 
 - Prefer behavior tests at narrowest stable boundary.
@@ -66,6 +91,14 @@ Preserve these constraints:
 - Test both Anthropic and OpenAI error surfaces when changing shared proxy behavior.
 - Authentication changes must cover Bearer and `x-api-key`, malformed input, conflicts, revoked keys, allowlists, and rate limits where relevant.
 - Deadline tests must distinguish gateway timeout from downstream client cancellation and must not leave timers/listeners active.
+
+Dashboard tests:
+
+- Run under happy-dom via the preloads in `apps/dashboard/test/setup/`.
+- Stub the network with `test/helpers/fetchStub.ts`; an unstubbed route returns a loud 501 rather than hanging.
+- Use `renderWithProviders` for features, `renderWithRouter` for anything that navigates.
+- Assert on what the operator sees — visible text, roles, accessible names — not on class names or component internals.
+- A component mounts only after its data loads, so re-query the DOM after waiting; an element found earlier belongs to a component that has since been replaced.
 
 ## Security and privacy
 
@@ -87,6 +120,12 @@ Client surface:
 
 Every `/v1/*` request accepts `Authorization: Bearer <key>` or `x-api-key: <key>`. Conflicting credentials must be rejected. A `null` model allowlist means unrestricted; an empty array denies all models.
 
+Ingress accepts the shapes current clients send, and these are contracts:
+
+- A `{"role": "system"}` entry inside `messages` is a mid-conversation system message. Carry it in place. Never fold it into the request-level `system` prompt: that moves the instruction to the front of the conversation, changes when it takes effect, and invalidates the provider's cached prefix.
+- `thinking` accepts `adaptive`, `enabled` with a budget, and `disabled`. Never synthesize a token budget from an effort level — current models reject that form. An explicit `disabled` must be forwarded, because omitting `thinking` is not the same thing on models that think by default.
+- A provider that cannot express something the client asked for records a degradation rather than dropping it silently. Degradations reach the request log.
+
 Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/*` and must not assume WebSocket log streaming; current design polls logs.
 
 ## Configuration
@@ -102,5 +141,6 @@ Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/
 
 - Version 1 is single-node and single-operator.
 - API-key rate limits are process-local, reset on restart, and are not shared across instances.
-- Dashboard is not implemented yet; follow dashboard plan rather than inventing a competing control API.
-- Biome currently emits an informational deprecation notice for `linter.recommended`; do not treat that notice as a task-specific failure unless changing Biome config.
+- The Docker image builds the gateway only. It does not include `apps/dashboard`, so a container serves the APIs and returns 404 for the console.
+- The gateway does not model which *model* accepts which request shape. Mid-conversation system messages and the several thinking forms vary by model and by platform, so an unsupported combination surfaces as an upstream 400 rather than being caught by the router.
+- The OpenAI adapter routes OAuth credentials to the Codex backend, which is a narrower surface than `api.openai.com`: it rejects several standard parameters and refuses a system turn inside `input`. Path-specific handling belongs behind the `oauth` flag already threaded into the encoder.
