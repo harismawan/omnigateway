@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import styled from "styled-components";
-import { useCredentials, useKeys, useUsage } from "../../api/queries.ts";
-import type { UsageDimension } from "../../api/types.ts";
+import { useCredentials, useKeys, useModels, useUsage } from "../../api/queries.ts";
+import type { ProviderId, UsageDimension } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount, formatMs, formatPercent, formatUsd } from "../../lib/format.ts";
 import { useLive } from "../../session/live.tsx";
@@ -10,6 +10,7 @@ import { Readout } from "../../ui/Readout.tsx";
 import { Sparkline } from "../../ui/Sparkline.tsx";
 import { ActivityGrid } from "./ActivityGrid.tsx";
 import { KeyPanel } from "./KeyPanel.tsx";
+import { ModelTrafficPanel } from "./ModelTrafficPanel.tsx";
 import { ProviderPanel } from "./ProviderPanel.tsx";
 import { RankPanel } from "./RankPanel.tsx";
 import { Section } from "./Section.tsx";
@@ -79,6 +80,10 @@ export function UsageBoard() {
     { ...common, groupBy: range.by, splitBy: "provider" },
     cadence(60_000),
   );
+  const modelTraffic = useUsage(
+    { ...common, groupBy: range.by, splitBy: "model" },
+    cadence(60_000),
+  );
   const keyTraffic = useUsage({ ...common, groupBy: range.by, splitBy: "apiKey" }, cadence(60_000));
   const models = useUsage({ ...common, groupBy: scope }, cadence(60_000));
   const accounts = useUsage({ ...common, groupBy: "credential" }, cadence(60_000));
@@ -90,6 +95,17 @@ export function UsageBoard() {
 
   const keys = useKeys();
   const credentials = useCredentials();
+  const virtualModels = useModels();
+  // Which provider an upstream model is served by, taken from the targets the
+  // operator configured. A model no longer routed anywhere falls through to the
+  // catalog inside the panel.
+  const modelProviders = useMemo(() => {
+    const routed = new Map<string, ProviderId>();
+    for (const model of virtualModels.data ?? []) {
+      for (const target of model.targets) routed.set(target.model, target.provider);
+    }
+    return routed;
+  }, [virtualModels.data]);
   const keyNames = useMemo(() => {
     const names = new Map<string, string>();
     for (const key of keys.data ?? []) names.set(key.id, key.label);
@@ -242,6 +258,27 @@ export function UsageBoard() {
           </Segment>
         ))}
       </Controls>
+
+      {/* Full width above the columns: it is the same window as the trace at
+          the top of the page, cut by the model that served it, and a stack of
+          seven bands needs the whole rack to stay legible. It reads through the
+          shared lens, so the control above it moves this panel too. */}
+      <Section
+        legend="Traffic by upstream model"
+        meta={`${metric.label}, ${range.by === "hour" ? "by hour" : "by day"}`}
+        query={modelTraffic}
+        isEmpty={(modelTraffic.data ?? []).length === 0}
+        empty={empty}
+      >
+        <ModelTrafficPanel
+          buckets={modelTraffic.data ?? []}
+          by={range.by}
+          since={since}
+          until={until}
+          metric={metric}
+          providers={modelProviders}
+        />
+      </Section>
 
       {/* Two explicit columns rather than a flowing grid: panels differ in
           height, and an auto-placed grid leaves a hole under every short one.

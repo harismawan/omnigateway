@@ -5,6 +5,8 @@ import { formatCount, formatUsd } from "../../lib/format.ts";
 import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Row, ScrollX, Stack } from "../../ui/primitives.ts";
 import {
+  addTotals,
+  asBucket,
   Controls,
   dayLabel,
   METRICS,
@@ -171,28 +173,22 @@ export function ActivityGrid({ days, now }: ActivityGridProps) {
 
   const cells = grid.flat();
   const thresholds = thresholdsOf(cells.map((day) => metric.of({ key: "", ...day.totals })));
-  const year = cells.reduce(
-    (sum, day) => ({
-      requests: sum.requests + day.totals.requests,
-      costUsd: sum.costUsd + day.totals.costUsd,
-      active: sum.active + (day.totals.requests > 0 ? 1 : 0),
-    }),
-    { requests: 0, costUsd: 0, active: 0 },
-  );
+  const year = cells.reduce((sum, day) => addTotals(sum, asBucket(day.totals)), ZERO_TOTALS);
+  const active = cells.reduce((sum, day) => sum + (day.totals.requests > 0 ? 1 : 0), 0);
 
-  const describe = (day: Day): string =>
-    `${dayLabel(day.at)}: ${formatCount(day.totals.requests)} requests, ` +
-    `${formatCount(day.totals.inputTokens + day.totals.outputTokens)} tokens, ` +
-    `${formatUsd(day.totals.costUsd)}`;
+  // One sentence, one shape: the year reads exactly like a day does, so moving
+  // off the grid changes the subject rather than the reading.
+  const describe = (label: string, totals: Totals): string =>
+    `${label}: ${formatCount(totals.requests)} requests, ` +
+    `${formatCount(totals.inputTokens + totals.outputTokens)} tokens, ` +
+    `${formatUsd(totals.costUsd)}`;
 
   return (
     <Module
       legend="Activity"
-      meta={
-        hovered === null
-          ? `${formatCount(year.requests)} requests on ${formatCount(year.active)} active days`
-          : undefined
-      }
+      // The readout below carries the totals; the header carries the one fact
+      // it cannot, which is how much of the year saw any traffic at all.
+      meta={hovered === null ? `${formatCount(active)} active days` : undefined}
       actions={
         <Controls>
           {METRICS.map((entry) => (
@@ -249,8 +245,8 @@ export function ActivityGrid({ days, now }: ActivityGridProps) {
                           key={day.at}
                           role="gridcell"
                           tabIndex={-1}
-                          aria-label={describe(day)}
-                          title={describe(day)}
+                          aria-label={describe(dayLabel(day.at), day.totals)}
+                          title={describe(dayLabel(day.at), day.totals)}
                           $future={day.future}
                           $level={
                             day.future
@@ -271,7 +267,9 @@ export function ActivityGrid({ days, now }: ActivityGridProps) {
 
         <Row $justify="space-between" $wrap>
           <Readout>
-            {hovered === null ? `Spend ${formatUsd(year.costUsd)}` : describe(hovered)}
+            {hovered === null
+              ? describe("Last 12 months", year)
+              : describe(dayLabel(hovered.at), hovered.totals)}
           </Readout>
           <Row $gap={1}>
             <Legend>Less</Legend>
