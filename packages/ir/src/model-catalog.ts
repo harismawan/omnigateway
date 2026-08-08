@@ -10,9 +10,7 @@ export type ProviderModelCatalogEntry = {
   models: readonly ProviderModelChoice[];
 };
 
-export const PROVIDER_MODEL_CATALOG: Readonly<
-  Record<ProviderId, ProviderModelCatalogEntry>
-> = {
+export const PROVIDER_MODEL_CATALOG: Readonly<Record<ProviderId, ProviderModelCatalogEntry>> = {
   anthropic: {
     defaultModel: "claude-opus-5",
     models: [
