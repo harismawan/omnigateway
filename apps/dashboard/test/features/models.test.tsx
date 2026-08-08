@@ -1,303 +1,312 @@
-import { afterEach, expect, test } from "bun:test";
-import { screen, waitFor } from "@testing-library/react";
+import { describe, expect, test } from "bun:test";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { emptyTarget } from "../../src/features/models/ModelEditor.tsx";
-import { filterModels, ModelsScreen } from "../../src/routes/_app.models.tsx";
+import {
+  blankModel,
+  blankTarget,
+  catalogPrices,
+  parseDraft,
+  toDraft,
+} from "../../src/features/models/draft.ts";
+import { ModelsBoard } from "../../src/features/models/ModelsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { modelFixture, targetFixture } from "../helpers/fixtures.ts";
+import { model, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
-const realFetch = globalThis.fetch;
-afterEach(() => {
-  globalThis.fetch = realFetch;
+describe("catalog pricing defaults", () => {
+  test("a new target starts at the provider's list price, not at zero", () => {
+    const target = blankTarget("anthropic");
+    // A zero price reads as "unpriced" in the router and drops the target out
+    // of cost ranking, so the default must be a real number.
+    expect(target.model).toBe("claude-opus-5");
+    expect(target.costInput).toBe("5");
+    expect(target.costOutput).toBe("25");
+    expect(target.costCacheRead).toBe("0.5");
+  });
+
+  test("each provider's default target is priced for that provider", () => {
+    expect(blankTarget("openai").costInput).toBe("5");
+    expect(blankTarget("kimi").costInput).toBe("3");
+  });
+
+  test("catalogPrices reports an unlisted model instead of guessing", () => {
+    expect(catalogPrices("anthropic", "claude-haiku-4-5")).toEqual({
+      costInput: "1",
+      costOutput: "5",
+      costCacheRead: "0.1",
+    });
+    expect(catalogPrices("anthropic", "not-a-real-model")).toBeNull();
+  });
+
+  test("the defaults survive a round trip through the parser", () => {
+    const parsed = parseDraft({ ...blankModel(), id: "fast" });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.model.targets[0]?.costPerMTok).toEqual({
+        input: 5,
+        output: 25,
+        cacheRead: 0.5,
+      });
+    }
+  });
 });
 
-function stubModels(models = [modelFixture()]) {
+describe("parseDraft", () => {
+  test("round-trips a model without inventing fields", () => {
+    const original = model();
+    const parsed = parseDraft(toDraft(original));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.model).toEqual(original);
+  });
+
+  test("omits cacheRead entirely when the field is blank", () => {
+    const draft = toDraft(model());
+    const target = draft.targets[0];
+    if (target === undefined) throw new Error("fixture has no target");
+    target.costCacheRead = "";
+
+    const parsed = parseDraft(draft);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      const [first] = parsed.model.targets;
+      if (first === undefined) throw new Error("the parsed model lost its target");
+      expect("cacheRead" in first.costPerMTok).toBe(false);
+    }
+  });
+
+  test("refuses a model with no name", () => {
+    const parsed = parseDraft({ ...blankModel(), id: "   " });
+    expect(parsed).toEqual({
+      ok: false,
+      problem: "Give the model a name clients will ask for.",
+    });
+  });
+
+  test("refuses a model with no targets", () => {
+    const parsed = parseDraft({ ...blankModel(), id: "fast", targets: [] });
+    expect(parsed).toEqual({
+      ok: false,
+      problem: "A model needs at least one target to route to.",
+    });
+  });
+
+  test("names the offending target and the rule it broke", () => {
+    const draft = { ...blankModel(), id: "fast", targets: [blankTarget(), blankTarget()] };
+    const second = draft.targets[1];
+    if (second === undefined) throw new Error("expected two targets");
+    second.weight = "0";
+
+    const parsed = parseDraft(draft);
+    expect(parsed).toEqual({
+      ok: false,
+      problem: "Target 2: weight must be greater than zero.",
+    });
+  });
+
+  test("rejects a fractional tier and a negative price", () => {
+    const fractional = { ...blankModel(), id: "a", targets: [{ ...blankTarget(), tier: "1.5" }] };
+    expect(parseDraft(fractional)).toEqual({
+      ok: false,
+      problem: "Target 1: tier must be a whole number of 1 or more.",
+    });
+
+    const negative = {
+      ...blankModel(),
+      id: "a",
+      targets: [{ ...blankTarget(), costOutput: "-1" }],
+    };
+    expect(parseDraft(negative)).toEqual({
+      ok: false,
+      problem: "Target 1: prices cannot be negative.",
+    });
+  });
+});
+
+function stubModels(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
-    "GET /api/models": () => ({ models }),
-    "PUT /api/models/fast": () => ({ ok: true }),
-    "DELETE /api/models/fast": () => ({ ok: true }),
+    "GET /api/models": () => ({ models: [model(), model({ id: "deep", strategy: "priority" })] }),
+    "GET /api/settings": () => ({ settings }),
+    ...overrides,
   });
 }
 
-test("filters model IDs case-insensitively", () => {
-  const models = [modelFixture({ id: "fast" }), modelFixture({ id: "smart" })];
-  expect(filterModels(models, "SMART").map((model) => model.id)).toEqual(["smart"]);
-});
+/**
+ * The editor mounts only once the model list has loaded, so every interaction
+ * test waits for it and then re-queries; an element found earlier belongs to a
+ * component that has since been replaced.
+ */
+async function openEditor(): Promise<void> {
+  await waitFor(() => expect(screen.getByText("Edit model")).toBeTruthy());
+}
 
-test("lists models in searchable master-detail workspace", async () => {
-  stubModels([modelFixture({ id: "fast" }), modelFixture({ id: "smart", isAlias: true })]);
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
+describe("ModelsBoard", () => {
+  test("opens the first model rather than an empty editor", async () => {
+    stubModels();
+    renderWithProviders(<ModelsBoard />);
 
-  const search = await screen.findByRole("searchbox", { name: "Search models" });
-  expect(screen.getByRole("navigation", { name: "Virtual models" })).toBeDefined();
-  expect(screen.getByRole("button", { name: "fast" })).toBeDefined();
-  expect(screen.getByText("alias")).toBeDefined();
-
-  await user.click(screen.getByRole("button", { name: "smart" }));
-  expect(screen.getByRole("main", { name: "Model smart" })).toBeDefined();
-
-  await user.type(search, "smart");
-  expect(screen.queryByRole("button", { name: "fast" })).toBeNull();
-  expect(screen.getByRole("button", { name: "smart" })).toBeDefined();
-});
-
-test("an alias is marked so the operator knows it was synthesized", async () => {
-  stubModels([modelFixture({ id: "claude-opus-4", isAlias: true })]);
-  renderWithProviders(<ModelsScreen />);
-  await screen.findByRole("button", { name: "claude-opus-4" });
-  expect(screen.getByText(/alias/i)).toBeDefined();
-});
-
-test("selecting a model loads its targets into the editor", async () => {
-  stubModels([
-    modelFixture({
-      targets: [
-        targetFixture({ model: "claude-haiku-4" }),
-        targetFixture({ provider: "openai", model: "gpt-5-mini", tier: 2 }),
-      ],
-    }),
-  ]);
-  renderWithProviders(<ModelsScreen />);
-  await (await userEvent.setup()).click(await screen.findByRole("button", { name: "fast" }));
-  expect(screen.getByDisplayValue("claude-haiku-4")).toBeDefined();
-  expect(screen.getByDisplayValue("gpt-5-mini")).toBeDefined();
-});
-
-test("the strategy picker offers exactly the four router strategies", async () => {
-  stubModels();
-  renderWithProviders(<ModelsScreen />);
-  await (await userEvent.setup()).click(await screen.findByRole("button", { name: "fast" }));
-  const picker = screen.getByLabelText(/strategy/i);
-  expect(Array.from(picker.querySelectorAll("option")).map((o) => o.getAttribute("value"))).toEqual(
-    ["score", "priority", "roundRobin", "weighted"],
-  );
-});
-
-test("saving puts the whole model back with a matching id", async () => {
-  const stub = stubModels();
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "fast" }));
-  await user.clear(screen.getByLabelText(/target 1 tier/i));
-  await user.type(screen.getByLabelText(/target 1 tier/i), "2");
-  await user.click(screen.getByRole("button", { name: /save model/i }));
-  await waitFor(() =>
-    expect(stub.calls.some((call) => call.url === "/api/models/fast")).toBe(true),
-  );
-  const put = stub.calls.find((call) => call.url === "/api/models/fast");
-  const body = JSON.parse(String(put?.init?.body)) as { id: string; targets: { tier: number }[] };
-  expect(put?.init?.method).toBe("PUT");
-  expect(body.id).toBe("fast");
-  expect(body.targets[0]?.tier).toBe(2);
-});
-
-test("the last target cannot be removed", async () => {
-  stubModels();
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "fast" }));
-  await user.click(screen.getByRole("button", { name: /remove target 1/i }));
-  expect(screen.getByText(/at least one target/i)).toBeDefined();
-});
-
-test("empty targets use the selected provider default model", () => {
-  expect(emptyTarget("kimi")).toEqual({
-    provider: "kimi",
-    model: "k3-256k",
-    tier: 1,
-    weight: 1,
-    costPerMTok: { input: 0, output: 0 },
-    capabilities: { tools: true, images: false, reasoning: false },
+    expect(await screen.findByText("2 models routing to 2 targets.")).toBeTruthy();
+    await openEditor();
+    expect((screen.getByLabelText("Model name") as HTMLInputElement).value).toBe("fast");
   });
-});
 
-test("move target controls reorder the whole saved target list", async () => {
-  const stub = stubModels([
-    modelFixture({
-      targets: [targetFixture({ model: "first" }), targetFixture({ model: "second" })],
-    }),
-  ]);
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "fast" }));
-  await user.click(screen.getByRole("button", { name: /move target 2 up/i }));
-  await user.click(screen.getByRole("button", { name: /save model/i }));
-  await waitFor(() =>
-    expect(stub.calls.some((call) => call.url === "/api/models/fast")).toBe(true),
-  );
-  const put = stub.calls.find((call) => call.url === "/api/models/fast");
-  const body = JSON.parse(String(put?.init?.body)) as { targets: { model: string }[] };
-  expect(body.targets.map((target) => target.model)).toEqual(["second", "first"]);
-});
+  test("an existing model's name cannot be edited", async () => {
+    stubModels();
+    renderWithProviders(<ModelsBoard />);
 
-test("delete requires confirmation before issuing the request", async () => {
-  const stub = stubModels();
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "fast" }));
-  await user.click(screen.getByRole("button", { name: "Delete model" }));
-  expect(screen.getByRole("alertdialog").textContent).toMatch(
-    /requests naming this model will fail/i,
-  );
-  expect(
-    stub.calls.some((call) => call.url === "/api/models/fast" && call.init?.method === "DELETE"),
-  ).toBe(false);
-  await user.click(screen.getByRole("button", { name: "Delete “fast”" }));
-  await waitFor(() => expect(stub.calls.some((call) => call.init?.method === "DELETE")).toBe(true));
-});
-
-test("model ids are encoded in mutation paths", async () => {
-  const stub = createFetchStub({
-    "GET /api/models": () => ({ models: [modelFixture({ id: "a/b" })] }),
-    "PUT /api/models/a%2Fb": () => ({ ok: true }),
+    await openEditor();
+    expect((screen.getByLabelText("Model name") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText(/Fixed once created/)).toBeTruthy();
   });
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "a/b" }));
-  await user.click(screen.getByRole("button", { name: /save model/i }));
-  await waitFor(() =>
-    expect(stub.calls.some((call) => call.url === "/api/models/a%2Fb")).toBe(true),
-  );
-});
 
-test("a rejected save displays the API error", async () => {
-  createFetchStub({
-    "GET /api/models": () => ({ models: [modelFixture()] }),
-    "PUT /api/models/fast": () => ({
-      status: 400,
-      body: { error: { code: "BAD_REQUEST", message: "invalid target" } },
-    }),
+  test("saving PUTs the whole model to its own id", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({ "PUT /api/models/fast": () => ({ ok: true }) });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.url).toBe("/api/models/fast");
+      expect(JSON.parse(String(put?.init?.body))).toEqual(model());
+    });
+    expect(await screen.findByText("Saved.")).toBeTruthy();
   });
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "fast" }));
-  await user.click(screen.getByRole("button", { name: /save model/i }));
-  expect(await screen.findByText("invalid target")).toBeDefined();
-});
 
-test("keeps Models workspace stacked until wide desktop content is available", async () => {
-  stubModels();
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
+  test("a new model needs a name before it is sent", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels();
+    renderWithProviders(<ModelsBoard />);
 
-  await user.click(await screen.findByRole("button", { name: "New model" }));
+    await openEditor();
+    await user.click(screen.getByRole("button", { name: "New model" }));
+    await user.click(await screen.findByRole("button", { name: "Create model" }));
 
-  const workspace = screen.getByRole("main", { name: "New model" }).parentElement;
-  expect(workspace).not.toBeNull();
-  expect(workspace?.className).toContain("xl:grid-cols-[17rem_minmax(0,1fr)]");
-  expect(workspace?.className).not.toContain("md:grid-cols-[17rem_minmax(0,1fr)]");
-});
-
-test("new model saves a complete virtual model", async () => {
-  const stub = createFetchStub({
-    "GET /api/models": () => ({ models: [] }),
-    "PUT /api/models/new": () => ({ ok: true }),
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Give the model a name clients will ask for.",
+    );
+    expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
   });
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  const [newModel] = await screen.findAllByRole("button", { name: "New model" });
-  if (newModel === undefined) throw new Error("New model action did not render");
-  await user.click(newModel);
-  await user.type(screen.getByLabelText("Model id"), "new");
-  await user.click(screen.getByRole("button", { name: /save model/i }));
-  await waitFor(() => expect(stub.calls.some((call) => call.url === "/api/models/new")).toBe(true));
-  const put = stub.calls.find((call) => call.url === "/api/models/new");
-  const body = JSON.parse(String(put?.init?.body)) as {
-    targets: { provider: string; model: string }[];
-  };
-  expect(body.targets[0]).toMatchObject({ provider: "anthropic", model: "claude-opus-5" });
-});
 
-test("new and added targets start with the Anthropic default", async () => {
-  createFetchStub({ "GET /api/models": () => ({ models: [] }) });
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  const [newModel] = await screen.findAllByRole("button", { name: "New model" });
-  if (newModel === undefined) throw new Error("New model action did not render");
+  test("adding a target and saving includes it", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({ "PUT /api/models/fast": () => ({ ok: true }) });
+    renderWithProviders(<ModelsBoard />);
 
-  await user.click(newModel);
-  expect(screen.getByRole("combobox", { name: "Target 1 model" })).toHaveProperty(
-    "value",
-    "claude-opus-5",
-  );
+    await openEditor();
+    await user.click(screen.getByRole("button", { name: "Add target" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
-  await user.click(screen.getByRole("button", { name: "Add target" }));
-  expect(screen.getByRole("combobox", { name: "Target 2 model" })).toHaveProperty(
-    "value",
-    "claude-opus-5",
-  );
-});
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body)).targets).toHaveLength(2);
+    });
+  });
 
-test("changing provider resets model but preserves operator-managed capabilities", async () => {
-  stubModels([
-    modelFixture({
-      targets: [
-        targetFixture({
-          model: "vendor-private-model",
-          capabilities: { tools: false, images: true, reasoning: false },
-        }),
-      ],
-    }),
-  ]);
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "fast" }));
+  test("the last target cannot be removed", async () => {
+    stubModels();
+    renderWithProviders(<ModelsBoard />);
 
-  await user.selectOptions(screen.getByLabelText("Target 1 provider"), "kimi");
+    await openEditor();
+    expect((screen.getByLabelText("Remove target 1") as HTMLButtonElement).disabled).toBe(true);
+  });
 
-  expect(screen.getByRole("combobox", { name: "Target 1 model" })).toHaveProperty(
-    "value",
-    "k3-256k",
-  );
-  expect(screen.getByLabelText("Target 1 supports tools")).toHaveProperty("checked", false);
-  expect(screen.getByLabelText("Target 1 supports images")).toHaveProperty("checked", true);
-  expect(screen.getByLabelText("Target 1 supports reasoning")).toHaveProperty("checked", false);
-});
+  test("deleting a model explains what breaks first", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({ "DELETE /api/models/fast": () => ({ ok: true }) });
+    renderWithProviders(<ModelsBoard />);
 
-test("custom model IDs render and save unchanged", async () => {
-  const stub = stubModels([
-    modelFixture({ targets: [targetFixture({ model: "vendor-private-model" })] }),
-  ]);
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "fast" }));
-  const input = screen.getByRole("combobox", { name: "Target 1 model" });
+    await openEditor();
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/makes it unroutable/i)).toBeTruthy();
 
-  expect(input).toHaveProperty("value", "vendor-private-model");
-  await user.clear(input);
-  await user.type(input, "org/custom-v2");
-  await user.click(screen.getByRole("button", { name: "Save model" }));
+    await user.click(within(dialog).getByRole("button", { name: "Delete model" }));
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.init?.method === "DELETE")).toBe(true);
+    });
+  });
 
-  await waitFor(() =>
-    expect(stub.calls.some((call) => call.url === "/api/models/fast")).toBe(true),
-  );
-  const put = stub.calls.find((call) => call.url === "/api/models/fast");
-  const body = JSON.parse(String(put?.init?.body)) as { targets: { model: string }[] };
-  expect(body.targets[0]?.model).toBe("org/custom-v2");
-});
+  test("choosing a different provider model re-prices the target", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({ "PUT /api/models/fast": () => ({ ok: true }) });
+    renderWithProviders(<ModelsBoard />);
 
-test("opening and saving an existing custom target does not rewrite it", async () => {
-  const stub = stubModels([
-    modelFixture({
-      targets: [targetFixture({ provider: "openai", model: "account-deployment-name" })],
-    }),
-  ]);
-  renderWithProviders(<ModelsScreen />);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "fast" }));
-  await user.click(screen.getByRole("button", { name: "Save model" }));
+    await openEditor();
+    const model = screen.getByLabelText("Provider model");
+    await user.clear(model);
+    await user.type(model, "claude-haiku-4-5");
 
-  await waitFor(() =>
-    expect(stub.calls.some((call) => call.url === "/api/models/fast")).toBe(true),
-  );
-  const put = stub.calls.find((call) => call.url === "/api/models/fast");
-  const body = JSON.parse(String(put?.init?.body)) as {
-    targets: { provider: string; model: string }[];
-  };
-  expect(body.targets[0]).toMatchObject({
-    provider: "openai",
-    model: "account-deployment-name",
+    await waitFor(() => {
+      expect((screen.getByLabelText("Input") as HTMLInputElement).value).toBe("1");
+    });
+    expect((screen.getByLabelText("Output") as HTMLInputElement).value).toBe("5");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body)).targets[0].costPerMTok).toEqual({
+        input: 1,
+        output: 5,
+        cacheRead: 0.1,
+      });
+    });
+  });
+
+  test("a hand-edited price sticks until the model changes", async () => {
+    const user = userEvent.setup();
+    stubModels();
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    const input = screen.getByLabelText("Input");
+    await user.clear(input);
+    await user.type(input, "12.5");
+    expect((input as HTMLInputElement).value).toBe("12.5");
+
+    // Editing an unrelated field leaves the operator's price alone.
+    const weight = screen.getByLabelText("Weight");
+    await user.clear(weight);
+    await user.type(weight, "2");
+    expect((screen.getByLabelText("Input") as HTMLInputElement).value).toBe("12.5");
+  });
+
+  test("list price can be restored after a hand edit", async () => {
+    const user = userEvent.setup();
+    stubModels();
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    // The fixture is already at the catalog price for claude-haiku-4-5.
+    expect(
+      (screen.getByRole("button", { name: /Use list price/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    const input = screen.getByLabelText("Input");
+    await user.clear(input);
+    await user.type(input, "99");
+
+    const reset = screen.getByRole("button", { name: /Use list price/ });
+    expect((reset as HTMLButtonElement).disabled).toBe(false);
+    await user.click(reset);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("Input") as HTMLInputElement).value).toBe("1");
+    });
+  });
+
+  test("with nothing configured the list invites the first model", async () => {
+    createFetchStub({
+      "GET /api/models": () => ({ models: [] }),
+      "GET /api/settings": () => ({ settings }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    expect(
+      await screen.findByText(
+        "No virtual models exist yet, so no client request can resolve to an upstream.",
+      ),
+    ).toBeTruthy();
   });
 });

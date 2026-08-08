@@ -1,75 +1,47 @@
-import type { ProviderId } from "@omni/ir";
+import type { ErrorCode, ProviderId } from "@omni/ir";
 import type {
   ApiKey,
-  BreakerState,
   Credential,
   CredentialHealth,
   QuotaWindow,
   RequestLog,
-  ScoringWeights,
   Settings,
   Strategy,
   Target,
   UsageBucket,
   VirtualModel,
-  WindowType,
+  // The `/types` subpath is provider-neutral domain types only; the package
+  // root would drag SQLite and encryption into the browser build graph.
 } from "@omni/store/types";
 
+/**
+ * Wire shapes for `/api/*`. They are expressed in terms of the gateway's own
+ * domain types wherever the route returns one unchanged, so a change on the
+ * server side surfaces here as a type error rather than as a silent mismatch.
+ */
 export type {
   ApiKey,
-  BreakerState,
   Credential,
   CredentialHealth,
+  ErrorCode,
   ProviderId,
   QuotaWindow,
   RequestLog,
-  ScoringWeights,
   Settings,
   Strategy,
   Target,
   UsageBucket,
   VirtualModel,
-  WindowType,
 };
 
-export const PROVIDER_IDS: readonly ProviderId[] = ["anthropic", "openai", "kimi"];
+export type ApiErrorBody = { error: { code: ErrorCode | string; message: string } };
 
-export const PROVIDER_LABELS: Readonly<Record<ProviderId, string>> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  kimi: "Kimi Coding",
-};
-
-export const STRATEGIES: readonly Strategy[] = ["score", "priority", "roundRobin", "weighted"];
-
-/** What `GET /api/credentials` actually serializes. */
-export type WireCredential = Credential;
-
-export type CredentialsResponse = { credentials: WireCredential[] };
-export type CredentialHealthResponse = { health: CredentialHealth[]; quota: QuotaWindow[] };
-export type ModelsResponse = { models: VirtualModel[] };
-export type SettingsResponse = { settings: Settings };
-export type UsageResponse = { rows: UsageBucket[] };
-export type LogsResponse = { logs: RequestLog[] };
-export type OkResponse = { ok: true };
-
-/** `GET /api/status` — drives the first-run branch in Task 4. */
 export type StatusResponse = { configured: boolean; authenticated: boolean };
 
-/** `GET /api/keys`. The stored `hash` is deliberately absent from the wire shape. */
-export type WireApiKey = Omit<ApiKey, "hash">;
-export type KeysResponse = { keys: WireApiKey[] };
+export type CredentialsResponse = { credentials: Credential[] };
 
-/** `POST /api/keys`. `key` is the plaintext value, returned exactly once. */
-export type MintedKey = { id: string; label: string; prefix: string; key: string };
+export type CredentialHealthResponse = { health: CredentialHealth[]; quota: QuotaWindow[] };
 
-export type MintKeyInput = {
-  label: string;
-  modelAllowlist: string[] | null;
-  rateLimitPerMin: number | null;
-};
-
-/** Only these credential fields are operator-editable; the gateway rejects the rest. */
 export type CredentialPatch = {
   label?: string;
   enabled?: boolean;
@@ -77,30 +49,39 @@ export type CredentialPatch = {
   weight?: number;
 };
 
-/** `POST /api/connect/start` */
-export type ConnectStart = {
-  flowId: string;
-  authorizeUrl: string;
-  userCode: string | null;
-  kind: "pkce" | "device";
-  supportsManualPaste: boolean;
-  pollIntervalMs: number;
+export type ModelsResponse = { models: VirtualModel[] };
+
+/** The key is never persisted in plaintext, so this response is the only copy. */
+export type MintedKey = { id: string; label: string; prefix: string; key: string };
+
+/** `hash` is withheld by the route: not a secret, but not worth publishing. */
+export type ApiKeySummary = Omit<ApiKey, "hash">;
+
+export type KeysResponse = { keys: ApiKeySummary[] };
+
+export type KeyCreateInput = {
+  label: string;
+  /** Null means every configured model; an empty array means none. */
+  modelAllowlist: string[] | null;
+  rateLimitPerMin: number | null;
 };
 
-/** `POST /api/connect/finish` — the response carries an id and nothing else. */
-export type ConnectFinish = { id: string };
-
-/** `POST /api/connect/poll` — 202 while pending, 200 with the id on completion. */
-export type ConnectPoll = { status: "pending" } | { status: "complete"; id: string };
+export type SettingsResponse = { settings: Settings };
 
 export type UsageGroupBy = "credential" | "model" | "apiKey" | "hour";
 
-export const USAGE_GROUP_BY: readonly UsageGroupBy[] = ["model", "credential", "apiKey", "hour"];
+export type UsageQuery = { groupBy: UsageGroupBy; since: number; until?: number };
 
-/** `POST /api/models/:id/dry-run` — the request body. */
-export type DryRunRequest = { tools: boolean; images: boolean; reasoning: boolean };
+export type UsageResponse = { rows: UsageBucket[] };
 
-/** One ranked candidate. `reasons` holds the six normalized score terms. */
+export type LogsResponse = { logs: RequestLog[] };
+
+/** A capability-only probe: no prompt content ever reaches the control API. */
+export type DryRunNeed = { tools: boolean; images: boolean; reasoning: boolean };
+
+/** Per-term score contributions, before weights. Keys match `Settings["weights"]`. */
+export type ScoreReasons = Record<string, number>;
+
 export type DryRunCandidate = {
   credentialId: string;
   credentialLabel: string;
@@ -108,19 +89,33 @@ export type DryRunCandidate = {
   model: string;
   tier: number;
   score: number;
-  reasons: Record<string, number>;
+  reasons: ScoreReasons;
 };
 
-/** Matches the router's excluded candidate representation. */
 export type DryRunExcluded = { credentialId: string; model: string; reason: string };
 
-export type DryRunResponse = {
+export type DryRunResult = {
   modelId: string;
   strategy: Strategy;
+  /** False for `weighted`, whose order depends on a random draw per request. */
   deterministic: boolean;
   rankedAt: number;
   candidates: DryRunCandidate[];
   excluded: DryRunExcluded[];
 };
 
-export const SCORE_TERMS = ["tier", "health", "quota", "cost", "latency", "recency"] as const;
+export type ConnectKind = "pkce" | "device";
+
+export type ConnectStart = {
+  flowId: string;
+  /** Open in a browser for PKCE; show to the operator for device flows. */
+  authorizeUrl: string;
+  userCode: string | null;
+  kind: ConnectKind;
+  supportsManualPaste: boolean;
+  pollIntervalMs: number;
+};
+
+export type ConnectPending = { status: "pending" };
+export type ConnectComplete = { status: "complete"; id: string };
+export type ConnectPollResult = ConnectPending | ConnectComplete;

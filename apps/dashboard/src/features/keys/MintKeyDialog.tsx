@@ -1,194 +1,232 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api } from "@/api/client.ts";
-import { modelsQuery, qk, useInvalidate } from "@/api/queries.ts";
-import type { MintedKey, MintKeyInput } from "@/api/types.ts";
-import { ErrorState } from "@/components/ErrorState.tsx";
-import { Button } from "@/components/ui/button.tsx";
-import {
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog.tsx";
-import { Input } from "@/components/ui/input.tsx";
-import { Label } from "@/components/ui/label.tsx";
-import { Textarea } from "@/components/ui/textarea.tsx";
+import styled from "styled-components";
+import { useCreateKey, useModels } from "../../api/queries.ts";
+import type { MintedKey } from "../../api/types.ts";
+import { CopyValue } from "../../components/CopyValue.tsx";
+import { Button } from "../../ui/Button.tsx";
+import { Field, Input } from "../../ui/Field.tsx";
+import { Modal } from "../../ui/Modal.tsx";
+import { Legend, Mono, Row, Stack } from "../../ui/primitives.ts";
+import { describeError } from "../../ui/States.tsx";
+import { Toggle } from "../../ui/Toggle.tsx";
 
-export function parseAllowlist(raw: string, known: readonly string[]) {
-  const models = [
-    ...new Set(
-      raw
-        .split(/[\n,]/)
-        .map((part) => part.trim())
-        .filter(Boolean),
-    ),
-  ];
-  return {
-    models: models.length === 0 ? null : models,
-    unknown: models.filter((model) => !known.includes(model)),
-  };
-}
+const Choices = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 190px;
+  overflow-y: auto;
+  padding: ${({ theme }) => theme.space(1)};
+  border: 1px solid ${({ theme }) => theme.color.ruleStrong};
+  border-radius: ${({ theme }) => theme.radius.control};
+  background: ${({ theme }) => theme.color.panelSunk};
+`;
 
-export function MintKeyDialog({
-  onClose,
-  onCloseAutoFocus,
-}: {
-  onClose: () => void;
-  onCloseAutoFocus: (event: Event) => void;
-}) {
-  const invalidate = useInvalidate();
-  const models = useQuery(modelsQuery());
+const Choice = styled.label`
+  display: flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.space(2)};
+  padding: 4px 6px;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: ${({ theme }) => theme.font.mono};
+  font-size: 12px;
+
+  &:hover {
+    background: ${({ theme }) => theme.color.panelRaised};
+  }
+`;
+
+const Warning = styled.p`
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.warn};
+`;
+
+const Problem = styled.p`
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.down};
+`;
+
+const Once = styled.p`
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.inkDim};
+`;
+
+export type MintKeyDialogProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+};
+
+/**
+ * Issues a key and shows it exactly once.
+ *
+ * The gateway stores only a hash, so this dialog holds the only plaintext copy
+ * that will ever exist. It stays open on the reveal step until the operator
+ * dismisses it deliberately.
+ */
+export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
+  const models = useModels();
+  const create = useCreateKey();
+
   const [label, setLabel] = useState("");
-  const [allowlist, setAllowlist] = useState("");
+  const [unrestricted, setUnrestricted] = useState(true);
+  const [allowed, setAllowed] = useState<string[]>([]);
   const [rateLimit, setRateLimit] = useState("");
-  const [unknown, setUnknown] = useState<string[]>([]);
-  const [localError, setLocalError] = useState<string | null>(null);
-  const [copyError, setCopyError] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [minted, setMinted] = useState<MintedKey | null>(null);
-  const mint = useMutation({
-    mutationFn: async (input: MintKeyInput) => {
-      setMinted(await api.post<MintedKey>("/api/keys", input));
-    },
-    onSuccess: async () => {
-      await invalidate([qk.keys()]);
-    },
-  });
-  const close = () => {
-    setMinted(null);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const reset = () => {
     setLabel("");
-    setAllowlist("");
+    setUnrestricted(true);
+    setAllowed([]);
     setRateLimit("");
-    setUnknown([]);
-    setLocalError(null);
-    setCopyError(false);
-    setCopied(false);
-    mint.reset();
-    onClose();
+    setMinted(null);
+    setProblem(null);
+    create.reset();
   };
+
+  const close = (next: boolean) => {
+    if (!next) reset();
+    onOpenChange(next);
+  };
+
   const submit = () => {
-    const trimmedLabel = label.trim();
-    if (trimmedLabel.length === 0) {
-      setLocalError("Label is required.");
+    const trimmed = rateLimit.trim();
+    const limit = trimmed.length === 0 ? null : Number(trimmed);
+    if (limit !== null && (!Number.isInteger(limit) || limit < 1)) {
+      setProblem(
+        "The rate limit must be a whole number of requests per minute, or blank for none.",
+      );
       return;
     }
-    const parsed = parseAllowlist(
-      allowlist,
-      (models.data ?? []).map((model) => model.id),
+    setProblem(null);
+    create.mutate(
+      {
+        label: label.trim().length === 0 ? "api key" : label.trim(),
+        modelAllowlist: unrestricted ? null : allowed,
+        rateLimitPerMin: limit,
+      },
+      {
+        onSuccess: (key) => setMinted(key),
+        onError: (error) => setProblem(describeError(error)),
+      },
     );
-    setUnknown(parsed.unknown);
-    if (parsed.unknown.length > 0) return;
-    const parsedRateLimit = rateLimit.trim() === "" ? null : Number(rateLimit);
-    if (parsedRateLimit !== null && (!Number.isInteger(parsedRateLimit) || parsedRateLimit < 1)) {
-      setLocalError("Rate limit must be a positive whole number.");
-      return;
-    }
-    setLocalError(null);
-    mint.mutate({
-      label: trimmedLabel,
-      modelAllowlist: parsed.models,
-      rateLimitPerMin: parsedRateLimit,
-    });
   };
-  const copy = async () => {
-    const clipboard = navigator.clipboard;
-    if (clipboard === undefined) {
-      setCopied(false);
-      setCopyError(true);
-      return;
-    }
-    try {
-      await clipboard.writeText(minted?.key ?? "");
-      setCopyError(false);
-      setCopied(true);
-    } catch {
-      setCopied(false);
-      setCopyError(true);
-    }
-  };
+
   return (
-    <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
-      <DialogHeader>
-        <DialogTitle>{minted === null ? "Mint API key" : "Copy your API key"}</DialogTitle>
-      </DialogHeader>
-      {minted !== null ? (
-        <div className="space-y-4">
-          <DialogDescription>
-            This key cannot be shown again. Copy it now and store it safely.
-          </DialogDescription>
-          <Input
-            aria-label="New API key"
-            className="font-mono text-xs"
-            readOnly
-            value={minted.key}
-            onFocus={(event) => event.currentTarget.select()}
-          />
-          {copyError && (
-            <p role="alert" className="text-sm text-warn">
-              Could not copy key; select and copy it manually.
-            </p>
-          )}
-          <div className="flex gap-2">
-            <Button onClick={copy}>{copied ? "Copied" : "Copy"}</Button>
-            <Button variant="secondary" onClick={close}>
-              I saved this key
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="key-label">Label</Label>
-            <Input
-              id="key-label"
-              value={label}
-              onChange={(event) => setLabel(event.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="key-models">Model allowlist</Label>
-            <Textarea
-              id="key-models"
-              value={allowlist}
-              onChange={(event) => setAllowlist(event.target.value)}
-              placeholder="fast, smart"
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">Leave blank to allow all models.</p>
-          {unknown.length > 0 && (
-            <p role="alert" className="text-sm text-warn">
-              Unknown models: {unknown.join(", ")}
-            </p>
-          )}
-          <div className="space-y-2">
-            <Label htmlFor="key-rate-limit">Rate limit per minute</Label>
-            <Input
-              id="key-rate-limit"
-              type="number"
-              min={1}
-              step={1}
-              inputMode="numeric"
-              value={rateLimit}
-              onChange={(event) => setRateLimit(event.target.value)}
-            />
-          </div>
-          {localError !== null && (
-            <p role="alert" className="text-sm text-warn">
-              {localError}
-            </p>
-          )}
-          {mint.isError && <ErrorState error={mint.error} />}
-          <div className="flex gap-2">
-            <Button disabled={mint.isPending} onClick={submit}>
-              Mint key
-            </Button>
-            <Button variant="secondary" onClick={close}>
+    <Modal
+      open={open}
+      onOpenChange={close}
+      title={minted === null ? "Create an API key" : "Key created"}
+      description={
+        minted === null
+          ? "Clients send this key as a bearer token or as x-api-key on every /v1 request."
+          : undefined
+      }
+      footer={
+        minted === null ? (
+          <>
+            <Button type="button" onClick={() => close(false)}>
               Cancel
             </Button>
-          </div>
-        </div>
+            <Button type="button" $variant="primary" disabled={create.isPending} onClick={submit}>
+              {create.isPending ? "Creating…" : "Create key"}
+            </Button>
+          </>
+        ) : (
+          <Button type="button" $variant="primary" onClick={() => close(false)}>
+            I have copied the key
+          </Button>
+        )
+      }
+    >
+      {minted === null ? (
+        <Stack $gap={3}>
+          <Field label="Label" hint="Names the client this key belongs to, e.g. laptop or CI.">
+            {(props) => (
+              <Input
+                {...props}
+                value={label}
+                placeholder="api key"
+                onChange={(event) => setLabel(event.target.value)}
+              />
+            )}
+          </Field>
+
+          <Stack $gap={2}>
+            <Row $gap={2}>
+              <Toggle
+                checked={unrestricted}
+                label="Allow every model"
+                onCheckedChange={setUnrestricted}
+              />
+              <Legend as="span">Allow every model</Legend>
+            </Row>
+
+            {unrestricted ? null : (
+              <>
+                <Choices>
+                  {(models.data ?? []).map((model) => (
+                    <Choice key={model.id}>
+                      <input
+                        type="checkbox"
+                        checked={allowed.includes(model.id)}
+                        onChange={(event) =>
+                          setAllowed((current) =>
+                            event.target.checked
+                              ? [...current, model.id]
+                              : current.filter((id) => id !== model.id),
+                          )
+                        }
+                      />
+                      {model.id}
+                    </Choice>
+                  ))}
+                </Choices>
+                {allowed.length === 0 ? (
+                  <Warning>
+                    With no model selected this key is allowed nothing and every request it makes
+                    will be refused.
+                  </Warning>
+                ) : null}
+              </>
+            )}
+          </Stack>
+
+          <Field
+            label="Rate limit"
+            hint="Requests per minute for this key. Leave blank for no limit. Counted per process, and reset when the gateway restarts."
+          >
+            {(props) => (
+              <Input
+                {...props}
+                type="number"
+                min={1}
+                step={1}
+                value={rateLimit}
+                placeholder="no limit"
+                onChange={(event) => setRateLimit(event.target.value)}
+              />
+            )}
+          </Field>
+
+          {problem === null ? null : <Problem role="alert">{problem}</Problem>}
+        </Stack>
+      ) : (
+        <Stack $gap={3}>
+          <Once>
+            This is the only time the key is shown. The gateway keeps a hash, so a lost key has to
+            be replaced rather than recovered.
+          </Once>
+          <CopyValue value={minted.key} label="Copy API key" />
+          <Row $gap={2}>
+            <Legend>Label</Legend>
+            <Mono>{minted.label}</Mono>
+            <Legend>Prefix</Legend>
+            <Mono>{minted.prefix}</Mono>
+          </Row>
+        </Stack>
       )}
-    </DialogContent>
+    </Modal>
   );
 }

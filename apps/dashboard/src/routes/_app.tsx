@@ -1,20 +1,34 @@
-import { createFileRoute, Outlet, useNavigate } from "@tanstack/react-router";
-import { AppShell, requireSession } from "@/components/AppShell.tsx";
+import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
+import { get } from "../api/client.ts";
+import { queryKeys } from "../api/queries.ts";
+import type { StatusResponse } from "../api/types.ts";
+import { Rack } from "../components/Rack.tsx";
+import { LiveProvider } from "../session/live.tsx";
 
+/**
+ * The gate in front of every console screen.
+ *
+ * `/api/status` is the one control route that answers without a session, so the
+ * guard asks it before the shell renders rather than letting each panel discover
+ * the expired cookie on its own.
+ */
 export const Route = createFileRoute("/_app")({
-  beforeLoad: ({ context }) => requireSession(context.queryClient),
-  component: AppLayout,
-});
+  beforeLoad: async ({ context, location }) => {
+    const status = await context.queryClient.ensureQueryData({
+      queryKey: queryKeys.status,
+      queryFn: () => get<StatusResponse>("/api/status"),
+      revalidateIfStale: true,
+    });
 
-function AppLayout() {
-  const navigate = useNavigate();
-  return (
-    <AppShell
-      onSignOut={() => {
-        void navigate({ to: "/login" });
-      }}
-    >
-      <Outlet />
-    </AppShell>
-  );
-}
+    if (!status.authenticated) {
+      throw redirect({ to: "/login", search: { next: location.href } });
+    }
+  },
+  component: () => (
+    <LiveProvider>
+      <Rack>
+        <Outlet />
+      </Rack>
+    </LiveProvider>
+  ),
+});

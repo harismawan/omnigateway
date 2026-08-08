@@ -1,104 +1,284 @@
-import { queryOptions, useQueryClient } from "@tanstack/react-query";
-import { api } from "./client.ts";
+import {
+  type UseMutationResult,
+  type UseQueryResult,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { del, get, patch, post, put, request, withQuery } from "./client.ts";
 import type {
+  ApiKeySummary,
+  ConnectPollResult,
+  ConnectStart,
+  Credential,
+  CredentialHealth,
   CredentialHealthResponse,
+  CredentialPatch,
   CredentialsResponse,
-  DryRunRequest,
-  DryRunResponse,
+  DryRunNeed,
+  DryRunResult,
+  KeyCreateInput,
   KeysResponse,
   LogsResponse,
+  MintedKey,
   ModelsResponse,
+  ProviderId,
+  QuotaWindow,
   RequestLog,
   Settings,
   SettingsResponse,
   StatusResponse,
   UsageBucket,
-  UsageGroupBy,
+  UsageQuery,
   UsageResponse,
   VirtualModel,
-  WireApiKey,
-  WireCredential,
 } from "./types.ts";
 
-export const qk = {
-  status: () => ["status"] as const,
-  credentials: () => ["credentials"] as const,
-  credentialHealth: () => ["credentials", "health"] as const,
-  models: () => ["models"] as const,
-  settings: () => ["settings"] as const,
-  keys: () => ["keys"] as const,
-  usage: (groupBy: UsageGroupBy, sinceMs: number) => ["usage", groupBy, sinceMs] as const,
+export const queryKeys = {
+  status: ["status"] as const,
+  credentials: ["credentials"] as const,
+  credentialHealth: ["credentials", "health"] as const,
+  models: ["models"] as const,
+  keys: ["keys"] as const,
+  settings: ["settings"] as const,
+  usage: (query: UsageQuery) => ["usage", query.groupBy, query.since, query.until ?? null] as const,
   logs: (limit: number) => ["logs", limit] as const,
 };
 
-export function statusQuery() {
-  return queryOptions<StatusResponse>({
-    queryKey: qk.status(),
-    queryFn: () => api.get<StatusResponse>("/api/status"),
+/**
+ * Polling cadence. `false` pauses a query, which is what the chassis LIVE
+ * switch does — an idle console should not keep a laptop awake.
+ */
+export type Cadence = number | false;
+
+export function useStatus(): UseQueryResult<StatusResponse> {
+  return useQuery({
+    queryKey: queryKeys.status,
+    queryFn: ({ signal }) => get<StatusResponse>("/api/status", signal),
+    // The session cookie can expire while the tab sits open.
+    staleTime: 30_000,
   });
 }
 
-export function credentialsQuery() {
-  return queryOptions<WireCredential[]>({
-    queryKey: qk.credentials(),
-    queryFn: async () => (await api.get<CredentialsResponse>("/api/credentials")).credentials,
+export function useCredentials(): UseQueryResult<Credential[]> {
+  return useQuery({
+    queryKey: queryKeys.credentials,
+    queryFn: async ({ signal }) =>
+      (await get<CredentialsResponse>("/api/credentials", signal)).credentials,
   });
 }
 
-export function credentialHealthQuery() {
-  return queryOptions<CredentialHealthResponse>({
-    queryKey: qk.credentialHealth(),
-    queryFn: () => api.get<CredentialHealthResponse>("/api/credentials/health"),
-    staleTime: 2_000,
-    retry: false,
+export type HealthSnapshot = { health: CredentialHealth[]; quota: QuotaWindow[] };
+
+export function useCredentialHealth(cadence: Cadence = 10_000): UseQueryResult<HealthSnapshot> {
+  return useQuery({
+    queryKey: queryKeys.credentialHealth,
+    queryFn: ({ signal }) => get<CredentialHealthResponse>("/api/credentials/health", signal),
+    refetchInterval: cadence,
   });
 }
 
-export function modelsQuery() {
-  return queryOptions<VirtualModel[]>({
-    queryKey: qk.models(),
-    queryFn: async () => (await api.get<ModelsResponse>("/api/models")).models,
+export function useModels(): UseQueryResult<VirtualModel[]> {
+  return useQuery({
+    queryKey: queryKeys.models,
+    queryFn: async ({ signal }) => (await get<ModelsResponse>("/api/models", signal)).models,
   });
 }
 
-export function settingsQuery() {
-  return queryOptions<Settings>({
-    queryKey: qk.settings(),
-    queryFn: async () => (await api.get<SettingsResponse>("/api/settings")).settings,
+export function useKeys(): UseQueryResult<ApiKeySummary[]> {
+  return useQuery({
+    queryKey: queryKeys.keys,
+    queryFn: async ({ signal }) => (await get<KeysResponse>("/api/keys", signal)).keys,
   });
 }
 
-export function keysQuery() {
-  return queryOptions<WireApiKey[]>({
-    queryKey: qk.keys(),
-    queryFn: async () => (await api.get<KeysResponse>("/api/keys")).keys,
+export function useSettings(): UseQueryResult<Settings> {
+  return useQuery({
+    queryKey: queryKeys.settings,
+    queryFn: async ({ signal }) => (await get<SettingsResponse>("/api/settings", signal)).settings,
   });
 }
 
-export function usageQuery(groupBy: UsageGroupBy, sinceMs: number) {
-  const query = new URLSearchParams({ groupBy, since: String(sinceMs) });
-  return queryOptions<UsageBucket[]>({
-    queryKey: qk.usage(groupBy, sinceMs),
-    queryFn: async () => (await api.get<UsageResponse>(`/api/usage?${query}`)).rows,
+export function useUsage(
+  query: UsageQuery,
+  cadence: Cadence = 60_000,
+): UseQueryResult<UsageBucket[]> {
+  return useQuery({
+    queryKey: queryKeys.usage(query),
+    queryFn: async ({ signal }) =>
+      (
+        await get<UsageResponse>(
+          withQuery("/api/usage", {
+            groupBy: query.groupBy,
+            since: query.since,
+            ...(query.until === undefined ? {} : { until: query.until }),
+          }),
+          signal,
+        )
+      ).rows,
+    refetchInterval: cadence,
   });
 }
 
-export function logsQuery(limit: number, pollMs: number) {
-  return queryOptions<RequestLog[]>({
-    queryKey: qk.logs(limit),
-    queryFn: async () => (await api.get<LogsResponse>(`/api/logs?limit=${limit}`)).logs,
-    refetchInterval: pollMs,
-    staleTime: 0,
+export function useLogs(limit = 100, cadence: Cadence = 10_000): UseQueryResult<RequestLog[]> {
+  return useQuery({
+    queryKey: queryKeys.logs(limit),
+    queryFn: async ({ signal }) =>
+      (await get<LogsResponse>(withQuery("/api/logs", { limit }), signal)).logs,
+    refetchInterval: cadence,
   });
 }
 
-export function dryRun(modelId: string, request: DryRunRequest): Promise<DryRunResponse> {
-  return api.post<DryRunResponse>(`/api/models/${encodeURIComponent(modelId)}/dry-run`, request);
+/* ---------------------------------------------------------------- session -- */
+
+export function useLogin(): UseMutationResult<{ ok: true }, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (password: string) => post<{ ok: true }>("/api/login", { password }),
+    onSuccess: () => client.invalidateQueries(),
+  });
 }
 
-export function useInvalidate(): (keys: readonly (readonly unknown[])[]) => Promise<void> {
-  const queryClient = useQueryClient();
-  return async (keys) => {
-    await Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
-  };
+export function useSetup(): UseMutationResult<{ ok: true }, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (password: string) => post<{ ok: true }>("/api/setup", { password }),
+    onSuccess: () => client.invalidateQueries(),
+  });
+}
+
+export function useLogout(): UseMutationResult<{ ok: true }, Error, void> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => post<{ ok: true }>("/api/logout"),
+    onSuccess: () => {
+      // Nothing cached survives a sign-out; the next operator starts clean.
+      client.clear();
+    },
+  });
+}
+
+/* ------------------------------------------------------------ credentials -- */
+
+export function useUpdateCredential(): UseMutationResult<
+  { ok: true },
+  Error,
+  { id: string; patch: CredentialPatch }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch: body }) => patch<{ ok: true }>(`/api/credentials/${id}`, body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.credentials });
+      void client.invalidateQueries({ queryKey: queryKeys.credentialHealth });
+    },
+  });
+}
+
+export function useDeleteCredential(): UseMutationResult<{ ok: true }, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => del<{ ok: true }>(`/api/credentials/${id}`),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.credentials });
+      void client.invalidateQueries({ queryKey: queryKeys.credentialHealth });
+    },
+  });
+}
+
+/* ----------------------------------------------------------------- models -- */
+
+export function useSaveModel(): UseMutationResult<{ ok: true }, Error, VirtualModel> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (model: VirtualModel) => put<{ ok: true }>(`/api/models/${model.id}`, model),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.models }),
+  });
+}
+
+export function useDeleteModel(): UseMutationResult<{ ok: true }, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => del<{ ok: true }>(`/api/models/${id}`),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.models }),
+  });
+}
+
+export function useDryRun(): UseMutationResult<
+  DryRunResult,
+  Error,
+  { modelId: string; need: DryRunNeed }
+> {
+  return useMutation({
+    mutationFn: ({ modelId, need }) => post<DryRunResult>(`/api/models/${modelId}/dry-run`, need),
+  });
+}
+
+/* ------------------------------------------------------------------- keys -- */
+
+export function useCreateKey(): UseMutationResult<MintedKey, Error, KeyCreateInput> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: KeyCreateInput) => post<MintedKey>("/api/keys", input),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
+  });
+}
+
+export function useRevokeKey(): UseMutationResult<{ ok: true }, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => del<{ ok: true }>(`/api/keys/${id}`),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
+  });
+}
+
+/* --------------------------------------------------------------- settings -- */
+
+export function useSaveSettings(): UseMutationResult<{ ok: true }, Error, Settings> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (settings: Settings) => put<{ ok: true }>("/api/settings", settings),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.settings }),
+  });
+}
+
+/* ---------------------------------------------------------------- connect -- */
+
+export function useConnectStart(): UseMutationResult<
+  ConnectStart,
+  Error,
+  { provider: ProviderId; label: string }
+> {
+  return useMutation({
+    mutationFn: (input) => post<ConnectStart>("/api/connect/start", input),
+  });
+}
+
+export function useConnectFinish(): UseMutationResult<
+  { id: string },
+  Error,
+  { flowId: string; code: string }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input) => post<{ id: string }>("/api/connect/finish", input),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.credentials }),
+  });
+}
+
+/**
+ * One poll of a device-code flow.
+ *
+ * The route answers 202 while the operator has not finished authorizing, which
+ * is a normal outcome rather than a failure, so it is accepted and reported as
+ * `pending`.
+ */
+export async function pollConnect(flowId: string): Promise<ConnectPollResult> {
+  const result = await request<ConnectPollResult>("/api/connect/poll", {
+    method: "POST",
+    body: { flowId },
+    accept: [202],
+  });
+  if (result.status === 202) return { status: "pending" };
+  return result.data;
 }

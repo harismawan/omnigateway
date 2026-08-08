@@ -1,198 +1,179 @@
-import { afterEach, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import { QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
   createRootRoute,
   createRoute,
   createRouter,
-  Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { LoginRoute, LoginScreen } from "../../src/routes/login.tsx";
+import { Route as loginRoute } from "../../src/routes/login.tsx";
+import { ThemeProvider } from "../../src/theme/ThemeProvider.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { makeQueryClient, renderWithProviders } from "../helpers/render.tsx";
+import { makeQueryClient } from "../helpers/render.tsx";
 
-const realFetch = globalThis.fetch;
-afterEach(() => {
-  globalThis.fetch = realFetch;
-});
+/**
+ * The login screen reads its own search params and navigates on success, so it
+ * is mounted in a real memory router rather than bare.
+ */
+function renderLogin(initial = "/login") {
+  const client = makeQueryClient();
+  const rootRoute = createRootRoute();
+  const { component, validateSearch } = loginRoute.options;
+  if (component === undefined || validateSearch === undefined) {
+    throw new Error("the login route lost its component or its search schema");
+  }
 
-test("authentication status loading announces progress to assistive technology", () => {
-  globalThis.fetch = (() => new Promise<Response>(() => {})) as unknown as typeof globalThis.fetch;
-  renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
-
-  const status = screen.getByRole("status");
-  expect(status.textContent).toBe("Loading authentication status…");
-  expect(status.getAttribute("aria-live")).toBe("polite");
-});
-
-test("an unconfigured gateway renders the first-run setup form", async () => {
-  createFetchStub({ "GET /api/status": () => ({ configured: false, authenticated: false }) });
-  renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
-  expect(await screen.findByRole("heading", { name: /set an admin password/i })).toBeDefined();
-  expect(screen.getByText(/at least 12 characters/i)).toBeDefined();
-  expect(screen.getByLabelText(/^password$/i)).toBeDefined();
-  expect(screen.getByLabelText(/confirm password/i)).toBeDefined();
-});
-
-test("a configured gateway renders the login workspace", async () => {
-  createFetchStub({ "GET /api/status": () => ({ configured: true, authenticated: false }) });
-  renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
-  expect(await screen.findByRole("heading", { name: /sign in/i })).toBeDefined();
-  expect(screen.getByText(/route requests across provider accounts/i)).toBeDefined();
-  expect(screen.getByLabelText("Password").getAttribute("autocomplete")).toBe("current-password");
-  expect(screen.queryByLabelText(/confirm password/i)).toBeNull();
-});
-
-test("setup posts the password and reports success upward", async () => {
-  const stub = createFetchStub({
-    "GET /api/status": () => ({ configured: false, authenticated: false }),
-    "POST /api/setup": () => ({ ok: true }),
-  });
-  let authenticated = false;
-  renderWithProviders(
-    <LoginScreen
-      onAuthenticated={() => {
-        authenticated = true;
-      }}
-    />,
-  );
-  await screen.findByRole("heading", { name: /set an admin password/i });
-
-  const user = userEvent.setup();
-  await user.type(screen.getByLabelText(/^password$/i), "correct-horse-battery");
-  await user.type(screen.getByLabelText(/confirm password/i), "correct-horse-battery");
-  await user.click(screen.getByRole("button", { name: /create password/i }));
-
-  await waitFor(() => expect(authenticated).toBe(true));
-  const setup = stub.calls.find((call) => call.url === "/api/setup");
-  expect(setup?.init?.body).toBe(JSON.stringify({ password: "correct-horse-battery" }));
-});
-
-test("successful setup navigates to credentials", async () => {
-  createFetchStub({
-    "GET /api/status": () => ({ configured: false, authenticated: false }),
-    "POST /api/setup": () => ({ ok: true }),
-  });
-  const rootRoute = createRootRoute({ component: () => <Outlet /> });
-  const loginRoute = createRoute({
+  const login = createRoute({
     getParentRoute: () => rootRoute,
     path: "/login",
-    component: LoginRoute,
+    validateSearch,
+    component,
   });
-  const credentialsRoute = createRoute({
+  const home = createRoute({
     getParentRoute: () => rootRoute,
-    path: "/credentials",
-    component: () => <p>Credentials</p>,
+    path: "/",
+    component: () => <div>rack</div>,
   });
   const router = createRouter({
-    routeTree: rootRoute.addChildren([loginRoute, credentialsRoute]),
-    history: createMemoryHistory({ initialEntries: ["/login"] }),
+    routeTree: rootRoute.addChildren([login, home]),
+    history: createMemoryHistory({ initialEntries: [initial] }),
   });
-  renderWithProviders(<RouterProvider router={router} />, { client: makeQueryClient() });
-  await screen.findByRole("heading", { name: /set an admin password/i });
 
-  const user = userEvent.setup();
-  await user.type(screen.getByLabelText(/^password$/i), "correct-horse-battery");
-  await user.type(screen.getByLabelText(/confirm password/i), "correct-horse-battery");
-  await user.click(screen.getByRole("button", { name: /create password/i }));
-
-  await waitFor(() => expect(router.state.location.pathname).toBe("/credentials"));
-});
-
-test("setup refuses to submit when the confirmation does not match", async () => {
-  const stub = createFetchStub({
-    "GET /api/status": () => ({ configured: false, authenticated: false }),
-    "POST /api/setup": () => ({ ok: true }),
-  });
-  renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
-  await screen.findByRole("heading", { name: /set an admin password/i });
-
-  const user = userEvent.setup();
-  await user.type(screen.getByLabelText(/^password$/i), "correct-horse-battery");
-  await user.type(screen.getByLabelText(/confirm password/i), "correct-horse-batteryy");
-  await user.click(screen.getByRole("button", { name: /create password/i }));
-
-  expect(await screen.findByText(/passwords do not match/i)).toBeDefined();
-  expect(stub.calls.some((call) => call.url === "/api/setup")).toBe(false);
-});
-
-test("setup refuses a password under twelve characters without a round trip", async () => {
-  const stub = createFetchStub({
-    "GET /api/status": () => ({ configured: false, authenticated: false }),
-    "POST /api/setup": () => ({ ok: true }),
-  });
-  renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
-  await screen.findByRole("heading", { name: /set an admin password/i });
-
-  const user = userEvent.setup();
-  await user.type(screen.getByLabelText(/^password$/i), "short");
-  await user.type(screen.getByLabelText(/confirm password/i), "short");
-  await user.click(screen.getByRole("button", { name: /create password/i }));
-
-  expect((await screen.findByRole("alert")).textContent).toMatch(/at least 12 characters/i);
-  expect(stub.calls.some((call) => call.url === "/api/setup")).toBe(false);
-});
-
-test("login posts the password and reports success upward", async () => {
-  const stub = createFetchStub({
-    "GET /api/status": () => ({ configured: true, authenticated: false }),
-    "POST /api/login": () => ({ ok: true }),
-  });
-  let authenticated = false;
-  renderWithProviders(
-    <LoginScreen
-      onAuthenticated={() => {
-        authenticated = true;
-      }}
-    />,
+  render(
+    <ThemeProvider>
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router as never} />
+      </QueryClientProvider>
+    </ThemeProvider>,
   );
-  await screen.findByRole("heading", { name: /sign in/i });
+  return router;
+}
 
-  const user = userEvent.setup();
-  await user.type(screen.getByLabelText(/^password$/i), "correct-horse-battery");
-  await user.click(screen.getByRole("button", { name: /sign in/i }));
+describe("login screen", () => {
+  test("asks for a password on a configured gateway", async () => {
+    createFetchStub({ "GET /api/status": () => ({ configured: true, authenticated: false }) });
+    renderLogin();
 
-  await waitFor(() => expect(authenticated).toBe(true));
-  expect(stub.calls.find((call) => call.url === "/api/login")?.init?.method).toBe("POST");
-});
-
-test("a rejected password surfaces the gateway's own message", async () => {
-  createFetchStub({
-    "GET /api/status": () => ({ configured: true, authenticated: false }),
-    "POST /api/login": () => ({
-      status: 401,
-      body: { error: { code: "AUTH", message: "invalid password" } },
-    }),
+    expect(
+      await screen.findByText("This console is for the operator of this gateway."),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Confirm password")).toBeNull();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
   });
-  renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
-  await screen.findByRole("heading", { name: /sign in/i });
 
-  const user = userEvent.setup();
-  await user.type(screen.getByLabelText(/^password$/i), "wrong-password-here");
-  await user.click(screen.getByRole("button", { name: /sign in/i }));
+  test("a first run asks for a new password twice", async () => {
+    createFetchStub({ "GET /api/status": () => ({ configured: false, authenticated: false }) });
+    renderLogin();
 
-  expect(await screen.findByText(/invalid password/i)).toBeDefined();
-});
-
-test("a failed setup preserves the typed password", async () => {
-  const password = "correct-horse-battery";
-  createFetchStub({
-    "GET /api/status": () => ({ configured: false, authenticated: false }),
-    "POST /api/setup": () => ({
-      status: 409,
-      body: { error: { code: "CONFLICT", message: "an admin password is already configured" } },
-    }),
+    expect(await screen.findByText("First run")).toBeTruthy();
+    expect(screen.getByLabelText("Confirm password")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Set password and sign in" })).toBeTruthy();
   });
-  renderWithProviders(<LoginScreen onAuthenticated={() => {}} />);
-  await screen.findByRole("heading", { name: /set an admin password/i });
 
-  const user = userEvent.setup();
-  await user.type(screen.getByLabelText(/^password$/i), password);
-  await user.type(screen.getByLabelText(/confirm password/i), password);
-  await user.click(screen.getByRole("button", { name: /create password/i }));
+  test("signing in posts the password and moves on", async () => {
+    const user = userEvent.setup();
+    const stub = createFetchStub({
+      "GET /api/status": () => ({ configured: true, authenticated: false }),
+      "POST /api/login": () => ({ ok: true }),
+    });
+    const router = renderLogin();
 
-  expect(await screen.findByText(/already configured/i)).toBeDefined();
-  expect((screen.getByLabelText(/^password$/i) as HTMLInputElement).value).toBe(password);
+    await user.type(await screen.findByLabelText("Password"), "hunter2");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => {
+      const call = stub.calls.find((entry) => entry.url === "/api/login");
+      expect(call?.init?.body).toBe(JSON.stringify({ password: "hunter2" }));
+    });
+    await waitFor(() => expect(router.state.location.pathname).toBe("/"));
+  });
+
+  test("a wrong password says what to do next and does not leak the reason", async () => {
+    const user = userEvent.setup();
+    createFetchStub({
+      "GET /api/status": () => ({ configured: true, authenticated: false }),
+      "POST /api/login": () => ({
+        status: 401,
+        body: { error: { code: "AUTH", message: "invalid password" } },
+      }),
+    });
+    renderLogin();
+
+    await user.type(await screen.findByLabelText("Password"), "wrong");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "That password does not match. Try again.",
+    );
+  });
+
+  test("mismatched setup passwords are caught before the request", async () => {
+    const user = userEvent.setup();
+    const stub = createFetchStub({
+      "GET /api/status": () => ({ configured: false, authenticated: false }),
+    });
+    renderLogin();
+
+    await user.type(await screen.findByLabelText("Password"), "one-password");
+    await user.type(screen.getByLabelText("Confirm password"), "another");
+    await user.click(screen.getByRole("button", { name: "Set password and sign in" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe("The two passwords do not match.");
+    expect(stub.calls.some((call) => call.url === "/api/setup")).toBe(false);
+  });
+
+  test("a rejected setup password is reported in the gateway's words", async () => {
+    const user = userEvent.setup();
+    createFetchStub({
+      "GET /api/status": () => ({ configured: false, authenticated: false }),
+      "POST /api/setup": () => ({
+        status: 400,
+        body: {
+          error: { code: "BAD_REQUEST", message: "password must be at least 12 characters" },
+        },
+      }),
+    });
+    renderLogin();
+
+    await user.type(await screen.findByLabelText("Password"), "short");
+    await user.type(screen.getByLabelText("Confirm password"), "short");
+    await user.click(screen.getByRole("button", { name: "Set password and sign in" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "password must be at least 12 characters",
+    );
+  });
+
+  test("returns to the screen the operator was sent away from", async () => {
+    const user = userEvent.setup();
+    createFetchStub({
+      "GET /api/status": () => ({ configured: true, authenticated: false }),
+      "POST /api/login": () => ({ ok: true }),
+    });
+    const router = renderLogin("/login?next=%2F");
+
+    await user.type(await screen.findByLabelText("Password"), "hunter2");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/"));
+  });
+
+  test("an unreachable gateway is reported rather than blamed on the password", async () => {
+    createFetchStub({
+      "GET /api/status": () => ({
+        status: 500,
+        body: { error: { code: "INTERNAL", message: "internal error" } },
+      }),
+    });
+    renderLogin();
+
+    expect(
+      await screen.findByText(
+        "The gateway is not answering. Check that it is running, then reload.",
+      ),
+    ).toBeTruthy();
+  });
 });

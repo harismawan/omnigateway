@@ -1,69 +1,107 @@
-import { afterEach, expect, test } from "bun:test";
-import { useQuery } from "@tanstack/react-query";
+import { describe, expect, test } from "bun:test";
 import { renderHook, waitFor } from "@testing-library/react";
 import {
-  credentialsQuery,
-  logsQuery,
-  qk,
-  usageQuery,
-  type useInvalidate,
+  pollConnect,
+  queryKeys,
+  useCreateKey,
+  useCredentials,
+  useKeys,
+  useLogs,
+  useUsage,
 } from "../../src/api/queries.ts";
-import { formatMs, formatTokens, formatUsd } from "../../src/lib/format.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { credentialFixture } from "../helpers/fixtures.ts";
-import { queryWrapper } from "../helpers/render.tsx";
+import { apiKey, credential, log } from "../helpers/fixtures.ts";
+import { makeQueryClient, queryWrapper } from "../helpers/render.tsx";
 
-const realFetch = globalThis.fetch;
-afterEach(() => {
-  globalThis.fetch = realFetch;
-});
+describe("query hooks", () => {
+  test("useCredentials unwraps the envelope", async () => {
+    createFetchStub({ "GET /api/credentials": () => ({ credentials: [credential()] }) });
+    const { result } = renderHook(() => useCredentials(), { wrapper: queryWrapper() });
 
-type Invalidate = typeof useInvalidate extends () => infer Callback ? Callback : never;
-type ExpectedInvalidate = (keys: readonly (readonly unknown[])[]) => Promise<void>;
-const acceptsReadonlyQueryKeys: ExpectedInvalidate = null as unknown as Invalidate;
-void acceptsReadonlyQueryKeys;
-
-test("query keys are stable and distinguish their arguments", () => {
-  expect(qk.credentials()).toEqual(["credentials"]);
-  expect(qk.usage("model", 100)).toEqual(["usage", "model", 100]);
-  expect(qk.usage("credential", 100)).not.toEqual(qk.usage("model", 100));
-  expect(qk.logs(50)).toEqual(["logs", 50]);
-});
-
-test("credentialsQuery unwraps the credentials envelope", async () => {
-  createFetchStub({
-    "GET /api/credentials": () => ({ credentials: [credentialFixture({ id: "c1" })] }),
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toHaveLength(1);
+    expect(result.current.data?.[0]?.label).toBe("claude-main");
   });
-  const { result } = renderHook(() => useQuery(credentialsQuery()), { wrapper: queryWrapper() });
-  await waitFor(() => expect(result.current.isSuccess).toBe(true));
-  expect(result.current.data?.[0]?.id).toBe("c1");
-});
 
-test("usageQuery encodes groupBy and since into the query string", async () => {
-  const stub = createFetchStub({
-    "GET /api/usage?groupBy=credential&since=1000": () => ({ rows: [] }),
+  test("useLogs passes the limit through", async () => {
+    const stub = createFetchStub({ "GET /api/logs": () => ({ logs: [log()] }) });
+    const { result } = renderHook(() => useLogs(250, false), { wrapper: queryWrapper() });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(stub.calls[0]?.url).toBe("/api/logs?limit=250");
   });
-  const { result } = renderHook(() => useQuery(usageQuery("credential", 1000)), {
-    wrapper: queryWrapper(),
+
+  test("useUsage builds the range query and keys on it", async () => {
+    const stub = createFetchStub({ "GET /api/usage": () => ({ rows: [] }) });
+    const { result } = renderHook(
+      () => useUsage({ groupBy: "hour", since: 1_000, until: 2_000 }, false),
+      { wrapper: queryWrapper() },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(stub.calls[0]?.url).toBe("/api/usage?groupBy=hour&since=1000&until=2000");
+    expect(queryKeys.usage({ groupBy: "hour", since: 1_000, until: 2_000 })).toEqual([
+      "usage",
+      "hour",
+      1_000,
+      2_000,
+    ]);
   });
-  await waitFor(() => expect(result.current.isSuccess).toBe(true));
-  expect(stub.calls[0]?.url).toBe("/api/usage?groupBy=credential&since=1000");
 });
 
-test("logsQuery caps the limit and sets a refetch interval", () => {
-  const options = logsQuery(50, 3000);
-  expect([...options.queryKey]).toEqual(["logs", 50]);
-  expect(options.refetchInterval).toBe(3000);
-  expect(options.staleTime).toBe(0);
+describe("mutations", () => {
+  test("creating a key refetches the key list", async () => {
+    let listCalls = 0;
+    createFetchStub({
+      "GET /api/keys": () => {
+        listCalls += 1;
+        return { keys: [apiKey()] };
+      },
+      "POST /api/keys": () => ({
+        id: "key-2",
+        label: "ci",
+        prefix: "omni_sk_zzzz",
+        key: "omni_sk_zzzz_secret",
+      }),
+    });
+
+    const client = makeQueryClient();
+    const wrapper = queryWrapper(client);
+    const list = renderHook(() => useKeys(), { wrapper });
+    await waitFor(() => expect(list.result.current.isSuccess).toBe(true));
+    expect(listCalls).toBe(1);
+
+    const create = renderHook(() => useCreateKey(), { wrapper });
+    create.result.current.mutate({ label: "ci", modelAllowlist: null, rateLimitPerMin: null });
+
+    await waitFor(() => expect(create.result.current.isSuccess).toBe(true));
+    expect(create.result.current.data?.key).toBe("omni_sk_zzzz_secret");
+    await waitFor(() => expect(listCalls).toBe(2));
+  });
 });
 
-test("formatters render the units an operator reads", () => {
-  expect(formatTokens(1_500_000)).toBe("1.5M");
-  expect(formatTokens(2_400)).toBe("2.4K");
-  expect(formatTokens(42)).toBe("42");
-  expect(formatUsd(1.5)).toBe("$1.50");
-  expect(formatUsd(0.0004)).toBe("$0.0004");
-  expect(formatMs(950)).toBe("950ms");
-  expect(formatMs(2_500)).toBe("2.5s");
-  expect(formatMs(null)).toBe("—");
+describe("pollConnect", () => {
+  test("reports a 202 as pending rather than as a failure", async () => {
+    createFetchStub({
+      "POST /api/connect/poll": () => ({ status: 202, body: { status: "pending" } }),
+    });
+    await expect(pollConnect("flow-1")).resolves.toEqual({ status: "pending" });
+  });
+
+  test("reports the created credential when the flow completes", async () => {
+    createFetchStub({
+      "POST /api/connect/poll": () => ({ status: "complete", id: "cred-9" }),
+    });
+    await expect(pollConnect("flow-1")).resolves.toEqual({ status: "complete", id: "cred-9" });
+  });
+
+  test("still throws on a real failure", async () => {
+    createFetchStub({
+      "POST /api/connect/poll": () => ({
+        status: 400,
+        body: { error: { code: "BAD_REQUEST", message: "unknown or expired authorization" } },
+      }),
+    });
+    await expect(pollConnect("flow-1")).rejects.toThrow("unknown or expired authorization");
+  });
 });

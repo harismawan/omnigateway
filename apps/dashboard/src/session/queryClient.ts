@@ -1,45 +1,37 @@
 import { MutationCache, QueryCache, QueryClient } from "@tanstack/react-query";
 import { ApiError } from "../api/client.ts";
 
-type DashboardQueryClientOptions = {
-  isLoginRoute?: () => boolean;
-  onUnauthenticated: () => void | Promise<void>;
+export type QueryClientOptions = {
+  /** The login screen must not bounce to itself when `/api/status` says no. */
+  isLoginRoute: () => boolean;
+  onUnauthenticated: () => void;
 };
 
-export function createDashboardQueryClient({
-  isLoginRoute = () => false,
-  onUnauthenticated,
-}: DashboardQueryClientOptions): QueryClient {
-  let handlingUnauthenticated = false;
-  let queryClient: QueryClient;
+/**
+ * One client, with a single place that reacts to an expired admin session.
+ *
+ * Every control route answers `AUTH` once the cookie is gone, so rather than
+ * each screen handling it, the caches funnel that one code to the router.
+ */
+export function createDashboardQueryClient(options: QueryClientOptions): QueryClient {
+  const handle = (error: unknown): void => {
+    if (!(error instanceof ApiError) || !error.isUnauthenticated) return;
+    if (options.isLoginRoute()) return;
+    options.onUnauthenticated();
+  };
 
-  function handleError(error: unknown): void {
-    if (
-      !(error instanceof ApiError) ||
-      !error.isUnauthenticated ||
-      isLoginRoute() ||
-      handlingUnauthenticated
-    ) {
-      return;
-    }
-
-    handlingUnauthenticated = true;
-    queryClient.clear();
-    void Promise.resolve(onUnauthenticated()).finally(() => {
-      handlingUnauthenticated = false;
-    });
-  }
-
-  queryClient = new QueryClient({
-    queryCache: new QueryCache({ onError: handleError }),
-    mutationCache: new MutationCache({ onError: handleError }),
+  return new QueryClient({
+    queryCache: new QueryCache({ onError: handle }),
+    mutationCache: new MutationCache({ onError: handle }),
     defaultOptions: {
       queries: {
+        // Retrying a rejected session just delays the redirect.
+        retry: (failureCount, error) =>
+          error instanceof ApiError && error.isUnauthenticated ? false : failureCount < 2,
         staleTime: 5_000,
-        retry: 1,
         refetchOnWindowFocus: true,
       },
+      mutations: { retry: false },
     },
   });
-  return queryClient;
 }

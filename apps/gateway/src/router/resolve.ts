@@ -1,4 +1,5 @@
 import { GatewayError, PROVIDER_CAPABILITIES, type ProviderId } from "@omni/ir";
+import { catalogPricing } from "@omni/providers/catalog";
 import type { Target, VirtualModel } from "@omni/store";
 import type { Snapshot } from "./types.ts";
 
@@ -19,14 +20,21 @@ const PREFIX_PROVIDER: ReadonlyArray<readonly [string, ProviderId]> = [
 ];
 
 function synthesize(provider: ProviderId, model: string): VirtualModel {
+  // The catalog's list price, so a bare model name is cost-ranked like a
+  // configured one. A model the catalog does not list stays at zero, which the
+  // scorer reads as "unpriced" and drops from the cost term rather than
+  // treating as free. Either way the operator can configure a virtual model to
+  // state the price they actually pay.
+  const listed = catalogPricing(provider, model);
   const target: Target = {
     provider,
     model,
     tier: 1,
     weight: 1,
-    // Unknown to the operator, so cost scoring contributes nothing and the
-    // remaining terms decide. Configure a virtual model to price it.
-    costPerMTok: { input: 0, output: 0 },
+    costPerMTok:
+      listed === null
+        ? { input: 0, output: 0 }
+        : { input: listed.input, output: listed.output, cacheRead: listed.cacheRead },
     capabilities: PROVIDER_CAPABILITIES[provider],
   };
   return { id: `${provider}/${model}`, targets: [target], strategy: "score", isAlias: true };
