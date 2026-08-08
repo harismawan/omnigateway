@@ -15,7 +15,7 @@ export async function startQuotaPoller(deps: PollerDeps): Promise<() => void> {
   if (quotaPollIntervalMs <= 0) return () => {};
 
   let running = false;
-  const timer = setInterval(() => {
+  const pass = (): void => {
     if (running) return;
     running = true;
     void poll(deps)
@@ -27,7 +27,16 @@ export async function startQuotaPoller(deps: PollerDeps): Promise<() => void> {
       .finally(() => {
         running = false;
       });
-  }, quotaPollIntervalMs);
+  };
+
+  // Once at startup, before the first interval elapses. A process that restarts
+  // more often than the interval — a watched dev server, a container that
+  // cycles, a unit with Restart=on-failure — would otherwise never poll, and
+  // its quota would read permanently stale while every probe worked fine.
+  // Started rather than awaited: boot does not wait on a provider.
+  pass();
+
+  const timer = setInterval(pass, quotaPollIntervalMs);
 
   timer.unref?.();
 

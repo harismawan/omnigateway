@@ -244,6 +244,16 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
         }));
     },
 
+    /**
+     * Replaces the reported window set for every credential named in `rows`.
+     *
+     * A probe reports a credential's whole set at once, so a window absent from
+     * it is one the provider no longer has — a plan that drops its five-hour
+     * cap, for instance. Upserting alone would leave that row behind forever,
+     * drawing a bar for a limit that does not exist and letting the router
+     * price against it. Credentials not named here are untouched, because this
+     * call carries no evidence about them.
+     */
     async saveQuota(rows: QuotaWindow[]) {
       const stmt = db.prepare(
         `INSERT INTO quota_windows
@@ -256,6 +266,17 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
            resets_at = excluded.resets_at,
            observed_at = excluded.observed_at`,
       );
+      const prune = db.prepare(
+        "DELETE FROM quota_windows WHERE credential_id = ? AND window_type NOT IN (SELECT value FROM json_each(?))",
+      );
+
+      const kept = new Map<string, string[]>();
+      for (const r of rows) {
+        const types = kept.get(r.credentialId);
+        if (types === undefined) kept.set(r.credentialId, [r.windowType]);
+        else types.push(r.windowType);
+      }
+
       db.transaction(() => {
         for (const r of rows) {
           stmt.run(
@@ -267,6 +288,9 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
             r.resetsAt,
             r.observedAt,
           );
+        }
+        for (const [credentialId, types] of kept) {
+          prune.run(credentialId, JSON.stringify(types));
         }
       })();
     },

@@ -110,6 +110,54 @@ test("a codex payload with only the short window yields only that window", () =>
   expect(report?.windows[0]?.windowType).toBe("fiveHour");
 });
 
+test("a codex window is named by the duration it declares, not by its position", () => {
+  // Observed on a `prolite` account in August 2026: Codex dropped the five-hour
+  // cap, leaving `primary_window` carrying the *weekly* allowance and
+  // `secondary_window` null. Reading position alone labels a seven-day window
+  // "fiveHour", which the router then prices as if it reset 34 times sooner.
+  const report = parseOpenAIUsage(
+    {
+      plan_type: "prolite",
+      rate_limit: {
+        primary_window: {
+          used_percent: 0,
+          limit_window_seconds: 604_800,
+          reset_after_seconds: 578_791,
+          reset_at: 1_786_776_104,
+        },
+        secondary_window: null,
+      },
+    },
+    NOW,
+  );
+
+  expect(report?.windows).toHaveLength(1);
+  expect(report?.windows[0]?.windowType).toBe("weekly");
+});
+
+test("a declared duration outranks position for both codex windows", () => {
+  const report = parseOpenAIUsage(
+    {
+      rate_limit: {
+        primary_window: { used_percent: 1, limit_window_seconds: 18_000 },
+        secondary_window: { used_percent: 2, limit_window_seconds: 604_800 },
+      },
+    },
+    NOW,
+  );
+
+  expect(report?.windows.map((w) => w.windowType)).toEqual(["fiveHour", "weekly"]);
+});
+
+test("a codex daily window is not rounded up into a weekly one", () => {
+  const report = parseOpenAIUsage(
+    { rate_limit: { primary_window: { used_percent: 3, limit_window_seconds: 86_400 } } },
+    NOW,
+  );
+
+  expect(report?.windows[0]?.windowType).toBe("daily");
+});
+
 test("codex feature caps are not mistaken for the plan window", () => {
   // code_review and the additional_rate_limits entries cap a feature, not the
   // subscription the router is choosing between.
