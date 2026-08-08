@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
-import type { CredentialSecrets, Store } from "@omni/store";
+import type { CredentialSecrets, Store, UsageSecrets } from "@omni/store";
 import { memoryStore, seedCredential } from "@omni/testkit";
 import type { OAuthProvider, UsageReport } from "../src/oauth/types.ts";
 import { poll, probe, RATE_LIMIT_COOLDOWN_MS, resetQuotaCooldowns } from "../src/quota.ts";
@@ -13,7 +13,7 @@ beforeEach(() => {
   resetQuotaCooldowns();
 });
 
-type UsageImpl = (secrets: CredentialSecrets) => Promise<UsageReport | null>;
+type UsageImpl = (secrets: UsageSecrets) => Promise<UsageReport | null>;
 
 /** A provider set where only `anthropic` can report usage. */
 function providers(usage?: UsageImpl): Readonly<Record<string, OAuthProvider>> {

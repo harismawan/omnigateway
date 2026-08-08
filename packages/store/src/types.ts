@@ -47,12 +47,20 @@ export type CredentialSecrets = {
   idToken: string | null;
 };
 
+export type InferenceSecrets = Pick<CredentialSecrets, "accessToken" | "apiKey">;
+export type RefreshSecrets = Pick<CredentialSecrets, "refreshToken">;
+export type UsageSecrets = Pick<CredentialSecrets, "accessToken">;
+
 /**
- * A credential plus a thunk for its secrets. The router reads only the
- * metadata; dispatch calls `secrets()` on the single winning candidate, so
- * ranking N candidates costs one decryption rather than N.
+ * A credential plus purpose-specific lazy secret loaders. The router reads only
+ * metadata; the selected operation decrypts only fields it needs.
  */
-export type CredentialView = Credential & { secrets: () => Promise<CredentialSecrets> };
+export type CredentialView = Credential & {
+  secrets: () => Promise<CredentialSecrets>;
+  openForInference: () => Promise<InferenceSecrets>;
+  openForRefresh: () => Promise<RefreshSecrets>;
+  openForUsage: () => Promise<UsageSecrets>;
+};
 
 export type CredentialHealth = {
   credentialId: string;

@@ -32,7 +32,7 @@ export async function attempt(opts: {
   const { candidate, adapter, http, now, signal, refresh, refreshLeadMs } = opts;
   const credential = candidate.credential;
 
-  let secrets = opts.secrets ?? (await credential.secrets());
+  let secrets = opts.secrets ?? (await credential.openForInference());
 
   const stale =
     opts.secrets === undefined &&

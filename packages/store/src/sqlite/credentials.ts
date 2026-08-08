@@ -10,7 +10,10 @@ import type {
   CredentialSecrets,
   CredentialView,
   DisabledReason,
+  InferenceSecrets,
   QuotaWindow,
+  RefreshSecrets,
+  UsageSecrets,
   WindowType,
 } from "../types.ts";
 
@@ -50,14 +53,65 @@ export function createCredentialRepo(
     apiKey: await open(row.api_key),
     idToken: await open(row.id_token),
   });
-  const currentSecrets = async (id: string): Promise<CredentialSecrets> => {
-    const row = db
-      .query<Pick<Row, "access_token" | "refresh_token" | "api_key" | "id_token">, [string]>(
-        "SELECT access_token, refresh_token, api_key, id_token FROM credentials WHERE id = ?",
-      )
-      .get(id);
+  const requiredRow = <T>(row: T | null, id: string): T => {
     if (row === null) throw new Error(`credential ${id} no longer exists`);
+    return row;
+  };
+  const currentSecrets = async (id: string): Promise<CredentialSecrets> => {
+    const row = requiredRow(
+      db
+        .query<Pick<Row, "access_token" | "refresh_token" | "api_key" | "id_token">, [string]>(
+          "SELECT access_token, refresh_token, api_key, id_token FROM credentials WHERE id = ?",
+        )
+        .get(id),
+      id,
+    );
     return secretsFrom(row);
+  };
+  const currentInferenceSecrets = async (
+    id: string,
+    authType: AuthType,
+  ): Promise<InferenceSecrets> => {
+    if (authType === "oauth") {
+      const row = requiredRow(
+        db
+          .query<Pick<Row, "access_token">, [string]>(
+            "SELECT access_token FROM credentials WHERE id = ?",
+          )
+          .get(id),
+        id,
+      );
+      return { accessToken: await open(row.access_token), apiKey: null };
+    }
+    const row = requiredRow(
+      db
+        .query<Pick<Row, "api_key">, [string]>("SELECT api_key FROM credentials WHERE id = ?")
+        .get(id),
+      id,
+    );
+    return { accessToken: null, apiKey: await open(row.api_key) };
+  };
+  const currentRefreshSecrets = async (id: string): Promise<RefreshSecrets> => {
+    const row = requiredRow(
+      db
+        .query<Pick<Row, "refresh_token">, [string]>(
+          "SELECT refresh_token FROM credentials WHERE id = ?",
+        )
+        .get(id),
+      id,
+    );
+    return { refreshToken: await open(row.refresh_token) };
+  };
+  const currentUsageSecrets = async (id: string): Promise<UsageSecrets> => {
+    const row = requiredRow(
+      db
+        .query<Pick<Row, "access_token">, [string]>(
+          "SELECT access_token FROM credentials WHERE id = ?",
+        )
+        .get(id),
+      id,
+    );
+    return { accessToken: await open(row.access_token) };
   };
 
   /** Decrypts lazily, so ranking N candidates costs zero decryptions. */
@@ -78,6 +132,21 @@ export function createCredentialRepo(
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     secrets: () => (loadCurrentSecrets ? currentSecrets(row.id) : secretsFrom(row)),
+    openForInference: async () => {
+      if (loadCurrentSecrets) return currentInferenceSecrets(row.id, row.auth_type as AuthType);
+      if (row.auth_type === "oauth") {
+        return { accessToken: await open(row.access_token), apiKey: null };
+      }
+      return { accessToken: null, apiKey: await open(row.api_key) };
+    },
+    openForRefresh: async () =>
+      loadCurrentSecrets
+        ? currentRefreshSecrets(row.id)
+        : { refreshToken: await open(row.refresh_token) },
+    openForUsage: async () =>
+      loadCurrentSecrets
+        ? currentUsageSecrets(row.id)
+        : { accessToken: await open(row.access_token) },
   });
 
   const seal = async (v: string | null | undefined): Promise<string | null> =>

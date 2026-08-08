@@ -56,6 +56,47 @@ test("tokens are encrypted at rest but decrypt through the thunk", async () => {
   db.close();
 });
 
+test("purpose-specific opening ignores unrelated malformed ciphertext", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  db.run("UPDATE credentials SET api_key = 'malformed', id_token = 'malformed' WHERE id = 'c1'");
+  const oauth = await repo.get("c1");
+  expect(await oauth?.openForInference()).toEqual({ accessToken: "test-token-1", apiKey: null });
+  expect(await oauth?.openForRefresh()).toEqual({ refreshToken: "test-token-2" });
+  expect(await oauth?.openForUsage()).toEqual({ accessToken: "test-token-1" });
+
+  await repo.create({
+    ...input,
+    id: "c2",
+    authType: "apiKey",
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "test-key-1",
+  });
+  db.run(
+    "UPDATE credentials SET access_token = 'malformed', refresh_token = 'malformed', id_token = 'malformed' WHERE id = 'c2'",
+  );
+  const apiKey = await repo.get("c2");
+  expect(await apiKey?.openForInference()).toEqual({ accessToken: null, apiKey: "test-key-1" });
+  db.close();
+});
+
+test("purpose-specific opening rejects malformed required ciphertext", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  db.run("UPDATE credentials SET access_token = 'malformed' WHERE id = 'c1'");
+  const malformedAccess = await repo.get("c1");
+  expect(malformedAccess?.openForInference()).rejects.toThrow("malformed ciphertext");
+  expect(malformedAccess?.openForUsage()).rejects.toThrow("malformed ciphertext");
+
+  db.run("UPDATE credentials SET refresh_token = 'malformed' WHERE id = 'c1'");
+  const malformedRefresh = await repo.get("c1");
+  expect(malformedRefresh?.openForRefresh()).rejects.toThrow("malformed ciphertext");
+  db.close();
+});
+
 test("list returns metadata without decrypting", async () => {
   const { repo, db } = await setup();
   await repo.create(input);
@@ -365,6 +406,23 @@ test("routing views load current secrets only when selected", async () => {
 
   await repo.updateSecrets("c1", { accessToken: "test-token-current" }, 5000);
   expect((await routing?.secrets())?.accessToken).toBe("test-token-current");
+  expect(await routing?.openForInference()).toEqual({
+    accessToken: "test-token-current",
+    apiKey: null,
+  });
+  expect(await routing?.openForUsage()).toEqual({ accessToken: "test-token-current" });
+  db.close();
+});
+
+test("routing purpose-specific loaders reject a removed credential", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  const [routing] = await repo.listRouting();
+
+  await repo.remove("c1");
+  expect(routing?.openForInference()).rejects.toThrow("credential c1 no longer exists");
+  expect(routing?.openForRefresh()).rejects.toThrow("credential c1 no longer exists");
+  expect(routing?.openForUsage()).rejects.toThrow("credential c1 no longer exists");
   db.close();
 });
 

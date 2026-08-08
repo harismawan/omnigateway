@@ -24,11 +24,12 @@ let seq = 0;
  */
 export function credential(overrides: Partial<CredentialView> = {}): CredentialView {
   const id = overrides.id ?? `cred-${++seq}`;
+  const authType = overrides.authType ?? "oauth";
   return {
     id,
     provider: "anthropic",
     label: id,
-    authType: "oauth",
+    authType,
     enabled: true,
     tier: 1,
     weight: 1,
@@ -46,6 +47,12 @@ export function credential(overrides: Partial<CredentialView> = {}): CredentialV
       apiKey: null,
       idToken: null,
     }),
+    openForInference: async () =>
+      authType === "oauth"
+        ? { accessToken: `test-token-${id}`, apiKey: null }
+        : { accessToken: null, apiKey: `test-key-${id}` },
+    openForRefresh: async () => ({ refreshToken: `test-refresh-${id}` }),
+    openForUsage: async () => ({ accessToken: `test-token-${id}` }),
     ...overrides,
   };
 }
