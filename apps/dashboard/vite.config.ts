@@ -25,8 +25,8 @@ export default defineConfig({
     proxy: {
       // Dev-only. In production the gateway serves the bundle from the same
       // origin, so these paths resolve without a proxy.
-      "/api": { target: "http://127.0.0.1:8787", changeOrigin: false },
-      "/oauth": { target: "http://127.0.0.1:8787", changeOrigin: false },
+      "/api": { target: "http://127.0.0.1:9000", changeOrigin: false },
+      "/oauth": { target: "http://127.0.0.1:9000", changeOrigin: false },
     },
   },
 });

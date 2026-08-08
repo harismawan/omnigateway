@@ -48,7 +48,7 @@ omni doctor --root <install>       # what it resolved, and whether it can act on
 Dashboard:
 
 ```bash
-bun run dev:dashboard              # Vite on 5173, proxies /api and /oauth to 8787
+bun run dev:dashboard              # Vite on 5173, proxies /api and /oauth to 9000
 bun run build:dashboard            # writes apps/dashboard/dist, which the gateway serves
 bun run --cwd apps/dashboard test  # needs a DOM; excluded from the root run
 ```

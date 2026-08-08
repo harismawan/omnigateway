@@ -77,7 +77,7 @@ Then set up and start:
 ```bash
 omni db migrate            # create the database
 omni admin set-password    # prompts; the console signs in with this
-omni start                 # serves the API and the console on 127.0.0.1:8787
+omni start                 # serves the API and the console on 127.0.0.1:9000
 ```
 
 Connect an account. The CLI prints a URL to open, and waits:
@@ -103,14 +103,14 @@ omni keys create --label laptop
 Now use it:
 
 ```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
+curl http://127.0.0.1:9000/v1/chat/completions \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer <gateway-key>' \
   -d '{"model": "fast", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
 Everything above is also available in the browser at
-`http://127.0.0.1:8787`, which walks the same steps.
+`http://127.0.0.1:9000`, which walks the same steps.
 
 ## Using it from a client
 
@@ -132,7 +132,7 @@ Ask for one of your virtual models by name. A bare provider model
 (`claude-sonnet-5`, `gpt-5`) also works if an account can serve it.
 
 Most tools that accept a custom base URL work unchanged: set it to
-`http://127.0.0.1:8787` and use a gateway key where the provider key goes.
+`http://127.0.0.1:9000` and use a gateway key where the provider key goes.
 
 ## The CLI
 
@@ -186,7 +186,7 @@ Configuration is environment variables, read from the installation's `.env`:
 | --- | --- | --- | --- |
 | `OMNI_ENCRYPTION_KEY` | Yes | — | Encrypts provider credentials at rest; 16 characters minimum |
 | `OMNI_HOST` | No | `127.0.0.1` | Listener host |
-| `OMNI_PORT` | No | `8787` | Listener port |
+| `OMNI_PORT` | No | `9000` | Listener port |
 | `OMNI_DB_PATH` | No | `./omnigateway.db` | SQLite database path |
 | `OMNI_BASE_URL` | No | derived from host and port | Public origin for OAuth callbacks; set this behind a reverse proxy |
 | `OMNI_STATIC_DIR` | No | the console shipped with the server | Serve a different console build |
@@ -203,13 +203,13 @@ client-identity overrides.
 ```bash
 docker build -t omnigateway .
 docker run --rm \
-  -p 8787:8787 \
+  -p 9000:9000 \
   -e OMNI_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
   -v omnigateway-data:/data \
   omnigateway
 ```
 
-The container listens on `0.0.0.0:8787` and keeps its database at
+The container listens on `0.0.0.0:9000` and keeps its database at
 `/data/omnigateway.db`. Note that **the image builds the gateway only**: it
 serves the APIs and returns 404 for the console. Use the CLI or the control API
 against it, or install the npm package if you want the console.
@@ -258,7 +258,7 @@ cd omnigateway
 bun install
 cp .env.example .env          # then set OMNI_ENCRYPTION_KEY
 bun run build:dashboard       # the gateway serves this build
-bun run dev                   # gateway on 8787, with file watching
+bun run dev                   # gateway on 9000, with file watching
 ```
 
 Releases are published to npm from a `v*` tag, with provenance attesting which

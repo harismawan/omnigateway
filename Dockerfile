@@ -16,12 +16,12 @@ COPY packages packages
 COPY apps/gateway apps/gateway
 
 ENV OMNI_HOST=0.0.0.0 \
-    OMNI_PORT=8787 \
+    OMNI_PORT=9000 \
     OMNI_DB_PATH=/data/omnigateway.db
 
 # Credentials outlive the container. Without this, `docker rm` deletes them.
 VOLUME /data
-EXPOSE 8787
+EXPOSE 9000
 
 # OMNI_ENCRYPTION_KEY is deliberately not set. The gateway refuses to boot
 # without it, which is the intended behaviour: baking a key into an image
