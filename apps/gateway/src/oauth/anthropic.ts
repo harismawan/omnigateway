@@ -1,14 +1,17 @@
 import { GatewayError } from "@omni/ir";
-import { PROFILES } from "@omni/providers";
+import { ANTHROPIC_CLI_VERSION, PROFILES } from "@omni/providers";
 import { createPkce, randomState } from "./pkce.ts";
 import {
   type FlowResult,
+  getJson,
   type OAuthDeps,
   type OAuthProvider,
   postJson,
   tokenErrorCode,
   tokenErrorMessage,
+  type UsageReport,
 } from "./types.ts";
+import { nestedOf, recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
 
 /**
  * The public OAuth client ID of the Claude CLI. Public clients cannot hold a
@@ -20,6 +23,7 @@ const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 const REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
 const SCOPES = "org:create_api_key user:profile user:inference";
+const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
 type TokenResponse = {
   access_token?: string;
@@ -65,6 +69,30 @@ function toResult(
     accountEmail: token.account?.email_address ?? null,
     providerData: {},
   };
+}
+
+/**
+ * Reads the subscription windows out of a usage payload.
+ *
+ * Anthropic reports a rolling five-hour window and a seven-day one, each with a
+ * `utilization` that is the percentage *used* and a `resets_at`. Either window
+ * may be absent — a plan without a weekly cap does not carry one — and the pair
+ * has been seen both at the top level and under a wrapper.
+ *
+ * Per-model weekly windows (`seven_day_opus` and friends) are deliberately not
+ * read: the router prices and picks a credential, not a credential-and-model
+ * quota pair, so a window we cannot act on would only make the tightest-window
+ * rule pessimistic.
+ */
+export function parseAnthropicUsage(value: unknown, now: number): UsageReport | null {
+  const root = recordOf(value);
+  if (root === null) return null;
+  const source = nestedOf(root, ["usage", "rate_limits", "limits"]) ?? root;
+
+  return reportFrom([
+    windowFrom(source.five_hour ?? source.fiveHour ?? source.session, "fiveHour", now),
+    windowFrom(source.seven_day ?? source.sevenDay ?? source.weekly, "weekly", now),
+  ]);
 }
 
 export const anthropicOAuth: OAuthProvider = {
@@ -117,5 +145,22 @@ export const anthropicOAuth: OAuthProvider = {
       deps,
     );
     return toResult(token, refreshToken, deps);
+  },
+
+  async usage(secrets, deps) {
+    if (secrets.accessToken === null) return null;
+    const { status, parsed } = await getJson(deps, USAGE_URL, PROFILES.anthropic, {
+      accessToken: secrets.accessToken,
+      extraHeaders: [
+        ["anthropic-beta", "oauth-2025-04-20"],
+        // The CLI does not reach this endpoint through its Stainless client, so
+        // it reports a different agent here than on /v1/messages. Sending the
+        // inference identity to an axios-shaped endpoint is the kind of
+        // mismatch that is louder than either header alone.
+        ["User-Agent", `claude-code/${ANTHROPIC_CLI_VERSION}`],
+      ],
+    });
+    if (!usageReadable(status, "anthropic")) return null;
+    return parseAnthropicUsage(parsed, deps.now());
   },
 };

@@ -20,6 +20,8 @@ const input = {
   expiresAt: 1000,
   accountEmail: "a@example.com",
   providerData: { deviceId: "d1" },
+  disabledReason: null,
+  disabledAt: null,
   accessToken: "test-token-1",
   refreshToken: "test-token-2",
   apiKey: null,
@@ -173,11 +175,69 @@ test("health and quota rows round-trip", async () => {
   expect(health[0]?.ewmaTtftMs).toBe(350);
 
   await repo.saveQuota([
-    { credentialId: "c1", windowType: "fiveHour", startsAt: 10, used: 5, limit: 100 },
+    {
+      credentialId: "c1",
+      windowType: "fiveHour",
+      startsAt: 10,
+      used: 5,
+      limit: 100,
+      resetsAt: 20,
+      observedAt: 15,
+    },
   ]);
   const quota = await repo.listQuota();
   expect(quota[0]?.used).toBe(5);
   expect(quota[0]?.limit).toBe(100);
+  db.close();
+});
+
+test("a quota snapshot round-trips its reset and observation times", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  await repo.saveQuota([
+    {
+      credentialId: "c1",
+      windowType: "weekly",
+      startsAt: 100,
+      used: 62,
+      limit: 100,
+      resetsAt: 900,
+      observedAt: 500,
+    },
+  ]);
+  // A second reading of the same window replaces the first rather than adding
+  // a row: the table holds the latest snapshot, not a history.
+  await repo.saveQuota([
+    {
+      credentialId: "c1",
+      windowType: "weekly",
+      startsAt: 200,
+      used: 71,
+      limit: 100,
+      resetsAt: 900,
+      observedAt: 600,
+    },
+  ]);
+
+  const rows = await repo.listQuota();
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ used: 71, resetsAt: 900, observedAt: 600 });
+  db.close();
+});
+
+test("a disabled reason round-trips and clears", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  await repo.update("c1", { enabled: false, disabledReason: "tokenRejected", disabledAt: 4_242 });
+
+  const disabled = await repo.get("c1");
+  expect(disabled?.disabledReason).toBe("tokenRejected");
+  expect(disabled?.disabledAt).toBe(4_242);
+
+  await repo.update("c1", { enabled: true, disabledReason: null, disabledAt: null });
+  const enabled = await repo.get("c1");
+  expect(enabled?.disabledReason).toBeNull();
+  expect(enabled?.disabledAt).toBeNull();
   db.close();
 });
 
@@ -226,7 +286,15 @@ test("remove cascades to health and quota rows", async () => {
     },
   ]);
   await repo.saveQuota([
-    { credentialId: "c1", windowType: "fiveHour", startsAt: 10, used: 5, limit: 100 },
+    {
+      credentialId: "c1",
+      windowType: "fiveHour",
+      startsAt: 10,
+      used: 5,
+      limit: 100,
+      resetsAt: 20,
+      observedAt: 15,
+    },
   ]);
 
   await repo.remove("c1");

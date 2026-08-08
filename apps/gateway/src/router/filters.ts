@@ -82,8 +82,12 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
         }
       }
 
+      // A snapshot is a reading from a moment in time. Once the provider's own
+      // reset time has passed, an exhausted window says nothing about now, and
+      // holding the credential out until the next poll would strand it for as
+      // long as the poll interval.
       const spent = (snapshot.quota.get(credential.id) ?? []).find(
-        (w) => w.limit !== null && w.used >= w.limit,
+        (w) => w.limit !== null && w.used >= w.limit && (w.resetsAt === null || w.resetsAt > now),
       );
       if (spent !== undefined) {
         drop(`quota:${spent.windowType}`);

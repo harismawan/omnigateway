@@ -2,7 +2,13 @@ import { Link } from "@tanstack/react-router";
 import styled from "styled-components";
 import type { Credential, CredentialHealth, QuotaWindow, UsageBucket } from "../../api/types.ts";
 import { formatCount, formatMs, formatRelative } from "../../lib/format.ts";
-import { credentialStatus, groupBy, tightestQuota, WINDOW_LABEL } from "../../lib/vitals.ts";
+import {
+  credentialStatus,
+  groupBy,
+  quotaLegend,
+  tightestQuota,
+  WINDOW_LABEL,
+} from "../../lib/vitals.ts";
 import { Button } from "../../ui/Button.tsx";
 import { ProviderTag } from "../../ui/Chip.tsx";
 import { Lamp } from "../../ui/Lamp.tsx";
@@ -36,6 +42,8 @@ export type AccountRackProps = {
   quota: readonly QuotaWindow[];
   /** Usage grouped by credential; the key is the credential id. */
   usage: readonly UsageBucket[];
+  /** Poll interval, so a reading can be called stale on the same rule everywhere. */
+  quotaPollIntervalMs: number;
   now: number;
 };
 
@@ -44,7 +52,14 @@ export type AccountRackProps = {
  * window closest to blocking, observed latency, and how much traffic it took.
  * Sorted worst-first, because a healthy pool is not what needs reading.
  */
-export function AccountRack({ credentials, health, quota, usage, now }: AccountRackProps) {
+export function AccountRack({
+  credentials,
+  health,
+  quota,
+  usage,
+  quotaPollIntervalMs,
+  now,
+}: AccountRackProps) {
   const healthByCredential = groupBy(health, (row) => row.credentialId);
   const quotaByCredential = groupBy(quota, (row) => row.credentialId);
   const usageByCredential = new Map(usage.map((row) => [row.key, row]));
@@ -57,6 +72,7 @@ export function AccountRack({ credentials, health, quota, usage, now }: AccountR
         healthByCredential.get(credential.id) ?? [],
         now,
         credential.enabled,
+        credential.disabledReason,
       ),
       quota: tightestQuota(quotaByCredential.get(credential.id) ?? []),
       usage: usageByCredential.get(credential.id),
@@ -124,14 +140,16 @@ export function AccountRack({ credentials, health, quota, usage, now }: AccountR
                   </Td>
                   <Td>
                     {tightest === null ? (
-                      <Note>no limit</Note>
+                      <Note>unknown</Note>
                     ) : (
                       <QuotaCell>
                         <Meter
                           fraction={tightest.fraction}
                           label={`${WINDOW_LABEL[tightest.window.windowType]} window, ${Math.round(tightest.fraction * 100)}% used`}
                         />
-                        <Legend>{WINDOW_LABEL[tightest.window.windowType]}</Legend>
+                        <Legend>
+                          {quotaLegend(tightest.window, now, quotaPollIntervalMs, formatRelative)}
+                        </Legend>
                       </QuotaCell>
                     )}
                   </Td>

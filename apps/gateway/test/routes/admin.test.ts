@@ -217,6 +217,37 @@ test("patching a credential updates tier, weight and enabled", async () => {
   expect(reloaded?.enabled).toBe(false);
 });
 
+test("the operator's own toggle is recorded as a manual disable", async () => {
+  const { call, store } = await harness();
+  await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
+
+  await call("PATCH", "/api/credentials/c1", { enabled: false });
+  const disabled = await store.credentials.get("c1");
+  expect(disabled?.disabledReason).toBe("manual");
+  expect(disabled?.disabledAt).toBe(NOW);
+
+  await call("PATCH", "/api/credentials/c1", { enabled: true });
+  const reenabled = await store.credentials.get("c1");
+  expect(reenabled?.disabledReason).toBeNull();
+  expect(reenabled?.disabledAt).toBeNull();
+});
+
+test("the credential list carries why an account stopped routing", async () => {
+  const { call, store } = await harness();
+  await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
+  await store.credentials.update("c1", {
+    enabled: false,
+    disabledReason: "tokenRejected",
+    disabledAt: NOW,
+  });
+
+  const body = (await (await call("GET", "/api/credentials")).json()) as {
+    credentials: Array<{ disabledReason: string | null; disabledAt: number | null }>;
+  };
+  expect(body.credentials[0]?.disabledReason).toBe("tokenRejected");
+  expect(body.credentials[0]?.disabledAt).toBe(NOW);
+});
+
 test("patching a credential cannot inject a token", async () => {
   const { call, store } = await harness();
   await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
@@ -399,7 +430,15 @@ test("credential health returns the health and quota rows the dashboard renders"
     },
   ]);
   await store.credentials.saveQuota([
-    { credentialId: "c1", windowType: "fiveHour", startsAt: NOW, used: 250, limit: 1_000 },
+    {
+      credentialId: "c1",
+      windowType: "fiveHour",
+      startsAt: NOW,
+      used: 250,
+      limit: 1_000,
+      resetsAt: NOW + 3_600_000,
+      observedAt: NOW,
+    },
   ]);
 
   const response = await call("GET", "/api/credentials/health");

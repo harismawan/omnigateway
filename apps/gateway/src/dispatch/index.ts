@@ -14,13 +14,11 @@ import type {
   Store,
   VirtualModel,
 } from "@omni/store";
+import { DISPATCH_REFRESH_LEAD_MS } from "../oauth/lead.ts";
 import { blankHealth, recordFailure, recordSuccess } from "../router/breaker.ts";
 import { buildSnapshot, type Candidate, healthKey, rank, resolveModel } from "../router/index.ts";
 import { attempt } from "./attempt.ts";
 import { classify } from "./classify.ts";
-
-/** Refresh this far ahead of expiry so a long stream cannot outlive its token. */
-const REFRESH_LEAD_MS = 120_000;
 
 export type DispatchDeps = {
   store: Store;
@@ -167,7 +165,7 @@ export async function dispatch(
         const preemptiveRefreshRequired =
           candidate.credential.authType === "oauth" &&
           candidate.credential.expiresAt !== null &&
-          candidate.credential.expiresAt - REFRESH_LEAD_MS <= attemptNow;
+          candidate.credential.expiresAt - DISPATCH_REFRESH_LEAD_MS <= attemptNow;
 
         while (true) {
           try {
@@ -181,7 +179,7 @@ export async function dispatch(
                 signal: dispatchSignal,
                 refresh: (credential) =>
                   waitForCancellation(deps.refresh(credential), dispatchSignal),
-                refreshLeadMs: REFRESH_LEAD_MS,
+                refreshLeadMs: DISPATCH_REFRESH_LEAD_MS,
                 ...(retrySecrets === undefined ? {} : { secrets: retrySecrets }),
               }),
               dispatchSignal,

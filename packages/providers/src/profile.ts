@@ -90,7 +90,13 @@ export function mergeHeaders(
 
 const host = stainlessHost(process.platform, process.arch);
 
-const ANTHROPIC_CLI_VERSION = env("OMNI_ANTHROPIC_CLI_VERSION", "2.1.219");
+/**
+ * Exported because not every Anthropic call wears the same identity: the CLI
+ * reaches `/v1/messages` through its Stainless client but reads its account
+ * usage with plain axios, so that request reports `claude-code/<version>`
+ * rather than `claude-cli/<version> (external, cli)`.
+ */
+export const ANTHROPIC_CLI_VERSION = env("OMNI_ANTHROPIC_CLI_VERSION", "2.1.219");
 
 const anthropic: ClientProfile = {
   headers: [

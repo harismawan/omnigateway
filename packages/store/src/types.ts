@@ -4,6 +4,16 @@ export type BreakerState = "closed" | "open" | "halfOpen";
 export type AuthType = "oauth" | "apiKey";
 export type WindowType = "fiveHour" | "daily" | "weekly";
 
+/**
+ * Why a credential is not routing.
+ *
+ * `tokenRejected` is the provider's verdict on a refresh: the credential cannot
+ * be revived without reconnecting. `expiredNoRefresh` is ours, for an OAuth
+ * credential that ran out with nothing to refresh from. `manual` is the
+ * operator's own switch, and is the only one they can undo with a toggle.
+ */
+export type DisabledReason = "tokenRejected" | "expiredNoRefresh" | "manual";
+
 export type Credential = {
   id: string;
   provider: ProviderId;
@@ -17,6 +27,9 @@ export type Credential = {
   accountEmail: string | null;
   /** Provider-specific durable state, e.g. Kimi device identity, Codex workspace id. */
   providerData: Record<string, unknown>;
+  /** Why `enabled` is false. Null whenever the credential is enabled. */
+  disabledReason: DisabledReason | null;
+  disabledAt: number | null;
   /**
    * Derived at read time, never written. Lets the router decide whether an
    * expired credential can be revived without decrypting anything.
@@ -52,13 +65,27 @@ export type CredentialHealth = {
   lastUsedAt: number | null;
 };
 
+/**
+ * One provider-reported usage window for one credential.
+ *
+ * `used` and `limit` are in whatever unit the provider reported. A provider
+ * that only gives a percentage is stored as `used: 87, limit: 100`, which keeps
+ * every consumer on the same ratio arithmetic.
+ */
 export type QuotaWindow = {
   credentialId: string;
   windowType: WindowType;
   startsAt: number;
   used: number;
-  /** Null means the operator configured no limit; the quota filter never excludes. */
+  /** Null means the provider reported usage without a ceiling to measure it against. */
   limit: number | null;
+  /** When the provider says the window rolls over, or null when it did not say. */
+  resetsAt: number | null;
+  /**
+   * When this reading was taken. Zero for a row written before snapshots
+   * existed; readers treat that as never observed rather than as current.
+   */
+  observedAt: number;
 };
 
 export type Target = {
@@ -130,6 +157,8 @@ export type Settings = {
   breakerThreshold: number;
   breakerCooldownMs: number;
   logRetentionDays: number;
+  /** How often provider quota is polled. Zero disables polling entirely. */
+  quotaPollIntervalMs: number;
 };
 
 export interface CredentialRepo {
@@ -244,4 +273,5 @@ export const DEFAULT_SETTINGS: Settings = {
   breakerThreshold: 3,
   breakerCooldownMs: 30_000,
   logRetentionDays: 30,
+  quotaPollIntervalMs: 300_000,
 };

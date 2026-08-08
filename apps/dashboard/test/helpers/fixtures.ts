@@ -25,6 +25,8 @@ export function credential(patch: Partial<Credential> = {}): Credential {
     expiresAt: NOW + 3_600_000,
     accountEmail: "ops@example.com",
     providerData: {},
+    disabledReason: null,
+    disabledAt: null,
     hasRefreshToken: true,
     createdAt: NOW - 86_400_000,
     updatedAt: NOW,
@@ -53,6 +55,8 @@ export function quota(patch: Partial<QuotaWindow> = {}): QuotaWindow {
     startsAt: NOW - 3_600_000,
     used: 500,
     limit: 1_000,
+    resetsAt: NOW + 3_600_000,
+    observedAt: NOW - 60_000,
     ...patch,
   };
 }
@@ -135,6 +139,7 @@ export const settings: Settings = {
   breakerThreshold: 3,
   breakerCooldownMs: 30_000,
   logRetentionDays: 30,
+  quotaPollIntervalMs: 300_000,
 };
 
 export const dryRunResult: DryRunResult = {

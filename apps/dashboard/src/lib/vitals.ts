@@ -1,4 +1,4 @@
-import type { CredentialHealth, QuotaWindow, RequestLog } from "../api/types.ts";
+import type { CredentialHealth, DisabledReason, QuotaWindow, RequestLog } from "../api/types.ts";
 
 /**
  * Derivations the gateway does not compute for us. The control API exposes raw
@@ -120,6 +120,12 @@ export const LAMP_GLYPH: Record<LampState, string> = {
   idle: "·",
 };
 
+/** What the operator has to do, not what the gateway observed. */
+const RECONNECT_NOTE: Record<"tokenRejected" | "expiredNoRefresh", string> = {
+  tokenRejected: "reconnect needed — provider rejected the refresh token",
+  expiredNoRefresh: "reconnect needed — token expired with nothing to refresh from",
+};
+
 export type CredentialStatus = {
   state: LampState;
   /** Short reason, shown next to the lamp. Empty when nothing is wrong. */
@@ -140,11 +146,18 @@ export function credentialStatus(
   rows: readonly CredentialHealth[],
   now: number,
   enabled: boolean,
+  disabledReason: DisabledReason | null = null,
 ): CredentialStatus {
   if (!enabled) {
+    // A credential the provider repudiated is not the same as one the operator
+    // switched off: it needs a reconnect, and nothing routes until it gets one.
+    // Showing both as a quiet "disabled" is how a dead account goes unnoticed
+    // until requests start failing.
+    const needsReconnect =
+      disabledReason === "tokenRejected" || disabledReason === "expiredNoRefresh";
     return {
-      state: "idle",
-      note: "disabled",
+      state: needsReconnect ? "down" : "idle",
+      note: needsReconnect ? RECONNECT_NOTE[disabledReason] : "disabled",
       ttftMs: null,
       lastUsedAt: null,
       consecutiveFailures: 0,
@@ -200,6 +213,46 @@ export const WINDOW_LABEL: Record<QuotaWindow["windowType"], string> = {
 };
 
 export type QuotaUse = { window: QuotaWindow; fraction: number };
+
+/**
+ * How old a reading may be before the console stops presenting it as current.
+ *
+ * Three poll intervals: one missed poll is a blip, three in a row means the
+ * probe is not getting through and the bar is describing the past.
+ */
+export function quotaStaleAfterMs(pollIntervalMs: number): number {
+  return Math.max(pollIntervalMs, 60_000) * 3;
+}
+
+/** True once a snapshot is old enough that it should be labelled, not trusted. */
+export function isQuotaStale(window: QuotaWindow, now: number, pollIntervalMs: number): boolean {
+  // Zero means the row predates snapshots, or polling has never succeeded.
+  if (window.observedAt <= 0) return true;
+  return now - window.observedAt > quotaStaleAfterMs(pollIntervalMs);
+}
+
+/**
+ * What to print under a quota bar: which window it is, and how much to trust it.
+ *
+ * A fresh reading gets its reset time, which is the number the operator plans
+ * around. A stale one says so instead, because a bar drawn from an old reading
+ * with a countdown beside it reads as live when it is not.
+ */
+export function quotaLegend(
+  window: QuotaWindow,
+  now: number,
+  pollIntervalMs: number,
+  formatRelative: (at: number, now: number) => string,
+): string {
+  const label = WINDOW_LABEL[window.windowType];
+  if (window.observedAt <= 0) return `${label} · never observed`;
+  if (isQuotaStale(window, now, pollIntervalMs)) {
+    return `${label} · stale, read ${formatRelative(window.observedAt, now)}`;
+  }
+  return window.resetsAt === null
+    ? label
+    : `${label} · resets ${formatRelative(window.resetsAt, now)}`;
+}
 
 /** The window closest to exhaustion, which is the one that will block first. */
 export function tightestQuota(windows: readonly QuotaWindow[]): QuotaUse | null {

@@ -107,8 +107,8 @@ test("prefers the credential with more quota headroom", () => {
     snapshot: snapshot({
       credentials: [credential({ id: "drained" }), credential({ id: "fresh" })],
       quota: [
-        quota({ credentialId: "drained", used: 90, limit: 100 }),
-        quota({ credentialId: "fresh", used: 10, limit: 100 }),
+        quota({ credentialId: "drained", used: 90, limit: 100, observedAt: NOW }),
+        quota({ credentialId: "fresh", used: 10, limit: 100, observedAt: NOW }),
       ],
       settings: { weights: { tier: 0, health: 0, quota: 1, cost: 0, latency: 0, recency: 0 } },
     }),
@@ -248,4 +248,109 @@ test("ranking is stable for identical inputs", () => {
       (c) => c.credential.id,
     );
   expect(ids()).toEqual(ids());
+});
+
+test("the weighted lottery draws a near-spent account less often than its weight says", () => {
+  const snapshotWith = () =>
+    snapshot({
+      credentials: [
+        credential({ id: "drained", weight: 1 }),
+        credential({ id: "fresh", weight: 1 }),
+      ],
+      quota: [
+        quota({ credentialId: "drained", used: 95, limit: 100, observedAt: NOW, resetsAt: null }),
+        quota({ credentialId: "fresh", used: 5, limit: 100, observedAt: NOW, resetsAt: null }),
+      ],
+    });
+
+  // Equal configured weights, so the draw is decided by headroom alone: 0.05
+  // against 0.95, which puts the crossover at five percent of the cursor.
+  const early = rank({
+    request: req,
+    model: model([target()], "weighted"),
+    snapshot: snapshotWith(),
+    now: NOW,
+    rand: 0.04,
+  });
+  expect(early.candidates[0]?.credential.id).toBe("drained");
+
+  const later = rank({
+    request: req,
+    model: model([target()], "weighted"),
+    snapshot: snapshotWith(),
+    now: NOW,
+    rand: 0.06,
+  });
+  expect(later.candidates[0]?.credential.id).toBe("fresh");
+});
+
+test("a candidate with no headroom left is never drawn by the lottery", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model([target()], "weighted"),
+    snapshot: snapshot({
+      credentials: [credential({ id: "spent" }), credential({ id: "fresh" })],
+      quota: [
+        // Not yet excluded by the filter: the reading is one request old and the
+        // window has not rolled over, but there is nothing left to draw on.
+        quota({ credentialId: "spent", used: 100, limit: 100, observedAt: NOW, resetsAt: null }),
+        quota({ credentialId: "fresh", used: 0, limit: 100, observedAt: NOW, resetsAt: null }),
+      ],
+    }),
+    now: NOW,
+    rand: 0.999,
+  });
+  expect(candidates[0]?.credential.id).toBe("fresh");
+});
+
+test("round robin skips past an account close to exhaustion", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model([target()], "roundRobin"),
+    snapshot: snapshot({
+      credentials: [credential({ id: "idle-but-spent" }), credential({ id: "busier" })],
+      health: [
+        health({ credentialId: "idle-but-spent", lastUsedAt: NOW - 600_000 }),
+        health({ credentialId: "busier", lastUsedAt: NOW - 1_000 }),
+      ],
+      quota: [
+        quota({
+          credentialId: "idle-but-spent",
+          used: 97,
+          limit: 100,
+          observedAt: NOW,
+          resetsAt: null,
+        }),
+        quota({ credentialId: "busier", used: 20, limit: 100, observedAt: NOW, resetsAt: null }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+
+  // Strict least-recently-used would pick the idle account and spend the rest
+  // of its window on requests that are about to start failing.
+  expect(candidates[0]?.credential.id).toBe("busier");
+  expect(candidates[1]?.credential.id).toBe("idle-but-spent");
+});
+
+test("round robin still rotates when both accounts have headroom", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model([target()], "roundRobin"),
+    snapshot: snapshot({
+      credentials: [credential({ id: "idle" }), credential({ id: "busier" })],
+      health: [
+        health({ credentialId: "idle", lastUsedAt: NOW - 600_000 }),
+        health({ credentialId: "busier", lastUsedAt: NOW - 1_000 }),
+      ],
+      quota: [
+        quota({ credentialId: "idle", used: 40, limit: 100, observedAt: NOW, resetsAt: null }),
+        quota({ credentialId: "busier", used: 20, limit: 100, observedAt: NOW, resetsAt: null }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(candidates[0]?.credential.id).toBe("idle");
 });

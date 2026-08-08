@@ -3,6 +3,7 @@ import {
   useCredentials,
   useLogs,
   useModels,
+  useSettings,
   useUsage,
 } from "../../api/queries.ts";
 import { PageHead } from "../../components/Rack.tsx";
@@ -30,6 +31,7 @@ export function OverviewBoard() {
   const health = useCredentialHealth(cadence(10_000));
   const models = useModels();
   const logs = useLogs(500, cadence(10_000));
+  const settings = useSettings();
 
   const now = Date.now();
   const since = Math.floor((now - WINDOW_MS) / 60_000) * 60_000;
@@ -39,8 +41,12 @@ export function OverviewBoard() {
   const healthByCredential = groupBy(health.data?.health ?? [], (row) => row.credentialId);
   const faults = rows.filter(
     (credential) =>
-      credentialStatus(healthByCredential.get(credential.id) ?? [], now, credential.enabled)
-        .state === "down",
+      credentialStatus(
+        healthByCredential.get(credential.id) ?? [],
+        now,
+        credential.enabled,
+        credential.disabledReason,
+      ).state === "down",
   );
 
   const summary =
@@ -49,7 +55,9 @@ export function OverviewBoard() {
       : rows.length === 0
         ? "No accounts are connected, so every request fails at the router."
         : faults.length > 0
-          ? `${faults.length} account${faults.length === 1 ? " has" : "s have"} an open breaker and ${faults.length === 1 ? "is" : "are"} out of rotation.`
+          ? // "Out of rotation" covers both faults now: an open breaker and a
+            // credential the provider repudiated. The row itself says which.
+            `${faults.length} account${faults.length === 1 ? " is" : "s are"} out of rotation.`
           : `All ${rows.length} accounts are answering. Nothing needs attention.`;
 
   return (
@@ -73,6 +81,7 @@ export function OverviewBoard() {
             health={health.data?.health ?? []}
             quota={health.data?.quota ?? []}
             usage={usage.data ?? []}
+            quotaPollIntervalMs={settings.data?.quotaPollIntervalMs ?? 300_000}
             now={now}
           />
 

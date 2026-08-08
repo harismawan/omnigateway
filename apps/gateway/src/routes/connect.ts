@@ -115,6 +115,8 @@ export function connectRoutes(deps: ConnectDeps) {
       expiresAt: result.expiresAt,
       accountEmail: result.accountEmail,
       providerData: result.providerData,
+      disabledReason: null,
+      disabledAt: null,
       ...result.secrets,
     });
     return { id };

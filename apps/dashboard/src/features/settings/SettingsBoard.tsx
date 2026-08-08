@@ -15,7 +15,11 @@ type WeightKey = keyof Settings["weights"];
 const WEIGHTS: ReadonlyArray<{ id: WeightKey; label: string; blurb: string }> = [
   { id: "tier", label: "Tier", blurb: "How strongly a lower tier is preferred." },
   { id: "health", label: "Health", blurb: "Penalty for recent failures and an open breaker." },
-  { id: "quota", label: "Quota", blurb: "Preference for accounts with headroom left." },
+  {
+    id: "quota",
+    label: "Quota",
+    blurb: "Preference for accounts keeping ahead of their window's burn rate.",
+  },
   { id: "cost", label: "Cost", blurb: "Preference for the cheaper target of the candidates." },
   { id: "latency", label: "Latency", blurb: "Preference for the faster observed first token." },
   { id: "recency", label: "Recency", blurb: "Preference for accounts that have been idle." },
@@ -68,6 +72,14 @@ const LIMITS: ReadonlyArray<{
     unit: "days",
     step: 1,
     min: 1,
+  },
+  {
+    id: "quotaPollIntervalMs",
+    label: "Quota poll interval",
+    hint: "How often each account's provider is asked for its remaining quota. 0 disables polling. Takes effect on restart.",
+    unit: "ms",
+    step: 60_000,
+    min: 0,
   },
 ];
 

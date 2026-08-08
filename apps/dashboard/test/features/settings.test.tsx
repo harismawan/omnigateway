@@ -25,6 +25,26 @@ describe("SettingsBoard", () => {
     expect((screen.getByLabelText("Recency") as HTMLInputElement).value).toBe("0.5");
   });
 
+  test("the quota poll interval is editable and can be switched off", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });
+    renderWithProviders(<SettingsBoard />);
+
+    const field = (await screen.findByLabelText("Quota poll interval")) as HTMLInputElement;
+    expect(field.value).toBe("300000");
+
+    await user.clear(field);
+    await user.type(field, "0");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put).toBeTruthy();
+      const body = JSON.parse(String(put?.init?.body)) as { quotaPollIntervalMs: number };
+      expect(body.quotaPollIntervalMs).toBe(0);
+    });
+  });
+
   test("saving sends numbers, not the strings the fields hold", async () => {
     const user = userEvent.setup();
     const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });

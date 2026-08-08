@@ -1,12 +1,14 @@
 import { GatewayError } from "@omni/ir";
 import { type KimiDevice, kimiDeviceHeaders, mintKimiDevice, PROFILES } from "@omni/providers";
-import type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider } from "./types.ts";
-import { postJson, tokenErrorCode, tokenErrorMessage } from "./types.ts";
+import type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider, UsageReport } from "./types.ts";
+import { getJson, postJson, tokenErrorCode, tokenErrorMessage } from "./types.ts";
+import { recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
 
 /** Public client ID of the Kimi CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
 const DEVICE_CODE_URL = "https://auth.kimi.com/api/oauth/device_authorization";
 const TOKEN_URL = "https://auth.kimi.com/api/oauth/token";
+const USAGE_URL = "https://api.kimi.com/coding/v1/usages";
 const DEFAULT_INTERVAL_SECONDS = 5;
 
 /** Errors that mean "keep polling" rather than "this flow failed". */
@@ -161,6 +163,27 @@ function toResult(
   };
 }
 
+/**
+ * Reads a Kimi usage payload.
+ *
+ * Kimi answers with one plan window under `usage`, whose counters are strings:
+ * `{"limit": "100", "used": "92", "remaining": "8", "resetTime": ...}`. It is
+ * the weekly allowance, which is what a Kimi Coding plan is sold in.
+ *
+ * The sibling `limits` array describes per-minute request ceilings rather than
+ * the plan window. Those are burst limits the breaker already reacts to, and
+ * mixing them into the tightest-window rule would park an account for a minute
+ * of throttling as if its subscription were spent.
+ *
+ * Exported for fixture tests.
+ */
+export function parseKimiUsage(value: unknown, now: number): UsageReport | null {
+  const root = recordOf(value);
+  if (root === null) return null;
+
+  return reportFrom([windowFrom(root.usage ?? root.Usage, "weekly", now)]);
+}
+
 export const kimiOAuth: OAuthProvider = {
   id: "kimi",
   kind: "device",
@@ -227,5 +250,18 @@ export const kimiOAuth: OAuthProvider = {
       ),
     );
     return toResult(token, device, refreshToken, deps);
+  },
+
+  async usage(secrets, deps, providerData) {
+    if (secrets.accessToken === null) return null;
+    const device = deviceFrom(providerData);
+    const { status, parsed } = await getJson(deps, USAGE_URL, PROFILES.kimi, {
+      accessToken: secrets.accessToken,
+      // The device identity the credential was minted with. Kimi ties a session
+      // to it, and a probe from an unknown device is answered differently.
+      extraHeaders: kimiDeviceHeaders(device),
+    });
+    if (!usageReadable(status, "kimi")) return null;
+    return parseKimiUsage(parsed, deps.now());
   },
 };

@@ -105,6 +105,8 @@ const settingsSchema = z.object({
   breakerThreshold: z.number().int().min(1),
   breakerCooldownMs: z.number().int().positive(),
   logRetentionDays: z.number().int().min(1),
+  /** Zero disables quota polling. Takes effect at the next restart. */
+  quotaPollIntervalMs: z.number().int().min(0),
 });
 
 /** Only these credential fields are operator-editable. Secrets are not. */
@@ -275,6 +277,8 @@ export function adminRoutes(deps: AdminDeps) {
           expiresAt: c.expiresAt,
           accountEmail: c.accountEmail,
           providerData: c.providerData,
+          disabledReason: c.disabledReason,
+          disabledAt: c.disabledAt,
           hasRefreshToken: c.hasRefreshToken,
           createdAt: c.createdAt,
           updatedAt: c.updatedAt,
@@ -299,7 +303,17 @@ export function adminRoutes(deps: AdminDeps) {
 
       await deps.store.credentials.update(params.id, {
         ...(patch.label === undefined ? {} : { label: patch.label }),
-        ...(patch.enabled === undefined ? {} : { enabled: patch.enabled }),
+        // The toggle is the operator's own verdict, so it overwrites whatever
+        // reason was there. Re-enabling a credential the provider repudiated is
+        // allowed: the operator may know something we do not, and the next
+        // refresh will disable it again if they do not.
+        ...(patch.enabled === undefined
+          ? {}
+          : {
+              enabled: patch.enabled,
+              disabledReason: patch.enabled ? null : ("manual" as const),
+              disabledAt: patch.enabled ? null : deps.now(),
+            }),
         ...(patch.tier === undefined ? {} : { tier: patch.tier }),
         ...(patch.weight === undefined ? {} : { weight: patch.weight }),
       });

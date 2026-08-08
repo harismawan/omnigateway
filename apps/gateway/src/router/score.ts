@@ -1,4 +1,5 @@
 import type { Pair } from "./filters.ts";
+import { quotaHeadroom } from "./quota.ts";
 import { healthKey } from "./snapshot.ts";
 import type { Candidate, RankInput } from "./types.ts";
 
@@ -56,12 +57,12 @@ export function score(pairs: Pair[], input: RankInput): Candidate[] {
     let health = 1 / (1 + (h?.consecutiveFailures ?? 0));
     if (h?.breakerState === "open" || h?.breakerState === "halfOpen") health *= 0.5;
 
-    const windows = snapshot.quota.get(pair.credential.id) ?? [];
-    const limited = windows.filter((q) => q.limit !== null);
-    const quota =
-      limited.length === 0
-        ? 1
-        : Math.min(...limited.map((q) => Math.max(0, 1 - q.used / (q.limit as number))));
+    const quota = quotaHeadroom(
+      pair.credential,
+      snapshot.quota.get(pair.credential.id) ?? [],
+      now,
+      snapshot.settings.quotaPollIntervalMs,
+    );
 
     // A zero-priced target means "unpriced", not "free"; treat it as unknown.
     const cost = maxCost === 0 ? UNKNOWN : lowerIsBetter(costs[i] as number, minCost, maxCost);

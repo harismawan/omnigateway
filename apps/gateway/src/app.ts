@@ -7,7 +7,7 @@ import { Elysia } from "elysia";
 import { createAdminAuth } from "./auth/admin.ts";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
 import { OAUTH_PROVIDERS } from "./oauth/index.ts";
-import { createRefresher } from "./oauth/refresh.ts";
+import { createRefresher, type Refresher } from "./oauth/refresh.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectRoutes } from "./routes/connect.ts";
 import { proxyRoutes } from "./routes/proxy.ts";
@@ -21,6 +21,15 @@ export type AppDeps = {
   http?: HttpClient;
   adapters?: Readonly<Record<ProviderId, ProviderAdapter>>;
   requestId?: () => string;
+  /**
+   * Shared with the background loops by the bootstrap.
+   *
+   * One refresher process-wide, because its coalescing map is what stops a
+   * scheduled sweep and a live request from each running a refresh against a
+   * provider that rotates refresh tokens. Two refreshers would each be
+   * internally consistent and jointly wrong.
+   */
+  refresh?: Refresher;
   /** Absolute directory containing the built dashboard bundle. */
   staticDir?: string;
 };
@@ -36,12 +45,14 @@ export function createApp(deps: AppDeps) {
   const rateLimiter = new ApiKeyRateLimiter(now);
 
   const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS });
-  const refresh = createRefresher({
-    store: deps.store,
-    providers: OAUTH_PROVIDERS,
-    http,
-    now,
-  });
+  const refresh =
+    deps.refresh ??
+    createRefresher({
+      store: deps.store,
+      providers: OAUTH_PROVIDERS,
+      http,
+      now,
+    });
 
   const staticDir = deps.staticDir ? resolve(deps.staticDir) : undefined;
   let staticRoot: string | undefined;

@@ -36,6 +36,8 @@ export function credential(overrides: Partial<CredentialView> = {}): CredentialV
     expiresAt: null,
     accountEmail: null,
     providerData: {},
+    disabledReason: null,
+    disabledAt: null,
     hasRefreshToken: true,
     createdAt: 0,
     updatedAt: 0,
@@ -82,6 +84,8 @@ export function quota(overrides: Partial<QuotaWindow> = {}): QuotaWindow {
     startsAt: 0,
     used: 0,
     limit: null,
+    resetsAt: null,
+    observedAt: 0,
     ...overrides,
   };
 }
@@ -115,6 +119,8 @@ export async function seedCredential(store: Store, overrides: SeedCredentialInpu
     expiresAt: null,
     accountEmail: null,
     providerData: {},
+    disabledReason: null,
+    disabledAt: null,
     accessToken: `test-token-${overrides.id}`,
     refreshToken: `test-refresh-${overrides.id}`,
     apiKey: null,

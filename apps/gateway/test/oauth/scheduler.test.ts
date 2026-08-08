@@ -1,0 +1,183 @@
+import { expect, test } from "bun:test";
+import { GatewayError } from "@omni/ir";
+import { nodeHttpClient } from "@omni/providers";
+import type { CredentialSecrets, CredentialView, Store } from "@omni/store";
+import { SCHEDULER_REFRESH_LEAD_MS } from "../../src/oauth/lead.ts";
+import { createRefresher } from "../../src/oauth/refresh.ts";
+import { due, startRefreshScheduler, sweep } from "../../src/oauth/scheduler.ts";
+import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
+import { credential, memoryStore, seedCredential } from "../helpers/fixtures.ts";
+
+const NOW = 1_000_000;
+
+function fakeProvider(
+  impl: (refreshToken: string) => Promise<FlowResult>,
+): Readonly<Record<string, OAuthProvider>> {
+  const provider = {
+    id: "anthropic",
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: () => {
+      throw new Error("unused");
+    },
+    exchange: async () => {
+      throw new Error("unused");
+    },
+    refresh: async (token: string) => impl(token),
+  } as unknown as OAuthProvider;
+  return { anthropic: provider, openai: provider, kimi: provider };
+}
+
+const result = (accessToken: string): FlowResult => ({
+  secrets: { accessToken, refreshToken: "test-token-9", apiKey: null, idToken: null },
+  expiresAt: NOW + 3_600_000,
+  accountEmail: "user@example.com",
+  providerData: {},
+});
+
+function refresherFor(
+  store: Store,
+  impl: (refreshToken: string) => Promise<FlowResult>,
+): (view: CredentialView) => Promise<CredentialSecrets> {
+  return createRefresher({
+    store,
+    providers: fakeProvider(impl),
+    http: nodeHttpClient(),
+    now: () => NOW,
+  });
+}
+
+test("due selects only enabled oauth credentials inside the lead window", () => {
+  const inside = credential({ id: "inside", expiresAt: NOW + SCHEDULER_REFRESH_LEAD_MS - 1 });
+  const rows = [
+    inside,
+    credential({ id: "later", expiresAt: NOW + SCHEDULER_REFRESH_LEAD_MS + 60_000 }),
+    credential({ id: "never", expiresAt: null }),
+    credential({ id: "disabled", expiresAt: NOW - 1, enabled: false }),
+    credential({ id: "apiKey", expiresAt: NOW - 1, authType: "apiKey" }),
+  ];
+
+  expect(due(rows, NOW).map((c) => c.id)).toEqual(["inside"]);
+});
+
+test("a sweep refreshes an expiring credential before any request needs it", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW + 60_000 });
+
+  let calls = 0;
+  const refresh = refresherFor(store, async () => {
+    calls += 1;
+    return result("test-token-3");
+  });
+
+  expect(await sweep({ store, refresh, now: () => NOW })).toBe(1);
+  expect(calls).toBe(1);
+  const after = await store.credentials.get("c1");
+  expect(after?.expiresAt).toBe(NOW + 3_600_000);
+  expect((await after?.secrets())?.accessToken).toBe("test-token-3");
+});
+
+test("a repudiated refresh token disables the credential and records why", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW + 60_000 });
+
+  const refresh = refresherFor(store, async () => {
+    throw new GatewayError("AUTH", "refresh token rejected");
+  });
+
+  expect(await sweep({ store, refresh, now: () => NOW })).toBe(0);
+
+  const after = await store.credentials.get("c1");
+  expect(after?.enabled).toBe(false);
+  expect(after?.disabledReason).toBe("tokenRejected");
+  expect(after?.disabledAt).toBe(NOW);
+});
+
+test("a transient failure leaves the credential enabled and is retried next sweep", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW + 60_000 });
+
+  let attempts = 0;
+  const refresh = refresherFor(store, async () => {
+    attempts += 1;
+    if (attempts === 1) throw new GatewayError("NETWORK", "connection reset");
+    return result("test-token-4");
+  });
+
+  const deps = { store, refresh, now: () => NOW };
+  expect(await sweep(deps)).toBe(0);
+  const midway = await store.credentials.get("c1");
+  expect(midway?.enabled).toBe(true);
+  expect(midway?.disabledReason).toBeNull();
+
+  expect(await sweep(deps)).toBe(1);
+  expect((await (await store.credentials.get("c1"))?.secrets())?.accessToken).toBe("test-token-4");
+});
+
+test("an expired credential with nothing to refresh from is retired, not retried", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW - 1, refreshToken: null });
+
+  let calls = 0;
+  const refresh = refresherFor(store, async () => {
+    calls += 1;
+    return result("unused");
+  });
+
+  await sweep({ store, refresh, now: () => NOW });
+
+  expect(calls).toBe(0);
+  const after = await store.credentials.get("c1");
+  expect(after?.enabled).toBe(false);
+  expect(after?.disabledReason).toBe("expiredNoRefresh");
+});
+
+test("a credential inside the lead but not yet expired keeps its refresh token role", async () => {
+  // Not expired, no refresh token: nothing can be done for it, but it is still
+  // serving requests until it runs out, so it must not be disabled early.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW + 60_000, refreshToken: null });
+
+  await sweep({ store, refresh: async () => ({}) as CredentialSecrets, now: () => NOW });
+
+  const after = await store.credentials.get("c1");
+  expect(after?.enabled).toBe(true);
+  expect(after?.disabledReason).toBeNull();
+});
+
+test("a sweep and a concurrent request refresh share one token exchange", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW + 60_000 });
+
+  let calls = 0;
+  const gate = Promise.withResolvers<void>();
+  const refresh = refresherFor(store, async () => {
+    calls += 1;
+    await gate.promise;
+    return result("test-token-5");
+  });
+
+  const view = (await store.credentials.get("c1")) as CredentialView;
+  const fromRequest = refresh(view);
+  const fromSweep = sweep({ store, refresh, now: () => NOW });
+  gate.resolve();
+  await Promise.all([fromRequest, fromSweep]);
+
+  // One exchange, not two: a provider that rotates refresh tokens would have
+  // invalidated the loser of that race.
+  expect(calls).toBe(1);
+});
+
+test("stopping the scheduler leaves no timer behind", async () => {
+  const store = await memoryStore();
+  const stop = startRefreshScheduler({
+    store,
+    refresh: async () => ({}) as CredentialSecrets,
+    now: () => NOW,
+  });
+  stop();
+  // A live interval would keep this process from settling; the assertion is
+  // that stop() is callable and idempotent.
+  stop();
+  expect(true).toBe(true);
+});
