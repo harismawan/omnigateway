@@ -96,11 +96,25 @@ test("flattens tool definitions and maps tool choice", () => {
 
 test("maps reasoning effort and drops the budget with a degradation", () => {
   const { body, degradations } = toResponsesWire(
-    { ...base, reasoning: { effort: "high", budgetTokens: 8000 } },
+    { ...base, reasoning: { mode: "budget", budgetTokens: 8000 } },
+    "gpt-5",
+  );
+  expect(body.reasoning).toEqual({ effort: "medium", summary: "auto" });
+  expect(degradations).toContain("openai:reasoning-budget-dropped");
+});
+
+test("clamps the deeper effort levels this API does not have", () => {
+  const { body, degradations } = toResponsesWire(
+    { ...base, reasoning: { mode: "adaptive", effort: "max" } },
     "gpt-5",
   );
   expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
-  expect(degradations).toContain("openai:reasoning-budget-dropped");
+  expect(degradations).toContain("openai:reasoning-effort-clamped");
+});
+
+test("sends no reasoning at all when the client turned it off", () => {
+  const { body } = toResponsesWire({ ...base, reasoning: { mode: "off" } }, "gpt-5");
+  expect(body.reasoning).toBeUndefined();
 });
 
 test("drops images with a degradation when the request carries them", () => {
@@ -311,4 +325,175 @@ test("turns a response.failed event into an error event", async () => {
     message: "slow down",
     retryable: true,
   });
+});
+
+test("inlines a mid-conversation system turn, which this backend refuses", () => {
+  const { body, degradations } = toResponsesWire(
+    {
+      model: "m",
+      system: [{ type: "text", text: "top-level prompt" }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "system", content: [{ type: "text", text: "Write Go." }] },
+        { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      ],
+      stream: false,
+    },
+    "gpt-5.6-sol",
+  );
+
+  // The request-level prompt has its own field and is untouched; the turn keeps
+  // its position but arrives as a marked user message.
+  expect(body.instructions).toBe("top-level prompt");
+  expect(body.input).toEqual([
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "<system-reminder>\nWrite Go.\n</system-reminder>" }],
+    },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+  ]);
+  expect(degradations).toContain("openai:system-turn-inlined");
+});
+
+test("never emits a system role inside the input", () => {
+  const { body } = toResponsesWire(
+    {
+      model: "m",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "system", content: [{ type: "text", text: "Write Go." }] },
+      ],
+      stream: false,
+    },
+    "gpt-5.6-sol",
+  );
+
+  const roles = (body.input as { role: string }[]).map((m) => m.role);
+  expect(roles).not.toContain("system");
+});
+
+test("keeps max_output_tokens and temperature on the standard API", () => {
+  const { body, degradations } = toResponsesWire(
+    { ...base, maxTokens: 2048, temperature: 0.4 },
+    "gpt-5.6-sol",
+  );
+
+  expect(body.max_output_tokens).toBe(2048);
+  expect(body.temperature).toBe(0.4);
+  expect(degradations).toEqual([]);
+});
+
+test("drops the parameters the Codex backend refuses", () => {
+  const { body, degradations } = toResponsesWire(
+    { ...base, maxTokens: 2048, temperature: 0.4 },
+    "gpt-5.6-sol",
+    { oauth: true },
+  );
+
+  // Sending either one returns "Unsupported parameter" from that endpoint.
+  expect(body.max_output_tokens).toBeUndefined();
+  expect(body.temperature).toBeUndefined();
+  expect(degradations).toContain("openai:max-tokens-dropped");
+  expect(degradations).toContain("openai:temperature-dropped");
+});
+
+test("records nothing when there was no such parameter to drop", () => {
+  const { degradations } = toResponsesWire(base, "gpt-5.6-sol", { oauth: true });
+  expect(degradations).toEqual([]);
+});
+
+test("closes a message block exactly once", async () => {
+  // The real Codex stream sends content_part.done *and* output_item.done for a
+  // message item. Emitting a blockEnd for both reached the client as a second
+  // content_block_stop for an already-closed block.
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({ output_index: 0, item: { type: "message" } }),
+        },
+        {
+          event: "response.content_part.added",
+          data: JSON.stringify({
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text" },
+          }),
+        },
+        {
+          event: "response.output_text.delta",
+          data: JSON.stringify({ output_index: 0, content_index: 0, delta: "hi" }),
+        },
+        {
+          event: "response.content_part.done",
+          data: JSON.stringify({ output_index: 0, content_index: 0 }),
+        },
+        { event: "response.output_item.done", data: JSON.stringify({ output_index: 0 }) },
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+      ),
+    ),
+  );
+
+  expect(events.filter((e) => e.type === "blockEnd")).toEqual([{ type: "blockEnd", index: 0 }]);
+  expect(events.filter((e) => e.type === "blockStart")).toHaveLength(1);
+});
+
+test("closes reasoning and message blocks once each in a full turn", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({ output_index: 0, item: { type: "reasoning" } }),
+        },
+        {
+          event: "response.reasoning_summary_text.delta",
+          data: JSON.stringify({ output_index: 0, delta: "thinking" }),
+        },
+        { event: "response.output_item.done", data: JSON.stringify({ output_index: 0 }) },
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({ output_index: 1, item: { type: "message" } }),
+        },
+        {
+          event: "response.content_part.added",
+          data: JSON.stringify({
+            output_index: 1,
+            content_index: 0,
+            part: { type: "output_text" },
+          }),
+        },
+        {
+          event: "response.output_text.delta",
+          data: JSON.stringify({ output_index: 1, content_index: 0, delta: "answer" }),
+        },
+        {
+          event: "response.content_part.done",
+          data: JSON.stringify({ output_index: 1, content_index: 0 }),
+        },
+        { event: "response.output_item.done", data: JSON.stringify({ output_index: 1 }) },
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+      ),
+    ),
+  );
+
+  // One start and one end per block, and the answer text appears once.
+  expect(events.filter((e) => e.type === "blockStart")).toHaveLength(2);
+  expect(events.filter((e) => e.type === "blockEnd")).toEqual([
+    { type: "blockEnd", index: 0 },
+    { type: "blockEnd", index: 1 },
+  ]);
+  const text = events
+    .filter((e) => e.type === "blockDelta" && e.delta.type === "text")
+    .map((e) => (e.type === "blockDelta" && e.delta.type === "text" ? e.delta.text : ""));
+  expect(text).toEqual(["answer"]);
 });

@@ -41,8 +41,12 @@ export async function httpError(
   try {
     const parsed = JSON.parse(text) as {
       error?: { type?: string; message?: string; code?: string };
+      detail?: unknown;
     };
     if (typeof parsed.error?.message === "string") message = parsed.error.message.slice(0, 500);
+    // Some upstreams answer with a bare `{"detail": "..."}` instead. Without
+    // this the whole JSON blob was handed to the client as the message.
+    else if (typeof parsed.detail === "string") message = parsed.detail.slice(0, 500);
     const type = parsed.error?.type ?? parsed.error?.code;
     if (type === "overloaded_error") code = "OVERLOADED";
     else if (type === "insufficient_quota") code = "QUOTA_EXHAUSTED";

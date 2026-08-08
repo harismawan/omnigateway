@@ -60,6 +60,11 @@ export async function* decodeResponses(
   };
 
   let sawToolCall = false;
+  // Output indices whose block was opened by `output_item.added` — reasoning
+  // and function_call items. A message item is not in here: its block is opened
+  // by content_part.added and closed by content_part.done, and both key the
+  // same `${output_index}:0` slot, so `indices` alone cannot tell them apart.
+  const ownsBlock = new Set<number>();
 
   for await (const msg of messages) {
     const d = json(msg.data);
@@ -77,6 +82,7 @@ export async function* decodeResponses(
       case "response.output_item.added": {
         const item = d.item ?? {};
         if (item.type === "reasoning") {
+          ownsBlock.add(d.output_index ?? 0);
           yield {
             type: "blockStart",
             index: irIndex(d.output_index ?? 0),
@@ -84,6 +90,7 @@ export async function* decodeResponses(
           };
         } else if (item.type === "function_call") {
           sawToolCall = true;
+          ownsBlock.add(d.output_index ?? 0);
           yield {
             type: "blockStart",
             index: irIndex(d.output_index ?? 0),
@@ -133,10 +140,14 @@ export async function* decodeResponses(
         break;
 
       case "response.output_item.done": {
-        // Only close items that opened their own block; message items closed
-        // via content_part.done above.
-        const key = `${d.output_index ?? 0}:0`;
-        if (indices.has(key)) yield { type: "blockEnd", index: irIndex(d.output_index ?? 0) };
+        // Only close items that opened their own block. Closing a message item
+        // here too would emit a second blockEnd for a block content_part.done
+        // already closed — which reaches the client as a duplicate
+        // content_block_stop. Deleting also makes a repeated done a no-op.
+        const outputIndex = d.output_index ?? 0;
+        if (ownsBlock.delete(outputIndex)) {
+          yield { type: "blockEnd", index: irIndex(outputIndex) };
+        }
         break;
       }
 

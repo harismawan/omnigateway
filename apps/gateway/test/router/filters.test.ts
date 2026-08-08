@@ -23,7 +23,9 @@ test("derives required capabilities from the request", () => {
   expect(requiredCapabilities({ ...req, tools: [{ name: "f", inputSchema: {} }] }).tools).toBe(
     true,
   );
-  expect(requiredCapabilities({ ...req, reasoning: { effort: "low" } }).reasoning).toBe(true);
+  expect(
+    requiredCapabilities({ ...req, reasoning: { mode: "adaptive", effort: "low" } }).reasoning,
+  ).toBe(true);
   expect(
     requiredCapabilities({
       ...req,

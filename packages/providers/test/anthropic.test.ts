@@ -77,11 +77,30 @@ test("translates tools and tool choice", () => {
   expect(body.tool_choice).toEqual({ type: "tool", name: "get_weather" });
 });
 
-test("maps reasoning config onto the thinking block", () => {
-  const { body } = toWire({ ...base, reasoning: { effort: "high", budgetTokens: 8000 } }, "m", {
+test("sends a client-named budget verbatim", () => {
+  const { body } = toWire({ ...base, reasoning: { mode: "budget", budgetTokens: 8000 } }, "m", {
     oauth: false,
   });
   expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
+  expect(body.output_config).toBeUndefined();
+});
+
+test("renders adaptive thinking with effort as an output control", () => {
+  const { body } = toWire(
+    { ...base, reasoning: { mode: "adaptive", effort: "xhigh", display: "summarized" } },
+    "m",
+    { oauth: false },
+  );
+  // Never a budget: that form is rejected by current models, so an effort
+  // level must not be turned into one.
+  expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+  expect(body.output_config).toEqual({ effort: "xhigh" });
+});
+
+test("passes an explicit opt-out through instead of dropping it", () => {
+  const { body } = toWire({ ...base, reasoning: { mode: "off" } }, "m", { oauth: false });
+  // Omitting `thinking` is not equivalent — several models think by default.
+  expect(body.thinking).toEqual({ type: "disabled" });
 });
 
 test("merges vendor passthrough last so it can override", () => {
@@ -237,4 +256,28 @@ test("ignores ping events and unparseable payloads", async () => {
     ),
   );
   expect(events).toEqual([]);
+});
+
+test("renders a mid-conversation system turn as the documented string form", () => {
+  const { body } = toWire(
+    {
+      model: "m",
+      system: [{ type: "text", text: "top-level prompt" }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "system", content: [{ type: "text", text: "Write Go." }] },
+      ],
+      stream: false,
+    },
+    "claude-opus-5",
+    { oauth: false },
+  );
+
+  // The request-level prompt stays in `system`; the turn stays in `messages`,
+  // in position, as a plain string rather than a block array.
+  expect(body.system).toEqual([{ type: "text", text: "top-level prompt" }]);
+  expect(body.messages).toEqual([
+    { role: "user", content: [{ type: "text", text: "hi" }] },
+    { role: "system", content: "Write Go." },
+  ]);
 });

@@ -12,11 +12,13 @@ export type AnthropicBody = {
   stop_sequences?: string[];
   tools?: { name: string; description?: string; input_schema: unknown }[];
   tool_choice?: unknown;
-  thinking?: { type: "enabled"; budget_tokens: number };
+  thinking?:
+    | { type: "adaptive"; display?: "summarized" | "omitted" }
+    | { type: "enabled"; budget_tokens: number }
+    | { type: "disabled" };
+  output_config?: Record<string, unknown>;
   [key: string]: unknown;
 };
-
-const EFFORT_BUDGET = { low: 2048, medium: 8192, high: 24576 } as const;
 
 function encodeBlock(b: ContentBlock): unknown {
   switch (b.type) {
@@ -39,6 +41,16 @@ function encodeBlock(b: ContentBlock): unknown {
         is_error: b.isError,
       };
   }
+}
+
+/**
+ * Flattens a mid-conversation system turn to the plain string the API
+ * documents for it. That role is text-only on the wire, and a string is the
+ * shape Anthropic's own examples use; whether it also accepts a block array
+ * there is unstated, so this takes the form that is known to work.
+ */
+function encodeSystemTurn(content: ContentBlock[]): string {
+  return content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n");
 }
 
 function encodeToolChoice(c: ToolChoice): unknown {
@@ -76,7 +88,11 @@ export function toWire(
 
   const body: AnthropicBody = {
     model,
-    messages: req.messages.map((m) => ({ role: m.role, content: m.content.map(encodeBlock) })),
+    messages: req.messages.map((m) =>
+      m.role === "system"
+        ? { role: m.role, content: encodeSystemTurn(m.content) }
+        : { role: m.role, content: m.content.map(encodeBlock) },
+    ),
     max_tokens: req.maxTokens ?? 4096,
     stream: req.stream,
   };
@@ -93,8 +109,26 @@ export function toWire(
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
   if (req.reasoning !== undefined) {
-    const budget = req.reasoning.budgetTokens ?? EFFORT_BUDGET[req.reasoning.effort];
-    body.thinking = { type: "enabled", budget_tokens: budget };
+    switch (req.reasoning.mode) {
+      case "adaptive":
+        body.thinking = {
+          type: "adaptive",
+          ...(req.reasoning.display === undefined ? {} : { display: req.reasoning.display }),
+        };
+        // Depth is an output-level control here, not a thinking-level one.
+        if (req.reasoning.effort !== undefined) {
+          body.output_config = { ...(body.output_config ?? {}), effort: req.reasoning.effort };
+        }
+        break;
+      case "budget":
+        // Only ever sent because a client asked for it by name. Current models
+        // reject this form, so it is never synthesized from an effort level.
+        body.thinking = { type: "enabled", budget_tokens: req.reasoning.budgetTokens };
+        break;
+      case "off":
+        body.thinking = { type: "disabled" };
+        break;
+    }
   }
 
   // Vendor passthrough is applied last: an operator setting a raw Anthropic

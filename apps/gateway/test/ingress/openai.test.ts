@@ -127,6 +127,7 @@ test("parses a named tool choice", () => {
 
 test("maps reasoning_effort onto the reasoning config", () => {
   expect(parseOpenAIRequest({ ...minimal, reasoning_effort: "high" }).reasoning).toEqual({
+    mode: "adaptive",
     effort: "high",
   });
 });

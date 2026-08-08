@@ -168,8 +168,10 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
     }));
   }
   if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);
+  // This surface has no budget or opt-out knob, so an effort alone means
+  // "think adaptively, this deep".
   if (parsed.reasoning_effort !== undefined)
-    request.reasoning = { effort: parsed.reasoning_effort };
+    request.reasoning = { mode: "adaptive", effort: parsed.reasoning_effort };
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { openai: extras };
