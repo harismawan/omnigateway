@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { memoryStore } from "@omni/testkit";
 import { createApp } from "../src/app.ts";
-import { memoryStore } from "./helpers/fixtures.ts";
 
 async function app() {
   return createApp({

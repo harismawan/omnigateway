@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { computeCch } from "@omni/providers";
 import type { Store } from "@omni/store";
-import { createApp } from "../../src/app.ts";
 import {
   memoryStore,
   seedApiKey,
   seedCredential as seedCredentialRow,
   target,
   virtualModel,
-} from "../helpers/fixtures.ts";
+} from "@omni/testkit";
+import { createApp } from "../../src/app.ts";
 import {
   ANTHROPIC_STREAM,
   createStubUpstream,

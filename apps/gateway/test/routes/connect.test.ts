@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
+import type { FlowResult, OAuthProvider } from "@omni/control";
+import { createAdminAuth } from "@omni/control";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
-import { createAdminAuth } from "../../src/auth/admin.ts";
-import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
+import { memoryStore } from "@omni/testkit";
 import { connectRoutes } from "../../src/routes/connect.ts";
-import { memoryStore } from "../helpers/fixtures.ts";
 
 const NOW = 1_000_000;
 

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createAdminAuth } from "../../src/auth/admin.ts";
-import { memoryStore } from "../helpers/fixtures.ts";
+import { memoryStore } from "@omni/testkit";
+import { createAdminAuth } from "../src/adminAuth.ts";
 
 let clock = 1_000_000;
 const opts = { now: () => clock, sessionTtlMs: 60_000 };

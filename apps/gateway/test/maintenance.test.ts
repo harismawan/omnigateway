@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Store } from "@omni/store";
+import { memoryStore, requestLog } from "@omni/testkit";
 import { pruneLogs } from "../src/maintenance.ts";
-import { memoryStore, requestLog } from "./helpers/fixtures.ts";
 
 const NOW = 30 * 24 * 60 * 60 * 1000;
 

@@ -1,0 +1,15 @@
+{
+  "name": "@omni/testkit",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@omni/ir": "workspace:*",
+    "@omni/providers": "workspace:*",
+    "@omni/router": "workspace:*",
+    "@omni/store": "workspace:*"
+  }
+}

@@ -8,6 +8,8 @@
     "packages/*/src/**/*",
     "packages/*/test/**/*",
     "apps/gateway/src/**/*",
-    "apps/gateway/test/**/*"
+    "apps/gateway/test/**/*",
+    "apps/cli/src/**/*",
+    "apps/cli/test/**/*"
   ]
 }

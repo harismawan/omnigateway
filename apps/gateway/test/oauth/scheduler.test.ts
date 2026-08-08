@@ -1,12 +1,11 @@
 import { expect, test } from "bun:test";
+import type { FlowResult, OAuthProvider } from "@omni/control";
+import { createRefresher, SCHEDULER_REFRESH_LEAD_MS } from "@omni/control";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { CredentialSecrets, CredentialView, Store } from "@omni/store";
-import { SCHEDULER_REFRESH_LEAD_MS } from "../../src/oauth/lead.ts";
-import { createRefresher } from "../../src/oauth/refresh.ts";
+import { credential, memoryStore, seedCredential } from "@omni/testkit";
 import { due, startRefreshScheduler, sweep } from "../../src/oauth/scheduler.ts";
-import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
-import { credential, memoryStore, seedCredential } from "../helpers/fixtures.ts";
 
 const NOW = 1_000_000;
 

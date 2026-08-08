@@ -1,7 +1,7 @@
 import { GatewayError, type StreamEvent } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
+import type { Candidate } from "@omni/router";
 import type { CredentialSecrets, CredentialView } from "@omni/store";
-import type { Candidate } from "../router/index.ts";
 
 export type AttemptResult = {
   events: AsyncGenerator<StreamEvent, void, undefined>;
