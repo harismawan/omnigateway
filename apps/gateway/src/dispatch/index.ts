@@ -1,3 +1,4 @@
+import { DISPATCH_REFRESH_LEAD_MS } from "@omni/control";
 import {
   type ChatRequest,
   GatewayError,
@@ -7,6 +8,16 @@ import {
   type StreamEvent,
 } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
+import {
+  blankHealth,
+  buildSnapshot,
+  type Candidate,
+  healthKey,
+  rank,
+  recordFailure,
+  recordSuccess,
+  resolveModel,
+} from "@omni/router";
 import type {
   CredentialSecrets,
   CredentialView,
@@ -14,9 +25,6 @@ import type {
   Store,
   VirtualModel,
 } from "@omni/store";
-import { DISPATCH_REFRESH_LEAD_MS } from "../oauth/lead.ts";
-import { blankHealth, recordFailure, recordSuccess } from "../router/breaker.ts";
-import { buildSnapshot, type Candidate, healthKey, rank, resolveModel } from "../router/index.ts";
 import { attempt } from "./attempt.ts";
 import { classify } from "./classify.ts";
 

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { DEFAULT_SETTINGS } from "@omni/store";
-import { blankHealth, PENALTY, recordFailure, recordSuccess } from "../../src/router/breaker.ts";
-import { health } from "../helpers/fixtures.ts";
+import { health } from "@omni/testkit";
+import { blankHealth, PENALTY, recordFailure, recordSuccess } from "../src/breaker.ts";
 
 const NOW = 1_000_000;
 const opts = { settings: DEFAULT_SETTINGS, now: NOW, jitter: 0 };

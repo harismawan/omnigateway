@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
-import { resolveModel } from "../../src/router/resolve.ts";
-import { snapshot, target } from "../helpers/fixtures.ts";
+import { snapshot, target } from "@omni/testkit";
+import { resolveModel } from "../src/resolve.ts";
 
 test("resolves a configured virtual model by id", () => {
   const vm = {

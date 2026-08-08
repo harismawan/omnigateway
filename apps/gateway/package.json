@@ -9,9 +9,12 @@
   },
   "dependencies": {
     "@node-rs/argon2": "2.0.2",
+    "@omni/control": "workspace:*",
     "@omni/ir": "workspace:*",
     "@omni/providers": "workspace:*",
+    "@omni/router": "workspace:*",
     "@omni/store": "workspace:*",
+    "@omni/testkit": "workspace:*",
     "elysia": "1.4.29",
     "zod": "4.4.3"
   }

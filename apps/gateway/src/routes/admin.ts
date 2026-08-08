@@ -1,18 +1,26 @@
-import { type ChatRequest, GatewayError, HTTP_STATUS } from "@omni/ir";
 import {
-  generateApiKey,
-  hashApiKey,
-  type Settings,
-  type Store,
-  type UsageDimension,
-  type UsageGrain,
-  type VirtualModel,
-} from "@omni/store";
+  ADMIN_COOKIE,
+  type AdminAuth,
+  createKey,
+  credentialHealth,
+  dryRun,
+  getSettings,
+  listCredentials,
+  listKeys,
+  listModels,
+  patchCredential,
+  putModel,
+  putSettings,
+  queryUsage,
+  recentLogs,
+  removeCredential,
+  removeModel,
+  revokeKey,
+} from "@omni/control";
+import { GatewayError, HTTP_STATUS } from "@omni/ir";
+import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
-import { z } from "zod";
-import { ADMIN_COOKIE, type AdminAuth } from "../auth/admin.ts";
-import { isRecord, parseOrThrow } from "../ingress/schemas.ts";
-import { buildSnapshot, rank } from "../router/index.ts";
+import { isRecord } from "../ingress/schemas.ts";
 
 export type AdminDeps = {
   store: Store;
@@ -20,133 +28,6 @@ export type AdminDeps = {
   now: () => number;
   sessionTtlMs: number;
 };
-const MAX_LOG_LIMIT = 500;
-
-const providerId = z.enum(["anthropic", "openai", "kimi"]);
-
-/**
- * A hypothetical request, described only by required capabilities. This keeps
- * prompt content out of the control API while exercising router hard filters.
- */
-const dryRunSchema = z
-  .object({
-    tools: z.boolean().default(false),
-    images: z.boolean().default(false),
-    reasoning: z.boolean().default(false),
-  })
-  .strict();
-
-const modelSchema = z.object({
-  id: z.string().min(1),
-  strategy: z.enum(["score", "priority", "roundRobin", "weighted"]),
-  isAlias: z.boolean(),
-  targets: z
-    .array(
-      z
-        .object({
-          provider: providerId,
-          model: z.string().min(1),
-          tier: z.number().int().min(1),
-          weight: z.number().positive(),
-          costPerMTok: z.object({
-            input: z.number().min(0),
-            output: z.number().min(0),
-            cacheRead: z.number().min(0),
-          }),
-          capabilities: z.object({
-            tools: z.boolean(),
-            images: z.boolean(),
-            reasoning: z.boolean(),
-          }),
-        })
-        .or(
-          z.object({
-            provider: providerId,
-            model: z.string().min(1),
-            tier: z.number().int().min(1),
-            weight: z.number().positive(),
-            costPerMTok: z.object({
-              input: z.number().min(0),
-              output: z.number().min(0),
-            }),
-            capabilities: z.object({
-              tools: z.boolean(),
-              images: z.boolean(),
-              reasoning: z.boolean(),
-            }),
-          }),
-        ),
-    )
-    .min(1, "a virtual model needs at least one target"),
-});
-
-const keyCreateSchema = z
-  .object({
-    label: z.string().min(1).default("api key"),
-    /** Null means every configured model. An empty array would mean none. */
-    modelAllowlist: z.array(z.string().min(1)).nullable().default(null),
-    rateLimitPerMin: z.number().int().positive().nullable().default(null),
-  })
-  .strict();
-
-const settingsSchema = z.object({
-  weights: z
-    .object({
-      tier: z.number(),
-      health: z.number(),
-      quota: z.number(),
-      cost: z.number(),
-      latency: z.number(),
-      recency: z.number(),
-    })
-    .strict(),
-  maxAttempts: z.number().int().min(1).max(10),
-  requestDeadlineMs: z.number().int().positive(),
-  breakerThreshold: z.number().int().min(1),
-  breakerCooldownMs: z.number().int().positive(),
-  logRetentionDays: z.number().int().min(1),
-  /** Zero disables quota polling. Takes effect at the next restart. */
-  quotaPollIntervalMs: z.number().int().min(0),
-});
-
-/** Only these credential fields are operator-editable. Secrets are not. */
-const credentialPatchSchema = z
-  .object({
-    label: z.string().min(1).optional(),
-    enabled: z.boolean().optional(),
-    tier: z.number().int().min(1).optional(),
-    weight: z.number().positive().optional(),
-  })
-  .strict();
-
-/** Mirrors `UsageDimension` exactly; the store whitelists the column. */
-const dimensionSchema = z.enum([
-  "credential",
-  "model",
-  "requestedModel",
-  "apiKey",
-  "provider",
-  "hour",
-  "day",
-]);
-
-const grainSchema = z.enum(["raw", "daily"]);
-
-/**
- * `hour` exists only in the raw logs and `day` only in the rollup. Rejecting
- * the mismatch here keeps the store's whitelist a lookup rather than a second
- * validation layer, and turns an operator's bad query into a 400 instead of a
- * 500 raised from SQL.
- */
-const GRAIN_DIMENSIONS: Readonly<Record<UsageGrain, ReadonlySet<UsageDimension>>> = {
-  raw: new Set(["credential", "model", "requestedModel", "apiKey", "provider", "hour"]),
-  daily: new Set(["credential", "model", "requestedModel", "apiKey", "provider", "day"]),
-};
-
-function requireDimension(grain: UsageGrain, dimension: UsageDimension): UsageDimension {
-  if (GRAIN_DIMENSIONS[grain].has(dimension)) return dimension;
-  throw new GatewayError("BAD_REQUEST", `usage grain "${grain}" cannot group by "${dimension}"`);
-}
 
 function sessionCookie(request: Request, token: string, maxAge: number): string {
   const secure = new URL(request.url).protocol === "https:" ? ["Secure"] : [];
@@ -180,6 +61,14 @@ async function jsonRecord(request: Request): Promise<Record<string, unknown> | n
   }
 }
 
+/**
+ * The HTTP half of the control surface.
+ *
+ * Every handler does the same three things: prove there is an admin session,
+ * call one operation in `@omni/control`, and shape the result as JSON. The
+ * operations themselves — validation, store writes, ranking — live in the
+ * package, so the CLI reaches them without going through a socket.
+ */
 export function adminRoutes(deps: AdminDeps) {
   const app = new Elysia().onError(({ error, set }) => {
     const gatewayError =
@@ -262,227 +151,92 @@ export function adminRoutes(deps: AdminDeps) {
 
     .get("/api/credentials", async ({ request }) => {
       await requireAdmin(request);
-      const credentials = await deps.store.credentials.list();
-      // `secrets` is a function on the view; spreading drops it, but the
-      // explicit projection makes that a decision rather than an accident.
-      return {
-        credentials: credentials.map((c) => ({
-          id: c.id,
-          provider: c.provider,
-          label: c.label,
-          authType: c.authType,
-          enabled: c.enabled,
-          tier: c.tier,
-          weight: c.weight,
-          expiresAt: c.expiresAt,
-          accountEmail: c.accountEmail,
-          providerData: c.providerData,
-          disabledReason: c.disabledReason,
-          disabledAt: c.disabledAt,
-          hasRefreshToken: c.hasRefreshToken,
-          createdAt: c.createdAt,
-          updatedAt: c.updatedAt,
-        })),
-      };
+      return { credentials: await listCredentials(deps.store) };
     })
 
     .get("/api/credentials/health", async ({ request }) => {
       await requireAdmin(request);
-      const [health, quota] = await Promise.all([
-        deps.store.credentials.listHealth(),
-        deps.store.credentials.listQuota(),
-      ]);
-      return { health, quota };
+      return credentialHealth(deps.store);
     })
 
     .patch("/api/credentials/:id", async ({ request, params }) => {
       await requireAdmin(request);
-      const patch = parseOrThrow(credentialPatchSchema, await request.json());
-      const existing = await deps.store.credentials.get(params.id);
-      if (existing === null) throw new GatewayError("BAD_REQUEST", "no such credential");
-
-      await deps.store.credentials.update(params.id, {
-        ...(patch.label === undefined ? {} : { label: patch.label }),
-        // The toggle is the operator's own verdict, so it overwrites whatever
-        // reason was there. Re-enabling a credential the provider repudiated is
-        // allowed: the operator may know something we do not, and the next
-        // refresh will disable it again if they do not.
-        ...(patch.enabled === undefined
-          ? {}
-          : {
-              enabled: patch.enabled,
-              disabledReason: patch.enabled ? null : ("manual" as const),
-              disabledAt: patch.enabled ? null : deps.now(),
-            }),
-        ...(patch.tier === undefined ? {} : { tier: patch.tier }),
-        ...(patch.weight === undefined ? {} : { weight: patch.weight }),
-      });
+      await patchCredential(deps, params.id, await request.json());
       return { ok: true };
     })
 
     .delete("/api/credentials/:id", async ({ request, params }) => {
       await requireAdmin(request);
-      await deps.store.credentials.remove(params.id);
+      await removeCredential(deps.store, params.id);
       return { ok: true };
     })
 
     .get("/api/models", async ({ request }) => {
       await requireAdmin(request);
-      return { models: await deps.store.config.listModels() };
+      return { models: await listModels(deps.store) };
     })
 
     .put("/api/models/:id", async ({ request, params }) => {
       await requireAdmin(request);
-      const model: VirtualModel = parseOrThrow(modelSchema, await request.json());
-      if (model.id !== params.id) {
-        throw new GatewayError("BAD_REQUEST", "model id in the path and body must match");
-      }
-      await deps.store.config.putModel(model);
+      await putModel(deps.store, params.id, await request.json());
       return { ok: true };
     })
 
     .delete("/api/models/:id", async ({ request, params }) => {
       await requireAdmin(request);
-      await deps.store.config.removeModel(params.id);
+      await removeModel(deps.store, params.id);
       return { ok: true };
     })
 
     .get("/api/keys", async ({ request }) => {
       await requireAdmin(request);
-      // The store never holds the raw key, only its hash, so there is nothing
-      // to strip here — but the shape is explicit for the same reason.
-      const keys = await deps.store.keys.list();
-      return {
-        keys: keys.map((k) => ({
-          id: k.id,
-          label: k.label,
-          // The display prefix, never the key. `hash` is deliberately absent:
-          // it is not a secret, but publishing it invites offline guessing.
-          prefix: k.prefix,
-          modelAllowlist: k.modelAllowlist,
-          rateLimitPerMin: k.rateLimitPerMin,
-          createdAt: k.createdAt,
-          revokedAt: k.revokedAt,
-        })),
-      };
+      return { keys: await listKeys(deps.store) };
     })
 
     .post("/api/keys", async ({ request }) => {
       await requireAdmin(request);
-      const body = parseOrThrow(keyCreateSchema, await request.json());
-
-      const raw = generateApiKey();
-      const created = await deps.store.keys.create({
-        id: crypto.randomUUID(),
-        label: body.label,
-        prefix: raw.slice(0, 12),
-        hash: await hashApiKey(raw),
-        modelAllowlist: body.modelAllowlist,
-        rateLimitPerMin: body.rateLimitPerMin,
-      });
-
       // The only response that ever contains a key. It exists in plaintext
       // nowhere else, so an operator who loses it must issue a new one.
-      return { id: created.id, label: created.label, prefix: created.prefix, key: raw };
+      return createKey(deps.store, await request.json());
     })
 
     .delete("/api/keys/:id", async ({ request, params }) => {
       await requireAdmin(request);
-      // Revoke, not delete. The usage rows reference this id, and a report that
-      // silently loses its attribution is worse than one naming a dead key.
-      await deps.store.keys.revoke(params.id);
+      await revokeKey(deps.store, params.id);
       return { ok: true };
     })
 
     .get("/api/settings", async ({ request }) => {
       await requireAdmin(request);
-      return { settings: await deps.store.config.getSettings() };
+      return { settings: await getSettings(deps.store) };
     })
 
     .put("/api/settings", async ({ request }) => {
       await requireAdmin(request);
-      const settings: Settings = parseOrThrow(settingsSchema, await request.json());
-      await deps.store.config.putSettings(settings);
+      await putSettings(deps.store, await request.json());
       return { ok: true };
     })
 
     .post("/api/models/:id/dry-run", async ({ request, params }) => {
       await requireAdmin(request);
-      const need = parseOrThrow(dryRunSchema, await request.json());
-      const now = deps.now();
-      const snapshot = await buildSnapshot(deps.store, now);
-      const model = snapshot.models.get(params.id);
-      if (model === undefined) {
-        throw new GatewayError("MODEL_UNAVAILABLE", `no virtual model "${params.id}"`);
-      }
-
-      const probe: ChatRequest = {
-        model: params.id,
-        messages: [
-          {
-            role: "user",
-            content: need.images
-              ? [{ type: "image", mediaType: "image/png", data: "" }]
-              : [{ type: "text", text: "" }],
-          },
-        ],
-        stream: false,
-        ...(need.tools
-          ? { tools: [{ name: "probe", description: "", inputSchema: { type: "object" } }] }
-          : {}),
-        ...(need.reasoning ? { reasoning: { mode: "adaptive" as const } } : {}),
-      };
-      const result = rank({ request: probe, model, snapshot, now, rand: 0 });
-
-      return {
-        modelId: model.id,
-        strategy: model.strategy,
-        deterministic: model.strategy !== "weighted",
-        rankedAt: now,
-        candidates: result.candidates.map((candidate) => ({
-          credentialId: candidate.credential.id,
-          credentialLabel: candidate.credential.label,
-          provider: candidate.credential.provider,
-          model: candidate.target.model,
-          tier: candidate.target.tier,
-          score: candidate.score,
-          reasons: candidate.reasons,
-        })),
-        excluded: result.excluded,
-      };
+      return dryRun(deps, params.id, await request.json());
     })
 
     .get("/api/usage", async ({ request, query }) => {
       await requireAdmin(request);
-      const grain = parseOrThrow(grainSchema, query.grain ?? "raw");
-      const groupBy = requireDimension(
-        grain,
-        parseOrThrow(dimensionSchema, query.groupBy ?? "model"),
-      );
-      const splitBy =
-        query.splitBy === undefined
-          ? undefined
-          : requireDimension(grain, parseOrThrow(dimensionSchema, query.splitBy));
-      const since = typeof query.since === "string" ? Number(query.since) : 0;
-      const until = typeof query.until === "string" ? Number(query.until) : deps.now();
-
       return {
-        rows: await deps.store.usage.aggregate({
-          grain,
-          groupBy,
-          ...(splitBy === undefined ? {} : { splitBy }),
-          since: Number.isFinite(since) ? since : 0,
-          until: Number.isFinite(until) ? until : deps.now(),
+        rows: await queryUsage(deps, {
+          grain: query.grain,
+          groupBy: query.groupBy,
+          splitBy: query.splitBy,
+          since: query.since,
+          until: query.until,
         }),
       };
     })
 
     .get("/api/logs", async ({ request, query }) => {
       await requireAdmin(request);
-      const requested = typeof query.limit === "string" ? Number(query.limit) : 100;
-      const limit = Number.isFinite(requested)
-        ? Math.floor(Math.min(Math.max(1, requested), MAX_LOG_LIMIT))
-        : 100;
-      return { logs: await deps.store.usage.recent(limit) };
+      return { logs: await recentLogs(deps.store, query.limit) };
     });
 }

@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import type { Store } from "@omni/store";
+import { memoryStore, seedApiKey } from "@omni/testkit";
 import { authenticateApiKey } from "../../src/auth/apiKey.ts";
-import { memoryStore, seedApiKey } from "../helpers/fixtures.ts";
 
 async function seed(): Promise<{ store: Store; raw: string }> {
   const store = await memoryStore();

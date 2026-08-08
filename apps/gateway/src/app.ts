@@ -1,13 +1,11 @@
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
+import { createAdminAuth, createRefresher, OAUTH_PROVIDERS, type Refresher } from "@omni/control";
 import type { ProviderId } from "@omni/ir";
 import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
-import { createAdminAuth } from "./auth/admin.ts";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
-import { OAUTH_PROVIDERS } from "./oauth/index.ts";
-import { createRefresher, type Refresher } from "./oauth/refresh.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectRoutes } from "./routes/connect.ts";
 import { proxyRoutes } from "./routes/proxy.ts";

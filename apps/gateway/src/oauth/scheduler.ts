@@ -1,7 +1,6 @@
+import { type Refresher, SCHEDULER_REFRESH_LEAD_MS } from "@omni/control";
 import { GatewayError } from "@omni/ir";
 import type { CredentialView, Store } from "@omni/store";
-import { SCHEDULER_REFRESH_LEAD_MS } from "./lead.ts";
-import type { Refresher } from "./refresh.ts";
 
 /**
  * How often the sweep runs. Shorter than the scheduler's refresh lead, so a

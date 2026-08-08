@@ -1,0 +1,49 @@
+import type { ConnectFlows } from "@omni/control";
+import type { ProviderId } from "@omni/ir";
+import type { Store } from "@omni/store";
+import type { OptionSpec, Parsed } from "./args.ts";
+import type { Context } from "./context.ts";
+import type { Writer } from "./output.ts";
+import { paint, type Tone } from "./output.ts";
+import type { Prompt } from "./prompt.ts";
+import type { ServiceDeps } from "./service.ts";
+
+export type CommandEnv = {
+  ctx: Context;
+  writer: Writer;
+  prompt: Prompt;
+  /** Built on demand: most commands never touch the process. */
+  service: () => ServiceDeps;
+  /** Built on demand, and injected by tests so no test ever reaches a provider. */
+  connect: (store: Store) => ConnectFlows;
+  /** Runs the gateway attached to this terminal, returning its exit code. */
+  foreground: (input: {
+    argv: readonly string[];
+    cwd: string;
+    env: Record<string, string | undefined>;
+  }) => Promise<number>;
+};
+
+export type Command = {
+  /** `omni <usage>`, shown in help. */
+  usage: string;
+  summary: string;
+  options?: OptionSpec;
+  run: (args: Parsed, env: CommandEnv) => Promise<void>;
+};
+
+/** Provider identity is one of the two things colour is allowed to mean. */
+const PROVIDER_TONE: Record<ProviderId, Tone> = {
+  anthropic: "magenta",
+  openai: "green",
+  kimi: "blue",
+};
+
+export function provider(ctx: Context, id: ProviderId): string {
+  return paint(ctx, PROVIDER_TONE[id], id);
+}
+
+/** The other: state. */
+export function state(ctx: Context, ok: boolean, text: string): string {
+  return paint(ctx, ok ? "green" : "red", text);
+}

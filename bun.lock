@@ -11,6 +11,23 @@
         "typescript": "^5.7.0",
       },
     },
+    "apps/cli": {
+      "name": "@omni/cli",
+      "version": "0.0.0",
+      "bin": {
+        "omni": "./src/index.ts",
+      },
+      "dependencies": {
+        "@omni/control": "workspace:*",
+        "@omni/ir": "workspace:*",
+        "@omni/providers": "workspace:*",
+        "@omni/router": "workspace:*",
+        "@omni/store": "workspace:*",
+      },
+      "devDependencies": {
+        "@omni/testkit": "workspace:*",
+      },
+    },
     "apps/dashboard": {
       "name": "@omni/dashboard",
       "dependencies": {
@@ -49,11 +66,29 @@
       "version": "0.0.0",
       "dependencies": {
         "@node-rs/argon2": "2.0.2",
+        "@omni/control": "workspace:*",
         "@omni/ir": "workspace:*",
         "@omni/providers": "workspace:*",
+        "@omni/router": "workspace:*",
         "@omni/store": "workspace:*",
+        "@omni/testkit": "workspace:*",
         "elysia": "1.4.29",
         "zod": "4.4.3",
+      },
+    },
+    "packages/control": {
+      "name": "@omni/control",
+      "version": "0.0.0",
+      "dependencies": {
+        "@node-rs/argon2": "2.0.2",
+        "@omni/ir": "workspace:*",
+        "@omni/providers": "workspace:*",
+        "@omni/router": "workspace:*",
+        "@omni/store": "workspace:*",
+        "zod": "4.4.3",
+      },
+      "devDependencies": {
+        "@omni/testkit": "workspace:*",
       },
     },
     "packages/ir": {
@@ -67,11 +102,33 @@
         "@omni/ir": "workspace:*",
       },
     },
+    "packages/router": {
+      "name": "@omni/router",
+      "version": "0.0.0",
+      "dependencies": {
+        "@omni/ir": "workspace:*",
+        "@omni/providers": "workspace:*",
+        "@omni/store": "workspace:*",
+      },
+      "devDependencies": {
+        "@omni/testkit": "workspace:*",
+      },
+    },
     "packages/store": {
       "name": "@omni/store",
       "version": "0.0.0",
       "dependencies": {
         "@omni/ir": "workspace:*",
+      },
+    },
+    "packages/testkit": {
+      "name": "@omni/testkit",
+      "version": "0.0.0",
+      "dependencies": {
+        "@omni/ir": "workspace:*",
+        "@omni/providers": "workspace:*",
+        "@omni/router": "workspace:*",
+        "@omni/store": "workspace:*",
       },
     },
   },
@@ -210,6 +267,10 @@
 
     "@node-rs/argon2-win32-x64-msvc": ["@node-rs/argon2-win32-x64-msvc@2.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-cJxWXanH4Ew9CfuZ4IAEiafpOBCe97bzoKowHCGk5lG/7kR4WF/eknnBlHW9m8q7t10mKq75kruPLtbSDqgRTw=="],
 
+    "@omni/cli": ["@omni/cli@workspace:apps/cli"],
+
+    "@omni/control": ["@omni/control@workspace:packages/control"],
+
     "@omni/dashboard": ["@omni/dashboard@workspace:apps/dashboard"],
 
     "@omni/gateway": ["@omni/gateway@workspace:apps/gateway"],
@@ -218,7 +279,11 @@
 
     "@omni/providers": ["@omni/providers@workspace:packages/providers"],
 
+    "@omni/router": ["@omni/router@workspace:packages/router"],
+
     "@omni/store": ["@omni/store@workspace:packages/store"],
+
+    "@omni/testkit": ["@omni/testkit@workspace:packages/testkit"],
 
     "@oxc-project/types": ["@oxc-project/types@0.142.0", "", {}, "sha512-7W+2q5AKQVU36fkaryontrHn3YDt1RyUYXatw9i5H8ocYe2sPKSFB6eS8WNPeRKiN1qAWWZUPm7gwFzJGrccqQ=="],
 

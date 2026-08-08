@@ -1,13 +1,7 @@
 import { expect, test } from "bun:test";
-import { ADMIN_COOKIE, createAdminAuth } from "../../src/auth/admin.ts";
+import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
+import { memoryStore, requestLog, seedCredential, target, virtualModel } from "@omni/testkit";
 import { adminRoutes } from "../../src/routes/admin.ts";
-import {
-  memoryStore,
-  requestLog,
-  seedCredential,
-  target,
-  virtualModel,
-} from "../helpers/fixtures.ts";
 
 const NOW = 1_000_000;
 const SESSION_TTL_MS = 60_000;

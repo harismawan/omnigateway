@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { QUOTA_FLOOR, quotaHeadroom, UNKNOWN_QUOTA } from "../../src/router/quota.ts";
-import { credential, quota } from "../helpers/fixtures.ts";
+import { credential, quota } from "@omni/testkit";
+import { QUOTA_FLOOR, quotaHeadroom, UNKNOWN_QUOTA } from "../src/quota.ts";
 
 const NOW = 1_000_000_000;
 const POLL_MS = 300_000;

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { createAdminAuth } from "../../src/auth/admin.ts";
+import { createAdminAuth } from "@omni/control";
+import { memoryStore, seedCredential, target, virtualModel } from "@omni/testkit";
 import { adminRoutes } from "../../src/routes/admin.ts";
-import { memoryStore, seedCredential, target, virtualModel } from "../helpers/fixtures.ts";
 
 const NOW = 1_000_000;
 

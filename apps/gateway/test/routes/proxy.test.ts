@@ -1,8 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ProviderId, StreamEvent } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
-import { authenticateApiKey } from "../../src/auth/apiKey.ts";
-import { proxyRoutes } from "../../src/routes/proxy.ts";
 import {
   memoryStore,
   seedApiKey,
@@ -10,7 +8,9 @@ import {
   stubAdapters,
   target,
   virtualModel,
-} from "../helpers/fixtures.ts";
+} from "@omni/testkit";
+import { authenticateApiKey } from "../../src/auth/apiKey.ts";
+import { proxyRoutes } from "../../src/routes/proxy.ts";
 
 const EVENTS: StreamEvent[] = [
   { type: "start", id: "upstream_1", model: "claude-opus-4" },

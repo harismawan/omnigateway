@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { CredentialView, Store } from "@omni/store";
+import { memoryStore, seedCredential } from "@omni/testkit";
 import { createRefresher } from "../../src/oauth/refresh.ts";
 import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
-import { memoryStore, seedCredential } from "../helpers/fixtures.ts";
 
 const NOW = 1_000_000;
 

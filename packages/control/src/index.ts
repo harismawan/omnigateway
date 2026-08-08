@@ -1,0 +1,72 @@
+/**
+ * Everything an operator can do to a gateway, independent of how they ask.
+ *
+ * The control API and the CLI are both adapters over this package: one turns
+ * HTTP requests into these calls, the other turns argv into them. Nothing here
+ * knows about either — no cookies, no argv, no terminal, no timers.
+ */
+export {
+  ADMIN_COOKIE,
+  type AdminAuth,
+  type AdminAuthOptions,
+  createAdminAuth,
+} from "./adminAuth.ts";
+export { type Config, loadConfig } from "./config.ts";
+export {
+  type ConnectDeps,
+  type ConnectFlows,
+  type ConnectPoll,
+  type ConnectStart,
+  createConnectFlows,
+  isProviderId,
+} from "./connect.ts";
+export {
+  type CredentialPatch,
+  type CredentialSummary,
+  credentialHealth,
+  listCredentials,
+  patchCredential,
+  removeCredential,
+} from "./credentials.ts";
+export { type DryRunCandidate, type DryRunResult, dryRun } from "./dryRun.ts";
+export { type ApiKeySummary, type CreatedKey, createKey, listKeys, revokeKey } from "./keys.ts";
+export { getModel, listModels, putModel, removeModel } from "./models.ts";
+export { OAUTH_PROVIDERS } from "./oauth/index.ts";
+export { DISPATCH_REFRESH_LEAD_MS, SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
+export { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
+export { createRefresher, type Refresher } from "./oauth/refresh.ts";
+export type {
+  AuthorizeStart,
+  FlowResult,
+  OAuthDeps,
+  OAuthProvider,
+  PendingFlow,
+  UsageReport,
+} from "./oauth/types.ts";
+export {
+  type PollerDeps,
+  poll,
+  probe,
+  RATE_LIMIT_COOLDOWN_MS,
+  resetQuotaCooldowns,
+} from "./quota.ts";
+export {
+  credentialPatchSchema,
+  dimensionSchema,
+  dryRunSchema,
+  grainSchema,
+  keyCreateSchema,
+  modelSchema,
+  parseOrThrow,
+  providerIdSchema,
+  requireDimension,
+  settingsSchema,
+} from "./schemas.ts";
+export { getSettings, putSettings } from "./settings.ts";
+export {
+  logLimit,
+  MAX_LOG_LIMIT,
+  queryUsage,
+  recentLogs,
+  type UsageQueryInput,
+} from "./usage.ts";

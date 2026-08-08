@@ -1,0 +1,19 @@
+{
+  "name": "@omni/cli",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "omni": "./src/index.ts"
+  },
+  "dependencies": {
+    "@omni/control": "workspace:*",
+    "@omni/ir": "workspace:*",
+    "@omni/providers": "workspace:*",
+    "@omni/router": "workspace:*",
+    "@omni/store": "workspace:*"
+  },
+  "devDependencies": {
+    "@omni/testkit": "workspace:*"
+  }
+}

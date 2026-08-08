@@ -1,11 +1,9 @@
 import { resolve } from "node:path";
+import { createRefresher, loadConfig, OAUTH_PROVIDERS } from "@omni/control";
 import { nodeHttpClient } from "@omni/providers";
 import { createStore, deriveKey } from "@omni/store";
 import { createApp } from "./app.ts";
-import { loadConfig } from "./config.ts";
 import { startMaintenance } from "./maintenance.ts";
-import { OAUTH_PROVIDERS } from "./oauth/index.ts";
-import { createRefresher } from "./oauth/refresh.ts";
 import { startRefreshScheduler } from "./oauth/scheduler.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
 

@@ -1,5 +1,6 @@
 import type { ProviderId, StreamEvent } from "@omni/ir";
 import type { ProviderAdapter } from "@omni/providers";
+import { healthKey, type Snapshot } from "@omni/router";
 import type {
   ApiKey,
   Credential,
@@ -14,8 +15,6 @@ import type {
   VirtualModel,
 } from "@omni/store";
 import { createStore, DEFAULT_SETTINGS, deriveKey, generateApiKey, hashApiKey } from "@omni/store";
-import { healthKey } from "../../src/router/snapshot.ts";
-import type { Snapshot } from "../../src/router/types.ts";
 
 let seq = 0;
 

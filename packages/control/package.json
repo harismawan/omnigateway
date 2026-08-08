@@ -1,0 +1,20 @@
+{
+  "name": "@omni/control",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@node-rs/argon2": "2.0.2",
+    "@omni/ir": "workspace:*",
+    "@omni/providers": "workspace:*",
+    "@omni/router": "workspace:*",
+    "@omni/store": "workspace:*",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@omni/testkit": "workspace:*"
+  }
+}

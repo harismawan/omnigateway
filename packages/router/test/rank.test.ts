@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
-import { rank } from "../../src/router/index.ts";
-import { credential, health, quota, snapshot, target } from "../helpers/fixtures.ts";
+import { credential, health, quota, snapshot, target } from "@omni/testkit";
+import { rank } from "../src/index.ts";
 
 const NOW = 1_000_000;
 
