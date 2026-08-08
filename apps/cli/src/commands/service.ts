@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { boolFlag, numberFlag } from "../args.ts";
+import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, note, paint } from "../output.ts";
@@ -7,7 +7,6 @@ import { gatewayEntrypoint } from "../runtime.ts";
 import {
   install,
   logFile,
-  serviceLogs,
   status as serviceStatus,
   start as startService,
   stop as stopService,
@@ -142,17 +141,6 @@ export const serviceUninstall: Command = {
     emit(ctx, writer, result, () =>
       result.removed ? `removed ${result.path}` : `no unit at ${result.path}`,
     );
-  },
-};
-
-export const serviceLogsCommand: Command = {
-  usage: "logs --service [-n N]",
-  summary: "Show the gateway process's own output",
-  options: { number: { type: "string", short: "n" } },
-  async run(args, { ctx, writer, service }) {
-    const lines = numberFlag(args.values, "number") ?? 50;
-    const text = await serviceLogs(service(), lines);
-    emit(ctx, writer, { log: text }, () => (text.length === 0 ? "no service output yet" : text));
   },
 };
 

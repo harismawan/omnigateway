@@ -414,3 +414,34 @@ test("a foreground gateway that exits non-zero is reported as the gateway's fail
   expect(result.code).toBe(3);
   expect(result.err).toContain("exited with code 1");
 });
+
+test("logs --service reads the process's own output, not the request log", async () => {
+  const root = await installation();
+  const service = fakeService({
+    root,
+    unitPath: `${root}/unit/omnigateway.service`,
+    runResults: {
+      "journalctl --user -u omnigateway.service -n 5 --no-pager": {
+        code: 0,
+        stdout: "omnigateway listening on http://127.0.0.1:8787\n",
+        stderr: "",
+      },
+    },
+  });
+  await Bun.write(`${root}/unit/omnigateway.service`, "[Unit]\n");
+
+  const result = await cli(["logs", "--service", "-n", "5"], { root, service });
+
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("omnigateway listening");
+});
+
+test("logs without --service reads the request log", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  const result = await cli(["logs", "--json"], { root, service });
+
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.out)).toEqual({ logs: [] });
+});

@@ -1,29 +1,53 @@
 # OmniGateway
 
-OmniGateway is a self-hosted, single-node AI gateway that presents Anthropic- and OpenAI-compatible APIs over OAuth-backed Anthropic, OpenAI, and Kimi Coding accounts. It normalizes incoming requests into a provider-neutral representation, routes virtual models across eligible credentials, handles failover and token refresh, and records operational usage without logging prompt or response bodies.
+One endpoint in front of the AI accounts you already pay for.
 
-> Current status: core gateway and admin dashboard are both implemented. Version 1 targets a single-node, single-operator deployment.
+OmniGateway is a self-hosted gateway that speaks the Anthropic and OpenAI APIs
+and answers them using your own Anthropic, OpenAI, and Kimi Coding
+subscriptions. Point any compatible client at it, ask for a model you defined,
+and the gateway picks an account that can serve it — falling back to another
+when one is rate-limited, expired, or out of quota.
 
-## Features
+It runs on one machine, stores everything in a local SQLite file, and never
+logs the contents of your prompts or replies.
 
-- Anthropic-compatible `POST /v1/messages`
-- OpenAI-compatible `POST /v1/chat/completions`
-- Authenticated `GET /v1/models`
-- Virtual-model routing, aliases, credential priority, failover, and cooldowns
-- OAuth connection flows for Anthropic, OpenAI, and Kimi Coding
-- Encrypted credential storage in SQLite
-- Per-key model allowlists and process-local rate limits
-- Streaming SSE translation between client and provider formats
-- Admin control API for setup, login, credentials, models, keys, settings, health, usage, and logs
-- Admin dashboard served from the same origin, covering every control endpoint
-- Per-provider model catalog with list pricing, used as the default when configuring targets
-- Provider-specific client identity profiles and ordered outbound headers
+```bash
+bun install -g omnigateway
+omni start
+```
+
+> Status: in use and complete for its scope. Version 1 targets a single
+> machine and a single operator — see [Scope](#scope-and-limits).
+
+## What it does
+
+- **Speaks both dialects.** `POST /v1/messages` (Anthropic) and
+  `POST /v1/chat/completions` (OpenAI), including streaming, translated to
+  whichever provider actually serves the request.
+- **Routes across your accounts.** Define a virtual model like `fast` or
+  `smart` with several targets; the gateway ranks them by tier, health,
+  remaining quota, cost, and latency.
+- **Fails over.** A rate-limited or broken account is skipped, its circuit
+  breaker opens, and the next candidate is tried — before the response starts
+  streaming.
+- **Keeps OAuth alive.** Tokens refresh in the background, before a request
+  needs them.
+- **Watches provider quota.** It asks each provider what you have left and
+  routes by *pace*: 5% remaining is fine minutes before a reset and urgent with
+  six days to run.
+- **Issues its own keys.** Hand out gateway keys with per-key model allowlists
+  and rate limits instead of sharing provider credentials.
+- **Reports usage.** Requests, tokens, and cost by provider, model, key, and
+  day — metadata only.
+- **Ships an admin console and a CLI.** Both cover the same ground; use
+  whichever suits the machine you are on.
 
 ## Requirements
 
-- [Bun](https://bun.sh/) 1.4 or later
-- A persistent filesystem location for SQLite
-- A private encryption key used to encrypt stored provider credentials
+- [Bun](https://bun.sh/) 1.4 or later. Bun is the runtime, not just the
+  installer, so a Node-only machine cannot run OmniGateway.
+- A directory that persists, for the SQLite database.
+- At least one Anthropic, OpenAI, or Kimi Coding account to connect.
 
 ## Install
 
@@ -31,189 +55,148 @@ OmniGateway is a self-hosted, single-node AI gateway that presents Anthropic- an
 bun install -g omnigateway     # or: npm i -g omnigateway
 ```
 
-One package carries all three halves: the `omni` CLI, the gateway server, and
-the built admin console the server hosts. Bun is the runtime, not just the
-installer — `bun:sqlite` and Bun's process APIs are load-bearing — so a Node-only
-machine cannot run it.
+One package carries the `omni` CLI, the gateway server, and the admin console
+the server hosts.
+
+## Getting started
+
+Pick a directory to hold the database and configuration. `~/.config/omnigateway`
+is where `omni` looks by default:
 
 ```bash
 mkdir -p ~/.config/omnigateway && cd ~/.config/omnigateway
 printf 'OMNI_ENCRYPTION_KEY=%s\n' "$(openssl rand -base64 32)" > .env
-
-omni db migrate                # create the database
-omni admin set-password        # prompts; never pass a secret on the command line
-omni start                     # serves the API and the console
-omni connect anthropic         # authorize an account from the terminal
 ```
 
-`omni doctor` reports which installation it resolved, and `omni --help` lists
-every command. Releases are published from a tag by
-[`.github/workflows/release.yml`](.github/workflows/release.yml), with npm
-provenance attesting which commit produced them.
+That key encrypts your provider credentials at rest. **Keep it. Changing it
+makes every stored credential unreadable**, and there is no recovery path
+except reconnecting the accounts.
 
-## Quick start from a checkout
+Then set up and start:
 
 ```bash
-bun install
-cp .env.example .env
-openssl rand -base64 32
+omni db migrate            # create the database
+omni admin set-password    # prompts; the console signs in with this
+omni start                 # serves the API and the console on 127.0.0.1:8787
 ```
 
-Put generated value in `.env`:
-
-```dotenv
-OMNI_ENCRYPTION_KEY=<generated-value>
-```
-
-Changing this key later makes existing stored credentials unreadable.
-
-Start development server with file watching:
+Connect an account. The CLI prints a URL to open, and waits:
 
 ```bash
-bun run dev
+omni connect anthropic     # or: openai, kimi
 ```
 
-Or run normally:
+Define a virtual model your clients will ask for, seeding its pricing and
+capabilities from the built-in catalog:
 
 ```bash
-bun run start
+omni models catalog                                  # what is available
+omni models put fast --from-catalog anthropic:claude-sonnet-5
 ```
 
-Default listener is `http://127.0.0.1:8787`. Check liveness:
+Mint a key for your client. **It is printed once and stored only as a hash:**
 
 ```bash
-curl http://127.0.0.1:8787/health
+omni keys create --label laptop
 ```
 
-### Dashboard
-
-The gateway serves the built dashboard from `apps/dashboard/dist` at its own
-origin, so building it once makes the console available on the same port:
-
-```bash
-bun run build:dashboard
-```
-
-For dashboard development, run the gateway and Vite side by side. Vite proxies
-`/api` and `/oauth` to `127.0.0.1:8787`, so both halves work against one
-gateway:
-
-```bash
-bun run dev            # gateway on 8787
-bun run dev:dashboard  # console on 5173
-```
-
-Requests for a path the bundle does not contain fall through to `index.html`
-for client-side routing. `/api`, `/v1`, and `/oauth` are never served from
-disk.
-
-## Configuration
-
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `OMNI_ENCRYPTION_KEY` | Yes | — | Encrypts provider credentials at rest; minimum 16 characters |
-| `OMNI_HOST` | No | `127.0.0.1` | Listener host |
-| `OMNI_PORT` | No | `8787` | Listener port |
-| `OMNI_DB_PATH` | No | `./omnigateway.db` | SQLite database path |
-| `OMNI_BASE_URL` | No | Derived from host and port | Public origin used for OAuth callbacks; set behind reverse proxy |
-
-`.env.example` documents optional provider client-identity version, header, and wire-order overrides. Those values have built-in defaults and are read at process startup.
-
-## First-run setup
-
-Build the dashboard, open the gateway in a browser, and it walks the same steps:
-set an operator password, connect provider accounts, define virtual models, then
-mint a key. The key is displayed once and stored only as a hash.
-
-The same sequence over the control API directly:
-
-1. Check setup state with `GET /api/status`.
-2. Configure admin password with `POST /api/setup`.
-3. Create a session with `POST /api/login`; retain returned HTTP-only cookie.
-4. Connect provider credentials through `/api/connect/*`.
-5. Configure virtual models through `/api/models`.
-6. Create gateway API keys through `/api/keys`. Raw key is returned once.
-
-Admin routes use session-cookie authentication. Client routes use either:
-
-```http
-Authorization: Bearer <gateway-key>
-```
-
-or:
-
-```http
-x-api-key: <gateway-key>
-```
-
-## Client API
-
-| Method | Path | Compatibility |
-| --- | --- | --- |
-| `POST` | `/v1/messages` | Anthropic Messages API |
-| `POST` | `/v1/chat/completions` | OpenAI Chat Completions API |
-| `GET` | `/v1/models` | OpenAI-style model listing filtered by key allowlist |
-| `GET` | `/health` | Unauthenticated liveness |
-
-Example:
+Now use it:
 
 ```bash
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer <gateway-key>' \
-  -d '{
-    "model": "fast",
-    "messages": [{"role": "user", "content": "Hello"}]
-  }'
+  -d '{"model": "fast", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-## Workspace
+Everything above is also available in the browser at
+`http://127.0.0.1:8787`, which walks the same steps.
 
-```text
-apps/gateway/       Elysia HTTP application, auth, ingress, routing, dispatch, APIs
-apps/dashboard/     React admin console; built output is served by the gateway
-packages/ir/        Provider-neutral request, stream, error, and usage types
-packages/providers/ Provider adapters, OAuth logic, wire formats, model catalog
-packages/store/     Store contracts, encryption, SQLite repositories and migrations
-docs/superpowers/   Approved design specifications and implementation plans
+## Using it from a client
+
+| Method | Path | Compatible with |
+| --- | --- | --- |
+| `POST` | `/v1/messages` | Anthropic Messages API |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions API |
+| `GET` | `/v1/models` | OpenAI-style listing, filtered by your key's allowlist |
+| `GET` | `/health` | Unauthenticated liveness check |
+
+Authenticate with either header — sending both is an error:
+
+```http
+Authorization: Bearer <gateway-key>
+x-api-key: <gateway-key>
 ```
 
-Dependency direction matters:
+Ask for one of your virtual models by name. A bare provider model
+(`claude-sonnet-5`, `gpt-5`) also works if an account can serve it.
 
-- `@omni/ir` does not depend on provider or gateway code, and holds nothing
-  provider-specific.
-- `@omni/providers` translates between provider wire formats and canonical IR,
-  and owns the per-provider model catalog. `@omni/providers/catalog` is a leaf
-  subpath the dashboard imports, so it must not pull in the HTTP client or
-  adapters.
-- Router chooses candidates; dispatch owns side effects, retries, refresh, and streaming commit.
-- Gateway composes packages and exposes client and control APIs.
-- Dashboard only calls `/api/*`; it never reaches into the store or providers
-  for anything but types and the catalog.
+Most tools that accept a custom base URL work unchanged: set it to
+`http://127.0.0.1:8787` and use a gateway key where the provider key goes.
 
-## Development
+## The CLI
+
+`omni --help` lists everything; `omni <command> --help` explains one. Every
+command takes `--json` for scripting, and `--root <path>` to manage an
+installation other than the default.
+
+| | |
+| --- | --- |
+| `omni status` | the gateway, its accounts, and their quota, on one screen |
+| `omni start` / `stop` / `restart` | run the gateway; `--foreground` attaches it to your terminal |
+| `omni doctor` | which installation it resolved, and whether it can act on it |
+| `omni logs` | recent requests as the gateway recorded them |
+| `omni usage` | spend and tokens, by provider, model, key, or day |
+| `omni connect <provider>` | authorize an account from the terminal |
+| `omni credentials …` | list, show, enable, disable, retier, refresh, remove |
+| `omni models …` | list, show, put, remove, `dry-run`, `catalog` |
+| `omni keys …` | list, create, revoke |
+| `omni settings get` / `set` | routing weights, retention, deadlines |
+| `omni admin set-password` | change the console password |
+| `omni db migrate` | create or upgrade the database |
+
+Two worth knowing:
+
+`omni models dry-run fast` shows exactly where a request would go and why —
+each candidate's score, and every account that was excluded with the reason.
+
+`omni status` is the "is anything wrong" command: process state, per-account
+health, and how much provider quota each account has left.
+
+## Running it as a service
+
+On a machine with systemd:
 
 ```bash
-bun test             # gateway, IR, providers, and store suites
-bun run typecheck    # gateway and dashboard
-bun run lint         # Biome checks
-bun run fmt          # format files
+omni service install --enable    # writes a user unit for this installation
+omni start                       # from here on, start/stop delegate to systemctl
+omni logs --service              # reads the journal
 ```
 
-Dashboard tests need a DOM and run separately; `bunfig.toml` excludes them from
-the root run so the two do not share a preload:
+Use `--system` for a system-wide unit (needs root). Without systemd, `omni
+start` supervises the process itself with a pidfile under
+`~/.local/state/omnigateway`. Either way, `omni start` returns only once
+`/health` actually answers.
 
-```bash
-bun run --cwd apps/dashboard test
-```
+## Configuration
 
-Run one test file:
+Configuration is environment variables, read from the installation's `.env`:
 
-```bash
-bun test apps/gateway/test/routes/proxy.test.ts
-```
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `OMNI_ENCRYPTION_KEY` | Yes | — | Encrypts provider credentials at rest; 16 characters minimum |
+| `OMNI_HOST` | No | `127.0.0.1` | Listener host |
+| `OMNI_PORT` | No | `8787` | Listener port |
+| `OMNI_DB_PATH` | No | `./omnigateway.db` | SQLite database path |
+| `OMNI_BASE_URL` | No | derived from host and port | Public origin for OAuth callbacks; set this behind a reverse proxy |
+| `OMNI_STATIC_DIR` | No | the console shipped with the server | Serve a different console build |
 
-Project uses strict TypeScript with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`. Committed code and tests must not use `any`.
+Routing behaviour — weights, retry limits, request deadline, log retention,
+how often provider quota is polled — lives in the database, not the
+environment. Edit it with `omni settings set` or in the console.
+
+`.env.example` in the repository documents the optional provider
+client-identity overrides.
 
 ## Docker
 
@@ -226,38 +209,57 @@ docker run --rm \
   omnigateway
 ```
 
-Container listens on `0.0.0.0:8787` and stores SQLite data at `/data/omnigateway.db`.
+The container listens on `0.0.0.0:8787` and keeps its database at
+`/data/omnigateway.db`. Note that **the image builds the gateway only**: it
+serves the APIs and returns 404 for the console. Use the CLI or the control API
+against it, or install the npm package if you want the console.
 
-The image builds the gateway only. It does not include `apps/dashboard`, so a
-container serves the client and control APIs while requests for the console
-return 404. Use the control API directly, or run the dashboard separately,
-until the image builds it.
+## Scope and limits
 
-## Operational notes
+Worth knowing before you deploy it:
 
-- Treat `OMNI_ENCRYPTION_KEY`, gateway keys, OAuth tokens, and SQLite data as secrets.
-- Request logs contain metadata and usage, never prompt or response bodies.
-- API-key rate limits are process-local. They reset on restart and are not shared across multiple gateway instances.
-- Version 1 targets a trusted, single-operator deployment. Multi-tenancy, distributed coordination, semantic caching, billing, and horizontal scaling are out of scope.
-- Set `OMNI_BASE_URL` to public HTTPS origin when running behind a reverse proxy so OAuth callbacks match provider registrations.
+- **One machine, one operator.** No multi-tenancy, no clustering, no shared
+  state. Rate limits are counted per process and reset when it restarts.
+- **Two grains of usage history.** Detailed request logs are pruned after 30
+  days by default; a daily rollup is kept for 400 days. A day is your host's
+  local midnight, fixed when the row is written.
+- **Quota readings come from the providers**, and their usage endpoints are
+  undocumented. An account with nothing reported is treated as unknown, never
+  as unlimited.
+- **The gateway does not know which model accepts which request shape.** An
+  unsupported combination surfaces as the provider's own 400 rather than being
+  caught earlier.
+- Not in scope for version 1: semantic caching, billing, prompt storage,
+  horizontal scaling.
 
-## Design documents
+## Security
 
-Specifications:
+- Treat `OMNI_ENCRYPTION_KEY`, gateway keys, and the SQLite file as secrets.
+  Anyone with the file *and* the key has your provider credentials.
+- Prompts and responses are never logged. Request logs hold metadata and token
+  counts only.
+- Gateway keys are stored as hashes. A lost key is reissued, not recovered.
+- Secrets are never accepted on the command line — `omni` prompts for them or
+  reads stdin — so they stay out of your shell history and the process table.
+- Behind a reverse proxy, set `OMNI_BASE_URL` to the public HTTPS origin so
+  OAuth callbacks match what the providers have registered.
+- The gateway talks to your providers and to nobody else. No telemetry, no CDN
+  fonts, no third-party origins.
 
-- `docs/superpowers/specs/2026-07-31-omnigateway-design.md`
-- `docs/superpowers/specs/2026-07-31-client-identity-profiles-design.md`
-- `docs/superpowers/specs/2026-08-05-dashboard-redesign-design.md`
-- `docs/superpowers/specs/2026-08-06-provider-chooser-focus-return-design.md`
-- `docs/superpowers/specs/2026-08-08-provider-model-catalog-design.md`
+## Development
 
-Plans:
+Contributing, or running from a checkout? See [CLAUDE.md](CLAUDE.md) for the
+repository map, architectural boundaries, and conventions, and
+`docs/superpowers/specs/` for the design documents behind each feature.
 
-- `docs/superpowers/plans/2026-07-31-omnigateway-core.md`
-- `docs/superpowers/plans/2026-07-31-omnigateway-dashboard.md`
-- `docs/superpowers/plans/2026-08-05-dashboard-redesign.md`
-- `docs/superpowers/plans/2026-08-06-provider-chooser-focus-return.md`
-- `docs/superpowers/plans/2026-08-08-provider-model-catalog.md`
+```bash
+git clone https://github.com/harismawan/omnigateway.git
+cd omnigateway
+bun install
+cp .env.example .env          # then set OMNI_ENCRYPTION_KEY
+bun run build:dashboard       # the gateway serves this build
+bun run dev                   # gateway on 8787, with file watching
+```
 
-Verify current code before assuming a plan snippet still matches the
-implementation.
+Releases are published to npm from a `v*` tag, with provenance attesting which
+commit produced them.

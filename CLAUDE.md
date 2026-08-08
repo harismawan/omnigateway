@@ -1,5 +1,14 @@
 # OmniGateway Repository Guidance
 
+Guidance for an agent working in this repository. It is the contributor-facing
+document: architecture, boundaries, conventions, and the reasons behind them.
+
+`README.md` is the other half, and is for people *using* OmniGateway — install,
+first run, the client API, the CLI, configuration, operational limits. Keep the
+split when editing either: a repository map or a testing convention does not
+belong in the README, and an operator does not need the dependency direction to
+point a client at the gateway. When a change affects both audiences, update both.
+
 ## Scope
 
 OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway. Three front ends are implemented over one core: the gateway under `apps/gateway`, the admin console under `apps/dashboard` whose built output the gateway serves, and the `omni` CLI under `apps/cli`. Admin operations themselves live in `packages/control`, which both the gateway routes and the CLI drive. Treat approved documents under `docs/superpowers/specs/` and `docs/superpowers/plans/` as product requirements, but verify current code before assuming plan snippets still match implementation.
@@ -43,6 +52,28 @@ bun run --cwd apps/dashboard test  # needs a DOM; excluded from the root run
 ```
 
 `bunfig.toml` excludes `apps/dashboard/test/**` from the root `bun test`, so a green root run says nothing about the dashboard. Run focused tests with `bun test <path>`. Before claiming completion, run tests covering changed behavior plus full `bun test`, the dashboard suite, `bun run typecheck`, and `bun run lint`.
+
+## Documentation
+
+- `README.md`: for users. What it is, install, first run, client API, CLI,
+  configuration, security, limits. No repository layout, no test conventions.
+- `CLAUDE.md`: this file. For whoever changes the code.
+- `docs/superpowers/specs/`: the approved design behind each feature, with the
+  reasoning. Read the relevant one before changing that area.
+- `docs/superpowers/plans/`: the implementation plans those specs produced.
+
+Specs, newest first:
+
+- `2026-08-08-omnigateway-cli-design.md` — the CLI, and the extraction into `packages/control`
+- `2026-08-08-provider-model-catalog-design.md`
+- `2026-08-06-provider-chooser-focus-return-design.md`
+- `2026-08-05-dashboard-redesign-design.md`
+- `2026-07-31-client-identity-profiles-design.md`
+- `2026-07-31-omnigateway-design.md` — the original system design
+
+Plans sit beside them under `docs/superpowers/plans/` with matching names.
+A plan records what was intended at the time; verify the current code before
+assuming a snippet still matches.
 
 ## Repository map
 
