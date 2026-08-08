@@ -18,6 +18,14 @@ bun run lint
 bun run fmt
 ```
 
+CLI:
+
+```bash
+bun apps/cli/src/index.ts --help   # run it in place
+cd apps/cli && bun link            # then `omni` is on PATH (registers the cwd package; it takes no path argument)
+omni doctor --root <install>       # what it resolved, and whether it can act on it
+```
+
 Dashboard:
 
 ```bash
