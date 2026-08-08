@@ -61,6 +61,7 @@ export async function* decodeAnthropic(
   let cacheWriteTokens = 0;
   let outputTokens = 0;
   let stopReason: StopReason = "endTurn";
+  let terminal = false;
 
   for await (const msg of messages) {
     const d = json(msg.data);
@@ -130,6 +131,7 @@ export async function* decodeAnthropic(
       }
 
       case "message_stop":
+        terminal = true;
         yield {
           type: "end",
           stopReason,
@@ -138,6 +140,7 @@ export async function* decodeAnthropic(
         break;
 
       case "error": {
+        terminal = true;
         const code = ERROR_TYPE[String(d.error?.type)] ?? "UPSTREAM";
         yield {
           type: "error",
@@ -152,5 +155,14 @@ export async function* decodeAnthropic(
         // ping and any future event types are ignored by design.
         break;
     }
+  }
+
+  if (!terminal) {
+    yield {
+      type: "error",
+      code: "UPSTREAM",
+      message: "upstream stream ended before message_stop",
+      retryable: RETRYABLE.UPSTREAM,
+    };
   }
 }

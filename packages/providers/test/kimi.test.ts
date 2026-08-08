@@ -150,6 +150,7 @@ test("decodes streamed tool calls indexed after text", async () => {
           event: "message",
           data: JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
         },
+        { event: "message", data: "[DONE]" },
       ),
     ),
   );
@@ -174,13 +175,50 @@ test("decodes streamed tool calls indexed after text", async () => {
 test("maps a length finish reason", async () => {
   const events = await collect(
     decodeChat(
-      msgs({
-        event: "message",
-        data: JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }] }),
-      }),
+      msgs(
+        {
+          event: "message",
+          data: JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }] }),
+        },
+        { event: "message", data: "[DONE]" },
+      ),
     ),
   );
   expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "maxTokens" });
+});
+
+test("emits UPSTREAM when EOF follows finish_reason without [DONE]", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs(
+        {
+          event: "message",
+          data: JSON.stringify({ choices: [{ delta: { content: "partial" } }] }),
+        },
+        {
+          event: "message",
+          data: JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+        },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(events.some((event) => event.type === "end")).toBe(false);
+});
+
+test("emits UPSTREAM when EOF arrives without [DONE]", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs({
+        event: "message",
+        data: JSON.stringify({ choices: [{ delta: { content: "partial" } }] }),
+      }),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(events.some((event) => event.type === "end")).toBe(false);
 });
 
 test("[DONE] with no finish_reason still terminates the stream", async () => {

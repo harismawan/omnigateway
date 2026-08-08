@@ -112,6 +112,56 @@ test("proxies a streaming openai request and terminates with [DONE]", async () =
   expect(await res.text()).toContain("data: [DONE]");
 });
 
+test("returns client-compatible errors for truncated non-streaming responses", async () => {
+  const partial = EVENTS.slice(0, 3);
+
+  for (const [path, body] of [
+    [
+      "/v1/messages",
+      { model: "fast", max_tokens: 100, messages: [{ role: "user", content: "hi" }] },
+    ],
+    ["/v1/chat/completions", { model: "fast", messages: [{ role: "user", content: "hi" }] }],
+  ] as const) {
+    const { call, store } = await harness(partial);
+    const res = await call(path, body);
+    expect(res.status).toBe(502);
+    const response = (await res.json()) as { error: { type: string } };
+    expect(response.error.type).toBe(path === "/v1/messages" ? "api_error" : "server_error");
+    expect((await store.usage.recent(10))[0]?.status).toBe(502);
+    store.close();
+  }
+});
+
+test("streams client-compatible errors without successful terminal markers after truncation", async () => {
+  const partial = EVENTS.slice(0, 3);
+
+  for (const [path, body, forbidden] of [
+    [
+      "/v1/messages",
+      {
+        model: "fast",
+        max_tokens: 100,
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      },
+      "event: message_stop",
+    ],
+    [
+      "/v1/chat/completions",
+      { model: "fast", stream: true, messages: [{ role: "user", content: "hi" }] },
+      "data: [DONE]",
+    ],
+  ] as const) {
+    const { call, store } = await harness(partial);
+    const res = await call(path, body);
+    const text = await res.text();
+    expect(text).toContain('"error"');
+    expect(text).not.toContain(forbidden);
+    expect((await store.usage.recent(10))[0]?.status).toBe(502);
+    store.close();
+  }
+});
+
 test("rejects a request with no api key", async () => {
   const { app } = await harness();
   const res = await app.handle(

@@ -291,6 +291,79 @@ test("a failure after the commit point surfaces as an error event, not a retry",
   store.close();
 });
 
+test("stops consuming an attempt after canonical end", async () => {
+  const store = await seeded(2);
+  const adapter = stubAdapter((call) => {
+    if (call > 1) return textStream("should not be reached");
+    return (async function* () {
+      yield { type: "start", id: "m", model: "claude-opus-4" } as StreamEvent;
+      yield {
+        type: "end",
+        stopReason: "endTurn",
+        usage: { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      } as StreamEvent;
+      throw new GatewayError("UPSTREAM", "after terminal event");
+    })();
+  });
+
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(adapter.calls).toHaveLength(1);
+  expect(events.filter((event) => event.type === "end")).toHaveLength(1);
+  expect(events.some((event) => event.type === "error")).toBe(false);
+  expect(outcome.log().status).toBe(200);
+  store.close();
+});
+
+test("adapter exhaustion without end or error fails after stream commit", async () => {
+  const store = await seeded(1);
+  const adapter = stubAdapter(() =>
+    (async function* () {
+      yield { type: "start", id: "m", model: "claude-opus-4" } as StreamEvent;
+      yield { type: "blockStart", index: 0, block: { type: "text" } } as StreamEvent;
+      yield {
+        type: "blockDelta",
+        index: 0,
+        delta: { type: "text", text: "partial" },
+      } as StreamEvent;
+    })(),
+  );
+
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(outcome.log().status).toBe(502);
+  expect(outcome.log().errorCode).toBe("UPSTREAM");
+  const rows = await store.credentials.listHealth();
+  expect(rows[0]?.consecutiveFailures).toBe(1);
+  store.close();
+});
+
+test("adapter exhaustion without end or error fails over before stream commit", async () => {
+  const store = await seeded(2);
+  const adapter = stubAdapter((call) =>
+    call === 1
+      ? (async function* () {
+          yield { type: "start", id: "failed", model: "claude-opus-4" } as StreamEvent;
+          yield { type: "blockStart", index: 0, block: { type: "text" } } as StreamEvent;
+        })()
+      : textStream("recovered"),
+  );
+
+  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const events = await drain(outcome.events);
+
+  expect(adapter.calls).toHaveLength(2);
+  expect(events.filter((event) => event.type === "start")).toEqual([
+    { type: "start", id: "m", model: "claude-opus-4" },
+  ]);
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  expect(outcome.log().status).toBe(200);
+  store.close();
+});
+
 test("an in-stream non-retryable error is not mistaken for success", async () => {
   // Real decoders (e.g. anthropic/decode.ts's "error" case) yield an error
   // StreamEvent rather than throwing. A non-retryable in-stream error must

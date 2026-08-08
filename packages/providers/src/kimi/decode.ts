@@ -1,4 +1,4 @@
-import type { StopReason, StreamEvent } from "@omni/ir";
+import { RETRYABLE, type StopReason, type StreamEvent } from "@omni/ir";
 import type { SseMessage } from "../sse.ts";
 
 const FINISH: Readonly<Record<string, StopReason>> = {
@@ -47,7 +47,7 @@ export async function* decodeChat(
   let started = false;
   let textOpen = false;
   let textIndex: number | undefined;
-  let ended = false;
+  let done = false;
   let stopReason: StopReason = "endTurn";
   let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   // Indices are assigned in first-seen order, whichever content type appears
@@ -55,13 +55,11 @@ export async function* decodeChat(
   const toolIndex = new Map<number, number>();
   let nextIndex = 0;
 
-  const emitEnd = (): StreamEvent => {
-    ended = true;
-    return { type: "end", stopReason, usage };
-  };
-
   for await (const msg of messages) {
-    if (msg.data === "[DONE]") break;
+    if (msg.data === "[DONE]") {
+      done = true;
+      break;
+    }
     const d = json(msg.data);
     if (d === null) continue;
 
@@ -123,17 +121,21 @@ export async function* decodeChat(
 
     if (typeof choice.finish_reason === "string") {
       stopReason = FINISH[choice.finish_reason] ?? "endTurn";
-      if (textOpen) yield { type: "blockEnd", index: textIndex ?? 0 };
-      for (const index of toolIndex.values()) yield { type: "blockEnd", index };
-      yield emitEnd();
     }
   }
 
-  // A stream that reaches [DONE] without a finish_reason still needs a terminal
-  // event, or collect() would report an unterminated response.
-  if (!ended) {
+  // [DONE] is Kimi's transport-level success marker. A finish_reason carries
+  // stop metadata but cannot certify that the stream arrived intact.
+  if (done) {
     if (textOpen) yield { type: "blockEnd", index: textIndex ?? 0 };
     for (const index of toolIndex.values()) yield { type: "blockEnd", index };
-    yield emitEnd();
+    yield { type: "end", stopReason, usage };
+  } else {
+    yield {
+      type: "error",
+      code: "UPSTREAM",
+      message: "upstream stream ended before [DONE]",
+      retryable: RETRYABLE.UPSTREAM,
+    };
   }
 }
