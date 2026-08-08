@@ -35,9 +35,33 @@ type Row = {
   updated_at: number;
 };
 
-export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRepo {
+export function createCredentialRepo(
+  db: Database,
+  key: CryptoKey,
+  emit: (change: import("../types.ts").RoutingChange) => void = () => {},
+): CredentialRepo {
+  const open = async (v: string | null): Promise<string | null> =>
+    v === null ? null : decrypt(key, v);
+  const secretsFrom = async (
+    row: Pick<Row, "access_token" | "refresh_token" | "api_key" | "id_token">,
+  ): Promise<CredentialSecrets> => ({
+    accessToken: await open(row.access_token),
+    refreshToken: await open(row.refresh_token),
+    apiKey: await open(row.api_key),
+    idToken: await open(row.id_token),
+  });
+  const currentSecrets = async (id: string): Promise<CredentialSecrets> => {
+    const row = db
+      .query<Pick<Row, "access_token" | "refresh_token" | "api_key" | "id_token">, [string]>(
+        "SELECT access_token, refresh_token, api_key, id_token FROM credentials WHERE id = ?",
+      )
+      .get(id);
+    if (row === null) throw new Error(`credential ${id} no longer exists`);
+    return secretsFrom(row);
+  };
+
   /** Decrypts lazily, so ranking N candidates costs zero decryptions. */
-  const view = (row: Row): CredentialView => ({
+  const view = (row: Row, loadCurrentSecrets = false): CredentialView => ({
     id: row.id,
     provider: row.provider as ProviderId,
     label: row.label,
@@ -53,22 +77,33 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
     hasRefreshToken: row.refresh_token !== null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    secrets: async (): Promise<CredentialSecrets> => ({
-      accessToken: await open(row.access_token),
-      refreshToken: await open(row.refresh_token),
-      apiKey: await open(row.api_key),
-      idToken: await open(row.id_token),
-    }),
+    secrets: () => (loadCurrentSecrets ? currentSecrets(row.id) : secretsFrom(row)),
   });
 
-  const open = async (v: string | null): Promise<string | null> =>
-    v === null ? null : decrypt(key, v);
   const seal = async (v: string | null | undefined): Promise<string | null> =>
     v === null || v === undefined ? null : encrypt(key, v);
 
   return {
     async list() {
-      return db.query<Row, []>("SELECT * FROM credentials ORDER BY tier, label").all().map(view);
+      return db
+        .query<Row, []>("SELECT * FROM credentials ORDER BY tier, label")
+        .all()
+        .map((row) => view(row));
+    },
+
+    async listRouting() {
+      return db
+        .query<Row, []>(
+          `SELECT id, provider, label, auth_type, enabled, tier, weight, expires_at,
+                  account_email, provider_data, disabled_reason, disabled_at,
+                  NULL AS access_token,
+                  CASE WHEN refresh_token IS NULL THEN NULL ELSE 'present' END AS refresh_token,
+                  NULL AS api_key, NULL AS id_token, created_at, updated_at
+             FROM credentials
+            ORDER BY tier, label`,
+        )
+        .all()
+        .map((row) => view(row, true));
     },
 
     async get(id) {
@@ -106,6 +141,7 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
         ],
       );
       const { accessToken, refreshToken, apiKey, idToken, ...meta } = input;
+      emit({ type: "credentialsChanged" });
       return {
         ...meta,
         hasRefreshToken: refreshToken != null,
@@ -134,6 +170,7 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
       if (sets.length === 0) return;
       put("updated_at", Date.now());
       db.run(`UPDATE credentials SET ${sets.join(", ")} WHERE id = ?`, [...vals, id]);
+      emit({ type: "credentialsChanged" });
     },
 
     async updateSecrets(id, secrets, expiresAt) {
@@ -158,10 +195,12 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
       sets.push("expires_at = ?", "updated_at = ?");
       vals.push(expiresAt, Date.now());
       db.run(`UPDATE credentials SET ${sets.join(", ")} WHERE id = ?`, [...vals, id]);
+      emit({ type: "credentialsChanged" });
     },
 
     async remove(id) {
       db.run("DELETE FROM credentials WHERE id = ?", [id]);
+      emit({ type: "credentialsChanged" });
     },
 
     async listHealth() {
@@ -218,6 +257,7 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
           );
         }
       })();
+      emit({ type: "healthSaved", rows });
     },
 
     async listQuota() {
@@ -293,6 +333,7 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
           prune.run(credentialId, JSON.stringify(types));
         }
       })();
+      emit({ type: "quotaSaved", rows });
     },
   };
 }

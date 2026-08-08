@@ -11,6 +11,85 @@ async function store(): Promise<Store> {
   });
 }
 
+test("routing subscribers receive committed local changes", async () => {
+  const s = await store();
+  const changes: string[] = [];
+  const unsubscribe = s.routing.subscribe((change) => changes.push(change.type));
+
+  await s.credentials.create({
+    id: "c1",
+    provider: "anthropic",
+    label: "personal",
+    authType: "oauth",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: "test-token",
+    refreshToken: "test-refresh",
+    apiKey: null,
+    idToken: null,
+  });
+  await s.credentials.saveHealth([
+    {
+      credentialId: "c1",
+      model: "claude-opus-4",
+      breakerState: "closed",
+      consecutiveFailures: 0,
+      openedAt: null,
+      rateLimitedUntil: null,
+      ewmaTtftMs: 100,
+      lastUsedAt: 200,
+    },
+  ]);
+  await s.credentials.saveQuota([
+    {
+      credentialId: "c1",
+      windowType: "weekly",
+      startsAt: 0,
+      used: 10,
+      limit: 100,
+      resetsAt: 1000,
+      observedAt: 50,
+    },
+  ]);
+  await s.config.putSettings({ maxAttempts: 4 });
+
+  expect(changes).toEqual(["credentialsChanged", "healthSaved", "quotaSaved", "settingsChanged"]);
+  unsubscribe();
+  s.close();
+});
+
+test("routing subscriber failures do not fail committed writes", async () => {
+  const s = await store();
+  s.routing.subscribe(() => {
+    throw new Error("listener failed");
+  });
+
+  await expect(s.config.putSettings({ maxAttempts: 4 })).resolves.toMatchObject({ maxAttempts: 4 });
+  expect((await s.config.getSettings()).maxAttempts).toBe(4);
+  s.close();
+});
+
+test("routing version changes after another connection commits", async () => {
+  const path = `/tmp/omnigateway-routing-version-${crypto.randomUUID()}.db`;
+  const key = await deriveKey("test-secret-value-for-unit-tests");
+  const first = await createStore({ path, encryptionKey: key });
+  const second = await createStore({ path, encryptionKey: key });
+  const before = first.routing.version();
+
+  await second.config.putSettings({ maxAttempts: 4 });
+
+  expect(first.routing.version()).not.toBe(before);
+  first.close();
+  second.close();
+  await Bun.file(path).delete();
+});
+
 test("admin password initialization only writes when absent", async () => {
   const s = await store();
   expect(await s.config.setAdminPasswordHashIfAbsent("first-hash")).toBe(true);

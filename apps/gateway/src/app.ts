@@ -6,6 +6,7 @@ import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from 
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
+import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectRoutes } from "./routes/connect.ts";
 import { proxyRoutes } from "./routes/proxy.ts";
@@ -41,6 +42,7 @@ export function createApp(deps: AppDeps) {
   const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
   const rateLimiter = new ApiKeyRateLimiter(now);
+  const snapshots = createRoutingSnapshotCache(deps.store);
 
   const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS });
   const refresh =
@@ -67,6 +69,7 @@ export function createApp(deps: AppDeps) {
     .use(
       proxyRoutes({
         store: deps.store,
+        snapshots,
         adapters,
         http,
         now,

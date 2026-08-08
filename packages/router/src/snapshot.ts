@@ -10,7 +10,7 @@ export function healthKey(credentialId: string, model: string): string {
 
 export async function buildSnapshot(store: Store, now: number): Promise<Snapshot> {
   const [credentials, healthRows, quotaRows, models, settings] = await Promise.all([
-    store.credentials.list(),
+    store.credentials.listRouting(),
     store.credentials.listHealth(),
     store.credentials.listQuota(),
     store.config.listModels(),

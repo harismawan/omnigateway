@@ -5,7 +5,10 @@ import { DEFAULT_SETTINGS } from "../types.ts";
 const SETTINGS_KEY = "settings";
 const ADMIN_HASH_KEY = "adminPasswordHash";
 
-export function createConfigRepo(db: Database): ConfigRepo {
+export function createConfigRepo(
+  db: Database,
+  emit: (change: import("../types.ts").RoutingChange) => void = () => {},
+): ConfigRepo {
   const readRaw = (key: string): string | null =>
     db.query<{ value: string }, [string]>("SELECT value FROM settings WHERE key = ?").get(key)
       ?.value ?? null;
@@ -40,10 +43,12 @@ export function createConfigRepo(db: Database): ConfigRepo {
            is_alias = excluded.is_alias`,
         [model.id, JSON.stringify(model.targets), model.strategy, model.isAlias ? 1 : 0],
       );
+      emit({ type: "modelsChanged" });
     },
 
     async removeModel(id: string) {
       db.run("DELETE FROM virtual_models WHERE id = ?", [id]);
+      emit({ type: "modelsChanged" });
     },
 
     async getSettings() {
@@ -67,6 +72,7 @@ export function createConfigRepo(db: Database): ConfigRepo {
         weights: { ...current.weights, ...patch.weights },
       };
       writeRaw(SETTINGS_KEY, JSON.stringify(next));
+      emit({ type: "settingsChanged" });
       return next;
     },
 

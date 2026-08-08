@@ -10,7 +10,6 @@ import {
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import {
   blankHealth,
-  buildSnapshot,
   type Candidate,
   healthKey,
   rank,
@@ -27,9 +26,11 @@ import type {
 } from "@omni/store";
 import { attempt } from "./attempt.ts";
 import { classify } from "./classify.ts";
+import type { RoutingSnapshotSource } from "./snapshotCache.ts";
 
 export type DispatchDeps = {
   store: Store;
+  snapshots: RoutingSnapshotSource;
   adapters: Readonly<Record<ProviderId, ProviderAdapter>>;
   /** Order-preserving transport. Never globalThis.fetch — see Global Constraints. */
   http: HttpClient;
@@ -50,7 +51,7 @@ export async function dispatch(
   signal: AbortSignal,
 ): Promise<DispatchOutcome> {
   const startedAt = deps.now();
-  const snapshot = await buildSnapshot(deps.store, startedAt);
+  const snapshot = await deps.snapshots.get(startedAt);
   const deadlineAt = startedAt + snapshot.settings.requestDeadlineMs;
 
   const log: RequestLog = {

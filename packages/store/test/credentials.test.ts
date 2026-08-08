@@ -356,6 +356,18 @@ test("saveHealth upserts rather than duplicating", async () => {
   db.close();
 });
 
+test("routing views load current secrets only when selected", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  const [routing] = await repo.listRouting();
+  expect(routing?.label).toBe("personal");
+
+  await repo.updateSecrets("c1", { accessToken: "test-token-current" }, 5000);
+  expect((await routing?.secrets())?.accessToken).toBe("test-token-current");
+  db.close();
+});
+
 test("remove deletes the credential", async () => {
   const { repo, db } = await setup();
   await repo.create(input);
