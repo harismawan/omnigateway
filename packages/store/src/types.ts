@@ -171,19 +171,53 @@ export interface KeyRepo {
   revoke(id: string): Promise<void>;
 }
 
+/**
+ * A dimension usage can be sliced by. `hour` only exists in raw logs and `day`
+ * only in the rollup; the rest are available at both grains.
+ */
+export type UsageDimension =
+  | "credential"
+  | "model"
+  | "requestedModel"
+  | "apiKey"
+  | "provider"
+  | "hour"
+  | "day";
+
+/**
+ * `raw` reads `request_logs`, which is bounded by the retention window but can
+ * resolve down to the hour. `daily` reads the `usage_daily` rollup, which keeps
+ * a year but only ever answers per day.
+ */
+export type UsageGrain = "raw" | "daily";
+
 export type UsageQuery = {
   since: number;
   until?: number;
-  groupBy: "credential" | "model" | "apiKey" | "hour";
+  /** Defaults to `raw`. */
+  grain?: UsageGrain;
+  groupBy: UsageDimension;
+  /**
+   * A second dimension, giving one bucket per (groupBy, splitBy) pair. This is
+   * what turns a time series into a stacked one — group by `day`, split by
+   * `provider` — without asking the caller to issue a query per series.
+   */
+  splitBy?: UsageDimension;
 };
 
 export type UsageBucket = {
   key: string;
+  /** Present only when the query set `splitBy`. */
+  split?: string;
   requests: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   costUsd: number;
   errors: number;
+  /** Summed request durations; divide by `requests` for the window's mean. */
+  durationMsSum: number;
 };
 
 export interface UsageRepo {
@@ -191,6 +225,8 @@ export interface UsageRepo {
   recent(limit: number): Promise<RequestLog[]>;
   aggregate(q: UsageQuery): Promise<UsageBucket[]>;
   prune(olderThan: number): Promise<number>;
+  /** Prunes the daily rollup, which is kept far longer than the raw logs. */
+  pruneDaily(olderThan: number): Promise<number>;
 }
 
 export type Store = {

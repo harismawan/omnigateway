@@ -40,6 +40,7 @@ bun run --cwd apps/dashboard test  # needs a DOM; excluded from the root run
 - `packages/ir/`: provider-neutral domain types and error mapping
 - `packages/providers/`: provider adapters, OAuth, HTTP client, wire rendering/parsing
 - `packages/store/`: store interfaces, encryption, SQLite repositories, migrations
+- `packages/store/src/sqlite/rollup.ts`: the `usage_daily` rollup, written in the same transaction as each request log
 - `apps/gateway/test/`: gateway unit, route, integration, and end-to-end tests
 - `packages/providers/src/{anthropic,openai,kimi}/models.ts`: per-provider model catalog with list pricing
 - `packages/providers/src/catalog.ts`: assembles them; exported at `@omni/providers/catalog`
@@ -140,6 +141,7 @@ Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/
 ## Known constraints
 
 - Version 1 is single-node and single-operator.
+- Usage has two grains. `/api/usage?grain=raw` reads `request_logs`, which is pruned at `logRetentionDays` (30 by default) and is the only grain that resolves to the hour. `grain=daily` reads `usage_daily`, kept for 400 days, and is the only grain that answers a year. A day key is the *host's local* midnight fixed at write time: rollup rows cannot be re-bucketed into another timezone afterwards, and changing the host timezone does not rewrite history.
 - API-key rate limits are process-local, reset on restart, and are not shared across instances.
 - The Docker image builds the gateway only. It does not include `apps/dashboard`, so a container serves the APIs and returns 404 for the console.
 - The gateway does not model which *model* accepts which request shape. Mid-conversation system messages and the several thinking forms vary by model and by platform, so an unsupported combination surfaces as an upstream 400 rather than being caught by the router.

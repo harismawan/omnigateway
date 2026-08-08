@@ -41,7 +41,15 @@ export const queryKeys = {
   models: ["models"] as const,
   keys: ["keys"] as const,
   settings: ["settings"] as const,
-  usage: (query: UsageQuery) => ["usage", query.groupBy, query.since, query.until ?? null] as const,
+  usage: (query: UsageQuery) =>
+    [
+      "usage",
+      query.grain ?? "raw",
+      query.groupBy,
+      query.splitBy ?? null,
+      query.since,
+      query.until ?? null,
+    ] as const,
   logs: (limit: number) => ["logs", limit] as const,
 };
 
@@ -111,6 +119,8 @@ export function useUsage(
           withQuery("/api/usage", {
             groupBy: query.groupBy,
             since: query.since,
+            ...(query.grain === undefined ? {} : { grain: query.grain }),
+            ...(query.splitBy === undefined ? {} : { splitBy: query.splitBy }),
             ...(query.until === undefined ? {} : { until: query.until }),
           }),
           signal,
