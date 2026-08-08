@@ -65,8 +65,19 @@ allowlist check pass, immediately before `dispatch()`. That is the first moment 
 the key id exist. A request that fails those checks never gets a pending row: it falls to the catch
 and writes one terminal row, exactly as now.
 
+The pending row's `at` is the request start time, matching what dispatch already records for a
+completed row. Completion must not restamp it, or a row would jump position in the tail at the
+moment it finished.
+
 Like `finishLog`, the begin path swallows its own errors. A store failure must not turn a working
 proxied request into a 500.
+
+One ordering hazard the upsert introduces: the route's terminal `catch` synthesizes a fully zeroed
+log with an empty `requestedModel`, and it can now be reached *after* a pending row exists — if
+`dispatch()` itself throws rather than yielding an error event. Written blindly, that completion
+would overwrite a real requested model with an empty string. The completion statement therefore
+leaves the columns that only `begin` knows — `requested_model`, `api_key_id`, `at` — untouched when
+they are absent from the completing log, rather than assigning them unconditionally.
 
 ## Orphans
 
@@ -168,14 +179,16 @@ Gateway:
 6. The same holds on stream error and on client cancellation.
 7. A pre-dispatch failure — auth, rate limit, bad JSON, allowlist — writes exactly one `done` row
    and never a pending one.
-8. A store failure during `begin` does not fail the proxied request.
+8. A throw from `dispatch()` after `begin` completes the existing row without erasing its requested
+   model or its start time.
+9. A store failure during `begin` does not fail the proxied request.
 
 Dashboard:
 
-9. A pending row renders the live lamp with the accessible name `in flight` and em dashes in the
-   unknown columns.
-10. `summarize` and `bucketLogs` ignore pending rows.
-11. The `failed` filter excludes pending rows.
+10. A pending row renders the live lamp with the accessible name `in flight` and em dashes in the
+    unknown columns.
+11. `summarize` and `bucketLogs` ignore pending rows.
+12. The `failed` filter excludes pending rows.
 
 Run the changed-area tests, the full root suite, the dashboard suite, `bun run typecheck`, and
 `bun run lint` before claiming completion.
