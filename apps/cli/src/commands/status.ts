@@ -1,4 +1,4 @@
-import { createAdminAuth } from "@omni/control";
+import { createAdminAuth, credentialStatus } from "@omni/control";
 import type { QuotaWindow } from "@omni/store";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -73,33 +73,15 @@ export const status: Command = {
       storeError = error instanceof Error ? error.message : "could not open the database";
     }
 
-    const credentials = store === null ? [] : await store.credentials.list();
-    const quotaRows = store === null ? [] : await store.credentials.listQuota();
-    const configured =
+    const persistent =
       store === null
-        ? false
-        : await createAdminAuth(store, {
-            now: ctx.now,
-            sessionTtlMs: 0,
-          }).isConfigured();
-
-    const byCredential = new Map<string, QuotaWindow[]>();
-    for (const row of quotaRows) {
-      const list = byCredential.get(row.credentialId);
-      if (list === undefined) byCredential.set(row.credentialId, [row]);
-      else list.push(row);
-    }
+        ? { adminConfigured: false, credentials: [] }
+        : await credentialStatus(store, { now: ctx.now });
+    const { adminConfigured: configured, credentials } = persistent;
 
     const data = {
       process,
-      adminConfigured: configured,
-      credentials: credentials.map((credential) => ({
-        id: credential.id,
-        provider: credential.provider,
-        label: credential.label,
-        enabled: credential.enabled,
-        quota: byCredential.get(credential.id) ?? [],
-      })),
+      ...persistent,
       storeError,
     };
 
@@ -121,15 +103,12 @@ export const status: Command = {
         return `${header}\n\nno credentials; add one with: omni connect <provider>`;
       }
 
-      const rows = credentials.map((credential) => {
-        const windows = byCredential.get(credential.id) ?? [];
-        return [
-          credential.label,
-          provider(ctx, credential.provider),
-          state(ctx, credential.enabled, credential.enabled ? "enabled" : "disabled"),
-          quotaCell(ctx, windows, ctx.now()),
-        ];
-      });
+      const rows = credentials.map((credential) => [
+        credential.label,
+        provider(ctx, credential.provider),
+        state(ctx, credential.enabled, credential.enabled ? "enabled" : "disabled"),
+        quotaCell(ctx, credential.quota, ctx.now()),
+      ]);
 
       return `${header}\n\n${table(
         [{ header: "ACCOUNT" }, { header: "PROVIDER" }, { header: "STATE" }, { header: "QUOTA" }],

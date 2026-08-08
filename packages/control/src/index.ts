@@ -22,10 +22,15 @@ export {
 } from "./connect.ts";
 export {
   type CredentialPatch,
+  type CredentialStatus,
   type CredentialSummary,
+  createApiKeyCredential,
   credentialHealth,
+  credentialStatus,
+  getCredential,
   listCredentials,
   patchCredential,
+  refreshCredential,
   removeCredential,
 } from "./credentials.ts";
 export { type DryRunCandidate, type DryRunResult, dryRun } from "./dryRun.ts";

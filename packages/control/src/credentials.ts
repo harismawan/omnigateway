@@ -1,6 +1,8 @@
 import { GatewayError } from "@omni/ir";
 import type { Credential, CredentialHealth, QuotaWindow, Store } from "@omni/store";
-import { credentialPatchSchema, parseOrThrow } from "./schemas.ts";
+import { createAdminAuth } from "./adminAuth.ts";
+import type { Refresher } from "./oauth/refresh.ts";
+import { credentialPatchSchema, parseOrThrow, providerIdSchema } from "./schemas.ts";
 
 /**
  * A credential as an operator may see it: every stored column, and nothing
@@ -11,25 +13,85 @@ import { credentialPatchSchema, parseOrThrow } from "./schemas.ts";
  */
 export type CredentialSummary = Credential;
 
+function summarizeCredential(credential: Credential): CredentialSummary {
+  return {
+    id: credential.id,
+    provider: credential.provider,
+    label: credential.label,
+    authType: credential.authType,
+    enabled: credential.enabled,
+    tier: credential.tier,
+    weight: credential.weight,
+    expiresAt: credential.expiresAt,
+    accountEmail: credential.accountEmail,
+    providerData: credential.providerData,
+    disabledReason: credential.disabledReason,
+    disabledAt: credential.disabledAt,
+    hasRefreshToken: credential.hasRefreshToken,
+    createdAt: credential.createdAt,
+    updatedAt: credential.updatedAt,
+  };
+}
+
 export async function listCredentials(store: Store): Promise<CredentialSummary[]> {
-  const credentials = await store.credentials.list();
-  return credentials.map((c) => ({
-    id: c.id,
-    provider: c.provider,
-    label: c.label,
-    authType: c.authType,
-    enabled: c.enabled,
-    tier: c.tier,
-    weight: c.weight,
-    expiresAt: c.expiresAt,
-    accountEmail: c.accountEmail,
-    providerData: c.providerData,
-    disabledReason: c.disabledReason,
-    disabledAt: c.disabledAt,
-    hasRefreshToken: c.hasRefreshToken,
-    createdAt: c.createdAt,
-    updatedAt: c.updatedAt,
-  }));
+  return (await store.credentials.list()).map(summarizeCredential);
+}
+
+export async function getCredential(store: Store, id: string): Promise<CredentialSummary> {
+  const credential = await store.credentials.get(id);
+  if (credential === null) throw new GatewayError("BAD_REQUEST", "no such credential");
+  return summarizeCredential(credential);
+}
+
+export async function createApiKeyCredential(
+  store: Store,
+  input: { provider: unknown; apiKey: unknown; label?: unknown },
+): Promise<CredentialSummary> {
+  const provider = parseOrThrow(providerIdSchema, input.provider);
+  if (typeof input.apiKey !== "string" || input.apiKey.trim().length === 0) {
+    throw new GatewayError("BAD_REQUEST", "apiKey: must not be empty");
+  }
+  if (input.label !== undefined && typeof input.label !== "string") {
+    throw new GatewayError("BAD_REQUEST", "label: must be a string");
+  }
+
+  const label = input.label?.trim() || `${provider} api key`;
+  const created = await store.credentials.create({
+    id: crypto.randomUUID(),
+    provider,
+    label,
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: input.apiKey,
+    idToken: null,
+  });
+  return summarizeCredential(created);
+}
+
+export async function refreshCredential(
+  deps: { store: Store; refresh: Refresher },
+  id: string,
+): Promise<CredentialSummary> {
+  const credential = await deps.store.credentials.get(id);
+  if (credential === null) throw new GatewayError("BAD_REQUEST", "no such credential");
+  if (credential.authType !== "oauth") {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `credential "${id}" is an api key and has nothing to refresh`,
+    );
+  }
+
+  await deps.refresh(credential);
+  return getCredential(deps.store, id);
 }
 
 export async function credentialHealth(
@@ -40,6 +102,43 @@ export async function credentialHealth(
     store.credentials.listQuota(),
   ]);
   return { health, quota };
+}
+
+export type CredentialStatus = {
+  adminConfigured: boolean;
+  credentials: Array<
+    Pick<CredentialSummary, "id" | "provider" | "label" | "enabled"> & {
+      quota: QuotaWindow[];
+    }
+  >;
+};
+
+export async function credentialStatus(
+  store: Store,
+  options: { now: () => number },
+): Promise<CredentialStatus> {
+  const [credentials, quota, adminConfigured] = await Promise.all([
+    listCredentials(store),
+    store.credentials.listQuota(),
+    createAdminAuth(store, { now: options.now, sessionTtlMs: 0 }).isConfigured(),
+  ]);
+  const byCredential = new Map<string, QuotaWindow[]>();
+  for (const row of quota) {
+    const rows = byCredential.get(row.credentialId);
+    if (rows === undefined) byCredential.set(row.credentialId, [row]);
+    else rows.push(row);
+  }
+
+  return {
+    adminConfigured,
+    credentials: credentials.map(({ id, provider, label, enabled }) => ({
+      id,
+      provider,
+      label,
+      enabled,
+      quota: byCredential.get(id) ?? [],
+    })),
+  };
 }
 
 export type CredentialPatch = {

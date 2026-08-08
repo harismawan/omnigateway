@@ -1,9 +1,13 @@
 import {
+  createApiKeyCredential,
   createRefresher,
+  credentialHealth,
+  getCredential,
   isProviderId,
   listCredentials,
   OAUTH_PROVIDERS,
   patchCredential,
+  refreshCredential,
   removeCredential,
 } from "@omni/control";
 import { nodeHttpClient } from "@omni/providers";
@@ -69,9 +73,7 @@ async function findCredential(
   ctx: { store: () => Promise<import("@omni/store").Store> },
   id: string,
 ) {
-  const credential = (await (await ctx.store()).credentials.get(id)) ?? null;
-  if (credential === null) throw new CliError(`no credential "${id}"`);
-  return credential;
+  return getCredential(await ctx.store(), id);
 }
 
 export const credentialsShow: Command = {
@@ -185,12 +187,7 @@ export const credentialsRefresh: Command = {
   async run(args, { ctx, writer }) {
     const id = requirePositional(args, 0, "credential id");
     const store = await ctx.store();
-    const credential = await store.credentials.get(id);
-    if (credential === null) throw new CliError(`no credential "${id}"`);
-    if (credential.authType !== "oauth") {
-      throw new CliError(`credential "${id}" is an api key and has nothing to refresh`);
-    }
-
+    const credential = await findCredential(ctx, id);
     const refresh = createRefresher({
       store,
       providers: OAUTH_PROVIDERS,
@@ -199,14 +196,13 @@ export const credentialsRefresh: Command = {
     });
 
     note(ctx, writer, `refreshing ${credential.provider} credential ${id}…`);
-    await refresh(credential);
+    const updated = await refreshCredential({ store, refresh }, id);
 
-    const updated = await store.credentials.get(id);
     emit(
       ctx,
       writer,
-      { id, expiresAt: updated?.expiresAt ?? null },
-      () => `${id} refreshed; expires ${formatTime(updated?.expiresAt ?? null)}`,
+      { id, expiresAt: updated.expiresAt },
+      () => `${id} refreshed; expires ${formatTime(updated.expiresAt)}`,
     );
   },
 };
@@ -224,28 +220,18 @@ export const credentialsAddKey: Command = {
     const key = await prompt.secret(`${providerId} API key: `);
     if (key.length === 0) throw new CliError("no API key given");
 
-    const store = await ctx.store();
-    const id = crypto.randomUUID();
-    await store.credentials.create({
-      id,
+    const created = await createApiKeyCredential(await ctx.store(), {
       provider: providerId,
-      label: stringFlag(args.values, "label") ?? `${providerId} api key`,
-      authType: "apiKey",
-      enabled: true,
-      tier: 1,
-      weight: 1,
-      expiresAt: null,
-      accountEmail: null,
-      providerData: {},
-      disabledReason: null,
-      disabledAt: null,
-      accessToken: null,
-      refreshToken: null,
       apiKey: key,
-      idToken: null,
+      label: stringFlag(args.values, "label"),
     });
 
-    emit(ctx, writer, { id, provider: providerId }, () => `stored ${providerId} api key as ${id}`);
+    emit(
+      ctx,
+      writer,
+      { id: created.id, provider: created.provider },
+      () => `stored ${created.provider} api key as ${created.id}`,
+    );
   },
 };
 
@@ -256,8 +242,8 @@ export const credentialsHealth: Command = {
   options: { all: { type: "boolean" } },
   async run(args, { ctx, writer }) {
     const store = await ctx.store();
-    const [rows, credentials] = await Promise.all([
-      store.credentials.listHealth(),
+    const [{ health: rows }, credentials] = await Promise.all([
+      credentialHealth(store),
       listCredentials(store),
     ]);
     const labels = new Map(credentials.map((c) => [c.id, c.label]));

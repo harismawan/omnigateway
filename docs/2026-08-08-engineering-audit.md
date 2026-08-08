@@ -364,10 +364,21 @@ tests, typecheck, and lint, but only immediately before publishing.
 Add a non-publishing workflow for pull requests and pushes to `main`. Add discoverable root scripts
 such as `test:dashboard` and `test:all`, then reuse them in CI.
 
-### 2. Route CLI admin operations through `packages/control`
+### 2. Route CLI admin operations through `packages/control` ✅ Done
 
-CLI credential creation and operational reads access repositories directly. This duplicates policy
-that should be shared with HTTP admin operations.
+**Completed:** 2026-08-08
+
+CLI credential lookup, API-key creation, OAuth refresh orchestration, health reads, and persistent
+status projections now call focused `packages/control` operations. CLI command code retains prompts,
+formatting, process inspection, and refresher dependency construction, but no longer calls
+`store.credentials.*` directly.
+
+Verification completed with focused tests (45 passed), `bun test` (669 passed), dashboard tests
+(180 passed), `bun run typecheck`, and `bun run lint`. Lint reports only existing Biome configuration
+deprecation notice.
+
+CLI credential creation and operational reads previously accessed repositories directly. This
+duplicated policy that should be shared with HTTP admin operations.
 
 #### Evidence
 
