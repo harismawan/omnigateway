@@ -187,6 +187,7 @@ Ingress accepts the shapes current clients send, and these are contracts:
 
 - A `{"role": "system"}` entry inside `messages` is a mid-conversation system message. Carry it in place. Never fold it into the request-level `system` prompt: that moves the instruction to the front of the conversation, changes when it takes effect, and invalidates the provider's cached prefix.
 - `thinking` accepts `adaptive`, `enabled` with a budget, and `disabled`. Never synthesize a token budget from an effort level — current models reject that form. An explicit `disabled` must be forwarded, because omitting `thinking` is not the same thing on models that think by default.
+- `anthropic-beta` is carried on the request as `betas` and re-emitted by the adapter, merged with the OAuth beta the OAuth path requires. A beta is a header *and* a body field: the field rides through `vendor` passthrough, so forwarding one without the other turns a legitimate request into an upstream 400 on an unknown key.
 - A provider that cannot express something the client asked for records a degradation rather than dropping it silently. Degradations reach the request log.
 
 Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/*` and must not assume WebSocket log streaming; current design polls logs.

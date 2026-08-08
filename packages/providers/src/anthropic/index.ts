@@ -33,9 +33,14 @@ export const anthropicAdapter: ProviderAdapter = {
       ["Accept", req.request.stream ? "text/event-stream" : "application/json"],
     ];
 
+    // The client's own betas ride along: the fields they authorise are already
+    // forwarded through `vendor`, and Anthropic rejects such a field outright
+    // when the header does not name its beta.
+    const betas = new Set(req.request.betas ?? []);
+
     if (oauth) {
       protocol.push(["Authorization", `Bearer ${req.credentials.accessToken}`]);
-      protocol.push(["anthropic-beta", OAUTH_BETA]);
+      betas.add(OAUTH_BETA);
     } else if (req.credentials.apiKey !== null) {
       protocol.push(["x-api-key", req.credentials.apiKey]);
     } else {
@@ -43,6 +48,8 @@ export const anthropicAdapter: ProviderAdapter = {
         provider: "anthropic",
       });
     }
+
+    if (betas.size > 0) protocol.push(["anthropic-beta", [...betas].join(",")]);
 
     const profile = PROFILES.anthropic;
     const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);

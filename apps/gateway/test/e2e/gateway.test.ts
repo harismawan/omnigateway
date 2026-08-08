@@ -33,7 +33,7 @@ async function seedCredential(store: Store, id: string, tier: number, token: str
 async function harness(): Promise<{
   store: Store;
   upstream: StubUpstream;
-  call: (body: unknown) => Promise<Response>;
+  call: (body: unknown, headers?: Record<string, string>) => Promise<Response>;
 }> {
   const store = await memoryStore();
   await store.config.putModel(
@@ -57,11 +57,15 @@ async function harness(): Promise<{
     requestId: () => `req_${++n}`,
   });
 
-  const call = (body: unknown) =>
+  const call = (body: unknown, headers: Record<string, string> = {}) =>
     app.handle(
       new Request("http://localhost/v1/messages", {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${raw}`,
+          ...headers,
+        },
         body: JSON.stringify(body),
       }),
     );
@@ -296,4 +300,60 @@ test("no request or response text ever reaches the log table", async () => {
   expect(serialized).not.toContain("sensitive-prompt-text");
   expect(serialized).not.toContain("Hello");
   expect(serialized).not.toContain("test-token-a");
+});
+
+test("the client's betas reach the upstream alongside the oauth beta", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(ANTHROPIC_STREAM);
+
+  await call(
+    { ...REQUEST, context_management: { edits: [{ type: "clear_tool_uses_20250919" }] } },
+    { "anthropic-beta": "context-management-2025-06-27,interleaved-thinking-2025-05-14" },
+  );
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  const betas = (header(sent, "anthropic-beta") ?? "").split(",");
+  expect(betas).toContain("context-management-2025-06-27");
+  expect(betas).toContain("interleaved-thinking-2025-05-14");
+  // Dropping this one would break the OAuth path itself.
+  expect(betas).toContain("oauth-2025-04-20");
+  // The body field the beta authorises travels with it, not without it.
+  expect((sent.body as { context_management?: unknown }).context_management).toEqual({
+    edits: [{ type: "clear_tool_uses_20250919" }],
+  });
+});
+
+test("the api-key path names the client's betas and no others", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredentialRow(store, {
+    id: "c1",
+    authType: "apiKey",
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "sk-ant-test",
+  });
+  upstream.queue(ANTHROPIC_STREAM);
+
+  await call(REQUEST, { "anthropic-beta": "context-management-2025-06-27" });
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  expect(header(sent, "anthropic-beta")).toBe("context-management-2025-06-27");
+});
+
+test("a request naming no beta sends no beta header on the api-key path", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredentialRow(store, {
+    id: "c1",
+    authType: "apiKey",
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "sk-ant-test",
+  });
+  upstream.queue(ANTHROPIC_STREAM);
+
+  await call(REQUEST);
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  expect(header(sent, "anthropic-beta")).toBeNull();
 });

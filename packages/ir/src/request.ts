@@ -88,4 +88,14 @@ export type ChatRequest = {
   stream: boolean;
   reasoning?: ReasoningConfig;
   vendor?: Partial<Record<ProviderId, Record<string, unknown>>>;
+  /**
+   * Beta feature names the client opted into, verbatim.
+   *
+   * A beta is two halves: a body field and a header naming the beta. `vendor`
+   * carries the field, and this carries the name, because a gateway that
+   * forwards one without the other produces an upstream 400 on a request the
+   * client had every right to make. Adapters decide what to do with the list;
+   * a provider with no such mechanism ignores it.
+   */
+  betas?: string[];
 };
