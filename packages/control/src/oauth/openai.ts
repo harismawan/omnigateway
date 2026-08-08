@@ -1,5 +1,6 @@
 import { GatewayError } from "@omni/ir";
 import { PROFILES } from "@omni/providers";
+import type { WindowType } from "@omni/store";
 import { createPkce, randomState } from "./pkce.ts";
 import {
   type FlowResult,
@@ -11,7 +12,7 @@ import {
   tokenErrorMessage,
   type UsageReport,
 } from "./types.ts";
-import { nestedOf, recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
+import { nestedOf, numberOf, recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
 
 /** Public client ID of the Codex CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -142,14 +143,48 @@ function toResult(
  * caps rather than the plan window the router is choosing between, so they are
  * left alone. Exported for fixture tests.
  */
+/**
+ * Names a window by the duration it declares, falling back to its position.
+ *
+ * Codex names windows by role, and the roles are not fixed to durations: a
+ * `prolite` account in August 2026 reports a *weekly* allowance as
+ * `primary_window` with `secondary_window` null, because that plan has no
+ * five-hour cap at all. Reading position alone stamps that seven-day window
+ * `fiveHour`, and the router then prices it as though it reset thirty-four
+ * times sooner than it does.
+ *
+ * `limit_window_seconds` is the provider stating the duration outright, so it
+ * wins whenever it is present. The boundaries are generous because the point is
+ * to pick the closest of three names, not to validate the provider.
+ */
+function windowTypeOf(value: unknown, fallback: WindowType): WindowType {
+  const record = recordOf(value);
+  if (record === null) return fallback;
+
+  const seconds = numberOf(record, [
+    "limit_window_seconds",
+    "limitWindowSeconds",
+    "window_seconds",
+    "windowSeconds",
+  ]);
+  if (seconds === null || seconds <= 0) return fallback;
+
+  if (seconds <= 6 * 60 * 60) return "fiveHour";
+  if (seconds <= 36 * 60 * 60) return "daily";
+  return "weekly";
+}
+
 export function parseOpenAIUsage(value: unknown, now: number): UsageReport | null {
   const root = recordOf(value);
   if (root === null) return null;
   const rateLimit = nestedOf(root, ["rate_limit", "rateLimit"]) ?? root;
 
+  const primary = rateLimit.primary_window ?? rateLimit.primaryWindow;
+  const secondary = rateLimit.secondary_window ?? rateLimit.secondaryWindow;
+
   return reportFrom([
-    windowFrom(rateLimit.primary_window ?? rateLimit.primaryWindow, "fiveHour", now),
-    windowFrom(rateLimit.secondary_window ?? rateLimit.secondaryWindow, "weekly", now),
+    windowFrom(primary, windowTypeOf(primary, "fiveHour"), now),
+    windowFrom(secondary, windowTypeOf(secondary, "weekly"), now),
   ]);
 }
 

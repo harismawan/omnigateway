@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { cli, fakeService, makeRoot, TEST_KEY } from "./helpers/harness.ts";
+import { cli, fakeService, makeRoot, openStore, TEST_KEY } from "./helpers/harness.ts";
 
 /** Every test starts from a migrated, empty installation. */
 async function installation(): Promise<string> {
@@ -444,4 +444,47 @@ test("logs without --service reads the request log", async () => {
 
   expect(result.code).toBe(0);
   expect(JSON.parse(result.out)).toEqual({ logs: [] });
+});
+
+test("status reports every quota window an account has, not just the tightest", async () => {
+  const root = await installation();
+  await cli(["credentials", "add-key", "anthropic", "--label", "work"], {
+    root,
+    prompt: { isTty: false, secret: async () => "key", confirm: async () => true },
+  });
+
+  const listed = JSON.parse((await cli(["credentials", "list", "--json"], { root })).out) as {
+    credentials: Array<{ id: string }>;
+  };
+  const id = listed.credentials[0]?.id ?? "";
+
+  // Written the way the poller writes them: one probe, two windows.
+  const store = await openStore(root);
+  await store.credentials.saveQuota([
+    {
+      credentialId: id,
+      windowType: "weekly",
+      startsAt: 1_000,
+      used: 200,
+      limit: 1_000,
+      resetsAt: null,
+      observedAt: 1_000,
+    },
+    {
+      credentialId: id,
+      windowType: "fiveHour",
+      startsAt: 1_000,
+      used: 950,
+      limit: 1_000,
+      resetsAt: null,
+      observedAt: 1_000,
+    },
+  ]);
+  store.close();
+
+  const result = await cli(["status"], { root, service: fakeService({ root }) });
+
+  expect(result.code).toBe(0);
+  // Shortest window first, so the cell reads soonest-to-latest.
+  expect(result.out).toMatch(/5h 95% · 7d 20%/);
 });

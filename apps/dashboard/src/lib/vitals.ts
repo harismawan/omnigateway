@@ -254,15 +254,32 @@ export function quotaLegend(
     : `${label} · resets ${formatRelative(window.resetsAt, now)}`;
 }
 
-/** The window closest to exhaustion, which is the one that will block first. */
-export function tightestQuota(windows: readonly QuotaWindow[]): QuotaUse | null {
-  let tightest: QuotaUse | null = null;
-  for (const window of windows) {
-    if (window.limit === null || window.limit <= 0) continue;
-    const fraction = Math.min(1, window.used / window.limit);
-    if (tightest === null || fraction > tightest.fraction) tightest = { window, fraction };
-  }
-  return tightest;
+/** Shortest window first, so a row reads left-to-right from soonest to latest. */
+const WINDOW_ORDER: Record<QuotaWindow["windowType"], number> = {
+  fiveHour: 0,
+  daily: 1,
+  weekly: 2,
+};
+
+/**
+ * Every window the provider reported, in duration order.
+ *
+ * All of them, not just the tightest: a five-hour window at 90% and a weekly
+ * one at 20% mean "pause for an hour", while the reverse means "this account
+ * is done for the week". Collapsing them to one bar throws away which of those
+ * an operator is looking at.
+ *
+ * A window with no limit is dropped rather than drawn empty — the provider
+ * reported usage without a ceiling, which is not the same as unused.
+ */
+export function quotaUsage(windows: readonly QuotaWindow[]): QuotaUse[] {
+  return windows
+    .filter((window) => window.limit !== null && window.limit > 0)
+    .map((window) => ({
+      window,
+      fraction: Math.min(1, window.used / (window.limit as number)),
+    }))
+    .sort((a, b) => WINDOW_ORDER[a.window.windowType] - WINDOW_ORDER[b.window.windowType]);
 }
 
 /** Groups rows by credential id without assuming the server sorted them. */

@@ -225,6 +225,100 @@ test("a quota snapshot round-trips its reset and observation times", async () =>
   db.close();
 });
 
+test("a window the provider stops reporting is dropped, not left behind", async () => {
+  // A probe reports the credential's whole window set, so a window missing from
+  // it is a window the provider no longer has — Codex dropping a five-hour cap,
+  // for one. Leaving the old row draws a bar for a limit that does not exist,
+  // and the router keeps pricing against it.
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  await repo.saveQuota([
+    {
+      credentialId: "c1",
+      windowType: "fiveHour",
+      startsAt: 0,
+      used: 5,
+      limit: 100,
+      resetsAt: 10,
+      observedAt: 1,
+    },
+    {
+      credentialId: "c1",
+      windowType: "weekly",
+      startsAt: 0,
+      used: 20,
+      limit: 100,
+      resetsAt: 99,
+      observedAt: 1,
+    },
+  ]);
+  expect(await repo.listQuota()).toHaveLength(2);
+
+  await repo.saveQuota([
+    {
+      credentialId: "c1",
+      windowType: "weekly",
+      startsAt: 0,
+      used: 24,
+      limit: 100,
+      resetsAt: 99,
+      observedAt: 2,
+    },
+  ]);
+
+  const rows = await repo.listQuota();
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ windowType: "weekly", used: 24 });
+  db.close();
+});
+
+test("saving one credential's windows leaves another credential's alone", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  await repo.create({ ...input, id: "c2", label: "second" });
+
+  await repo.saveQuota([
+    {
+      credentialId: "c1",
+      windowType: "weekly",
+      startsAt: 0,
+      used: 1,
+      limit: 100,
+      resetsAt: 9,
+      observedAt: 1,
+    },
+    {
+      credentialId: "c2",
+      windowType: "weekly",
+      startsAt: 0,
+      used: 2,
+      limit: 100,
+      resetsAt: 9,
+      observedAt: 1,
+    },
+  ]);
+
+  await repo.saveQuota([
+    {
+      credentialId: "c1",
+      windowType: "fiveHour",
+      startsAt: 0,
+      used: 3,
+      limit: 100,
+      resetsAt: 9,
+      observedAt: 2,
+    },
+  ]);
+
+  const rows = await repo.listQuota();
+  expect(rows.filter((r) => r.credentialId === "c1").map((r) => r.windowType)).toEqual([
+    "fiveHour",
+  ]);
+  expect(rows.filter((r) => r.credentialId === "c2").map((r) => r.windowType)).toEqual(["weekly"]);
+  db.close();
+});
+
 test("a disabled reason round-trips and clears", async () => {
   const { repo, db } = await setup();
   await repo.create(input);
