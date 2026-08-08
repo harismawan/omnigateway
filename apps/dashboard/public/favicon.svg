@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="OmniGateway">
+  <title>OmniGateway</title>
+  <!--
+    Three inbound lines converging into one outbound line: many provider
+    accounts behind a single endpoint, which is the whole product in one mark.
+
+    Drawn on a solid accent badge rather than as bare strokes so it survives a
+    16px tab on either a light or a dark browser chrome without needing two
+    variants. Stroke weight is 3 for the same reason — thinner reads as fuzz
+    once the icon is scaled down.
+  -->
+  <rect width="32" height="32" rx="7" fill="#2f5fd0" />
+  <g
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="M7 8h5.5l3.5 8" />
+    <path d="M7 16h9" />
+    <path d="M7 24h5.5l3.5 -8" />
+    <path d="M16 16h9" />
+  </g>
+</svg>

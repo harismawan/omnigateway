@@ -16,7 +16,7 @@ import {
   credentialStatus,
   groupBy,
   quotaLegend,
-  tightestQuota,
+  quotaUsage,
   WINDOW_LABEL,
 } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
@@ -77,6 +77,13 @@ const Note = styled.span`
 const QuotaCell = styled(Row)`
   min-width: 130px;
   gap: 6px;
+`;
+
+/** One row per reported window, shortest first. */
+const QuotaStack = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 `;
 
 /**
@@ -204,7 +211,7 @@ export function AccountsBoard() {
                             credential.enabled,
                             credential.disabledReason,
                           );
-                          const quota = tightestQuota(quotaByCredential.get(credential.id) ?? []);
+                          const windows = quotaUsage(quotaByCredential.get(credential.id) ?? []);
                           return (
                             <Tr key={credential.id}>
                               <Td>
@@ -286,25 +293,24 @@ export function AccountsBoard() {
                                 />
                               </Td>
                               <Td>
-                                {quota === null ? (
+                                {windows.length === 0 ? (
                                   // Quota is what the provider reported. Nothing
                                   // reported is not the same claim as no limit.
                                   <Legend>unknown</Legend>
                                 ) : (
-                                  <QuotaCell>
-                                    <Meter
-                                      fraction={quota.fraction}
-                                      label={`${WINDOW_LABEL[quota.window.windowType]} window, ${Math.round(quota.fraction * 100)}% used`}
-                                    />
-                                    <Legend>
-                                      {quotaLegend(
-                                        quota.window,
-                                        now,
-                                        pollIntervalMs,
-                                        formatRelative,
-                                      )}
-                                    </Legend>
-                                  </QuotaCell>
+                                  <QuotaStack>
+                                    {windows.map(({ window, fraction }) => (
+                                      <QuotaCell key={window.windowType}>
+                                        <Meter
+                                          fraction={fraction}
+                                          label={`${WINDOW_LABEL[window.windowType]} window, ${Math.round(fraction * 100)}% used`}
+                                        />
+                                        <Legend>
+                                          {quotaLegend(window, now, pollIntervalMs, formatRelative)}
+                                        </Legend>
+                                      </QuotaCell>
+                                    ))}
+                                  </QuotaStack>
                                 )}
                               </Td>
                               <Td $align="right" $mono>

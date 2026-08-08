@@ -1,37 +1,59 @@
 import { createAdminAuth } from "@omni/control";
-import { quotaHeadroom } from "@omni/router";
 import type { QuotaWindow } from "@omni/store";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatAge, note, paint, table } from "../output.ts";
 import { status as serviceStatus } from "../service.ts";
 
-/** The quota window an operator is most likely asking about: the tightest one. */
-function tightest(windows: readonly QuotaWindow[]): QuotaWindow | null {
-  let worst: QuotaWindow | null = null;
-  for (const window of windows) {
-    if (window.limit === null || window.limit <= 0) continue;
-    if (worst === null || window.used / window.limit > worst.used / (worst.limit ?? 1)) {
-      worst = window;
-    }
-  }
-  return worst;
+/** Shortest window first, so the cell reads soonest-to-latest. */
+const WINDOW_ORDER: Record<QuotaWindow["windowType"], number> = {
+  fiveHour: 0,
+  daily: 1,
+  weekly: 2,
+};
+
+const WINDOW_LABEL: Record<QuotaWindow["windowType"], string> = {
+  fiveHour: "5h",
+  daily: "24h",
+  weekly: "7d",
+};
+
+/**
+ * Every window the provider reported, in duration order.
+ *
+ * All of them, not just the tightest: a five-hour window at 90% and a weekly
+ * one at 20% mean "pause for an hour", while the reverse means the account is
+ * done for the week. One number cannot say which of those the operator is
+ * looking at.
+ */
+function reportedWindows(windows: readonly QuotaWindow[]): QuotaWindow[] {
+  return windows
+    .filter((window) => window.limit !== null && window.limit > 0)
+    .sort((a, b) => WINDOW_ORDER[a.windowType] - WINDOW_ORDER[b.windowType]);
 }
 
+/**
+ * One cell covering every window, e.g. `5h 62% · 7d 18%`.
+ *
+ * Each window is coloured on its own fraction, while the age note is printed
+ * once from the oldest reading in the row: two windows arrive from the same
+ * probe, so one timestamp describes both.
+ */
 function quotaCell(
   ctx: Parameters<typeof paint>[0],
   windows: readonly QuotaWindow[],
-  headroom: number,
   now: number,
 ): string {
-  const window = tightest(windows);
-  if (window === null || window.limit === null) return paint(ctx, "dim", "unknown");
+  const reported = reportedWindows(windows);
+  if (reported.length === 0) return paint(ctx, "dim", "unknown");
 
-  const used = Math.round((window.used / window.limit) * 100);
-  const age = formatAge(window.observedAt, now);
-  // Headroom is pace, not raw remainder: 5% left reads as fine minutes before a
-  // reset and as urgent with six days to run.
-  return `${state(ctx, headroom >= 0.5, `${used}% used`)} ${paint(ctx, "dim", `(${window.windowType}, ${age} ago)`)}`;
+  const parts = reported.map((window) => {
+    const used = Math.round((window.used / (window.limit as number)) * 100);
+    return state(ctx, used < 90, `${WINDOW_LABEL[window.windowType]} ${used}%`);
+  });
+
+  const observedAt = Math.min(...reported.map((window) => window.observedAt));
+  return `${parts.join(" · ")} ${paint(ctx, "dim", `(${formatAge(observedAt, now)} ago)`)}`;
 }
 
 export const status: Command = {
@@ -53,7 +75,6 @@ export const status: Command = {
 
     const credentials = store === null ? [] : await store.credentials.list();
     const quotaRows = store === null ? [] : await store.credentials.listQuota();
-    const settings = store === null ? null : await store.config.getSettings();
     const configured =
       store === null
         ? false
@@ -102,17 +123,11 @@ export const status: Command = {
 
       const rows = credentials.map((credential) => {
         const windows = byCredential.get(credential.id) ?? [];
-        const headroom = quotaHeadroom(
-          credential,
-          windows,
-          ctx.now(),
-          settings?.quotaPollIntervalMs ?? 0,
-        );
         return [
           credential.label,
           provider(ctx, credential.provider),
           state(ctx, credential.enabled, credential.enabled ? "enabled" : "disabled"),
-          quotaCell(ctx, windows, headroom, ctx.now()),
+          quotaCell(ctx, windows, ctx.now()),
         ];
       });
 

@@ -33,12 +33,31 @@ describe("AccountsBoard", () => {
     expect(screen.getByText("1 of 2 accounts are enabled and eligible for routing.")).toBeTruthy();
   });
 
-  test("shows the fault and the tightest quota window on the row", async () => {
+  test("shows the fault and the quota windows on the row", async () => {
     stubAccounts();
     renderWithProviders(<AccountsBoard />);
 
     expect(await screen.findByText("breaker open")).toBeTruthy();
     expect(screen.getByLabelText("5h window, 95% used")).toBeTruthy();
+  });
+
+  test("draws every reported window, not just the tightest", async () => {
+    // A five-hour window at 95% and a weekly one at 20% mean "pause for an
+    // hour"; the reverse means "this account is done for the week". One bar
+    // cannot say which.
+    stubAccounts({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [
+          quota({ windowType: "weekly", used: 200, limit: 1_000 }),
+          quota({ windowType: "fiveHour", used: 950, limit: 1_000 }),
+        ],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    expect(await screen.findByLabelText("5h window, 95% used")).toBeTruthy();
+    expect(screen.getByLabelText("7d window, 20% used")).toBeTruthy();
   });
 
   test("turning an account off patches only that field", async () => {

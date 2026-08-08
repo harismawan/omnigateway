@@ -2,13 +2,21 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ConnectFlows } from "@omni/control";
-import type { Store } from "@omni/store";
+import { createStore, deriveKey, type Store } from "@omni/store";
 import type { Writer } from "../../src/output.ts";
 import type { Prompt } from "../../src/prompt.ts";
 import { type RunOptions, run } from "../../src/run.ts";
 import type { RunResult, ServiceDeps, Spawner } from "../../src/service.ts";
 
 export const TEST_KEY = "test-encryption-key-0123456789";
+
+/** Opens an installation's store the way the CLI would, for arranging state. */
+export async function openStore(root: string): Promise<Store> {
+  return createStore({
+    path: join(root, "omnigateway.db"),
+    encryptionKey: await deriveKey(TEST_KEY),
+  });
+}
 
 /** A throwaway installation root with a `.env` the CLI will find. */
 export function makeRoot(env: Record<string, string> = {}): string {

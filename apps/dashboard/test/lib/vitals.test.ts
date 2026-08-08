@@ -5,8 +5,8 @@ import {
   groupBy,
   isError,
   percentile,
+  quotaUsage,
   summarize,
-  tightestQuota,
 } from "../../src/lib/vitals.ts";
 import { health, log, NOW, quota } from "../helpers/fixtures.ts";
 
@@ -127,22 +127,36 @@ describe("credentialStatus", () => {
   });
 });
 
-describe("tightestQuota", () => {
-  test("returns the window closest to its limit", () => {
-    const tightest = tightestQuota([
-      quota({ windowType: "fiveHour", used: 200, limit: 1_000 }),
-      quota({ windowType: "weekly", used: 950, limit: 1_000 }),
+describe("quotaUsage", () => {
+  test("reports every window the provider gave a limit for", () => {
+    const windows = quotaUsage([
+      quota({ windowType: "weekly", used: 200, limit: 1_000 }),
+      quota({ windowType: "fiveHour", used: 950, limit: 1_000 }),
     ]);
-    expect(tightest?.window.windowType).toBe("weekly");
-    expect(tightest?.fraction).toBeCloseTo(0.95, 5);
+
+    expect(windows).toHaveLength(2);
+    expect(windows[0]?.fraction).toBeCloseTo(0.95, 5);
+    expect(windows[1]?.fraction).toBeCloseTo(0.2, 5);
   });
 
-  test("ignores windows the operator left unlimited", () => {
-    expect(tightestQuota([quota({ limit: null })])).toBeNull();
+  test("orders windows shortest first, whatever order they arrived in", () => {
+    const windows = quotaUsage([
+      quota({ windowType: "weekly", used: 1, limit: 10 }),
+      quota({ windowType: "fiveHour", used: 1, limit: 10 }),
+      quota({ windowType: "daily", used: 1, limit: 10 }),
+    ]);
+
+    expect(windows.map((w) => w.window.windowType)).toEqual(["fiveHour", "daily", "weekly"]);
+  });
+
+  test("drops windows the provider reported without a limit", () => {
+    // Usage without a ceiling is not the same claim as an unused window, so
+    // there is nothing honest to draw.
+    expect(quotaUsage([quota({ limit: null })])).toEqual([]);
   });
 
   test("never reports more than fully spent", () => {
-    expect(tightestQuota([quota({ used: 5_000, limit: 1_000 })])?.fraction).toBe(1);
+    expect(quotaUsage([quota({ used: 5_000, limit: 1_000 })])[0]?.fraction).toBe(1);
   });
 });
 
