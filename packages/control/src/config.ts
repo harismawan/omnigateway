@@ -41,7 +41,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
 
   const host = optionalText(env.OMNI_HOST, "127.0.0.1");
 
-  const rawPort = env.OMNI_PORT ?? "8787";
+  const rawPort = env.OMNI_PORT ?? "9000";
   const port = Number(rawPort);
   if (!DECIMAL_INTEGER.test(rawPort) || !Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error(`OMNI_PORT must be an integer between 1 and 65535, got "${rawPort}"`);
