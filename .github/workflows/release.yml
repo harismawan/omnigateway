@@ -22,12 +22,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Pinned, and it has to be: `bun.lock` is lockfileVersion 2, which Bun
-      # before 1.4 cannot parse, and setup-bun's default is older than that.
-      # The published package declares the same floor in its `engines`.
+      # Canary, deliberately: `bun.lock` is lockfileVersion 2, which only Bun
+      # 1.4 writes and reads, and 1.4 is unreleased. A released pin cannot
+      # install this lockfile, and asking for "1.4.0" 404s — both were tried on
+      # this tag. CI therefore tracks the same Bun the repository is developed
+      # on. If a canary ever breaks a release, pin the exact build here rather
+      # than rewriting the lockfile.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.0"
+          bun-version: canary
 
       - name: Install
         run: bun install --frozen-lockfile
