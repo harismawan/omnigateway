@@ -93,7 +93,11 @@ export async function buildPackage(version: string): Promise<string> {
         // Bun is the runtime, not just the bundler: bun:sqlite, Bun.spawn and
         // Bun.file are all load-bearing. Saying so here turns a confusing
         // `env: bun: not found` into an install-time complaint.
-        engines: { bun: ">=1.4.0" },
+        //
+        // The floor is the oldest Bun the package actually needs, not the one
+        // this repository happens to be developed on: 1.4 is unreleased, so
+        // claiming it would fail the engine check for every user on stable.
+        engines: { bun: ">=1.3.0" },
         repository: { type: "git", url: "git+https://github.com/harismawan/omnigateway.git" },
         homepage: "https://github.com/harismawan/omnigateway#readme",
         bugs: "https://github.com/harismawan/omnigateway/issues",
