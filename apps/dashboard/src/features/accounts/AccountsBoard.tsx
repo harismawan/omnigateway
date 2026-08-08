@@ -5,13 +5,20 @@ import {
   useCredentialHealth,
   useCredentials,
   useDeleteCredential,
+  useSettings,
   useUpdateCredential,
 } from "../../api/queries.ts";
 import type { Credential, ProviderId } from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatMs, formatRelative } from "../../lib/format.ts";
-import { credentialStatus, groupBy, tightestQuota, WINDOW_LABEL } from "../../lib/vitals.ts";
+import {
+  credentialStatus,
+  groupBy,
+  quotaLegend,
+  tightestQuota,
+  WINDOW_LABEL,
+} from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
 import { Button, IconButton } from "../../ui/Button.tsx";
 import { Chip } from "../../ui/Chip.tsx";
@@ -90,6 +97,8 @@ export function AccountsBoard() {
   const { cadence } = useLive();
   const credentials = useCredentials();
   const health = useCredentialHealth(cadence(10_000));
+  // Only for reading how old a snapshot may be before it stops being current.
+  const settings = useSettings();
   const remove = useDeleteCredential();
   const { commit } = useCommit();
 
@@ -100,6 +109,7 @@ export function AccountsBoard() {
   const rows = credentials.data ?? [];
   const healthByCredential = groupBy(health.data?.health ?? [], (row) => row.credentialId);
   const quotaByCredential = groupBy(health.data?.quota ?? [], (row) => row.credentialId);
+  const pollIntervalMs = settings.data?.quotaPollIntervalMs ?? 300_000;
 
   const enabledCount = rows.filter((row) => row.enabled).length;
   const summary = credentials.isLoading
@@ -192,6 +202,7 @@ export function AccountsBoard() {
                             healthByCredential.get(credential.id) ?? [],
                             now,
                             credential.enabled,
+                            credential.disabledReason,
                           );
                           const quota = tightestQuota(quotaByCredential.get(credential.id) ?? []);
                           return (
@@ -276,14 +287,23 @@ export function AccountsBoard() {
                               </Td>
                               <Td>
                                 {quota === null ? (
-                                  <Legend>no limit</Legend>
+                                  // Quota is what the provider reported. Nothing
+                                  // reported is not the same claim as no limit.
+                                  <Legend>unknown</Legend>
                                 ) : (
                                   <QuotaCell>
                                     <Meter
                                       fraction={quota.fraction}
                                       label={`${WINDOW_LABEL[quota.window.windowType]} window, ${Math.round(quota.fraction * 100)}% used`}
                                     />
-                                    <Legend>{WINDOW_LABEL[quota.window.windowType]}</Legend>
+                                    <Legend>
+                                      {quotaLegend(
+                                        quota.window,
+                                        now,
+                                        pollIntervalMs,
+                                        formatRelative,
+                                      )}
+                                    </Legend>
                                   </QuotaCell>
                                 )}
                               </Td>

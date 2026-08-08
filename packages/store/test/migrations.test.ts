@@ -23,7 +23,7 @@ test("openDb applies migrations and records them", () => {
     expect(tables).toContain(t);
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
-  expect(applied.map((row) => row.id)).toEqual([1, 2]);
+  expect(applied.map((row) => row.id)).toEqual([1, 2, 3]);
   db.close();
 });
 
@@ -31,7 +31,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(2);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(3);
   db.close();
 });
 
@@ -55,5 +55,27 @@ test("foreign keys cascade from credentials to health", () => {
   db.run("DELETE FROM credentials WHERE id = 'c1'");
   const left = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM credential_health").get();
   expect(left?.n).toBe(0);
+  db.close();
+});
+
+test("migration 3 adds the snapshot columns to a database created before it", () => {
+  const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
+  const first = openDb(path);
+  first.close();
+
+  const db = openDb(path);
+  const quotaColumns = db
+    .query<{ name: string }, []>("PRAGMA table_info(quota_windows)")
+    .all()
+    .map((r) => r.name);
+  expect(quotaColumns).toContain("resets_at");
+  expect(quotaColumns).toContain("observed_at");
+
+  const credentialColumns = db
+    .query<{ name: string }, []>("PRAGMA table_info(credentials)")
+    .all()
+    .map((r) => r.name);
+  expect(credentialColumns).toContain("disabled_reason");
+  expect(credentialColumns).toContain("disabled_at");
   db.close();
 });

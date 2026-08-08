@@ -168,7 +168,38 @@ test("an expired rate-limit window no longer excludes", () => {
   expect(pairs).toHaveLength(1);
 });
 
-test("excludes a credential whose configured quota is spent", () => {
+test("a spent window past its reported reset no longer excludes", () => {
+  // The snapshot is a reading from the last poll. Once the provider's own reset
+  // time has passed, holding the credential out would strand it until the next
+  // poll for a window that has already rolled over.
+  const { pairs } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      quota: [quota({ credentialId: "a", used: 100, limit: 100, resetsAt: NOW - 1 })],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(pairs).toHaveLength(1);
+});
+
+test("a spent window whose reset is still ahead keeps excluding", () => {
+  const { excluded } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      quota: [quota({ credentialId: "a", used: 100, limit: 100, resetsAt: NOW + 60_000 })],
+    }),
+    now: NOW,
+    rand: 0,
+  });
+  expect(excluded[0]?.reason).toBe("quota:fiveHour");
+});
+
+test("excludes a credential whose reported quota is spent", () => {
   const { excluded } = eligible({
     request: req,
     model: model(),

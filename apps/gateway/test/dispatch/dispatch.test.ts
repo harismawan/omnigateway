@@ -58,6 +58,8 @@ async function seeded(credentials: number): Promise<Store> {
       expiresAt: null,
       accountEmail: null,
       providerData: {},
+      disabledReason: null,
+      disabledAt: null,
       accessToken: `test-token-${i}`,
       refreshToken: `test-refresh-${i}`,
       apiKey: null,

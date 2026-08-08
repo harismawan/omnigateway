@@ -51,7 +51,14 @@ export function createRefresher(deps: RefreshDeps): Refresher {
       // help, and leaving the credential enabled burns one attempt on every
       // subsequent request. Anything else (network, timeout) is transient.
       if (error instanceof GatewayError && error.code === "AUTH") {
-        await deps.store.credentials.update(credential.id, { enabled: false });
+        await deps.store.credentials.update(credential.id, {
+          enabled: false,
+          // Recorded here rather than at the call site so the background sweep
+          // and a live request leave the same evidence behind. Without it the
+          // console cannot tell a repudiated account from a switched-off one.
+          disabledReason: "tokenRejected",
+          disabledAt: deps.now(),
+        });
       }
       throw error;
     }

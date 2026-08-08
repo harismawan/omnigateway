@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import init001 from "./migrations/001_init.sql" with { type: "text" };
 import usageDaily002 from "./migrations/002_usage_daily.sql" with { type: "text" };
+import quotaSnapshot003 from "./migrations/003_quota_snapshot.sql" with { type: "text" };
 import { backfillDaily } from "./rollup.ts";
 
 /**
@@ -11,6 +12,7 @@ import { backfillDaily } from "./rollup.ts";
 const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database) => void }> = [
   { id: 1, sql: init001 },
   { id: 2, sql: usageDaily002, after: backfillDaily },
+  { id: 3, sql: quotaSnapshot003 },
 ];
 
 /**

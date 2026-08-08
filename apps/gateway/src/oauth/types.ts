@@ -6,7 +6,7 @@ import {
   mergeHeaders,
   orderHeaders,
 } from "@omni/providers";
-import type { CredentialSecrets } from "@omni/store";
+import type { CredentialSecrets, WindowType } from "@omni/store";
 
 /** Injected so tests never touch the network or the clock. */
 export type OAuthDeps = {
@@ -48,6 +48,22 @@ export type FlowResult = {
   providerData: Record<string, unknown>;
 };
 
+/**
+ * One usage window as the provider described it.
+ *
+ * `used` and `limit` carry the provider's own unit. Providers that report a
+ * percentage are normalized to `used: 87, limit: 100` by their probe, so the
+ * router and the console never have to know which is which.
+ */
+export type UsageWindowReport = {
+  windowType: WindowType;
+  used: number;
+  limit: number | null;
+  resetsAt: number | null;
+};
+
+export type UsageReport = { windows: UsageWindowReport[] };
+
 export type OAuthProvider = {
   readonly id: ProviderId;
   readonly kind: "pkce" | "device";
@@ -74,6 +90,23 @@ export type OAuthProvider = {
     deps: OAuthDeps,
     providerData: Record<string, unknown>,
   ): Promise<FlowResult>;
+
+  /**
+   * Reads the account's subscription usage.
+   *
+   * Optional: a provider with no usage surface omits it, and its accounts read
+   * as unknown rather than as unlimited. Returning `null` says the same thing
+   * for a provider that has the endpoint but answered with nothing usable.
+   *
+   * A probe reports; it never judges the credential. In particular it must not
+   * treat its own 401 as a repudiation — a usage endpoint that moved would then
+   * disable working accounts. That verdict belongs to token refresh alone.
+   */
+  usage?(
+    secrets: CredentialSecrets,
+    deps: OAuthDeps,
+    providerData: Record<string, unknown>,
+  ): Promise<UsageReport | null>;
 };
 
 /** Sent by every token call. Arguments are ordered by the provider's profile. */
@@ -111,6 +144,47 @@ export async function postJson(
     parsed = JSON.parse(text);
   } catch {
     // Non-JSON error bodies are real; the caller falls back to the status.
+  }
+  return { status: res.status, parsed };
+}
+
+/**
+ * Reads an account-level JSON endpoint with a bearer token.
+ *
+ * Same client identity as inference and the token endpoints: a process that
+ * authenticates as one client and then reads its account as another is a
+ * louder signal than either alone. The timeout is short because nothing on the
+ * request path waits for this — a slow probe should be abandoned, not retried.
+ */
+export async function getJson(
+  deps: OAuthDeps,
+  url: string,
+  profile: ClientProfile,
+  opts: { accessToken: string; extraHeaders?: readonly HeaderPair[] },
+): Promise<{ status: number; parsed: unknown }> {
+  const headers = orderHeaders(
+    mergeHeaders(profile.headers, [
+      ["Authorization", `Bearer ${opts.accessToken}`],
+      ["Accept", "application/json"],
+      ...(opts.extraHeaders ?? []),
+    ]),
+    profile.order,
+  );
+
+  const res = await deps.http({
+    url,
+    method: "GET",
+    headers,
+    body: "",
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  const text = await res.text();
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // An HTML error page is a real answer; the caller falls back to the status.
   }
   return { status: res.status, parsed };
 }

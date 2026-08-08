@@ -56,9 +56,7 @@ describe("OverviewBoard", () => {
     });
     renderWithRouter(<OverviewBoard />);
 
-    expect(
-      await screen.findByText("1 account has an open breaker and is out of rotation."),
-    ).toBeTruthy();
+    expect(await screen.findByText("1 account is out of rotation.")).toBeTruthy();
   });
 
   test("reads the vitals off the request log", async () => {

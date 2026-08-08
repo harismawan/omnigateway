@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AccountsBoard } from "../../src/features/accounts/AccountsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { credential, health, quota } from "../helpers/fixtures.ts";
+import { credential, health, NOW, quota, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 const credentials = [
@@ -18,6 +18,7 @@ function stubAccounts(overrides: Parameters<typeof createFetchStub>[0] = {}) {
       health: [health({ breakerState: "open", consecutiveFailures: 4 })],
       quota: [quota({ used: 950, limit: 1_000 })],
     }),
+    "GET /api/settings": () => ({ settings }),
     ...overrides,
   });
 }
@@ -140,5 +141,75 @@ describe("AccountsBoard", () => {
 
     expect(await screen.findByText("never")).toBeTruthy();
     expect(screen.getByText("api key")).toBeTruthy();
+  });
+
+  test("an account the provider repudiated asks for a reconnect", async () => {
+    stubAccounts({
+      "GET /api/credentials": () => ({
+        credentials: [
+          credential({
+            enabled: false,
+            disabledReason: "tokenRejected",
+            disabledAt: NOW - 60_000,
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    expect(
+      await screen.findByText("reconnect needed — provider rejected the refresh token"),
+    ).toBeTruthy();
+  });
+
+  test("an account the operator switched off reads as disabled, not as broken", async () => {
+    stubAccounts({
+      "GET /api/credentials": () => ({
+        credentials: [credential({ enabled: false, disabledReason: "manual", disabledAt: NOW })],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    expect(await screen.findByText("disabled")).toBeTruthy();
+    expect(screen.queryByText(/reconnect needed/)).toBeNull();
+  });
+
+  test("a fresh quota reading is shown with when the window resets", async () => {
+    // Against the real clock, because the board reads Date.now() rather than
+    // the fixture's fixed instant.
+    const now = Date.now();
+    stubAccounts({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [quota({ observedAt: now - 30_000, resetsAt: now + 3_600_000 })],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    // The board reads its own Date.now() microseconds later, so the countdown
+    // is matched by shape rather than to the millisecond.
+    expect(await screen.findByText(/^5h · resets in \d+[mh]$/)).toBeTruthy();
+  });
+
+  test("a reading older than three poll intervals is labelled stale", async () => {
+    const now = Date.now();
+    stubAccounts({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [quota({ observedAt: now - 3_600_000, resetsAt: now + 600_000 })],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    expect(await screen.findByText(/stale, read 1h ago/)).toBeTruthy();
+  });
+
+  test("an account the provider reports nothing for reads as unknown", async () => {
+    stubAccounts({
+      "GET /api/credentials/health": () => ({ health: [health()], quota: [] }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    expect(await screen.findAllByText("unknown")).toBeTruthy();
   });
 });

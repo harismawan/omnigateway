@@ -200,3 +200,49 @@ test("surfaces a rejected refresh as AUTH so the credential is disabled", async 
     ),
   ).rejects.toThrow(GatewayError);
 });
+
+test("the usage probe sends the access token and reads the reported windows", async () => {
+  const http = stubHttp(200, { five_hour: { utilization: 62 } });
+  const report = await anthropicOAuth.usage?.(
+    { accessToken: "test-token-1", refreshToken: null, apiKey: null, idToken: null },
+    { http, now: () => NOW },
+    {},
+  );
+
+  const sent = http.last();
+  expect(sent.method).toBe("GET");
+  expect(new URL(sent.url).pathname).toBe("/api/oauth/usage");
+  expect(sent.headers).toContainEqual(["Authorization", "Bearer test-token-1"]);
+  expect(sent.headers).toContainEqual(["anthropic-beta", "oauth-2025-04-20"]);
+  // The CLI reads this endpoint with axios, not its Stainless client, so it
+  // reports claude-code here rather than the claude-cli identity /v1/messages
+  // carries.
+  const userAgent = sent.headers.find(([name]) => name.toLowerCase() === "user-agent")?.[1];
+  expect(userAgent?.startsWith("claude-code/")).toBe(true);
+  expect(report?.windows[0]).toMatchObject({ windowType: "fiveHour", used: 62, limit: 100 });
+});
+
+test("a rate-limited usage endpoint is reported so the poller can back off", async () => {
+  // Anthropic throttles this endpoint independently of /v1/messages, so a 429
+  // means stop asking — not that the account is out of quota.
+  expect(
+    anthropicOAuth.usage?.(
+      { accessToken: "test-token-1", refreshToken: null, apiKey: null, idToken: null },
+      { http: stubHttp(429, { error: "rate_limited" }), now: () => NOW },
+      {},
+    ),
+  ).rejects.toThrow(GatewayError);
+});
+
+test("a usage endpoint that refuses the read reports nothing rather than a verdict", async () => {
+  // The probe must not speak for the credential: this endpoint is undocumented
+  // and a 401 here is as likely to mean it moved as that the token is dead.
+  for (const status of [401, 404, 500]) {
+    const report = await anthropicOAuth.usage?.(
+      { accessToken: "test-token-1", refreshToken: null, apiKey: null, idToken: null },
+      { http: stubHttp(status, { error: "nope" }), now: () => NOW },
+      {},
+    );
+    expect(report).toBeNull();
+  }
+});

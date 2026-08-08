@@ -1,4 +1,5 @@
 import { eligible } from "./filters.ts";
+import { QUOTA_FLOOR, quotaHeadroom } from "./quota.ts";
 import { score } from "./score.ts";
 import { healthKey } from "./snapshot.ts";
 import type { Candidate, RankInput, RankResult } from "./types.ts";
@@ -15,16 +16,26 @@ import type { Candidate, RankInput, RankResult } from "./types.ts";
  * (see `score.ts`), so sorting by score first would double-count weight and
  * skew the cumulative distribution toward heavier candidates regardless of
  * `rand`. The tail is sorted by score only after the head is drawn.
+ *
+ * Draw weight is scaled by quota headroom, so an account running out is drawn
+ * proportionally less often rather than at its configured weight right up to
+ * the moment the filter excludes it. A candidate with no headroom left is not
+ * drawn at all, which is the same verdict the filter is about to reach.
  */
-function weightedShuffle(candidates: Candidate[], rand: number): Candidate[] {
-  const total = candidates.reduce((sum, c) => sum + c.credential.weight * c.target.weight, 0);
+function weightedShuffle(
+  candidates: Candidate[],
+  rand: number,
+  headroom: (c: Candidate) => number,
+): Candidate[] {
+  const drawWeight = (c: Candidate): number => c.credential.weight * c.target.weight * headroom(c);
+
+  const total = candidates.reduce((sum, c) => sum + drawWeight(c), 0);
   if (total <= 0) return [...candidates].sort((a, b) => b.score - a.score);
 
   let cursor = rand * total;
   let chosen = candidates.length - 1;
   for (let i = 0; i < candidates.length; i++) {
-    cursor -=
-      (candidates[i] as Candidate).credential.weight * (candidates[i] as Candidate).target.weight;
+    cursor -= drawWeight(candidates[i] as Candidate);
     if (cursor < 0) {
       chosen = i;
       break;
@@ -42,6 +53,14 @@ export function rank(input: RankInput): RankResult {
 
   const scored = score(pairs, input);
 
+  const headroom = (c: Candidate): number =>
+    quotaHeadroom(
+      c.credential,
+      input.snapshot.quota.get(c.credential.id) ?? [],
+      input.now,
+      input.snapshot.settings.quotaPollIntervalMs,
+    );
+
   switch (input.model.strategy) {
     case "priority":
       // Tier is the only signal; score breaks ties within a tier.
@@ -53,12 +72,16 @@ export function rank(input: RankInput): RankResult {
         const h = input.snapshot.health.get(healthKey(c.credential.id, c.target.model));
         return h?.lastUsedAt == null ? Number.POSITIVE_INFINITY : input.now - h.lastUsedAt;
       };
-      scored.sort((a, b) => idle(b) - idle(a));
+      // Least-recently-used, except that an account close to exhaustion drops
+      // to the tail. Strict rotation would keep handing work to the account
+      // about to be excluded, and spend the rest of its window on retries.
+      const spent = (c: Candidate): number => (headroom(c) < QUOTA_FLOOR ? 1 : 0);
+      scored.sort((a, b) => spent(a) - spent(b) || idle(b) - idle(a));
       break;
     }
 
     case "weighted":
-      return { candidates: weightedShuffle(scored, input.rand), excluded };
+      return { candidates: weightedShuffle(scored, input.rand, headroom), excluded };
 
     case "score":
       scored.sort((a, b) => b.score - a.score);

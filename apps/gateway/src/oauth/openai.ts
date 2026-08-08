@@ -3,18 +3,22 @@ import { PROFILES } from "@omni/providers";
 import { createPkce, randomState } from "./pkce.ts";
 import {
   type FlowResult,
+  getJson,
   type OAuthDeps,
   type OAuthProvider,
   postJson,
   tokenErrorCode,
   tokenErrorMessage,
+  type UsageReport,
 } from "./types.ts";
+import { nestedOf, recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
 
 /** Public client ID of the Codex CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const SCOPES = "openid profile email offline_access";
+const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
 type TokenResponse = {
   accessToken: string;
@@ -125,6 +129,30 @@ function toResult(
   };
 }
 
+/**
+ * Reads the Codex rate-limit snapshot.
+ *
+ * Codex names its windows by role rather than by duration: `primary_window` is
+ * the short one and `secondary_window` the long one, which on current plans are
+ * the five-hour and weekly caps. Each carries `used_percent` and either a
+ * `reset_at` in epoch seconds or a `reset_after_seconds` offset.
+ *
+ * The pair sits under a `rate_limit` object. The additional blocks the payload
+ * can carry — `code_review_rate_limit`, `additional_rate_limits` — are feature
+ * caps rather than the plan window the router is choosing between, so they are
+ * left alone. Exported for fixture tests.
+ */
+export function parseOpenAIUsage(value: unknown, now: number): UsageReport | null {
+  const root = recordOf(value);
+  if (root === null) return null;
+  const rateLimit = nestedOf(root, ["rate_limit", "rateLimit"]) ?? root;
+
+  return reportFrom([
+    windowFrom(rateLimit.primary_window ?? rateLimit.primaryWindow, "fiveHour", now),
+    windowFrom(rateLimit.secondary_window ?? rateLimit.secondaryWindow, "weekly", now),
+  ]);
+}
+
 export const openaiOAuth: OAuthProvider = {
   id: "openai",
   kind: "pkce",
@@ -175,5 +203,18 @@ export const openaiOAuth: OAuthProvider = {
       deps,
     );
     return toResult(token, refreshToken, deps, accountIdFromProviderData(providerData));
+  },
+
+  async usage(secrets, deps, providerData) {
+    if (secrets.accessToken === null) return null;
+    const accountId = accountIdFromProviderData(providerData);
+    const { status, parsed } = await getJson(deps, USAGE_URL, PROFILES.openai, {
+      accessToken: secrets.accessToken,
+      // Same account selector inference sends. Without it a token that can see
+      // several workspaces reads the wrong one's usage.
+      ...(accountId === null ? {} : { extraHeaders: [["chatgpt-account-id", accountId]] }),
+    });
+    if (!usageReadable(status, "openai")) return null;
+    return parseOpenAIUsage(parsed, deps.now());
   },
 };

@@ -18,7 +18,7 @@ type Term = (typeof TERMS)[number];
 const TERM_BLURB: Record<Term, string> = {
   tier: "How preferred this tier is",
   health: "Consecutive failures and breaker state",
-  quota: "Headroom left in the tightest window",
+  quota: "Headroom in the tightest window, against how much of it is left",
   cost: "Price against the other candidates",
   latency: "Observed time to first token",
   recency: "How long this pair has been idle",

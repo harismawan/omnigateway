@@ -9,6 +9,7 @@ import type {
   CredentialRepo,
   CredentialSecrets,
   CredentialView,
+  DisabledReason,
   QuotaWindow,
   WindowType,
 } from "../types.ts";
@@ -24,6 +25,8 @@ type Row = {
   expires_at: number | null;
   account_email: string | null;
   provider_data: string;
+  disabled_reason: string | null;
+  disabled_at: number | null;
   access_token: string | null;
   refresh_token: string | null;
   api_key: string | null;
@@ -45,6 +48,8 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
     expiresAt: row.expires_at,
     accountEmail: row.account_email,
     providerData: JSON.parse(row.provider_data) as Record<string, unknown>,
+    disabledReason: row.disabled_reason as DisabledReason | null,
+    disabledAt: row.disabled_at,
     hasRefreshToken: row.refresh_token !== null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -76,8 +81,9 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
       db.run(
         `INSERT INTO credentials
            (id, provider, label, auth_type, enabled, tier, weight, expires_at, account_email,
-            provider_data, access_token, refresh_token, api_key, id_token, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            provider_data, disabled_reason, disabled_at, access_token, refresh_token, api_key,
+            id_token, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           input.id,
           input.provider,
@@ -89,6 +95,8 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
           input.expiresAt,
           input.accountEmail,
           JSON.stringify(input.providerData),
+          input.disabledReason,
+          input.disabledAt,
           await seal(input.accessToken),
           await seal(input.refreshToken),
           await seal(input.apiKey),
@@ -121,6 +129,8 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
       if (patch.accountEmail !== undefined) put("account_email", patch.accountEmail);
       if (patch.providerData !== undefined)
         put("provider_data", JSON.stringify(patch.providerData));
+      if (patch.disabledReason !== undefined) put("disabled_reason", patch.disabledReason);
+      if (patch.disabledAt !== undefined) put("disabled_at", patch.disabledAt);
       if (sets.length === 0) return;
       put("updated_at", Date.now());
       db.run(`UPDATE credentials SET ${sets.join(", ")} WHERE id = ?`, [...vals, id]);
@@ -217,6 +227,8 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
         starts_at: number;
         used: number;
         limit_value: number | null;
+        resets_at: number | null;
+        observed_at: number;
       };
       return db
         .query<Q, []>("SELECT * FROM quota_windows")
@@ -227,21 +239,34 @@ export function createCredentialRepo(db: Database, key: CryptoKey): CredentialRe
           startsAt: r.starts_at,
           used: r.used,
           limit: r.limit_value,
+          resetsAt: r.resets_at,
+          observedAt: r.observed_at,
         }));
     },
 
     async saveQuota(rows: QuotaWindow[]) {
       const stmt = db.prepare(
-        `INSERT INTO quota_windows (credential_id, window_type, starts_at, used, limit_value)
-         VALUES (?,?,?,?,?)
+        `INSERT INTO quota_windows
+           (credential_id, window_type, starts_at, used, limit_value, resets_at, observed_at)
+         VALUES (?,?,?,?,?,?,?)
          ON CONFLICT (credential_id, window_type) DO UPDATE SET
            starts_at = excluded.starts_at,
            used = excluded.used,
-           limit_value = excluded.limit_value`,
+           limit_value = excluded.limit_value,
+           resets_at = excluded.resets_at,
+           observed_at = excluded.observed_at`,
       );
       db.transaction(() => {
         for (const r of rows) {
-          stmt.run(r.credentialId, r.windowType, r.startsAt, r.used, r.limit);
+          stmt.run(
+            r.credentialId,
+            r.windowType,
+            r.startsAt,
+            r.used,
+            r.limit,
+            r.resetsAt,
+            r.observedAt,
+          );
         }
       })();
     },
