@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { health, seedCredential } from "@omni/testkit";
 import { cli, fakeService, makeRoot, openStore, TEST_KEY } from "./helpers/harness.ts";
 
 /** Every test starts from a migrated, empty installation. */
@@ -175,6 +176,20 @@ test("credentials add-key stores a key read from a prompt, never from argv", asy
   expect(listed.out).not.toContain("sk-ant-secret");
 });
 
+test("credentials add-key treats a blank label as the provider default", async () => {
+  const root = await installation();
+
+  await cli(["credentials", "add-key", "kimi", "--label", "   "], {
+    root,
+    prompt: { isTty: false, secret: async () => "test-key", confirm: async () => true },
+  });
+
+  const listed = JSON.parse((await cli(["credentials", "list", "--json"], { root })).out) as {
+    credentials: Array<{ label: string }>;
+  };
+  expect(listed.credentials[0]?.label).toBe("kimi api key");
+});
+
 test("credentials set changes only what was named", async () => {
   const root = await installation();
   await cli(["credentials", "add-key", "kimi"], {
@@ -197,6 +212,42 @@ test("credentials set changes only what was named", async () => {
     label: first.credentials[0]?.label ?? "",
     weight: first.credentials[0]?.weight ?? 1,
   });
+});
+
+test("credentials show returns one secret-free projection", async () => {
+  const root = await installation();
+  await cli(["credentials", "add-key", "anthropic", "--label", "work"], {
+    root,
+    prompt: { isTty: false, secret: async () => "test-secret", confirm: async () => true },
+  });
+  const listed = JSON.parse((await cli(["credentials", "list", "--json"], { root })).out) as {
+    credentials: Array<{ id: string }>;
+  };
+
+  const shown = await cli(["credentials", "show", listed.credentials[0]?.id ?? "", "--json"], {
+    root,
+  });
+  const credential = JSON.parse(shown.out) as Record<string, unknown>;
+
+  expect(credential).toMatchObject({ provider: "anthropic", label: "work", authType: "apiKey" });
+  expect(shown.out).not.toContain("test-secret");
+});
+
+test("credentials health emits all rows in JSON mode", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await seedCredential(store, { id: "c1", label: "work" });
+  await store.credentials.saveHealth([
+    health({ credentialId: "c1", model: "model-1", consecutiveFailures: 1 }),
+  ]);
+  store.close();
+
+  const result = await cli(["credentials", "health", "--json"], { root });
+  const body = JSON.parse(result.out) as { health: Array<{ credentialId: string }> };
+
+  expect(body.health).toEqual([
+    expect.objectContaining({ credentialId: "c1", model: "model-1", consecutiveFailures: 1 }),
+  ]);
 });
 
 test("credentials set with nothing to change is a usage error", async () => {
