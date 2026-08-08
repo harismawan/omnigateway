@@ -1,5 +1,6 @@
 import { closestCenter, DndContext, type DragEndEvent } from "@dnd-kit/core";
 import { arrayMove, SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { PROVIDER_MODEL_CATALOG } from "@omni/ir";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "@/api/client.ts";
@@ -12,7 +13,7 @@ import { TargetRow } from "./TargetRow.tsx";
 export function emptyTarget(provider: ProviderId): Target {
   return {
     provider,
-    model: "",
+    model: PROVIDER_MODEL_CATALOG[provider].defaultModel,
     tier: 1,
     weight: 1,
     costPerMTok: { input: 0, output: 0 },

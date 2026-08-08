@@ -1,7 +1,9 @@
 import { useSortable } from "@dnd-kit/sortable";
+import { PROVIDER_MODEL_CATALOG } from "@omni/ir";
 import type { ProviderId, Target } from "@/api/types.ts";
 import { PROVIDER_IDS } from "@/api/types.ts";
 import { Button } from "@/components/ui/button.tsx";
+import { ProviderModelInput } from "./ProviderModelInput.tsx";
 
 type Props = {
   id: string;
@@ -49,7 +51,10 @@ export function TargetRow({ id, target, index, count, onChange, onRemove, onMove
         <select
           aria-label={`Target ${index + 1} provider`}
           value={target.provider}
-          onChange={(event) => onChange({ provider: event.target.value as ProviderId })}
+          onChange={(event) => {
+            const provider = event.target.value as ProviderId;
+            onChange({ provider, model: PROVIDER_MODEL_CATALOG[provider].defaultModel });
+          }}
         >
           {PROVIDER_IDS.map((provider) => (
             <option key={provider} value={provider}>
@@ -58,14 +63,15 @@ export function TargetRow({ id, target, index, count, onChange, onRemove, onMove
           ))}
         </select>
       </label>
-      <label>
-        Model
-        <input
-          aria-label={`Target ${index + 1} model`}
+      <div>
+        <span>Model</span>
+        <ProviderModelInput
+          onChange={(model) => onChange({ model })}
+          provider={target.provider}
+          targetNumber={index + 1}
           value={target.model}
-          onChange={(event) => onChange({ model: event.target.value })}
         />
-      </label>
+      </div>
       <label>
         Tier
         <input
