@@ -10,8 +10,8 @@ on:
 
 permissions:
   contents: read
-  # Required for npm provenance: the published package is signed with a
-  # statement of which workflow, commit, and repository produced it.
+  # Required for npm provenance, and for the OIDC exchange that replaces the
+  # token once `omnigateway` exists on npm and can be configured there.
   id-token: write
 
 jobs:
@@ -19,11 +19,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.0"
 
       - name: Install
         run: bun install --frozen-lockfile
@@ -50,11 +48,19 @@ jobs:
 
       # npm, not bun, does the publishing: provenance and the OIDC exchange are
       # npm CLI features.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "22"
+          node-version: 22
           registry-url: "https://registry.npmjs.org"
 
+      # Node 22 ships an npm older than 11.5.1, which is the floor for both
+      # provenance and the trusted-publishing exchange this will move to.
+      - run: npm install -g npm@latest
+
+      # A token, only until the package exists. Once it does, configure a
+      # trusted publisher for it on npmjs.com, then delete the `env:` block
+      # below and the NPM_TOKEN secret: OIDC needs neither, and generates the
+      # provenance attestation on its own.
       - name: Publish
         run: npm publish --provenance --access public
         working-directory: dist/npm

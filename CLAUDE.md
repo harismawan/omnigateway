@@ -33,7 +33,9 @@ Release:
 bun run build:npm v1.2.3   # assembles dist/npm: bundled CLI, bundled gateway, dashboard as public/
 ```
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, which verifies, builds, and publishes `omnigateway` to npm. The tag is the only place a version is written down; the workspace manifests stay private at 0.0.0. Publishing needs the `NPM_TOKEN` secret.
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which verifies, builds, and publishes `omnigateway` to npm. The tag is the only place a version is written down; the workspace manifests stay private at 0.0.0.
+
+Publishing currently uses the `NPM_TOKEN` secret, which is a bootstrap step: npm can only be told to trust this workflow once the package exists. After the first release, configure a trusted publisher on npmjs.com and delete both the `env:` block and the secret — OIDC needs neither and attests provenance itself. `harismawan/stamp-ui` made exactly this move and its workflow is the reference.
 
 CLI:
 
