@@ -1,4 +1,4 @@
-import type { Store } from "../types.ts";
+import type { RoutingChange, Store } from "../types.ts";
 import { createConfigRepo } from "./config.ts";
 import { createCredentialRepo } from "./credentials.ts";
 import { openDb } from "./db.ts";
@@ -10,11 +10,31 @@ export async function createStore(opts: {
   encryptionKey: CryptoKey;
 }): Promise<Store> {
   const db = openDb(opts.path);
+  const listeners = new Set<(change: RoutingChange) => void>();
+  const emit = (change: RoutingChange): void => {
+    for (const listener of listeners) {
+      try {
+        listener(change);
+      } catch {
+        // Routing observers run after commit and must not turn a successful write
+        // into a rejected repository operation.
+      }
+    }
+  };
+
   return {
-    credentials: createCredentialRepo(db, opts.encryptionKey),
-    config: createConfigRepo(db),
+    credentials: createCredentialRepo(db, opts.encryptionKey, emit),
+    config: createConfigRepo(db, emit),
     keys: createKeyRepo(db),
     usage: createUsageRepo(db),
+    routing: {
+      version: () =>
+        db.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version ?? 0,
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    },
     close: () => db.close(),
   };
 }

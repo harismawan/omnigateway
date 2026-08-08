@@ -3,16 +3,20 @@ import { Elysia } from "elysia";
 import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
 import { ApiKeyRateLimiter } from "../auth/rateLimit.ts";
 import { type DispatchDeps, dispatch } from "../dispatch/index.ts";
+import { createRoutingSnapshotCache } from "../dispatch/snapshotCache.ts";
 import { anthropicErrorBody, anthropicResponse, anthropicStream } from "../egress/anthropic.ts";
 import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.ts";
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
 import { finishLog } from "../logging.ts";
 
-export type ProxyDeps = DispatchDeps & {
+export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
+  snapshots?: DispatchDeps["snapshots"];
   requestId: () => string;
   rateLimiter?: ApiKeyRateLimiter;
 };
+
+type ResolvedProxyDeps = DispatchDeps & Pick<ProxyDeps, "requestId" | "rateLimiter">;
 
 type Surface = "anthropic" | "openai";
 
@@ -82,7 +86,7 @@ function sseResponse(
 }
 
 async function handle(
-  deps: ProxyDeps,
+  deps: ResolvedProxyDeps,
   rateLimiter: ApiKeyRateLimiter,
   surface: Surface,
   request: Request,
@@ -169,9 +173,15 @@ async function handle(
 
 export function proxyRoutes(deps: ProxyDeps) {
   const rateLimiter = deps.rateLimiter ?? new ApiKeyRateLimiter(deps.now);
+  const dispatchDeps: ResolvedProxyDeps = {
+    ...deps,
+    snapshots: deps.snapshots ?? createRoutingSnapshotCache(deps.store),
+  };
   return new Elysia()
-    .post("/v1/messages", ({ request }) => handle(deps, rateLimiter, "anthropic", request))
-    .post("/v1/chat/completions", ({ request }) => handle(deps, rateLimiter, "openai", request))
+    .post("/v1/messages", ({ request }) => handle(dispatchDeps, rateLimiter, "anthropic", request))
+    .post("/v1/chat/completions", ({ request }) =>
+      handle(dispatchDeps, rateLimiter, "openai", request),
+    )
     .get("/v1/models", async ({ request }) => {
       try {
         const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
+import { buildSnapshot } from "@omni/router";
 import type { Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
 import { dispatch } from "../../src/dispatch/index.ts";
@@ -92,6 +93,7 @@ const noHttp: HttpClient = () => {
 function deps(store: Store, adapter: ProviderAdapter) {
   return {
     store,
+    snapshots: { get: (now: number) => buildSnapshot(store, now) },
     adapters: { anthropic: adapter, openai: adapter, kimi: adapter },
     http: noHttp,
     now: () => 1_000_000,
@@ -110,6 +112,31 @@ async function drain(events: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]
   for await (const e of events) out.push(e);
   return out;
 }
+
+test("reads routing through the injected snapshot source", async () => {
+  const store = await seeded(1);
+  const adapter = stubAdapter(() => textStream("hello"));
+  const snapshot = await buildSnapshot(store, 1_000_000);
+  await store.config.removeModel("fast");
+  let reads = 0;
+  const configured = {
+    ...deps(store, adapter),
+    snapshots: {
+      get: async () => {
+        reads++;
+        return snapshot;
+      },
+    },
+  };
+
+  const events = await drain(
+    (await dispatch(req, configured, new AbortController().signal)).events,
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  expect(reads).toBe(1);
+  store.close();
+});
 
 test("streams a successful response and logs it", async () => {
   const store = await seeded(1);

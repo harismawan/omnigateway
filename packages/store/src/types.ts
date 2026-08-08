@@ -163,6 +163,8 @@ export type Settings = {
 
 export interface CredentialRepo {
   list(): Promise<CredentialView[]>;
+  /** Routing metadata only; secret ciphertext is loaded lazily by credential id. */
+  listRouting(): Promise<CredentialView[]>;
   get(id: string): Promise<CredentialView | null>;
   create(
     input: Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken"> & CredentialSecrets,
@@ -258,11 +260,25 @@ export interface UsageRepo {
   pruneDaily(olderThan: number): Promise<number>;
 }
 
+export type RoutingChange =
+  | { type: "healthSaved"; rows: CredentialHealth[] }
+  | { type: "quotaSaved"; rows: QuotaWindow[] }
+  | { type: "credentialsChanged" }
+  | { type: "modelsChanged" }
+  | { type: "settingsChanged" };
+
+export interface RoutingChangeSource {
+  /** SQLite connection-local view of commits made by other connections. */
+  version(): number;
+  subscribe(listener: (change: RoutingChange) => void): () => void;
+}
+
 export type Store = {
   credentials: CredentialRepo;
   config: ConfigRepo;
   keys: KeyRepo;
   usage: UsageRepo;
+  routing: RoutingChangeSource;
   close(): void;
 };
 
