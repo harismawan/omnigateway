@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { UsageBoard } from "../../src/features/usage/UsageBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { apiKey, credential, usageBucket } from "../helpers/fixtures.ts";
+import { apiKey, credential, model, usageBucket } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 const HOUR_MS = 3_600_000;
@@ -33,6 +33,37 @@ function rowsFor(url: string): { rows: unknown[] } {
       rows: [
         usageBucket({ key: THIS_HOUR, split: "anthropic", requests: 30, errors: 1, costUsd: 2 }),
         usageBucket({ key: THIS_HOUR, split: "openai", requests: 10, errors: 0, costUsd: 0.5 }),
+      ],
+    };
+  }
+  if (url.includes("splitBy=model")) {
+    return {
+      rows: [
+        usageBucket({
+          key: THIS_HOUR,
+          split: "claude-haiku-4-5",
+          requests: 30,
+          inputTokens: 300_000,
+          outputTokens: 40_000,
+          costUsd: 2,
+        }),
+        usageBucket({
+          key: THIS_HOUR,
+          split: "gpt-5-codex",
+          requests: 8,
+          inputTokens: 60_000,
+          outputTokens: 20_000,
+          costUsd: 0.5,
+        }),
+        usageBucket({
+          key: THIS_HOUR,
+          split: "unknown",
+          requests: 2,
+          inputTokens: 4_000,
+          outputTokens: 1_000,
+          errors: 2,
+          costUsd: 0,
+        }),
       ],
     };
   }
@@ -80,6 +111,7 @@ function stubUsage() {
     "GET /api/usage": ({ url }) => rowsFor(url),
     "GET /api/credentials": () => ({ credentials: [credential()] }),
     "GET /api/keys": () => ({ keys: [apiKey()] }),
+    "GET /api/models": () => ({ models: [model()] }),
   });
 }
 
@@ -109,6 +141,30 @@ describe("UsageBoard", () => {
       year: "numeric",
     });
     expect(screen.getByLabelText(`${today}: 40 requests, 150k tokens, $2.00`)).toBeTruthy();
+  });
+
+  test("the activity grid reads the whole year when no day is hovered", async () => {
+    const user = userEvent.setup();
+    stubUsage();
+    renderWithProviders(<UsageBoard />);
+    await screen.findByRole("grid", { name: "Tokens per day over the last year" });
+
+    // 40 + 4 requests, two days of the fixture's 150k tokens, $2.00 + $0.20.
+    expect(screen.getByText("Last 12 months: 44 requests, 300k tokens, $2.20")).toBeTruthy();
+    expect(screen.getByText("2 active days")).toBeTruthy();
+
+    // Hovering a day swaps the subject, not the shape of the reading.
+    const today = new Date(TODAY).toLocaleDateString("en-GB", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+    await user.hover(screen.getByLabelText(`${today}: 40 requests, 150k tokens, $2.00`));
+    expect(await screen.findByText(`${today}: 40 requests, 150k tokens, $2.00`)).toBeTruthy();
+
+    await user.unhover(screen.getByLabelText(`${today}: 40 requests, 150k tokens, $2.00`));
+    expect(await screen.findByText("Last 12 months: 44 requests, 300k tokens, $2.20")).toBeTruthy();
   });
 
   test("the activity grid reads a year from the rollup, not from the raw logs", async () => {
@@ -164,6 +220,67 @@ describe("UsageBoard", () => {
       expect(stub.calls.some((call) => call.url.includes("groupBy=requestedModel"))).toBe(true);
     });
     expect(await screen.findByText("fast")).toBeTruthy();
+  });
+
+  test("cuts the traffic trace by the upstream model that served it", async () => {
+    const stub = stubUsage();
+    renderWithProviders(<UsageBoard />);
+
+    expect(await screen.findByText("Traffic by upstream model")).toBeTruthy();
+    // Tokens is the default lens, and the header says which one is painting it.
+    expect(screen.getByText("Tokens, by hour")).toBeTruthy();
+    // Named in the legend, because a band is never identified by colour alone.
+    expect(screen.getByText("claude-haiku-4-5")).toBeTruthy();
+    expect(screen.getByText("gpt-5-codex")).toBeTruthy();
+    // Traffic the gateway never resolved to a model is still a band.
+    expect(screen.getByText("Unresolved")).toBeTruthy();
+
+    await waitFor(() => {
+      expect(
+        stub.calls.some(
+          (call) => call.url.includes("groupBy=hour") && call.url.includes("splitBy=model"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  test("the model stack follows the shared ranking lens", async () => {
+    const user = userEvent.setup();
+    stubUsage();
+    renderWithProviders(<UsageBoard />);
+    await screen.findByText("Tokens, by hour");
+
+    await user.click(screen.getByRole("button", { name: "Rank by cost" }));
+
+    expect(await screen.findByText("Cost, by hour")).toBeTruthy();
+  });
+
+  test("folds the tail of a long model list into one band", async () => {
+    createFetchStub({
+      "GET /api/usage": ({ url }) =>
+        url.includes("splitBy=model")
+          ? {
+              rows: Array.from({ length: 9 }, (_, index) =>
+                usageBucket({
+                  key: THIS_HOUR,
+                  split: `model-${index}`,
+                  inputTokens: (9 - index) * 1_000,
+                  outputTokens: 0,
+                }),
+              ),
+            }
+          : rowsFor(url),
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+      "GET /api/models": () => ({ models: [model()] }),
+    });
+    renderWithProviders(<UsageBoard />);
+
+    // Six bands are drawn; the three quietest are counted, not hidden.
+    expect(await screen.findByText("model-0")).toBeTruthy();
+    expect(screen.getByText("model-5")).toBeTruthy();
+    expect(screen.queryByText("model-6")).toBeNull();
+    expect(screen.getByText("3 more")).toBeTruthy();
   });
 
   test("names keys and accounts, keeps unattributed traffic, and falls back to the raw id", async () => {
