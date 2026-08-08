@@ -10,7 +10,7 @@ import {
   virtualModel,
 } from "@omni/testkit";
 import { authenticateApiKey } from "../../src/auth/apiKey.ts";
-import { proxyRoutes } from "../../src/routes/proxy.ts";
+import { type ProxyDeps, proxyRoutes } from "../../src/routes/proxy.ts";
 
 const EVENTS: StreamEvent[] = [
   { type: "start", id: "upstream_1", model: "claude-opus-4" },
@@ -24,7 +24,7 @@ const EVENTS: StreamEvent[] = [
   },
 ];
 
-async function harness(events: StreamEvent[] = EVENTS) {
+async function harness(events: StreamEvent[] = EVENTS, overrides: Partial<ProxyDeps> = {}) {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
   await store.config.putModel(
@@ -46,6 +46,7 @@ async function harness(events: StreamEvent[] = EVENTS) {
     rand: () => 0.5,
     refresh: async (c) => await c.secrets(),
     requestId: () => `req_${++n}`,
+    ...overrides,
   });
 
   const call = (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -86,6 +87,66 @@ test("proxies a streaming anthropic request as sse", async () => {
   expect(text).toContain("event: message_start");
   expect(text).toContain("event: message_stop");
   expect(text).toContain('"text":"Hi"');
+});
+
+test("holds a stalled stream open with keepalive comments", async () => {
+  // Upstream can go quiet for a long time — a slow first token, a long
+  // thinking block — and the provider's own pings are decoded away rather
+  // than forwarded. Without a keepalive the socket carries no bytes at all
+  // and Bun's idle timeout (Elysia defaults it to 30s) resets it, which the
+  // client reports as a connection closed mid-response.
+  const gate = Promise.withResolvers<void>();
+  const stalling = (id: ProviderId): ProviderAdapter => ({
+    id,
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send() {
+      return {
+        events: (async function* () {
+          for (const event of EVENTS.slice(0, 3)) yield event;
+          await gate.promise;
+          for (const event of EVENTS.slice(3)) yield event;
+        })(),
+        degradations: [],
+      };
+    },
+  });
+
+  const { call, store } = await harness(EVENTS, {
+    adapters: {
+      anthropic: stalling("anthropic"),
+      openai: stalling("openai"),
+      kimi: stalling("kimi"),
+    },
+    keepaliveMs: 5,
+  });
+
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  setTimeout(() => gate.resolve(), 60);
+  const text = await res.text();
+
+  expect(text).toContain(": keepalive");
+  expect(text).toContain("event: message_stop");
+  expect((await store.usage.recent(10))[0]?.status).toBe(200);
+  store.close();
+});
+
+test("writes no keepalive into a stream that never stalls", async () => {
+  const { call, store } = await harness(EVENTS, { keepaliveMs: 5 });
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  expect(await res.text()).not.toContain(": keepalive");
+  store.close();
 });
 
 test("proxies a non-streaming openai request", async () => {

@@ -14,11 +14,40 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
   snapshots?: DispatchDeps["snapshots"];
   requestId: () => string;
   rateLimiter?: ApiKeyRateLimiter;
+  keepaliveMs?: number;
 };
 
-type ResolvedProxyDeps = DispatchDeps & Pick<ProxyDeps, "requestId" | "rateLimiter">;
+type ResolvedProxyDeps = DispatchDeps &
+  Pick<ProxyDeps, "requestId" | "rateLimiter"> & { keepaliveMs: number };
 
 type Surface = "anthropic" | "openai";
+
+/**
+ * How long a stream may carry no bytes before a keepalive is written. Upstream
+ * silence is normal — a slow first token, a long thinking block — and the
+ * providers' own heartbeats are decoded away rather than forwarded, so without
+ * this the socket goes completely quiet. Bun closes an idle connection (Elysia
+ * defaults `idleTimeout` to 30s), and the client reports that as a response
+ * truncated mid-flight. Ten seconds matches Anthropic's own ping cadence and
+ * leaves room under any intermediate proxy's read timeout.
+ */
+const KEEPALIVE_MS = 10_000;
+
+/** Distinguishes "nothing arrived yet" from a frame, without a nullable frame. */
+const KEEPALIVE = Symbol("keepalive");
+
+/**
+ * Resolves to the pending frame, or to KEEPALIVE if `ms` passes first. The
+ * caller keeps the same pending promise across ticks, so a slow frame is
+ * awaited once however many keepalives are written while it is in flight.
+ */
+function withKeepalive<T>(pending: Promise<T>, ms: number): Promise<T | typeof KEEPALIVE> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const tick = new Promise<typeof KEEPALIVE>((resolve) => {
+    timer = setTimeout(() => resolve(KEEPALIVE), ms);
+  });
+  return Promise.race([pending, tick]).finally(() => clearTimeout(timer));
+}
 
 const SSE_HEADERS = {
   "content-type": "text/event-stream; charset=utf-8",
@@ -45,6 +74,7 @@ function asGatewayError(error: unknown): GatewayError {
 function sseResponse(
   frames: AsyncGenerator<{ event: string; data: string }, void, undefined>,
   onDone: () => Promise<void>,
+  keepaliveMs: number,
 ): Response {
   const encoder = new TextEncoder();
 
@@ -58,10 +88,22 @@ function sseResponse(
     return done;
   };
 
+  // Held across pulls so a frame that outlives several keepalives is awaited
+  // once rather than restarted, which would drop it.
+  let inflight: Promise<IteratorResult<{ event: string; data: string }, void>> | null = null;
+
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
-        const next = await frames.next();
+        inflight ??= frames.next();
+        const next = await withKeepalive(inflight, keepaliveMs);
+        if (next === KEEPALIVE) {
+          // An SSE comment: legal, ignored by every client parser, and enough
+          // traffic to keep the connection from being judged idle.
+          controller.enqueue(encoder.encode(": keepalive\n\n"));
+          return;
+        }
+        inflight = null;
         if (next.done === true) {
           controller.close();
           await runOnce();
@@ -121,7 +163,7 @@ async function handle(
         surface === "anthropic"
           ? anthropicStream(outcome.events, requestId)
           : openaiStream(outcome.events, requestId, Math.floor(deps.now() / 1000));
-      return sseResponse(frames, log);
+      return sseResponse(frames, log, deps.keepaliveMs);
     }
 
     const events: StreamEvent[] = [];
@@ -178,6 +220,7 @@ export function proxyRoutes(deps: ProxyDeps) {
   const dispatchDeps: ResolvedProxyDeps = {
     ...deps,
     snapshots: deps.snapshots ?? createRoutingSnapshotCache(deps.store),
+    keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
   };
   return new Elysia()
     .post("/v1/messages", ({ request }) => handle(dispatchDeps, rateLimiter, "anthropic", request))
