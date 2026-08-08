@@ -1,13 +1,12 @@
 import { existsSync } from "node:fs";
-import { boolFlag, numberFlag } from "../args.ts";
+import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, note, paint } from "../output.ts";
-import { gatewayEntrypoint, hasGatewayEntrypoint } from "../runtime.ts";
+import { gatewayEntrypoint } from "../runtime.ts";
 import {
   install,
   logFile,
-  serviceLogs,
   status as serviceStatus,
   start as startService,
   stop as stopService,
@@ -17,12 +16,14 @@ import {
 
 /** The command line that runs the gateway from this installation. */
 function gatewayArgv(root: string): string[] {
-  if (!hasGatewayEntrypoint(root)) {
+  const entrypoint = gatewayEntrypoint(root);
+  if (entrypoint === null) {
     throw new CliError(
-      `no gateway entrypoint under ${root}; point --root at an OmniGateway checkout`,
+      `no gateway to run: ${root} is not an OmniGateway checkout, and no bundled server ` +
+        "was found beside this CLI",
     );
   }
-  return [process.execPath, gatewayEntrypoint(root)];
+  return [process.execPath, entrypoint];
 }
 
 export const start: Command = {
@@ -105,13 +106,12 @@ export const serviceInstall: Command = {
   },
   async run(args, { ctx, writer, service }) {
     const deps = service();
-    if (!hasGatewayEntrypoint(deps.root)) {
-      throw new CliError(`no gateway entrypoint under ${deps.root}`);
-    }
+    const entrypoint = gatewayEntrypoint(deps.root);
+    if (entrypoint === null) throw new CliError(`no gateway to run for ${deps.root}`);
 
     const result = await install(deps, {
       bun: process.execPath,
-      entrypoint: gatewayEntrypoint(deps.root),
+      entrypoint,
       enable: boolFlag(args.values, "enable"),
       force: boolFlag(args.values, "force"),
     });
@@ -144,17 +144,6 @@ export const serviceUninstall: Command = {
   },
 };
 
-export const serviceLogsCommand: Command = {
-  usage: "logs --service [-n N]",
-  summary: "Show the gateway process's own output",
-  options: { number: { type: "string", short: "n" } },
-  async run(args, { ctx, writer, service }) {
-    const lines = numberFlag(args.values, "number") ?? 50;
-    const text = await serviceLogs(service(), lines);
-    emit(ctx, writer, { log: text }, () => (text.length === 0 ? "no service output yet" : text));
-  },
-};
-
 export const doctor: Command = {
   usage: "doctor",
   summary: "Check what this CLI resolved, and whether it can do anything with it",
@@ -174,7 +163,7 @@ export const doctor: Command = {
       // Never the key itself: presence and length are all a diagnostic needs.
       encryptionKey: typeof key === "string" ? `present (${key.length} chars)` : "missing",
       configError: ctx.configError,
-      gatewayEntrypoint: hasGatewayEntrypoint(deps.root) ? gatewayEntrypoint(deps.root) : null,
+      gatewayEntrypoint: gatewayEntrypoint(deps.root),
       unitInstalled: unit,
       supervisor: status.supervisor,
       running: status.running,

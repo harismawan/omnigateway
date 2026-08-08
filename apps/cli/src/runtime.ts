@@ -84,17 +84,23 @@ export function processAlive(pid: number): boolean {
 }
 
 /**
- * The gateway entrypoint inside an installation.
+ * The gateway this installation should run.
  *
- * A root that is a checkout runs from source; one that is not has no
- * entrypoint to run, and the error says so rather than spawning nothing.
+ * Two layouts exist. A checkout runs its own source, which is what an operator
+ * developing against a root expects: the code they are editing. A published
+ * package has no checkout, and ships the server bundled beside the CLI.
+ *
+ * The checkout wins when both are present. The root names the installation
+ * being managed, so its own code is the more specific answer.
  */
-export function gatewayEntrypoint(root: string): string {
-  return join(root, "apps", "gateway", "src", "index.ts");
-}
-
-export function hasGatewayEntrypoint(root: string): boolean {
-  return existsSync(gatewayEntrypoint(root));
+export function gatewayEntrypoint(root: string, cliDir = import.meta.dir): string | null {
+  const candidates = [
+    join(root, "apps", "gateway", "src", "index.ts"),
+    // Published layout: bin/omni.js and gateway.js are siblings.
+    join(cliDir, "..", "gateway.js"),
+    join(cliDir, "gateway.js"),
+  ];
+  return candidates.find((path) => existsSync(path)) ?? null;
 }
 
 export function createServiceDeps(input: {

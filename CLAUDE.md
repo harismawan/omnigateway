@@ -1,5 +1,14 @@
 # OmniGateway Repository Guidance
 
+Guidance for an agent working in this repository. It is the contributor-facing
+document: architecture, boundaries, conventions, and the reasons behind them.
+
+`README.md` is the other half, and is for people *using* OmniGateway — install,
+first run, the client API, the CLI, configuration, operational limits. Keep the
+split when editing either: a repository map or a testing convention does not
+belong in the README, and an operator does not need the dependency direction to
+point a client at the gateway. When a change affects both audiences, update both.
+
 ## Scope
 
 OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway. Three front ends are implemented over one core: the gateway under `apps/gateway`, the admin console under `apps/dashboard` whose built output the gateway serves, and the `omni` CLI under `apps/cli`. Admin operations themselves live in `packages/control`, which both the gateway routes and the CLI drive. Treat approved documents under `docs/superpowers/specs/` and `docs/superpowers/plans/` as product requirements, but verify current code before assuming plan snippets still match implementation.
@@ -18,6 +27,14 @@ bun run lint
 bun run fmt
 ```
 
+Release:
+
+```bash
+bun run build:npm v1.2.3   # assembles dist/npm: bundled CLI, bundled gateway, dashboard as public/
+```
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which verifies, builds, and publishes `omnigateway` to npm. The tag is the only place a version is written down; the workspace manifests stay private at 0.0.0. Publishing needs the `NPM_TOKEN` secret.
+
 CLI:
 
 ```bash
@@ -35,6 +52,28 @@ bun run --cwd apps/dashboard test  # needs a DOM; excluded from the root run
 ```
 
 `bunfig.toml` excludes `apps/dashboard/test/**` from the root `bun test`, so a green root run says nothing about the dashboard. Run focused tests with `bun test <path>`. Before claiming completion, run tests covering changed behavior plus full `bun test`, the dashboard suite, `bun run typecheck`, and `bun run lint`.
+
+## Documentation
+
+- `README.md`: for users. What it is, install, first run, client API, CLI,
+  configuration, security, limits. No repository layout, no test conventions.
+- `CLAUDE.md`: this file. For whoever changes the code.
+- `docs/superpowers/specs/`: the approved design behind each feature, with the
+  reasoning. Read the relevant one before changing that area.
+- `docs/superpowers/plans/`: the implementation plans those specs produced.
+
+Specs, newest first:
+
+- `2026-08-08-omnigateway-cli-design.md` — the CLI, and the extraction into `packages/control`
+- `2026-08-08-provider-model-catalog-design.md`
+- `2026-08-06-provider-chooser-focus-return-design.md`
+- `2026-08-05-dashboard-redesign-design.md`
+- `2026-07-31-client-identity-profiles-design.md`
+- `2026-07-31-omnigateway-design.md` — the original system design
+
+Plans sit beside them under `docs/superpowers/plans/` with matching names.
+A plan records what was intended at the time; verify the current code before
+assuming a snippet still matches.
 
 ## Repository map
 
@@ -173,6 +212,9 @@ Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/
 - Quota steers routing by *pace*, not by raw headroom: `quotaHeadroom` divides fraction-remaining by fraction-of-window-remaining, so 5% left reads as fine minutes before a reset and as urgent with six days to run. A stale reading (older than three poll intervals), an unobserved row, or a window past its reset scores neutral rather than optimistic, and an OAuth credential with nothing reported scores neutral while an api-key credential scores unconstrained. `score`, `weighted` (draw weight scaled by headroom) and `roundRobin` (below-floor accounts demoted to the tail) all read it; `priority` deliberately keeps tier as the only primary signal.
 - The CLI manages a *local* installation: it needs the database file and `OMNI_ENCRYPTION_KEY`, and it does not administer a remote gateway. Writing while the gateway runs is safe — the gateway rebuilds its snapshot per request — but the CLI cannot see process-local state (rate-limit counters, quota-poll cooldowns, in-flight OAuth flows, admin sessions), and a password change therefore does not evict a signed-in console until the gateway restarts.
 - The CLI resolves an installation root (`--root` > `OMNI_ROOT` > cwd holding an installation > `~/.config/omnigateway`) and lets that root's `.env` win over the ambient environment. That is deliberately the opposite of the usual rule: Bun loads the *current directory's* `.env` into `process.env` before the CLI starts, so ambient-wins would make `omni --root /srv/omni` read one installation's database with another's encryption key. `omni doctor` prints the root and env file it chose.
-- The Docker image builds the gateway only. It does not include `apps/dashboard`, so a container serves the APIs and returns 404 for the console.
+- The Docker image builds the gateway only. It does not include `apps/dashboard`, so a container serves the APIs and returns 404 for the console. The npm package is the opposite: it carries the CLI, the bundled server, and the console together.
+- The published package is one bundle, not six libraries. `workspace:*` cannot be resolved by npm, so `scripts/build-npm.ts` inlines the `@omni/*` packages into two files. `@node-rs/argon2` stays an external dependency because it is native, and Bun stays the required runtime.
+- The published server finds the console at `./public` beside itself, and a checkout finds it at `apps/dashboard/dist`. `OMNI_STATIC_DIR` overrides both and is taken literally.
+- `omni` runs the root's own `apps/gateway/src/index.ts` when the root is a checkout, and the bundled `gateway.js` beside the CLI otherwise. The checkout wins, because the root names the installation being managed.
 - The gateway does not model which *model* accepts which request shape. Mid-conversation system messages and the several thinking forms vary by model and by platform, so an unsupported combination surfaces as an upstream 400 rather than being caught by the router.
 - The OpenAI adapter routes OAuth credentials to the Codex backend, which is a narrower surface than `api.openai.com`: it rejects several standard parameters and refuses a system turn inside `input`. Path-specific handling belongs behind the `oauth` flag already threaded into the encoder.

@@ -1,7 +1,8 @@
 import { queryUsage, recentLogs } from "@omni/control";
-import { numberFlag, stringFlag, UsageError } from "../args.ts";
+import { boolFlag, numberFlag, stringFlag, UsageError } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { emit, formatTime, formatUsd, paint, table } from "../output.ts";
+import { serviceLogs } from "../service.ts";
 
 /** Accepts an epoch millisecond value or anything `Date` understands. */
 function instant(raw: string | undefined, fallback: number): number {
@@ -63,15 +64,25 @@ export const usage: Command = {
 };
 
 export const logs: Command = {
-  usage: "logs [-n N] [--follow]",
-  summary: "Show recent requests as the gateway recorded them",
+  usage: "logs [-n N] [--follow] [--service]",
+  summary: "Show recent requests, or the gateway process's own output",
   options: {
     number: { type: "string", short: "n" },
     follow: { type: "boolean" },
     service: { type: "boolean" },
   },
-  async run(args, { ctx, writer }) {
+  async run(args, { ctx, writer, service }) {
     const limit = numberFlag(args.values, "number") ?? 20;
+
+    // Two different logs share one verb. The gateway's request log answers
+    // "what did clients ask for"; the process's own output answers "why will
+    // it not start", which is the question asked when there are no requests.
+    if (boolFlag(args.values, "service")) {
+      const text = await serviceLogs(service(), limit);
+      emit(ctx, writer, { log: text }, () => (text.length === 0 ? "no service output yet" : text));
+      return;
+    }
+
     const store = await ctx.store();
 
     const render = (rows: Awaited<ReturnType<typeof recentLogs>>): string =>
