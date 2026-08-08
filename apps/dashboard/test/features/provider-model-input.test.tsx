@@ -74,6 +74,28 @@ test("keyboard navigation selects the active suggestion and Escape closes the li
   expect(input.getAttribute("aria-expanded")).toBe("false");
 });
 
+test("focus with a custom value shows all current-provider choices", async () => {
+  const { user } = renderInput("anthropic", "vendor-private-model");
+  const input = screen.getByRole("combobox", { name: "Target 1 model" });
+
+  await user.click(input);
+
+  expect(screen.getByRole("option", { name: "claude-fable-5" })).toBeDefined();
+  expect(screen.getByRole("option", { name: "claude-opus-5" })).toBeDefined();
+});
+
+test("clicking a focused combobox after selection reopens all choices", async () => {
+  const { user } = renderInput("anthropic");
+  const input = screen.getByRole("combobox", { name: "Target 1 model" });
+
+  await user.click(input);
+  await user.click(screen.getByRole("option", { name: "claude-opus-5" }));
+  await user.click(input);
+
+  expect(screen.getByRole("option", { name: "claude-fable-5" })).toBeDefined();
+  expect(screen.getByRole("option", { name: "claude-opus-5" })).toBeDefined();
+});
+
 test("existing custom values render unchanged", () => {
   renderInput("anthropic", "vendor-private-model");
   expect(screen.getByRole("combobox", { name: "Target 1 model" })).toHaveProperty(

@@ -22,12 +22,18 @@ export function ProviderModelInput({ provider, value, targetNumber, onChange }: 
   const listboxId = useId();
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [query, setQuery] = useState("");
   const choices = PROVIDER_MODEL_CATALOG[provider].models.filter((choice) =>
-    matches(choice, value),
+    matches(choice, query),
   );
   const activeChoice = activeIndex >= 0 ? choices[activeIndex] : undefined;
   const optionName = (choice: ProviderModelChoice) =>
     choice.label === choice.id ? choice.label : `${choice.label} (${choice.id})`;
+  const openChoices = () => {
+    setQuery("");
+    setOpen(true);
+    setActiveIndex(-1);
+  };
   const select = (choice: ProviderModelChoice) => {
     onChange(choice.id);
     setOpen(false);
@@ -69,11 +75,14 @@ export function ProviderModelInput({ provider, value, targetNumber, onChange }: 
           if (!event.currentTarget.parentElement?.contains(event.relatedTarget)) setOpen(false);
         }}
         onChange={(event) => {
-          onChange(event.target.value);
+          const nextValue = event.target.value;
+          onChange(nextValue);
+          setQuery(nextValue);
           setOpen(true);
           setActiveIndex(-1);
         }}
-        onFocus={() => setOpen(true)}
+        onClick={openChoices}
+        onFocus={openChoices}
         onKeyDown={onKeyDown}
         role="combobox"
         value={value}
