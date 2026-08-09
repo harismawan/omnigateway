@@ -71,6 +71,19 @@ export function createStubUpstream(): StubUpstream {
     if (response === undefined) throw new Error("stub upstream received an unexpected call");
 
     if (response.kind === "sse") {
+      // A real provider streams only when the request asked it to. Returning
+      // SSE unconditionally would let an adapter that forgot `stream: true`
+      // pass every test here and then fail against the live API, which is
+      // exactly how the Anthropic non-streaming path stayed broken.
+      const askedToStream =
+        parsed !== null &&
+        typeof parsed === "object" &&
+        (parsed as { stream?: unknown }).stream === true;
+      if (!askedToStream) {
+        return respond(200, JSON.stringify({ type: "message", content: [] }), {
+          "content-type": "application/json",
+        });
+      }
       return respond(200, sseBody(response.events), { "content-type": "text/event-stream" });
     }
     if (response.kind === "json") {
