@@ -1,3 +1,4 @@
+import { ArrowDown, ArrowUp, Database } from "lucide-react";
 import { useMemo, useState } from "react";
 import styled from "styled-components";
 import { LOG_CADENCE_MS, useCredentials, useLogs } from "../../api/queries.ts";
@@ -24,8 +25,13 @@ import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 
 const LIMITS = [50, 100, 250, 500] as const;
+const TOKEN_COUNT = new Intl.NumberFormat("en-US");
 
 type Filter = "all" | "failed";
+
+function tokenBreakdownLabel(log: RequestLog): string {
+  return `${TOKEN_COUNT.format(log.inputTokens)} input, ${TOKEN_COUNT.format(log.outputTokens)} output, ${TOKEN_COUNT.format(log.cacheReadTokens)} cache read, ${TOKEN_COUNT.format(log.cacheWriteTokens)} cache write tokens`;
+}
 
 const Controls = styled(Row)`
   gap: ${({ theme }) => theme.space(2)};
@@ -39,6 +45,61 @@ const Search = styled(Input)`
 const Narrow = styled(Select)`
   width: auto;
 `;
+
+const TokenBreakdown = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+`;
+
+const TokenPart = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+
+  svg {
+    width: 12px;
+    height: 12px;
+    stroke-width: 1.75;
+  }
+`;
+
+function TokenCell({ log }: { log: RequestLog }) {
+  if (isPending(log)) {
+    return (
+      <Td $align="right" $mono>
+        —
+      </Td>
+    );
+  }
+
+  const label = tokenBreakdownLabel(log);
+  return (
+    <Td $align="right" $mono aria-label={label} title={label}>
+      <TokenBreakdown aria-hidden="true">
+        <TokenPart>
+          <ArrowDown />
+          {formatCount(log.inputTokens)}
+        </TokenPart>
+        <TokenPart>
+          <ArrowUp />
+          {formatCount(log.outputTokens)}
+        </TokenPart>
+        <TokenPart>
+          <Database />
+          <ArrowDown />
+          {formatCount(log.cacheReadTokens)}
+        </TokenPart>
+        <TokenPart>
+          <Database />
+          <ArrowUp />
+          {formatCount(log.cacheWriteTokens)}
+        </TokenPart>
+      </TokenBreakdown>
+    </Td>
+  );
+}
 
 const Detail = styled.dl`
   display: grid;
@@ -209,9 +270,7 @@ export function LogsBoard() {
                     <Td $align="right" $mono>
                       {isPending(log) ? "—" : formatMs(log.durationMs)}
                     </Td>
-                    <Td $align="right" $mono>
-                      {isPending(log) ? "—" : formatCount(log.inputTokens + log.outputTokens)}
-                    </Td>
+                    <TokenCell log={log} />
                     <Td $align="right" $mono>
                       {isPending(log) ? "—" : formatUsd(log.costUsd)}
                     </Td>
