@@ -1,6 +1,13 @@
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
-import { createAdminAuth, createRefresher, OAUTH_PROVIDERS, type Refresher } from "@omni/control";
+import {
+  type ConsoleDeps,
+  type ConsoleSource,
+  createAdminAuth,
+  createRefresher,
+  OAUTH_PROVIDERS,
+  type Refresher,
+} from "@omni/control";
 import { type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from "@omni/providers";
 import type { Store } from "@omni/store";
@@ -32,6 +39,8 @@ export type AppDeps = {
   /** Absolute directory containing the built dashboard bundle. */
   staticDir?: string;
   logger?: Logger;
+  /** Where this process's stdout was captured, when anything captured it. */
+  console?: { source: ConsoleSource; deps: ConsoleDeps };
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -90,6 +99,7 @@ export function createApp(deps: AppDeps) {
         now,
         sessionTtlMs: ADMIN_SESSION_TTL_MS,
         logger,
+        ...(deps.console === undefined ? {} : { console: deps.console }),
       }),
     )
     .use(

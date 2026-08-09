@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
 import { memoryStore, requestLog, seedCredential, target, virtualModel } from "@omni/testkit";
-import { adminRoutes } from "../../src/routes/admin.ts";
+import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
 
 const NOW = 1_000_000;
 const SESSION_TTL_MS = 60_000;
 
-type HarnessOptions = { configured?: boolean };
+type HarnessOptions = { configured?: boolean; console?: AdminDeps["console"] };
 
-async function harness({ configured = true }: HarnessOptions = {}) {
+async function harness({ configured = true, console: consoleDeps }: HarnessOptions = {}) {
   const store = await memoryStore();
   const admin = createAdminAuth(store, { now: () => NOW, sessionTtlMs: SESSION_TTL_MS });
 
@@ -20,7 +20,13 @@ async function harness({ configured = true }: HarnessOptions = {}) {
     cookie = `${ADMIN_COOKIE}=${token}`;
   }
 
-  const app = adminRoutes({ store, admin, now: () => NOW, sessionTtlMs: SESSION_TTL_MS });
+  const app = adminRoutes({
+    store,
+    admin,
+    now: () => NOW,
+    sessionTtlMs: SESSION_TTL_MS,
+    ...(consoleDeps === undefined ? {} : { console: consoleDeps }),
+  });
 
   const call = (
     method: string,
@@ -175,6 +181,7 @@ test("every data route requires a session", async () => {
     "/api/settings",
     "/api/usage",
     "/api/logs",
+    "/api/console",
   ]) {
     expect((await call("GET", path, undefined, false)).status).toBe(401);
   }
@@ -512,4 +519,88 @@ test("logout clears the session cookie with secure over https", async () => {
   expect(cookie.toLowerCase()).toContain("samesite=strict");
   expect(cookie.toLowerCase()).toContain("secure");
   expect(cookie).toContain("Max-Age=0");
+});
+
+/** A console source over a fake log file, recording what it was asked to run. */
+function consoleHarness(contents: string) {
+  const argv: string[][] = [];
+  const deps: AdminDeps["console"] = {
+    source: { kind: "file", path: "/tmp/gateway.log" },
+    deps: {
+      readFile: (path) => (path === "/tmp/gateway.log" ? contents : null),
+      run: async (args) => {
+        argv.push([...args]);
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    },
+  };
+  return { argv, console: deps };
+}
+
+const CONSOLE_LINES = [
+  "2026-08-09T04:12:03.114Z INFO  omnigateway listening  port=9000",
+  "2026-08-09T04:12:04.000Z WARN  scheduled token refresh failed  credentialId=c1",
+  "2026-08-09T04:12:05.000Z ERROR quota poll failed  reason=boom",
+].join("\n");
+
+test("the console route returns the gateway's own output and the file it read", async () => {
+  const { console: consoleDeps } = consoleHarness(CONSOLE_LINES);
+  const { call } = await harness({ console: consoleDeps });
+
+  const body = (await (await call("GET", "/api/console")).json()) as {
+    source: string;
+    path: string;
+    lines: Array<{ raw: string; level: string | null; msg: string | null }>;
+  };
+  expect(body.source).toBe("file");
+  expect(body.path).toBe("/tmp/gateway.log");
+  expect(body.lines.map((l) => l.msg)).toEqual([
+    "omnigateway listening",
+    "scheduled token refresh failed",
+    "quota poll failed",
+  ]);
+});
+
+test("the console route filters by level", async () => {
+  const { console: consoleDeps } = consoleHarness(CONSOLE_LINES);
+  const { call } = await harness({ console: consoleDeps });
+
+  const body = (await (await call("GET", "/api/console?level=warn")).json()) as {
+    lines: Array<{ msg: string | null }>;
+  };
+  expect(body.lines.map((l) => l.msg)).toEqual([
+    "scheduled token refresh failed",
+    "quota poll failed",
+  ]);
+});
+
+test("the console route ignores a level it does not recognise rather than failing", async () => {
+  const { console: consoleDeps } = consoleHarness(CONSOLE_LINES);
+  const { call } = await harness({ console: consoleDeps });
+
+  const res = await call("GET", "/api/console?level=verbose");
+  expect(res.status).toBe(200);
+  expect(((await res.json()) as { lines: unknown[] }).lines).toHaveLength(3);
+});
+
+test("the console route clamps the page size", async () => {
+  const { console: consoleDeps } = consoleHarness(CONSOLE_LINES);
+  const { call } = await harness({ console: consoleDeps });
+
+  const one = (await (await call("GET", "/api/console?lines=1")).json()) as { lines: unknown[] };
+  expect(one.lines).toHaveLength(1);
+
+  // Over the cap and below the floor both resolve rather than erroring.
+  for (const query of ["lines=100000", "lines=0", "lines=-5", "lines=abc"]) {
+    expect((await call("GET", `/api/console?${query}`)).status).toBe(200);
+  }
+});
+
+test("the console route reports that nothing captured stdout, and shells out to nothing", async () => {
+  const { call } = await harness();
+  const body = (await (await call("GET", "/api/console")).json()) as {
+    source: string;
+    lines: unknown[];
+  };
+  expect(body).toEqual({ source: "none", lines: [] });
 });
