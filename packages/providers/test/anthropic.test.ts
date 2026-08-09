@@ -574,3 +574,122 @@ test("records a dropped system-turn breakpoint once, however many turns carried 
     "anthropic:system-turn-cache-control-dropped",
   ]);
 });
+
+test("drops an unsigned thinking block and records the loss", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", text: "reasoning from another provider" },
+            { type: "text", text: "hello" },
+          ],
+        },
+      ],
+    },
+    "claude-opus-4",
+    { oauth: false },
+  );
+  expect(body.messages[1]).toEqual({
+    role: "assistant",
+    content: [{ type: "text", text: "hello" }],
+  });
+  expect(degradations).toContain("anthropic:unsigned-thinking-dropped");
+});
+
+test("drops a thinking block whose signature is empty", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", text: "hm", signature: "" },
+            { type: "text", text: "hello" },
+          ],
+        },
+      ],
+    },
+    "claude-opus-4",
+    { oauth: false },
+  );
+  expect(body.messages[1]).toEqual({
+    role: "assistant",
+    content: [{ type: "text", text: "hello" }],
+  });
+  expect(degradations).toContain("anthropic:unsigned-thinking-dropped");
+});
+
+test("keeps a signed thinking block", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "assistant",
+          content: [{ type: "thinking", text: "hm", signature: "sig" }],
+        },
+      ],
+    },
+    "claude-opus-4",
+    { oauth: false },
+  );
+  expect(body.messages[1]).toEqual({
+    role: "assistant",
+    content: [{ type: "thinking", thinking: "hm", signature: "sig" }],
+  });
+  expect(degradations).not.toContain("anthropic:unsigned-thinking-dropped");
+});
+
+test("drops a message left with no content by an unsigned thinking block", () => {
+  const { body } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "assistant", content: [{ type: "thinking", text: "hm" }] },
+        { role: "user", content: [{ type: "text", text: "again" }] },
+      ],
+    },
+    "claude-opus-4",
+    { oauth: false },
+  );
+  expect(body.messages).toEqual([
+    { role: "user", content: [{ type: "text", text: "hi" }] },
+    { role: "user", content: [{ type: "text", text: "again" }] },
+  ]);
+});
+
+test("marks decoded thinking blocks as signed", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs({
+        event: "content_block_start",
+        data: JSON.stringify({ index: 0, content_block: { type: "thinking" } }),
+      }),
+    ),
+  );
+  expect(events[0]).toEqual({
+    type: "blockStart",
+    index: 0,
+    block: { type: "thinking", signed: true },
+  });
+});
+
+test("ignores a signature delta that carries no signature", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs({
+        event: "content_block_delta",
+        data: JSON.stringify({ index: 0, delta: { type: "signature_delta" } }),
+      }),
+    ),
+  );
+  expect(events.filter((e) => e.type === "blockDelta")).toEqual([]);
+});

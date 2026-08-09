@@ -37,6 +37,13 @@ export async function* anthropicStream(
   requestId: string,
 ): AsyncGenerator<SseFrame, void, undefined> {
   let model = "";
+  // Blocks dropped on the way out, and the client-facing index of every block
+  // that survived. Anthropic numbers content blocks contiguously from zero, so
+  // dropping one renumbers the rest rather than leaving a hole where a client
+  // expects the next block.
+  const suppressed = new Set<number>();
+  const outIndex = new Map<number, number>();
+  let nextOutIndex = 0;
 
   for await (const event of events) {
     switch (event.type) {
@@ -69,21 +76,33 @@ export async function* anthropicStream(
 
       case "blockStart": {
         const b = event.block;
+        // Unsigned reasoning never reaches an Anthropic-shaped client. The
+        // client stores the assistant turn and replays it verbatim on the next
+        // one, and a thinking block Anthropic did not sign fails that request
+        // with `Invalid \`signature\` in \`thinking\` block` — so a summary
+        // from another provider would poison the conversation from here on.
+        if (b.type === "thinking" && b.signed !== true) {
+          suppressed.add(event.index);
+          break;
+        }
         const content_block =
           b.type === "text"
             ? { type: "text", text: "" }
             : b.type === "thinking"
               ? { type: "thinking", thinking: "" }
               : { type: "tool_use", id: b.id, name: b.name, input: {} };
+        const index = nextOutIndex++;
+        outIndex.set(event.index, index);
         yield frame("content_block_start", {
           type: "content_block_start",
-          index: event.index,
+          index,
           content_block,
         });
         break;
       }
 
       case "blockDelta": {
+        if (suppressed.has(event.index)) break;
         const d = event.delta;
         const delta =
           d.type === "text"
@@ -95,14 +114,18 @@ export async function* anthropicStream(
                 : { type: "input_json_delta", partial_json: d.partial };
         yield frame("content_block_delta", {
           type: "content_block_delta",
-          index: event.index,
+          index: outIndex.get(event.index) ?? event.index,
           delta,
         });
         break;
       }
 
       case "blockEnd":
-        yield frame("content_block_stop", { type: "content_block_stop", index: event.index });
+        if (suppressed.has(event.index)) break;
+        yield frame("content_block_stop", {
+          type: "content_block_stop",
+          index: outIndex.get(event.index) ?? event.index,
+        });
         break;
 
       case "end":
@@ -139,18 +162,22 @@ export function anthropicResponse(collected: CollectedResponse, requestId: strin
     type: "message",
     role: "assistant",
     model: collected.model,
-    content: collected.content.map((b) => {
-      switch (b.type) {
-        case "text":
-          return { type: "text", text: b.text };
-        case "thinking":
-          return { type: "thinking", thinking: b.text, signature: b.signature };
-        case "toolUse":
-          return { type: "tool_use", id: b.id, name: b.name, input: b.input };
-        default:
-          return { type: "text", text: "" };
-      }
-    }),
+    // Same rule as the stream: a thinking block Anthropic did not sign cannot
+    // be replayed, so it is not handed to a client that will replay it.
+    content: collected.content
+      .filter((b) => b.type !== "thinking" || (b.signature !== undefined && b.signature !== ""))
+      .map((b) => {
+        switch (b.type) {
+          case "text":
+            return { type: "text", text: b.text };
+          case "thinking":
+            return { type: "thinking", thinking: b.text, signature: b.signature };
+          case "toolUse":
+            return { type: "tool_use", id: b.id, name: b.name, input: b.input };
+          default:
+            return { type: "text", text: "" };
+        }
+      }),
     stop_reason: STOP_REASON[collected.stopReason],
     stop_sequence: null,
     usage: {

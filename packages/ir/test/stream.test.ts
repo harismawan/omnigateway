@@ -87,3 +87,16 @@ test("collect reports zero usage for a stream that never ends", () => {
   expect(r.usage).toEqual(usage());
   expect(r.stopReason).toBe("endTurn");
 });
+
+test("collect concatenates a signature split across deltas", () => {
+  const r = collect([
+    { type: "start", id: "m", model: "x" },
+    { type: "blockStart", index: 0, block: { type: "thinking", signed: true } },
+    { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hmm" } },
+    { type: "blockDelta", index: 0, delta: { type: "thinkingSignature", signature: "sig" } },
+    { type: "blockDelta", index: 0, delta: { type: "thinkingSignature", signature: "123" } },
+    { type: "blockEnd", index: 0 },
+    { type: "end", stopReason: "endTurn", usage: usage() },
+  ]);
+  expect(r.content).toEqual([{ type: "thinking", text: "hmm", signature: "sig123" }]);
+});
