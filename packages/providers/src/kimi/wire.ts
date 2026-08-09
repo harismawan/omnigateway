@@ -1,4 +1,5 @@
 import type { ChatRequest, ToolChoice } from "@omni/ir";
+import { CONTEXT_1M_BETA } from "../betas.ts";
 
 export type ChatBody = {
   model: string;
@@ -34,6 +35,10 @@ export function toChatWire(
   const note = (d: string): void => {
     if (!degradations.includes(d)) degradations.push(d);
   };
+
+  // Same reasoning as the OpenAI encoder: no beta mechanism, so a 1M request is
+  // silently not honoured unless the loss is recorded here.
+  if (req.betas?.includes(CONTEXT_1M_BETA)) note("kimi:context-1m-dropped");
 
   const messages: unknown[] = [];
 

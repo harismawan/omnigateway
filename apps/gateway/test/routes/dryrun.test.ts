@@ -12,7 +12,13 @@ async function harness() {
   const token = await admin.login("hunter2hunter2");
   if (token === null) throw new Error("test admin login failed");
   const cookie = `omni_admin=${token}`;
-  const app = adminRoutes({ store, admin, now: () => NOW, sessionTtlMs: 60_000 });
+  const app = adminRoutes({
+    store,
+    admin,
+    baseUrl: "http://localhost:9000",
+    now: () => NOW,
+    sessionTtlMs: 60_000,
+  });
 
   const post = (path: string, body: unknown, auth = true) =>
     app.handle(

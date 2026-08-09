@@ -576,3 +576,20 @@ test("falls back to the chat-completions spelling of cached tokens", async () =>
     usage: { inputTokens: 6, outputTokens: 5, cacheReadTokens: 4, cacheWriteTokens: 0 },
   });
 });
+
+// The client asked for a megabyte of context and this surface has no way to
+// grant or refuse it. The silence is what makes it worth recording: the client
+// keeps pacing itself against 1M while the target caps far lower, and the
+// request that finally exceeds it fails with nothing explaining why.
+test("records that a 1m request could not be honoured here", () => {
+  const { degradations } = toResponsesWire(
+    { ...base, betas: ["context-1m-2025-08-07"] },
+    "gpt-5.6",
+  );
+  expect(degradations).toContain("openai:context-1m-dropped");
+});
+
+test("records nothing when no 1m request was made", () => {
+  const { degradations } = toResponsesWire(base, "gpt-5.6");
+  expect(degradations).not.toContain("openai:context-1m-dropped");
+});
