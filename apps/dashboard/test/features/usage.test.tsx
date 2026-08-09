@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { UsageBoard } from "../../src/features/usage/UsageBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
@@ -131,8 +131,9 @@ describe("UsageBoard", () => {
     const grid = await screen.findByRole("grid", {
       name: "Tokens per day over the last year",
     });
-    // 53 weeks of 7 days, whatever the window the panels below are showing.
-    expect(within(grid).getAllByRole("gridcell")).toHaveLength(371);
+    // Future days in the current week are deliberately hidden from the
+    // accessibility tree, but still occupy cells so the 53-week shape holds.
+    expect(grid.querySelectorAll('[role="gridcell"]')).toHaveLength(371);
 
     const today = new Date(TODAY).toLocaleDateString("en-GB", {
       weekday: "short",
@@ -329,8 +330,9 @@ describe("UsageBoard", () => {
     expect(messages.length).toBeGreaterThan(0);
 
     // The year grid keeps its squares when there is nothing to colour them with.
+    // Future days remain hidden from the accessibility tree.
     const grid = screen.getByRole("grid", { name: "Tokens per day over the last year" });
-    expect(within(grid).getAllByRole("gridcell")).toHaveLength(371);
+    expect(grid.querySelectorAll('[role="gridcell"]')).toHaveLength(371);
     expect(screen.getAllByLabelText(/: 0 requests, 0 tokens, \$0$/)).toHaveLength(371);
   });
 
