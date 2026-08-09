@@ -12,6 +12,7 @@ export type HeaderPair = readonly [name: string, value: string];
  * alphabetically, which destroys the CLI fingerprint.
  */
 export type HttpRequest = {
+  provider: ProviderId;
   url: string;
   method: string;
   headers: readonly HeaderPair[];

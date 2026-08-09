@@ -33,7 +33,7 @@ type TokenResponse = {
 };
 
 async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise<TokenResponse> {
-  const { status, parsed } = await postJson(deps, TOKEN_URL, PROFILES.anthropic, {
+  const { status, parsed } = await postJson(deps, "anthropic", TOKEN_URL, PROFILES.anthropic, {
     contentType: "application/json",
     body: JSON.stringify({ ...body, client_id: CLIENT_ID }),
   });
@@ -149,7 +149,7 @@ export const anthropicOAuth: OAuthProvider = {
 
   async usage(secrets, deps) {
     if (secrets.accessToken === null) return null;
-    const { status, parsed } = await getJson(deps, USAGE_URL, PROFILES.anthropic, {
+    const { status, parsed } = await getJson(deps, "anthropic", USAGE_URL, PROFILES.anthropic, {
       accessToken: secrets.accessToken,
       extraHeaders: [
         ["anthropic-beta", "oauth-2025-04-20"],

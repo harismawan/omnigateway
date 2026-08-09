@@ -1,3 +1,5 @@
+import { type LogLevel, parseLogLevel } from "@omni/ir";
+
 export type Config = {
   port: number;
   host: string;
@@ -14,6 +16,14 @@ export type Config = {
    * takes this literally when it is set.
    */
   staticDir: string | null;
+  /** Threshold for stdout logging. Read once, at boot. */
+  logLevel: LogLevel;
+  /**
+   * Set when `OMNI_LOG_LEVEL` held something unrecognised.
+   *
+   * The boot line reports it, so a typo is visible rather than silent.
+   */
+  logLevelFallbackFrom: string | null;
 };
 
 const MIN_KEY_LENGTH = 16;
@@ -53,7 +63,15 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
 
   const staticDir = env.OMNI_STATIC_DIR?.trim();
 
+  // Deliberately not fatal, unlike OMNI_PORT: a typo in a log level is not a
+  // reason to refuse to serve traffic. The boot line says which value was
+  // ignored, so the mistake is still visible.
+  const rawLogLevel = env.OMNI_LOG_LEVEL?.trim();
+  const logLevel = parseLogLevel(rawLogLevel);
+
   return {
+    logLevel: logLevel ?? "info",
+    logLevelFallbackFrom: logLevel === null && rawLogLevel ? rawLogLevel : null,
     port,
     host,
     databasePath: optionalText(env.OMNI_DB_PATH, "./omnigateway.db"),

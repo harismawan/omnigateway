@@ -3,6 +3,8 @@ import {
   type ChatRequest,
   GatewayError,
   HTTP_STATUS,
+  type Logger,
+  noopLogger,
   type ProviderId,
   RETRYABLE,
   type StreamEvent,
@@ -38,6 +40,7 @@ export type DispatchDeps = {
   now: () => number;
   rand: () => number;
   refresh: (credential: CredentialView) => Promise<CredentialSecrets>;
+  logger?: Logger;
   /** Called when an attempt selects its target, before outbound work starts. */
   onRoute?: (target: {
     provider: ProviderId;
@@ -58,6 +61,7 @@ export async function dispatch(
   signal: AbortSignal,
   requestId: string,
 ): Promise<DispatchOutcome> {
+  const logger = deps.logger ?? noopLogger;
   const startedAt = deps.now();
   const snapshot = await deps.snapshots.get(startedAt);
   const deadlineAt = startedAt + snapshot.settings.requestDeadlineMs;
@@ -119,8 +123,21 @@ export async function dispatch(
     rand: deps.rand(),
   });
 
+  logger.debug("routing candidates ranked", {
+    requestId,
+    requestedModel: request.model,
+    model: candidates[0]?.target.model,
+    credentialId: candidates[0]?.credential.id,
+    count: candidates.length,
+  });
+
   for (const e of excluded) {
     log.degradations.push(`excluded:${e.credentialId}:${e.reason}`);
+    logger.debug("routing candidate excluded", {
+      requestId,
+      credentialId: e.credentialId,
+      reason: e.reason,
+    });
   }
 
   if (candidates.length === 0) {
@@ -158,6 +175,13 @@ export async function dispatch(
           model: candidate.target.model,
           credentialId: candidate.credential.id,
         });
+        logger.debug("attempt started", {
+          requestId,
+          provider: candidate.target.provider,
+          model: candidate.target.model,
+          credentialId: candidate.credential.id,
+          attempt: i + 1,
+        });
 
         // Reset per-attempt: a failed attempt's partial usage must not leak into
         // the next one's log.
@@ -190,6 +214,8 @@ export async function dispatch(
                   waitForCancellation(deps.refresh(credential), dispatchSignal),
                 refreshLeadMs: DISPATCH_REFRESH_LEAD_MS,
                 ...(retrySecrets === undefined ? {} : { secrets: retrySecrets }),
+                logger,
+                requestId,
               }),
               dispatchSignal,
             );
@@ -204,6 +230,14 @@ export async function dispatch(
                 // failover is impossible and errors must be forwarded in-stream.
                 committed = true;
                 log.ttftMs = deps.now() - startedAt;
+                logger.debug("stream committed", {
+                  requestId,
+                  provider: candidate.target.provider,
+                  model: candidate.target.model,
+                  credentialId: candidate.credential.id,
+                  attempt: i + 1,
+                  ttftMs: log.ttftMs,
+                });
                 for (const buffered of pending) yield buffered;
                 pending.length = 0;
               }
@@ -294,6 +328,14 @@ export async function dispatch(
               candidate.credential.hasRefreshToken
             ) {
               authRefreshRetried = true;
+              logger.warn("attempt authentication failed; refreshing credential", {
+                requestId,
+                provider: candidate.target.provider,
+                model: candidate.target.model,
+                credentialId: candidate.credential.id,
+                attempt: i + 1,
+                code,
+              });
               try {
                 retrySecrets = await waitForCancellation(
                   deps.refresh(candidate.credential),
@@ -330,6 +372,19 @@ export async function dispatch(
                 jitter: deps.rand(),
               }),
             );
+
+            if (!committed && RETRYABLE[failure.code] && i + 1 < maxAttempts) {
+              logger.warn("attempt failed; retrying", {
+                requestId,
+                provider: candidate.target.provider,
+                model: candidate.target.model,
+                credentialId: candidate.credential.id,
+                attempt: i + 1,
+                code: failure.code,
+                retryable: true,
+                retryAfterMs: failure.retryAfterMs,
+              });
+            }
 
             if (committed) {
               // Bytes already went out; the client gets an in-band error and the

@@ -1,4 +1,4 @@
-import { GatewayError, type StreamEvent } from "@omni/ir";
+import { GatewayError, type Logger, noopLogger, type StreamEvent } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import type { Candidate } from "@omni/router";
 import type { CredentialSecrets, CredentialView } from "@omni/store";
@@ -28,8 +28,11 @@ export async function attempt(opts: {
   refreshLeadMs: number;
   /** Already-refreshed secrets for an AUTH retry; avoids a second refresh. */
   secrets?: CredentialSecrets;
+  logger?: Logger;
+  requestId?: string;
 }): Promise<AttemptResult> {
   const { candidate, adapter, http, now, signal, refresh, refreshLeadMs } = opts;
+  const logger = opts.logger ?? noopLogger;
   const credential = candidate.credential;
 
   let secrets = opts.secrets ?? (await credential.openForInference());
@@ -41,6 +44,11 @@ export async function attempt(opts: {
     credential.expiresAt - refreshLeadMs <= now;
 
   if (stale) {
+    logger.debug("preemptive credential refresh", {
+      requestId: opts.requestId,
+      provider: credential.provider,
+      credentialId: credential.id,
+    });
     if (!credential.hasRefreshToken) {
       throw new GatewayError("AUTH", "credential expired with no refresh token", {
         provider: credential.provider,

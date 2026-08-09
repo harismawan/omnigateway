@@ -85,7 +85,8 @@ assuming a snippet still matches.
 - `apps/gateway/src/dispatch/`: upstream attempts, refresh, failover, deadlines, stream commit
 - `apps/gateway/src/routes/`: client, admin, and OAuth control surfaces
 - `apps/gateway/src/auth/`: gateway API-key authentication and its process-local rate limiter
-- `packages/ir/`: provider-neutral domain types and error mapping
+- `packages/ir/`: provider-neutral domain types, error mapping, and the pure structured logger
+- `packages/ir/src/logger.ts`: level filtering, safe `LogFields` allowlist, deterministic line formatting, and no-op logger; sinks are injected by callers
 - `packages/router/`: pure candidate selection and routing state
 - `packages/control/`: every admin operation, the OAuth connect flow, admin auth, config parsing, and the quota probe
 - `packages/testkit/`: shared test fixtures (`@omni/testkit`), used by the gateway, router, control, and CLI suites
@@ -113,7 +114,7 @@ assuming a snippet still matches.
 
 Preserve these constraints:
 
-1. `packages/ir` stays provider-independent and side-effect-free.
+1. `packages/ir` stays provider-independent and side-effect-free. Its structured logger is allowed because clocks and sinks are injected; it must never import `process`, `console`, or a transport.
 2. Provider-specific wire formats, headers, signing, and stream decoding stay in `packages/providers`.
 3. `packages/router` stays pure: no network, database, token refresh, or timers.
 4. Dispatch owns side effects, retries, refresh, request deadlines, and streaming commit semantics.
@@ -204,6 +205,7 @@ Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/
 ## Known constraints
 
 - Version 1 is single-node and single-operator.
+- `OMNI_LOG_LEVEL` is read once at boot and defaults to `info`; an invalid value falls back to `info` and is reported. Stdout logging relies on `LogFields` being a closed allowlist with no index signature — that type is the redaction mechanism, not a convenience. Never add bodies, headers, tokens, keys, passwords, or unconstrained metadata to it; treat each new free-text field as a security-boundary change.
 - Usage has two grains. `/api/usage?grain=raw` reads `request_logs`, which is pruned at `logRetentionDays` (30 by default) and is the only grain that resolves to the hour. `grain=daily` reads `usage_daily`, kept for 400 days, and is the only grain that answers a year. A day key is the *host's local* midnight fixed at write time: rollup rows cannot be re-bucketed into another timezone afterwards, and changing the host timezone does not rewrite history.
 - A `request_logs` row is filed `pending` by `usage.begin` when dispatch selects its first provider/model/credential, updated by `usage.route` if failover selects another attempt, and upserted to `done` by `usage.append` when the request ends. A pending row's `status`, `attempts`, tokens, cost and duration are placeholder zeros, never measurements — read `state`, never `status`, to tell the two apart. Only completion writes `usage_daily`, and `append` must therefore run at most once per id: the upsert no longer throws on a duplicate, so double-counting the rollup is the failure mode that replaced it. Raw-grain aggregation excludes pending rows in SQL, and the console excludes them again in `summarize`/`bucketLogs`. Rows still pending at boot are swept to `499`/`interrupted` with a zero duration, because nobody knows when the process died.
 - API-key rate limits are process-local, reset on restart, and are not shared across instances.

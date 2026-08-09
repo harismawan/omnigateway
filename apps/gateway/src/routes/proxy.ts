@@ -1,4 +1,13 @@
-import { collect, type ErrorCode, GatewayError, HTTP_STATUS, type StreamEvent } from "@omni/ir";
+import {
+  collect,
+  type ErrorCode,
+  GatewayError,
+  HTTP_STATUS,
+  type LogFields,
+  type Logger,
+  noopLogger,
+  type StreamEvent,
+} from "@omni/ir";
 import { Elysia } from "elysia";
 import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
 import { ApiKeyRateLimiter } from "../auth/rateLimit.ts";
@@ -24,7 +33,7 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
 };
 
 type ResolvedProxyDeps = DispatchDeps &
-  Pick<ProxyDeps, "requestId" | "rateLimiter"> & { keepaliveMs: number };
+  Pick<ProxyDeps, "requestId" | "rateLimiter"> & { keepaliveMs: number; logger: Logger };
 
 type Surface = "anthropic" | "openai";
 
@@ -79,7 +88,7 @@ function asGatewayError(error: unknown): GatewayError {
 /** Serializes SSE frames and drains the stream, logging once it is done. */
 function sseResponse(
   frames: AsyncGenerator<{ event: string; data: string }, void, undefined>,
-  onDone: () => Promise<void>,
+  onDone: (cancelled: boolean) => Promise<void>,
   keepaliveMs: number,
 ): Response {
   const encoder = new TextEncoder();
@@ -89,8 +98,8 @@ function sseResponse(
   // cancelled), so the log write is latched to run exactly once regardless
   // of which path gets there first.
   let done: Promise<void> | null = null;
-  const runOnce = (): Promise<void> => {
-    if (done === null) done = onDone();
+  const runOnce = (cancelled = false): Promise<void> => {
+    if (done === null) done = onDone(cancelled);
     return done;
   };
 
@@ -126,7 +135,7 @@ function sseResponse(
       // The client hung up. Close the upstream generator so the provider
       // connection is released, then still write the log (exactly once).
       await frames.return(undefined);
-      await runOnce();
+      await runOnce(true);
     },
   });
 
@@ -145,9 +154,34 @@ async function handle(
   let requestedModel = "";
 
   try {
-    const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
+    let key: Awaited<ReturnType<typeof authenticateApiKey>>;
+    try {
+      key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
+    } catch (error) {
+      if (error instanceof GatewayError && error.code === "AUTH") {
+        deps.logger.warn("authentication rejected", {
+          requestId,
+          surface,
+          reason: "invalid credentials",
+        });
+      }
+      throw error;
+    }
     keyId = key.id;
-    rateLimiter.consume(key.id, key.rateLimitPerMin);
+    try {
+      rateLimiter.consume(key.id, key.rateLimitPerMin);
+    } catch (error) {
+      if (error instanceof GatewayError && error.code === "RATE_LIMIT") {
+        deps.logger.warn("rate limit rejected", {
+          requestId,
+          surface,
+          apiKeyId: key.id,
+          code: error.code,
+          retryAfterMs: error.retryAfterMs,
+        });
+      }
+      throw error;
+    }
 
     const body: unknown = await request.json();
     const chatRequest =
@@ -169,7 +203,7 @@ async function handle(
         ...deps,
         async onRoute(target) {
           if (began) {
-            await routeLog(deps.store, requestId, target);
+            await routeLog(deps.store, requestId, target, deps.logger);
             return;
           }
           began = true;
@@ -181,13 +215,45 @@ async function handle(
             resolvedModel: target.model,
             credentialId: target.credentialId,
           });
-          await beginLog(deps.store, log, keyId);
+          await beginLog(deps.store, log, keyId, deps.logger);
         },
       },
       request.signal,
       requestId,
     );
-    const log = () => finishLog(deps.store, outcome.log(), keyId);
+    const log = async (cancelled = false): Promise<void> => {
+      const completed = outcome.log();
+      const wasCancelled = cancelled || request.signal.aborted;
+      if (wasCancelled && completed.status === 0) {
+        completed.status = 499;
+        completed.errorCode = "interrupted";
+        completed.durationMs = deps.now() - startedAt;
+      }
+      await finishLog(deps.store, completed, keyId, deps.logger);
+      const fields: LogFields = {
+        requestId,
+        surface,
+        status: completed.status,
+        provider: completed.resolvedProvider ?? undefined,
+        model: completed.resolvedModel ?? undefined,
+        requestedModel: completed.requestedModel,
+        credentialId: completed.credentialId ?? undefined,
+        apiKeyId: keyId ?? undefined,
+        attempts: completed.attempts,
+        code: (completed.errorCode as ErrorCode | "interrupted" | null) ?? undefined,
+        stream: chatRequest.stream,
+        inputTokens: completed.inputTokens,
+        outputTokens: completed.outputTokens,
+        cacheReadTokens: completed.cacheReadTokens,
+        cacheWriteTokens: completed.cacheWriteTokens,
+        costUsd: completed.costUsd,
+        ttftMs: completed.ttftMs,
+        durationMs: completed.durationMs,
+      };
+      if (wasCancelled) deps.logger.debug("request cancelled", fields);
+      else if (completed.status >= 400) deps.logger.error("request failed", fields);
+      else deps.logger.info("request done", fields);
+    };
 
     if (chatRequest.stream) {
       const frames =
@@ -218,26 +284,37 @@ async function handle(
     });
   } catch (error) {
     const gatewayError = asGatewayError(error);
-    await finishLog(
-      deps.store,
-      // Completes a pending row if the request got as far as dispatch. The
-      // store keeps what beginning it recorded where this log carries nothing.
-      newCompletedRequestLog(requestId, startedAt, {
-        requestedModel,
-        status: HTTP_STATUS[gatewayError.code],
-        errorCode: gatewayError.code,
-      }),
-      keyId,
-    );
+    const completed = newCompletedRequestLog(requestId, startedAt, {
+      requestedModel,
+      status: HTTP_STATUS[gatewayError.code],
+      errorCode: gatewayError.code,
+      durationMs: deps.now() - startedAt,
+    });
+    // Completes a pending row if the request got as far as dispatch. The store
+    // keeps what beginning it recorded where this log carries nothing.
+    await finishLog(deps.store, completed, keyId, deps.logger);
+    deps.logger.error("request failed", {
+      requestId,
+      surface,
+      status: completed.status,
+      requestedModel,
+      apiKeyId: keyId ?? undefined,
+      code: gatewayError.code,
+      attempts: completed.attempts,
+      durationMs: completed.durationMs,
+      reason: gatewayError.message,
+    });
     return errorResponse(surface, gatewayError.code, gatewayError.message);
   }
 }
 
 export function proxyRoutes(deps: ProxyDeps) {
   const rateLimiter = deps.rateLimiter ?? new ApiKeyRateLimiter(deps.now);
+  const logger = deps.logger ?? noopLogger;
   const dispatchDeps: ResolvedProxyDeps = {
     ...deps,
-    snapshots: deps.snapshots ?? createRoutingSnapshotCache(deps.store),
+    logger,
+    snapshots: deps.snapshots ?? createRoutingSnapshotCache(deps.store, logger),
     keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
   };
   return new Elysia()
@@ -264,11 +341,21 @@ export function proxyRoutes(deps: ProxyDeps) {
         });
       } catch (error) {
         const gatewayError = asGatewayError(error);
+        logger.error("model listing failed", {
+          status: HTTP_STATUS[gatewayError.code],
+          code: gatewayError.code,
+          reason: gatewayError.message,
+        });
         return errorResponse("anthropic", gatewayError.code, gatewayError.message);
       }
     })
     .onError(({ error }) => {
       const gatewayError = asGatewayError(error);
+      logger.error("unhandled proxy route error", {
+        status: HTTP_STATUS[gatewayError.code],
+        code: gatewayError.code,
+        reason: gatewayError.message,
+      });
       return errorResponse("anthropic", gatewayError.code, gatewayError.message);
     });
 }

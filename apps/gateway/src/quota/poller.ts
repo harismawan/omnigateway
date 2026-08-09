@@ -1,4 +1,5 @@
 import { type PollerDeps, poll } from "@omni/control";
+import { noopLogger } from "@omni/ir";
 
 /**
  * Starts the poll loop at the interval in settings.
@@ -11,6 +12,7 @@ import { type PollerDeps, poll } from "@omni/control";
  * timer; what stays here is the part that only a long-lived process wants.
  */
 export async function startQuotaPoller(deps: PollerDeps): Promise<() => void> {
+  const logger = deps.logger ?? noopLogger;
   const { quotaPollIntervalMs } = await deps.store.config.getSettings();
   if (quotaPollIntervalMs <= 0) return () => {};
 
@@ -20,7 +22,7 @@ export async function startQuotaPoller(deps: PollerDeps): Promise<() => void> {
     running = true;
     void poll(deps)
       .catch((error: unknown) => {
-        console.error("quota poll failed", {
+        logger.error("quota poll failed", {
           reason: error instanceof Error ? error.message : "unknown",
         });
       })

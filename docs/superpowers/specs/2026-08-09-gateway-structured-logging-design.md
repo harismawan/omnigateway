@@ -141,6 +141,8 @@ export type LogFields = {
   durationMs?: number | undefined;
   retryAfterMs?: number | undefined;
   count?: number | undefined;
+  rawCount?: number | undefined;
+  dailyCount?: number | undefined;
   host?: string | undefined;
   port?: number | undefined;
   path?: string | undefined;

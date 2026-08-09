@@ -1,3 +1,4 @@
+import { type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
 
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
@@ -16,22 +17,31 @@ export const ROLLUP_RETENTION_DAYS = 400;
  * past the far longer one. The rollup is what survives to answer "last year",
  * so it is deliberately not governed by `logRetentionDays`.
  */
-export async function pruneLogs(store: Store, now: number): Promise<void> {
+export async function pruneLogs(
+  store: Store,
+  now: number,
+): Promise<{ raw: number; daily: number }> {
   const settings = await store.config.getSettings();
-  await store.usage.prune(now - settings.logRetentionDays * DAY_MS);
-  await store.usage.pruneDaily(now - ROLLUP_RETENTION_DAYS * DAY_MS);
+  const raw = await store.usage.prune(now - settings.logRetentionDays * DAY_MS);
+  const daily = await store.usage.pruneDaily(now - ROLLUP_RETENTION_DAYS * DAY_MS);
+  return { raw, daily };
 }
 
-export type MaintenanceDeps = { store: Store; now: () => number };
+export type MaintenanceDeps = { store: Store; now: () => number; logger?: Logger };
 
 /** Starts the hourly sweep. Returns a function that stops it. */
 export function startMaintenance(deps: MaintenanceDeps): () => void {
+  const logger = deps.logger ?? noopLogger;
   const timer = setInterval(() => {
-    void pruneLogs(deps.store, deps.now()).catch((error: unknown) => {
-      console.error("log pruning failed", {
-        reason: error instanceof Error ? error.message : "unknown",
+    void pruneLogs(deps.store, deps.now())
+      .then(({ raw, daily }) =>
+        logger.debug("request logs pruned", { rawCount: raw, dailyCount: daily }),
+      )
+      .catch((error: unknown) => {
+        logger.error("log pruning failed", {
+          reason: error instanceof Error ? error.message : "unknown",
+        });
       });
-    });
   }, SWEEP_INTERVAL_MS);
 
   // Do not hold the process open for a maintenance timer.

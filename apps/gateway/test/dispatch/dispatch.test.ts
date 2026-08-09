@@ -4,6 +4,7 @@ import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import { buildSnapshot } from "@omni/router";
 import type { Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
+import { captureLogger } from "@omni/testkit";
 import { dispatch } from "../../src/dispatch/index.ts";
 
 const req: ChatRequest = {
@@ -259,12 +260,14 @@ test("a refresh failure proceeds to the next candidate", async () => {
 
 test("fails over to the next credential before the commit point", async () => {
   const store = await seeded(2);
+  const logger = captureLogger();
+  const upstreamBody = "UPSTREAM_ERROR_BODY_SENTINEL";
   const adapter = stubAdapter((call) =>
-    call === 1 ? new GatewayError("UPSTREAM", "boom") : textStream("recovered"),
+    call === 1 ? new GatewayError("UPSTREAM", upstreamBody) : textStream("recovered"),
   );
   const outcome = await dispatch(
     req,
-    deps(store, adapter),
+    { ...deps(store, adapter), logger },
     new AbortController().signal,
     "req_test",
   );
@@ -274,6 +277,19 @@ test("fails over to the next credential before the commit point", async () => {
   expect(events.some((e) => e.type === "blockDelta")).toBe(true);
   expect(outcome.log().attempts).toBe(2);
   expect(outcome.log().status).toBe(200);
+  expect(logger.records).toContainEqual(
+    expect.objectContaining({
+      level: "warn",
+      msg: "attempt failed; retrying",
+      fields: expect.objectContaining({
+        requestId: "req_test",
+        attempt: 1,
+        code: "UPSTREAM",
+        retryable: true,
+      }),
+    }),
+  );
+  expect(logger.lines.join("\n")).not.toContain(upstreamBody);
   store.close();
 });
 

@@ -1,4 +1,4 @@
-import { GatewayError, type ProviderId } from "@omni/ir";
+import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { CredentialSecrets, CredentialView, Store } from "@omni/store";
 import type { OAuthProvider } from "./types.ts";
@@ -8,11 +8,14 @@ export type RefreshDeps = {
   providers: Readonly<Record<ProviderId, OAuthProvider>>;
   http: HttpClient;
   now: () => number;
+  logger?: Logger;
 };
 
 export type Refresher = (credential: CredentialView) => Promise<CredentialSecrets>;
 
 export function createRefresher(deps: RefreshDeps): Refresher {
+  const logger = deps.logger ?? noopLogger;
+
   /**
    * One in-flight refresh per credential.
    *
@@ -38,6 +41,10 @@ export function createRefresher(deps: RefreshDeps): Refresher {
     }
 
     const provider = deps.providers[credential.provider];
+    logger.debug("refreshing credential", {
+      provider: credential.provider,
+      credentialId: credential.id,
+    });
 
     let result: Awaited<ReturnType<OAuthProvider["refresh"]>>;
     try {
@@ -51,6 +58,11 @@ export function createRefresher(deps: RefreshDeps): Refresher {
       // help, and leaving the credential enabled burns one attempt on every
       // subsequent request. Anything else (network, timeout) is transient.
       if (error instanceof GatewayError && error.code === "AUTH") {
+        logger.warn("credential disabled: refresh token rejected", {
+          provider: credential.provider,
+          credentialId: credential.id,
+          code: "AUTH",
+        });
         await deps.store.credentials.update(credential.id, {
           enabled: false,
           // Recorded here rather than at the call site so the background sweep
@@ -73,6 +85,11 @@ export function createRefresher(deps: RefreshDeps): Refresher {
       // Merge: a refresh response may omit fields the connect flow captured,
       // such as the Kimi device id.
       providerData: { ...credential.providerData, ...result.providerData },
+    });
+
+    logger.debug("credential refreshed", {
+      provider: credential.provider,
+      credentialId: credential.id,
     });
 
     return result.secrets;

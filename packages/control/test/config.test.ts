@@ -9,6 +9,8 @@ test("applies defaults for everything but the encryption key", () => {
   expect(config.host).toBe("127.0.0.1");
   expect(config.databasePath).toBe("./omnigateway.db");
   expect(config.baseUrl).toBe("http://127.0.0.1:9000");
+  expect(config.logLevel).toBe("info");
+  expect(config.logLevelFallbackFrom).toBeNull();
 });
 
 test("refuses to boot without an encryption key", () => {
@@ -31,6 +33,18 @@ test("reads overrides from the environment", () => {
   expect(config.host).toBe("0.0.0.0");
   expect(config.databasePath).toBe("/data/omni.db");
   expect(config.baseUrl).toBe("https://gw.example.com");
+});
+
+test.each(["debug", "info", "warn", "error"] as const)("reads %s from OMNI_LOG_LEVEL", (level) => {
+  const config = loadConfig({ ...base, OMNI_LOG_LEVEL: level });
+  expect(config.logLevel).toBe(level);
+  expect(config.logLevelFallbackFrom).toBeNull();
+});
+
+test("falls back to info for an invalid log level without refusing to boot", () => {
+  const config = loadConfig({ ...base, OMNI_LOG_LEVEL: "verbose" });
+  expect(config.logLevel).toBe("info");
+  expect(config.logLevelFallbackFrom).toBe("verbose");
 });
 
 test.each([

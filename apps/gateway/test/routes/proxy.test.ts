@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { ProviderId, StreamEvent } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import {
+  captureLogger,
   memoryStore,
   seedApiKey,
   seedCredential,
@@ -72,6 +73,86 @@ test("proxies a non-streaming anthropic request", async () => {
   const body = (await res.json()) as { content: unknown; id: string };
   expect(body.content).toEqual([{ type: "text", text: "Hi" }]);
   expect(body.id).toBe("req_1");
+});
+
+test("logs exactly one terminal access line for a non-streaming request", async () => {
+  const logger = captureLogger();
+  const { call } = await harness(EVENTS, { logger });
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(res.status).toBe(200);
+
+  const terminal = logger.records.filter((record) =>
+    ["request done", "request failed", "request cancelled"].includes(record.msg),
+  );
+  expect(terminal).toEqual([
+    expect.objectContaining({
+      level: "info",
+      msg: "request done",
+      fields: expect.objectContaining({
+        requestId: "req_1",
+        surface: "anthropic",
+        status: 200,
+        provider: "anthropic",
+        model: "claude-opus-4",
+        inputTokens: 10,
+        outputTokens: 2,
+      }),
+    }),
+  ]);
+});
+
+test("logs exactly one terminal access line after a streaming response drains", async () => {
+  const logger = captureLogger();
+  const { call } = await harness(EVENTS, { logger });
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  await res.text();
+
+  expect(logger.records.filter((record) => record.msg === "request done")).toHaveLength(1);
+});
+
+test("never writes request bodies or keys into stdout", async () => {
+  const logger = captureLogger();
+  const { call, raw } = await harness(EVENTS, { logger });
+  const sentinel = "PROMPT_SENTINEL_MUST_NOT_REACH_STDOUT";
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: sentinel }],
+  });
+  expect(res.status).toBe(200);
+
+  const output = logger.lines.join("\n");
+  expect(output).not.toContain(sentinel);
+  expect(output).not.toContain(raw);
+  expect(output).not.toContain("test-token-c1");
+  expect(output).not.toContain("test-refresh-c1");
+});
+
+test("logs a malformed request once at error with no prompt body", async () => {
+  const logger = captureLogger();
+  const { call } = await harness(EVENTS, { logger });
+  const sentinel = "MALFORMED_BODY_SENTINEL";
+  const res = await call("/v1/messages", { model: "fast", messages: [sentinel] });
+  expect(res.status).toBe(400);
+
+  const failures = logger.records.filter((record) => record.msg === "request failed");
+  expect(failures).toHaveLength(1);
+  expect(failures[0]).toEqual(
+    expect.objectContaining({
+      level: "error",
+      fields: expect.objectContaining({ status: 400, code: "BAD_REQUEST" }),
+    }),
+  );
+  expect(logger.lines.join("\n")).not.toContain(sentinel);
 });
 
 test("proxies a streaming anthropic request as sse", async () => {
@@ -506,6 +587,7 @@ test("writes exactly one log row when the client disconnects mid-stream after th
   };
 
   let n = 0;
+  const logger = captureLogger("debug");
   const app = proxyRoutes({
     store,
     adapters,
@@ -516,6 +598,7 @@ test("writes exactly one log row when the client disconnects mid-stream after th
     rand: () => 0.5,
     refresh: async (c) => await c.secrets(),
     requestId: () => `req_${++n}`,
+    logger,
   });
 
   const server = Bun.serve({ port: 0, fetch: app.fetch });
@@ -549,7 +632,18 @@ test("writes exactly one log row when the client disconnects mid-stream after th
     const logs = await store.usage.recent(10);
     expect(logs).toHaveLength(1);
     expect(logs[0]?.id).toBe("req_1");
+    expect(logs[0]?.status).toBe(499);
+    expect(logs[0]?.errorCode).toBe("interrupted");
     expect(appendCalls).toBe(1);
+    expect(
+      logger.records.filter(
+        (record) => record.level === "debug" && record.msg === "request cancelled",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        fields: expect.objectContaining({ requestId: "req_1", status: 499, code: "interrupted" }),
+      }),
+    ]);
   } finally {
     server.stop(true);
   }
@@ -577,7 +671,8 @@ test("accepts x-api-key on proxy and models routes", async () => {
 });
 
 test("rejects conflicting API key headers on proxy and models routes", async () => {
-  const { app, raw } = await harness();
+  const logger = captureLogger();
+  const { app, raw } = await harness(EVENTS, { logger });
   const headers = { authorization: `Bearer ${raw}`, "x-api-key": "sk-omni-conflict" };
   const proxy = await app.handle(
     new Request("http://localhost/v1/messages", {
@@ -593,6 +688,15 @@ test("rejects conflicting API key headers on proxy and models routes", async () 
   expect(proxy.status).toBe(401);
   const models = await app.handle(new Request("http://localhost/v1/models", { headers }));
   expect(models.status).toBe(401);
+  expect(logger.records).toContainEqual(
+    expect.objectContaining({
+      level: "warn",
+      msg: "authentication rejected",
+      fields: expect.objectContaining({ reason: "invalid credentials" }),
+    }),
+  );
+  expect(logger.lines.join("\n")).not.toContain(raw);
+  expect(logger.lines.join("\n")).not.toContain("sk-omni-conflict");
 });
 
 test("enforces exact model allowlists before dispatch", async () => {
@@ -674,6 +778,7 @@ test("fixed-window rate limits are atomic, per-key, and roll over at the boundar
   const first = await seedApiKey(store, { rateLimitPerMin: 2 });
   const second = await seedApiKey(store, { rateLimitPerMin: 1 });
   let sends = 0;
+  const logger = captureLogger();
   const adapters = stubAdapters(EVENTS);
   const anthropic = adapters.anthropic;
   const app = proxyRoutes({
@@ -695,6 +800,7 @@ test("fixed-window rate limits are atomic, per-key, and roll over at the boundar
     rand: () => 0,
     refresh: async (credential) => await credential.secrets(),
     requestId: () => crypto.randomUUID(),
+    logger,
   });
   const request = (raw: string) =>
     app.handle(
@@ -718,6 +824,16 @@ test("fixed-window rate limits are atomic, per-key, and roll over at the boundar
   expect((await request(second.raw)).status).toBe(200);
   expect((await request(second.raw)).status).toBe(429);
   expect(sends).toBe(3);
+  expect(logger.records.filter((record) => record.msg === "rate limit rejected")).toHaveLength(2);
+  expect(logger.records).toContainEqual(
+    expect.objectContaining({
+      level: "warn",
+      msg: "rate limit rejected",
+      fields: expect.objectContaining({ apiKeyId: first.key.id, code: "RATE_LIMIT" }),
+    }),
+  );
+  expect(logger.lines.join("\n")).not.toContain(first.raw);
+  expect(logger.lines.join("\n")).not.toContain(second.raw);
 
   now = 60_000;
   expect((await request(first.raw)).status).toBe(200);

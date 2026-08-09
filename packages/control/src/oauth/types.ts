@@ -112,6 +112,7 @@ export type OAuthProvider = {
 /** Sent by every token call. Arguments are ordered by the provider's profile. */
 export async function postJson(
   deps: OAuthDeps,
+  provider: ProviderId,
   url: string,
   profile: ClientProfile,
   opts: {
@@ -130,6 +131,7 @@ export async function postJson(
   );
 
   const res = await deps.http({
+    provider,
     url,
     method: "POST",
     headers,
@@ -158,6 +160,7 @@ export async function postJson(
  */
 export async function getJson(
   deps: OAuthDeps,
+  provider: ProviderId,
   url: string,
   profile: ClientProfile,
   opts: { accessToken: string; extraHeaders?: readonly HeaderPair[] },
@@ -172,6 +175,7 @@ export async function getJson(
   );
 
   const res = await deps.http({
+    provider,
     url,
     method: "GET",
     headers,

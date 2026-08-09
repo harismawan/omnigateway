@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { createAdminAuth, createRefresher, OAUTH_PROVIDERS, type Refresher } from "@omni/control";
-import type { ProviderId } from "@omni/ir";
+import { type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
@@ -31,18 +31,20 @@ export type AppDeps = {
   refresh?: Refresher;
   /** Absolute directory containing the built dashboard bundle. */
   staticDir?: string;
+  logger?: Logger;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 export function createApp(deps: AppDeps) {
   const now = deps.now ?? (() => Date.now());
+  const logger = deps.logger ?? noopLogger;
   const rand = deps.rand ?? Math.random;
-  const http = deps.http ?? nodeHttpClient();
+  const http = deps.http ?? nodeHttpClient({ logger, now });
   const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
   const rateLimiter = new ApiKeyRateLimiter(now);
-  const snapshots = createRoutingSnapshotCache(deps.store);
+  const snapshots = createRoutingSnapshotCache(deps.store, logger);
 
   const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS });
   const refresh =
@@ -52,6 +54,7 @@ export function createApp(deps: AppDeps) {
       providers: OAUTH_PROVIDERS,
       http,
       now,
+      logger,
     });
 
   const staticDir = deps.staticDir ? resolve(deps.staticDir) : undefined;
@@ -77,9 +80,18 @@ export function createApp(deps: AppDeps) {
         refresh,
         requestId,
         rateLimiter,
+        logger,
       }),
     )
-    .use(adminRoutes({ store: deps.store, admin, now, sessionTtlMs: ADMIN_SESSION_TTL_MS }))
+    .use(
+      adminRoutes({
+        store: deps.store,
+        admin,
+        now,
+        sessionTtlMs: ADMIN_SESSION_TTL_MS,
+        logger,
+      }),
+    )
     .use(
       connectRoutes({
         store: deps.store,
@@ -87,6 +99,7 @@ export function createApp(deps: AppDeps) {
         providers: OAUTH_PROVIDERS,
         http,
         now,
+        logger,
       }),
     )
     .get("/*", ({ path, request, set }) => {

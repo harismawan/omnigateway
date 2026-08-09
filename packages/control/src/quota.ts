@@ -1,4 +1,4 @@
-import { GatewayError, type ProviderId } from "@omni/ir";
+import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { CredentialView, QuotaWindow, Store } from "@omni/store";
 import { SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
@@ -38,6 +38,7 @@ export type PollerDeps = {
   http: HttpClient;
   refresh: Refresher;
   now: () => number;
+  logger?: Logger;
 };
 
 /**
@@ -91,6 +92,11 @@ export async function probe(
   );
 
   await deps.store.credentials.saveQuota(rows);
+  (deps.logger ?? noopLogger).debug("quota snapshot written", {
+    provider: credential.provider,
+    credentialId: credential.id,
+    count: rows.length,
+  });
   return rows;
 }
 
@@ -101,6 +107,7 @@ export async function probe(
  * credentials produced a snapshot.
  */
 export async function poll(deps: PollerDeps): Promise<number> {
+  const logger = deps.logger ?? noopLogger;
   const now = deps.now();
   const credentials = (await deps.store.credentials.list()).filter(
     (c) =>
@@ -120,14 +127,17 @@ export async function poll(deps: PollerDeps): Promise<number> {
       try {
         if ((await probe(deps, credential)) !== null) written += 1;
       } catch (error) {
-        if (error instanceof GatewayError && error.code === "RATE_LIMIT") {
+        const rateLimited = error instanceof GatewayError && error.code === "RATE_LIMIT";
+        if (rateLimited) {
           cooldowns.set(credential.id, deps.now() + RATE_LIMIT_COOLDOWN_MS);
         }
         // A failed probe leaves the previous snapshot in place. The console
         // reports it as ageing rather than as an outage, which is what it is.
-        console.warn("quota probe failed", {
-          credentialId: credential.id,
+        logger.warn(rateLimited ? "quota probe rate limited" : "quota probe failed", {
           provider: credential.provider,
+          credentialId: credential.id,
+          code: error instanceof GatewayError ? error.code : "INTERNAL",
+          ...(rateLimited ? { retryAfterMs: RATE_LIMIT_COOLDOWN_MS } : {}),
           reason: error instanceof Error ? error.message : "unknown",
         });
       }

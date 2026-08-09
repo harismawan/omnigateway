@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createLogger } from "@omni/ir";
 import { nodeHttpClient } from "../src/http-client.ts";
 
 /** Captures the literal request head, byte for byte, off the socket. */
@@ -39,6 +40,7 @@ test("writes headers in the given order with the given casing", async () => {
   const s = rawServer();
   const http = nodeHttpClient();
   const res = await http({
+    provider: "anthropic",
     url: s.url,
     method: "POST",
     headers: [
@@ -77,6 +79,7 @@ test("sends the body verbatim", async () => {
   // Field order here is deliberately not alphabetical.
   const body = '{"model":"m","messages":[],"system":"s"}';
   await http({
+    provider: "anthropic",
     url: s.url,
     method: "POST",
     headers: [["Content-Type", "application/json"]],
@@ -88,15 +91,70 @@ test("sends the body verbatim", async () => {
   s.stop();
 });
 
+test("logs safe upstream metadata without query or body", async () => {
+  const s = rawServer();
+  const lines: string[] = [];
+  const logger = createLogger({ level: "debug", write: (line) => lines.push(line) });
+  const http = nodeHttpClient({ logger, now: () => 1_000 });
+  const querySentinel = "QUERY_SECRET_SENTINEL";
+  const bodySentinel = "BODY_SECRET_SENTINEL";
+
+  await http({
+    provider: "anthropic",
+    url: `${s.url}?key=${querySentinel}`,
+    method: "POST",
+    headers: [["Authorization", "Bearer HEADER_SECRET_SENTINEL"]],
+    body: bodySentinel,
+    signal: AbortSignal.timeout(5000),
+  });
+
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("DEBUG upstream http");
+  expect(lines[0]).toContain("provider=anthropic");
+  expect(lines[0]).toContain("status=200");
+  expect(lines[0]).toContain("path=/v1/messages");
+  const output = lines.join("\n");
+  expect(output).not.toContain(querySentinel);
+  expect(output).not.toContain(bodySentinel);
+  expect(output).not.toContain("HEADER_SECRET_SENTINEL");
+  s.stop();
+});
+
+test("rejects an already-aborted request without an uncaught error", async () => {
+  const lines: string[] = [];
+  const logger = createLogger({ level: "debug", write: (line) => lines.push(line) });
+  const http = nodeHttpClient({ logger });
+  const ac = new AbortController();
+  ac.abort();
+
+  await expect(
+    http({
+      provider: "anthropic",
+      url: "http://127.0.0.1:1/",
+      method: "POST",
+      headers: [],
+      body: "{}",
+      signal: ac.signal,
+    }),
+  ).rejects.toThrow("aborted");
+
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("provider=anthropic");
+  expect(lines[0]).toContain('reason="transport error"');
+});
+
 test("aborts an in-flight request", async () => {
   const server = Bun.listen({
     hostname: "127.0.0.1",
     port: 0,
     socket: { data() {}, open() {}, close() {}, error() {} },
   });
-  const http = nodeHttpClient();
+  const lines: string[] = [];
+  const logger = createLogger({ level: "debug", write: (line) => lines.push(line) });
+  const http = nodeHttpClient({ logger });
   const ac = new AbortController();
   const pending = http({
+    provider: "anthropic",
     url: `http://127.0.0.1:${server.port}/`,
     method: "POST",
     headers: [],
@@ -105,5 +163,8 @@ test("aborts an in-flight request", async () => {
   });
   ac.abort();
   await expect(pending).rejects.toThrow();
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("provider=anthropic");
+  expect(lines[0]).toContain('reason="transport error"');
   server.stop(true);
 });
