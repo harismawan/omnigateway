@@ -207,6 +207,15 @@ export function createUsageRepo(db: Database): UsageRepo {
       db.run(`INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}`, values(log, "pending"));
     },
 
+    async route(id, target) {
+      db.run(
+        `UPDATE request_logs
+            SET resolved_provider = ?, resolved_model = ?, credential_id = ?
+          WHERE id = ? AND state = 'pending'`,
+        [target.provider, target.model, target.credentialId, id],
+      );
+    },
+
     async append(log: RequestLog) {
       complete(log);
     },

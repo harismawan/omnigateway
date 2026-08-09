@@ -190,6 +190,27 @@ test("a begun request is visible in the log but absent from usage", async () => 
   s.close();
 });
 
+test("routing a begun request fills its target without completing or rolling it up", async () => {
+  const s = await store();
+  await s.usage.begin(log({ id: "r1", at: noon(0), state: "pending" }));
+
+  await s.usage.route("r1", {
+    provider: "anthropic",
+    model: "claude-opus-4",
+    credentialId: "c1",
+  });
+
+  const [row] = await s.usage.recent(10);
+  expect(row).toMatchObject({
+    state: "pending",
+    resolvedProvider: "anthropic",
+    resolvedModel: "claude-opus-4",
+    credentialId: "c1",
+  });
+  expect(await s.usage.aggregate({ since: noon(2), grain: "daily", groupBy: "day" })).toEqual([]);
+  s.close();
+});
+
 test("completing a begun request updates the row in place and rolls it up once", async () => {
   const s = await store();
   await s.usage.begin(log({ id: "r1", at: noon(0), state: "pending" }));

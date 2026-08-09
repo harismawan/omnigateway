@@ -45,10 +45,12 @@ client from one edit. The `/api/logs` response shape is otherwise unchanged.
 
 ## Write path
 
-`UsageRepo` gains two methods beside `append`:
+`UsageRepo` gains three methods beside `append`:
 
 - `begin(log)` — a plain `INSERT` with `state='pending'`, and **no rollup**. A request that has not
   finished has no tokens and no cost to accumulate.
+- `route(id, target)` — updates provider, model, and credential on the pending row after dispatch
+  selects an attempt. It does not complete or roll up the row.
 - `sweepPending()` — completes every row still pending.
 
 `append(log)` becomes `INSERT … ON CONFLICT(id) DO UPDATE`, setting `state='done'`, and keeps
@@ -129,14 +131,11 @@ those surfaces do not show in-flight rows.
 `isError` gains an explicit `if (isPending(log)) return false`. A pending row reads as non-error
 today only because `0 >= 400` is false; the guard makes that intent rather than luck.
 
-## Spinner
+## Live indicator
 
-`LampState` gains `live`, and `LAMP_GLYPH.live` is `◐` — the static fallback, and what a monochrome
-or reduced-motion screen shows. Its tone is `inkFaint`: a request in flight is not a state to judge,
-and colour on this console means provider or state only.
-
-The animation is a CSS `steps()` keyframe cycling `◜◝◞◟` through the `content` of a `::before`, four
-frames over roughly 0.8 seconds, with the text node hidden. No JavaScript timer and no re-render,
+`LampState` gains `live`, and `LAMP_GLYPH.live` is `●`. Its tone is green and its opacity pulses with
+a CSS keyframe. Reduced-motion mode disables the animation and leaves the filled green mark standing.
+No JavaScript timer and no re-render,
 which matters because the table now re-renders on a two-second poll. Under
 `@media (prefers-reduced-motion: reduce)` the animation is dropped and the static glyph stands.
 
@@ -149,9 +148,10 @@ In `LogsBoard`, the lamp becomes three-way: pending renders `live` with the labe
 otherwise the existing error and success branches stand. The label is the accessible name, so a
 screen reader announces "in flight" — the whole signal, since the animation carries nothing for it.
 
-A pending row shows its requested model and its time. Routed to, Account, Try, TTFT, Total, Tokens,
-and Cost render an em dash. This follows from writing only twice: `attempts: 0` and `costUsd: 0` are
-placeholders, not measurements, and rendering `0` would state something false. Outcome shows a chip
+A pending row shows its requested model and its time. Once dispatch selects an attempt, Routed to
+and Account show that target; before selection they remain unknown. Try, TTFT, Total, Tokens, and Cost
+render an em dash because `attempts: 0` and `costUsd: 0` are placeholders, not measurements, and
+rendering `0` would state something false. Outcome shows a chip
 toned `idle` reading `live` in place of a status number. If `Chip` does not already accept an `idle`
 tone, add one beside the existing tones rather than reusing `ok`.
 

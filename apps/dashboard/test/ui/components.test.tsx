@@ -19,6 +19,7 @@ describe("Lamp", () => {
         <Lamp state="warn" label="probing" />
         <Lamp state="down" label="breaker open" />
         <Lamp state="idle" label="disabled" />
+        <Lamp state="live" label="in flight" />
       </>,
     );
 
@@ -26,6 +27,7 @@ describe("Lamp", () => {
     expect(screen.getByRole("img", { name: "probing" }).textContent).toBe("◐");
     expect(screen.getByRole("img", { name: "breaker open" }).textContent).toBe("○");
     expect(screen.getByRole("img", { name: "disabled" }).textContent).toBe("·");
+    expect(screen.getByRole("img", { name: "in flight" }).textContent).toBe("●");
   });
 });
 

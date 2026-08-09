@@ -59,9 +59,8 @@ export const LAMP_GLYPH: Record<LampState, string> = {
   warn: "◐",
   down: "○",
   idle: "·",
-  // What a `live` lamp shows when it cannot spin: the frames are animated over
-  // this, and reduced motion or a monochrome screen leaves it standing.
-  live: "◐",
+  // Live shares the healthy glyph, but pulses until the request completes.
+  live: "●",
 };
 
 /**

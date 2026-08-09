@@ -8,7 +8,7 @@ import { anthropicErrorBody, anthropicResponse, anthropicStream } from "../egres
 import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.ts";
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
-import { beginLog, finishLog } from "../logging.ts";
+import { beginLog, finishLog, routeLog } from "../logging.ts";
 
 export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
   snapshots?: DispatchDeps["snapshots"];
@@ -182,7 +182,14 @@ async function handle(
       keyId,
     );
 
-    const outcome = await dispatch(chatRequest, deps, request.signal);
+    const outcome = await dispatch(
+      chatRequest,
+      {
+        ...deps,
+        onRoute: (target) => routeLog(deps.store, requestId, target),
+      },
+      request.signal,
+    );
     // Overrides dispatch's internally generated id with the route-level
     // requestId so the client-visible response id and the log row id match.
     const log = () => finishLog(deps.store, { ...outcome.log(), id: requestId }, keyId);

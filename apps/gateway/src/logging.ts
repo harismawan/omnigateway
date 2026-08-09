@@ -1,3 +1,4 @@
+import type { ProviderId } from "@omni/ir";
 import type { RequestLog, Store } from "@omni/store";
 
 function report(what: string, requestId: string, error: unknown): void {
@@ -24,6 +25,19 @@ export async function beginLog(
     await store.usage.begin({ ...log, state: "pending", apiKeyId: keyId });
   } catch (error) {
     report("failed to record request start", log.id, error);
+  }
+}
+
+/** Records the target once routing picks one, without completing the request. */
+export async function routeLog(
+  store: Store,
+  requestId: string,
+  target: { provider: ProviderId; model: string; credentialId: string },
+): Promise<void> {
+  try {
+    await store.usage.route(requestId, target);
+  } catch (error) {
+    report("failed to record request route", requestId, error);
   }
 }
 

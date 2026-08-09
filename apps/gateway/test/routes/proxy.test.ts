@@ -320,6 +320,9 @@ test("a request in flight is in the log before its stream drains", async () => {
   const live = (await store.usage.recent(10))[0];
   expect(live?.state).toBe("pending");
   expect(live?.requestedModel).toBe("fast");
+  expect(live?.resolvedProvider).toBe("anthropic");
+  expect(live?.resolvedModel).toBe("claude-opus-4");
+  expect(live?.credentialId).toBe("c1");
 
   gate.resolve();
   await res.text();

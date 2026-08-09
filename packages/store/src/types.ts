@@ -273,6 +273,11 @@ export interface UsageRepo {
    * not finished has no tokens and no cost to accumulate.
    */
   begin(log: RequestLog): Promise<void>;
+  /** Updates routing fields on a pending row without completing or rolling it up. */
+  route(
+    id: string,
+    target: { provider: ProviderId; model: string; credentialId: string },
+  ): Promise<void>;
   /**
    * Completes a request, writing the `usage_daily` rollup in the same
    * transaction. Upserts, so it serves both a request that began and one that

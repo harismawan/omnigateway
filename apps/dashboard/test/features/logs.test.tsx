@@ -132,9 +132,9 @@ describe("LogsBoard", () => {
             requestedModel: "fast",
             status: 0,
             attempts: 0,
-            resolvedProvider: null,
-            resolvedModel: null,
-            credentialId: null,
+            resolvedProvider: "anthropic",
+            resolvedModel: "claude-opus-4",
+            credentialId: "cred-1",
             inputTokens: 0,
             outputTokens: 0,
             ttftMs: null,
@@ -148,11 +148,13 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     expect(await screen.findByLabelText("in flight")).toBeTruthy();
-    expect(screen.getByText("routing…")).toBeTruthy();
+    expect(screen.getByText("anthropic")).toBeTruthy();
+    expect(screen.getByText("claude-opus-4")).toBeTruthy();
+    expect(screen.getByText("claude-main")).toBeTruthy();
     expect(screen.getByText("live")).toBeTruthy();
     // Every measured column is an em dash rather than a nought nobody counted:
-    // attempts, TTFT, total, tokens, cost, and the account it has not picked.
-    expect(screen.getAllByText("—")).toHaveLength(6);
+    // attempts, TTFT, total, tokens, and cost.
+    expect(screen.getAllByText("—")).toHaveLength(5);
   });
 
   test("a request still in flight is counted as running, not as failed", async () => {

@@ -184,10 +184,8 @@ export function LogsBoard() {
                         filed to keep the column NOT NULL, so printing them
                         would state a nought that nobody counted. */}
                     <Td>
-                      {isPending(log) ? (
-                        <Legend>routing…</Legend>
-                      ) : log.resolvedProvider === null ? (
-                        <Legend>not routed</Legend>
+                      {log.resolvedProvider === null ? (
+                        <Legend>{isPending(log) ? "routing…" : "not routed"}</Legend>
                       ) : (
                         <Row $gap={1}>
                           <ProviderTag provider={log.resolvedProvider} />
