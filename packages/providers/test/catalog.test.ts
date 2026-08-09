@@ -85,6 +85,10 @@ test("catalogPricing reports an unlisted model rather than guessing", () => {
     input: 5,
     output: 25,
     cacheRead: 0.5,
+    // 1.25x and 2x of base input, which is what Anthropic charges to create a
+    // cache entry at each TTL.
+    cacheWrite5m: 6.25,
+    cacheWrite1h: 10,
   });
   expect(catalogPricing("anthropic", "some-model-we-do-not-list")).toBeNull();
   // A model listed under one provider is not priced under another.

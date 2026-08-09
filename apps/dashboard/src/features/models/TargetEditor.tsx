@@ -205,7 +205,9 @@ export function TargetEditor({ target, index, onChange, onRemove, removable }: T
               disabled={
                 target.costInput === listed.costInput &&
                 target.costOutput === listed.costOutput &&
-                target.costCacheRead === listed.costCacheRead
+                target.costCacheRead === listed.costCacheRead &&
+                target.costCacheWrite5m === listed.costCacheWrite5m &&
+                target.costCacheWrite1h === listed.costCacheWrite1h
               }
               onClick={() => onChange({ ...target, ...listed })}
             >
@@ -250,6 +252,32 @@ export function TargetEditor({ target, index, onChange, onRemove, removable }: T
               placeholder="same as input"
               value={target.costCacheRead}
               onChange={(event) => set("costCacheRead", event.target.value)}
+            />
+          </Cell>
+          <Cell>
+            <Legend as="label" htmlFor={`${listId}-write5m`}>
+              Cache write 5m
+            </Legend>
+            <NumberInput
+              id={`${listId}-write5m`}
+              min={0}
+              step={0.01}
+              placeholder="1.25x input"
+              value={target.costCacheWrite5m}
+              onChange={(event) => set("costCacheWrite5m", event.target.value)}
+            />
+          </Cell>
+          <Cell>
+            <Legend as="label" htmlFor={`${listId}-write1h`}>
+              Cache write 1h
+            </Legend>
+            <NumberInput
+              id={`${listId}-write1h`}
+              min={0}
+              step={0.01}
+              placeholder="2x input"
+              value={target.costCacheWrite1h}
+              onChange={(event) => set("costCacheWrite1h", event.target.value)}
             />
           </Cell>
         </Prices>

@@ -287,3 +287,94 @@ test("passes a mid-conversation system turn through in position", () => {
     { role: "system", content: "Write Go." },
   ]);
 });
+
+test("subtracts kimi's cache hits out of the prompt total", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs(
+        {
+          event: "message",
+          data: JSON.stringify({ id: "c1", model: "kimi-k2", choices: [] }),
+        },
+        {
+          event: "message",
+          data: JSON.stringify({
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            // Kimi reports the whole prompt in `prompt_tokens`, with the hits
+            // as a subset. The IR wants the miss remainder.
+            usage: { prompt_tokens: 100, completion_tokens: 5, prompt_cache_hit_tokens: 60 },
+          }),
+        },
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toEqual({
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 40, outputTokens: 5, cacheReadTokens: 60, cacheWriteTokens: 0 },
+  });
+});
+
+test("asks for usage on the stream, which is the only way kimi reports any", () => {
+  const { body } = toChatWire(base, "kimi-k2");
+  // The adapter always streams upstream, and an OpenAI-compatible chat stream
+  // carries no usage object at all unless this is set — no tokens, no cost,
+  // no cache counters.
+  expect(body.stream_options).toEqual({ include_usage: true });
+});
+
+test("reads kimi's cache hits from the openai-compatible field", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs(
+        { event: "message", data: JSON.stringify({ id: "c1", model: "kimi-k2", choices: [] }) },
+        {
+          event: "message",
+          data: JSON.stringify({
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            usage: {
+              prompt_tokens: 100,
+              completion_tokens: 5,
+              prompt_tokens_details: { cached_tokens: 60 },
+            },
+          }),
+        },
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toEqual({
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 40, outputTokens: 5, cacheReadTokens: 60, cacheWriteTokens: 0 },
+  });
+});
+
+test("reads cache creation tokens when the upstream reports them", async () => {
+  const events = await collect(
+    decodeChat(
+      msgs(
+        { event: "message", data: JSON.stringify({ id: "c1", model: "kimi-k2", choices: [] }) },
+        {
+          event: "message",
+          data: JSON.stringify({
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            usage: {
+              prompt_tokens: 100,
+              completion_tokens: 5,
+              prompt_tokens_details: { cached_tokens: 60, cache_creation_tokens: 10 },
+            },
+          }),
+        },
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({
+    usage: { inputTokens: 30, outputTokens: 5, cacheReadTokens: 60, cacheWriteTokens: 10 },
+  });
+});

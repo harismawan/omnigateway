@@ -14,7 +14,7 @@ const TEXT: StreamEvent[] = [
   {
     type: "end",
     stopReason: "endTurn",
-    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 4000, cacheWriteTokens: 120 },
   },
 ];
 
@@ -37,10 +37,22 @@ test("emits the full anthropic sse sequence", async () => {
   expect(f[0]?.data.message.id).toBe("msg_1");
   // message_start goes out before any usage is known, so it reports zero and
   // message_delta carries the real counts.
-  expect(f[0]?.data.message.usage.input_tokens).toBe(0);
+  expect(f[0]?.data.message.usage).toEqual({
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
   expect(f[2]?.data.delta).toEqual({ type: "text_delta", text: "Hi" });
   expect(f[4]?.data.delta.stop_reason).toBe("end_turn");
-  expect(f[4]?.data.usage).toEqual({ input_tokens: 10, output_tokens: 2 });
+  // A client that cannot see these cannot tell a cache hit from a cold prefix,
+  // which is the whole signal caching exists to report.
+  expect(f[4]?.data.usage).toEqual({
+    input_tokens: 10,
+    output_tokens: 2,
+    cache_read_input_tokens: 4000,
+    cache_creation_input_tokens: 120,
+  });
 });
 
 test("renders tool use blocks with input_json_delta", async () => {
@@ -91,7 +103,12 @@ test("builds a non-streaming response body", () => {
   expect(body.role).toBe("assistant");
   expect(body.content).toEqual([{ type: "text", text: "Hi" }]);
   expect(body.stop_reason).toBe("end_turn");
-  expect(body.usage).toEqual({ input_tokens: 10, output_tokens: 2 });
+  expect(body.usage).toEqual({
+    input_tokens: 10,
+    output_tokens: 2,
+    cache_read_input_tokens: 4000,
+    cache_creation_input_tokens: 120,
+  });
 });
 
 test("renders collected tool use with parsed input", () => {

@@ -27,6 +27,11 @@ type AnthropicEvent = {
       input_tokens?: number;
       cache_read_input_tokens?: number;
       cache_creation_input_tokens?: number;
+      /** Per-TTL split of the line above, which it sums to. */
+      cache_creation?: {
+        ephemeral_5m_input_tokens?: number;
+        ephemeral_1h_input_tokens?: number;
+      };
     };
   };
   index?: number;
@@ -59,6 +64,10 @@ export async function* decodeAnthropic(
   let inputTokens = 0;
   let cacheReadTokens = 0;
   let cacheWriteTokens = 0;
+  // Left undefined when the upstream reports no breakdown, so a consumer can
+  // tell "all one TTL" apart from "not told".
+  let cacheWrite5mTokens: number | undefined;
+  let cacheWrite1hTokens: number | undefined;
   let outputTokens = 0;
   let stopReason: StopReason = "endTurn";
   let terminal = false;
@@ -73,6 +82,8 @@ export async function* decodeAnthropic(
         inputTokens = m.usage?.input_tokens ?? 0;
         cacheReadTokens = m.usage?.cache_read_input_tokens ?? 0;
         cacheWriteTokens = m.usage?.cache_creation_input_tokens ?? 0;
+        cacheWrite5mTokens = m.usage?.cache_creation?.ephemeral_5m_input_tokens;
+        cacheWrite1hTokens = m.usage?.cache_creation?.ephemeral_1h_input_tokens;
         yield { type: "start", id: String(m.id ?? ""), model: String(m.model ?? "") };
         break;
       }
@@ -135,7 +146,14 @@ export async function* decodeAnthropic(
         yield {
           type: "end",
           stopReason,
-          usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+          usage: {
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+            ...(cacheWrite5mTokens === undefined ? {} : { cacheWrite5mTokens }),
+            ...(cacheWrite1hTokens === undefined ? {} : { cacheWrite1hTokens }),
+          },
         };
         break;
 

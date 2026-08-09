@@ -72,7 +72,7 @@ export function model(patch: Partial<VirtualModel> = {}): VirtualModel {
         model: "claude-haiku-4-5",
         tier: 1,
         weight: 1,
-        costPerMTok: { input: 1, output: 5, cacheRead: 0.1 },
+        costPerMTok: { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
         capabilities: { tools: true, images: true, reasoning: false },
       },
     ],

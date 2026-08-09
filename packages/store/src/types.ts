@@ -96,12 +96,30 @@ export type QuotaWindow = {
   observedAt: number;
 };
 
+/**
+ * Dollars per million tokens, by token class.
+ *
+ * Everything but `input` and `output` is optional because a target saved
+ * before that class was priced simply has no figure for it. Cache writes are
+ * split by TTL: Anthropic bills a 5m write at 1.25x base input and a 1h write
+ * at 2x, so one write price cannot cover both.
+ */
+export type TargetPricing = {
+  input: number;
+  output: number;
+  // Spelled `| undefined` so a Zod-parsed body, whose optional keys infer that
+  // way, assigns without a cast under `exactOptionalPropertyTypes`.
+  cacheRead?: number | undefined;
+  cacheWrite5m?: number | undefined;
+  cacheWrite1h?: number | undefined;
+};
+
 export type Target = {
   provider: ProviderId;
   model: string;
   tier: number;
   weight: number;
-  costPerMTok: { input: number; output: number; cacheRead?: number };
+  costPerMTok: TargetPricing;
   capabilities: { tools: boolean; images: boolean; reasoning: boolean };
 };
 

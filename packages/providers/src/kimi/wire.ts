@@ -4,6 +4,7 @@ export type ChatBody = {
   model: string;
   messages: unknown[];
   stream: boolean;
+  stream_options?: { include_usage: boolean };
   max_tokens?: number;
   temperature?: number;
   stop?: string[];
@@ -83,7 +84,15 @@ export function toChatWire(
     }
   }
 
-  const body: ChatBody = { model, messages, stream: req.stream };
+  // The adapter always streams upstream, and an OpenAI-compatible chat stream
+  // reports no usage at all without this — which reaches the request log as a
+  // request that cost nothing and cached nothing.
+  const body: ChatBody = {
+    model,
+    messages,
+    stream: req.stream,
+    stream_options: { include_usage: true },
+  };
   if (req.maxTokens !== undefined) body.max_tokens = req.maxTokens;
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.stopSequences !== undefined) body.stop = req.stopSequences;

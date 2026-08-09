@@ -154,3 +154,200 @@ test("rejects a request that is only a system message", () => {
     parseOpenAIRequest({ ...minimal, messages: [{ role: "system", content: "x" }] }),
   ).toThrow(GatewayError);
 });
+
+// Cache breakpoints. This surface has two spellings — on a content part, and
+// on the message itself — because OpenAI-shaped clients send both. Neither
+// reaches an OpenAI upstream, which caches on its own, but a request routed to
+// Anthropic loses every breakpoint if ingress drops them here.
+
+test("keeps a cache breakpoint on a content part", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "stable", cache_control: { type: "ephemeral", ttl: "1h" } },
+          { type: "text", text: "volatile" },
+        ],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "stable", cacheControl: { type: "ephemeral", ttl: "1h" } },
+    { type: "text", text: "volatile" },
+  ]);
+});
+
+test("moves a message-level breakpoint onto the last content block", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "one" },
+          { type: "text", text: "two" },
+        ],
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+  });
+  // Anthropic rejects a marker on the message object, so the only faithful
+  // reading of "cache through here" is the last block of the message.
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "one" },
+    { type: "text", text: "two", cacheControl: { type: "ephemeral" } },
+  ]);
+});
+
+test("lets a part-level breakpoint win over the message-level one", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "one", cache_control: { type: "ephemeral", ttl: "1h" } }],
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "one", cacheControl: { type: "ephemeral", ttl: "1h" } },
+  ]);
+});
+
+test("marks a string message's only block", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [{ role: "user", content: "hi", cache_control: { type: "ephemeral" } }],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "hi", cacheControl: { type: "ephemeral" } },
+  ]);
+});
+
+test("keeps a breakpoint on a hoisted system message", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      { role: "system", content: "be terse", cache_control: { type: "ephemeral", ttl: "1h" } },
+      { role: "user", content: "hi" },
+    ],
+  });
+  expect(req.system).toEqual([
+    { type: "text", text: "be terse", cacheControl: { type: "ephemeral", ttl: "1h" } },
+  ]);
+});
+
+test("applies a system message-level breakpoint to that message's last block only", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "a" },
+          { type: "text", text: "b" },
+        ],
+        cache_control: { type: "ephemeral" },
+      },
+      { role: "developer", content: "c" },
+      { role: "user", content: "hi" },
+    ],
+  });
+  // The marker belongs to the message that carried it, not to whatever block
+  // happens to end up last after later system messages are appended.
+  expect(req.system).toEqual([
+    { type: "text", text: "a" },
+    { type: "text", text: "b", cacheControl: { type: "ephemeral" } },
+    { type: "text", text: "c" },
+  ]);
+});
+
+test("keeps a breakpoint on a tool result message", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        tool_calls: [{ id: "t", type: "function", function: { name: "f", arguments: "{}" } }],
+      },
+      {
+        role: "tool",
+        tool_call_id: "t",
+        content: "ok",
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+  });
+  expect(req.messages[1]?.content[0]).toEqual({
+    type: "toolResult",
+    toolUseId: "t",
+    content: "ok",
+    isError: false,
+    cacheControl: { type: "ephemeral" },
+  });
+});
+
+test("marks a trailing tool call when the message carried the breakpoint", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "calling",
+        tool_calls: [{ id: "t", type: "function", function: { name: "f", arguments: '{"a":1}' } }],
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+  });
+  expect(req.messages[1]?.content).toEqual([
+    { type: "text", text: "calling" },
+    { type: "toolUse", id: "t", name: "f", input: { a: 1 }, cacheControl: { type: "ephemeral" } },
+  ]);
+});
+
+test("keeps a breakpoint on a tool definition, at either level", () => {
+  const outer = parseOpenAIRequest({
+    ...minimal,
+    tools: [
+      {
+        type: "function",
+        function: { name: "f", parameters: { type: "object" } },
+        cache_control: { type: "ephemeral", ttl: "1h" },
+      },
+    ],
+  });
+  expect(outer.tools).toEqual([
+    { name: "f", inputSchema: { type: "object" }, cacheControl: { type: "ephemeral", ttl: "1h" } },
+  ]);
+
+  // Some clients put it inside `function` instead; the outer one wins.
+  const inner = parseOpenAIRequest({
+    ...minimal,
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "f",
+          parameters: { type: "object" },
+          cache_control: { type: "ephemeral" },
+        },
+      },
+    ],
+  });
+  expect(inner.tools).toEqual([
+    { name: "f", inputSchema: { type: "object" }, cacheControl: { type: "ephemeral" } },
+  ]);
+});
+
+test("rejects a cache control shape the provider does not accept", () => {
+  expect(() =>
+    parseOpenAIRequest({
+      ...minimal,
+      messages: [{ role: "user", content: "hi", cache_control: { type: "persistent" } }],
+    }),
+  ).toThrow(GatewayError);
+});

@@ -14,6 +14,7 @@ import {
   createStubUpstream,
   header,
   headerNames,
+  type StubResponse,
   type StubUpstream,
 } from "./upstream.ts";
 
@@ -89,10 +90,119 @@ test("a request travels through the real adapter to the stub upstream and back",
   expect(res.status).toBe(200);
   const body = (await res.json()) as {
     content: { type: string; text: string }[];
-    usage: { input_tokens: number; output_tokens: number };
+    usage: Record<string, number>;
   };
   expect(body.content).toEqual([{ type: "text", text: "Hello" }]);
-  expect(body.usage).toEqual({ input_tokens: 12, output_tokens: 3 });
+  expect(body.usage).toEqual({
+    input_tokens: 12,
+    output_tokens: 3,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
+});
+
+/** The same stream, with the upstream reporting a warm cache. */
+const CACHED_STREAM: StubResponse = {
+  kind: "sse",
+  events: [
+    {
+      event: "message_start",
+      data: {
+        type: "message_start",
+        message: {
+          id: "msg_upstream",
+          model: "claude-opus-4",
+          usage: {
+            input_tokens: 12,
+            output_tokens: 0,
+            cache_read_input_tokens: 4000,
+            cache_creation_input_tokens: 120,
+          },
+        },
+      },
+    },
+    {
+      event: "content_block_start",
+      data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    },
+    {
+      event: "content_block_delta",
+      data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } },
+    },
+    { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+    {
+      event: "message_delta",
+      data: {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 3 },
+      },
+    },
+    { event: "message_stop", data: { type: "message_stop" } },
+  ],
+};
+
+const CACHED_REQUEST = {
+  model: "fast",
+  max_tokens: 100,
+  system: [
+    { type: "text", text: "stable preamble", cache_control: { type: "ephemeral", ttl: "1h" } },
+  ],
+  tools: [{ name: "f", input_schema: { type: "object" }, cache_control: { type: "ephemeral" } }],
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "history", cache_control: { type: "ephemeral" } },
+        { type: "text", text: "question" },
+      ],
+    },
+  ],
+};
+
+test("cache breakpoints reach the upstream body intact, on the blocks that carried them", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(CACHED_STREAM);
+
+  await call(CACHED_REQUEST);
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  const body = sent.body as {
+    system: { text: string; cache_control?: unknown }[];
+    tools: { cache_control?: unknown }[];
+    messages: { content: { text: string; cache_control?: unknown }[] }[];
+  };
+
+  // The blocks the gateway prepends are its own, so they stay unmarked and the
+  // caller's breakpoint stays where the caller put it.
+  const preamble = body.system.find((b) => b.text === "stable preamble");
+  expect(preamble?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  expect(body.system.filter((b) => b.cache_control !== undefined)).toHaveLength(1);
+
+  expect(body.tools[0]?.cache_control).toEqual({ type: "ephemeral" });
+  expect(body.messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral" });
+  expect(body.messages[0]?.content[1]?.cache_control).toBeUndefined();
+});
+
+test("upstream cache counters reach both the client and the request log", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(CACHED_STREAM);
+
+  const res = await call(CACHED_REQUEST);
+  const body = (await res.json()) as { usage: Record<string, number> };
+
+  expect(body.usage).toEqual({
+    input_tokens: 12,
+    output_tokens: 3,
+    cache_read_input_tokens: 4000,
+    cache_creation_input_tokens: 120,
+  });
+
+  const logs = await store.usage.recent(1);
+  expect(logs[0]?.cacheReadTokens).toBe(4000);
+  expect(logs[0]?.cacheWriteTokens).toBe(120);
 });
 
 test("the upstream request carries the claude-cli client identity", async () => {

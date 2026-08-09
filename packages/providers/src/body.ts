@@ -1,6 +1,10 @@
 import type { ProviderId } from "@omni/ir";
 
-export type SystemBlock = { type: "text"; text: string };
+export type SystemBlock = {
+  type: "text";
+  text: string;
+  cache_control?: { type: "ephemeral"; ttl?: "5m" | "1h" };
+};
 
 /** Top-level JSON key order, matching each CLI's own serializer. */
 export const BODY_ORDER: Readonly<Record<ProviderId, readonly string[]>> = {
@@ -132,7 +136,16 @@ export function applyAnthropicSystem(system: readonly SystemBlock[]): SystemBloc
 
     let rewritten = text;
     for (const [from, to] of REWRITES) rewritten = rewritten.replaceAll(from, to);
-    if (rewritten.trim().length > 0) kept.push({ type: "text", text: rewritten });
+    // A caller's cache breakpoint rides on its block. Rewriting the text
+    // changes what is cached, but dropping the marker would cache nothing at
+    // all, which is the worse of the two.
+    if (rewritten.trim().length > 0) {
+      kept.push({
+        type: "text",
+        text: rewritten,
+        ...(block.cache_control === undefined ? {} : { cache_control: block.cache_control }),
+      });
+    }
   }
 
   return [{ type: "text", text: billingBlock() }, { type: "text", text: AGENT_PREAMBLE }, ...kept];

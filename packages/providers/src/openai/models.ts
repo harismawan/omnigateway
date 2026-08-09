@@ -17,22 +17,22 @@ export const OPENAI_MODELS: ProviderModelCatalogEntry = {
     {
       id: "gpt-5.6",
       label: "GPT-5.6 — routes to Sol",
-      pricing: { input: 5, output: 30, cacheRead: 0.5 },
+      pricing: { input: 5, output: 30, cacheRead: 0.5, cacheWrite5m: 0, cacheWrite1h: 0 },
     },
     {
       id: "gpt-5.6-sol",
       label: "GPT-5.6 Sol — deepest reasoning",
-      pricing: { input: 5, output: 30, cacheRead: 0.5 },
+      pricing: { input: 5, output: 30, cacheRead: 0.5, cacheWrite5m: 0, cacheWrite1h: 0 },
     },
     {
       id: "gpt-5.6-terra",
       label: "GPT-5.6 Terra — balanced",
-      pricing: { input: 2, output: 12, cacheRead: 0.2 },
+      pricing: { input: 2, output: 12, cacheRead: 0.2, cacheWrite5m: 0, cacheWrite1h: 0 },
     },
     {
       id: "gpt-5.6-luna",
       label: "GPT-5.6 Luna — fastest",
-      pricing: { input: 0.2, output: 1.2, cacheRead: 0.02 },
+      pricing: { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite5m: 0, cacheWrite1h: 0 },
     },
   ],
 };

@@ -42,10 +42,11 @@ export async function* anthropicStream(
     switch (event.type) {
       case "start":
         model = event.model;
-        // Zero input tokens, always. The IR carries usage on `end`, and this
-        // frame goes out before the upstream has reported any. The real count
-        // arrives in `message_delta` below, which is where a client that cares
-        // about totals reads them anyway.
+        // Zero tokens, always. The IR carries usage on `end`, and this frame
+        // goes out before the upstream has reported any. The real counts arrive
+        // in `message_delta` below, which is where a client that cares about
+        // totals reads them anyway — the cache fields are here only so the
+        // usage object has one shape throughout the stream.
         yield frame("message_start", {
           type: "message_start",
           message: {
@@ -56,7 +57,12 @@ export async function* anthropicStream(
             content: [],
             stop_reason: null,
             stop_sequence: null,
-            usage: { input_tokens: 0, output_tokens: 0 },
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
           },
         });
         break;
@@ -103,9 +109,15 @@ export async function* anthropicStream(
         yield frame("message_delta", {
           type: "message_delta",
           delta: { stop_reason: STOP_REASON[event.stopReason], stop_sequence: null },
+          // `input_tokens` is the uncached remainder, not the whole prompt:
+          // that is Anthropic's own definition, and the decoder carries the
+          // upstream number through unchanged. Recomputing a total here would
+          // report a different quantity under the same name.
           usage: {
             input_tokens: event.usage.inputTokens,
             output_tokens: event.usage.outputTokens,
+            cache_read_input_tokens: event.usage.cacheReadTokens,
+            cache_creation_input_tokens: event.usage.cacheWriteTokens,
           },
         });
         yield frame("message_stop", { type: "message_stop" });
@@ -144,6 +156,8 @@ export function anthropicResponse(collected: CollectedResponse, requestId: strin
     usage: {
       input_tokens: collected.usage.inputTokens,
       output_tokens: collected.usage.outputTokens,
+      cache_read_input_tokens: collected.usage.cacheReadTokens,
+      cache_creation_input_tokens: collected.usage.cacheWriteTokens,
     },
   };
 }

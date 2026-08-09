@@ -16,22 +16,22 @@ export const KIMI_MODELS: ProviderModelCatalogEntry = {
     {
       id: "k3-256k",
       label: "Kimi K3 — 256K",
-      pricing: { input: 3, output: 15, cacheRead: 0.3 },
+      pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 0, cacheWrite1h: 0 },
     },
     {
       id: "k3",
       label: "Kimi K3 — up to 1M",
-      pricing: { input: 3, output: 15, cacheRead: 0.3 },
+      pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 0, cacheWrite1h: 0 },
     },
     {
       id: "kimi-for-coding",
       label: "Kimi K2.7 Code",
-      pricing: { input: 0.95, output: 4, cacheRead: 0.19 },
+      pricing: { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite5m: 0, cacheWrite1h: 0 },
     },
     {
       id: "kimi-for-coding-highspeed",
       label: "Kimi K2.7 Code — High Speed",
-      pricing: { input: 0.95, output: 8, cacheRead: 0.19 },
+      pricing: { input: 0.95, output: 8, cacheRead: 0.19, cacheWrite5m: 0, cacheWrite1h: 0 },
     },
   ],
 };

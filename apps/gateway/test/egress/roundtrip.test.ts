@@ -92,7 +92,12 @@ test("tool use survives the round trip through openai egress", async () => {
 test("a non-streaming anthropic body carries the same content as the stream", () => {
   const body = anthropicResponse(collect(RESPONSE), "msg_1") as Record<string, unknown>;
   expect(body.content).toEqual([{ type: "text", text: "Hello world" }]);
-  expect(body.usage).toEqual({ input_tokens: 10, output_tokens: 2 });
+  expect(body.usage).toEqual({
+    input_tokens: 10,
+    output_tokens: 2,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
 });
 
 test("a non-streaming openai body carries the same content as the stream", () => {
