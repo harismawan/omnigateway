@@ -68,6 +68,7 @@ export function fakeService(input: {
   healthy?: boolean;
   alivePids?: Set<number>;
   pid?: number;
+  logFile?: string;
 }): FakeService {
   const commands: string[][] = [];
   const spawned: Array<Parameters<Spawner>[0]> = [];
@@ -83,6 +84,7 @@ export function fakeService(input: {
     // Points inside the temporary root: a test must never see, or write, the
     // operator's real unit.
     unitPath: input.unitPath ?? join(input.root, "no-unit", "omnigateway.service"),
+    ...(input.logFile === undefined ? {} : { logFile: input.logFile }),
     run: async (argv) => {
       commands.push([...argv]);
       return input.runResults?.[argv.join(" ")] ?? { code: 0, stdout: "", stderr: "" };

@@ -80,6 +80,20 @@ export function logFile(stateDir: string): string {
   return join(stateDir, "gateway.log");
 }
 
+/**
+ * Where this installation's output goes when the CLI is the supervisor.
+ *
+ * One answer for three callers — the redirect `start` opens, the path `status`
+ * reports, and the file `consoleSource` reads back. Splitting them is how
+ * `omni start` ends up writing one file while `omni console` reads another:
+ * the operator's `OMNI_LOG_FILE` is the gateway's own answer, so it has to be
+ * this one too, and the state directory is only the fallback.
+ */
+export function supervisedLogFile(deps: Pick<ServiceDeps, "stateDir" | "logFile">): string {
+  const configured = deps.logFile?.trim();
+  return configured !== undefined && configured.length > 0 ? configured : logFile(deps.stateDir);
+}
+
 /** The default state directory, honouring XDG when the operator has set it. */
 export function defaultStateDir(env: Record<string, string | undefined>): string {
   const xdg = env.XDG_STATE_HOME;
@@ -171,7 +185,7 @@ export async function status(deps: ServiceDeps): Promise<ServiceStatus> {
     pid,
     state: null,
     unitPath: null,
-    logFile: logFile(deps.stateDir),
+    logFile: supervisedLogFile(deps),
   };
 }
 
@@ -216,7 +230,11 @@ export async function start(
   }
 
   mkdirSync(deps.stateDir, { recursive: true });
-  const file = logFile(deps.stateDir);
+  const file = supervisedLogFile(deps);
+  // An operator-named path can be anywhere; the state directory exists by now
+  // but `/var/log/omni` may not, and an unopenable log must not be the reason
+  // the gateway does not start.
+  mkdirSync(dirname(file), { recursive: true });
   const pid = deps.spawn({
     argv: input.argv,
     cwd: deps.root,
@@ -337,23 +355,24 @@ export async function uninstall(deps: ServiceDeps): Promise<UninstallResult> {
  * and infers the rest.
  */
 export function consoleSource(deps: ServiceDeps): { source: ConsoleSource; deps: ConsoleDeps } {
-  // The operator's own answer, when there is one. `OMNI_LOG_FILE` is what the
-  // gateway reads, so the CLI has to read the same file or the two surfaces
-  // disagree about what an operator is looking at.
+  // The operator's own answer outranks the journal, because it outranks it for
+  // the gateway too: `resolveConsoleSource` reads `OMNI_LOG_FILE` first, and a
+  // CLI that ordered these differently would read a different log than the
+  // Console screen for the same installation.
   const configured = deps.logFile?.trim();
-  const supervised = logFile(deps.stateDir);
 
-  // A path is claimed only once it exists. The state directory is where *this*
-  // supervisor would send output, but a gateway started by hand never wrote
-  // there, and naming an empty path would report a quiet log where the honest
-  // answer is that nothing captured anything.
+  // A path is claimed only once it exists. A gateway started by hand, or a unit
+  // whose output goes to the journal, wrote nothing there, and naming an empty
+  // path reports a quiet log where the honest answer is the journal or nothing.
   const chosen =
-    configured !== undefined && configured.length > 0
+    configured !== undefined && configured.length > 0 && fileExists(configured)
       ? configured
       : unitInstalled(deps)
         ? undefined
-        : fileExists(supervised)
-          ? supervised
+        : // What `start` redirects to when this CLI is the supervisor, which is
+          // the same path — one function answers that for both.
+          fileExists(supervisedLogFile(deps))
+          ? supervisedLogFile(deps)
           : undefined;
 
   return {

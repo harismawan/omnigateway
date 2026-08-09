@@ -274,3 +274,52 @@ test("service logs read the journal when a unit is installed", async () => {
     "--output=cat",
   ]);
 });
+
+test("start redirects to the operator's own log file, and reads back the same one", async () => {
+  // The bug this pins: `start` hardcoded the state directory while
+  // `consoleSource` preferred OMNI_LOG_FILE, so `omni start` wrote one file and
+  // `omni console` read another — an empty screen on a running gateway.
+  const root = makeRoot();
+  const configured = join(root, "custom", "omni.log");
+  const service = fakeService({ root, logFile: configured });
+
+  await start(service.deps, { argv: ["bun", "x.ts"], env: {}, baseUrl: "http://x" });
+
+  expect(service.spawned[0]?.logFile).toBe(configured);
+  expect(service.spawned[0]?.env).toMatchObject({ OMNI_LOG_FILE: configured });
+  // The redirect's directory is created, since an operator path need not exist.
+  expect(existsSync(join(root, "custom"))).toBe(true);
+
+  writeFileSync(configured, `${LOG_LINES}\n`);
+  expect(await serviceLogs(service.deps, 10)).toBe(LOG_LINES);
+  // And nothing falls back to the state directory it never wrote to.
+  expect(existsSync(logFile(service.deps.stateDir))).toBe(false);
+});
+
+test("status reports the log file it would actually write", async () => {
+  const root = makeRoot();
+  const configured = join(root, "custom", "omni.log");
+  const service = fakeService({ root, logFile: configured, pid: 5, alivePids: new Set([5]) });
+  writeFileSync(pidFile(service.deps.stateDir), "5\n");
+
+  expect(await status(service.deps)).toMatchObject({ logFile: configured });
+});
+
+test("an OMNI_LOG_FILE that was never written to does not mask the journal", async () => {
+  // Setting the variable does not create the file. Claiming it anyway would
+  // report an empty log for a unit whose output is in the journal.
+  const root = makeRoot();
+  const unitPath = join(root, "systemd", "omnigateway.service");
+  mkdirSync(join(root, "systemd"), { recursive: true });
+  writeFileSync(unitPath, "[Unit]\n");
+
+  const journal = "journalctl --user -u omnigateway.service -n 5 --no-pager --output=cat";
+  const service = fakeService({
+    root,
+    unitPath,
+    logFile: join(root, "never-written.log"),
+    runResults: { [journal]: { code: 0, stdout: LOG_LINES, stderr: "" } },
+  });
+
+  expect(await serviceLogs(service.deps, 5)).toBe(LOG_LINES);
+});

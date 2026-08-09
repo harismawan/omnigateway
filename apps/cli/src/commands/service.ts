@@ -7,10 +7,10 @@ import { gatewayEntrypoint } from "../runtime.ts";
 import {
   consoleSource,
   install,
-  logFile,
   status as serviceStatus,
   start as startService,
   stop as stopService,
+  supervisedLogFile,
   uninstall,
   unitInstalled,
 } from "../service.ts";
@@ -59,7 +59,7 @@ export const start: Command = {
         const where =
           result.supervisor === "systemd"
             ? "journalctl -u omnigateway.service"
-            : logFile(deps.stateDir);
+            : supervisedLogFile(deps);
         return `${state(ctx, false, "started but /health never answered")} (${how}); see ${where}`;
       }
       return `${state(ctx, true, "running")} (${how}) at ${baseUrl}`;
