@@ -17,10 +17,17 @@ import {
   removeModel,
   revokeKey,
 } from "@omni/control";
-import { GatewayError, HTTP_STATUS } from "@omni/ir";
+import { GatewayError } from "@omni/ir";
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
-import { isRecord } from "../ingress/schemas.ts";
+import {
+  apiErrorHandler,
+  readCookie,
+  readJson,
+  readJsonRecord,
+  requireAdmin,
+  sessionCookie,
+} from "./http.ts";
 
 export type AdminDeps = {
   store: Store;
@@ -28,38 +35,6 @@ export type AdminDeps = {
   now: () => number;
   sessionTtlMs: number;
 };
-
-function sessionCookie(request: Request, token: string, maxAge: number): string {
-  const secure = new URL(request.url).protocol === "https:" ? ["Secure"] : [];
-  return [
-    `${ADMIN_COOKIE}=${token}`,
-    "Path=/",
-    "HttpOnly",
-    // Strict, because no legitimate cross-site request should carry this.
-    "SameSite=Strict",
-    ...secure,
-    `Max-Age=${maxAge}`,
-  ].join("; ");
-}
-
-function readCookie(request: Request, name: string): string | null {
-  const header = request.headers.get("cookie");
-  if (header === null) return null;
-  for (const part of header.split(";")) {
-    const [key, ...rest] = part.trim().split("=");
-    if (key === name) return rest.join("=");
-  }
-  return null;
-}
-
-async function jsonRecord(request: Request): Promise<Record<string, unknown> | null> {
-  try {
-    const body: unknown = await request.json();
-    return isRecord(body) ? body : null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * The HTTP half of the control surface.
@@ -70,21 +45,8 @@ async function jsonRecord(request: Request): Promise<Record<string, unknown> | n
  * package, so the CLI reaches them without going through a socket.
  */
 export function adminRoutes(deps: AdminDeps) {
-  const app = new Elysia().onError(({ error, set }) => {
-    const gatewayError =
-      error instanceof GatewayError ? error : new GatewayError("INTERNAL", "internal error");
-    set.status = HTTP_STATUS[gatewayError.code];
-    return { error: { code: gatewayError.code, message: gatewayError.message } };
-  });
-
-  async function requireAdmin(request: Request): Promise<void> {
-    const token = readCookie(request, ADMIN_COOKIE);
-    if (token === null || !(await deps.admin.verify(token))) {
-      throw new GatewayError("AUTH", "admin session required");
-    }
-  }
-
-  return app
+  return new Elysia()
+    .onError(apiErrorHandler)
     .get("/api/status", async ({ request }) => {
       const token = readCookie(request, ADMIN_COOKIE);
       return {
@@ -99,7 +61,7 @@ export function adminRoutes(deps: AdminDeps) {
         return { error: { code: "CONFLICT", message: "an admin password is already configured" } };
       }
 
-      const body = await jsonRecord(request);
+      const body = await readJsonRecord(request);
       if (typeof body?.password !== "string") {
         throw new GatewayError("BAD_REQUEST", "password is required");
       }
@@ -129,7 +91,7 @@ export function adminRoutes(deps: AdminDeps) {
     })
 
     .post("/api/login", async ({ request, set }) => {
-      const body = await jsonRecord(request);
+      const body = await readJsonRecord(request);
       const token =
         typeof body?.password === "string" ? await deps.admin.login(body.password) : null;
       if (token === null) throw new GatewayError("AUTH", "invalid password");
@@ -150,80 +112,80 @@ export function adminRoutes(deps: AdminDeps) {
     })
 
     .get("/api/credentials", async ({ request }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       return { credentials: await listCredentials(deps.store) };
     })
 
     .get("/api/credentials/health", async ({ request }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       return credentialHealth(deps.store);
     })
 
     .patch("/api/credentials/:id", async ({ request, params }) => {
-      await requireAdmin(request);
-      await patchCredential(deps, params.id, await request.json());
+      await requireAdmin(request, deps.admin);
+      await patchCredential(deps, params.id, await readJson(request));
       return { ok: true };
     })
 
     .delete("/api/credentials/:id", async ({ request, params }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       await removeCredential(deps.store, params.id);
       return { ok: true };
     })
 
     .get("/api/models", async ({ request }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       return { models: await listModels(deps.store) };
     })
 
     .put("/api/models/:id", async ({ request, params }) => {
-      await requireAdmin(request);
-      await putModel(deps.store, params.id, await request.json());
+      await requireAdmin(request, deps.admin);
+      await putModel(deps.store, params.id, await readJson(request));
       return { ok: true };
     })
 
     .delete("/api/models/:id", async ({ request, params }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       await removeModel(deps.store, params.id);
       return { ok: true };
     })
 
     .get("/api/keys", async ({ request }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       return { keys: await listKeys(deps.store) };
     })
 
     .post("/api/keys", async ({ request }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       // The only response that ever contains a key. It exists in plaintext
       // nowhere else, so an operator who loses it must issue a new one.
-      return createKey(deps.store, await request.json());
+      return createKey(deps.store, await readJson(request));
     })
 
     .delete("/api/keys/:id", async ({ request, params }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       await revokeKey(deps.store, params.id);
       return { ok: true };
     })
 
     .get("/api/settings", async ({ request }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       return { settings: await getSettings(deps.store) };
     })
 
     .put("/api/settings", async ({ request }) => {
-      await requireAdmin(request);
-      await putSettings(deps.store, await request.json());
+      await requireAdmin(request, deps.admin);
+      await putSettings(deps.store, await readJson(request));
       return { ok: true };
     })
 
     .post("/api/models/:id/dry-run", async ({ request, params }) => {
-      await requireAdmin(request);
-      return dryRun(deps, params.id, await request.json());
+      await requireAdmin(request, deps.admin);
+      return dryRun(deps, params.id, await readJson(request));
     })
 
     .get("/api/usage", async ({ request, query }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       return {
         rows: await queryUsage(deps, {
           grain: query.grain,
@@ -236,7 +198,7 @@ export function adminRoutes(deps: AdminDeps) {
     })
 
     .get("/api/logs", async ({ request, query }) => {
-      await requireAdmin(request);
+      await requireAdmin(request, deps.admin);
       return { logs: await recentLogs(deps.store, query.limit) };
     });
 }

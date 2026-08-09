@@ -20,7 +20,7 @@ No production files were modified during the audit.
 
 ## Confirmed defects
 
-### 1. Premature provider EOF becomes successful completion
+### 1. Premature provider EOF becomes successful completion ✅ Done
 
 **Severity:** High  
 **Confidence:** 10/10
@@ -71,7 +71,7 @@ successful health transition instead of triggering pre-commit failover or a post
 - Dispatch adapter yielding partial events then returning: failed health and status 502.
 - Both client surfaces, streaming and non-streaming, before and after commit.
 
-### 2. Concurrent health updates lose breaker and rate-limit state
+### 2. Concurrent health updates lose breaker and rate-limit state ⛔️ Deffered
 
 **Severity:** High  
 **Confidence:** 10/10
@@ -134,7 +134,7 @@ Implementation requirements:
 3. Complete a threshold-one failure before an older success; expect breaker to remain open.
 4. If multi-process SQLite behavior matters later, repeat against two stores connected to one file.
 
-### 3. Admin session cookie loses `Secure` behind TLS termination
+### 3. Admin session cookie loses `Secure` behind TLS termination ⛔️ Deffered
 
 **Severity:** Medium  
 **Confidence:** 9/10
@@ -349,7 +349,7 @@ shared refresher's per-credential coalescing and scheduler no-overlap guard.
 
 ## Maintainability and test leverage
 
-### 1. Add pull-request and default-branch CI
+### 1. Add pull-request and default-branch CI ✅ Done
 
 Current release workflow triggers only for `v*` tags. It runs the correct root tests, dashboard
 tests, typecheck, and lint, but only immediately before publishing.
@@ -406,7 +406,18 @@ First add tests covering implicit transitions. Then extract typed units for dead
 candidate attempt, stream outcome reduction, and terminal finalization. Keep `dispatch()` as a short
 orchestration layer.
 
-### 4. Unify admin HTTP session and error utilities
+### 4. Unify admin HTTP session and error utilities ✅ Done
+
+**Completed:** 2026-08-09
+
+Admin and connect routes now share gateway-local cookie, admin authorization, JSON parsing,
+and canonical control-error helpers. Malformed JSON consistently returns `400 BAD_REQUEST`,
+while unknown exceptions return a redacted `500 INTERNAL` response.
+
+Verification completed with focused review tests (123 passed), `bun test` (711 passed), dashboard
+tests (192 passed), `bun run typecheck`, and `bun run lint`. Dashboard tests retain existing
+chart-size and React `act(...)` warnings; lint reports only the existing Biome configuration
+deprecation notice.
 
 Admin and connect routes duplicate cookie parsing and admin authorization while using different
 error-rendering paths.
@@ -421,7 +432,18 @@ error-rendering paths.
 Extract gateway-local cookie, authorization, JSON parsing, and canonical control-error helpers.
 Apply one error contract across `/api/*`.
 
-### 5. Create one request-log factory and ID owner
+### 5. Create one request-log factory and ID owner ✅ Done
+
+**Completed:** 2026-08-09
+
+Gateway logging now owns lifecycle-specific request-log factories. Proxy routes generate each
+request ID once and pass it into dispatch, so client responses, pending rows, route updates,
+final logs, and exception logs share one identity without an ID overwrite.
+
+Verification completed with focused review tests (123 passed), `bun test` (711 passed), dashboard
+tests (192 passed), `bun run typecheck`, and `bun run lint`. Dashboard tests retain existing
+chart-size and React `act(...)` warnings; lint reports only the existing Biome configuration
+deprecation notice.
 
 Normal dispatch and proxy exception paths duplicate the request-log object. Proxy also overwrites an
 ID created by dispatch.
