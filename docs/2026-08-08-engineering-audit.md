@@ -349,7 +349,7 @@ shared refresher's per-credential coalescing and scheduler no-overlap guard.
 
 ## Maintainability and test leverage
 
-### 1. Add pull-request and default-branch CI
+### 1. Add pull-request and default-branch CI ✅ Done
 
 Current release workflow triggers only for `v*` tags. It runs the correct root tests, dashboard
 tests, typecheck, and lint, but only immediately before publishing.
