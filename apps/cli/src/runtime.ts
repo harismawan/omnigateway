@@ -109,11 +109,13 @@ export function createServiceDeps(input: {
   scope: Scope;
   now: () => number;
 }): ServiceDeps {
+  const logFile = input.env.OMNI_LOG_FILE?.trim();
   return {
     root: input.root,
     stateDir: defaultStateDir(input.env),
     scope: input.scope,
     unitPath: unitPath(input.scope),
+    ...(logFile === undefined || logFile.length === 0 ? {} : { logFile }),
     run: runCommand,
     spawn: spawnDetached,
     probe: probeHealth,

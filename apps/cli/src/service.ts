@@ -1,6 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import {
+  type ConsoleDeps,
+  type ConsoleSource,
+  fileExists,
+  readConsole,
+  resolveConsoleSource,
+  tailFile,
+} from "@omni/control";
 
 export const UNIT_NAME = "omnigateway.service";
 
@@ -25,6 +33,13 @@ export type ServiceDeps = {
   scope: Scope;
   /** Where this scope's unit file lives. Injected so a test never writes to a real one. */
   unitPath: string;
+  /**
+   * `OMNI_LOG_FILE` for this installation, when the operator set one.
+   *
+   * The gateway reads it to find its own captured output; the CLI has to read
+   * the same file or `omni console` and the Console screen show different logs.
+   */
+  logFile?: string | undefined;
   run: CommandRunner;
   spawn: Spawner;
   /** True when the gateway answers `/health`. */
@@ -63,6 +78,20 @@ export function pidFile(stateDir: string): string {
 
 export function logFile(stateDir: string): string {
   return join(stateDir, "gateway.log");
+}
+
+/**
+ * Where this installation's output goes when the CLI is the supervisor.
+ *
+ * One answer for three callers — the redirect `start` opens, the path `status`
+ * reports, and the file `consoleSource` reads back. Splitting them is how
+ * `omni start` ends up writing one file while `omni console` reads another:
+ * the operator's `OMNI_LOG_FILE` is the gateway's own answer, so it has to be
+ * this one too, and the state directory is only the fallback.
+ */
+export function supervisedLogFile(deps: Pick<ServiceDeps, "stateDir" | "logFile">): string {
+  const configured = deps.logFile?.trim();
+  return configured !== undefined && configured.length > 0 ? configured : logFile(deps.stateDir);
 }
 
 /** The default state directory, honouring XDG when the operator has set it. */
@@ -156,7 +185,7 @@ export async function status(deps: ServiceDeps): Promise<ServiceStatus> {
     pid,
     state: null,
     unitPath: null,
-    logFile: logFile(deps.stateDir),
+    logFile: supervisedLogFile(deps),
   };
 }
 
@@ -201,11 +230,20 @@ export async function start(
   }
 
   mkdirSync(deps.stateDir, { recursive: true });
+  const file = supervisedLogFile(deps);
+  // An operator-named path can be anywhere; the state directory exists by now
+  // but `/var/log/omni` may not, and an unopenable log must not be the reason
+  // the gateway does not start.
+  mkdirSync(dirname(file), { recursive: true });
   const pid = deps.spawn({
     argv: input.argv,
     cwd: deps.root,
-    env: input.env,
-    logFile: logFile(deps.stateDir),
+    // The gateway is told where its own stdout is going, because a process
+    // cannot read back what it wrote and the console view has to read it from
+    // somewhere. systemd answers this with JOURNAL_STREAM; under this
+    // supervisor there is nobody to answer it but us.
+    env: { ...input.env, OMNI_LOG_FILE: file },
+    logFile: file,
   });
   writeFileSync(pidFile(deps.stateDir), `${pid}\n`);
 
@@ -307,23 +345,52 @@ export async function uninstall(deps: ServiceDeps): Promise<UninstallResult> {
   return { path, removed: true };
 }
 
+/**
+ * Where this installation's gateway output goes, and how to read it.
+ *
+ * The journal when a unit is installed, this state directory's log file
+ * otherwise — the same two answers `resolveConsoleSource` gives the gateway,
+ * reached differently. The gateway asks whether systemd is capturing *it*; the
+ * CLI is a separate process and cannot, so it asks whether a unit is installed
+ * and infers the rest.
+ */
+export function consoleSource(deps: ServiceDeps): { source: ConsoleSource; deps: ConsoleDeps } {
+  // The operator's own answer outranks the journal, because it outranks it for
+  // the gateway too: `resolveConsoleSource` reads `OMNI_LOG_FILE` first, and a
+  // CLI that ordered these differently would read a different log than the
+  // Console screen for the same installation.
+  const configured = deps.logFile?.trim();
+
+  // A path is claimed only once it exists. A gateway started by hand, or a unit
+  // whose output goes to the journal, wrote nothing there, and naming an empty
+  // path reports a quiet log where the honest answer is the journal or nothing.
+  const chosen =
+    configured !== undefined && configured.length > 0 && fileExists(configured)
+      ? configured
+      : unitInstalled(deps)
+        ? undefined
+        : // What `start` redirects to when this CLI is the supervisor, which is
+          // the same path — one function answers that for both.
+          fileExists(supervisedLogFile(deps))
+          ? supervisedLogFile(deps)
+          : undefined;
+
+  return {
+    source: resolveConsoleSource({
+      ...(chosen === undefined ? {} : { logFile: chosen }),
+      unitInstalled: unitInstalled(deps),
+      scope: deps.scope,
+    }),
+    deps: {
+      readFile: (path, lines) => tailFile(path, lines),
+      run: deps.run,
+    },
+  };
+}
+
 /** Reads the process's own output: the journal under systemd, the log file otherwise. */
 export async function serviceLogs(deps: ServiceDeps, lines: number): Promise<string> {
-  if (unitInstalled(deps)) {
-    const args = deps.scope === "system" ? [] : ["--user"];
-    const result = await deps.run([
-      "journalctl",
-      ...args,
-      "-u",
-      UNIT_NAME,
-      "-n",
-      String(lines),
-      "--no-pager",
-    ]);
-    return result.stdout.trimEnd();
-  }
-
-  const file = logFile(deps.stateDir);
-  if (!existsSync(file)) return "";
-  return readFileSync(file, "utf8").split("\n").slice(-lines).join("\n").trimEnd();
+  const { source, deps: readDeps } = consoleSource(deps);
+  const read = await readConsole(readDeps, source, { lines });
+  return read.lines.map((line) => line.raw).join("\n");
 }

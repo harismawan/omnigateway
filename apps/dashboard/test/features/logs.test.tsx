@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LogsBoard } from "../../src/features/logs/LogsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { credential, log, NOW } from "../helpers/fixtures.ts";
+import { apiKey, credential, log, NOW } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 const logs = [
@@ -28,6 +28,7 @@ function stubLogs(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
     "GET /api/logs": () => ({ logs }),
     "GET /api/credentials": () => ({ credentials: [credential()] }),
+    "GET /api/keys": () => ({ keys: [apiKey()] }),
     ...overrides,
   });
 }
@@ -106,6 +107,74 @@ describe("LogsBoard", () => {
 
     await waitFor(() => expect(screen.queryByText("fast")).toBeNull());
     expect(screen.getByText("deep")).toBeTruthy();
+  });
+
+  test("resolves an api key id to the key's label", async () => {
+    stubLogs();
+    renderWithProviders(<LogsBoard />);
+
+    // Both rows were made by the same key, so the label appears once per row.
+    await waitFor(() => expect(screen.getAllByText("laptop")).toHaveLength(2));
+  });
+
+  test("falls back to the id for a key that has since been deleted", async () => {
+    createFetchStub({
+      "GET /api/logs": () => ({ logs: [log({ id: "req-1", apiKeyId: "key-gone" })] }),
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+      "GET /api/keys": () => ({ keys: [] }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    // A revoked key keeps its requests in the log; the row still has to say
+    // which key, and the full id is the title.
+    const cell = await screen.findByTitle("key-gone");
+    expect(cell.textContent).toBe("key-gone");
+  });
+
+  test("shows an em dash for a request that carried no key", async () => {
+    createFetchStub({
+      "GET /api/logs": () => ({ logs: [log({ id: "req-1", apiKeyId: null })] }),
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("claude-main");
+    expect(screen.queryByText("laptop")).toBeNull();
+  });
+
+  test("the search box matches a key label", async () => {
+    const user = userEvent.setup();
+    createFetchStub({
+      "GET /api/logs": () => ({
+        logs: [
+          log({ id: "req-laptop", requestedModel: "fast", apiKeyId: "key-1" }),
+          log({ id: "req-ci", requestedModel: "deep", apiKeyId: "key-2" }),
+        ],
+      }),
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+      "GET /api/keys": () => ({
+        keys: [apiKey(), apiKey({ id: "key-2", label: "ci-runner" })],
+      }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.type(await screen.findByLabelText("Filter requests"), "ci-runner");
+
+    await waitFor(() => expect(screen.queryByText("fast")).toBeNull());
+    expect(screen.getByText("deep")).toBeTruthy();
+  });
+
+  test("the detail shows the key's label rather than its id", async () => {
+    const user = userEvent.setup();
+    stubLogs();
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("deep"));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(within(dialog).getByText("laptop")).toBeTruthy();
+    expect(within(dialog).queryByText("key-1")).toBeNull();
   });
 
   test("a filter that matches nothing says how to recover", async () => {

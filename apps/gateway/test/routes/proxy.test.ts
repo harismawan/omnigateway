@@ -75,9 +75,15 @@ test("proxies a non-streaming anthropic request", async () => {
   expect(body.id).toBe("req_1");
 });
 
-test("logs exactly one terminal access line for a non-streaming request", async () => {
+/** The lines that used to restate a `request_logs` row on stdout. */
+const TERMINAL = ["request done", "request failed", "request cancelled"];
+
+const terminalLines = (logger: ReturnType<typeof captureLogger>) =>
+  logger.records.filter((record) => TERMINAL.includes(record.msg));
+
+test("records a finished request as a row, and prints nothing", async () => {
   const logger = captureLogger();
-  const { call } = await harness(EVENTS, { logger });
+  const { call, store } = await harness(EVENTS, { logger });
   const res = await call("/v1/messages", {
     model: "fast",
     max_tokens: 100,
@@ -85,29 +91,25 @@ test("logs exactly one terminal access line for a non-streaming request", async 
   });
   expect(res.status).toBe(200);
 
-  const terminal = logger.records.filter((record) =>
-    ["request done", "request failed", "request cancelled"].includes(record.msg),
-  );
-  expect(terminal).toEqual([
+  expect(terminalLines(logger)).toEqual([]);
+
+  const [row] = await store.usage.recent(10);
+  expect(row).toEqual(
     expect.objectContaining({
-      level: "info",
-      msg: "request done",
-      fields: expect.objectContaining({
-        requestId: "req_1",
-        surface: "anthropic",
-        status: 200,
-        provider: "anthropic",
-        model: "claude-opus-4",
-        inputTokens: 10,
-        outputTokens: 2,
-      }),
+      id: "req_1",
+      state: "done",
+      status: 200,
+      resolvedProvider: "anthropic",
+      resolvedModel: "claude-opus-4",
+      inputTokens: 10,
+      outputTokens: 2,
     }),
-  ]);
+  );
 });
 
-test("logs exactly one terminal access line after a streaming response drains", async () => {
+test("records a streaming request as one row once it drains, and prints nothing", async () => {
   const logger = captureLogger();
-  const { call } = await harness(EVENTS, { logger });
+  const { call, store } = await harness(EVENTS, { logger });
   const res = await call("/v1/messages", {
     model: "fast",
     max_tokens: 100,
@@ -116,7 +118,11 @@ test("logs exactly one terminal access line after a streaming response drains", 
   });
   await res.text();
 
-  expect(logger.records.filter((record) => record.msg === "request done")).toHaveLength(1);
+  expect(terminalLines(logger)).toEqual([]);
+
+  const rows = await store.usage.recent(10);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toEqual(expect.objectContaining({ id: "req_1", state: "done", status: 200 }));
 });
 
 test("never writes request bodies or keys into stdout", async () => {
@@ -137,22 +143,50 @@ test("never writes request bodies or keys into stdout", async () => {
   expect(output).not.toContain("test-refresh-c1");
 });
 
-test("logs a malformed request once at error with no prompt body", async () => {
+test("records a malformed request as a row, and prints neither a line nor the body", async () => {
   const logger = captureLogger();
-  const { call } = await harness(EVENTS, { logger });
+  const { call, store } = await harness(EVENTS, { logger });
   const sentinel = "MALFORMED_BODY_SENTINEL";
   const res = await call("/v1/messages", { model: "fast", messages: [sentinel] });
   expect(res.status).toBe(400);
 
-  const failures = logger.records.filter((record) => record.msg === "request failed");
-  expect(failures).toHaveLength(1);
-  expect(failures[0]).toEqual(
-    expect.objectContaining({
-      level: "error",
-      fields: expect.objectContaining({ status: 400, code: "BAD_REQUEST" }),
-    }),
-  );
+  expect(terminalLines(logger)).toEqual([]);
   expect(logger.lines.join("\n")).not.toContain(sentinel);
+
+  const [row] = await store.usage.recent(10);
+  expect(row).toEqual(
+    expect.objectContaining({ state: "done", status: 400, errorCode: "BAD_REQUEST" }),
+  );
+});
+
+test("prints why a request was rejected, since the row has nowhere to keep it", async () => {
+  const logger = captureLogger();
+  const { call } = await harness(EVENTS, { logger });
+  const res = await call("/v1/messages", { model: "fast", messages: ["MALFORMED"] });
+  expect(res.status).toBe(400);
+
+  const rejected = logger.records.filter((record) => record.msg === "request rejected");
+  expect(rejected).toHaveLength(1);
+  expect(rejected[0]?.level).toBe("warn");
+  expect(rejected[0]?.fields).toMatchObject({ surface: "anthropic", status: 400 });
+  // The reason is the whole point of the line: `request_logs` keeps
+  // `BAD_REQUEST` and not what about the request was bad.
+  expect(rejected[0]?.fields.reason).toBeTruthy();
+});
+
+test("prints nothing for a request that succeeded", async () => {
+  const logger = captureLogger();
+  const { call } = await harness(EVENTS, { logger });
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(res.status).toBe(200);
+
+  // A rejection line on the happy path is an access line by another name, which
+  // is what this change removed.
+  expect(logger.records.map((record) => record.msg)).not.toContain("request rejected");
 });
 
 test("proxies a streaming anthropic request as sse", async () => {
@@ -671,15 +705,7 @@ test("writes exactly one log row when the client disconnects mid-stream after th
     expect(logs[0]?.status).toBe(499);
     expect(logs[0]?.errorCode).toBe("interrupted");
     expect(appendCalls).toBe(1);
-    expect(
-      logger.records.filter(
-        (record) => record.level === "debug" && record.msg === "request cancelled",
-      ),
-    ).toEqual([
-      expect.objectContaining({
-        fields: expect.objectContaining({ requestId: "req_1", status: 499, code: "interrupted" }),
-      }),
-    ]);
+    expect(terminalLines(logger)).toEqual([]);
   } finally {
     server.stop(true);
   }

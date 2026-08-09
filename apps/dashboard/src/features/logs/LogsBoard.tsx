@@ -1,7 +1,7 @@
 import { ArrowDown, ArrowUp, Database } from "lucide-react";
 import { useMemo, useState } from "react";
 import styled from "styled-components";
-import { LOG_CADENCE_MS, useCredentials, useLogs } from "../../api/queries.ts";
+import { LOG_CADENCE_MS, useCredentials, useKeys, useLogs } from "../../api/queries.ts";
 import type { RequestLog } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import {
@@ -125,12 +125,25 @@ export function LogsBoard() {
 
   const logs = useLogs(limit, cadence(LOG_CADENCE_MS));
   const credentials = useCredentials();
+  const keys = useKeys();
 
   const names = useMemo(() => {
     const map = new Map<string, string>();
     for (const credential of credentials.data ?? []) map.set(credential.id, credential.label);
     return map;
   }, [credentials.data]);
+
+  /**
+   * Key labels by id.
+   *
+   * A row outlives the key that made it — a revoked key still has requests in
+   * the log — so a missing label falls back to the id rather than to nothing.
+   */
+  const keyNames = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const key of keys.data ?? []) map.set(key.id, key.label);
+    return map;
+  }, [keys.data]);
 
   const needle = term.trim().toLowerCase();
   const rows = (logs.data ?? []).filter((log) => {
@@ -141,6 +154,9 @@ export function LogsBoard() {
       (log.resolvedModel ?? "").toLowerCase().includes(needle) ||
       (log.errorCode ?? "").toLowerCase().includes(needle) ||
       (log.credentialId === null ? "" : (names.get(log.credentialId) ?? ""))
+        .toLowerCase()
+        .includes(needle) ||
+      (log.apiKeyId === null ? "" : (keyNames.get(log.apiKeyId) ?? log.apiKeyId))
         .toLowerCase()
         .includes(needle)
     );
@@ -163,7 +179,7 @@ export function LogsBoard() {
           <Controls>
             <Search
               value={term}
-              placeholder="Filter by model, account, or error"
+              placeholder="Filter by model, account, key, or error"
               aria-label="Filter requests"
               onChange={(event) => setTerm(event.target.value)}
             />
@@ -216,6 +232,7 @@ export function LogsBoard() {
                   <Th>Requested</Th>
                   <Th>Routed to</Th>
                   <Th>Account</Th>
+                  <Th>Key</Th>
                   <Th $align="right">Try</Th>
                   <Th $align="right">TTFT</Th>
                   <Th $align="right">Total</Th>
@@ -259,6 +276,20 @@ export function LogsBoard() {
                         {log.credentialId === null
                           ? "—"
                           : (names.get(log.credentialId) ?? shortId(log.credentialId))}
+                      </Truncate>
+                    </Td>
+                    {/* A key that has since been revoked keeps its requests in
+                        the log, and the label goes with it. The id is the
+                        fallback, and the title, so a renamed key is still
+                        traceable to the row that named it. */}
+                    <Td>
+                      <Truncate
+                        style={{ display: "block", maxWidth: "16ch" }}
+                        title={log.apiKeyId ?? undefined}
+                      >
+                        {log.apiKeyId === null
+                          ? "—"
+                          : (keyNames.get(log.apiKeyId) ?? shortId(log.apiKeyId))}
                       </Truncate>
                     </Td>
                     <Td $align="right" $mono>
@@ -328,7 +359,9 @@ export function LogsBoard() {
                   : (names.get(open.credentialId) ?? open.credentialId)}
               </Value>
               <Legend as="dt">Key</Legend>
-              <Value>{open.apiKeyId ?? "—"}</Value>
+              <Value>
+                {open.apiKeyId === null ? "—" : (keyNames.get(open.apiKeyId) ?? open.apiKeyId)}
+              </Value>
               <Legend as="dt">Attempts</Legend>
               <Value>{isPending(open) ? "—" : open.attempts}</Value>
               <Legend as="dt">Status</Legend>

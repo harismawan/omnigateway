@@ -1,6 +1,14 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { createRefresher, loadConfig, OAUTH_PROVIDERS } from "@omni/control";
+import {
+  type ConsoleDeps,
+  type ConsoleSource,
+  createRefresher,
+  loadConfig,
+  OAUTH_PROVIDERS,
+  resolveConsoleSource,
+  tailFile,
+} from "@omni/control";
 import { createLogger, type Logger } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import { createStore, deriveKey } from "@omni/store";
@@ -25,6 +33,48 @@ function stdoutLogger(level: "debug" | "info" | "warn" | "error"): Logger {
 // Exists before configuration is parsed, so even an invalid encryption key or
 // port reaches stdout in the same structured format as every later boot error.
 let logger = stdoutLogger("info");
+
+/**
+ * Finds whatever captured this process's stdout, and how to read it back.
+ *
+ * `JOURNAL_STREAM` is systemd's own statement that it is capturing us: it sets
+ * the variable on a unit's stdout, whatever the unit is called. That beats
+ * looking for an installed unit file, which says a unit exists — not that this
+ * process is the one it started, and not that stdout went to the journal.
+ *
+ * The real filesystem and a real spawn enter here and nowhere else. Both are
+ * arguments to the reader, so every test of it stays hermetic.
+ */
+function consoleSource(logFile: string | null): { source: ConsoleSource; deps: ConsoleDeps } {
+  const source = resolveConsoleSource({
+    logFile,
+    unitInstalled: process.env.JOURNAL_STREAM !== undefined,
+    // Which journal to ask, taken from systemd rather than guessed. The user
+    // manager sets `MANAGERPID`, and only for the units it started; the system
+    // manager is pid 1 and sets nothing. Inferring this from `getuid()` was
+    // wrong in both directions — a system unit with `User=omni` has a nonzero
+    // uid, and a root user manager has uid 0 — and asking the wrong journal
+    // returns another service's output or nothing at all.
+    scope: process.env.MANAGERPID === undefined ? "system" : "user",
+  });
+
+  return {
+    source,
+    deps: {
+      readFile: (path, lines) => tailFile(path, lines),
+      run: async (argv) => {
+        const [cmd, ...args] = argv;
+        if (cmd === undefined) return { code: 1, stdout: "", stderr: "empty argv" };
+        const proc = Bun.spawn([cmd, ...args], { stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        return { code: await proc.exited, stdout, stderr };
+      },
+    },
+  };
+}
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
@@ -73,6 +123,9 @@ async function main(): Promise<void> {
    * live request from running two refreshes against a provider that rotates
    * refresh tokens, which would invalidate every rotation but the last.
    */
+  const console = consoleSource(config.logFile);
+  logger.info("console log source resolved", { reason: console.source.kind });
+
   const now = () => Date.now();
   const http = nodeHttpClient({ logger, now });
   const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger });
@@ -92,6 +145,7 @@ async function main(): Promise<void> {
     refresh,
     staticDir,
     logger,
+    console,
   });
 
   const stopMaintenance = startMaintenance({ store, now, logger });

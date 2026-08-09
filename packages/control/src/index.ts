@@ -21,6 +21,19 @@ export {
   isProviderId,
 } from "./connect.ts";
 export {
+  type CommandRunner,
+  type ConsoleDeps,
+  type ConsoleLine,
+  type ConsoleQuery,
+  type ConsoleRead,
+  type ConsoleSource,
+  consoleLimit,
+  MAX_CONSOLE_LINES,
+  readConsole,
+  resolveConsoleSource,
+  UNIT_NAME,
+} from "./console.ts";
+export {
   type CredentialPatch,
   type CredentialStatus,
   type CredentialSummary,
@@ -68,6 +81,7 @@ export {
   settingsSchema,
 } from "./schemas.ts";
 export { getSettings, putSettings } from "./settings.ts";
+export { fileExists, tailFile } from "./tail.ts";
 export {
   logLimit,
   MAX_LOG_LIMIT,

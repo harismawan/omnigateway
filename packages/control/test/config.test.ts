@@ -47,6 +47,16 @@ test("falls back to info for an invalid log level without refusing to boot", () 
   expect(config.logLevelFallbackFrom).toBe("verbose");
 });
 
+test("takes OMNI_LOG_FILE literally", () => {
+  expect(loadConfig({ ...base, OMNI_LOG_FILE: " /var/log/omni.log " }).logFile).toBe(
+    "/var/log/omni.log",
+  );
+});
+
+test.each([undefined, "", "   "])("reads %p as no captured output", (value) => {
+  expect(loadConfig({ ...base, OMNI_LOG_FILE: value }).logFile).toBeNull();
+});
+
 test.each([
   ["8787", true],
   ["0", false],

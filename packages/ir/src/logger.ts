@@ -142,6 +142,76 @@ export function formatLine(
   return parts.length === 0 ? head : `${head}  ${parts.join(" ")}`;
 }
 
+/**
+ * What can be recovered from a rendered line, plus the line itself.
+ *
+ * `raw` is what a reader displays; the rest is what a reader filters on. The
+ * structured fields are deliberately not parsed back into an object: they are
+ * already rendered in `raw`, and re-deriving them would give this format a
+ * second definition that could disagree with `formatLine`.
+ *
+ * Every field but `raw` is nullable because not every line came from here. A
+ * journal carries systemd's own output, and a `reason` can contain a newline,
+ * so a line split from a file is not guaranteed to be one log line.
+ */
+export type ParsedLine = {
+  raw: string;
+  at: number | null;
+  level: LogLevel | null;
+  msg: string | null;
+};
+
+/** SGR sequences, which `formatLine` writes around the level token on a TTY. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escapes is the point.
+const ANSI = /\[[0-9;]*m/g;
+
+/**
+ * The head `formatLine` writes: an ISO instant, a padded level, the message.
+ *
+ * The level is padded to five, so one or two spaces follow it.
+ */
+const HEAD = /^(\S+) (DEBUG|INFO|WARN|ERROR) {1,2}(.*)$/;
+
+/**
+ * Where the message ends and `formatLine`'s `k=v` tail begins.
+ *
+ * The rendered format is lossy here and cannot be made otherwise without
+ * changing it: two spaces separate the message from the fields, but nothing
+ * stops a message from containing two spaces itself. Requiring what follows to
+ * look like a field name narrows it, and does not close it — a message of
+ * `"phase  reason=x"` still parses as `"phase"`.
+ *
+ * That is acceptable because every message in this codebase is a fixed literal
+ * with no `=` in it, and `msg` is only ever used for display and filtering,
+ * never for dispatch. `raw` always carries the whole line. A message that ever
+ * needs an `=` should put it in `reason`, which is quoted.
+ */
+const FIELDS = / {2}(?=[a-zA-Z]+=)/;
+
+/**
+ * Reads a line back into the parts a reader filters on.
+ *
+ * The inverse of `formatLine`, and pure for the same reason: a console reader
+ * runs in the gateway, in the CLI, and in tests, and none of them should need a
+ * clock or a file to interpret a line. An unrecognised line is returned intact
+ * with null fields rather than dropped — the line explaining a crash is often
+ * the one the logger did not write.
+ */
+export function parseLine(raw: string): ParsedLine {
+  const absent: ParsedLine = { raw, at: null, level: null, msg: null };
+  const match = HEAD.exec(raw.replace(ANSI, ""));
+  if (match === null) return absent;
+
+  const [, instant, label, tail] = match;
+  if (instant === undefined || label === undefined || tail === undefined) return absent;
+
+  const at = Date.parse(instant);
+  if (Number.isNaN(at)) return absent;
+
+  const msg = tail.split(FIELDS, 1)[0] ?? tail;
+  return { raw, at, level: label.toLowerCase() as LogLevel, msg };
+}
+
 export type Logger = {
   debug(msg: string, fields?: LogFields): void;
   info(msg: string, fields?: LogFields): void;

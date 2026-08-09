@@ -10,6 +10,7 @@ import type {
   ApiKeySummary,
   ConnectPollResult,
   ConnectStart,
+  ConsoleResponse,
   Credential,
   CredentialHealth,
   CredentialHealthResponse,
@@ -51,6 +52,7 @@ export const queryKeys = {
       query.until ?? null,
     ] as const,
   logs: (limit: number) => ["logs", limit] as const,
+  console: (lines: number, level: string) => ["console", lines, level] as const,
 };
 
 /**
@@ -149,6 +151,31 @@ export function useLogs(
     queryKey: queryKeys.logs(limit),
     queryFn: async ({ signal }) =>
       (await get<LogsResponse>(withQuery("/api/logs", { limit }), signal)).logs,
+    refetchInterval: cadence,
+  });
+}
+
+/**
+ * How often the gateway's own output is re-read.
+ *
+ * Slower than the request log, which carries in-flight requests a spinner has
+ * to keep up with. Console lines are written by boot, refresh, and quota work,
+ * none of which moves at request speed.
+ */
+export const CONSOLE_CADENCE_MS = 5_000;
+
+export function useConsole(
+  lines = 200,
+  level = "",
+  cadence: Cadence = CONSOLE_CADENCE_MS,
+): UseQueryResult<ConsoleResponse> {
+  return useQuery({
+    queryKey: queryKeys.console(lines, level),
+    queryFn: async ({ signal }) =>
+      get<ConsoleResponse>(
+        withQuery("/api/console", { lines, ...(level === "" ? {} : { level }) }),
+        signal,
+      ),
     refetchInterval: cadence,
   });
 }
