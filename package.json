@@ -12,6 +12,8 @@
     "dev:dashboard": "cd apps/dashboard && bun run dev",
     "start": "bun apps/gateway/src/index.ts",
     "test": "bun test",
+    "test:dashboard": "bun run --cwd apps/dashboard test",
+    "test:all": "bun test && bun run test:dashboard",
     "lint": "biome check .",
     "fmt": "biome format --write .",
     "typecheck:core": "tsc --noEmit --pretty false -p tsconfig.json",

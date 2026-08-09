@@ -38,10 +38,7 @@ jobs:
       # Everything below the publish step is unrecoverable — a bad version
       # cannot be unpublished after 72 hours — so the whole suite runs first.
       - name: Test
-        run: bun test
-
-      - name: Test the dashboard
-        run: bun run --cwd apps/dashboard test
+        run: bun run test:all
 
       - name: Typecheck
         run: bun run typecheck
