@@ -1,4 +1,5 @@
 import type { ChatRequest, ToolChoice } from "@omni/ir";
+import { CONTEXT_1M_BETA } from "../betas.ts";
 
 export type ResponsesBody = {
   model: string;
@@ -49,6 +50,13 @@ export function toResponsesWire(
   const note = (d: string): void => {
     if (!degradations.includes(d)) degradations.push(d);
   };
+
+  // There is no beta mechanism here, so a client asking for the 1M window is
+  // not refused, it is simply not honoured. Recorded because the silence is the
+  // dangerous part: the client keeps pacing itself against a megabyte while
+  // this target caps far lower, and the request that finally exceeds it fails
+  // with nothing in the log explaining why.
+  if (req.betas?.includes(CONTEXT_1M_BETA)) note("openai:context-1m-dropped");
 
   for (const message of req.messages) {
     const parts: unknown[] = [];

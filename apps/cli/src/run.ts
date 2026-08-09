@@ -1,3 +1,6 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname } from "node:path";
 import { type ConnectFlows, createConnectFlows, OAUTH_PROVIDERS } from "@omni/control";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
@@ -20,6 +23,7 @@ export type RunOptions = ContextOptions & {
   prompt?: CommandEnv["prompt"];
   connect?: (store: Store) => ConnectFlows;
   foreground?: CommandEnv["foreground"];
+  setupFs?: CommandEnv["setupFs"];
 };
 
 /**
@@ -77,6 +81,14 @@ export async function run(
     ctx,
     writer,
     prompt,
+    setupFs: options.setupFs ?? {
+      homeDir: homedir(),
+      cwd: process.cwd(),
+      write: (path, contents) => {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, contents);
+      },
+    },
     service: () =>
       options.service?.({ root: ctx.root.root, env: ctx.env }) ??
       createServiceDeps({ root: ctx.root.root, env: ctx.env, scope, now: ctx.now }),

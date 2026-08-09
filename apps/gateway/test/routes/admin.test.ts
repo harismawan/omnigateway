@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
-import { memoryStore, requestLog, seedCredential, target, virtualModel } from "@omni/testkit";
+import {
+  memoryStore,
+  requestLog,
+  seedApiKey,
+  seedCredential,
+  target,
+  virtualModel,
+} from "@omni/testkit";
 import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
 
 const NOW = 1_000_000;
@@ -23,6 +30,7 @@ async function harness({ configured = true, console: consoleDeps }: HarnessOptio
   const app = adminRoutes({
     store,
     admin,
+    baseUrl: "http://localhost:9000",
     now: () => NOW,
     sessionTtlMs: SESSION_TTL_MS,
     ...(consoleDeps === undefined ? {} : { console: consoleDeps }),
@@ -182,6 +190,7 @@ test("every data route requires a session", async () => {
     "/api/usage",
     "/api/logs",
     "/api/console",
+    "/api/agent-setup",
   ]) {
     expect((await call("GET", path, undefined, false)).status).toBe(401);
   }
@@ -603,4 +612,47 @@ test("the console route reports that nothing captured stdout, and shells out to 
     lines: unknown[];
   };
   expect(body).toEqual({ source: "none", lines: [] });
+});
+
+test("agent setup returns the files a client needs, with the window in them", async () => {
+  const { call, store } = await harness();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await store.config.putModel(
+    virtualModel({
+      id: "opus",
+      targets: [target({ provider: "anthropic", model: "claude-opus-5" })],
+    }),
+  );
+
+  const body = (await (await call("GET", "/api/agent-setup?client=claude")).json()) as {
+    client: string;
+    files: { path: string; contents: string }[];
+  };
+
+  expect(body.client).toBe("claude");
+  expect(body.files.map((file) => file.path)).toEqual(["opus/settings.json"]);
+  // Without this the operator copies a block that leaves the session on the
+  // client's own default, which is the whole problem this surface exists for.
+  expect(body.files[0]?.contents).toContain('"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"');
+});
+
+// The store keeps only hashes, so there is no real key to render — but a
+// snippet that carried one would leak it into every screenshot of this screen.
+test("agent setup never renders a key", async () => {
+  const { call, store } = await harness();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await store.config.putModel(
+    virtualModel({
+      id: "opus",
+      targets: [target({ provider: "anthropic", model: "claude-opus-5" })],
+    }),
+  );
+  const { raw } = await seedApiKey(store, { label: "live" });
+
+  const body = (await (await call("GET", "/api/agent-setup?client=opencode")).json()) as {
+    files: { contents: string }[];
+  };
+  const contents = body.files.map((file) => file.contents).join("");
+  expect(contents).toContain("<your OmniGateway key>");
+  expect(contents).not.toContain(raw);
 });

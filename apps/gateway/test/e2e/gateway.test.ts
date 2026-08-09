@@ -485,3 +485,64 @@ test("a non-streaming client request still streams from the upstream", async () 
   expect((sent.body as { stream?: unknown }).stream).toBe(true);
   expect(header(sent, "accept")).toBe("text/event-stream");
 });
+
+/**
+ * `[1m]` is a claim about the target, so the target decides.
+ *
+ * Claude Code emits `context-1m-2025-08-07` whenever the operator typed the
+ * suffix, and it has no way to know what the pool behind the name resolves to.
+ * Forwarding it to a 200K model is an upstream 400 on a request the client
+ * believed was fine.
+ */
+test("the 1m suffix reaches the upstream as a beta on a model that has the window", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  await store.config.putModel(
+    virtualModel({
+      id: "wide",
+      strategy: "priority",
+      targets: [target({ provider: "anthropic", model: "claude-opus-5" })],
+    }),
+  );
+  upstream.queue(ANTHROPIC_STREAM);
+
+  await call({ ...REQUEST, model: "wide[1m]" });
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  expect((header(sent, "anthropic-beta") ?? "").split(",")).toContain("context-1m-2025-08-07");
+  // The suffix is a client-side spelling; the upstream is told the model's name.
+  expect((sent.body as { model: string }).model).toBe("claude-opus-5");
+});
+
+test("the 1m beta is dropped for a model whose window is smaller, and the loss is recorded", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  await store.config.putModel(
+    virtualModel({
+      id: "narrow",
+      strategy: "priority",
+      targets: [target({ provider: "anthropic", model: "claude-haiku-4-5" })],
+    }),
+  );
+  upstream.queue(ANTHROPIC_STREAM);
+
+  const res = await call({ ...REQUEST, model: "narrow[1m]" });
+  expect(res.status).toBe(200);
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  expect((header(sent, "anthropic-beta") ?? "").split(",")).not.toContain("context-1m-2025-08-07");
+  expect((await store.usage.recent(1))[0]?.degradations).toContain("anthropic:context-1m-dropped");
+});
+
+test("the 1m beta survives for a model the catalog does not list", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(ANTHROPIC_STREAM);
+
+  // `claude-opus-4` is an operator's own id. Nothing is known about its window,
+  // and guessing "no" would break a custom 1M target that works today.
+  await call({ ...REQUEST, model: "fast[1m]" });
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  expect((header(sent, "anthropic-beta") ?? "").split(",")).toContain("context-1m-2025-08-07");
+});

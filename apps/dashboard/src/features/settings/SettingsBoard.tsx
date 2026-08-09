@@ -9,6 +9,7 @@ import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
+import { AgentSetup } from "./AgentSetup.tsx";
 
 type WeightKey = keyof Settings["weights"];
 
@@ -288,6 +289,8 @@ export function SettingsBoard() {
 
           {problem === null ? null : <Problem role="alert">{problem}</Problem>}
           {saved && problem === null ? <Saved role="status">Settings saved.</Saved> : null}
+
+          <AgentSetup />
 
           <Module legend="Known limits">
             <Stack $gap={2}>

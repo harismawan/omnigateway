@@ -1,6 +1,7 @@
 import {
   collect,
   type ErrorCode,
+  estimateInputTokens,
   GatewayError,
   HTTP_STATUS,
   type Logger,
@@ -30,6 +31,13 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
   requestId: () => string;
   rateLimiter?: ApiKeyRateLimiter;
   keepaliveMs?: number;
+  /**
+   * Whether `GET /v1/models` also advertises `claude/<id>` mirrors.
+   *
+   * Off unless an operator asks for it: an installation whose clients are not
+   * Claude Code should not have its catalog doubled.
+   */
+  discoveryMirrors?: boolean;
 };
 
 type ResolvedProxyDeps = DispatchDeps &
@@ -300,44 +308,85 @@ export function proxyRoutes(deps: ProxyDeps) {
     snapshots: deps.snapshots ?? createRoutingSnapshotCache(deps.store, logger),
     keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
   };
-  return new Elysia()
-    .post("/v1/messages", ({ request }) => handle(dispatchDeps, rateLimiter, "anthropic", request))
-    .post("/v1/chat/completions", ({ request }) =>
-      handle(dispatchDeps, rateLimiter, "openai", request),
-    )
-    .get("/v1/models", async ({ request }) => {
-      try {
-        const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
-        // The routing snapshot, not the store: it already holds both halves of
-        // the answer, it is invalidated on every routing change, and taking it
-        // here means the listing and dispatch cannot disagree about which
-        // credentials exist.
-        const snapshot = await dispatchDeps.snapshots.get(deps.now());
-        const models = [...snapshot.models.values()];
-        const visibleModels =
-          key.modelAllowlist === null
-            ? models
-            : models.filter((model) => key.modelAllowlist?.includes(model.id));
-        // Credentials decide the answer: an OAuth OpenAI credential is served
-        // by Codex, whose window is under a third of the API's.
-        return Response.json(modelListBody(visibleModels, snapshot.credentials));
-      } catch (error) {
+  return (
+    new Elysia()
+      .post("/v1/messages", ({ request }) =>
+        handle(dispatchDeps, rateLimiter, "anthropic", request),
+      )
+      .post("/v1/chat/completions", ({ request }) =>
+        handle(dispatchDeps, rateLimiter, "openai", request),
+      )
+      .get("/v1/models", async ({ request }) => {
+        try {
+          const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
+          // The routing snapshot, not the store: it already holds both halves of
+          // the answer, it is invalidated on every routing change, and taking it
+          // here means the listing and dispatch cannot disagree about which
+          // credentials exist.
+          const snapshot = await dispatchDeps.snapshots.get(deps.now());
+          const models = [...snapshot.models.values()];
+          const visibleModels =
+            key.modelAllowlist === null
+              ? models
+              : models.filter((model) => key.modelAllowlist?.includes(model.id));
+          // Credentials decide the answer: an OAuth OpenAI credential is served
+          // by Codex, whose window is under a third of the API's.
+          return Response.json(
+            modelListBody(visibleModels, snapshot.credentials, {
+              discoveryMirrors: deps.discoveryMirrors === true,
+            }),
+          );
+        } catch (error) {
+          const gatewayError = asGatewayError(error);
+          logger.error("model listing failed", {
+            status: HTTP_STATUS[gatewayError.code],
+            code: gatewayError.code,
+            reason: gatewayError.message,
+          });
+          return errorResponse("anthropic", gatewayError.code, gatewayError.message);
+        }
+      })
+      // Answered from a local estimate rather than from an upstream count.
+      //
+      // Claude Code paces its own compaction with this, and the alternatives are
+      // both worse: 404 leaves the client guessing, and the 501 its own gateway
+      // document prescribes sends it to a Haiku `max_tokens: 1` probe — a real
+      // request against the operator's pool for every count. An upstream count
+      // would also need a credential and have nothing to say about a Kimi target,
+      // which is exactly when a client most needs the number.
+      .post("/v1/messages/count_tokens", async ({ request }) => {
+        try {
+          const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
+          rateLimiter.consume(key.id, key.rateLimitPerMin);
+          const body: unknown = await request.json();
+          const chatRequest = parseAnthropicRequest(body, request.headers);
+          if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {
+            throw new GatewayError(
+              "AUTH",
+              `model "${chatRequest.model}" is not allowed for this API key`,
+            );
+          }
+          // No request-log row: nothing was dispatched and no tokens were spent,
+          // so a row here would be counted by every usage aggregate.
+          return Response.json({ input_tokens: estimateInputTokens(chatRequest) });
+        } catch (error) {
+          const gatewayError = asGatewayError(error);
+          logger.warn("token count failed", {
+            status: HTTP_STATUS[gatewayError.code],
+            code: gatewayError.code,
+            reason: gatewayError.message,
+          });
+          return errorResponse("anthropic", gatewayError.code, gatewayError.message);
+        }
+      })
+      .onError(({ error }) => {
         const gatewayError = asGatewayError(error);
-        logger.error("model listing failed", {
+        logger.error("unhandled proxy route error", {
           status: HTTP_STATUS[gatewayError.code],
           code: gatewayError.code,
           reason: gatewayError.message,
         });
         return errorResponse("anthropic", gatewayError.code, gatewayError.message);
-      }
-    })
-    .onError(({ error }) => {
-      const gatewayError = asGatewayError(error);
-      logger.error("unhandled proxy route error", {
-        status: HTTP_STATUS[gatewayError.code],
-        code: gatewayError.code,
-        reason: gatewayError.message,
-      });
-      return errorResponse("anthropic", gatewayError.code, gatewayError.message);
-    });
+      })
+  );
 }

@@ -123,6 +123,7 @@ export async function cli(
     prompt?: Prompt;
     connect?: (store: Store) => ConnectFlows;
     foreground?: RunOptions["foreground"];
+    setupFs?: RunOptions["setupFs"];
     env?: Record<string, string | undefined>;
     now?: () => number;
   },
@@ -137,6 +138,7 @@ export async function cli(
     ...(input.service === undefined ? {} : { service: () => input.service?.deps as ServiceDeps }),
     ...(input.connect === undefined ? {} : { connect: input.connect }),
     ...(input.foreground === undefined ? {} : { foreground: input.foreground }),
+    ...(input.setupFs === undefined ? {} : { setupFs: input.setupFs }),
   };
 
   const code = await run(["--root", input.root, ...argv], captured.writer, options);

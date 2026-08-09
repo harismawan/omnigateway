@@ -66,6 +66,7 @@ bun run --cwd apps/dashboard test  # needs a DOM; excluded from the root run
 
 Specs, newest first:
 
+- `2026-08-09-agent-client-context-and-setup-design.md` — why no agent reads its context window from `/v1/models`, generated client config, and the missing `/v1/responses`
 - `2026-08-08-omnigateway-cli-design.md` — the CLI, and the extraction into `packages/control`
 - `2026-08-08-provider-model-catalog-design.md`
 - `2026-08-06-provider-chooser-focus-return-design.md`
@@ -85,6 +86,10 @@ assuming a snippet still matches.
 - `apps/gateway/src/dispatch/`: upstream attempts, refresh, failover, deadlines, stream commit
 - `apps/gateway/src/routes/`: client, admin, and OAuth control surfaces
 - `apps/gateway/src/routes/models.ts`: the `/v1/models` listing, including the token limits it advertises; the route feeds it the routing snapshot rather than its own store reads, so the listing cannot disagree with dispatch about which credentials exist
+- `packages/control/src/modelLimits.ts`: how much a virtual model holds and what to call it, shared by the `/v1/models` listing and by the setup writers, so a pool is never described one way to a client and another to the operator
+- `packages/control/src/setup.ts`: the configuration files Claude Code and opencode read at startup, generated for both `omni setup-*` and `GET /api/agent-setup`
+- `packages/ir/src/tokens.ts`: the local prompt estimate behind `POST /v1/messages/count_tokens`
+- `apps/gateway/src/ingress/model.ts`: unwinds a `claude/` discovery mirror and a `[1m]` suffix, during parsing and so before the key allowlist
 - `apps/gateway/src/auth/`: gateway API-key authentication and its process-local rate limiter
 - `packages/ir/`: provider-neutral domain types, error mapping, and the pure structured logger
 - `packages/ir/src/logger.ts`: level filtering, safe `LogFields` allowlist, deterministic line formatting, `parseLine` reading a rendered line back, and no-op logger; sinks are injected by callers
@@ -182,6 +187,7 @@ Client surface:
 - `POST /v1/messages`: Anthropic-compatible request, response, SSE, and error shape
 - `POST /v1/chat/completions`: OpenAI-compatible request, response, SSE, and error shape
 - `GET /v1/models`: authenticated and filtered by calling key model allowlist, and describing each model in both dialects at once
+- `POST /v1/messages/count_tokens`: authenticated local estimate of a prompt's size
 - `GET /health`: unauthenticated liveness
 
 Every `/v1/*` request accepts `Authorization: Bearer <key>` or `x-api-key: <key>`. Conflicting credentials must be rejected. A `null` model allowlist means unrestricted; an empty array denies all models.
@@ -201,7 +207,10 @@ Ingress accepts the shapes current clients send, and these are contracts:
 - `Usage.inputTokens` changed meaning for OpenAI and Kimi when the decoders were normalized, and rows written before that still count cached tokens inside it. Nothing rewrites them, so a chart or rollup spanning the change mixes two definitions and over-reports prompt volume for those two providers. The console stacks the classes as disjoint, which they now are and were not.
 - `Usage.inputTokens` is the *uncached remainder*, never the whole prompt. Anthropic reports input already net of cache; OpenAI and Kimi count cached tokens inside their prompt total, so those decoders subtract via `usageFromPromptTotal`. Pricing adds `cacheReadTokens` at the cache rate on top of `inputTokens`, so a decoder that leaves the overlap in bills those tokens twice — once at full input price and again at the cache rate. `promptTokens()` adds the parts back for a surface that wants one number.
 - A provider that cannot express something the client asked for records a degradation rather than dropping it silently. Degradations reach the request log.
-- `GET /v1/models` is the only place the gateway states how much context a model holds, and a client told nothing falls back to its own default — 200K in Claude Code's case, for every model however large. An entry therefore carries `max_input_tokens` and `max_tokens` beside the OpenAI-shaped keys, read from the target the operator saved and falling back to the catalog. A pool reports the *smallest* window any of its targets names, because failover can land on any of them, and a model where nothing is known reports nothing rather than a zero.
+- `GET /v1/models` states how much context a model holds: an entry carries `max_input_tokens` and `max_tokens` beside the OpenAI-shaped keys, read from the target the operator saved and falling back to the catalog. A pool reports the *smallest* window any of its targets names, because failover can land on any of them, and a model where nothing is known reports nothing rather than a zero. OpenAI-dialect clients read these fields. **Claude Code does not** — measured against 2.1.226, it ignores the listing entirely for sizing and assumes 200K for any id its built-in table does not know, and opencode takes the number from its own config file instead. Sizing those two is a configuration problem, not a response-body one: `omni setup claude` and `omni setup opencode` write the same figures into what each client reads at startup, and `GET /api/agent-setup` serves them to the console. See `docs/superpowers/specs/2026-08-09-agent-client-context-and-setup-design.md` for what was measured.
+- Claude Code's model picker lists only ids beginning with `claude` or `anthropic`, so a pool named `opus` or `gpt-5.6-sol` is invisible there. With `OMNI_EXPOSE_CLAUDE_CODE_ALIASES` set, the listing also advertises a `claude/<id>` mirror of every other pool, carrying that pool's limits and a `root` back-pointer, and ingress unwinds the prefix again. The separator is a slash, not a hyphen, because the client ignores `CLAUDE_CODE_MAX_CONTEXT_TOKENS` for an id beginning `claude-` — a mirror spelled that way would be visible and permanently pinned to 200K. `claude/` is a reserved namespace: `modelSchema` refuses a pool id in it, since such a pool would be shadowed by its own mirror rule. Unwinding happens during parsing, which puts it *before* the key allowlist: a key denied `gpt-5.6-sol` is equally denied `claude/gpt-5.6-sol`, and moving it later would turn the mirror into a way around policy.
+- `[1m]` after a model name is a client-side assumption plus a header. Claude Code strips the suffix and sends `context-1m-2025-08-07`; ingress accepts either spelling and folds the suffix into `betas`, so the encoders gate on one thing. The Anthropic adapter forwards that beta only where the catalog does *not* report a smaller window — an unlisted model is an operator's own id, about which nothing is known, and guessing "no" would break a custom 1M target that works today. The OpenAI and Kimi encoders have no beta mechanism at all, so they record `openai:context-1m-dropped` / `kimi:context-1m-dropped` rather than losing the request silently while the client keeps pacing itself against a megabyte.
+- `POST /v1/messages/count_tokens` answers `{"input_tokens": n}` from `estimateInputTokens` in `packages/ir`, with no upstream call. It counts every block class — text, images, tool-use arguments, tool-result content, thinking, the system prompt and tool schemas — because a real agentic conversation keeps most of its tokens inside tool results, and an estimator that walked only `text` would return near-zero for a session minutes from its limit. It writes no request-log row: nothing was dispatched, and a row would be counted by every usage aggregate. The figure is an estimate for pacing compaction and is never billed from.
 - `Target.contextWindow` and `Target.maxOutputTokens` are advertised, never enforced: an over-long request still fails upstream. Unlike pricing, they are resolved when the listing is built rather than copied onto a target when it is saved, because the answer depends on the credential: the OpenAI adapter routes an OAuth credential to Codex, which caps a prompt at 272,000 tokens where `api.openai.com` takes 922,000. A provider with both kinds of credential is described by the narrower. That is why the console and `--from-catalog` leave both fields empty — a saved figure is an operator override that pins one of those answers.
 - The OpenAI catalog's `contextWindow` is the published cap on *input* (922,000), not the 1,050,000 context window, because the field is advertised as the size of prompt a client may send.
 
@@ -211,7 +220,7 @@ Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/
 
 ## Configuration
 
-`OMNI_ENCRYPTION_KEY` is mandatory and changing it invalidates existing encrypted credentials. `OMNI_BASE_URL` must be public origin behind reverse proxy. Provider identity environment overrides are startup configuration; validate and keep built-in defaults when absent or invalid.
+`OMNI_EXPOSE_CLAUDE_CODE_ALIASES` (`1`/`true`/`yes`/`on`) turns on the `claude/<id>` discovery mirrors, off by default and read once at boot. `OMNI_ENCRYPTION_KEY` is mandatory and changing it invalidates existing encrypted credentials. `OMNI_BASE_URL` must be public origin behind reverse proxy. Provider identity environment overrides are startup configuration; validate and keep built-in defaults when absent or invalid.
 
 ## Subagent workflow
 
