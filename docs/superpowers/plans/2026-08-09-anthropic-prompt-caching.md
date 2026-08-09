@@ -267,3 +267,36 @@ first eligible request: cache_creation_input_tokens > 0
 matching follow-up:      cache_read_input_tokens > 0
 repeated cached prefix:  excluded from ITPM on most current models
 ```
+
+## Verified against the live upstream (2026-08-09)
+
+Run on a copy of an installation database, through a gateway built from this
+branch, using an OAuth credential and the `opus` virtual model
+(`claude-opus-5`). One request body, sent twice, byte-identical, with a single
+`cache_control` breakpoint on a ~4.5k-token system block:
+
+```text
+request 1: input=14  cache_creation=4520  cache_read=0
+request 2: input=14  cache_creation=0     cache_read=4520
+```
+
+That is the expected behaviour this plan set out, and it settles the open
+question the implementation could not answer from the checkout: the
+per-request `cch` token that `signAnthropicBody` writes into system block 0 —
+a hash over the whole serialized body, so different on every request — does
+**not** prevent a prefix match. Anthropic evidently does not key its cache on
+the `x-anthropic-billing-header:` block. No change to the signing flow is
+needed, and none should be made on the theory that it might be.
+
+Pricing was confirmed on the same two requests. The stored `cost_usd` matched
+a hand calculation exactly: `$0.028420` for the creating request
+(`14×5 + 4×25 + 4520×6.25`, all per MTok) and `$0.002430` for the reading one
+(`4520×0.50`), i.e. a cache read cost 8.5% of what creating the same entry
+cost, and the write was priced rather than free.
+
+Not covered by this run: `ttl: "1h"` writes, and the non-streaming client
+path, which failed independently of this work — the Anthropic adapter sends
+`stream: false` upstream with `Accept: application/json` and then parses the
+response as SSE, so a non-streaming `/v1/messages` request ends as
+`upstream stream ended before message_stop`. That predates this branch and is
+untouched by it.
