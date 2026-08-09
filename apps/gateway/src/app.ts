@@ -38,6 +38,12 @@ export type AppDeps = {
   refresh?: Refresher;
   /** Absolute directory containing the built dashboard bundle. */
   staticDir?: string;
+  /**
+   * Whether `GET /v1/models` also advertises `claude/<id>` discovery mirrors,
+   * which is the only way a pool named anything else appears in Claude Code's
+   * model picker. Startup configuration, read once from the environment.
+   */
+  discoveryMirrors?: boolean;
   logger?: Logger;
   /** Where this process's stdout was captured, when anything captured it. */
   console?: { source: ConsoleSource; deps: ConsoleDeps };
@@ -90,12 +96,15 @@ export function createApp(deps: AppDeps) {
         requestId,
         rateLimiter,
         logger,
+        discoveryMirrors: deps.discoveryMirrors === true,
       }),
     )
     .use(
       adminRoutes({
         store: deps.store,
         admin,
+        baseUrl: deps.baseUrl,
+        discoveryMirrors: deps.discoveryMirrors === true,
         now,
         sessionTtlMs: ADMIN_SESSION_TTL_MS,
         logger,

@@ -378,3 +378,13 @@ test("reads cache creation tokens when the upstream reports them", async () => {
     usage: { inputTokens: 30, outputTokens: 5, cacheReadTokens: 60, cacheWriteTokens: 10 },
   });
 });
+
+test("records that a 1m request could not be honoured here", () => {
+  const { degradations } = toChatWire({ ...base, betas: ["context-1m-2025-08-07"] }, "k2");
+  expect(degradations).toContain("kimi:context-1m-dropped");
+});
+
+test("records nothing when no 1m request was made", () => {
+  const { degradations } = toChatWire(base, "k2");
+  expect(degradations).not.toContain("kimi:context-1m-dropped");
+});

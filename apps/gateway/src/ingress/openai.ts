@@ -1,6 +1,7 @@
 import type { CacheControl, ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
 import { GatewayError, validateRequest } from "@omni/ir";
 import { z } from "zod";
+import { normalizeClientModel } from "./model.ts";
 import {
   applyMessageCacheControl,
   extraFields,
@@ -188,7 +189,10 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
   }
 
   const request: ChatRequest = {
-    model: parsed.model,
+    // Mirrored and `[1m]`-suffixed ids are resolved here too: this surface can
+    // route to an Anthropic target just as the other one can, and a caller that
+    // picked an id out of `GET /v1/models` sent whatever that listing offered.
+    model: normalizeClientModel(parsed.model).model,
     messages,
     stream: parsed.stream ?? false,
   };

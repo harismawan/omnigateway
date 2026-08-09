@@ -8,10 +8,18 @@ import { paint, type Tone } from "./output.ts";
 import type { Prompt } from "./prompt.ts";
 import type { ServiceDeps } from "./service.ts";
 
+export type SetupFs = {
+  homeDir: string;
+  cwd: string;
+  write: (path: string, contents: string) => void;
+};
+
 export type CommandEnv = {
   ctx: Context;
   writer: Writer;
   prompt: Prompt;
+  /** Filesystem effects used only by generated client setup commands. */
+  setupFs: SetupFs;
   /** Built on demand: most commands never touch the process. */
   service: () => ServiceDeps;
   /** Built on demand, and injected by tests so no test ever reaches a provider. */

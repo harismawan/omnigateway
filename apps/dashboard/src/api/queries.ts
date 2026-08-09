@@ -28,6 +28,9 @@ import type {
   RequestLog,
   Settings,
   SettingsResponse,
+  SetupClient,
+  SetupFile,
+  SetupResponse,
   StatusResponse,
   UsageBucket,
   UsageQuery,
@@ -42,6 +45,7 @@ export const queryKeys = {
   models: ["models"] as const,
   keys: ["keys"] as const,
   settings: ["settings"] as const,
+  agentSetup: (client: SetupClient) => ["agent-setup", client] as const,
   usage: (query: UsageQuery) =>
     [
       "usage",
@@ -106,6 +110,22 @@ export function useSettings(): UseQueryResult<Settings> {
   return useQuery({
     queryKey: queryKeys.settings,
     queryFn: async ({ signal }) => (await get<SettingsResponse>("/api/settings", signal)).settings,
+  });
+}
+
+/**
+ * The configuration files an agent needs to reach this gateway.
+ *
+ * Fetched rather than built here: each entry's context window is resolved by
+ * the same code `GET /v1/models` uses, and a console deriving it separately
+ * would eventually disagree with the gateway about what a pool holds. The key
+ * in these files is always a placeholder — the store keeps only hashes.
+ */
+export function useAgentSetup(client: SetupClient): UseQueryResult<SetupFile[]> {
+  return useQuery({
+    queryKey: queryKeys.agentSetup(client),
+    queryFn: async ({ signal }) =>
+      (await get<SetupResponse>(`/api/agent-setup?client=${client}`, signal)).files,
   });
 }
 

@@ -48,6 +48,12 @@ export {
 } from "./credentials.ts";
 export { type DryRunCandidate, type DryRunResult, dryRun } from "./dryRun.ts";
 export { type ApiKeySummary, type CreatedKey, createKey, listKeys, revokeKey } from "./keys.ts";
+export {
+  type ModelLimits,
+  modelDisplayName,
+  resolveModelLimits,
+  type ServingCredential,
+} from "./modelLimits.ts";
 export { getModel, listModels, putModel, removeModel } from "./models.ts";
 export { OAUTH_PROVIDERS } from "./oauth/index.ts";
 export { DISPATCH_REFRESH_LEAD_MS, SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
@@ -81,6 +87,16 @@ export {
   settingsSchema,
 } from "./schemas.ts";
 export { getSettings, putSettings } from "./settings.ts";
+export {
+  claudeProfiles,
+  describeModelsForSetup,
+  KEY_PLACEHOLDER,
+  opencodeConfig,
+  type SetupClient,
+  type SetupFile,
+  type SetupInput,
+  setupFiles,
+} from "./setup.ts";
 export { fileExists, tailFile } from "./tail.ts";
 export {
   logLimit,

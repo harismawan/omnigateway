@@ -20,6 +20,7 @@ import {
   removeCredential,
   removeModel,
   revokeKey,
+  setupFiles,
 } from "@omni/control";
 import { GatewayError, type Logger, noopLogger, parseLogLevel } from "@omni/ir";
 import type { Store } from "@omni/store";
@@ -38,6 +39,9 @@ export type AdminDeps = {
   admin: AdminAuth;
   now: () => number;
   sessionTtlMs: number;
+  /** Public origin, which is what a generated client configuration points at. */
+  baseUrl: string;
+  discoveryMirrors?: boolean;
   logger?: Logger;
   /**
    * Where this process's stdout was captured, and how to read it.
@@ -173,6 +177,30 @@ export function adminRoutes(deps: AdminDeps) {
         await requireAdmin(request, deps.admin);
         await removeModel(deps.store, params.id);
         return { ok: true };
+      })
+
+      /**
+       * The configuration an agent needs to talk to this gateway.
+       *
+       * Served rather than rendered in the browser because the numbers in it —
+       * each model's context window — are resolved exactly as `GET /v1/models`
+       * resolves them, and a console deriving them separately would eventually
+       * disagree with the gateway about what a pool holds.
+       *
+       * The key is always a placeholder. The store keeps only hashes, so there is
+       * no real key to render, and a snippet that carried one would leak it into
+       * every screenshot of this screen.
+       */
+      .get("/api/agent-setup", async ({ request, query }) => {
+        await requireAdmin(request, deps.admin);
+        const client = query.client === "opencode" ? "opencode" : "claude";
+        return {
+          client,
+          files: await setupFiles(deps.store, client, {
+            baseUrl: deps.baseUrl,
+            discoveryMirrors: deps.discoveryMirrors === true,
+          }),
+        };
       })
 
       .get("/api/keys", async ({ request }) => {

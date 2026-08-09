@@ -146,6 +146,7 @@ async function main(): Promise<void> {
     staticDir,
     logger,
     console,
+    discoveryMirrors: config.exposeClaudeCodeAliases,
   });
 
   const stopMaintenance = startMaintenance({ store, now, logger });
