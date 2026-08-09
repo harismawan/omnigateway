@@ -8,6 +8,7 @@ import type {
 } from "@omni/ir";
 import { GatewayError, validateRequest } from "@omni/ir";
 import { z } from "zod";
+import { normalizeClientModel } from "./model.ts";
 import {
   cacheControlSchema as cacheControl,
   extraFields,
@@ -257,8 +258,9 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
             ...irCacheControl(b.cache_control),
           }));
 
+  const named = normalizeClientModel(parsed.model, readBetas(headers));
   const request: ChatRequest = {
-    model: parsed.model,
+    model: named.model,
     messages,
     stream: parsed.stream ?? false,
   };
@@ -289,8 +291,7 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { anthropic: extras };
 
-  const betas = readBetas(headers);
-  if (betas.length > 0) request.betas = betas;
+  if (named.betas.length > 0) request.betas = named.betas;
 
   return validateRequest(request);
 }

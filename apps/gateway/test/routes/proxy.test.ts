@@ -916,3 +916,94 @@ test("models route returns no models for an empty allowlist", async () => {
   expect(response.status).toBe(200);
   expect(body.data).toEqual([]);
 });
+
+test("counts tokens without dispatching or logging the request", async () => {
+  const { call, store } = await harness();
+  const res = await call("/v1/messages/count_tokens", {
+    model: "fast",
+    messages: [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t1", name: "read", input: { path: "/etc/hosts" } }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "t1", content: "a".repeat(40_000) }],
+      },
+    ],
+  });
+
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { input_tokens: number };
+  // Tool output is where an agentic session keeps its tokens; a count that
+  // ignored it would let the client run past its window without compacting.
+  expect(body.input_tokens).toBeGreaterThan(9_000);
+
+  // Nothing was dispatched and nothing was spent, so nothing may reach usage.
+  const logs = await store.usage.recent(10);
+  expect(logs).toEqual([]);
+});
+
+test("token counting requires a key", async () => {
+  const { app } = await harness();
+  const res = await app.handle(
+    new Request("http://localhost/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "fast", messages: [{ role: "user", content: "hi" }] }),
+    }),
+  );
+  expect(res.status).toBe(401);
+});
+
+test("token counting honours the key's model allowlist", async () => {
+  const { store, app } = await harness();
+  const { raw } = await seedApiKey(store, { label: "limited", modelAllowlist: [] });
+  const res = await app.handle(
+    new Request("http://localhost/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({ model: "fast", messages: [{ role: "user", content: "hi" }] }),
+    }),
+  );
+  expect(res.status).toBe(401);
+});
+
+test("token counting rejects a malformed body in the anthropic error shape", async () => {
+  const { call } = await harness();
+  const res = await call("/v1/messages/count_tokens", { messages: [] });
+  expect(res.status).toBe(400);
+  const body = (await res.json()) as { type: string; error: { type: string } };
+  expect(body.type).toBe("error");
+  expect(body.error.type).toBe("invalid_request_error");
+});
+
+// The mirror exists so Claude Code can see the pool. It must not also be a way
+// around the policy that governs the pool.
+test("a key denied a model is denied its discovery mirror too", async () => {
+  const { store, app } = await harness();
+  const { raw } = await seedApiKey(store, { label: "limited", modelAllowlist: ["slow"] });
+  const res = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({
+        model: "claude/fast",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    }),
+  );
+  expect(res.status).toBe(401);
+});
+
+test("a mirrored id routes to the pool it stands for", async () => {
+  const { call } = await harness();
+  const res = await call("/v1/messages", {
+    model: "claude/fast",
+    max_tokens: 16,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(res.status).toBe(200);
+});

@@ -30,6 +30,7 @@ import {
   stop,
 } from "./commands/service.ts";
 import { settingsGet, settingsSet } from "./commands/settings.ts";
+import { setupClaude, setupOpencode } from "./commands/setup.ts";
 import { adminSetPassword, status } from "./commands/status.ts";
 import { logs, usage } from "./commands/usage.ts";
 
@@ -75,6 +76,9 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
 
   "settings get": settingsGet,
   "settings set": settingsSet,
+
+  "setup claude": setupClaude,
+  "setup opencode": setupOpencode,
 
   "admin set-password": adminSetPassword,
 

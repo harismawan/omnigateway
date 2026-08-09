@@ -1,5 +1,7 @@
 import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
+import { CONTEXT_1M_BETA, CONTEXT_1M_TOKENS } from "../betas.ts";
 import { applyAnthropicSystem, BODY_ORDER, orderFields, signAnthropicBody } from "../body.ts";
+import { catalogLimits } from "../catalog.ts";
 import { httpError } from "../http.ts";
 import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
 import { parseSse } from "../sse.ts";
@@ -48,6 +50,21 @@ export const anthropicAdapter: ProviderAdapter = {
     // when the header does not name its beta.
     const betas = new Set(req.request.betas ?? []);
 
+    // The 1M beta is a claim about the target, so the target decides. It is
+    // dropped only where the catalog positively reports a smaller window: a
+    // model the catalog does not list is an operator's own id, about which
+    // nothing is known, and guessing "no" there would break a custom 1M target
+    // that works today.
+    const notes = [...degradations];
+    if (betas.has(CONTEXT_1M_BETA)) {
+      const limits = catalogLimits("anthropic", req.model, oauth ? "oauth" : "apiKey");
+      const window = limits?.contextWindow;
+      if (window !== undefined && window < CONTEXT_1M_TOKENS) {
+        betas.delete(CONTEXT_1M_BETA);
+        notes.push("anthropic:context-1m-dropped");
+      }
+    }
+
     if (oauth) {
       protocol.push(["Authorization", `Bearer ${req.credentials.accessToken}`]);
       betas.add(OAUTH_BETA);
@@ -83,7 +100,7 @@ export const anthropicAdapter: ProviderAdapter = {
     if (res.body === null)
       throw new GatewayError("UPSTREAM", "empty response body", { provider: "anthropic" });
 
-    return { events: decodeAnthropic(parseSse(res.body)), degradations };
+    return { events: decodeAnthropic(parseSse(res.body)), degradations: notes };
   },
 };
 
