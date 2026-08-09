@@ -29,6 +29,13 @@ const READ_OVER_INPUT = 0.1;
  * it, so whichever side is missing is the remainder. Symmetric on purpose:
  * deriving only one direction would price the other's shortfall at zero if an
  * upstream ever reported a partial breakdown.
+ *
+ * When both parts are present they are trusted over the aggregate, and that
+ * sum is not reconciled. An upstream reporting parts that fall short of its
+ * own aggregate would price the difference at zero while the request log kept
+ * the larger figure. Deliberate: the aggregate is documented as their sum, and
+ * inventing a split for a provider that contradicted itself would be a guess
+ * about which TTL the missing tokens bought.
  */
 function splitWrites(usage: Usage): { fiveMinute: number; oneHour: number } {
   const { cacheWrite5mTokens: five, cacheWrite1hTokens: hour, cacheWriteTokens: total } = usage;

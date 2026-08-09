@@ -1,4 +1,4 @@
-import type { ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
+import type { CacheControl, ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
 import { GatewayError, validateRequest } from "@omni/ir";
 import { z } from "zod";
 import {
@@ -114,6 +114,12 @@ function contentBlocks(content: z.infer<typeof message>["content"]): ContentBloc
   });
 }
 
+/** The outer marker when it maps, else the one inside `function`. */
+function toolCacheControl(outer: unknown, inner: unknown): { cacheControl?: CacheControl } {
+  const parsed = looseCacheControl(outer);
+  return parsed.cacheControl === undefined ? looseCacheControl(inner) : parsed;
+}
+
 function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): ToolChoice {
   if (typeof c === "string") {
     if (c === "required") return { type: "any" };
@@ -200,8 +206,11 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
       ...(t.function.description !== undefined && { description: t.function.description }),
       inputSchema: t.function.parameters ?? { type: "object" },
       // Clients disagree on which level carries it; the outer one is the more
-      // specific statement about this tool entry, so it wins.
-      ...looseCacheControl(t.cache_control ?? t.function.cache_control),
+      // specific statement about this tool entry, so it wins — but only if it
+      // is a marker at all. `??` falls through on absence, not on garbage, so
+      // testing the parsed result rather than the raw field keeps a malformed
+      // outer marker from swallowing a good inner one.
+      ...toolCacheControl(t.cache_control, t.function.cache_control),
     }));
   }
   if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);

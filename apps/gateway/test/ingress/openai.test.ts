@@ -366,6 +366,29 @@ test("ignores a cache control shape it cannot translate rather than refusing", (
   expect(unknownTtl.messages[0]?.content).toEqual([{ type: "text", text: "hi" }]);
 });
 
+test("a malformed marker at one tool level does not mask a good one at the other", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "f",
+          parameters: { type: "object" },
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        // `??` only falls through on null/undefined, so reading the outer
+        // level loosely would let garbage here swallow the valid inner marker
+        // and drop both.
+        cache_control: { type: "persistent" },
+      },
+    ],
+  });
+  expect(req.tools).toEqual([
+    { name: "f", inputSchema: { type: "object" }, cacheControl: { type: "ephemeral", ttl: "1h" } },
+  ]);
+});
+
 test("still refuses a malformed cache control on the anthropic surface", () => {
   // Anthropic would reject it too, and there the field is part of the
   // contract rather than a translation.
