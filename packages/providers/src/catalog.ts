@@ -1,12 +1,19 @@
 import type { ProviderId } from "@omni/ir";
 import { ANTHROPIC_MODELS } from "./anthropic/models.ts";
-import type { ProviderModelChoice, ProviderModelPricing } from "./catalog-types.ts";
+import type {
+  CatalogAuth,
+  ProviderModelChoice,
+  ProviderModelLimits,
+  ProviderModelPricing,
+} from "./catalog-types.ts";
 import { KIMI_MODELS } from "./kimi/models.ts";
 import { OPENAI_MODELS } from "./openai/models.ts";
 
 export type {
+  CatalogAuth,
   ProviderModelCatalogEntry,
   ProviderModelChoice,
+  ProviderModelLimits,
   ProviderModelPricing,
 } from "./catalog-types.ts";
 
@@ -33,6 +40,24 @@ export const PROVIDER_MODEL_CATALOG = {
 /** The catalog's price for one provider model, or null if it is not listed. */
 export function catalogPricing(provider: ProviderId, model: string): ProviderModelPricing | null {
   return (
-    PROVIDER_MODEL_CATALOG[provider].models.find((entry) => entry.id === model)?.pricing ?? null
+    PROVIDER_MODEL_CATALOG[provider]?.models.find((entry) => entry.id === model)?.pricing ?? null
   );
+}
+
+/**
+ * The catalog's context and output limits for one provider model, or null if it
+ * is not listed.
+ *
+ * How a credential authenticates is part of the question: an OAuth credential
+ * for OpenAI is served by the Codex backend, whose window is a quarter of the
+ * API's. A provider that answers the same either way ignores the argument.
+ */
+export function catalogLimits(
+  provider: ProviderId,
+  model: string,
+  auth: CatalogAuth = "apiKey",
+): ProviderModelLimits | null {
+  const entry = PROVIDER_MODEL_CATALOG[provider]?.models.find((choice) => choice.id === model);
+  if (entry === undefined) return null;
+  return (auth === "oauth" ? entry.oauthLimits : undefined) ?? entry.limits;
 }

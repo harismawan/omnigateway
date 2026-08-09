@@ -118,7 +118,7 @@ Everything above is also available in the browser at
 | --- | --- | --- |
 | `POST` | `/v1/messages` | Anthropic Messages API |
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions API |
-| `GET` | `/v1/models` | OpenAI-style listing, filtered by your key's allowlist |
+| `GET` | `/v1/models` | Listing in both dialects, filtered by your key's allowlist |
 | `GET` | `/health` | Unauthenticated liveness check |
 
 Authenticate with either header — sending both is an error:
@@ -130,6 +130,27 @@ x-api-key: <gateway-key>
 
 Ask for one of your virtual models by name. A bare provider model
 (`claude-sonnet-5`, `gpt-5`) also works if an account can serve it.
+
+`GET /v1/models` answers both client families from one listing: each entry
+carries the OpenAI keys (`object`, `created`, `owned_by`) and the Anthropic ones
+(`type`, `display_name`, `created_at`, `max_input_tokens`, `max_tokens`) at
+once. `max_input_tokens` is the one worth knowing about — a client that is told
+no context window assumes its own default, which is 200K whatever the model
+really holds, so a 1M-context target would be used as if it were a fifth of its
+size. The figure is the smallest window any of that model's targets can hold,
+because failover can land on any of them.
+
+A client reads these figures once, when it starts, and caches them — so
+raising a limit here can take a client restart to show up.
+
+The figures come from the published limits for the model each target names, and
+from how the credential that would serve it signs in: an OpenAI account
+connected by OAuth is served through the Codex backend, which takes a 272,000
+token prompt where the API takes 922,000, so a gateway with both kinds of
+OpenAI credential advertises the smaller. Leave the fields in the console (or
+the CLI) empty to keep that worked out for you, and fill them in per target only
+when your own account's limits differ. A model outside the built-in catalog with
+nothing stated is left undescribed, and its clients keep their own defaults.
 
 Most tools that accept a custom base URL work unchanged: set it to
 `http://127.0.0.1:9000` and use a gateway key where the provider key goes.

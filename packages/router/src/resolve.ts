@@ -1,5 +1,5 @@
 import { GatewayError, PROVIDER_CAPABILITIES, type ProviderId } from "@omni/ir";
-import { catalogPricing } from "@omni/providers/catalog";
+import { catalogLimits, catalogPricing } from "@omni/providers/catalog";
 import type { Target, VirtualModel } from "@omni/store";
 import type { Snapshot } from "./types.ts";
 
@@ -26,6 +26,11 @@ function synthesize(provider: ProviderId, model: string): VirtualModel {
   // treating as free. Either way the operator can configure a virtual model to
   // state the price they actually pay.
   const listed = catalogPricing(provider, model);
+  // The same treatment for limits, so a synthesized target is shaped like a
+  // configured one. Nothing reads them yet — `/v1/models` lists only configured
+  // models — but a target that carried prices and not limits would be a trap
+  // for the next reader of this function.
+  const limits = catalogLimits(provider, model);
   const target: Target = {
     provider,
     model,
@@ -41,6 +46,9 @@ function synthesize(provider: ProviderId, model: string): VirtualModel {
             cacheWrite5m: listed.cacheWrite5m,
             cacheWrite1h: listed.cacheWrite1h,
           },
+    ...(limits === null
+      ? {}
+      : { contextWindow: limits.contextWindow, maxOutputTokens: limits.maxOutputTokens }),
     capabilities: PROVIDER_CAPABILITIES[provider],
   };
   return { id: `${provider}/${model}`, targets: [target], strategy: "score", isAlias: true };

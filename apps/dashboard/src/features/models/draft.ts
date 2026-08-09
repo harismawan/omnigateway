@@ -1,4 +1,4 @@
-import { catalogPricing, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
+import { catalogLimits, catalogPricing, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import type { ProviderId, Strategy, Target, VirtualModel } from "../../api/types.ts";
 
 /**
@@ -26,6 +26,14 @@ export type TargetDraft = {
    */
   costCacheWrite5m: string;
   costCacheWrite1h: string;
+  /**
+   * What the gateway tells clients this target holds and emits. Empty is the
+   * normal state and means the gateway works it out per listing, from the
+   * catalog and from how the serving credential authenticates. Fill one in only
+   * where the account's own limits differ from the published ones.
+   */
+  contextWindow: string;
+  maxOutputTokens: string;
   tools: boolean;
   images: boolean;
   reasoning: boolean;
@@ -90,6 +98,49 @@ export function catalogPrices(
   };
 }
 
+/**
+ * The catalog's limits for a provider model, as the strings the editor holds.
+ * Null for a model it does not list, which leaves the operator's figures alone.
+ */
+export function catalogTokenLimits(
+  provider: ProviderId,
+  model: string,
+): Pick<TargetDraft, "contextWindow" | "maxOutputTokens"> | null {
+  const listed = catalogLimits(provider, model);
+  if (listed === null) return null;
+  return {
+    contextWindow: String(listed.contextWindow),
+    maxOutputTokens: String(listed.maxOutputTokens),
+  };
+}
+
+/**
+ * Points a target at a different model, and settles what carries across.
+ *
+ * Prices follow the model: a price left over from the previous model is wrong
+ * in a way nothing surfaces, and the field has no fallback, so it has to hold
+ * a number. Limits do the opposite and are cleared, because they *do* have a
+ * fallback — the gateway works them out when it lists the model, from the
+ * catalog and from how the serving credential signs in. Filling in the new
+ * model's published figure would pin it, and on an OpenAI target pinning the
+ * API's window is what hides the narrower one its OAuth backend allows.
+ *
+ * A model the catalog does not list keeps whatever prices are in the fields:
+ * there is nothing better to put there.
+ */
+export function retargetDraft(
+  target: TargetDraft,
+  next: Pick<TargetDraft, "provider" | "model">,
+): TargetDraft {
+  return {
+    ...target,
+    ...next,
+    ...(catalogPrices(next.provider, next.model) ?? {}),
+    contextWindow: "",
+    maxOutputTokens: "",
+  };
+}
+
 export function blankTarget(provider: ProviderId = "anthropic"): TargetDraft {
   const model = PROVIDER_MODEL_CATALOG[provider].defaultModel;
   const prices = catalogPrices(provider, model);
@@ -106,6 +157,12 @@ export function blankTarget(provider: ProviderId = "anthropic"): TargetDraft {
     costCacheRead: prices?.costCacheRead ?? "",
     costCacheWrite5m: prices?.costCacheWrite5m ?? "",
     costCacheWrite1h: prices?.costCacheWrite1h ?? "",
+    // Blank on purpose, unlike the prices above. A saved figure overrides what
+    // the gateway would otherwise work out when it lists the model, which for
+    // an OpenAI target depends on whether an API key or an OAuth credential
+    // serves it. Filling these in would freeze one of those two answers.
+    contextWindow: "",
+    maxOutputTokens: "",
     tools: true,
     images: true,
     reasoning: true,
@@ -139,6 +196,8 @@ export function toDraft(model: VirtualModel): ModelDraft {
         target.costPerMTok.cacheWrite1h === undefined
           ? ""
           : String(target.costPerMTok.cacheWrite1h),
+      contextWindow: target.contextWindow === undefined ? "" : String(target.contextWindow),
+      maxOutputTokens: target.maxOutputTokens === undefined ? "" : String(target.maxOutputTokens),
       tools: target.capabilities.tools,
       images: target.capabilities.images,
       reasoning: target.capabilities.reasoning,
@@ -203,6 +262,24 @@ export function parseDraft(draft: ModelDraft): Parsed {
       };
     }
 
+    const hasContext = target.contextWindow.trim().length > 0;
+    const contextWindow = Number(target.contextWindow);
+    if (hasContext && (!Number.isInteger(contextWindow) || contextWindow < 1)) {
+      return {
+        ok: false,
+        problem: `${position}: the context window must be a whole number of tokens.`,
+      };
+    }
+
+    const hasMaxOutput = target.maxOutputTokens.trim().length > 0;
+    const maxOutputTokens = Number(target.maxOutputTokens);
+    if (hasMaxOutput && (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1)) {
+      return {
+        ok: false,
+        problem: `${position}: the output limit must be a whole number of tokens.`,
+      };
+    }
+
     targets.push({
       provider: target.provider,
       model,
@@ -215,6 +292,8 @@ export function parseDraft(draft: ModelDraft): Parsed {
         ...(hasWrite5m ? { cacheWrite5m } : {}),
         ...(hasWrite1h ? { cacheWrite1h } : {}),
       },
+      ...(hasContext ? { contextWindow } : {}),
+      ...(hasMaxOutput ? { maxOutputTokens } : {}),
       capabilities: { tools: target.tools, images: target.images, reasoning: target.reasoning },
     });
   }

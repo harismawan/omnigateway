@@ -56,6 +56,11 @@ export const modelSchema = z.object({
           cacheWrite5m: z.number().min(0).optional(),
           cacheWrite1h: z.number().min(0).optional(),
         }),
+        // Advertised on GET /v1/models, never enforced here. Optional so a
+        // target for a model the catalog does not list can stay silent rather
+        // than claim a window nobody checked.
+        contextWindow: z.number().int().positive().optional(),
+        maxOutputTokens: z.number().int().positive().optional(),
         capabilities: z.object({
           tools: z.boolean(),
           images: z.boolean(),
