@@ -19,6 +19,16 @@ export type Config = {
   /** Threshold for stdout logging. Read once, at boot. */
   logLevel: LogLevel;
   /**
+   * Where something captured this process's stdout, when anything did.
+   *
+   * A process cannot read back what it wrote to stdout, so the console view
+   * reads whatever captured it. Null means look for the systemd journal
+   * instead, and then report that nothing captured it — which is the ordinary
+   * state under `bun run dev`, not an error. Taken literally when set, like
+   * `staticDir`.
+   */
+  logFile: string | null;
+  /**
    * Set when `OMNI_LOG_LEVEL` held something unrecognised.
    *
    * The boot line reports it, so a typo is visible rather than silent.
@@ -62,6 +72,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     optionalText(env.OMNI_BASE_URL, derivedBaseUrl).replace(/\/+$/, "") || derivedBaseUrl;
 
   const staticDir = env.OMNI_STATIC_DIR?.trim();
+  const logFile = env.OMNI_LOG_FILE?.trim();
 
   // Deliberately not fatal, unlike OMNI_PORT: a typo in a log level is not a
   // reason to refuse to serve traffic. The boot line says which value was
@@ -78,5 +89,6 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     encryptionKey,
     baseUrl,
     staticDir: staticDir === undefined || staticDir.length === 0 ? null : staticDir,
+    logFile: logFile === undefined || logFile.length === 0 ? null : logFile,
   };
 }
