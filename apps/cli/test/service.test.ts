@@ -5,7 +5,9 @@ import { join } from "node:path";
 import {
   install,
   livePid,
+  logFile,
   pidFile,
+  serviceLogs,
   start,
   status,
   stop,
@@ -57,6 +59,14 @@ test("start spawns and records a pid when no unit is installed", async () => {
   expect(service.spawned[0]?.argv).toEqual(["bun", "gateway.ts"]);
   expect(service.spawned[0]?.cwd).toBe(root);
   expect(readFileSync(pidFile(service.deps.stateDir), "utf8").trim()).toBe("321");
+
+  // The gateway cannot read back its own stdout, so it is told where the
+  // supervisor is sending it. Under systemd, JOURNAL_STREAM answers this.
+  expect(service.spawned[0]?.env).toMatchObject({
+    OMNI_PORT: "8787",
+    OMNI_LOG_FILE: logFile(service.deps.stateDir),
+  });
+  expect(service.spawned[0]?.logFile).toBe(logFile(service.deps.stateDir));
 });
 
 test("a start whose health check never answers is reported, not claimed", async () => {
@@ -209,4 +219,57 @@ test("systemd status reports the unit's own word for what it is doing", async ()
     state: "failed",
     pid: null,
   });
+});
+
+const LOG_LINES = [
+  "2026-08-09T04:12:03.114Z INFO  omnigateway listening  port=9000",
+  "2026-08-09T04:12:04.000Z ERROR quota poll failed  reason=boom",
+].join("\n");
+
+test("service logs read this installation's log file when no unit is installed", async () => {
+  const root = makeRoot();
+  const service = fakeService({ root });
+  writeFileSync(logFile(service.deps.stateDir), `${LOG_LINES}\n`);
+
+  expect(await serviceLogs(service.deps, 10)).toBe(LOG_LINES);
+  // The file is the source, so nothing asks systemd anything.
+  expect(service.commands).toEqual([]);
+});
+
+test("service logs return the tail, and an absent log as nothing", async () => {
+  const root = makeRoot();
+  const service = fakeService({ root });
+  expect(await serviceLogs(service.deps, 10)).toBe("");
+
+  writeFileSync(logFile(service.deps.stateDir), `${LOG_LINES}\n`);
+  expect(await serviceLogs(service.deps, 1)).toBe(
+    "2026-08-09T04:12:04.000Z ERROR quota poll failed  reason=boom",
+  );
+});
+
+test("service logs read the journal when a unit is installed", async () => {
+  const root = makeRoot();
+  const unitPath = join(root, "systemd", "omnigateway.service");
+  mkdirSync(join(root, "systemd"), { recursive: true });
+  writeFileSync(unitPath, "[Unit]\n");
+
+  const journal = "journalctl --user -u omnigateway.service -n 5 --no-pager";
+  const service = fakeService({
+    root,
+    unitPath,
+    runResults: { [journal]: { code: 0, stdout: LOG_LINES, stderr: "" } },
+  });
+  // A file exists too; the unit wins, because that is where output went.
+  writeFileSync(logFile(service.deps.stateDir), "2026-08-09T04:12:03.114Z INFO  stale\n");
+
+  expect(await serviceLogs(service.deps, 5)).toBe(LOG_LINES);
+  expect(service.commands).toContainEqual([
+    "journalctl",
+    "--user",
+    "-u",
+    "omnigateway.service",
+    "-n",
+    "5",
+    "--no-pager",
+  ]);
 });

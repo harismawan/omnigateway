@@ -592,3 +592,84 @@ test("status reports every quota window an account has, not just the tightest", 
   // Shortest window first, so the cell reads soonest-to-latest.
   expect(result.out).toMatch(/5h 95% · 7d 20%/);
 });
+
+const CONSOLE_LINES = [
+  "2026-08-09T04:12:03.114Z INFO  omnigateway listening  port=9000",
+  "2026-08-09T04:12:04.000Z ERROR quota poll failed  reason=boom",
+].join("\n");
+
+test("console reads the installation's log file and says which one", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  await Bun.write(`${service.deps.stateDir}/gateway.log`, `${CONSOLE_LINES}\n`);
+
+  const result = await cli(["console"], { root, service });
+
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("omnigateway listening");
+  expect(result.out).toContain("quota poll failed");
+  // The hint names the file, and how to point it somewhere else.
+  expect(result.err).toContain("gateway.log");
+  expect(result.err).toContain("OMNI_LOG_FILE");
+});
+
+test("console filters by level", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  await Bun.write(`${service.deps.stateDir}/gateway.log`, `${CONSOLE_LINES}\n`);
+
+  const result = await cli(["console", "--level", "error"], { root, service });
+
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("quota poll failed");
+  expect(result.out).not.toContain("omnigateway listening");
+});
+
+test("console refuses a level it does not know rather than showing everything", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  const result = await cli(["console", "--level", "verbose"], { root, service });
+
+  expect(result.code).toBe(2);
+  expect(result.err).toContain("unknown level");
+});
+
+test("console explains an uncaptured gateway instead of looking broken", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  const result = await cli(["console"], { root, service });
+
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("not being captured");
+  expect(result.out).toContain("OMNI_LOG_FILE");
+});
+
+test("console --json emits the structure, with no hint mixed into it", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  await Bun.write(`${service.deps.stateDir}/gateway.log`, `${CONSOLE_LINES}\n`);
+
+  const result = await cli(["console", "--json"], { root, service });
+
+  expect(result.code).toBe(0);
+  const body = JSON.parse(result.out) as {
+    source: string;
+    path: string;
+    lines: Array<{ level: string | null; msg: string | null }>;
+  };
+  expect(body.source).toBe("file");
+  expect(body.lines.map((l) => l.level)).toEqual(["info", "error"]);
+  expect(result.err).toBe("");
+});
+
+test("doctor reports which log the console will read", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  const result = await cli(["doctor"], { root, service });
+
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("console log");
+});

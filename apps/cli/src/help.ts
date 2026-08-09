@@ -1,7 +1,10 @@
 import { COMMANDS } from "./registry.ts";
 
 const GROUPS: ReadonlyArray<{ title: string; prefixes: readonly string[] }> = [
-  { title: "Gateway", prefixes: ["status", "start", "stop", "restart", "doctor", "logs"] },
+  {
+    title: "Gateway",
+    prefixes: ["status", "start", "stop", "restart", "doctor", "logs", "console"],
+  },
   { title: "Service", prefixes: ["service "] },
   { title: "Accounts", prefixes: ["connect", "credentials "] },
   { title: "Models", prefixes: ["models "] },

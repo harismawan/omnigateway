@@ -1,6 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import {
+  type ConsoleDeps,
+  type ConsoleSource,
+  readConsole,
+  resolveConsoleSource,
+} from "@omni/control";
 
 export const UNIT_NAME = "omnigateway.service";
 
@@ -201,11 +207,16 @@ export async function start(
   }
 
   mkdirSync(deps.stateDir, { recursive: true });
+  const file = logFile(deps.stateDir);
   const pid = deps.spawn({
     argv: input.argv,
     cwd: deps.root,
-    env: input.env,
-    logFile: logFile(deps.stateDir),
+    // The gateway is told where its own stdout is going, because a process
+    // cannot read back what it wrote and the console view has to read it from
+    // somewhere. systemd answers this with JOURNAL_STREAM; under this
+    // supervisor there is nobody to answer it but us.
+    env: { ...input.env, OMNI_LOG_FILE: file },
+    logFile: file,
   });
   writeFileSync(pidFile(deps.stateDir), `${pid}\n`);
 
@@ -307,23 +318,38 @@ export async function uninstall(deps: ServiceDeps): Promise<UninstallResult> {
   return { path, removed: true };
 }
 
+/**
+ * Where this installation's gateway output goes, and how to read it.
+ *
+ * The journal when a unit is installed, this state directory's log file
+ * otherwise — the same two answers `resolveConsoleSource` gives the gateway,
+ * reached differently. The gateway asks whether systemd is capturing *it*; the
+ * CLI is a separate process and cannot, so it asks whether a unit is installed
+ * and infers the rest.
+ */
+export function consoleSource(deps: ServiceDeps): { source: ConsoleSource; deps: ConsoleDeps } {
+  const file = logFile(deps.stateDir);
+  // The file is claimed only once it exists. This directory is where *this*
+  // supervisor would send output, but a gateway started by hand never wrote
+  // here, and naming an empty path would report a quiet log where the honest
+  // answer is that nothing captured anything.
+  const hasFile = !unitInstalled(deps) && existsSync(file);
+  return {
+    source: resolveConsoleSource({
+      ...(hasFile ? { logFile: file } : {}),
+      unitInstalled: unitInstalled(deps),
+      scope: deps.scope,
+    }),
+    deps: {
+      readFile: (path) => (existsSync(path) ? readFileSync(path, "utf8") : null),
+      run: deps.run,
+    },
+  };
+}
+
 /** Reads the process's own output: the journal under systemd, the log file otherwise. */
 export async function serviceLogs(deps: ServiceDeps, lines: number): Promise<string> {
-  if (unitInstalled(deps)) {
-    const args = deps.scope === "system" ? [] : ["--user"];
-    const result = await deps.run([
-      "journalctl",
-      ...args,
-      "-u",
-      UNIT_NAME,
-      "-n",
-      String(lines),
-      "--no-pager",
-    ]);
-    return result.stdout.trimEnd();
-  }
-
-  const file = logFile(deps.stateDir);
-  if (!existsSync(file)) return "";
-  return readFileSync(file, "utf8").split("\n").slice(-lines).join("\n").trimEnd();
+  const { source, deps: readDeps } = consoleSource(deps);
+  const read = await readConsole(readDeps, source, { lines });
+  return read.lines.map((line) => line.raw).join("\n");
 }

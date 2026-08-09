@@ -1,5 +1,6 @@
 import type { Command } from "./command.ts";
 import { connect } from "./commands/connect.ts";
+import { console_ } from "./commands/console.ts";
 import {
   credentialsAddKey,
   credentialsDisable,
@@ -46,6 +47,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   restart,
   doctor,
   logs,
+  console: console_,
   usage,
   connect,
 

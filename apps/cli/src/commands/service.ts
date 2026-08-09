@@ -5,6 +5,7 @@ import { CliError } from "../context.ts";
 import { emit, fields, note, paint } from "../output.ts";
 import { gatewayEntrypoint } from "../runtime.ts";
 import {
+  consoleSource,
   install,
   logFile,
   status as serviceStatus,
@@ -13,6 +14,7 @@ import {
   uninstall,
   unitInstalled,
 } from "../service.ts";
+import { sourceHint } from "./console.ts";
 
 /** The command line that runs the gateway from this installation. */
 function gatewayArgv(root: string): string[] {
@@ -167,6 +169,8 @@ export const doctor: Command = {
       unitInstalled: unit,
       supervisor: status.supervisor,
       running: status.running,
+      // Which log `omni console` will read, and whether there is one at all.
+      consoleSource: consoleSource(deps).source,
     };
 
     emit(ctx, writer, checks, () => {
@@ -183,6 +187,7 @@ export const doctor: Command = {
         ["entrypoint", checks.gatewayEntrypoint ?? ok(false, "not found")],
         ["systemd unit", unit ? deps.scope : paint(ctx, "dim", "none")],
         ["gateway", ok(status.running, status.running ? "running" : "stopped")],
+        ["console log", sourceHint(checks.consoleSource)],
       ]);
     });
   },

@@ -65,7 +65,7 @@ export const usage: Command = {
 
 export const logs: Command = {
   usage: "logs [-n N] [--follow] [--service]",
-  summary: "Show recent requests, or the gateway process's own output",
+  summary: "Show recent requests (--service is an alias for `omni console`)",
   options: {
     number: { type: "string", short: "n" },
     follow: { type: "boolean" },
@@ -74,9 +74,9 @@ export const logs: Command = {
   async run(args, { ctx, writer, service }) {
     const limit = numberFlag(args.values, "number") ?? 20;
 
-    // Two different logs share one verb. The gateway's request log answers
-    // "what did clients ask for"; the process's own output answers "why will
-    // it not start", which is the question asked when there are no requests.
+    // Kept as an alias for `omni console`, which is the discoverable name for
+    // the same log and the only one with --follow and --level. The flag is
+    // documented and may be in an operator's scripts, so it does not move.
     if (boolFlag(args.values, "service")) {
       const text = await serviceLogs(service(), limit);
       emit(ctx, writer, { log: text }, () => (text.length === 0 ? "no service output yet" : text));
