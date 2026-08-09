@@ -158,8 +158,8 @@ describe("LogsBoard", () => {
       .map((node) => node.textContent ?? "")
       .join("");
     const rule = injected.match(new RegExp(`\\.${generatedClass}\\{([^}]*)\\}`))?.[1] ?? "";
-    expect(rule).toContain("color:var(--ok)");
-    expect(rule).toContain("background:var(--ok-wash)");
+    expect(rule).toContain("color:var(--accent)");
+    expect(rule).toContain("background:var(--accent-wash)");
     // Every measured column is an em dash rather than a nought nobody counted:
     // attempts, TTFT, total, tokens, and cost.
     expect(screen.getAllByText("—")).toHaveLength(5);

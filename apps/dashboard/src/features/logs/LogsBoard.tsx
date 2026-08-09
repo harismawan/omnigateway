@@ -217,7 +217,7 @@ export function LogsBoard() {
                     </Td>
                     <Td>
                       {isPending(log) ? (
-                        <Chip $tone="ok">live</Chip>
+                        <Chip $tone="accent">live</Chip>
                       ) : log.errorCode === null ? (
                         <Chip $tone="ok">{log.status}</Chip>
                       ) : (
