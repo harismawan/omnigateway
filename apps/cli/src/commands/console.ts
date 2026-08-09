@@ -40,9 +40,9 @@ function render(ctx: Context, lines: readonly ConsoleLine[]): string {
  * anything to read.
  */
 export function sourceHint(source: ConsoleSource): string {
-  if (source.kind === "file") return `${source.path} (set OMNI_LOG_FILE to change it)`;
+  if (source.kind === "file") return `${source.path} (named by OMNI_LOG_FILE)`;
   if (source.kind === "journal") return `systemd journal for ${source.unit}`;
-  return "not captured — run under systemd, or set OMNI_LOG_FILE and restart";
+  return "not captured — run under systemd, or start it with `omni start`";
 }
 
 /**
@@ -57,7 +57,8 @@ function empty(source: ConsoleSource): string {
   return [
     "this gateway's output is not being captured, so there is nothing to show.",
     "run it in the foreground and its output goes to your terminal instead.",
-    "to capture it: `omni service install`, or set OMNI_LOG_FILE and restart.",
+    "to capture it: `omni service install`, or `omni start`, which redirects",
+    "output to a file and points OMNI_LOG_FILE at it.",
   ].join("\n");
 }
 
@@ -68,6 +69,10 @@ export const console_: Command = {
     number: { type: "string", short: "n" },
     follow: { type: "boolean" },
     level: { type: "string" },
+    // Selects the system journal rather than this user's. `run.ts` reads it to
+    // build the scope; without it declared here, strict parsing rejects the
+    // flag before that ever happens.
+    system: { type: "boolean" },
   },
   async run(args, { ctx, writer, service }) {
     const lines = numberFlag(args.values, "number") ?? 50;

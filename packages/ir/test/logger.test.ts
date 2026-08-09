@@ -222,4 +222,24 @@ describe("parseLine", () => {
     const line = "  2026-08-09T04:12:03.114Z INFO  x  ";
     expect(parseLine(line).raw).toBe(line);
   });
+
+  test("keeps two spaces inside a message that no field could follow", () => {
+    // Only a `k=` after the gap starts the field tail, so ordinary double
+    // spacing in a message survives.
+    const line = formatLine("info", AT, "quota poll  finished", undefined, false);
+    expect(parseLine(line).msg).toBe("quota poll  finished");
+  });
+
+  test("truncates a message that itself contains a field-shaped gap", () => {
+    // The rendered format cannot distinguish this from a real field tail. It is
+    // acceptable because every message here is a fixed literal without `=`, and
+    // `msg` only ever drives display and filtering — `raw` keeps the whole line.
+    const line = formatLine("info", AT, "parsed reason=x", undefined, false).replace(
+      "parsed reason",
+      "parsed  reason",
+    );
+    const parsed = parseLine(line);
+    expect(parsed.msg).toBe("parsed");
+    expect(parsed.raw).toContain("reason=x");
+  });
 });

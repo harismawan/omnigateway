@@ -80,7 +80,8 @@ function SourceHint({ read }: { read: ConsoleResponse }) {
   if (read.source === "file") {
     return (
       <Hint>
-        Reading <Path>{read.path}</Path>, set by <Path>OMNI_LOG_FILE</Path>.
+        Reading <Path>{read.path}</Path>, named by <Path>OMNI_LOG_FILE</Path>. That variable says
+        where the gateway's output is being captured; it does not redirect it.
       </Hint>
     );
   }
@@ -88,7 +89,7 @@ function SourceHint({ read }: { read: ConsoleResponse }) {
     return (
       <Hint>
         Reading the systemd journal for <Path>omnigateway.service</Path>. To read a file instead,
-        set <Path>OMNI_LOG_FILE=/path/to/gateway.log</Path> and restart the gateway.
+        redirect the gateway's output to one and point <Path>OMNI_LOG_FILE</Path> at the same path.
       </Hint>
     );
   }
@@ -157,29 +158,35 @@ export function ConsoleBoard() {
         ) : read !== undefined && read.source === "none" ? (
           <Empty
             legend="Nothing is capturing this gateway"
-            message="Its output is going to a terminal, so there is nothing to read back. To capture it, run the gateway under systemd with `omni service install`, or set OMNI_LOG_FILE=/path/to/gateway.log and restart it."
-          />
-        ) : rows.length === 0 ? (
-          <Empty
-            legend="Nothing to show"
-            message={
-              level === ""
-                ? "This log is empty. The gateway writes here when it boots, refreshes a token, or polls a quota."
-                : "No line in this window is at that level. Widen the filter to see everything."
-            }
+            message="Its output is going to a terminal, so there is nothing to read back. To capture it, run the gateway under systemd with `omni service install`, or start it with `omni start`, which redirects output to a file and points OMNI_LOG_FILE at it."
           />
         ) : (
+          // The hint sits outside this branch on purpose. An operator reading an
+          // empty file who expected the journal needs to know which log they are
+          // looking at as much as one reading a full page — arguably more, since
+          // "empty" and "wrong log" look identical without it.
           <>
-            <Lines>
-              {rows.map((line, index) => (
-                // Nothing in a line is unique — the same message can repeat at
-                // the same millisecond — so position is the only honest key.
-                // biome-ignore lint/suspicious/noArrayIndexKey: no stable id exists
-                <Line key={`${line.at ?? 0}-${index}`} $level={line.level}>
-                  {line.raw}
-                </Line>
-              ))}
-            </Lines>
+            {rows.length === 0 ? (
+              <Empty
+                legend="Nothing to show"
+                message={
+                  level === ""
+                    ? "This log is empty. The gateway writes here when it boots, refreshes a token, or polls a quota."
+                    : "No line in this window is at that level. Widen the filter to see everything."
+                }
+              />
+            ) : (
+              <Lines>
+                {rows.map((line, index) => (
+                  // Nothing in a line is unique — the same message can repeat at
+                  // the same millisecond — so position is the only honest key.
+                  // biome-ignore lint/suspicious/noArrayIndexKey: no stable id exists
+                  <Line key={`${line.at ?? 0}-${index}`} $level={line.level}>
+                    {line.raw}
+                  </Line>
+                ))}
+              </Lines>
+            )}
             {read === undefined ? null : <SourceHint read={read} />}
           </>
         )}

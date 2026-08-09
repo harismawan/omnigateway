@@ -4,8 +4,10 @@ import { dirname, join } from "node:path";
 import {
   type ConsoleDeps,
   type ConsoleSource,
+  fileExists,
   readConsole,
   resolveConsoleSource,
+  tailFile,
 } from "@omni/control";
 
 export const UNIT_NAME = "omnigateway.service";
@@ -31,6 +33,13 @@ export type ServiceDeps = {
   scope: Scope;
   /** Where this scope's unit file lives. Injected so a test never writes to a real one. */
   unitPath: string;
+  /**
+   * `OMNI_LOG_FILE` for this installation, when the operator set one.
+   *
+   * The gateway reads it to find its own captured output; the CLI has to read
+   * the same file or `omni console` and the Console screen show different logs.
+   */
+  logFile?: string | undefined;
   run: CommandRunner;
   spawn: Spawner;
   /** True when the gateway answers `/health`. */
@@ -328,20 +337,33 @@ export async function uninstall(deps: ServiceDeps): Promise<UninstallResult> {
  * and infers the rest.
  */
 export function consoleSource(deps: ServiceDeps): { source: ConsoleSource; deps: ConsoleDeps } {
-  const file = logFile(deps.stateDir);
-  // The file is claimed only once it exists. This directory is where *this*
+  // The operator's own answer, when there is one. `OMNI_LOG_FILE` is what the
+  // gateway reads, so the CLI has to read the same file or the two surfaces
+  // disagree about what an operator is looking at.
+  const configured = deps.logFile?.trim();
+  const supervised = logFile(deps.stateDir);
+
+  // A path is claimed only once it exists. The state directory is where *this*
   // supervisor would send output, but a gateway started by hand never wrote
-  // here, and naming an empty path would report a quiet log where the honest
+  // there, and naming an empty path would report a quiet log where the honest
   // answer is that nothing captured anything.
-  const hasFile = !unitInstalled(deps) && existsSync(file);
+  const chosen =
+    configured !== undefined && configured.length > 0
+      ? configured
+      : unitInstalled(deps)
+        ? undefined
+        : fileExists(supervised)
+          ? supervised
+          : undefined;
+
   return {
     source: resolveConsoleSource({
-      ...(hasFile ? { logFile: file } : {}),
+      ...(chosen === undefined ? {} : { logFile: chosen }),
       unitInstalled: unitInstalled(deps),
       scope: deps.scope,
     }),
     deps: {
-      readFile: (path) => (existsSync(path) ? readFileSync(path, "utf8") : null),
+      readFile: (path, lines) => tailFile(path, lines),
       run: deps.run,
     },
   };

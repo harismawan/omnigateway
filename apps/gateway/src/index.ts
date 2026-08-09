@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   type ConsoleDeps,
@@ -7,6 +7,7 @@ import {
   loadConfig,
   OAUTH_PROVIDERS,
   resolveConsoleSource,
+  tailFile,
 } from "@omni/control";
 import { createLogger, type Logger } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
@@ -48,14 +49,19 @@ function consoleSource(logFile: string | null): { source: ConsoleSource; deps: C
   const source = resolveConsoleSource({
     logFile,
     unitInstalled: process.env.JOURNAL_STREAM !== undefined,
-    // A user unit's journal is readable with `--user`; a system unit's is not.
-    scope: process.getuid?.() === 0 ? "system" : "user",
+    // Which journal to ask, taken from systemd rather than guessed. The user
+    // manager sets `MANAGERPID`, and only for the units it started; the system
+    // manager is pid 1 and sets nothing. Inferring this from `getuid()` was
+    // wrong in both directions — a system unit with `User=omni` has a nonzero
+    // uid, and a root user manager has uid 0 — and asking the wrong journal
+    // returns another service's output or nothing at all.
+    scope: process.env.MANAGERPID === undefined ? "system" : "user",
   });
 
   return {
     source,
     deps: {
-      readFile: (path) => (existsSync(path) ? readFileSync(path, "utf8") : null),
+      readFile: (path, lines) => tailFile(path, lines),
       run: async (argv) => {
         const [cmd, ...args] = argv;
         if (cmd === undefined) return { code: 1, stdout: "", stderr: "empty argv" };

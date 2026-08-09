@@ -175,10 +175,16 @@ const HEAD = /^(\S+) (DEBUG|INFO|WARN|ERROR) {1,2}(.*)$/;
 /**
  * Where the message ends and `formatLine`'s `k=v` tail begins.
  *
- * The separator alone is ambiguous — a message could contain two spaces — so
- * the boundary also requires what follows to look like a field name. Every
- * message in the codebase is a fixed literal without an `=`, which is what
- * makes this safe; a message that ever needs one should carry it in `reason`.
+ * The rendered format is lossy here and cannot be made otherwise without
+ * changing it: two spaces separate the message from the fields, but nothing
+ * stops a message from containing two spaces itself. Requiring what follows to
+ * look like a field name narrows it, and does not close it — a message of
+ * `"phase  reason=x"` still parses as `"phase"`.
+ *
+ * That is acceptable because every message in this codebase is a fixed literal
+ * with no `=` in it, and `msg` is only ever used for display and filtering,
+ * never for dispatch. `raw` always carries the whole line. A message that ever
+ * needs an `=` should put it in `reason`, which is quoted.
  */
 const FIELDS = / {2}(?=[a-zA-Z]+=)/;
 

@@ -3,6 +3,7 @@ import { formatLine, type LogLevel } from "@omni/ir";
 import {
   type ConsoleDeps,
   type ConsoleSource,
+  MAX_CONSOLE_LINES,
   readConsole,
   resolveConsoleSource,
   UNIT_NAME,
@@ -22,6 +23,7 @@ function deps(input: { files?: Record<string, string>; journal?: string } = {}):
   return {
     argv,
     readFile: (path) => input.files?.[path] ?? null,
+
     run: async (args) => {
       argv.push([...args]);
       return { code: 0, stdout: input.journal ?? "", stderr: "" };
@@ -121,7 +123,35 @@ describe("readConsole from the journal", () => {
   test("asks journalctl for the unit, with --user under a user-scope unit", async () => {
     const d = deps({ journal: line("info", "a") });
     await readConsole(d, source, { lines: 25 });
-    expect(d.argv[0]).toEqual(["journalctl", "--user", "-u", UNIT_NAME, "-n", "25", "--no-pager"]);
+    expect(d.argv[0]).toEqual([
+      "journalctl",
+      "--user",
+      "-u",
+      UNIT_NAME,
+      "-n",
+      "25",
+      "--no-pager",
+      "--output=cat",
+    ]);
+  });
+
+  test("asks for the raw message, because the default prefix hides the log line", async () => {
+    // Without --output=cat, journalctl writes
+    //   `Aug 09 04:12:03 host bun[123]: <the actual line>`
+    // and the gateway's own instant is no longer the first token, so every
+    // line parses to nulls and a level filter matches everything.
+    const d = deps({ journal: "" });
+    await readConsole(d, source, { lines: 5 });
+    expect(d.argv[0]).toContain("--output=cat");
+  });
+
+  test("a journal line that arrived with its default prefix still parses to nothing", async () => {
+    // Documents why the flag above matters, by feeding what the prefix looks
+    // like. This is the shape that silently broke level filtering.
+    const prefixed = `Aug 09 04:12:03 host bun[123]: ${line("error", "quota poll failed")}`;
+    const d = deps({ journal: prefixed });
+    const read = await readConsole(d, source, { lines: 5 });
+    expect(read.lines[0]).toMatchObject({ level: null, at: null });
   });
 
   test("omits --user for a system unit", async () => {
@@ -167,5 +197,68 @@ describe("readConsole with no source", () => {
     const read = await readConsole(d, { kind: "none" }, { lines: 10 });
     expect(read).toEqual({ source: "none", lines: [] });
     expect(d.argv).toEqual([]);
+  });
+});
+
+describe("readConsole line clamping", () => {
+  const source: ConsoleSource = { kind: "file", path: "/tmp/gateway.log" };
+  const many = Array.from({ length: 40 }, (_, i) => line("info", `n${i}`, i)).join("\n");
+
+  test("reads -n 0 as one line, not as the whole file", async () => {
+    // `.slice(-0)` is `.slice(0)`, which returns everything. An unclamped zero
+    // from the CLI therefore printed the entire log.
+    const read = await readConsole(deps({ files: { "/tmp/gateway.log": many } }), source, {
+      lines: 0,
+    });
+    expect(read.lines).toHaveLength(1);
+  });
+
+  test.each([-5, 2.7, Number.NaN])("clamps %p rather than trusting it", async (lines) => {
+    const read = await readConsole(deps({ files: { "/tmp/gateway.log": many } }), source, {
+      lines,
+    });
+    expect(read.lines.length).toBeGreaterThan(0);
+    expect(read.lines.length).toBeLessThanOrEqual(MAX_CONSOLE_LINES);
+  });
+
+  test("caps a page above the maximum", async () => {
+    const d = deps({ journal: "" });
+    await readConsole(d, { kind: "journal", unit: UNIT_NAME, scope: "user" }, { lines: 100_000 });
+    // The clamp reaches journalctl too, so a huge page cannot be pushed onto it.
+    const n = d.argv[0]?.[d.argv[0].indexOf("-n") + 1];
+    expect(Number(n)).toBeLessThanOrEqual(MAX_CONSOLE_LINES);
+  });
+});
+
+describe("readConsole fills a filtered page", () => {
+  const source: ConsoleSource = { kind: "file", path: "/tmp/gateway.log" };
+
+  test("finds an error older than the page size, rather than returning nothing", async () => {
+    // One error, then 30 info lines. A naive tail of 5 sees only info and
+    // reports an empty page; the error is what the operator opened this for.
+    const contents = [
+      line("error", "the thing that broke", 0),
+      ...Array.from({ length: 30 }, (_, i) => line("info", `noise${i}`, i + 1)),
+    ].join("\n");
+
+    const read = await readConsole(deps({ files: { "/tmp/gateway.log": contents } }), source, {
+      lines: 5,
+      level: "error",
+    });
+    expect(read.lines.map((l) => l.msg)).toEqual(["the thing that broke"]);
+  });
+
+  test("asks the source for a wider window only when filtering", async () => {
+    const plain = deps({ journal: "" });
+    await readConsole(plain, { kind: "journal", unit: UNIT_NAME, scope: "user" }, { lines: 10 });
+    expect(plain.argv[0]?.[plain.argv[0].indexOf("-n") + 1]).toBe("10");
+
+    const filtered = deps({ journal: "" });
+    await readConsole(
+      filtered,
+      { kind: "journal", unit: UNIT_NAME, scope: "user" },
+      { lines: 10, level: "error" },
+    );
+    expect(Number(filtered.argv[0]?.[filtered.argv[0].indexOf("-n") + 1])).toBeGreaterThan(10);
   });
 });

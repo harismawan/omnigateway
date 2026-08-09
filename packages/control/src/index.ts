@@ -81,6 +81,7 @@ export {
   settingsSchema,
 } from "./schemas.ts";
 export { getSettings, putSettings } from "./settings.ts";
+export { fileExists, tailFile } from "./tail.ts";
 export {
   logLimit,
   MAX_LOG_LIMIT,

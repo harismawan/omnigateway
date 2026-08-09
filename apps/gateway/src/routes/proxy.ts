@@ -275,6 +275,18 @@ async function handle(
     // Completes a pending row if the request got as far as dispatch. The store
     // keeps what beginning it recorded where this log carries nothing.
     await finishLog(deps.store, completed, keyId, deps.logger);
+    // Not an access line: this fires only when a request failed outright, which
+    // a busy gateway does rarely. It exists because the row cannot hold the
+    // reason — `request_logs` has a status and an error code and no room for
+    // "model \"x\" is not allowed for this API key" — so without this, the one
+    // fact an operator needs is the one nothing recorded.
+    deps.logger.warn("request rejected", {
+      requestId,
+      surface,
+      status: completed.status,
+      code: gatewayError.code,
+      reason: gatewayError.message,
+    });
     return errorResponse(surface, gatewayError.code, gatewayError.message);
   }
 }

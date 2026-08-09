@@ -42,6 +42,10 @@ describe("ConsoleBoard", () => {
 
     expect(await screen.findByText("/var/log/omni.log")).toBeTruthy();
     expect(screen.getByText("OMNI_LOG_FILE")).toBeTruthy();
+    // The variable names where output is captured; it does not redirect it,
+    // and saying otherwise sends operators to set it and wonder why nothing
+    // appears.
+    expect(screen.getByText(/does not redirect it/)).toBeTruthy();
   });
 
   test("says when it is reading the journal, and how to read a file instead", async () => {
@@ -49,7 +53,7 @@ describe("ConsoleBoard", () => {
     renderWithProviders(<ConsoleBoard />);
 
     expect(await screen.findByText("omnigateway.service")).toBeTruthy();
-    expect(screen.getByText("OMNI_LOG_FILE=/path/to/gateway.log")).toBeTruthy();
+    expect(screen.getByText(/redirect the gateway's output/)).toBeTruthy();
   });
 
   test("explains an uncaptured gateway rather than showing an empty log", async () => {
@@ -58,7 +62,7 @@ describe("ConsoleBoard", () => {
 
     expect(await screen.findByText("Nothing is capturing this gateway")).toBeTruthy();
     expect(screen.getByText(/omni service install/)).toBeTruthy();
-    expect(screen.getByText(/OMNI_LOG_FILE=\/path\/to\/gateway.log/)).toBeTruthy();
+    expect(screen.getByText(/omni start/)).toBeTruthy();
   });
 
   test("distinguishes a quiet log from one filtered to nothing", async () => {
@@ -102,5 +106,37 @@ describe("ConsoleBoard", () => {
     renderWithProviders(<ConsoleBoard />);
 
     expect(await screen.findByRole("button", { name: /try again/i })).toBeTruthy();
+  });
+});
+
+describe("ConsoleBoard source hint visibility", () => {
+  test("names the file even when it is empty", async () => {
+    // "Empty log" and "wrong log" look identical without this, which is why
+    // the hint does not live in the has-rows branch.
+    stubConsole({ source: "file", path: "/var/log/omni.log", lines: [] });
+    renderWithProviders(<ConsoleBoard />);
+
+    expect(await screen.findByText(/This log is empty/)).toBeTruthy();
+    expect(screen.getByText("/var/log/omni.log")).toBeTruthy();
+  });
+
+  test("names the journal even when it is empty", async () => {
+    stubConsole({ source: "journal", lines: [] });
+    renderWithProviders(<ConsoleBoard />);
+
+    expect(await screen.findByText(/This log is empty/)).toBeTruthy();
+    expect(screen.getByText("omnigateway.service")).toBeTruthy();
+  });
+
+  test("keeps naming the source when a filter matches nothing", async () => {
+    const stub = stubConsole({ source: "file", path: "/var/log/omni.log", lines: LINES });
+    renderWithProviders(<ConsoleBoard />);
+    await screen.findByText(/omnigateway listening/);
+
+    stub.set("GET /api/console", () => ({ source: "file", path: "/var/log/omni.log", lines: [] }));
+    await userEvent.selectOptions(screen.getByLabelText("Which levels to show"), "error");
+
+    expect(await screen.findByText(/No line in this window is at that level/)).toBeTruthy();
+    expect(screen.getByText("/var/log/omni.log")).toBeTruthy();
   });
 });

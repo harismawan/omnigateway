@@ -159,6 +159,36 @@ test("records a malformed request as a row, and prints neither a line nor the bo
   );
 });
 
+test("prints why a request was rejected, since the row has nowhere to keep it", async () => {
+  const logger = captureLogger();
+  const { call } = await harness(EVENTS, { logger });
+  const res = await call("/v1/messages", { model: "fast", messages: ["MALFORMED"] });
+  expect(res.status).toBe(400);
+
+  const rejected = logger.records.filter((record) => record.msg === "request rejected");
+  expect(rejected).toHaveLength(1);
+  expect(rejected[0]?.level).toBe("warn");
+  expect(rejected[0]?.fields).toMatchObject({ surface: "anthropic", status: 400 });
+  // The reason is the whole point of the line: `request_logs` keeps
+  // `BAD_REQUEST` and not what about the request was bad.
+  expect(rejected[0]?.fields.reason).toBeTruthy();
+});
+
+test("prints nothing for a request that succeeded", async () => {
+  const logger = captureLogger();
+  const { call } = await harness(EVENTS, { logger });
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(res.status).toBe(200);
+
+  // A rejection line on the happy path is an access line by another name, which
+  // is what this change removed.
+  expect(logger.records.map((record) => record.msg)).not.toContain("request rejected");
+});
+
 test("proxies a streaming anthropic request as sse", async () => {
   const { call } = await harness();
   const res = await call("/v1/messages", {

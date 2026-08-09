@@ -213,7 +213,7 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_BASE_URL` | No | derived from host and port | Public origin for OAuth callbacks; set this behind a reverse proxy |
 | `OMNI_STATIC_DIR` | No | the console shipped with the server | Serve a different console build |
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
-| `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout is captured, so the Console screen can read it back |
+| `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
 
 Gateway events are written to stdout as one greppable line each: process lifecycle, OAuth
 refreshes, quota probes, failover, and errors. Completed requests are *not* among them — they
@@ -231,8 +231,18 @@ an invalid value falls back to `info` and is reported in the boot log.
 The Console screen and `omni console` show these lines. A process cannot read back its own
 stdout, so both read whatever captured it: `OMNI_LOG_FILE` if set, otherwise the systemd
 journal. Run the gateway in the foreground and its output goes to your terminal, where nothing
-captured it — both surfaces say so rather than showing an empty log. `omni start` sets
-`OMNI_LOG_FILE` for the gateway it supervises, and under systemd the journal needs no setup.
+captured it — both surfaces say so rather than showing an empty log.
+
+`OMNI_LOG_FILE` *names* where output was captured; it does not redirect it. Setting it alone
+leaves the log empty, because the gateway still writes to stdout. Redirect the output and name
+the same path:
+
+```bash
+bun apps/gateway/src/index.ts >> /var/log/omni.log 2>&1
+```
+
+`omni start` does both for the gateway it supervises, and under systemd the journal needs no
+setup.
 
 Routing behaviour — weights, retry limits, request deadline, log retention,
 how often provider quota is polled — lives in the database, not the

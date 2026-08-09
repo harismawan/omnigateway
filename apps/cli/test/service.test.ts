@@ -253,7 +253,7 @@ test("service logs read the journal when a unit is installed", async () => {
   mkdirSync(join(root, "systemd"), { recursive: true });
   writeFileSync(unitPath, "[Unit]\n");
 
-  const journal = "journalctl --user -u omnigateway.service -n 5 --no-pager";
+  const journal = "journalctl --user -u omnigateway.service -n 5 --no-pager --output=cat";
   const service = fakeService({
     root,
     unitPath,
@@ -271,5 +271,6 @@ test("service logs read the journal when a unit is installed", async () => {
     "-n",
     "5",
     "--no-pager",
+    "--output=cat",
   ]);
 });

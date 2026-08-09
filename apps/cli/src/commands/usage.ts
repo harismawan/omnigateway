@@ -70,6 +70,10 @@ export const logs: Command = {
     number: { type: "string", short: "n" },
     follow: { type: "boolean" },
     service: { type: "boolean" },
+    // Only meaningful beside --service, but declared unconditionally: strict
+    // parsing rejects an undeclared flag, and the alias must accept whatever
+    // `omni console` accepts.
+    system: { type: "boolean" },
   },
   async run(args, { ctx, writer, service }) {
     const limit = numberFlag(args.values, "number") ?? 20;

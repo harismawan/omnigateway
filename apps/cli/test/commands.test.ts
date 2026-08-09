@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { health, seedCredential } from "@omni/testkit";
+import { serviceLogs } from "../src/service.ts";
 import { cli, fakeService, makeRoot, openStore, TEST_KEY } from "./helpers/harness.ts";
 
 /** Every test starts from a migrated, empty installation. */
@@ -525,7 +526,7 @@ test("logs --service reads the process's own output, not the request log", async
     root,
     unitPath: `${root}/unit/omnigateway.service`,
     runResults: {
-      "journalctl --user -u omnigateway.service -n 5 --no-pager": {
+      "journalctl --user -u omnigateway.service -n 5 --no-pager --output=cat": {
         code: 0,
         stdout: "omnigateway listening on http://127.0.0.1:8787\n",
         stderr: "",
@@ -672,4 +673,61 @@ test("doctor reports which log the console will read", async () => {
 
   expect(result.code).toBe(0);
   expect(result.out).toContain("console log");
+});
+
+test("console reads the file OMNI_LOG_FILE names, not the supervisor's default", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const configured = `${root}/elsewhere.log`;
+  await Bun.write(configured, `${CONSOLE_LINES}\n`);
+  // The default path also exists, with different content: if the CLI ignored
+  // OMNI_LOG_FILE it would read this and the gateway would read the other.
+  await Bun.write(`${service.deps.stateDir}/gateway.log`, "2026-08-09T04:12:03.114Z INFO  wrong\n");
+  service.deps.logFile = configured;
+
+  const result = await cli(["console"], { root, service });
+
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("quota poll failed");
+  expect(result.out).not.toContain("wrong");
+  expect(result.err).toContain("elsewhere.log");
+});
+
+test("console accepts --system rather than refusing the flag", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  const result = await cli(["console", "--system"], { root, service });
+
+  // Strict parsing rejects an undeclared flag with exit 2 before the command
+  // ever runs, which is what made `omni console --system` unusable. The scope
+  // it selects is resolved in run.ts and exercised by the service tests; here
+  // the contract is only that the flag is accepted.
+  expect(result.code).toBe(0);
+  expect(result.err).not.toContain("usage:");
+});
+
+test("a system-scope installation reads the system journal, without --user", async () => {
+  const root = makeRoot();
+  const unitPath = `${root}/systemd/omnigateway.service`;
+  await Bun.write(unitPath, "[Unit]\n");
+  const service = fakeService({ root, unitPath });
+  service.deps.scope = "system";
+
+  await serviceLogs(service.deps, 5);
+
+  // Asking the wrong journal returns another service's output, or nothing.
+  expect(service.commands.some((c) => c.includes("--user"))).toBe(false);
+  expect(service.commands[0]).toContain("--output=cat");
+});
+
+test("console clamps -n 0 instead of printing the whole log", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  await Bun.write(`${service.deps.stateDir}/gateway.log`, `${CONSOLE_LINES}\n`);
+
+  const result = await cli(["console", "-n", "0", "--json"], { root, service });
+
+  expect(result.code).toBe(0);
+  expect((JSON.parse(result.out) as { lines: unknown[] }).lines).toHaveLength(1);
 });
