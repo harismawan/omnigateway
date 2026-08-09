@@ -60,6 +60,9 @@ export const modelsShow: Command = {
             { header: "WEIGHT", align: "right" },
             { header: "IN $/MTOK", align: "right" },
             { header: "OUT $/MTOK", align: "right" },
+            { header: "CACHE R", align: "right" },
+            { header: "CACHE W 5M", align: "right" },
+            { header: "CACHE W 1H", align: "right" },
             { header: "CAPABILITIES" },
           ],
           model.targets.map((target) => [
@@ -69,6 +72,9 @@ export const modelsShow: Command = {
             String(target.weight),
             target.costPerMTok.input.toFixed(2),
             target.costPerMTok.output.toFixed(2),
+            price(target.costPerMTok.cacheRead),
+            price(target.costPerMTok.cacheWrite5m),
+            price(target.costPerMTok.cacheWrite1h),
             capabilityList(target),
           ]),
         ),
@@ -76,6 +82,17 @@ export const modelsShow: Command = {
     );
   },
 };
+
+/**
+ * A price the target names, or an em dash when it names none.
+ *
+ * Not `0.00`: an unnamed price is not a free one. The router falls back to a
+ * multiple of input, so printing a zero would claim the operator is billed
+ * nothing for a token class that in fact costs more than fresh input.
+ */
+function price(value: number | undefined): string {
+  return value === undefined ? "\u2014" : value.toFixed(2);
+}
 
 function capabilityList(target: Target): string {
   const on = Object.entries(target.capabilities)
@@ -146,15 +163,21 @@ export const modelsCatalog: Command = {
           { header: "LABEL" },
           { header: "IN $/MTOK", align: "right" },
           { header: "OUT $/MTOK", align: "right" },
+          { header: "CACHE R", align: "right" },
+          { header: "CACHE W 5M", align: "right" },
+          { header: "CACHE W 1H", align: "right" },
         ],
         entries.map((entry) => {
-          const price = catalogPricing(entry.provider, entry.id);
+          const listed = catalogPricing(entry.provider, entry.id);
           return [
             provider(ctx, entry.provider),
             entry.id,
             entry.label,
-            price === null ? "\u2014" : price.input.toFixed(2),
-            price === null ? "\u2014" : price.output.toFixed(2),
+            price(listed?.input),
+            price(listed?.output),
+            price(listed?.cacheRead),
+            price(listed?.cacheWrite5m),
+            price(listed?.cacheWrite1h),
           ];
         }),
       ),

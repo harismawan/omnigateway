@@ -39,40 +39,29 @@ export const modelSchema = z.object({
   isAlias: z.boolean(),
   targets: z
     .array(
-      z
-        .object({
-          provider: providerIdSchema,
-          model: z.string().min(1),
-          tier: z.number().int().min(1),
-          weight: z.number().positive(),
-          costPerMTok: z.object({
-            input: z.number().min(0),
-            output: z.number().min(0),
-            cacheRead: z.number().min(0),
-          }),
-          capabilities: z.object({
-            tools: z.boolean(),
-            images: z.boolean(),
-            reasoning: z.boolean(),
-          }),
-        })
-        .or(
-          z.object({
-            provider: providerIdSchema,
-            model: z.string().min(1),
-            tier: z.number().int().min(1),
-            weight: z.number().positive(),
-            costPerMTok: z.object({
-              input: z.number().min(0),
-              output: z.number().min(0),
-            }),
-            capabilities: z.object({
-              tools: z.boolean(),
-              images: z.boolean(),
-              reasoning: z.boolean(),
-            }),
-          }),
-        ),
+      z.object({
+        provider: providerIdSchema,
+        model: z.string().min(1),
+        tier: z.number().int().min(1),
+        weight: z.number().positive(),
+        // One object with optional prices rather than a union of shapes: a
+        // union lets a malformed `cacheRead` fall through to the branch that
+        // does not name it, so a bad price is dropped instead of rejected.
+        costPerMTok: z.object({
+          input: z.number().min(0),
+          output: z.number().min(0),
+          cacheRead: z.number().min(0).optional(),
+          // A zero is a provider that bills no premium for creating a cache
+          // entry — a price, not a missing one — so it has to survive parsing.
+          cacheWrite5m: z.number().min(0).optional(),
+          cacheWrite1h: z.number().min(0).optional(),
+        }),
+        capabilities: z.object({
+          tools: z.boolean(),
+          images: z.boolean(),
+          reasoning: z.boolean(),
+        }),
+      }),
     )
     .min(1, "a virtual model needs at least one target"),
 });

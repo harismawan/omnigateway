@@ -1,11 +1,34 @@
-import type { ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
+import type { CacheControl, ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
 import { GatewayError, validateRequest } from "@omni/ir";
 import { z } from "zod";
-import { extraFields, parseDataUrl, parseOrThrow } from "./schemas.ts";
+import {
+  applyMessageCacheControl,
+  extraFields,
+  looseCacheControl,
+  parseDataUrl,
+  parseOrThrow,
+} from "./schemas.ts";
 
+/**
+ * Cache breakpoints have two spellings on this surface.
+ *
+ * Anthropic only accepts a marker on a content block, but OpenAI-shaped
+ * clients also put one on the message or the tool itself. Both are read here:
+ * an OpenAI upstream caches on its own and ignores them, while a request
+ * routed to an Anthropic target would otherwise arrive with no breakpoints at
+ * all and bill every repeated prefix as fresh input.
+ */
 const part = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("text"), text: z.string() }),
-  z.object({ type: z.literal("image_url"), image_url: z.object({ url: z.string() }) }),
+  z.object({
+    type: z.literal("text"),
+    text: z.string(),
+    cache_control: z.unknown().optional(),
+  }),
+  z.object({
+    type: z.literal("image_url"),
+    image_url: z.object({ url: z.string() }),
+    cache_control: z.unknown().optional(),
+  }),
 ]);
 
 const toolCall = z.object({
@@ -19,6 +42,7 @@ const message = z.object({
   content: z.union([z.string(), z.array(part), z.null()]).optional(),
   tool_calls: z.array(toolCall).optional(),
   tool_call_id: z.string().optional(),
+  cache_control: z.unknown().optional(),
 });
 
 const schema = z.object({
@@ -37,7 +61,9 @@ const schema = z.object({
           name: z.string(),
           description: z.string().optional(),
           parameters: z.record(z.string(), z.unknown()).optional(),
+          cache_control: z.unknown().optional(),
         }),
+        cache_control: z.unknown().optional(),
       }),
     )
     .optional(),
@@ -81,10 +107,17 @@ function contentBlocks(content: z.infer<typeof message>["content"]): ContentBloc
     return content.length > 0 ? [{ type: "text", text: content }] : [];
   if (!Array.isArray(content)) return [];
   return content.map((p): ContentBlock => {
-    if (p.type === "text") return { type: "text", text: p.text };
+    if (p.type === "text")
+      return { type: "text", text: p.text, ...looseCacheControl(p.cache_control) };
     const { mediaType, data } = parseDataUrl(p.image_url.url);
-    return { type: "image", mediaType, data };
+    return { type: "image", mediaType, data, ...looseCacheControl(p.cache_control) };
   });
+}
+
+/** The outer marker when it maps, else the one inside `function`. */
+function toolCacheControl(outer: unknown, inner: unknown): { cacheControl?: CacheControl } {
+  const parsed = looseCacheControl(outer);
+  return parsed.cacheControl === undefined ? looseCacheControl(inner) : parsed;
 }
 
 function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): ToolChoice {
@@ -108,7 +141,11 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
   for (const m of parsed.messages) {
     if (m.role === "system" || m.role === "developer") {
       // Both map to the IR system prompt; developer is the newer spelling.
-      system.push(...contentBlocks(m.content));
+      const blocks = contentBlocks(m.content);
+      // Scoped to this message's own blocks: a later system message appends
+      // after them, and the marker belongs to the message that carried it.
+      applyMessageCacheControl(blocks, m.cache_control);
+      system.push(...blocks);
       continue;
     }
 
@@ -125,6 +162,7 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
             toolUseId: m.tool_call_id,
             content: typeof m.content === "string" ? m.content : "",
             isError: false,
+            ...looseCacheControl(m.cache_control),
           },
         ],
       });
@@ -140,6 +178,8 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
         input: parseArguments(call.function.arguments),
       });
     }
+    // After the tool calls, so "cache through this message" includes them.
+    applyMessageCacheControl(content, m.cache_control);
     if (content.length > 0) messages.push({ role: m.role, content });
   }
 
@@ -165,6 +205,12 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
       name: t.function.name,
       ...(t.function.description !== undefined && { description: t.function.description }),
       inputSchema: t.function.parameters ?? { type: "object" },
+      // Clients disagree on which level carries it; the outer one is the more
+      // specific statement about this tool entry, so it wins — but only if it
+      // is a marker at all. `??` falls through on absence, not on garbage, so
+      // testing the parsed result rather than the raw field keeps a malformed
+      // outer marker from swallowing a good inner one.
+      ...toolCacheControl(t.cache_control, t.function.cache_control),
     }));
   }
   if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);

@@ -1,5 +1,24 @@
-import type { CollectedResponse, ErrorCode, StopReason, StreamEvent } from "@omni/ir";
+import type { CollectedResponse, ErrorCode, StopReason, StreamEvent, Usage } from "@omni/ir";
+import { promptTokens } from "@omni/ir";
 import type { SseFrame } from "./anthropic.ts";
+
+/**
+ * Renders usage the way this surface counts it.
+ *
+ * OpenAI's `prompt_tokens` is the whole prompt with the cached part inside it,
+ * which is the opposite of the IR's convention — so the parts are added back
+ * and the cached share reported as the subset a client expects to be able to
+ * subtract. `cache_creation` has no field here and lands in the total only.
+ */
+function usageBody(usage: Usage): Record<string, unknown> {
+  const prompt = promptTokens(usage);
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: usage.outputTokens,
+    total_tokens: prompt + usage.outputTokens,
+    prompt_tokens_details: { cached_tokens: usage.cacheReadTokens },
+  };
+}
 
 const FINISH: Readonly<Record<StopReason, string>> = {
   endTurn: "stop",
@@ -127,11 +146,7 @@ export async function* openaiStream(
             created,
             model,
             { index: 0, delta: {}, finish_reason: FINISH[event.stopReason] },
-            {
-              prompt_tokens: event.usage.inputTokens,
-              completion_tokens: event.usage.outputTokens,
-              total_tokens: event.usage.inputTokens + event.usage.outputTokens,
-            },
+            usageBody(event.usage),
           ),
         );
         break;
@@ -181,11 +196,7 @@ export function openaiResponse(
         finish_reason: FINISH[collected.stopReason],
       },
     ],
-    usage: {
-      prompt_tokens: collected.usage.inputTokens,
-      completion_tokens: collected.usage.outputTokens,
-      total_tokens: collected.usage.inputTokens + collected.usage.outputTokens,
-    },
+    usage: usageBody(collected.usage),
   };
 }
 

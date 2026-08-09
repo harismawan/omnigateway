@@ -9,12 +9,60 @@ export type StopReason = "endTurn" | "maxTokens" | "toolUse" | "stopSequence" | 
  * aggregates in Task 25 — writes the same `?? 0`, and one that forgets silently
  * bills a cache read at the full input rate.
  */
+/**
+ * `inputTokens` is the *uncached* remainder, never the whole prompt.
+ *
+ * The three providers disagree: Anthropic reports input already net of cache,
+ * while OpenAI and Kimi count cached tokens inside their prompt total. This is
+ * Anthropic's convention, so those two decoders subtract on the way in. Pricing
+ * adds `cacheReadTokens` at the cache rate on top, so a decoder that leaves the
+ * overlap in charges those tokens twice — once at full input price and again at
+ * the cache rate. An egress rendering a provider that wants a total adds the
+ * parts back.
+ */
 export type Usage = {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /**
+   * `cacheWriteTokens` split by the TTL each write bought, when the upstream
+   * says. Optional because only Anthropic reports the breakdown, and because a
+   * consumer that ignores it still has the aggregate.
+   *
+   * The two sum to `cacheWriteTokens`. They exist because the rates differ —
+   * a 5m write bills at 1.25x base input and a 1h write at 2x — so the
+   * aggregate alone cannot be priced once a request mixes the two.
+   */
+  cacheWrite5mTokens?: number;
+  cacheWrite1hTokens?: number;
 };
+
+/**
+ * Builds `Usage` from a provider that counts cached tokens inside its prompt
+ * total, subtracting the overlap back out.
+ *
+ * Clamped at zero: an upstream reporting more cached tokens than prompt tokens
+ * is nonsense, and a negative input would flow into pricing as a credit.
+ */
+export function usageFromPromptTotal(
+  promptTokens: number,
+  outputTokens: number,
+  cacheReadTokens: number,
+  cacheWriteTokens = 0,
+): Usage {
+  return {
+    inputTokens: Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens),
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+  };
+}
+
+/** The whole prompt, for a client surface that reports one number. */
+export function promptTokens(usage: Usage): number {
+  return usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+}
 
 export type ContentBlockStart =
   | { type: "text" }

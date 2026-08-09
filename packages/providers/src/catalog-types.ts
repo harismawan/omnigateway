@@ -18,6 +18,13 @@ export type ProviderModelPricing = {
   input: number;
   output: number;
   cacheRead: number;
+  /**
+   * Cache writes, by the TTL each buys. Zero where a provider caches
+   * automatically and bills no premium for creating an entry — a real price,
+   * not a missing one.
+   */
+  cacheWrite5m: number;
+  cacheWrite1h: number;
 };
 
 export type ProviderModelChoice = {

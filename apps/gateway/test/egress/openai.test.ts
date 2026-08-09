@@ -14,7 +14,7 @@ const TEXT: StreamEvent[] = [
   {
     type: "end",
     stopReason: "endTurn",
-    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 4000, cacheWriteTokens: 120 },
   },
 ];
 
@@ -39,7 +39,15 @@ test("emits chat completion chunks terminated by [DONE]", async () => {
 
   const last = JSON.parse(f[f.length - 2]?.data as string);
   expect(last.choices[0].finish_reason).toBe("stop");
-  expect(last.usage).toEqual({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 });
+  // OpenAI counts cached tokens inside `prompt_tokens`, unlike the IR — so the
+  // prompt total is rebuilt here and the cached part reported as the subset it
+  // is. A client subtracting one from the other must get the uncached input.
+  expect(last.usage).toEqual({
+    prompt_tokens: 4130,
+    completion_tokens: 2,
+    total_tokens: 4132,
+    prompt_tokens_details: { cached_tokens: 4000 },
+  });
 });
 
 test("streams tool calls with index and argument deltas", async () => {
@@ -152,7 +160,7 @@ test("builds a non-streaming chat completion body", () => {
   expect(body.object).toBe("chat.completion");
   expect(body.choices[0]?.message).toEqual({ role: "assistant", content: "Hi" });
   expect(body.choices[0]?.finish_reason).toBe("stop");
-  expect(body.usage.total_tokens).toBe(12);
+  expect(body.usage.total_tokens).toBe(4132);
 });
 
 test("renders collected tool calls in a non-streaming body", () => {
@@ -175,5 +183,17 @@ test("renders collected tool calls in a non-streaming body", () => {
     id: "c1",
     type: "function",
     function: { name: "f", arguments: '{"a":1}' },
+  });
+});
+
+test("reports cached prompt tokens on a non-streaming body", () => {
+  const body = openaiResponse(collect(TEXT), "chatcmpl-1", 1000) as {
+    usage: Record<string, unknown>;
+  };
+  expect(body.usage).toEqual({
+    prompt_tokens: 4130,
+    completion_tokens: 2,
+    total_tokens: 4132,
+    prompt_tokens_details: { cached_tokens: 4000 },
   });
 });

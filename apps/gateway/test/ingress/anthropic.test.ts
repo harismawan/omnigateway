@@ -276,6 +276,100 @@ test("still rejects a role no surface defines", () => {
   ).toThrow(GatewayError);
 });
 
+test("keeps a cache breakpoint on a system block, with its ttl", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    system: [{ type: "text", text: "a", cache_control: { type: "ephemeral", ttl: "1h" } }],
+  });
+  expect(req.system).toEqual([
+    { type: "text", text: "a", cacheControl: { type: "ephemeral", ttl: "1h" } },
+  ]);
+});
+
+test("defaults a cache breakpoint with no ttl to the bare marker", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    system: [{ type: "text", text: "a", cache_control: { type: "ephemeral" } }],
+  });
+  expect(req.system).toEqual([{ type: "text", text: "a", cacheControl: { type: "ephemeral" } }]);
+});
+
+test("keeps cache breakpoints on message blocks, text and otherwise", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t", name: "f", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t",
+            content: "ok",
+            cache_control: { type: "ephemeral" },
+          },
+          { type: "text", text: "next", cache_control: { type: "ephemeral", ttl: "5m" } },
+        ],
+      },
+    ],
+  });
+  expect(req.messages[1]?.content[0]).toEqual({
+    type: "toolResult",
+    toolUseId: "t",
+    content: "ok",
+    isError: false,
+    cacheControl: { type: "ephemeral" },
+  });
+  expect(req.messages[1]?.content[1]).toEqual({
+    type: "text",
+    text: "next",
+    cacheControl: { type: "ephemeral", ttl: "5m" },
+  });
+});
+
+test("keeps a cache breakpoint on a tool definition", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    tools: [
+      {
+        name: "f",
+        input_schema: { type: "object" },
+        cache_control: { type: "ephemeral", ttl: "1h" },
+      },
+    ],
+  });
+  expect(req.tools).toEqual([
+    {
+      name: "f",
+      inputSchema: { type: "object" },
+      cacheControl: { type: "ephemeral", ttl: "1h" },
+    },
+  ]);
+});
+
+test("rejects a cache control shape the provider does not accept", () => {
+  expect(() =>
+    parseAnthropicRequest({
+      ...minimal,
+      system: [{ type: "text", text: "a", cache_control: { type: "persistent" } }],
+    }),
+  ).toThrow(GatewayError);
+  expect(() =>
+    parseAnthropicRequest({
+      ...minimal,
+      system: [{ type: "text", text: "a", cache_control: { type: "ephemeral", ttl: "2h" } }],
+    }),
+  ).toThrow(GatewayError);
+});
+
+test("leaves an unmarked block without cache metadata", () => {
+  const req = parseAnthropicRequest({ ...minimal, system: [{ type: "text", text: "a" }] });
+  expect(req.system?.[0]).toEqual({ type: "text", text: "a" });
+});
+
 test("carries the betas the client opted into", () => {
   const req = parseAnthropicRequest(
     minimal,

@@ -29,6 +29,7 @@ import type {
 import { newCompletedRequestLog } from "../logging.ts";
 import { attempt } from "./attempt.ts";
 import { classify } from "./classify.ts";
+import { priceOf } from "./price.ts";
 import type { RoutingSnapshotSource } from "./snapshotCache.ts";
 
 export type DispatchDeps = {
@@ -248,7 +249,11 @@ export async function dispatch(
                 log.outputTokens = event.usage.outputTokens;
                 log.cacheReadTokens = event.usage.cacheReadTokens;
                 log.cacheWriteTokens = event.usage.cacheWriteTokens;
-                log.costUsd = priceOf(candidate, event.usage);
+                log.costUsd = priceOf(
+                  candidate.target.costPerMTok,
+                  event.usage,
+                  candidate.target.provider,
+                );
               }
 
               if (event.type === "error") {
@@ -429,20 +434,6 @@ export async function dispatch(
   }
 
   return { events: run(), log: () => log };
-}
-
-function priceOf(
-  candidate: Candidate,
-  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number },
-): number {
-  const p = candidate.target.costPerMTok;
-  const cacheRate = p.cacheRead ?? p.input * 0.1;
-  return (
-    (usage.inputTokens * p.input +
-      usage.outputTokens * p.output +
-      usage.cacheReadTokens * cacheRate) /
-    1_000_000
-  );
 }
 
 function waitForCancellation<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

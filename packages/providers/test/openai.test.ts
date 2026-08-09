@@ -204,7 +204,33 @@ test("decodes a text response stream", async () => {
   expect(events.at(-1)).toEqual({
     type: "end",
     stopReason: "endTurn",
-    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 4, cacheWriteTokens: 0 },
+    // OpenAI counts cached tokens inside `input_tokens`; the IR does not, so
+    // the cached part is subtracted out here. Leaving it in would bill those
+    // tokens twice — once at the input rate and again at the cache rate.
+    usage: { inputTokens: 6, outputTokens: 5, cacheReadTokens: 4, cacheWriteTokens: 0 },
+  });
+});
+
+test("never reports negative input when upstream cache counts look wrong", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs({
+        event: "response.completed",
+        data: JSON.stringify({
+          response: {
+            status: "completed",
+            usage: {
+              input_tokens: 3,
+              output_tokens: 1,
+              input_tokens_details: { cached_tokens: 10 },
+            },
+          },
+        }),
+      }),
+    ),
+  );
+  expect(events.at(-1)).toMatchObject({
+    usage: { inputTokens: 0, outputTokens: 1, cacheReadTokens: 10, cacheWriteTokens: 0 },
   });
 });
 
@@ -524,4 +550,29 @@ test("closes reasoning and message blocks once each in a full turn", async () =>
     .filter((e) => e.type === "blockDelta" && e.delta.type === "text")
     .map((e) => (e.type === "blockDelta" && e.delta.type === "text" ? e.delta.text : ""));
   expect(text).toEqual(["answer"]);
+});
+
+test("falls back to the chat-completions spelling of cached tokens", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs({
+        event: "response.completed",
+        data: JSON.stringify({
+          response: {
+            status: "completed",
+            // An OpenAI-compatible endpoint behind an `openai` target may use
+            // the chat-completions field name rather than the Responses one.
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              prompt_tokens_details: { cached_tokens: 4 },
+            },
+          },
+        }),
+      }),
+    ),
+  );
+  expect(events.at(-1)).toMatchObject({
+    usage: { inputTokens: 6, outputTokens: 5, cacheReadTokens: 4, cacheWriteTokens: 0 },
+  });
 });

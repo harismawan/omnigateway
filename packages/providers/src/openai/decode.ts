@@ -1,4 +1,10 @@
-import { type ErrorCode, RETRYABLE, type StopReason, type StreamEvent } from "@omni/ir";
+import {
+  type ErrorCode,
+  RETRYABLE,
+  type StopReason,
+  type StreamEvent,
+  usageFromPromptTotal,
+} from "@omni/ir";
 import type { SseMessage } from "../sse.ts";
 
 const ERROR_CODE: Readonly<Record<string, ErrorCode>> = {
@@ -23,6 +29,8 @@ type ResponsesEvent = {
       input_tokens?: number;
       output_tokens?: number;
       input_tokens_details?: { cached_tokens?: number };
+      /** An OpenAI-compatible endpoint may use the chat-completions name. */
+      prompt_tokens_details?: { cached_tokens?: number };
     };
     error?: ErrorPayload;
   };
@@ -163,12 +171,14 @@ export async function* decodeResponses(
         yield {
           type: "end",
           stopReason,
-          usage: {
-            inputTokens: r.usage?.input_tokens ?? 0,
-            outputTokens: r.usage?.output_tokens ?? 0,
-            cacheReadTokens: r.usage?.input_tokens_details?.cached_tokens ?? 0,
-            cacheWriteTokens: 0,
-          },
+          // `input_tokens` includes the cached part; the IR wants it net.
+          usage: usageFromPromptTotal(
+            r.usage?.input_tokens ?? 0,
+            r.usage?.output_tokens ?? 0,
+            r.usage?.input_tokens_details?.cached_tokens ??
+              r.usage?.prompt_tokens_details?.cached_tokens ??
+              0,
+          ),
         };
         break;
       }

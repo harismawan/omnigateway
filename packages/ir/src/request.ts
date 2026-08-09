@@ -1,9 +1,30 @@
 export type ProviderId = "anthropic" | "openai" | "kimi";
 
-export type TextBlock = { type: "text"; text: string; cacheBreakpoint?: boolean };
-export type ImageBlock = { type: "image"; mediaType: string; data: string };
+/**
+ * A caller-placed cache breakpoint, in the only shape providers accept.
+ *
+ * Modelled as a value rather than a boolean because the TTL is part of what the
+ * caller asked for: a marker rendered without its `1h` silently buys a
+ * five-minute cache. The union is closed on purpose — this is caller intent the
+ * gateway forwards, not free-form metadata it carries.
+ */
+export type CacheControl = { type: "ephemeral"; ttl?: "5m" | "1h" };
+
+export type TextBlock = { type: "text"; text: string; cacheControl?: CacheControl };
+export type ImageBlock = {
+  type: "image";
+  mediaType: string;
+  data: string;
+  cacheControl?: CacheControl;
+};
 export type ThinkingBlock = { type: "thinking"; text: string; signature?: string };
-export type ToolUseBlock = { type: "toolUse"; id: string; name: string; input: unknown };
+export type ToolUseBlock = {
+  type: "toolUse";
+  id: string;
+  name: string;
+  input: unknown;
+  cacheControl?: CacheControl;
+};
 /**
  * `content` is flattened text, not blocks.
  *
@@ -19,9 +40,20 @@ export type ToolResultBlock = {
   toolUseId: string;
   content: string;
   isError?: boolean;
+  cacheControl?: CacheControl;
 };
 
 export type ContentBlock = TextBlock | ImageBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock;
+
+/**
+ * Reads a block's cache breakpoint without every caller narrowing the union.
+ *
+ * A thinking block cannot carry one — Anthropic rejects a marker there — so its
+ * absence is a property of the type, not a case someone forgot.
+ */
+export function cacheControlOf(block: ContentBlock): CacheControl | undefined {
+  return block.type === "thinking" ? undefined : block.cacheControl;
+}
 
 /**
  * `system` is a mid-conversation operator instruction, distinct from the
@@ -44,6 +76,7 @@ export type ToolDef = {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  cacheControl?: CacheControl;
 };
 
 /**

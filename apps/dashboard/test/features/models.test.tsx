@@ -34,6 +34,10 @@ describe("catalog pricing defaults", () => {
       costInput: "1",
       costOutput: "5",
       costCacheRead: "0.1",
+      // 1.25x and 2x of input: what Anthropic charges to create a cache entry
+      // at each TTL.
+      costCacheWrite5m: "1.25",
+      costCacheWrite1h: "2",
     });
     expect(catalogPrices("anthropic", "not-a-real-model")).toBeNull();
   });
@@ -46,6 +50,8 @@ describe("catalog pricing defaults", () => {
         input: 5,
         output: 25,
         cacheRead: 0.5,
+        cacheWrite5m: 6.25,
+        cacheWrite1h: 10,
       });
     }
   });
@@ -250,6 +256,8 @@ describe("ModelsBoard", () => {
         input: 1,
         output: 5,
         cacheRead: 0.1,
+        cacheWrite5m: 1.25,
+        cacheWrite1h: 2,
       });
     });
   });

@@ -8,9 +8,19 @@ import type {
 } from "@omni/ir";
 import { GatewayError, validateRequest } from "@omni/ir";
 import { z } from "zod";
-import { extraFields, isRecord, parseOrThrow } from "./schemas.ts";
+import {
+  cacheControlSchema as cacheControl,
+  extraFields,
+  irCacheControl,
+  isRecord,
+  parseOrThrow,
+} from "./schemas.ts";
 
-const textBlock = z.object({ type: z.literal("text"), text: z.string() });
+const textBlock = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+  cache_control: cacheControl.optional(),
+});
 
 const imageBlock = z.object({
   type: z.literal("image"),
@@ -19,6 +29,7 @@ const imageBlock = z.object({
     media_type: z.string(),
     data: z.string(),
   }),
+  cache_control: cacheControl.optional(),
 });
 
 const thinkingBlock = z.object({
@@ -32,6 +43,7 @@ const toolUseBlock = z.object({
   id: z.string(),
   name: z.string(),
   input: z.record(z.string(), z.unknown()).default({}),
+  cache_control: cacheControl.optional(),
 });
 
 const toolResultBlock = z.object({
@@ -39,6 +51,7 @@ const toolResultBlock = z.object({
   tool_use_id: z.string(),
   content: z.union([z.string(), z.array(z.unknown())]).optional(),
   is_error: z.boolean().optional(),
+  cache_control: cacheControl.optional(),
 });
 
 const block = z.discriminatedUnion("type", [
@@ -74,6 +87,7 @@ const schema = z.object({
         name: z.string(),
         description: z.string().optional(),
         input_schema: z.record(z.string(), z.unknown()),
+        cache_control: cacheControl.optional(),
       }),
     )
     .optional(),
@@ -132,9 +146,14 @@ function flattenToolResult(content: string | unknown[] | undefined): string {
 function toIrBlock(b: z.infer<typeof block>): ContentBlock {
   switch (b.type) {
     case "text":
-      return { type: "text", text: b.text };
+      return { type: "text", text: b.text, ...irCacheControl(b.cache_control) };
     case "image":
-      return { type: "image", mediaType: b.source.media_type, data: b.source.data };
+      return {
+        type: "image",
+        mediaType: b.source.media_type,
+        data: b.source.data,
+        ...irCacheControl(b.cache_control),
+      };
     case "thinking":
       return {
         type: "thinking",
@@ -142,13 +161,20 @@ function toIrBlock(b: z.infer<typeof block>): ContentBlock {
         ...(b.signature !== undefined && { signature: b.signature }),
       };
     case "tool_use":
-      return { type: "toolUse", id: b.id, name: b.name, input: b.input };
+      return {
+        type: "toolUse",
+        id: b.id,
+        name: b.name,
+        input: b.input,
+        ...irCacheControl(b.cache_control),
+      };
     case "tool_result":
       return {
         type: "toolResult",
         toolUseId: b.tool_use_id,
         content: flattenToolResult(b.content),
         isError: b.is_error ?? false,
+        ...irCacheControl(b.cache_control),
       };
   }
 }
@@ -225,7 +251,11 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
       ? undefined
       : typeof parsed.system === "string"
         ? [{ type: "text" as const, text: parsed.system }]
-        : parsed.system.map((b) => ({ type: "text" as const, text: b.text }));
+        : parsed.system.map((b) => ({
+            type: "text" as const,
+            text: b.text,
+            ...irCacheControl(b.cache_control),
+          }));
 
   const request: ChatRequest = {
     model: parsed.model,
@@ -242,6 +272,7 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
       name: t.name,
       ...(t.description !== undefined && { description: t.description }),
       inputSchema: t.input_schema,
+      ...irCacheControl(t.cache_control),
     }));
   }
   if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);

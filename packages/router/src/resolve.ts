@@ -34,7 +34,13 @@ function synthesize(provider: ProviderId, model: string): VirtualModel {
     costPerMTok:
       listed === null
         ? { input: 0, output: 0 }
-        : { input: listed.input, output: listed.output, cacheRead: listed.cacheRead },
+        : {
+            input: listed.input,
+            output: listed.output,
+            cacheRead: listed.cacheRead,
+            cacheWrite5m: listed.cacheWrite5m,
+            cacheWrite1h: listed.cacheWrite1h,
+          },
     capabilities: PROVIDER_CAPABILITIES[provider],
   };
   return { id: `${provider}/${model}`, targets: [target], strategy: "score", isAlias: true };

@@ -19,6 +19,13 @@ export type TargetDraft = {
   costOutput: string;
   /** Empty means the provider does not price cache reads separately. */
   costCacheRead: string;
+  /**
+   * Empty means the target names no write price, and pricing falls back to a
+   * multiple of input chosen for that provider. Blank and 0 are different: a
+   * provider that bills no write premium needs the explicit 0.
+   */
+  costCacheWrite5m: string;
+  costCacheWrite1h: string;
   tools: boolean;
   images: boolean;
   reasoning: boolean;
@@ -68,13 +75,18 @@ function nextKey(): string {
 export function catalogPrices(
   provider: ProviderId,
   model: string,
-): Pick<TargetDraft, "costInput" | "costOutput" | "costCacheRead"> | null {
+): Pick<
+  TargetDraft,
+  "costInput" | "costOutput" | "costCacheRead" | "costCacheWrite5m" | "costCacheWrite1h"
+> | null {
   const listed = catalogPricing(provider, model);
   if (listed === null) return null;
   return {
     costInput: String(listed.input),
     costOutput: String(listed.output),
     costCacheRead: String(listed.cacheRead),
+    costCacheWrite5m: String(listed.cacheWrite5m),
+    costCacheWrite1h: String(listed.cacheWrite1h),
   };
 }
 
@@ -92,6 +104,8 @@ export function blankTarget(provider: ProviderId = "anthropic"): TargetDraft {
     costInput: prices?.costInput ?? "0",
     costOutput: prices?.costOutput ?? "0",
     costCacheRead: prices?.costCacheRead ?? "",
+    costCacheWrite5m: prices?.costCacheWrite5m ?? "",
+    costCacheWrite1h: prices?.costCacheWrite1h ?? "",
     tools: true,
     images: true,
     reasoning: true,
@@ -117,6 +131,14 @@ export function toDraft(model: VirtualModel): ModelDraft {
       costOutput: String(target.costPerMTok.output),
       costCacheRead:
         target.costPerMTok.cacheRead === undefined ? "" : String(target.costPerMTok.cacheRead),
+      costCacheWrite5m:
+        target.costPerMTok.cacheWrite5m === undefined
+          ? ""
+          : String(target.costPerMTok.cacheWrite5m),
+      costCacheWrite1h:
+        target.costPerMTok.cacheWrite1h === undefined
+          ? ""
+          : String(target.costPerMTok.cacheWrite1h),
       tools: target.capabilities.tools,
       images: target.capabilities.images,
       reasoning: target.capabilities.reasoning,
@@ -163,12 +185,36 @@ export function parseDraft(draft: ModelDraft): Parsed {
       return { ok: false, problem: `${position}: the cache-read price cannot be negative.` };
     }
 
+    const hasWrite5m = target.costCacheWrite5m.trim().length > 0;
+    const cacheWrite5m = Number(target.costCacheWrite5m);
+    if (hasWrite5m && (!Number.isFinite(cacheWrite5m) || cacheWrite5m < 0)) {
+      return {
+        ok: false,
+        problem: `${position}: the 5m cache-write price must be a number of 0 or more.`,
+      };
+    }
+
+    const hasWrite1h = target.costCacheWrite1h.trim().length > 0;
+    const cacheWrite1h = Number(target.costCacheWrite1h);
+    if (hasWrite1h && (!Number.isFinite(cacheWrite1h) || cacheWrite1h < 0)) {
+      return {
+        ok: false,
+        problem: `${position}: the 1h cache-write price must be a number of 0 or more.`,
+      };
+    }
+
     targets.push({
       provider: target.provider,
       model,
       tier,
       weight,
-      costPerMTok: { input, output, ...(hasCacheRead ? { cacheRead } : {}) },
+      costPerMTok: {
+        input,
+        output,
+        ...(hasCacheRead ? { cacheRead } : {}),
+        ...(hasWrite5m ? { cacheWrite5m } : {}),
+        ...(hasWrite1h ? { cacheWrite1h } : {}),
+      },
       capabilities: { tools: target.tools, images: target.images, reasoning: target.reasoning },
     });
   }

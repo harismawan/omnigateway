@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest, StreamEvent } from "@omni/ir";
 import { decodeAnthropic } from "../src/anthropic/decode.ts";
-import { toWire } from "../src/anthropic/wire.ts";
+import { OAUTH_IDENTITY, toWire } from "../src/anthropic/wire.ts";
 import type { SseMessage } from "../src/sse.ts";
 
 const base: ChatRequest = {
@@ -106,6 +106,172 @@ test("passes an explicit opt-out through instead of dropping it", () => {
 test("merges vendor passthrough last so it can override", () => {
   const { body } = toWire({ ...base, vendor: { anthropic: { top_k: 40 } } }, "m", { oauth: false });
   expect(body.top_k).toBe(40);
+});
+
+test("renders a cache breakpoint on a system block, ttl and all", () => {
+  const { body } = toWire(
+    {
+      ...base,
+      system: [{ type: "text", text: "be terse", cacheControl: { type: "ephemeral", ttl: "1h" } }],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(body.system).toEqual([
+    { type: "text", text: "be terse", cache_control: { type: "ephemeral", ttl: "1h" } },
+  ]);
+});
+
+test("omits an absent ttl rather than inventing one", () => {
+  const { body } = toWire(
+    { ...base, system: [{ type: "text", text: "be terse", cacheControl: { type: "ephemeral" } }] },
+    "m",
+    { oauth: false },
+  );
+  expect(body.system).toEqual([
+    { type: "text", text: "be terse", cache_control: { type: "ephemeral" } },
+  ]);
+});
+
+test("renders a cache breakpoint on the message block that carried it", () => {
+  const { body } = toWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "stable", cacheControl: { type: "ephemeral" } },
+            { type: "text", text: "volatile" },
+          ],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(body.messages).toEqual([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "stable", cache_control: { type: "ephemeral" } },
+        { type: "text", text: "volatile" },
+      ],
+    },
+  ]);
+});
+
+test("renders a cache breakpoint on a tool definition", () => {
+  const { body } = toWire(
+    {
+      ...base,
+      tools: [
+        {
+          name: "f",
+          inputSchema: { type: "object" },
+          cacheControl: { type: "ephemeral", ttl: "1h" },
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(body.tools).toEqual([
+    {
+      name: "f",
+      input_schema: { type: "object" },
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    },
+  ]);
+});
+
+test("leaves the caller's breakpoint on its own block after the oauth prefix", () => {
+  const { body } = toWire(
+    {
+      ...base,
+      system: [{ type: "text", text: "be terse", cacheControl: { type: "ephemeral" } }],
+    },
+    "m",
+    { oauth: true },
+  );
+  // The prefix is ours, not the caller's: marking it would move the breakpoint
+  // and change what the caller asked to cache.
+  expect(body.system?.[0]).toEqual({ type: "text", text: OAUTH_IDENTITY });
+  expect(body.system?.[1]).toEqual({
+    type: "text",
+    text: "be terse",
+    cache_control: { type: "ephemeral" },
+  });
+});
+
+test("records a degradation when a system turn's breakpoint cannot survive flattening", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "system",
+          content: [{ type: "text", text: "Write Go.", cacheControl: { type: "ephemeral" } }],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  // The turn is a plain string on the wire, so a block-level marker has nowhere
+  // to go. Dropping it silently would hide a caching intent that never took.
+  expect(body.messages?.[1]).toEqual({ role: "system", content: "Write Go." });
+  expect(degradations).toContain("anthropic:system-turn-cache-control-dropped");
+});
+
+test("leaves an unmarked system turn free of degradations", () => {
+  const { degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "system", content: [{ type: "text", text: "Write Go." }] },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(degradations).not.toContain("anthropic:system-turn-cache-control-dropped");
+});
+
+test("decodes upstream cache counters into canonical usage", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs(
+        {
+          event: "message_start",
+          data: JSON.stringify({
+            message: {
+              id: "msg_1",
+              model: "claude-opus-4",
+              usage: {
+                input_tokens: 10,
+                cache_read_input_tokens: 4000,
+                cache_creation_input_tokens: 120,
+              },
+            },
+          }),
+        },
+        {
+          event: "message_delta",
+          data: JSON.stringify({ delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } }),
+        },
+        { event: "message_stop", data: "{}" },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toEqual({
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 4000, cacheWriteTokens: 120 },
+  });
 });
 
 test("decodes a text stream into canonical events", async () => {
@@ -312,5 +478,99 @@ test("renders a mid-conversation system turn as the documented string form", () 
   expect(body.messages).toEqual([
     { role: "user", content: [{ type: "text", text: "hi" }] },
     { role: "system", content: "Write Go." },
+  ]);
+});
+
+test("splits cache creation by ttl so each write prices at its own rate", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs(
+        {
+          event: "message_start",
+          data: JSON.stringify({
+            message: {
+              id: "msg_1",
+              model: "claude-opus-4",
+              usage: {
+                input_tokens: 10,
+                cache_read_input_tokens: 1800,
+                cache_creation_input_tokens: 248,
+                cache_creation: {
+                  ephemeral_5m_input_tokens: 148,
+                  ephemeral_1h_input_tokens: 100,
+                },
+              },
+            },
+          }),
+        },
+        {
+          event: "message_delta",
+          data: JSON.stringify({ delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } }),
+        },
+        { event: "message_stop", data: "{}" },
+      ),
+    ),
+  );
+
+  // A 5m write bills at 1.25x input and a 1h write at 2x, so the aggregate
+  // alone cannot be priced. The breakdown sums to it.
+  expect(events.at(-1)).toEqual({
+    type: "end",
+    stopReason: "endTurn",
+    usage: {
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 1800,
+      cacheWriteTokens: 248,
+      cacheWrite5mTokens: 148,
+      cacheWrite1hTokens: 100,
+    },
+  });
+});
+
+test("leaves the ttl split off when the upstream reports no breakdown", async () => {
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs(
+        {
+          event: "message_start",
+          data: JSON.stringify({
+            message: {
+              id: "msg_1",
+              model: "claude-opus-4",
+              usage: { input_tokens: 10, cache_creation_input_tokens: 248 },
+            },
+          }),
+        },
+        { event: "message_stop", data: "{}" },
+      ),
+    ),
+  );
+  const end = events.at(-1);
+  expect(end).toMatchObject({ usage: { cacheWriteTokens: 248 } });
+  // Absent, not zero: "not told" and "no 1h writes" price the same today but
+  // are different facts, and `exactOptionalPropertyTypes` keeps them apart.
+  expect(end).not.toHaveProperty("usage.cacheWrite5mTokens");
+  expect(end).not.toHaveProperty("usage.cacheWrite1hTokens");
+});
+
+test("records a dropped system-turn breakpoint once, however many turns carried one", () => {
+  const marked = {
+    role: "system" as const,
+    content: [{ type: "text" as const, text: "x", cacheControl: { type: "ephemeral" as const } }],
+  };
+  const { degradations } = toWire(
+    {
+      ...base,
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }, marked, marked],
+    },
+    "m",
+    { oauth: false },
+  );
+  // A degradation names a thing the request lost, not how many times the
+  // encoder noticed. The other two encoders dedupe; this one should read the
+  // same in a request log.
+  expect(degradations.filter((d) => d === "anthropic:system-turn-cache-control-dropped")).toEqual([
+    "anthropic:system-turn-cache-control-dropped",
   ]);
 });

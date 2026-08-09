@@ -1,4 +1,4 @@
-import { RETRYABLE, type StopReason, type StreamEvent } from "@omni/ir";
+import { RETRYABLE, type StopReason, type StreamEvent, usageFromPromptTotal } from "@omni/ir";
 import type { SseMessage } from "../sse.ts";
 
 const FINISH: Readonly<Record<string, StopReason>> = {
@@ -15,6 +15,13 @@ type ChatChunk = {
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
+    /** The OpenAI-compatible spelling, which is what this surface uses. */
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+      cache_creation_tokens?: number;
+      cache_write_tokens?: number;
+    };
+    /** The DeepSeek-family spelling, kept as a fallback. */
     prompt_cache_hit_tokens?: number;
   };
   choices?: {
@@ -72,12 +79,15 @@ export async function* decodeChat(
     }
 
     if (d.usage) {
-      usage = {
-        inputTokens: d.usage.prompt_tokens ?? 0,
-        outputTokens: d.usage.completion_tokens ?? 0,
-        cacheReadTokens: d.usage.prompt_cache_hit_tokens ?? 0,
-        cacheWriteTokens: 0,
-      };
+      // `prompt_tokens` is the whole prompt, hits included; the IR wants the
+      // miss remainder so pricing does not charge a hit at the input rate too.
+      const details = d.usage.prompt_tokens_details;
+      usage = usageFromPromptTotal(
+        d.usage.prompt_tokens ?? 0,
+        d.usage.completion_tokens ?? 0,
+        details?.cached_tokens ?? d.usage.prompt_cache_hit_tokens ?? 0,
+        details?.cache_creation_tokens ?? details?.cache_write_tokens ?? 0,
+      );
     }
 
     const choice = d.choices?.[0];

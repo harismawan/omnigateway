@@ -99,6 +99,59 @@ test("models put seeds a target from the catalog, with its list pricing", async 
   expect(body.model.targets[0]?.costPerMTok.input).toBeGreaterThan(0);
 });
 
+test("models show prices every token class, not just input and output", async () => {
+  const root = await installation();
+  await cli(["models", "put", "fast", "--from-catalog", "anthropic:claude-opus-5"], { root });
+
+  const shown = await cli(["models", "show", "fast"], { root });
+  expect(shown.code).toBe(0);
+  // An operator reading a bill needs the cache rates too: a write costs more
+  // than fresh input, not less, so a table that hides it reads as if caching
+  // were free.
+  expect(shown.out).toContain("CACHE R");
+  expect(shown.out).toContain("CACHE W 5M");
+  expect(shown.out).toContain("CACHE W 1H");
+  expect(shown.out).toContain("0.50");
+  expect(shown.out).toContain("6.25");
+  expect(shown.out).toContain("10.00");
+});
+
+test("models show marks a price the target does not name", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.config.putModel({
+    id: "legacy",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        // A target saved before write pricing existed.
+        costPerMTok: { input: 5, output: 25 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const shown = await cli(["models", "show", "legacy"], { root });
+  expect(shown.code).toBe(0);
+  // Not a zero: nothing is stored, and pricing falls back to a multiple of
+  // input. Printing 0.00 would claim the writes are free.
+  expect(shown.out).toContain("\u2014");
+});
+
+test("models catalog lists the cache prices a new target would start at", async () => {
+  const root = await installation();
+  const listed = await cli(["models", "catalog"], { root });
+  expect(listed.code).toBe(0);
+  expect(listed.out).toContain("CACHE R");
+  expect(listed.out).toContain("CACHE W 5M");
+  expect(listed.out).toContain("CACHE W 1H");
+});
+
 test("a model that is not in the catalog is refused before anything is written", async () => {
   const root = await installation();
 
