@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Database } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import styled from "styled-components";
 import { LOG_CADENCE_MS, useCredentials, useKeys, useLogs } from "../../api/queries.ts";
 import type { RequestLog } from "../../api/types.ts";
@@ -65,6 +65,19 @@ const TokenPart = styled.span`
   }
 `;
 
+function useCurrentTime(active: boolean): number {
+  const [now, setNow] = useState(Date.now);
+
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [active]);
+
+  return now;
+}
+
 function TokenCell({ log }: { log: RequestLog }) {
   if (isPending(log)) {
     return (
@@ -117,7 +130,7 @@ const Value = styled.dd`
 
 /** One row per request, most recent first. Polling is the only feed available. */
 export function LogsBoard() {
-  const { cadence } = useLive();
+  const { cadence, live: liveUpdates } = useLive();
   const [limit, setLimit] = useState<number>(100);
   const [filter, setFilter] = useState<Filter>("all");
   const [term, setTerm] = useState("");
@@ -126,6 +139,8 @@ export function LogsBoard() {
   const logs = useLogs(limit, cadence(LOG_CADENCE_MS));
   const credentials = useCredentials();
   const keys = useKeys();
+  const hasPending = (logs.data ?? []).some(isPending);
+  const now = useCurrentTime(liveUpdates && hasPending);
 
   const names = useMemo(() => {
     const map = new Map<string, string>();
@@ -299,7 +314,7 @@ export function LogsBoard() {
                       {isPending(log) ? "—" : formatMs(log.ttftMs)}
                     </Td>
                     <Td $align="right" $mono>
-                      {isPending(log) ? "—" : formatMs(log.durationMs)}
+                      {formatMs(isPending(log) ? Math.max(0, now - log.at) : log.durationMs)}
                     </Td>
                     <TokenCell log={log} />
                     <Td $align="right" $mono>

@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { describe, expect, setSystemTime, test } from "bun:test";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LogsBoard } from "../../src/features/logs/LogsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
@@ -254,9 +254,42 @@ describe("LogsBoard", () => {
     const rule = injected.match(new RegExp(`\\.${generatedClass}\\{([^}]*)\\}`))?.[1] ?? "";
     expect(rule).toContain("color:var(--accent)");
     expect(rule).toContain("background:var(--accent-wash)");
-    // Every measured column is an em dash rather than a nought nobody counted:
-    // attempts, TTFT, total, tokens, and cost.
-    expect(screen.getAllByText("—")).toHaveLength(5);
+    // Provider-reported measurements stay unavailable until completion:
+    // attempts, TTFT, tokens, and cost. Total is live elapsed wall-clock time.
+    expect(screen.getAllByText("—")).toHaveLength(4);
+  });
+
+  test("a request still in flight updates its elapsed total", async () => {
+    setSystemTime(NOW);
+    const request = log({ id: "req-live", state: "pending", status: 0, at: NOW - 1_000 });
+    createFetchStub({
+      "GET /api/logs": () => ({ logs: [request] }),
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+    });
+    const view = renderWithProviders(<LogsBoard />);
+
+    try {
+      const row = (await screen.findByLabelText("in flight")).closest("tr");
+      if (row === null) throw new Error("live request has no table row");
+      expect(within(row).getByText("1.0s")).toBeTruthy();
+
+      setSystemTime(NOW + 1_000);
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 1_050));
+      });
+      expect(within(row).getByText("2.0s")).toBeTruthy();
+
+      request.state = "done";
+      request.durationMs = 1_500;
+      await act(async () => {
+        await view.client.refetchQueries({ queryKey: ["logs", 100] });
+      });
+      await waitFor(() => expect(screen.queryByLabelText("in flight")).toBeNull());
+      expect(screen.getByText("1.5s")).toBeTruthy();
+    } finally {
+      setSystemTime();
+    }
   });
 
   test("a request still in flight is counted as running, not as failed", async () => {
