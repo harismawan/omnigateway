@@ -3,7 +3,7 @@ import { parseLogLevel } from "@omni/ir";
 import { boolFlag, numberFlag, stringFlag, UsageError } from "../args.ts";
 import type { Command } from "../command.ts";
 import type { Context } from "../context.ts";
-import { emit, note, paint } from "../output.ts";
+import { emit, note, paint, type Tone } from "../output.ts";
 import { consoleSource } from "../service.ts";
 
 const FOLLOW_INTERVAL_MS = 2_000;
@@ -16,13 +16,16 @@ const FOLLOW_INTERVAL_MS = 2_000;
  * line the gateway did not write has no level at all. Both print as they
  * arrived.
  */
-const LEVEL_TONE = { debug: "dim", warn: "yellow", error: "red" } as const;
+const LEVEL_TONE: Partial<Record<NonNullable<ConsoleLine["level"]>, Tone>> = {
+  debug: "dim",
+  warn: "yellow",
+  error: "red",
+};
 
 function render(ctx: Context, lines: readonly ConsoleLine[]): string {
   return lines
     .map((line) => {
-      const tone =
-        line.level === null ? undefined : LEVEL_TONE[line.level as keyof typeof LEVEL_TONE];
+      const tone = line.level === null ? undefined : LEVEL_TONE[line.level];
       return tone === undefined ? line.raw : paint(ctx, tone, line.raw);
     })
     .join("\n");

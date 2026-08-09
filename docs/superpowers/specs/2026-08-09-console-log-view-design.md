@@ -94,23 +94,36 @@ In order:
 
 1. **`OMNI_LOG_FILE`**, if set. New configuration, read in
    `packages/control/src/config.ts` and taken literally.
-2. **The systemd journal**, if `omnigateway.service` is installed —
+2. **The systemd journal** —
    `journalctl -u omnigateway.service -n <lines> --no-pager`, with `--user`
    under a user-scope unit. This is what `apps/cli/src/service.ts:310` already
    does.
 3. **`none`.**
+
+The two callers ask the second question differently, because they are different
+processes. The gateway reads **`JOURNAL_STREAM`**, which systemd sets on a
+unit's stdout: that is the actual question — is systemd capturing *me* — and an
+installed unit file would only prove a unit exists, not that this process is the
+one it started. The CLI cannot see another process's environment, so it falls
+back to whether a unit is installed, and claims its own state directory's log
+file only once that file exists. Naming a path that was never written would
+report a quiet log where the honest answer is that nothing captured anything.
 
 `none` is a first-class answer, not an error. Under `bun run dev` the gateway's
 stdout goes to a terminal that nothing captured; there is no file and no unit,
 and there is nothing wrong. The screen says so, in those words, rather than
 rendering an empty table that reads as a failure.
 
-Both writers set the file when they can. The CLI's pidfile supervisor already
-passes `logFile` to its spawner (`apps/cli/src/service.ts:19`) and will set
-`OMNI_LOG_FILE` to the same path in the child's environment. `unitFile()` gains
-a `StandardOutput=append:` line pointing at that path, so a newly installed unit
-has a file too. Journald remains the fallback for units installed before this
-change — an operator is not required to reinstall.
+The CLI's pidfile supervisor already passes `logFile` to its spawner
+(`apps/cli/src/service.ts:19`) and now sets `OMNI_LOG_FILE` to the same path in
+the child's environment. That is the only way a gateway under that supervisor
+can learn where its own stdout went.
+
+The unit file is deliberately left alone. An earlier draft of this design had it
+gain a `StandardOutput=append:` line, which would have been wrong: journald
+already captures a unit's stdout, already sets `JOURNAL_STREAM` so the gateway
+knows, and already rotates. Redirecting to a file would opt out of all three to
+solve a problem that does not exist there.
 
 ### The reader
 
@@ -310,6 +323,11 @@ exactly the moment it is needed.
   Changing it takes effect on restart.
 - The file grows without bound unless something rotates it. Journald rotates on
   its own; a file set by the CLI supervisor does not.
-- Under a unit installed before this change, the journal is read and
-  `OMNI_LOG_FILE` is unset, so the hint tells the operator how to switch. No
-  reinstall is required to keep working.
+- Nothing about an existing installation has to change. A unit installed before
+  this work is read through the journal exactly as a new one is, because the
+  unit file is not touched; a pidfile installation gains `OMNI_LOG_FILE` the
+  next time `omni start` runs. No reinstall, no migration.
+- The CLI reports `none` for an installation whose gateway has not yet written
+  its log file, even though `omni start` would create one. That is honest —
+  there is nothing to read — but it means the hint changes wording after the
+  first start.

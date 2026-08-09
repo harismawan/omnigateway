@@ -167,6 +167,7 @@ installation other than the default.
 | `omni start` / `stop` / `restart` | run the gateway; `--foreground` attaches it to your terminal |
 | `omni doctor` | which installation it resolved, and whether it can act on it |
 | `omni logs` | recent requests as the gateway recorded them |
+| `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
 | `omni usage` | spend and tokens, by provider, model, key, or day |
 | `omni connect <provider>` | authorize an account from the terminal |
 | `omni credentials …` | list, show, enable, disable, retier, refresh, remove |
@@ -191,7 +192,7 @@ On a machine with systemd:
 ```bash
 omni service install --enable    # writes a user unit for this installation
 omni start                       # from here on, start/stop delegate to systemctl
-omni logs --service              # reads the journal
+omni console                     # reads the journal (or the log file, without systemd)
 ```
 
 Use `--system` for a system-wide unit (needs root). Without systemd, `omni
@@ -212,18 +213,26 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_BASE_URL` | No | derived from host and port | Public origin for OAuth callbacks; set this behind a reverse proxy |
 | `OMNI_STATIC_DIR` | No | the console shipped with the server | Serve a different console build |
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
+| `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout is captured, so the Console screen can read it back |
 
-Gateway events are written to stdout as one greppable line each. At `info`, every completed
-request produces an access line alongside process lifecycle and error events. Use `debug` to see
-routing decisions, failover attempts, OAuth refreshes, quota probes, and upstream HTTP timing:
+Gateway events are written to stdout as one greppable line each: process lifecycle, OAuth
+refreshes, quota probes, failover, and errors. Completed requests are *not* among them — they
+are recorded in the database and read back through `omni logs` and the console's Logs screen.
+Use `debug` to add routing decisions, per-attempt tracing, and upstream HTTP timing:
 
 ```text
-2026-08-09T04:12:03.114Z INFO  request done  requestId=req_9f2 surface=anthropic status=200 provider=anthropic model=claude-opus-5 attempts=1 inputTokens=1204 outputTokens=88 durationMs=2100
+2026-08-09T04:12:04.881Z WARN  attempt failed; retrying  requestId=req_9f2 provider=anthropic attempt=1 code=UPSTREAM retryable=true
 ```
 
 Fields are a closed allowlist: logs never include request or response bodies, headers, OAuth
 tokens, API keys, admin passwords, or encryption keys. `OMNI_LOG_LEVEL` is read once at boot;
 an invalid value falls back to `info` and is reported in the boot log.
+
+The Console screen and `omni console` show these lines. A process cannot read back its own
+stdout, so both read whatever captured it: `OMNI_LOG_FILE` if set, otherwise the systemd
+journal. Run the gateway in the foreground and its output goes to your terminal, where nothing
+captured it — both surfaces say so rather than showing an empty log. `omni start` sets
+`OMNI_LOG_FILE` for the gateway it supervises, and under systemd the journal needs no setup.
 
 Routing behaviour — weights, retry limits, request deadline, log retention,
 how often provider quota is polled — lives in the database, not the
