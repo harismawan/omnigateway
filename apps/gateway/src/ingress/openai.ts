@@ -3,9 +3,8 @@ import { GatewayError, validateRequest } from "@omni/ir";
 import { z } from "zod";
 import {
   applyMessageCacheControl,
-  cacheControlSchema,
   extraFields,
-  irCacheControl,
+  looseCacheControl,
   parseDataUrl,
   parseOrThrow,
 } from "./schemas.ts";
@@ -23,12 +22,12 @@ const part = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("text"),
     text: z.string(),
-    cache_control: cacheControlSchema.optional(),
+    cache_control: z.unknown().optional(),
   }),
   z.object({
     type: z.literal("image_url"),
     image_url: z.object({ url: z.string() }),
-    cache_control: cacheControlSchema.optional(),
+    cache_control: z.unknown().optional(),
   }),
 ]);
 
@@ -43,7 +42,7 @@ const message = z.object({
   content: z.union([z.string(), z.array(part), z.null()]).optional(),
   tool_calls: z.array(toolCall).optional(),
   tool_call_id: z.string().optional(),
-  cache_control: cacheControlSchema.optional(),
+  cache_control: z.unknown().optional(),
 });
 
 const schema = z.object({
@@ -62,9 +61,9 @@ const schema = z.object({
           name: z.string(),
           description: z.string().optional(),
           parameters: z.record(z.string(), z.unknown()).optional(),
-          cache_control: cacheControlSchema.optional(),
+          cache_control: z.unknown().optional(),
         }),
-        cache_control: cacheControlSchema.optional(),
+        cache_control: z.unknown().optional(),
       }),
     )
     .optional(),
@@ -109,9 +108,9 @@ function contentBlocks(content: z.infer<typeof message>["content"]): ContentBloc
   if (!Array.isArray(content)) return [];
   return content.map((p): ContentBlock => {
     if (p.type === "text")
-      return { type: "text", text: p.text, ...irCacheControl(p.cache_control) };
+      return { type: "text", text: p.text, ...looseCacheControl(p.cache_control) };
     const { mediaType, data } = parseDataUrl(p.image_url.url);
-    return { type: "image", mediaType, data, ...irCacheControl(p.cache_control) };
+    return { type: "image", mediaType, data, ...looseCacheControl(p.cache_control) };
   });
 }
 
@@ -157,7 +156,7 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
             toolUseId: m.tool_call_id,
             content: typeof m.content === "string" ? m.content : "",
             isError: false,
-            ...irCacheControl(m.cache_control),
+            ...looseCacheControl(m.cache_control),
           },
         ],
       });
@@ -202,7 +201,7 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
       inputSchema: t.function.parameters ?? { type: "object" },
       // Clients disagree on which level carries it; the outer one is the more
       // specific statement about this tool entry, so it wins.
-      ...irCacheControl(t.cache_control ?? t.function.cache_control),
+      ...looseCacheControl(t.cache_control ?? t.function.cache_control),
     }));
   }
   if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);

@@ -249,7 +249,11 @@ export async function dispatch(
                 log.outputTokens = event.usage.outputTokens;
                 log.cacheReadTokens = event.usage.cacheReadTokens;
                 log.cacheWriteTokens = event.usage.cacheWriteTokens;
-                log.costUsd = priceOf(candidate.target.costPerMTok, event.usage);
+                log.costUsd = priceOf(
+                  candidate.target.costPerMTok,
+                  event.usage,
+                  candidate.target.provider,
+                );
               }
 
               if (event.type === "error") {

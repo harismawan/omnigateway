@@ -39,6 +39,9 @@ export const BODY_ORDER: Readonly<Record<ProviderId, readonly string[]>> = {
     "metadata",
   ],
   // Constructed, not captured. See the profile note in Task 8B.
+  // `stream_options` is deliberately absent: the order mirrors what each CLI's
+  // own serializer emits, and this gateway adds that field for usage reporting
+  // rather than copying it from one. Unlisted keys append in insertion order.
   kimi: ["model", "messages", "tools", "tool_choice", "max_tokens", "temperature", "stream"],
 };
 

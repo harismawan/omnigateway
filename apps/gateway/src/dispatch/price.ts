@@ -1,47 +1,63 @@
-import type { Usage } from "@omni/ir";
+import type { ProviderId, Usage } from "@omni/ir";
 import type { TargetPricing } from "@omni/store/types";
 
 /**
- * Anthropic's published multipliers over base input, used only when a target
- * names no price of its own.
+ * What a provider charges to create a cache entry, as a multiple of its base
+ * input price, for a target that names no price of its own.
  *
- * A target saved before write pricing existed carries `input`, `output` and
- * `cacheRead` and nothing else. Charging zero for a cache write is the one
- * answer that is certainly wrong — those tokens cost more than fresh input,
- * not less — so the documented rates stand in until the operator saves real
- * ones. A provider that bills no write premium says so with an explicit zero,
- * which is a price and not a missing one.
+ * Only used as a fallback: a target saved before write pricing existed carries
+ * `input`, `output` and `cacheRead` and nothing else, and the catalog now
+ * gives every new target an explicit figure. The default has to be per
+ * provider rather than a single constant, because the two answers are
+ * opposite — Anthropic bills a write at more than fresh input, while OpenAI
+ * and Kimi cache automatically and bill no premium at all. Guessing
+ * Anthropic's rate for a Kimi target overcharges exactly the tokens its
+ * decoder now reports.
  */
-const WRITE_5M_OVER_INPUT = 1.25;
-const WRITE_1H_OVER_INPUT = 2;
+const WRITE_OVER_INPUT: Readonly<Record<ProviderId, { fiveMinute: number; oneHour: number }>> = {
+  anthropic: { fiveMinute: 1.25, oneHour: 2 },
+  openai: { fiveMinute: 0, oneHour: 0 },
+  kimi: { fiveMinute: 0, oneHour: 0 },
+};
+
 const READ_OVER_INPUT = 0.1;
+
+/**
+ * Splits cache-creation tokens by the TTL each write bought.
+ *
+ * The breakdown and the aggregate are reported together and the parts sum to
+ * it, so whichever side is missing is the remainder. Symmetric on purpose:
+ * deriving only one direction would price the other's shortfall at zero if an
+ * upstream ever reported a partial breakdown.
+ */
+function splitWrites(usage: Usage): { fiveMinute: number; oneHour: number } {
+  const { cacheWrite5mTokens: five, cacheWrite1hTokens: hour, cacheWriteTokens: total } = usage;
+  if (five !== undefined && hour !== undefined) return { fiveMinute: five, oneHour: hour };
+  if (five !== undefined) return { fiveMinute: five, oneHour: Math.max(0, total - five) };
+  if (hour !== undefined) return { fiveMinute: Math.max(0, total - hour), oneHour: hour };
+  // Nothing reported: a marker without an explicit TTL asks for five minutes.
+  return { fiveMinute: total, oneHour: 0 };
+}
 
 /**
  * What one request cost, in dollars, at the prices the operator saved.
  *
- * `inputTokens` is the uncached remainder, so the four token classes are
- * disjoint and each is priced once. Cache writes are split by TTL when the
- * upstream reported the breakdown; an upstream that reported only the
- * aggregate is priced as 5m, which is what a marker without an explicit TTL
- * asks for.
+ * `inputTokens` is the uncached remainder, so the token classes are disjoint
+ * and each is priced once.
  */
-export function priceOf(prices: TargetPricing, usage: Usage): number {
+export function priceOf(prices: TargetPricing, usage: Usage, provider: ProviderId): number {
+  const fallback = WRITE_OVER_INPUT[provider];
   const readRate = prices.cacheRead ?? prices.input * READ_OVER_INPUT;
-  const write5mRate = prices.cacheWrite5m ?? prices.input * WRITE_5M_OVER_INPUT;
-  const write1hRate = prices.cacheWrite1h ?? prices.input * WRITE_1H_OVER_INPUT;
-
-  const write1h = usage.cacheWrite1hTokens ?? 0;
-  // Whatever the breakdown did not account for is 5m by default. When neither
-  // field is present that is the whole aggregate; when both are, it is exactly
-  // the 5m figure, because they sum to it.
-  const write5m = usage.cacheWrite5mTokens ?? Math.max(0, usage.cacheWriteTokens - write1h);
+  const write5mRate = prices.cacheWrite5m ?? prices.input * fallback.fiveMinute;
+  const write1hRate = prices.cacheWrite1h ?? prices.input * fallback.oneHour;
+  const writes = splitWrites(usage);
 
   return (
     (usage.inputTokens * prices.input +
       usage.outputTokens * prices.output +
       usage.cacheReadTokens * readRate +
-      write5m * write5mRate +
-      write1h * write1hRate) /
+      writes.fiveMinute * write5mRate +
+      writes.oneHour * write1hRate) /
     1_000_000
   );
 }

@@ -553,3 +553,24 @@ test("leaves the ttl split off when the upstream reports no breakdown", async ()
   expect(end).not.toHaveProperty("usage.cacheWrite5mTokens");
   expect(end).not.toHaveProperty("usage.cacheWrite1hTokens");
 });
+
+test("records a dropped system-turn breakpoint once, however many turns carried one", () => {
+  const marked = {
+    role: "system" as const,
+    content: [{ type: "text" as const, text: "x", cacheControl: { type: "ephemeral" as const } }],
+  };
+  const { degradations } = toWire(
+    {
+      ...base,
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }, marked, marked],
+    },
+    "m",
+    { oauth: false },
+  );
+  // A degradation names a thing the request lost, not how many times the
+  // encoder noticed. The other two encoders dedupe; this one should read the
+  // same in a request log.
+  expect(degradations.filter((d) => d === "anthropic:system-turn-cache-control-dropped")).toEqual([
+    "anthropic:system-turn-cache-control-dropped",
+  ]);
+});

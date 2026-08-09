@@ -20,9 +20,9 @@ export type TargetDraft = {
   /** Empty means the provider does not price cache reads separately. */
   costCacheRead: string;
   /**
-   * Empty means the target names no write price, and pricing falls back to
-   * Anthropic's published multipliers over input. A provider that bills no
-   * write premium needs an explicit 0, not a blank.
+   * Empty means the target names no write price, and pricing falls back to a
+   * multiple of input chosen for that provider. Blank and 0 are different: a
+   * provider that bills no write premium needs the explicit 0.
    */
   costCacheWrite5m: string;
   costCacheWrite1h: string;
@@ -188,13 +188,19 @@ export function parseDraft(draft: ModelDraft): Parsed {
     const hasWrite5m = target.costCacheWrite5m.trim().length > 0;
     const cacheWrite5m = Number(target.costCacheWrite5m);
     if (hasWrite5m && (!Number.isFinite(cacheWrite5m) || cacheWrite5m < 0)) {
-      return { ok: false, problem: `${position}: the cache-write price cannot be negative.` };
+      return {
+        ok: false,
+        problem: `${position}: the 5m cache-write price must be a number of 0 or more.`,
+      };
     }
 
     const hasWrite1h = target.costCacheWrite1h.trim().length > 0;
     const cacheWrite1h = Number(target.costCacheWrite1h);
     if (hasWrite1h && (!Number.isFinite(cacheWrite1h) || cacheWrite1h < 0)) {
-      return { ok: false, problem: `${position}: the cache-write price cannot be negative.` };
+      return {
+        ok: false,
+        problem: `${position}: the 1h cache-write price must be a number of 0 or more.`,
+      };
     }
 
     targets.push({

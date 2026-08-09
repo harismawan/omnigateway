@@ -94,6 +94,11 @@ export function toWire(
   opts: { oauth: boolean },
 ): { body: AnthropicBody; degradations: string[] } {
   const degradations: string[] = [];
+  // A degradation names something the request lost, not how many times the
+  // encoder noticed; the other two encoders dedupe the same way.
+  const note = (d: string): void => {
+    if (!degradations.includes(d)) degradations.push(d);
+  };
 
   let system = req.system?.flatMap((b) =>
     b.type === "text"
@@ -107,7 +112,7 @@ export function toWire(
   // degradation so it is visible in the request log.
   if (opts.oauth && system?.[0]?.text !== OAUTH_IDENTITY) {
     system = [{ type: "text" as const, text: OAUTH_IDENTITY }, ...(system ?? [])];
-    degradations.push("anthropic:oauth-system-prefix");
+    note("anthropic:oauth-system-prefix");
   }
 
   const body: AnthropicBody = {
@@ -118,7 +123,7 @@ export function toWire(
       // one the caller placed here is lost. Record it rather than let a caching
       // intent disappear between the request log and the upstream body.
       if (m.content.some((b) => cacheControlOf(b) !== undefined)) {
-        degradations.push("anthropic:system-turn-cache-control-dropped");
+        note("anthropic:system-turn-cache-control-dropped");
       }
       return { role: m.role, content: encodeSystemTurn(m.content) };
     }),

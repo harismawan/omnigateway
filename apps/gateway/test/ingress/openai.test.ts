@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
+import { parseAnthropicRequest } from "../../src/ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../../src/ingress/openai.ts";
 
 const minimal = { model: "gpt-5", messages: [{ role: "user", content: "hi" }] };
@@ -343,11 +344,37 @@ test("keeps a breakpoint on a tool definition, at either level", () => {
   ]);
 });
 
-test("rejects a cache control shape the provider does not accept", () => {
+test("ignores a cache control shape it cannot translate rather than refusing", () => {
+  // This surface has no `cache_control` of its own; carrying one is a
+  // best-effort translation for a request that may reach an Anthropic target.
+  // Before it was read at all the field was dropped and the request
+  // succeeded, so refusing now would break callers that worked yesterday and
+  // would make the gateway the thing that has to ship before a client can use
+  // a TTL the provider added.
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [{ role: "user", content: "hi", cache_control: { type: "persistent" } }],
+  });
+  expect(req.messages[0]?.content).toEqual([{ type: "text", text: "hi" }]);
+
+  const unknownTtl = parseOpenAIRequest({
+    ...minimal,
+    messages: [{ role: "user", content: "hi", cache_control: { type: "ephemeral", ttl: "2h" } }],
+  });
+  // Not downgraded to a bare marker: a TTL this gateway cannot express is not
+  // the same request as one with no TTL at all.
+  expect(unknownTtl.messages[0]?.content).toEqual([{ type: "text", text: "hi" }]);
+});
+
+test("still refuses a malformed cache control on the anthropic surface", () => {
+  // Anthropic would reject it too, and there the field is part of the
+  // contract rather than a translation.
   expect(() =>
-    parseOpenAIRequest({
-      ...minimal,
-      messages: [{ role: "user", content: "hi", cache_control: { type: "persistent" } }],
+    parseAnthropicRequest({
+      model: "m",
+      max_tokens: 1,
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      system: [{ type: "text", text: "a", cache_control: { type: "persistent" } }],
     }),
   ).toThrow(GatewayError);
 });

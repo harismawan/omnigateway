@@ -3,14 +3,36 @@ import { cacheControlOf, GatewayError } from "@omni/ir";
 import { z } from "zod";
 
 /**
- * Only the shapes Anthropic accepts. An unknown marker is a `BAD_REQUEST`
- * rather than something forwarded verbatim: the field decides what gets
- * cached, and a typo the gateway waves through becomes a silent upstream 400.
+ * Only the shapes Anthropic accepts.
+ *
+ * Used strictly on the Anthropic surface, where an unknown marker is a
+ * `BAD_REQUEST` rather than something forwarded verbatim: the field decides
+ * what gets cached, and a typo waved through becomes a silent upstream 400.
+ * `looseCacheControl` reads the same shapes without refusing, for a surface
+ * where the field is a translation rather than a contract.
  */
 export const cacheControlSchema = z.object({
   type: z.literal("ephemeral"),
   ttl: z.enum(["5m", "1h"]).optional(),
 });
+
+/**
+ * Reads a marker on a surface that does not define one, ignoring anything
+ * this gateway cannot express.
+ *
+ * `cache_control` is not an OpenAI field: carrying it there is a best-effort
+ * translation for a request that may be routed to an Anthropic target. A
+ * shape that does not map is dropped rather than refused, because it was
+ * dropped before this field was read at all — refusing would break a caller
+ * that worked yesterday, and would put the gateway in the way of a TTL the
+ * provider adds later. A shape that maps exactly is honoured; a partial match
+ * is not downgraded, since a TTL that cannot be expressed is not the same
+ * request as no TTL at all.
+ */
+export function looseCacheControl(value: unknown): { cacheControl?: CacheControl } {
+  const parsed = cacheControlSchema.safeParse(value);
+  return parsed.success ? irCacheControl(parsed.data) : {};
+}
 
 /**
  * Spreads a cache breakpoint onto whatever block is being built.
@@ -35,14 +57,12 @@ export function irCacheControl(c: z.infer<typeof cacheControlSchema> | undefined
  * carry one at all, so a message ending in thinking drops it — nothing else
  * would be a legal request.
  */
-export function applyMessageCacheControl(
-  blocks: ContentBlock[],
-  c: z.infer<typeof cacheControlSchema> | undefined,
-): void {
-  if (c === undefined) return;
+export function applyMessageCacheControl(blocks: ContentBlock[], value: unknown): void {
+  const control = looseCacheControl(value);
+  if (control.cacheControl === undefined) return;
   const last = blocks.at(-1);
   if (last === undefined || last.type === "thinking" || cacheControlOf(last) !== undefined) return;
-  Object.assign(last, irCacheControl(c));
+  Object.assign(last, control);
 }
 
 /**
