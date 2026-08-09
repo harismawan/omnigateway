@@ -23,7 +23,7 @@ test("openDb applies migrations and records them", () => {
     expect(tables).toContain(t);
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
-  expect(applied.map((row) => row.id)).toEqual([1, 2, 3]);
+  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4]);
   db.close();
 });
 
@@ -31,7 +31,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(3);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(4);
   db.close();
 });
 
@@ -55,6 +55,21 @@ test("foreign keys cascade from credentials to health", () => {
   db.run("DELETE FROM credentials WHERE id = 'c1'");
   const left = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM credential_health").get();
   expect(left?.n).toBe(0);
+  db.close();
+});
+
+test("migration 4 backfills existing request logs as finished", () => {
+  const db = openDb(":memory:");
+  // A row written by a build that predates the column would have been left
+  // pending by a nullable default, and swept to `interrupted` on the next boot.
+  db.run(
+    `INSERT INTO request_logs (id, at, requested_model, attempts, status, input_tokens,
+                               output_tokens, cache_read_tokens, cache_write_tokens,
+                               duration_ms, cost_usd, degradations)
+     VALUES ('r1', 0, 'm', 1, 200, 0, 0, 0, 0, 1, 0, '[]')`,
+  );
+  const row = db.query<{ state: string }, []>("SELECT state FROM request_logs").get();
+  expect(row?.state).toBe("done");
   db.close();
 });
 

@@ -27,12 +27,62 @@ export function percentile(values: readonly number[], p: number): number | null 
   return sorted[index] ?? null;
 }
 
+/** A request the gateway is still serving. Its zeros are placeholders. */
+export function isPending(log: RequestLog): boolean {
+  return log.state === "pending";
+}
+
+/**
+ * Drops rows for requests still in flight.
+ *
+ * Every derived figure runs through this first. A pending row reports no
+ * tokens, no cost and no latency, so counting one as a request would pull each
+ * rate toward zero exactly when traffic picks up — the health strip would dip
+ * for being busy.
+ */
+export function completed(logs: readonly RequestLog[]): RequestLog[] {
+  return logs.filter((log) => !isPending(log));
+}
+
 /** A log row counts as an error on any non-2xx status the gateway recorded. */
 export function isError(log: RequestLog): boolean {
+  // A request in flight has not failed yet. Its status is a placeholder zero,
+  // so this would read as success anyway; saying so makes that intent.
+  if (isPending(log)) return false;
   return log.status >= 400 || log.errorCode !== null;
 }
 
-export function summarize(logs: readonly RequestLog[], windowMs: number): Vitals {
+export type LampState = "ok" | "warn" | "down" | "idle" | "live";
+
+export const LAMP_GLYPH: Record<LampState, string> = {
+  ok: "●",
+  warn: "◐",
+  down: "○",
+  idle: "·",
+  // What a `live` lamp shows when it cannot spin: the frames are animated over
+  // this, and reduced motion or a monochrome screen leaves it standing.
+  live: "◐",
+};
+
+/**
+ * How a log row reads in a lamp. Shared by the log and the activity tail, so
+ * one request looks the same on both screens.
+ *
+ * The label is the lamp's accessible name, and for a live row it is the whole
+ * signal: the animation says nothing to a screen reader.
+ */
+export function lampState(log: RequestLog): LampState {
+  if (isPending(log)) return "live";
+  return isError(log) ? "down" : "ok";
+}
+
+export function lampLabel(log: RequestLog): string {
+  if (isPending(log)) return "in flight";
+  return isError(log) ? `failed with ${log.status}` : "succeeded";
+}
+
+export function summarize(all: readonly RequestLog[], windowMs: number): Vitals {
+  const logs = completed(all);
   const ttfts: number[] = [];
   let errors = 0;
   let costUsd = 0;
@@ -79,9 +129,10 @@ export type Bucket = {
  * gateway draws a flat line rather than an empty box.
  */
 export function bucketLogs(
-  logs: readonly RequestLog[],
+  all: readonly RequestLog[],
   options: { now: number; spanMs: number; count: number },
 ): Bucket[] {
+  const logs = completed(all);
   const { now, spanMs, count } = options;
   const width = spanMs / count;
   const start = now - spanMs;
@@ -110,15 +161,6 @@ export function bucketLogs(
   }
   return buckets;
 }
-
-export type LampState = "ok" | "warn" | "down" | "idle";
-
-export const LAMP_GLYPH: Record<LampState, string> = {
-  ok: "●",
-  warn: "◐",
-  down: "○",
-  idle: "·",
-};
 
 /** What the operator has to do, not what the gateway observed. */
 const RECONNECT_NOTE: Record<"tokenRejected" | "expiredNoRefresh", string> = {

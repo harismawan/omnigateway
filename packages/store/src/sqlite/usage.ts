@@ -1,7 +1,8 @@
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { ProviderId } from "@omni/ir";
 import type {
   RequestLog,
+  RequestState,
   UsageBucket,
   UsageDimension,
   UsageGrain,
@@ -12,6 +13,7 @@ import { rollupLog, startOfLocalDay } from "./rollup.ts";
 
 type Row = {
   id: string;
+  state: string;
   at: number;
   api_key_id: string | null;
   requested_model: string;
@@ -33,6 +35,7 @@ type Row = {
 
 const toLog = (r: Row): RequestLog => ({
   id: r.id,
+  state: r.state === "pending" ? "pending" : "done",
   at: r.at,
   apiKeyId: r.api_key_id,
   requestedModel: r.requested_model,
@@ -85,7 +88,14 @@ function columnFor(grain: UsageGrain, dimension: UsageDimension): string {
   return column;
 }
 
-/** Raw logs count failures from the status; the rollup already stored them. */
+/**
+ * Raw logs count failures from the status; the rollup already stored them.
+ *
+ * Raw aggregation also excludes in-flight rows (see the `state` predicate in
+ * `aggregate`): a pending row's zeros are placeholders, and counting one as a
+ * request with no tokens would drag every mean toward zero. The rollup needs no
+ * such filter — nothing writes it until a request completes.
+ */
 const MEASURES: Readonly<Record<UsageGrain, string>> = {
   raw: `COUNT(*) AS requests,
         COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0) AS errors,
@@ -115,45 +125,107 @@ function label(value: string | number | null): string {
   return text.length === 0 ? "unknown" : text;
 }
 
+const COLUMNS = `(id, state, at, api_key_id, requested_model, resolved_provider, resolved_model,
+                  credential_id, attempts, status, error_code, input_tokens, output_tokens,
+                  cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms, cost_usd,
+                  degradations)`;
+
+const PLACEHOLDERS = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+function values(log: RequestLog, state: RequestState): SQLQueryBindings[] {
+  return [
+    log.id,
+    state,
+    log.at,
+    log.apiKeyId,
+    log.requestedModel,
+    log.resolvedProvider,
+    log.resolvedModel,
+    log.credentialId,
+    log.attempts,
+    log.status,
+    log.errorCode,
+    log.inputTokens,
+    log.outputTokens,
+    log.cacheReadTokens,
+    log.cacheWriteTokens,
+    log.ttftMs,
+    log.durationMs,
+    log.costUsd,
+    JSON.stringify(log.degradations),
+  ];
+}
+
+/**
+ * Completion upserts, because it serves both a request that began and one that
+ * failed before dispatch ever ran.
+ *
+ * Three columns are deliberately not overwritten. `at` is omitted entirely, so
+ * a row keeps the start time it was filed under and does not jump position in
+ * the log the instant it finishes. `requested_model` and `api_key_id` fall back
+ * to what the row already holds, because the route's terminal catch synthesises
+ * a blank log and can reach a row that already began — when dispatch throws
+ * rather than yielding an error event.
+ */
+const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
+  ON CONFLICT(id) DO UPDATE SET
+    state = 'done',
+    requested_model = COALESCE(NULLIF(excluded.requested_model, ''), request_logs.requested_model),
+    api_key_id = COALESCE(excluded.api_key_id, request_logs.api_key_id),
+    resolved_provider = excluded.resolved_provider,
+    resolved_model = excluded.resolved_model,
+    credential_id = excluded.credential_id,
+    attempts = excluded.attempts,
+    status = excluded.status,
+    error_code = excluded.error_code,
+    input_tokens = excluded.input_tokens,
+    output_tokens = excluded.output_tokens,
+    cache_read_tokens = excluded.cache_read_tokens,
+    cache_write_tokens = excluded.cache_write_tokens,
+    ttft_ms = excluded.ttft_ms,
+    duration_ms = excluded.duration_ms,
+    cost_usd = excluded.cost_usd,
+    degradations = excluded.degradations`;
+
 export function createUsageRepo(db: Database): UsageRepo {
   /**
    * The raw row and its rollup are written together: a crash between the two
    * would leave the year view quietly disagreeing with the log it summarizes.
+   *
+   * The rollup is fed from the stored row rather than from the argument, so it
+   * summarizes what the log actually says even where the upsert kept a column
+   * the completing log did not carry.
    */
-  const insert = db.transaction((log: RequestLog) => {
-    db.run(
-      `INSERT INTO request_logs
-           (id, at, api_key_id, requested_model, resolved_provider, resolved_model, credential_id,
-            attempts, status, error_code, input_tokens, output_tokens, cache_read_tokens,
-            cache_write_tokens, ttft_ms, duration_ms, cost_usd, degradations)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        log.id,
-        log.at,
-        log.apiKeyId,
-        log.requestedModel,
-        log.resolvedProvider,
-        log.resolvedModel,
-        log.credentialId,
-        log.attempts,
-        log.status,
-        log.errorCode,
-        log.inputTokens,
-        log.outputTokens,
-        log.cacheReadTokens,
-        log.cacheWriteTokens,
-        log.ttftMs,
-        log.durationMs,
-        log.costUsd,
-        JSON.stringify(log.degradations),
-      ],
-    );
-    rollupLog(db, log);
+  const complete = db.transaction((log: RequestLog) => {
+    db.run(COMPLETE, values(log, "done"));
+    const stored = db.query<Row, [string]>("SELECT * FROM request_logs WHERE id = ?").get(log.id);
+    if (stored !== null) rollupLog(db, toLog(stored));
   });
 
   return {
+    async begin(log: RequestLog) {
+      db.run(`INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}`, values(log, "pending"));
+    },
+
     async append(log: RequestLog) {
-      insert(log);
+      complete(log);
+    },
+
+    async sweepPending() {
+      const stale = db
+        .query<Row, []>("SELECT * FROM request_logs WHERE state = 'pending'")
+        .all()
+        .map(toLog);
+      for (const log of stale) {
+        // Through the same path as a real completion, so the daily rollup keeps
+        // agreeing with the rows it summarizes.
+        //
+        // Zero duration, not elapsed-since-start: nobody knows when the process
+        // died, and a row pending across a weekend of downtime would otherwise
+        // put two days into the mean latency of the day it started on.
+        complete({ ...log, status: 499, errorCode: "interrupted", durationMs: 0 });
+      }
+      return stale.length;
     },
 
     async recent(limit: number) {
@@ -186,7 +258,7 @@ export function createUsageRepo(db: Database): UsageRepo {
                   COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
                   COALESCE(SUM(cost_usd), 0) AS cost_usd
              FROM ${daily ? "usage_daily" : "request_logs"}
-            WHERE ${timeColumn} >= ? AND ${timeColumn} <= ?
+            WHERE ${daily ? "" : "state = 'done' AND "}${timeColumn} >= ? AND ${timeColumn} <= ?
             GROUP BY key${split === null ? "" : ", split"}
             ORDER BY requests DESC`,
         )

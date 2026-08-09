@@ -56,6 +56,9 @@ export async function dispatch(
 
   const log: RequestLog = {
     id: crypto.randomUUID(),
+    // Dispatch only ever hands back a finished log; the pending row the console
+    // watches is written by the route, before this runs.
+    state: "done",
     at: startedAt,
     apiKeyId: null,
     requestedModel: request.model,

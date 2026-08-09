@@ -8,7 +8,7 @@ import { anthropicErrorBody, anthropicResponse, anthropicStream } from "../egres
 import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.ts";
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
-import { finishLog } from "../logging.ts";
+import { beginLog, finishLog } from "../logging.ts";
 
 export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
   snapshots?: DispatchDeps["snapshots"];
@@ -153,6 +153,35 @@ async function handle(
       );
     }
 
+    // Filed before dispatch, so a long stream shows up in the console while it
+    // runs rather than only once it ends. This is the first point at which the
+    // requested model and the key are known; a request that fails auth, parsing
+    // or the allowlist never begins, and writes one finished row from the catch.
+    await beginLog(
+      deps.store,
+      {
+        id: requestId,
+        at: deps.now(),
+        apiKeyId: keyId,
+        requestedModel: chatRequest.model,
+        resolvedProvider: null,
+        resolvedModel: null,
+        credentialId: null,
+        attempts: 0,
+        status: 0,
+        errorCode: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        ttftMs: null,
+        durationMs: 0,
+        costUsd: 0,
+        degradations: [],
+      },
+      keyId,
+    );
+
     const outcome = await dispatch(chatRequest, deps, request.signal);
     // Overrides dispatch's internally generated id with the route-level
     // requestId so the client-visible response id and the log row id match.
@@ -191,6 +220,9 @@ async function handle(
       deps.store,
       {
         id: requestId,
+        // Completes a pending row if the request got as far as dispatch. The
+        // store keeps what beginning it recorded where this log carries nothing.
+        state: "done",
         at: deps.now(),
         apiKeyId: keyId,
         requestedModel: "",

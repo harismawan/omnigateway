@@ -96,6 +96,7 @@ export function apiKey(patch: Partial<ApiKeySummary> = {}): ApiKeySummary {
 export function log(patch: Partial<RequestLog> = {}): RequestLog {
   return {
     id: "req-1",
+    state: "done",
     at: NOW - 60_000,
     apiKeyId: "key-1",
     requestedModel: "fast",

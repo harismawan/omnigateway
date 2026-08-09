@@ -35,6 +35,12 @@ const store = await createStore({
   encryptionKey,
 });
 
+// The gateway is one process, so a request still marked in-flight at startup
+// died with the last one. Retiring them here is what stops a crash leaving a
+// row that spins in the console forever.
+const swept = await store.usage.sweepPending();
+if (swept > 0) console.log(`retired ${swept} request(s) interrupted by the last shutdown`);
+
 /**
  * One refresher for the whole process, shared by the request path and both
  * background loops. Its per-credential coalescing is what keeps a sweep and a
