@@ -50,6 +50,31 @@ describe("LogsBoard", () => {
     expect(await screen.findByText("claude-main")).toBeTruthy();
   });
 
+  test("breaks a completed request's tokens into four compact categories", async () => {
+    createFetchStub({
+      "GET /api/logs": () => ({
+        logs: [
+          log({
+            inputTokens: 1_234,
+            outputTokens: 0,
+            cacheReadTokens: 89_010,
+            cacheWriteTokens: 234,
+          }),
+        ],
+      }),
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    const tokens = await screen.findByRole("cell", {
+      name: "1,234 input, 0 output, 89,010 cache read, 234 cache write tokens",
+    });
+    expect(tokens.textContent).toBe("1,234089k234");
+    expect(tokens.getAttribute("title")).toBe(
+      "1,234 input, 0 output, 89,010 cache read, 234 cache write tokens",
+    );
+  });
+
   test("an unrouted request says so instead of showing a blank cell", async () => {
     stubLogs();
     renderWithProviders(<LogsBoard />);
