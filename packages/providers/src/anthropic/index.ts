@@ -22,15 +22,25 @@ export const anthropicAdapter: ProviderAdapter = {
     // The billing block and the agent preamble go in as system blocks, and
     // the cch token is computed over the finished bytes, so this has to run
     // before serialization.
+    //
+    // The upstream leg always streams, whatever the client asked for, as it
+    // does for the other two providers: dispatch collects events into a
+    // buffered body when the client wants one, so a non-streaming request
+    // needs an event stream to collect. Asking for JSON here and then parsing
+    // the reply as SSE yields no events at all. Streaming also keeps bytes
+    // moving on a long generation instead of holding one response open, and
+    // it is what the client this adapter mimics actually sends.
     const withSystem: Record<string, unknown> = {
       ...body,
       system: applyAnthropicSystem(body.system ?? []),
+      stream: true,
     };
 
     const protocol: HeaderPair[] = [
       ["Content-Type", "application/json"],
       ["anthropic-version", API_VERSION],
-      ["Accept", req.request.stream ? "text/event-stream" : "application/json"],
+      // Constant, because the request above always streams.
+      ["Accept", "text/event-stream"],
     ];
 
     // The client's own betas ride along: the fields they authorise are already

@@ -467,3 +467,21 @@ test("a request naming no beta sends no beta header on the api-key path", async 
   const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
   expect(header(sent, "anthropic-beta")).toBeNull();
 });
+
+test("a non-streaming client request still streams from the upstream", async () => {
+  const { call, upstream, store } = await harness();
+  await seedCredential(store, "c1", 1, "test-token-a");
+  upstream.queue(ANTHROPIC_STREAM);
+
+  // The client did not ask to stream; the gateway collects events into a
+  // buffered body either way, so the upstream leg should stream regardless.
+  const res = await call(REQUEST);
+
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { content: { type: string; text: string }[] };
+  expect(body.content).toEqual([{ type: "text", text: "Hello" }]);
+
+  const sent = upstream.calls[0] as NonNullable<(typeof upstream.calls)[0]>;
+  expect((sent.body as { stream?: unknown }).stream).toBe(true);
+  expect(header(sent, "accept")).toBe("text/event-stream");
+});
