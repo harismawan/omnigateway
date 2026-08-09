@@ -120,14 +120,12 @@ describe("readConsole from a file", () => {
 describe("readConsole from the journal", () => {
   const source: ConsoleSource = { kind: "journal", unit: UNIT_NAME, scope: "user" };
 
-  test("asks journalctl for the unit, with --user under a user-scope unit", async () => {
+  test("asks the system journal for a user-scope unit", async () => {
     const d = deps({ journal: line("info", "a") });
     await readConsole(d, source, { lines: 25 });
     expect(d.argv[0]).toEqual([
       "journalctl",
-      "--user",
-      "-u",
-      UNIT_NAME,
+      `--user-unit=${UNIT_NAME}`,
       "-n",
       "25",
       "--no-pager",
