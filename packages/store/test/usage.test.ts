@@ -16,6 +16,7 @@ async function store(): Promise<Store> {
 
 function log(patch: Partial<RequestLog> & { id: string; at: number }): RequestLog {
   return {
+    state: "done",
     apiKeyId: "k1",
     requestedModel: "fast",
     resolvedProvider: "anthropic",
@@ -171,6 +172,150 @@ test("a grain cannot be asked for a dimension it does not carry", async () => {
   await expect(s.usage.aggregate({ since: 0, grain: "raw", groupBy: "day" })).rejects.toThrow(
     "cannot group by day",
   );
+  s.close();
+});
+
+test("a begun request is visible in the log but absent from usage", async () => {
+  const s = await store();
+  await s.usage.begin(log({ id: "r1", at: noon(0), state: "pending" }));
+
+  const [row] = await s.usage.recent(10);
+  expect(row?.state).toBe("pending");
+
+  // Neither grain counts a request that has not finished: its zeros are
+  // placeholders, and counting one would drag every mean toward zero.
+  for (const grain of ["raw", "daily"] as const) {
+    expect(await s.usage.aggregate({ since: noon(2), grain, groupBy: "provider" })).toEqual([]);
+  }
+  s.close();
+});
+
+test("routing a begun request fills its target without completing or rolling it up", async () => {
+  const s = await store();
+  await s.usage.begin(log({ id: "r1", at: noon(0), state: "pending" }));
+
+  await s.usage.route("r1", {
+    provider: "anthropic",
+    model: "claude-opus-4",
+    credentialId: "c1",
+  });
+
+  const [row] = await s.usage.recent(10);
+  expect(row).toMatchObject({
+    state: "pending",
+    resolvedProvider: "anthropic",
+    resolvedModel: "claude-opus-4",
+    credentialId: "c1",
+  });
+  expect(await s.usage.aggregate({ since: noon(2), grain: "daily", groupBy: "day" })).toEqual([]);
+  s.close();
+});
+
+test("completing a begun request updates the row in place and rolls it up once", async () => {
+  const s = await store();
+  await s.usage.begin(log({ id: "r1", at: noon(0), state: "pending" }));
+  await s.usage.append(log({ id: "r1", at: noon(0) }));
+
+  const rows = await s.usage.recent(10);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]?.state).toBe("done");
+  expect(rows[0]?.status).toBe(200);
+
+  const days = await s.usage.aggregate({ since: noon(2), grain: "daily", groupBy: "day" });
+  expect(days).toHaveLength(1);
+  expect(days[0]?.requests).toBe(1);
+  expect(days[0]?.inputTokens).toBe(100);
+  s.close();
+});
+
+test("completion keeps the start time, so a finishing row does not jump the log", async () => {
+  const s = await store();
+  const startedAt = noon(0);
+  await s.usage.begin(log({ id: "r1", at: startedAt, state: "pending" }));
+  await s.usage.append(log({ id: "r1", at: startedAt + 90_000 }));
+
+  expect((await s.usage.recent(10))[0]?.at).toBe(startedAt);
+  s.close();
+});
+
+test("a blank completing log does not erase what beginning the request recorded", async () => {
+  const s = await store();
+  // What the route's terminal catch synthesizes when dispatch throws outright.
+  await s.usage.begin(log({ id: "r1", at: noon(0), state: "pending" }));
+  await s.usage.append(
+    log({
+      id: "r1",
+      at: noon(0),
+      requestedModel: "",
+      apiKeyId: null,
+      resolvedProvider: null,
+      resolvedModel: null,
+      credentialId: null,
+      attempts: 0,
+      status: 500,
+      errorCode: "UPSTREAM",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      ttftMs: null,
+      durationMs: 0,
+      costUsd: 0,
+    }),
+  );
+
+  const [row] = await s.usage.recent(10);
+  expect(row?.requestedModel).toBe("fast");
+  expect(row?.apiKeyId).toBe("k1");
+  expect(row?.status).toBe(500);
+  expect(row?.errorCode).toBe("UPSTREAM");
+
+  // And the rollup describes the row as stored, not the blank that completed it.
+  const models = await s.usage.aggregate({
+    since: noon(2),
+    grain: "daily",
+    groupBy: "requestedModel",
+  });
+  expect(models).toEqual([expect.objectContaining({ key: "fast", requests: 1, errors: 1 })]);
+  s.close();
+});
+
+test("a request that never began completes exactly as it always did", async () => {
+  const s = await store();
+  await s.usage.append(log({ id: "r1", at: noon(0), status: 401, errorCode: "AUTH" }));
+
+  const rows = await s.usage.recent(10);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]?.state).toBe("done");
+
+  const days = await s.usage.aggregate({ since: noon(2), grain: "daily", groupBy: "day" });
+  expect(days[0]?.requests).toBe(1);
+  expect(days[0]?.errors).toBe(1);
+  s.close();
+});
+
+test("sweepPending retires rows the last process left behind", async () => {
+  const s = await store();
+  await s.usage.begin(log({ id: "r1", at: noon(0), state: "pending" }));
+  await s.usage.append(log({ id: "r2", at: noon(0) }));
+
+  expect(await s.usage.sweepPending()).toBe(1);
+  expect(await s.usage.sweepPending()).toBe(0);
+
+  const rows = await s.usage.recent(10);
+  expect(rows.every((row) => row.state === "done")).toBe(true);
+  const swept = rows.find((row) => row.id === "r1");
+  expect(swept?.status).toBe(499);
+  expect(swept?.errorCode).toBe("interrupted");
+  // Nobody knows when the process died, so no duration is claimed.
+  expect(swept?.durationMs).toBe(0);
+  // The completed request keeps its own outcome.
+  expect(rows.find((row) => row.id === "r2")?.status).toBe(200);
+
+  // A swept row reaches the rollup, so the year view still counts the request.
+  const days = await s.usage.aggregate({ since: noon(2), grain: "daily", groupBy: "day" });
+  expect(days[0]?.requests).toBe(2);
+  expect(days[0]?.errors).toBe(1);
   s.close();
 });
 

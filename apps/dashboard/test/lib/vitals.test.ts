@@ -4,6 +4,8 @@ import {
   credentialStatus,
   groupBy,
   isError,
+  lampLabel,
+  lampState,
   percentile,
   quotaUsage,
   summarize,
@@ -15,6 +17,23 @@ describe("isError", () => {
     expect(isError(log())).toBe(false);
     expect(isError(log({ status: 502 }))).toBe(true);
     expect(isError(log({ status: 200, errorCode: "TIMEOUT" }))).toBe(true);
+  });
+
+  // A pending row carries `status: 0`, which is neither a success nor a
+  // failure. Reading it as either would put a running request in the failure
+  // count the moment it started.
+  test("a request still in flight is not a failure", () => {
+    expect(isError(log({ state: "pending", status: 0 }))).toBe(false);
+  });
+});
+
+describe("lampState", () => {
+  test("distinguishes in flight from finished, and names each for a reader", () => {
+    const pending = log({ state: "pending", status: 0 });
+    expect(lampState(pending)).toBe("live");
+    expect(lampLabel(pending)).toBe("in flight");
+    expect(lampState(log())).toBe("ok");
+    expect(lampState(log({ status: 502 }))).toBe("down");
   });
 });
 
@@ -35,6 +54,23 @@ describe("summarize", () => {
     expect(vitals.ttftP50).toBe(200);
     expect(vitals.ttftP95).toBe(900);
     expect(vitals.costUsd).toBeCloseTo(0.048, 5);
+  });
+
+  // Its tokens, cost and duration are placeholder zeros the gateway filed to
+  // keep the columns NOT NULL. Counting the row would divide real work by a
+  // request that has produced none of it.
+  test("ignores a request that has not finished", () => {
+    const vitals = summarize(
+      [
+        log({ id: "a", ttftMs: 100 }),
+        log({ id: "b", state: "pending", status: 0, ttftMs: null, costUsd: 0, durationMs: 0 }),
+      ],
+      600_000,
+    );
+
+    expect(vitals.requests).toBe(1);
+    expect(vitals.ttftP50).toBe(100);
+    expect(vitals.costUsd).toBeCloseTo(0.012, 5);
   });
 
   test("reports zeroes rather than NaN for an idle window", () => {
@@ -66,6 +102,18 @@ describe("bucketLogs", () => {
     expect(buckets.at(-1)?.total).toBe(2);
     // Nearest-rank median: with two samples the lower one is the p50.
     expect(buckets.at(-1)?.ttftMs).toBe(100);
+  });
+
+  test("ignores a request that has not finished", () => {
+    const buckets = bucketLogs(
+      [
+        log({ id: "a", at: NOW - 30_000 }),
+        log({ id: "b", at: NOW - 30_000, state: "pending", status: 0, ttftMs: null }),
+      ],
+      { now: NOW, spanMs: 600_000, count: 10 },
+    );
+
+    expect(buckets.reduce((sum, bucket) => sum + bucket.total, 0)).toBe(1);
   });
 
   test("ignores anything outside the window", () => {

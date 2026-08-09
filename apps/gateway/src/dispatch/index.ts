@@ -37,6 +37,12 @@ export type DispatchDeps = {
   now: () => number;
   rand: () => number;
   refresh: (credential: CredentialView) => Promise<CredentialSecrets>;
+  /** Called when an attempt selects its target, before outbound work starts. */
+  onRoute?: (target: {
+    provider: ProviderId;
+    model: string;
+    credentialId: string;
+  }) => Promise<void>;
 };
 
 export type DispatchOutcome = {
@@ -56,6 +62,9 @@ export async function dispatch(
 
   const log: RequestLog = {
     id: crypto.randomUUID(),
+    // Dispatch only ever hands back a finished log; the pending row the console
+    // watches is written by the route, before this runs.
+    state: "done",
     at: startedAt,
     apiKeyId: null,
     requestedModel: request.model,
@@ -158,6 +167,11 @@ export async function dispatch(
         log.credentialId = candidate.credential.id;
         log.resolvedProvider = candidate.target.provider;
         log.resolvedModel = candidate.target.model;
+        await deps.onRoute?.({
+          provider: candidate.target.provider,
+          model: candidate.target.model,
+          credentialId: candidate.credential.id,
+        });
 
         // Reset per-attempt: a failed attempt's partial usage must not leak into
         // the next one's log.

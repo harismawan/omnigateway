@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import styled from "styled-components";
-import { useCredentials, useLogs } from "../../api/queries.ts";
+import { LOG_CADENCE_MS, useCredentials, useLogs } from "../../api/queries.ts";
 import type { RequestLog } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import {
@@ -11,7 +11,7 @@ import {
   formatUsd,
   shortId,
 } from "../../lib/format.ts";
-import { isError } from "../../lib/vitals.ts";
+import { isError, isPending, lampLabel, lampState } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
 import { Button } from "../../ui/Button.tsx";
 import { Chip, ProviderTag } from "../../ui/Chip.tsx";
@@ -62,7 +62,7 @@ export function LogsBoard() {
   const [term, setTerm] = useState("");
   const [open, setOpen] = useState<RequestLog | null>(null);
 
-  const logs = useLogs(limit, cadence(10_000));
+  const logs = useLogs(limit, cadence(LOG_CADENCE_MS));
   const credentials = useCredentials();
 
   const names = useMemo(() => {
@@ -86,6 +86,7 @@ export function LogsBoard() {
   });
 
   const failed = (logs.data ?? []).filter(isError).length;
+  const live = (logs.data ?? []).filter(isPending).length;
 
   return (
     <>
@@ -95,7 +96,7 @@ export function LogsBoard() {
         summary={
           logs.isLoading
             ? "Reading the request log…"
-            : `${formatCount(logs.data?.length ?? 0)} recent requests, ${formatCount(failed)} of them failed. Prompt and response bodies are never recorded.`
+            : `${formatCount(logs.data?.length ?? 0)} recent requests, ${formatCount(failed)} of them failed${live === 0 ? "" : `, ${formatCount(live)} still running`}. Prompt and response bodies are never recorded.`
         }
         actions={
           <Controls>
@@ -166,10 +167,7 @@ export function LogsBoard() {
                 {rows.map((log) => (
                   <Tr key={log.id} $selectable onClick={() => setOpen(log)}>
                     <Td>
-                      <Lamp
-                        state={isError(log) ? "down" : "ok"}
-                        label={isError(log) ? `failed with ${log.status}` : "succeeded"}
-                      />
+                      <Lamp state={lampState(log)} label={lampLabel(log)} />
                     </Td>
                     {/* Clock only: every row in a tail shares the day, and the
                         full stamp is a hover away. */}
@@ -181,9 +179,13 @@ export function LogsBoard() {
                         {log.requestedModel || "—"}
                       </Truncate>
                     </Td>
+                    {/* A row still in flight has been measured for none of
+                        what follows. Its zeros are placeholders the gateway
+                        filed to keep the column NOT NULL, so printing them
+                        would state a nought that nobody counted. */}
                     <Td>
                       {log.resolvedProvider === null ? (
-                        <Legend>not routed</Legend>
+                        <Legend>{isPending(log) ? "routing…" : "not routed"}</Legend>
                       ) : (
                         <Row $gap={1}>
                           <ProviderTag provider={log.resolvedProvider} />
@@ -199,22 +201,24 @@ export function LogsBoard() {
                       </Truncate>
                     </Td>
                     <Td $align="right" $mono>
-                      {log.attempts}
+                      {isPending(log) ? "—" : log.attempts}
                     </Td>
                     <Td $align="right" $mono>
-                      {formatMs(log.ttftMs)}
+                      {isPending(log) ? "—" : formatMs(log.ttftMs)}
                     </Td>
                     <Td $align="right" $mono>
-                      {formatMs(log.durationMs)}
+                      {isPending(log) ? "—" : formatMs(log.durationMs)}
                     </Td>
                     <Td $align="right" $mono>
-                      {formatCount(log.inputTokens + log.outputTokens)}
+                      {isPending(log) ? "—" : formatCount(log.inputTokens + log.outputTokens)}
                     </Td>
                     <Td $align="right" $mono>
-                      {formatUsd(log.costUsd)}
+                      {isPending(log) ? "—" : formatUsd(log.costUsd)}
                     </Td>
                     <Td>
-                      {log.errorCode === null ? (
+                      {isPending(log) ? (
+                        <Chip $tone="accent">live</Chip>
+                      ) : log.errorCode === null ? (
                         <Chip $tone="ok">{log.status}</Chip>
                       ) : (
                         <Chip $tone="down">{log.errorCode}</Chip>
@@ -252,9 +256,11 @@ export function LogsBoard() {
               <Value>{open.requestedModel || "—"}</Value>
               <Legend as="dt">Routed to</Legend>
               <Value>
-                {open.resolvedProvider === null
-                  ? "not routed"
-                  : `${open.resolvedProvider} · ${open.resolvedModel ?? "—"}`}
+                {isPending(open)
+                  ? "—"
+                  : open.resolvedProvider === null
+                    ? "not routed"
+                    : `${open.resolvedProvider} · ${open.resolvedModel ?? "—"}`}
               </Value>
               <Legend as="dt">Account</Legend>
               <Value>
@@ -265,23 +271,37 @@ export function LogsBoard() {
               <Legend as="dt">Key</Legend>
               <Value>{open.apiKeyId ?? "—"}</Value>
               <Legend as="dt">Attempts</Legend>
-              <Value>{open.attempts}</Value>
+              <Value>{isPending(open) ? "—" : open.attempts}</Value>
               <Legend as="dt">Status</Legend>
+              {/* The snapshot the row was opened with. The log behind this
+                  refreshes on the next poll; the modal does not. */}
               <Value>
-                {open.errorCode === null ? open.status : `${open.status} ${open.errorCode}`}
+                {isPending(open)
+                  ? "in flight"
+                  : open.errorCode === null
+                    ? open.status
+                    : `${open.status} ${open.errorCode}`}
               </Value>
               <Legend as="dt">Timing</Legend>
               <Value>
-                first token {formatMs(open.ttftMs)} · total {formatMs(open.durationMs)}
+                {isPending(open)
+                  ? "—"
+                  : `first token ${formatMs(open.ttftMs)} · total ${formatMs(open.durationMs)}`}
               </Value>
               <Legend as="dt">Tokens</Legend>
               <Value>
-                {formatCount(open.inputTokens)} in · {formatCount(open.outputTokens)} out ·{" "}
-                {formatCount(open.cacheReadTokens)} cache read ·{" "}
-                {formatCount(open.cacheWriteTokens)} cache write
+                {isPending(open) ? (
+                  "—"
+                ) : (
+                  <>
+                    {formatCount(open.inputTokens)} in · {formatCount(open.outputTokens)} out ·{" "}
+                    {formatCount(open.cacheReadTokens)} cache read ·{" "}
+                    {formatCount(open.cacheWriteTokens)} cache write
+                  </>
+                )}
               </Value>
               <Legend as="dt">Cost</Legend>
-              <Value>{formatUsd(open.costUsd)}</Value>
+              <Value>{isPending(open) ? "—" : formatUsd(open.costUsd)}</Value>
             </Detail>
 
             {open.degradations.length === 0 ? null : (

@@ -127,8 +127,16 @@ export type ApiKey = {
   revokedAt: number | null;
 };
 
+/**
+ * `pending` is a request still in flight. Its `status`, `attempts`, tokens and
+ * cost are placeholder zeros, never measurements: read `state` to tell the two
+ * apart, never `status`.
+ */
+export type RequestState = "pending" | "done";
+
 export type RequestLog = {
   id: string;
+  state: RequestState;
   at: number;
   apiKeyId: string | null;
   requestedModel: string;
@@ -260,7 +268,29 @@ export type UsageBucket = {
 };
 
 export interface UsageRepo {
+  /**
+   * Records a request that has started. Writes no rollup: a request that has
+   * not finished has no tokens and no cost to accumulate.
+   */
+  begin(log: RequestLog): Promise<void>;
+  /** Updates routing fields on a pending row without completing or rolling it up. */
+  route(
+    id: string,
+    target: { provider: ProviderId; model: string; credentialId: string },
+  ): Promise<void>;
+  /**
+   * Completes a request, writing the `usage_daily` rollup in the same
+   * transaction. Upserts, so it serves both a request that began and one that
+   * failed before dispatch, but must run at most once per id: a second call
+   * would count the same request into the rollup twice.
+   */
   append(log: RequestLog): Promise<void>;
+  /**
+   * Completes every row left pending, as `interrupted`. The gateway is one
+   * process, so anything still pending at startup died with the last one.
+   * Returns how many were swept.
+   */
+  sweepPending(): Promise<number>;
   recent(limit: number): Promise<RequestLog[]>;
   aggregate(q: UsageQuery): Promise<UsageBucket[]>;
   prune(olderThan: number): Promise<number>;

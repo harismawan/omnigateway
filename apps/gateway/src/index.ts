@@ -35,6 +35,12 @@ const store = await createStore({
   encryptionKey,
 });
 
+// The gateway is one process, so a request still marked in-flight at startup
+// died with the last one. Retiring them here is what stops a crash leaving a
+// row that spins in the console forever.
+const swept = await store.usage.sweepPending();
+if (swept > 0) console.log(`retired ${swept} request(s) interrupted by the last shutdown`);
+
 /**
  * One refresher for the whole process, shared by the request path and both
  * background loops. Its per-credential coalescing is what keeps a sweep and a
@@ -64,7 +70,13 @@ const stopQuotaPoller = await startQuotaPoller({
   now,
 });
 
-app.listen({ port: config.port, hostname: config.host });
+// Elysia defaults Bun's socket `idleTimeout` to 30 seconds, which is shorter
+// than a request is allowed to take: `requestDeadlineMs` is 120s by default,
+// and a non-streaming request writes nothing at all until its JSON body is
+// ready. Streaming is held open by the SSE keepalive, but that cannot help a
+// buffered response, so the socket budget has to clear the request budget.
+// 255 is Bun's maximum.
+app.listen({ port: config.port, hostname: config.host, idleTimeout: 255 });
 
 console.log(`omnigateway listening on http://${config.host}:${config.port}`);
 

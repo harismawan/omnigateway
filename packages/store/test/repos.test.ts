@@ -208,6 +208,7 @@ test("usage appends, lists recent, and aggregates by model", async () => {
   const s = await store();
   const log = {
     id: "r1",
+    state: "done" as const,
     at: 1000,
     apiKeyId: "k1",
     requestedModel: "fast",
@@ -245,6 +246,7 @@ test("usage appends, lists recent, and aggregates by model", async () => {
 test("prune removes logs older than the cutoff", async () => {
   const s = await store();
   const base = {
+    state: "done" as const,
     apiKeyId: null,
     requestedModel: "m",
     resolvedProvider: null,

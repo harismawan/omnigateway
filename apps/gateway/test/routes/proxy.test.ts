@@ -10,7 +10,7 @@ import {
   virtualModel,
 } from "@omni/testkit";
 import { authenticateApiKey } from "../../src/auth/apiKey.ts";
-import { proxyRoutes } from "../../src/routes/proxy.ts";
+import { type ProxyDeps, proxyRoutes } from "../../src/routes/proxy.ts";
 
 const EVENTS: StreamEvent[] = [
   { type: "start", id: "upstream_1", model: "claude-opus-4" },
@@ -24,7 +24,7 @@ const EVENTS: StreamEvent[] = [
   },
 ];
 
-async function harness(events: StreamEvent[] = EVENTS) {
+async function harness(events: StreamEvent[] = EVENTS, overrides: Partial<ProxyDeps> = {}) {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
   await store.config.putModel(
@@ -46,6 +46,7 @@ async function harness(events: StreamEvent[] = EVENTS) {
     rand: () => 0.5,
     refresh: async (c) => await c.secrets(),
     requestId: () => `req_${++n}`,
+    ...overrides,
   });
 
   const call = (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -86,6 +87,66 @@ test("proxies a streaming anthropic request as sse", async () => {
   expect(text).toContain("event: message_start");
   expect(text).toContain("event: message_stop");
   expect(text).toContain('"text":"Hi"');
+});
+
+test("holds a stalled stream open with keepalive comments", async () => {
+  // Upstream can go quiet for a long time — a slow first token, a long
+  // thinking block — and the provider's own pings are decoded away rather
+  // than forwarded. Without a keepalive the socket carries no bytes at all
+  // and Bun's idle timeout (Elysia defaults it to 30s) resets it, which the
+  // client reports as a connection closed mid-response.
+  const gate = Promise.withResolvers<void>();
+  const stalling = (id: ProviderId): ProviderAdapter => ({
+    id,
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send() {
+      return {
+        events: (async function* () {
+          for (const event of EVENTS.slice(0, 3)) yield event;
+          await gate.promise;
+          for (const event of EVENTS.slice(3)) yield event;
+        })(),
+        degradations: [],
+      };
+    },
+  });
+
+  const { call, store } = await harness(EVENTS, {
+    adapters: {
+      anthropic: stalling("anthropic"),
+      openai: stalling("openai"),
+      kimi: stalling("kimi"),
+    },
+    keepaliveMs: 5,
+  });
+
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  setTimeout(() => gate.resolve(), 60);
+  const text = await res.text();
+
+  expect(text).toContain(": keepalive");
+  expect(text).toContain("event: message_stop");
+  expect((await store.usage.recent(10))[0]?.status).toBe(200);
+  store.close();
+});
+
+test("writes no keepalive into a stream that never stalls", async () => {
+  const { call, store } = await harness(EVENTS, { keepaliveMs: 5 });
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  expect(await res.text()).not.toContain(": keepalive");
+  store.close();
 });
 
 test("proxies a non-streaming openai request", async () => {
@@ -224,6 +285,152 @@ test("logs a streaming request after the stream drains", async () => {
   expect(logs[0]?.outputTokens).toBe(2);
 });
 
+test("the first selected route inserts the pending row without a separate route update", async () => {
+  const { call, store } = await harness();
+  let beginCalls = 0;
+  let routeCalls = 0;
+  const originalBegin = store.usage.begin.bind(store.usage);
+  const originalRoute = store.usage.route.bind(store.usage);
+  store.usage.begin = async (log) => {
+    beginCalls++;
+    await originalBegin(log);
+  };
+  store.usage.route = async (id, target) => {
+    routeCalls++;
+    await originalRoute(id, target);
+  };
+
+  const response = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  expect(response.status).toBe(200);
+  expect(beginCalls).toBe(1);
+  expect(routeCalls).toBe(0);
+  store.close();
+});
+
+test("a request in flight is in the log before its stream drains", async () => {
+  const gate = Promise.withResolvers<void>();
+  const stalling = (id: ProviderId): ProviderAdapter => ({
+    id,
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send() {
+      return {
+        events: (async function* () {
+          for (const event of EVENTS.slice(0, 3)) yield event;
+          await gate.promise;
+          for (const event of EVENTS.slice(3)) yield event;
+        })(),
+        degradations: [],
+      };
+    },
+  });
+
+  const { call, store } = await harness(EVENTS, {
+    adapters: {
+      anthropic: stalling("anthropic"),
+      openai: stalling("openai"),
+      kimi: stalling("kimi"),
+    },
+  });
+
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  const live = (await store.usage.recent(10))[0];
+  expect(live?.state).toBe("pending");
+  expect(live?.requestedModel).toBe("fast");
+  expect(live?.resolvedProvider).toBe("anthropic");
+  expect(live?.resolvedModel).toBe("claude-opus-4");
+  expect(live?.credentialId).toBe("c1");
+
+  gate.resolve();
+  await res.text();
+
+  const finished = await store.usage.recent(10);
+  // Completed in place: still one row, and still filed under its start time.
+  expect(finished).toHaveLength(1);
+  expect(finished[0]?.state).toBe("done");
+  expect(finished[0]?.status).toBe(200);
+  expect(finished[0]?.at).toBe(live?.at);
+  store.close();
+});
+
+test("a request rejected before dispatch never appears as in flight", async () => {
+  const { app, store } = await harness();
+  const res = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer nope" },
+      body: JSON.stringify({
+        model: "fast",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    }),
+  );
+  expect(res.status).toBe(401);
+
+  const logs = await store.usage.recent(10);
+  expect(logs).toHaveLength(1);
+  expect(logs[0]?.state).toBe("done");
+  store.close();
+});
+
+test("a throw from dispatch completes the pending row without erasing it", async () => {
+  const exploding = (id: ProviderId): ProviderAdapter => ({
+    id,
+    capabilities: { tools: true, images: true, reasoning: true },
+    send() {
+      throw new Error("adapter exploded");
+    },
+  });
+  const { call, store } = await harness(EVENTS, {
+    adapters: {
+      anthropic: exploding("anthropic"),
+      openai: exploding("openai"),
+      kimi: exploding("kimi"),
+    },
+  });
+
+  await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  const logs = await store.usage.recent(10);
+  expect(logs).toHaveLength(1);
+  expect(logs[0]?.state).toBe("done");
+  // The terminal catch carries no model; what beginning the request recorded stands.
+  expect(logs[0]?.requestedModel).toBe("fast");
+  store.close();
+});
+
+test("a store that cannot record the start still serves the request", async () => {
+  const { call, store } = await harness();
+  store.usage.begin = async () => {
+    throw new Error("disk is full");
+  };
+
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  expect(res.status).toBe(200);
+  expect((await store.usage.recent(10))[0]?.status).toBe(200);
+  store.close();
+});
+
 test("lists the configured virtual models", async () => {
   const { app, raw } = await harness();
   const res = await app.handle(
@@ -251,9 +458,9 @@ test("writes exactly one log row when the client disconnects mid-stream after th
   // cancel callback, which is exactly the path that previously double-wrote
   // the request log (see the sseResponse `runOnce` latch).
   //
-  // The row count alone cannot tell the two paths apart -- a second write
-  // with the same id fails on the UNIQUE constraint and is silently
-  // swallowed by `finishLog`, so this counts the actual `append` calls.
+  // The row count alone cannot tell the two paths apart: completion upserts,
+  // so a second write with the same id leaves one row while counting the
+  // request into the daily rollup twice. This counts the `append` calls.
   const store = await memoryStore();
   let appendCalls = 0;
   const originalAppend = store.usage.append.bind(store.usage);

@@ -5,6 +5,7 @@ import { formatCount, formatMs, formatRelative } from "../../lib/format.ts";
 import {
   credentialStatus,
   groupBy,
+  type LampState,
   quotaLegend,
   quotaUsage,
   WINDOW_LABEL,
@@ -71,7 +72,9 @@ export function AccountRack({
   const quotaByCredential = groupBy(quota, (row) => row.credentialId);
   const usageByCredential = new Map(usage.map((row) => [row.key, row]));
 
-  const rank = { down: 0, warn: 1, ok: 2, idle: 3 } as const;
+  // `live` belongs to a request in flight, never to an account; it is listed
+  // only so the record covers every LampState.
+  const rank: Readonly<Record<LampState, number>> = { down: 0, warn: 1, ok: 2, idle: 3, live: 3 };
   const rows = credentials
     .map((credential) => ({
       credential,

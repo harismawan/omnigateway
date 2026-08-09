@@ -130,7 +130,21 @@ export function useUsage(
   });
 }
 
-export function useLogs(limit = 100, cadence: Cadence = 10_000): UseQueryResult<RequestLog[]> {
+/**
+ * How often the request log is re-read.
+ *
+ * Faster than the rest of the console because the log now carries requests that
+ * are still running. At ten seconds a spinner lies in both directions: a short
+ * request is over before it is ever fetched, and a finished one keeps turning
+ * until the next poll. Each read is a session check and one indexed SELECT
+ * against local SQLite, and the LIVE switch still stops it dead.
+ */
+export const LOG_CADENCE_MS = 2_000;
+
+export function useLogs(
+  limit = 100,
+  cadence: Cadence = LOG_CADENCE_MS,
+): UseQueryResult<RequestLog[]> {
   return useQuery({
     queryKey: queryKeys.logs(limit),
     queryFn: async ({ signal }) =>

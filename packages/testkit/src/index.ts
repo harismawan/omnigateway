@@ -166,6 +166,7 @@ export async function seedApiKey(
  */
 export function requestLog(overrides: Partial<RequestLog> & { id: string }): RequestLog {
   return {
+    state: "done",
     at: 1_000_000,
     apiKeyId: null,
     requestedModel: "fast",

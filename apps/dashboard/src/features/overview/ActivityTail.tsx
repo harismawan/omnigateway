@@ -2,7 +2,7 @@ import { Link } from "@tanstack/react-router";
 import styled from "styled-components";
 import type { RequestLog } from "../../api/types.ts";
 import { formatClock, formatMs, formatUsd } from "../../lib/format.ts";
-import { isError } from "../../lib/vitals.ts";
+import { isPending, lampLabel, lampState } from "../../lib/vitals.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Lamp } from "../../ui/Lamp.tsx";
 import { Module } from "../../ui/Panel.tsx";
@@ -60,10 +60,7 @@ export function ActivityTail({ logs }: { logs: readonly RequestLog[] }) {
         <List>
           {recent.map((log) => (
             <Entry key={log.id}>
-              <Lamp
-                state={isError(log) ? "down" : "ok"}
-                label={isError(log) ? `failed with ${log.status}` : "succeeded"}
-              />
+              <Lamp state={lampState(log)} label={lampLabel(log)} />
               <Mono $dim>{formatClock(log.at)}</Mono>
               <Model title={log.requestedModel}>{log.requestedModel || "—"}</Model>
               {log.resolvedProvider === null ? null : (
@@ -72,10 +69,16 @@ export function ActivityTail({ logs }: { logs: readonly RequestLog[] }) {
                 </Mono>
               )}
               <Spacer />
-              {log.errorCode === null ? null : <Fault>{log.errorCode}</Fault>}
-              {log.attempts > 1 ? <Mono $dim>{log.attempts}×</Mono> : null}
-              <Mono $dim>{formatMs(log.durationMs)}</Mono>
-              <Mono $dim>{formatUsd(log.costUsd)}</Mono>
+              {/* Nothing to the right of here has been measured yet on a
+                  request still running; the lamp carries it instead. */}
+              {isPending(log) ? null : (
+                <>
+                  {log.errorCode === null ? null : <Fault>{log.errorCode}</Fault>}
+                  {log.attempts > 1 ? <Mono $dim>{log.attempts}×</Mono> : null}
+                  <Mono $dim>{formatMs(log.durationMs)}</Mono>
+                  <Mono $dim>{formatUsd(log.costUsd)}</Mono>
+                </>
+              )}
             </Entry>
           ))}
         </List>
