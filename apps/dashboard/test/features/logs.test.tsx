@@ -151,7 +151,15 @@ describe("LogsBoard", () => {
     expect(screen.getByText("anthropic")).toBeTruthy();
     expect(screen.getByText("claude-opus-4")).toBeTruthy();
     expect(screen.getByText("claude-main")).toBeTruthy();
-    expect(screen.getByText("live")).toBeTruthy();
+    const live = screen.getByText("live");
+    const generatedClass = live.className.split(" ").at(-1);
+    if (generatedClass === undefined) throw new Error("live chip has no generated class");
+    const injected = [...document.querySelectorAll("style")]
+      .map((node) => node.textContent ?? "")
+      .join("");
+    const rule = injected.match(new RegExp(`\\.${generatedClass}\\{([^}]*)\\}`))?.[1] ?? "";
+    expect(rule).toContain("color:var(--ok)");
+    expect(rule).toContain("background:var(--ok-wash)");
     // Every measured column is an em dash rather than a nought nobody counted:
     // attempts, TTFT, total, tokens, and cost.
     expect(screen.getAllByText("—")).toHaveLength(5);
