@@ -4,6 +4,7 @@ import {
   formatLine,
   type LogLevel,
   noopLogger,
+  parseLine,
   parseLogLevel,
 } from "../src/index.ts";
 
@@ -172,4 +173,53 @@ describe("parseLogLevel", () => {
       expect(parseLogLevel(value)).toBeNull();
     },
   );
+});
+
+describe("parseLine", () => {
+  test("recovers the head of a line the formatter produced", () => {
+    const line = formatLine("warn", AT, "attempt failed; retrying", { attempt: 2 }, false);
+    expect(parseLine(line)).toEqual({
+      raw: line,
+      at: AT,
+      level: "warn",
+      msg: "attempt failed; retrying",
+    });
+  });
+
+  test.each(["debug", "info", "warn", "error"] as const)("round-trips %s", (level) => {
+    const line = formatLine(level, AT, "x", undefined, false);
+    expect(parseLine(line).level).toBe(level);
+  });
+
+  test("reads a coloured line, because a TTY-started gateway writes escapes to its log file", () => {
+    const line = formatLine("error", AT, "gateway boot failed", { reason: "no key" }, true);
+    expect(line).toContain("[");
+    expect(parseLine(line)).toMatchObject({ at: AT, level: "error", msg: "gateway boot failed" });
+  });
+
+  test("keeps the message whole and leaves the fields in raw", () => {
+    const line = formatLine("info", AT, "omnigateway listening", { port: 9000 }, false);
+    const parsed = parseLine(line);
+    expect(parsed.msg).toBe("omnigateway listening");
+    expect(parsed.raw).toContain("port=9000");
+  });
+
+  test("returns nulls for a line the gateway did not write", () => {
+    const line = "Aug 09 04:12:03 host systemd[1]: Started omnigateway.service.";
+    expect(parseLine(line)).toEqual({ raw: line, at: null, level: null, msg: null });
+  });
+
+  test.each([
+    ["an empty line", ""],
+    ["a bare message", "something happened"],
+    ["a plausible but unparsable instant", "not-a-date INFO  hello"],
+    ["an unknown level", "2026-08-09T04:12:03.114Z TRACE hello"],
+  ])("returns nulls for %s", (_label, line) => {
+    expect(parseLine(line)).toEqual({ raw: line, at: null, level: null, msg: null });
+  });
+
+  test("preserves the raw line exactly, so nothing is lost to display", () => {
+    const line = "  2026-08-09T04:12:03.114Z INFO  x  ";
+    expect(parseLine(line).raw).toBe(line);
+  });
 });

@@ -3,7 +3,6 @@ import {
   type ErrorCode,
   GatewayError,
   HTTP_STATUS,
-  type LogFields,
   type Logger,
   noopLogger,
   type StreamEvent,
@@ -230,30 +229,12 @@ async function handle(
         completed.errorCode = "interrupted";
         completed.durationMs = deps.now() - startedAt;
       }
+      // The row is the request log. Nothing is printed for a finished request:
+      // a terminal line would restate what `request_logs` already holds, more
+      // briefly, somewhere nothing can query — and at a volume that buries the
+      // lines about the process itself. The console reads those rows; stdout
+      // carries what never becomes one. `requestId` is on both, and joins them.
       await finishLog(deps.store, completed, keyId, deps.logger);
-      const fields: LogFields = {
-        requestId,
-        surface,
-        status: completed.status,
-        provider: completed.resolvedProvider ?? undefined,
-        model: completed.resolvedModel ?? undefined,
-        requestedModel: completed.requestedModel,
-        credentialId: completed.credentialId ?? undefined,
-        apiKeyId: keyId ?? undefined,
-        attempts: completed.attempts,
-        code: (completed.errorCode as ErrorCode | "interrupted" | null) ?? undefined,
-        stream: chatRequest.stream,
-        inputTokens: completed.inputTokens,
-        outputTokens: completed.outputTokens,
-        cacheReadTokens: completed.cacheReadTokens,
-        cacheWriteTokens: completed.cacheWriteTokens,
-        costUsd: completed.costUsd,
-        ttftMs: completed.ttftMs,
-        durationMs: completed.durationMs,
-      };
-      if (wasCancelled) deps.logger.debug("request cancelled", fields);
-      else if (completed.status >= 400) deps.logger.error("request failed", fields);
-      else deps.logger.info("request done", fields);
     };
 
     if (chatRequest.stream) {
@@ -294,17 +275,6 @@ async function handle(
     // Completes a pending row if the request got as far as dispatch. The store
     // keeps what beginning it recorded where this log carries nothing.
     await finishLog(deps.store, completed, keyId, deps.logger);
-    deps.logger.error("request failed", {
-      requestId,
-      surface,
-      status: completed.status,
-      requestedModel,
-      apiKeyId: keyId ?? undefined,
-      code: gatewayError.code,
-      attempts: completed.attempts,
-      durationMs: completed.durationMs,
-      reason: gatewayError.message,
-    });
     return errorResponse(surface, gatewayError.code, gatewayError.message);
   }
 }
