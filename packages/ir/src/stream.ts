@@ -66,7 +66,14 @@ export function promptTokens(usage: Usage): number {
 
 export type ContentBlockStart =
   | { type: "text" }
-  | { type: "thinking" }
+  /**
+   * `signed` states that this reasoning will carry a provider signature, and so
+   * can be replayed to that provider on a later turn. Only Anthropic signs one.
+   * Reasoning that is not signed is displayable but not replayable, and a
+   * surface that would hand it back to Anthropic has to drop it rather than
+   * send a block the upstream will reject.
+   */
+  | { type: "thinking"; signed?: boolean }
   | { type: "toolUse"; id: string; name: string };
 
 export type Delta =
@@ -143,8 +150,11 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
         if (!acc) break;
         if (ev.delta.type === "text" && acc.kind === "text") acc.text += ev.delta.text;
         else if (ev.delta.type === "thinking" && acc.kind === "thinking") acc.text += ev.delta.text;
+        // Concatenated, not assigned: a signature is one long opaque string and
+        // nothing promises it arrives in a single delta. Overwriting would keep
+        // the last fragment, which is a signature the provider then rejects.
         else if (ev.delta.type === "thinkingSignature" && acc.kind === "thinking")
-          acc.signature = ev.delta.signature;
+          acc.signature = (acc.signature ?? "") + ev.delta.signature;
         else if (ev.delta.type === "toolJson" && acc.kind === "toolUse")
           acc.json += ev.delta.partial;
         break;

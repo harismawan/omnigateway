@@ -93,7 +93,7 @@ export async function* decodeAnthropic(
         const index: number = d.index ?? 0;
         if (cb.type === "text") yield { type: "blockStart", index, block: { type: "text" } };
         else if (cb.type === "thinking")
-          yield { type: "blockStart", index, block: { type: "thinking" } };
+          yield { type: "blockStart", index, block: { type: "thinking", signed: true } };
         else if (cb.type === "tool_use")
           yield {
             type: "blockStart",
@@ -114,7 +114,10 @@ export async function* decodeAnthropic(
             index,
             delta: { type: "thinking", text: delta.thinking ?? "" },
           };
-        else if (delta.type === "signature_delta")
+        // A signature delta with nothing in it is skipped rather than defaulted
+        // to the empty string: an empty signature is not a missing one, and
+        // sending it back is what turns a replay into an upstream 400.
+        else if (delta.type === "signature_delta" && (delta.signature ?? "") !== "")
           yield {
             type: "blockDelta",
             index,

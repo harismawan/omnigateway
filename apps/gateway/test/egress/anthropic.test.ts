@@ -74,7 +74,7 @@ test("renders thinking deltas and signatures", async () => {
   const f = await frames(
     anthropicStream(
       src(
-        { type: "blockStart", index: 0, block: { type: "thinking" } },
+        { type: "blockStart", index: 0, block: { type: "thinking", signed: true } },
         { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hm" } },
         { type: "blockDelta", index: 0, delta: { type: "thinkingSignature", signature: "s" } },
       ),
@@ -132,4 +132,73 @@ test("renders collected tool use with parsed input", () => {
     input: { a: 1 },
   });
   expect(body.stop_reason).toBe("tool_use");
+});
+
+// An unsigned thinking block is reasoning from a provider that does not sign
+// one. Handing it to an Anthropic-shaped client poisons that client's history:
+// it replays the block on the next turn, and Anthropic rejects the request with
+// `Invalid \`signature\` in \`thinking\` block`.
+test("suppresses an unsigned thinking block from the stream", async () => {
+  const f = await frames(
+    anthropicStream(
+      src(
+        { type: "start", id: "msg_1", model: "gpt-5.6-sol" },
+        { type: "blockStart", index: 0, block: { type: "thinking" } },
+        { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hm" } },
+        { type: "blockEnd", index: 0 },
+        { type: "blockStart", index: 1, block: { type: "text" } },
+        { type: "blockDelta", index: 1, delta: { type: "text", text: "Hi" } },
+        { type: "blockEnd", index: 1 },
+      ),
+      "msg_1",
+    ),
+  );
+  expect(f.map((x) => x.event)).toEqual([
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+  ]);
+  expect(f[1]?.data.content_block).toEqual({ type: "text", text: "" });
+  // The surviving block is renumbered, because Anthropic's own streams index
+  // content blocks contiguously from zero and a client may rely on that.
+  expect(f[1]?.data.index).toBe(0);
+  expect(f[2]?.data.index).toBe(0);
+  expect(f[3]?.data.index).toBe(0);
+});
+
+test("omits an unsigned thinking block from a buffered response", () => {
+  const collected = collect([
+    { type: "start", id: "m", model: "gpt-5.6-sol" },
+    { type: "blockStart", index: 0, block: { type: "thinking" } },
+    { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hm" } },
+    { type: "blockEnd", index: 0 },
+    { type: "blockStart", index: 1, block: { type: "text" } },
+    { type: "blockDelta", index: 1, delta: { type: "text", text: "Hi" } },
+    { type: "blockEnd", index: 1 },
+    {
+      type: "end",
+      stopReason: "endTurn",
+      usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    },
+  ]);
+  const body = anthropicResponse(collected, "msg_1") as { content: unknown[] };
+  expect(body.content).toEqual([{ type: "text", text: "Hi" }]);
+});
+
+test("keeps a signed thinking block in a buffered response", () => {
+  const collected = collect([
+    { type: "start", id: "m", model: "claude-opus-4" },
+    { type: "blockStart", index: 0, block: { type: "thinking", signed: true } },
+    { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hm" } },
+    { type: "blockDelta", index: 0, delta: { type: "thinkingSignature", signature: "s" } },
+    { type: "blockEnd", index: 0 },
+    {
+      type: "end",
+      stopReason: "endTurn",
+      usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    },
+  ]);
+  const body = anthropicResponse(collected, "msg_1") as { content: unknown[] };
+  expect(body.content).toEqual([{ type: "thinking", thinking: "hm", signature: "s" }]);
 });

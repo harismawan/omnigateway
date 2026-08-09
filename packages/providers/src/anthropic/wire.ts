@@ -39,6 +39,21 @@ function wireCacheControl(c: CacheControl | undefined): { cache_control?: WireCa
   return { cache_control: { type: c.type, ...(c.ttl === undefined ? {} : { ttl: c.ttl }) } };
 }
 
+/**
+ * Whether a thinking block can be replayed to Anthropic at all.
+ *
+ * A signature is minted by Anthropic over the reasoning it produced, and the
+ * upstream verifies it on every later turn that carries the block. Reasoning
+ * that came from another provider has none — the OpenAI decoder turns a
+ * reasoning summary into a thinking block, and a client that stores the
+ * assistant turn replays it here when the operator switches models. Forwarding
+ * it fails the whole request with `Invalid \`signature\` in \`thinking\``, so
+ * the block is dropped instead and the loss is recorded.
+ */
+function isReplayableThinking(b: ContentBlock): boolean {
+  return b.type !== "thinking" || (b.signature !== undefined && b.signature !== "");
+}
+
 function encodeBlock(b: ContentBlock): unknown {
   const cache = wireCacheControl(cacheControlOf(b));
   switch (b.type) {
@@ -117,15 +132,23 @@ export function toWire(
 
   const body: AnthropicBody = {
     model,
-    messages: req.messages.map((m) => {
-      if (m.role !== "system") return { role: m.role, content: m.content.map(encodeBlock) };
+    messages: req.messages.flatMap((m): { role: string; content: unknown }[] => {
+      if (m.role !== "system") {
+        const replayable = m.content.filter(isReplayableThinking);
+        if (replayable.length !== m.content.length) note("anthropic:unsigned-thinking-dropped");
+        // A turn whose only content was unsignable reasoning has nothing left
+        // to say. Anthropic rejects an empty content array, so the message goes
+        // rather than being sent as one.
+        if (replayable.length === 0) return [];
+        return [{ role: m.role, content: replayable.map(encodeBlock) }];
+      }
       // Flattening to a string has nowhere to put a block-level breakpoint, so
       // one the caller placed here is lost. Record it rather than let a caching
       // intent disappear between the request log and the upstream body.
       if (m.content.some((b) => cacheControlOf(b) !== undefined)) {
         note("anthropic:system-turn-cache-control-dropped");
       }
-      return { role: m.role, content: encodeSystemTurn(m.content) };
+      return [{ role: m.role, content: encodeSystemTurn(m.content) }];
     }),
     max_tokens: req.maxTokens ?? 4096,
     stream: req.stream,
