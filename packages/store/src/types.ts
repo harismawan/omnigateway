@@ -120,6 +120,16 @@ export type Target = {
   tier: number;
   weight: number;
   costPerMTok: TargetPricing;
+  /**
+   * What the gateway tells clients this target can hold and emit, in tokens.
+   *
+   * Optional because a target saved before these were recorded names neither,
+   * and because a model outside the catalog has no default to fall back to.
+   * Nothing enforces them: they are advertised on `GET /v1/models` so a client
+   * sizes its own context, and an over-long request still fails upstream.
+   */
+  contextWindow?: number | undefined;
+  maxOutputTokens?: number | undefined;
   capabilities: { tools: boolean; images: boolean; reasoning: boolean };
 };
 

@@ -24,6 +24,7 @@ import {
   newPendingRequestLog,
   routeLog,
 } from "../logging.ts";
+import { modelListBody } from "./models.ts";
 
 export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
   snapshots?: DispatchDeps["snapshots"];
@@ -325,20 +326,19 @@ export function proxyRoutes(deps: ProxyDeps) {
     .get("/v1/models", async ({ request }) => {
       try {
         const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
-        const models = await deps.store.config.listModels();
+        // The routing snapshot, not the store: it already holds both halves of
+        // the answer, it is invalidated on every routing change, and taking it
+        // here means the listing and dispatch cannot disagree about which
+        // credentials exist.
+        const snapshot = await dispatchDeps.snapshots.get(deps.now());
+        const models = [...snapshot.models.values()];
         const visibleModels =
           key.modelAllowlist === null
             ? models
             : models.filter((model) => key.modelAllowlist?.includes(model.id));
-        return Response.json({
-          object: "list",
-          data: visibleModels.map((m) => ({
-            id: m.id,
-            object: "model",
-            created: 0,
-            owned_by: "omnigateway",
-          })),
-        });
+        // Credentials decide the answer: an OAuth OpenAI credential is served
+        // by Codex, whose window is under a third of the API's.
+        return Response.json(modelListBody(visibleModels, snapshot.credentials));
       } catch (error) {
         const gatewayError = asGatewayError(error);
         logger.error("model listing failed", {

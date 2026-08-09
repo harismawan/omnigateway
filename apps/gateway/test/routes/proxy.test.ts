@@ -521,6 +521,42 @@ test("lists the configured virtual models", async () => {
   expect(body.data.map((m) => m.id)).toContain("fast");
 });
 
+test("tells the client how much context each model holds", async () => {
+  const { app, store, raw } = await harness();
+  await store.config.putModel(
+    virtualModel({
+      id: "opus",
+      targets: [target({ provider: "anthropic", model: "claude-opus-5" })],
+    }),
+  );
+
+  const res = await app.handle(
+    new Request("http://localhost/v1/models", { headers: { authorization: `Bearer ${raw}` } }),
+  );
+
+  // Without this a client falls back to its own default window, which is 200K
+  // for every model however much the target actually holds.
+  const body = (await res.json()) as { data: Array<{ id: string; max_input_tokens?: number }> };
+  expect(body.data.find((m) => m.id === "opus")?.max_input_tokens).toBe(1_000_000);
+});
+
+test("reports the Codex window for an OpenAI model an OAuth credential serves", async () => {
+  const { app, store, raw } = await harness();
+  await seedCredential(store, { id: "c-openai", provider: "openai", authType: "oauth" });
+  await store.config.putModel(
+    virtualModel({ id: "gpt", targets: [target({ provider: "openai", model: "gpt-5.6" })] }),
+  );
+
+  const res = await app.handle(
+    new Request("http://localhost/v1/models", { headers: { authorization: `Bearer ${raw}` } }),
+  );
+
+  // The API takes 922K, but an OAuth credential reaches the model through
+  // Codex, which caps a prompt at 272K.
+  const body = (await res.json()) as { data: Array<{ id: string; max_input_tokens?: number }> };
+  expect(body.data.find((m) => m.id === "gpt")?.max_input_tokens).toBe(272_000);
+});
+
 test("never echoes the request body into the log", async () => {
   const { call, store } = await harness();
   await call("/v1/messages", {

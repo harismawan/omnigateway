@@ -84,6 +84,7 @@ assuming a snippet still matches.
 - `apps/gateway/src/ingress/`: Anthropic/OpenAI request parsing into canonical IR
 - `apps/gateway/src/dispatch/`: upstream attempts, refresh, failover, deadlines, stream commit
 - `apps/gateway/src/routes/`: client, admin, and OAuth control surfaces
+- `apps/gateway/src/routes/models.ts`: the `/v1/models` listing, including the token limits it advertises; the route feeds it the routing snapshot rather than its own store reads, so the listing cannot disagree with dispatch about which credentials exist
 - `apps/gateway/src/auth/`: gateway API-key authentication and its process-local rate limiter
 - `packages/ir/`: provider-neutral domain types, error mapping, and the pure structured logger
 - `packages/ir/src/logger.ts`: level filtering, safe `LogFields` allowlist, deterministic line formatting, and no-op logger; sinks are injected by callers
@@ -99,7 +100,7 @@ assuming a snippet still matches.
 - `apps/gateway/src/quota/poller.ts`: the timer that runs that pass on an interval
 - `packages/router/src/quota.ts`: pure reading of a quota snapshot into a routing signal
 - `apps/gateway/test/`: gateway unit, route, integration, and end-to-end tests
-- `packages/providers/src/{anthropic,openai,kimi}/models.ts`: per-provider model catalog with list pricing
+- `packages/providers/src/{anthropic,openai,kimi}/models.ts`: per-provider model catalog with list pricing and token limits
 - `packages/providers/src/catalog.ts`: assembles them; exported at `@omni/providers/catalog`
 - `apps/dashboard/src/api/`: typed control-API client and TanStack Query hooks
 - `apps/dashboard/src/ui/`: styled-components primitives (Panel, Table, Lamp, Meter, Sparkline)
@@ -179,7 +180,7 @@ Client surface:
 
 - `POST /v1/messages`: Anthropic-compatible request, response, SSE, and error shape
 - `POST /v1/chat/completions`: OpenAI-compatible request, response, SSE, and error shape
-- `GET /v1/models`: authenticated and filtered by calling key model allowlist
+- `GET /v1/models`: authenticated and filtered by calling key model allowlist, and describing each model in both dialects at once
 - `GET /health`: unauthenticated liveness
 
 Every `/v1/*` request accepts `Authorization: Bearer <key>` or `x-api-key: <key>`. Conflicting credentials must be rejected. A `null` model allowlist means unrestricted; an empty array denies all models.
@@ -198,6 +199,9 @@ Ingress accepts the shapes current clients send, and these are contracts:
 - `Usage.inputTokens` changed meaning for OpenAI and Kimi when the decoders were normalized, and rows written before that still count cached tokens inside it. Nothing rewrites them, so a chart or rollup spanning the change mixes two definitions and over-reports prompt volume for those two providers. The console stacks the classes as disjoint, which they now are and were not.
 - `Usage.inputTokens` is the *uncached remainder*, never the whole prompt. Anthropic reports input already net of cache; OpenAI and Kimi count cached tokens inside their prompt total, so those decoders subtract via `usageFromPromptTotal`. Pricing adds `cacheReadTokens` at the cache rate on top of `inputTokens`, so a decoder that leaves the overlap in bills those tokens twice — once at full input price and again at the cache rate. `promptTokens()` adds the parts back for a surface that wants one number.
 - A provider that cannot express something the client asked for records a degradation rather than dropping it silently. Degradations reach the request log.
+- `GET /v1/models` is the only place the gateway states how much context a model holds, and a client told nothing falls back to its own default — 200K in Claude Code's case, for every model however large. An entry therefore carries `max_input_tokens` and `max_tokens` beside the OpenAI-shaped keys, read from the target the operator saved and falling back to the catalog. A pool reports the *smallest* window any of its targets names, because failover can land on any of them, and a model where nothing is known reports nothing rather than a zero.
+- `Target.contextWindow` and `Target.maxOutputTokens` are advertised, never enforced: an over-long request still fails upstream. Unlike pricing, they are resolved when the listing is built rather than copied onto a target when it is saved, because the answer depends on the credential: the OpenAI adapter routes an OAuth credential to Codex, which caps a prompt at 272,000 tokens where `api.openai.com` takes 922,000. A provider with both kinds of credential is described by the narrower. That is why the console and `--from-catalog` leave both fields empty — a saved figure is an operator override that pins one of those answers.
+- The OpenAI catalog's `contextWindow` is the published cap on *input* (922,000), not the 1,050,000 context window, because the field is advertised as the size of prompt a client may send.
 
 Control surface uses `/api/*`, never `/admin/*`. Dashboard code must call `/api/*` and must not assume WebSocket log streaming; current design polls logs.
 

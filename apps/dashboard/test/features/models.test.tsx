@@ -5,7 +5,9 @@ import {
   blankModel,
   blankTarget,
   catalogPrices,
+  catalogTokenLimits,
   parseDraft,
+  retargetDraft,
   toDraft,
 } from "../../src/features/models/draft.ts";
 import { ModelsBoard } from "../../src/features/models/ModelsBoard.tsx";
@@ -54,6 +56,81 @@ describe("catalog pricing defaults", () => {
         cacheWrite1h: 10,
       });
     }
+  });
+});
+
+describe("catalog token limits", () => {
+  test("a new target states no limits of its own", () => {
+    // Saving a figure here pins it. Left blank, the gateway works the limits
+    // out when it lists the model, which is the only place that can account for
+    // an OpenAI target being served through the narrower Codex backend.
+    const target = blankTarget("anthropic");
+    expect(target.contextWindow).toBe("");
+    expect(target.maxOutputTokens).toBe("");
+  });
+
+  test("changing the model clears the limits instead of pinning the new ones", () => {
+    // The one path that can reach an OpenAI target: a blank target starts on
+    // Anthropic, so creating one always goes through here. Carrying the API's
+    // 922K across would pin it, and an OAuth account is served through Codex
+    // at 272K — the narrowing this whole field exists for.
+    const edited = {
+      ...blankTarget("anthropic"),
+      contextWindow: "500000",
+      maxOutputTokens: "8000",
+    };
+    const retargeted = retargetDraft(edited, { provider: "openai", model: "gpt-5.6-sol" });
+
+    expect(retargeted.contextWindow).toBe("");
+    expect(retargeted.maxOutputTokens).toBe("");
+    // Prices still follow the model — they have no fallback to be worked out.
+    expect(retargeted.costInput).toBe("5");
+    expect(retargeted.costOutput).toBe("30");
+  });
+
+  test("catalogTokenLimits reports an unlisted model instead of guessing", () => {
+    expect(catalogTokenLimits("anthropic", "claude-haiku-4-5")).toEqual({
+      contextWindow: "200000",
+      maxOutputTokens: "64000",
+    });
+    expect(catalogTokenLimits("anthropic", "not-a-real-model")).toBeNull();
+  });
+
+  test("an unedited target is saved without limits, not with zeroes", () => {
+    const parsed = parseDraft({ ...blankModel(), id: "fast" });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.model.targets[0]).not.toHaveProperty("contextWindow");
+      expect(parsed.model.targets[0]).not.toHaveProperty("maxOutputTokens");
+    }
+  });
+
+  test("an edited limit survives a round trip through the parser", () => {
+    const draft = blankModel();
+    const target = draft.targets[0];
+    if (target === undefined) throw new Error("a blank model has one target");
+    const parsed = parseDraft({
+      ...draft,
+      id: "fast",
+      targets: [{ ...target, contextWindow: "500000", maxOutputTokens: "64000" }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.model.targets[0]?.contextWindow).toBe(500_000);
+      expect(parsed.model.targets[0]?.maxOutputTokens).toBe(64_000);
+    }
+  });
+
+  test("refuses a window that is not a whole number of tokens", () => {
+    const draft = blankModel();
+    const target = draft.targets[0];
+    if (target === undefined) throw new Error("a blank model has one target");
+    const parsed = parseDraft({
+      ...draft,
+      id: "fast",
+      targets: [{ ...target, contextWindow: "1.5" }],
+    });
+    expect(parsed.ok).toBe(false);
   });
 });
 

@@ -7,7 +7,7 @@ import { Button, IconButton } from "../../ui/Button.tsx";
 import { Input, NumberInput, Select } from "../../ui/Field.tsx";
 import { Legend, Row, Spacer, Stack } from "../../ui/primitives.ts";
 import { Toggle } from "../../ui/Toggle.tsx";
-import { catalogPrices, type TargetDraft } from "./draft.ts";
+import { catalogPrices, catalogTokenLimits, retargetDraft, type TargetDraft } from "./draft.ts";
 
 const PROVIDER_IDS = Object.keys(PROVIDER_MODEL_CATALOG) as ProviderId[];
 
@@ -83,18 +83,10 @@ export function TargetEditor({ target, index, onChange, onRemove, removable }: T
   };
 
   const listed = catalogPrices(target.provider, target.model);
+  const listedLimits = catalogTokenLimits(target.provider, target.model);
 
-  /**
-   * Point the target at a different model, carrying that model's list price
-   * across with it.
-   *
-   * Prices follow the model rather than persisting through a change, because a
-   * price left over from the previous model is wrong in a way nothing surfaces.
-   * A model the catalog does not list keeps whatever is in the fields — there
-   * is nothing better to put there.
-   */
   const retarget = (next: Pick<TargetDraft, "provider" | "model">) => {
-    onChange({ ...target, ...next, ...(catalogPrices(next.provider, next.model) ?? {}) });
+    onChange(retargetDraft(target, next));
   };
 
   return (
@@ -278,6 +270,49 @@ export function TargetEditor({ target, index, onChange, onRemove, removable }: T
               placeholder="2x input"
               value={target.costCacheWrite1h}
               onChange={(event) => set("costCacheWrite1h", event.target.value)}
+            />
+          </Cell>
+        </Prices>
+      </Stack>
+
+      <Stack $gap={1}>
+        <Row $gap={2}>
+          <Legend>Token limits</Legend>
+          <Spacer />
+          {listedLimits === null ? (
+            <Legend as="span">not in the catalog — state them yourself</Legend>
+          ) : (
+            <Legend as="span">
+              left empty, the published figures are used — and for an OpenAI target, the narrower
+              ones its OAuth backend allows
+            </Legend>
+          )}
+        </Row>
+        <Prices>
+          <Cell>
+            <Legend as="label" htmlFor={`${listId}-context`}>
+              Context window
+            </Legend>
+            <NumberInput
+              id={`${listId}-context`}
+              min={1}
+              step={1024}
+              placeholder={listedLimits?.contextWindow ?? "published"}
+              value={target.contextWindow}
+              onChange={(event) => set("contextWindow", event.target.value)}
+            />
+          </Cell>
+          <Cell>
+            <Legend as="label" htmlFor={`${listId}-maxout`}>
+              Max output
+            </Legend>
+            <NumberInput
+              id={`${listId}-maxout`}
+              min={1}
+              step={1024}
+              placeholder={listedLimits?.maxOutputTokens ?? "published"}
+              value={target.maxOutputTokens}
+              onChange={(event) => set("maxOutputTokens", event.target.value)}
             />
           </Cell>
         </Prices>

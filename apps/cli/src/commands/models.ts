@@ -1,6 +1,11 @@
 import { dryRun, getModel, listModels, putModel, removeModel } from "@omni/control";
 import { PROVIDER_CAPABILITIES, type ProviderId } from "@omni/ir";
-import { catalogPricing, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
+import {
+  catalogLimits,
+  catalogPricing,
+  PROVIDER_MODEL_CATALOG,
+  type ProviderModelChoice,
+} from "@omni/providers/catalog";
 import type { Target, VirtualModel } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
@@ -63,6 +68,8 @@ export const modelsShow: Command = {
             { header: "CACHE R", align: "right" },
             { header: "CACHE W 5M", align: "right" },
             { header: "CACHE W 1H", align: "right" },
+            { header: "CONTEXT", align: "right" },
+            { header: "MAX OUT", align: "right" },
             { header: "CAPABILITIES" },
           ],
           model.targets.map((target) => [
@@ -75,6 +82,8 @@ export const modelsShow: Command = {
             price(target.costPerMTok.cacheRead),
             price(target.costPerMTok.cacheWrite5m),
             price(target.costPerMTok.cacheWrite1h),
+            tokens(target.contextWindow),
+            tokens(target.maxOutputTokens),
             capabilityList(target),
           ]),
         ),
@@ -92,6 +101,17 @@ export const modelsShow: Command = {
  */
 function price(value: number | undefined): string {
   return value === undefined ? "\u2014" : value.toFixed(2);
+}
+
+/**
+ * A token limit the target names, or an em dash when it names none.
+ *
+ * Unlike a price, an unnamed limit is not filled in from anywhere at read
+ * time — `GET /v1/models` falls back to the catalog itself — so the dash means
+ * "whatever the catalog says", not "unlimited".
+ */
+function tokens(value: number | undefined): string {
+  return value === undefined ? "\u2014" : value.toLocaleString("en-US");
 }
 
 function capabilityList(target: Target): string {
@@ -123,13 +143,16 @@ function targetFromCatalog(spec: string): Target {
   if (pricing === null) {
     throw new UsageError(`no catalog entry for "${spec}"; see omni models catalog`);
   }
-
   return {
     provider: providerId,
     model,
     tier: 1,
     weight: 1,
     costPerMTok: pricing,
+    // Deliberately no token limits: unlike pricing, they are resolved when the
+    // model is listed, from the catalog and from how the serving credential
+    // authenticates. Copying them here would freeze the API's window onto a
+    // target an OAuth credential serves through a narrower backend.
     // Capabilities are a property of the provider, not of the catalog entry;
     // the operator narrows them afterwards if a particular model is narrower.
     capabilities: PROVIDER_CAPABILITIES[providerId],
@@ -140,10 +163,15 @@ function isCatalogProvider(value: string): value is ProviderId {
   return value in PROVIDER_MODEL_CATALOG;
 }
 
-/** The catalog flattened into rows, which is how an operator reads it. */
-function catalogRows(): Array<{ provider: ProviderId; id: string; label: string }> {
+/**
+ * The catalog flattened into rows, which is how an operator reads it.
+ *
+ * Carries the prices and limits rather than just the names, so `--json` answers
+ * the same question the table does.
+ */
+function catalogRows(): Array<ProviderModelChoice & { provider: ProviderId }> {
   return Object.entries(PROVIDER_MODEL_CATALOG).flatMap(([id, entry]) =>
-    entry.models.map((model) => ({ provider: id as ProviderId, id: model.id, label: model.label })),
+    entry.models.map((model) => ({ ...model, provider: id as ProviderId })),
   );
 }
 
@@ -166,9 +194,17 @@ export const modelsCatalog: Command = {
           { header: "CACHE R", align: "right" },
           { header: "CACHE W 5M", align: "right" },
           { header: "CACHE W 1H", align: "right" },
+          { header: "CONTEXT", align: "right" },
+          { header: "CONTEXT OAUTH", align: "right" },
+          { header: "MAX OUT", align: "right" },
         ],
         entries.map((entry) => {
           const listed = catalogPricing(entry.provider, entry.id);
+          const limits = catalogLimits(entry.provider, entry.id);
+          // What the same model holds when an OAuth credential serves it: the
+          // OpenAI adapter routes those to Codex, which takes a smaller prompt
+          // than the API does. A dash means the two ways in are the same.
+          const oauth = catalogLimits(entry.provider, entry.id, "oauth");
           return [
             provider(ctx, entry.provider),
             entry.id,
@@ -178,6 +214,9 @@ export const modelsCatalog: Command = {
             price(listed?.cacheRead),
             price(listed?.cacheWrite5m),
             price(listed?.cacheWrite1h),
+            tokens(limits?.contextWindow),
+            oauth?.contextWindow === limits?.contextWindow ? "—" : tokens(oauth?.contextWindow),
+            tokens(limits?.maxOutputTokens),
           ];
         }),
       ),
