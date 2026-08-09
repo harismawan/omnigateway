@@ -9,7 +9,7 @@ const pulse = keyframes`
 
 /** CSS animation avoids a React timer and stops under reduced motion. */
 const live = css`
-  color: ${({ theme }) => theme.color.accent};
+  color: ${({ theme }) => theme.color.ok};
   animation: ${pulse} 1.2s ease-in-out infinite;
 
   @media (prefers-reduced-motion: reduce) {
