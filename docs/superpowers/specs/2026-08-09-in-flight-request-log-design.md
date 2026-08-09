@@ -47,10 +47,10 @@ client from one edit. The `/api/logs` response shape is otherwise unchanged.
 
 `UsageRepo` gains three methods beside `append`:
 
-- `begin(log)` — a plain `INSERT` with `state='pending'`, and **no rollup**. A request that has not
-  finished has no tokens and no cost to accumulate.
-- `route(id, target)` — updates provider, model, and credential on the pending row after dispatch
-  selects an attempt. It does not complete or roll up the row.
+- `begin(log)` — a plain `INSERT` with `state='pending'` when dispatch selects its first target, and
+  **no rollup**. A request that has not finished has no tokens and no cost to accumulate.
+- `route(id, target)` — updates provider, model, and credential if failover selects another attempt.
+  It does not complete or roll up the row.
 - `sweepPending()` — completes every row still pending.
 
 `append(log)` becomes `INSERT … ON CONFLICT(id) DO UPDATE`, setting `state='done'`, and keeps
@@ -62,10 +62,10 @@ id.** A second call would double-count `usage_daily`, which an upsert accepts si
 plain insert used to throw. What guarantees it is the `runOnce` latch inside `sseResponse` and the
 single terminal `catch` in the route — both already exist, and both are covered by tests.
 
-In `apps/gateway/src/routes/proxy.ts`, `begin` fires after authentication, parsing, and the model
-allowlist check pass, immediately before `dispatch()`. That is the first moment `requestedModel` and
-the key id exist. A request that fails those checks never gets a pending row: it falls to the catch
-and writes one terminal row, exactly as now.
+In `apps/gateway/src/routes/proxy.ts`, dispatch's first route-selection callback calls `begin` with
+the requested model, key id, provider, upstream model, and credential. A later callback means
+failover and calls `route` to replace those target fields. A request that fails before selecting a
+target never gets a pending row: completion upserts one terminal, unrouted row.
 
 The pending row's `at` is the request start time, matching what dispatch already records for a
 completed row. Completion must not restamp it, or a row would jump position in the tail at the
@@ -195,6 +195,7 @@ Run the changed-area tests, the full root suite, the dashboard suite, `bun run t
 
 ## Documentation
 
-`CLAUDE.md` records under known constraints that a `request_logs` row is written twice — once at
-dispatch start as `pending`, once at completion — that the rollup is written only on completion, and
-that pending rows surviving a crash are swept to `interrupted` at boot.
+`CLAUDE.md` records under known constraints that a `request_logs` row is inserted `pending` when its
+first target is selected, updated if failover selects another target, and completed at the end; that
+the rollup is written only on completion; and that pending rows surviving a crash are swept to
+`interrupted` at boot.

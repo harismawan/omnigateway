@@ -134,7 +134,9 @@ async function handle(
   request: Request,
 ): Promise<Response> {
   const requestId = deps.requestId();
+  const startedAt = deps.now();
   let keyId: string | null = null;
+  let requestedModel = "";
 
   try {
     const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
@@ -153,40 +155,43 @@ async function handle(
       );
     }
 
-    // Filed before dispatch, so a long stream shows up in the console while it
-    // runs rather than only once it ends. This is the first point at which the
-    // requested model and the key are known; a request that fails auth, parsing
-    // or the allowlist never begins, and writes one finished row from the catch.
-    await beginLog(
-      deps.store,
-      {
-        id: requestId,
-        at: deps.now(),
-        apiKeyId: keyId,
-        requestedModel: chatRequest.model,
-        resolvedProvider: null,
-        resolvedModel: null,
-        credentialId: null,
-        attempts: 0,
-        status: 0,
-        errorCode: null,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        ttftMs: null,
-        durationMs: 0,
-        costUsd: 0,
-        degradations: [],
-      },
-      keyId,
-    );
-
+    requestedModel = chatRequest.model;
+    let began = false;
     const outcome = await dispatch(
       chatRequest,
       {
         ...deps,
-        onRoute: (target) => routeLog(deps.store, requestId, target),
+        async onRoute(target) {
+          if (began) {
+            await routeLog(deps.store, requestId, target);
+            return;
+          }
+          began = true;
+          await beginLog(
+            deps.store,
+            {
+              id: requestId,
+              at: startedAt,
+              apiKeyId: keyId,
+              requestedModel,
+              resolvedProvider: target.provider,
+              resolvedModel: target.model,
+              credentialId: target.credentialId,
+              attempts: 0,
+              status: 0,
+              errorCode: null,
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              ttftMs: null,
+              durationMs: 0,
+              costUsd: 0,
+              degradations: [],
+            },
+            keyId,
+          );
+        },
       },
       request.signal,
     );
@@ -230,9 +235,9 @@ async function handle(
         // Completes a pending row if the request got as far as dispatch. The
         // store keeps what beginning it recorded where this log carries nothing.
         state: "done",
-        at: deps.now(),
+        at: startedAt,
         apiKeyId: keyId,
-        requestedModel: "",
+        requestedModel,
         resolvedProvider: null,
         resolvedModel: null,
         credentialId: null,

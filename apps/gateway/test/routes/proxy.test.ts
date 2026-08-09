@@ -285,6 +285,33 @@ test("logs a streaming request after the stream drains", async () => {
   expect(logs[0]?.outputTokens).toBe(2);
 });
 
+test("the first selected route inserts the pending row without a separate route update", async () => {
+  const { call, store } = await harness();
+  let beginCalls = 0;
+  let routeCalls = 0;
+  const originalBegin = store.usage.begin.bind(store.usage);
+  const originalRoute = store.usage.route.bind(store.usage);
+  store.usage.begin = async (log) => {
+    beginCalls++;
+    await originalBegin(log);
+  };
+  store.usage.route = async (id, target) => {
+    routeCalls++;
+    await originalRoute(id, target);
+  };
+
+  const response = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  expect(response.status).toBe(200);
+  expect(beginCalls).toBe(1);
+  expect(routeCalls).toBe(0);
+  store.close();
+});
+
 test("a request in flight is in the log before its stream drains", async () => {
   const gate = Promise.withResolvers<void>();
   const stalling = (id: ProviderId): ProviderAdapter => ({
