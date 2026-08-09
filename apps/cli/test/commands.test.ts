@@ -526,7 +526,7 @@ test("logs --service reads the process's own output, not the request log", async
     root,
     unitPath: `${root}/unit/omnigateway.service`,
     runResults: {
-      "journalctl --user -u omnigateway.service -n 5 --no-pager --output=cat": {
+      "journalctl --user-unit=omnigateway.service -n 5 --no-pager --output=cat": {
         code: 0,
         stdout: "omnigateway listening on http://127.0.0.1:8787\n",
         stderr: "",

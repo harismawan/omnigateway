@@ -131,12 +131,10 @@ async function readSource(
   if (source.kind === "none") return "";
   if (source.kind === "file") return deps.readFile(source.path, lines) ?? "";
 
-  const scope = source.scope === "system" ? [] : ["--user"];
+  const unit = source.scope === "system" ? ["-u", source.unit] : [`--user-unit=${source.unit}`];
   const result = await deps.run([
     "journalctl",
-    ...scope,
-    "-u",
-    source.unit,
+    ...unit,
     "-n",
     String(lines),
     "--no-pager",

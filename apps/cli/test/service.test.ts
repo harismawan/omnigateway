@@ -253,7 +253,7 @@ test("service logs read the journal when a unit is installed", async () => {
   mkdirSync(join(root, "systemd"), { recursive: true });
   writeFileSync(unitPath, "[Unit]\n");
 
-  const journal = "journalctl --user -u omnigateway.service -n 5 --no-pager --output=cat";
+  const journal = "journalctl --user-unit=omnigateway.service -n 5 --no-pager --output=cat";
   const service = fakeService({
     root,
     unitPath,
@@ -265,9 +265,7 @@ test("service logs read the journal when a unit is installed", async () => {
   expect(await serviceLogs(service.deps, 5)).toBe(LOG_LINES);
   expect(service.commands).toContainEqual([
     "journalctl",
-    "--user",
-    "-u",
-    "omnigateway.service",
+    "--user-unit=omnigateway.service",
     "-n",
     "5",
     "--no-pager",
@@ -313,7 +311,7 @@ test("an OMNI_LOG_FILE that was never written to does not mask the journal", asy
   mkdirSync(join(root, "systemd"), { recursive: true });
   writeFileSync(unitPath, "[Unit]\n");
 
-  const journal = "journalctl --user -u omnigateway.service -n 5 --no-pager --output=cat";
+  const journal = "journalctl --user-unit=omnigateway.service -n 5 --no-pager --output=cat";
   const service = fakeService({
     root,
     unitPath,
