@@ -1,4 +1,11 @@
-import type { ProviderId, StreamEvent } from "@omni/ir";
+import {
+  createLogger,
+  type LogFields,
+  type Logger,
+  type LogLevel,
+  type ProviderId,
+  type StreamEvent,
+} from "@omni/ir";
 import type { ProviderAdapter } from "@omni/providers";
 import { healthKey, type Snapshot } from "@omni/router";
 import type {
@@ -17,6 +24,46 @@ import type {
 import { createStore, DEFAULT_SETTINGS, deriveKey, generateApiKey, hashApiKey } from "@omni/store";
 
 let seq = 0;
+
+export type CaptureLogger = Logger & {
+  /** Rendered lines, exactly as they would reach stdout. */
+  lines: string[];
+  /** The same calls unrendered, for assertions that should not pin the format. */
+  records: Array<{ level: LogLevel; msg: string; fields: LogFields }>;
+};
+
+/**
+ * A logger that keeps what it was told instead of writing it.
+ *
+ * Both views exist on purpose: `lines` is how a leak test checks that no secret
+ * reached the output, and `records` is how a behaviour test asserts that a
+ * failure was reported at `warn` without caring how a line is formatted.
+ */
+export function captureLogger(level: LogLevel = "debug"): CaptureLogger {
+  const lines: string[] = [];
+  const records: Array<{ level: LogLevel; msg: string; fields: LogFields }> = [];
+  const write = (line: string): void => {
+    lines.push(line);
+  };
+  const inner = createLogger({ level, write });
+
+  const record =
+    (at: LogLevel) =>
+    (msg: string, fields?: LogFields): void => {
+      if (inner.enabled(at)) records.push({ level: at, msg, fields: fields ?? {} });
+      inner[at](msg, fields);
+    };
+
+  return {
+    lines,
+    records,
+    debug: record("debug"),
+    info: record("info"),
+    warn: record("warn"),
+    error: record("error"),
+    enabled: inner.enabled,
+  };
+}
 
 /**
  * Secrets are synthetic. No test in this repo carries a real token, and the

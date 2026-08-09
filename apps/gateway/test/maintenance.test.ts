@@ -44,7 +44,7 @@ test("the rollup survives log pruning and is swept on its own horizon", async ()
   await log(store, "old", now - 31 * day);
   await log(store, "new", now - 1000);
 
-  await pruneLogs(store, now);
+  expect(await pruneLogs(store, now)).toEqual({ raw: 2, daily: 1 });
 
   // Raw logs keep the retention window; the rollup keeps a year and a margin.
   expect((await store.usage.recent(10)).map((l) => l.id)).toEqual(["new"]);

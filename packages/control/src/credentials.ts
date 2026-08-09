@@ -1,4 +1,4 @@
-import { GatewayError } from "@omni/ir";
+import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import type { Credential, CredentialHealth, QuotaWindow, Store } from "@omni/store";
 import { createAdminAuth } from "./adminAuth.ts";
 import type { Refresher } from "./oauth/refresh.ts";
@@ -46,6 +46,7 @@ export async function getCredential(store: Store, id: string): Promise<Credentia
 export async function createApiKeyCredential(
   store: Store,
   input: { provider: unknown; apiKey: unknown; label?: unknown },
+  logger: Logger = noopLogger,
 ): Promise<CredentialSummary> {
   const provider = parseOrThrow(providerIdSchema, input.provider);
   if (typeof input.apiKey !== "string" || input.apiKey.trim().length === 0) {
@@ -74,6 +75,7 @@ export async function createApiKeyCredential(
     apiKey: input.apiKey,
     idToken: null,
   });
+  logger.info("credential added", { credentialId: created.id, provider: created.provider });
   return summarizeCredential(created);
 }
 
@@ -149,7 +151,7 @@ export type CredentialPatch = {
 };
 
 export async function patchCredential(
-  deps: { store: Store; now: () => number },
+  deps: { store: Store; now: () => number; logger?: Logger },
   id: string,
   input: unknown,
 ): Promise<void> {
@@ -173,6 +175,12 @@ export async function patchCredential(
     ...(patch.tier === undefined ? {} : { tier: patch.tier }),
     ...(patch.weight === undefined ? {} : { weight: patch.weight }),
   });
+  if (patch.enabled !== undefined && patch.enabled !== existing.enabled) {
+    (deps.logger ?? noopLogger).info(patch.enabled ? "credential enabled" : "credential disabled", {
+      credentialId: id,
+      provider: existing.provider,
+    });
+  }
 }
 
 export async function removeCredential(store: Store, id: string): Promise<void> {

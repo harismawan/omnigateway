@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import type { CredentialView } from "@omni/store";
-import { health, memoryStore, quota, seedCredential } from "@omni/testkit";
+import { captureLogger, health, memoryStore, quota, seedCredential } from "@omni/testkit";
 import {
   createApiKeyCredential,
   credentialHealth,
   credentialStatus,
   getCredential,
+  patchCredential,
   refreshCredential,
 } from "../src/credentials.ts";
 
@@ -53,6 +54,44 @@ test("createApiKeyCredential applies API-key defaults without returning the key"
   expect(JSON.stringify(created)).not.toContain("test-provider-key");
   const stored = (await store.credentials.get(created.id)) as CredentialView;
   expect((await stored.openForInference()).apiKey).toBe("test-provider-key");
+});
+
+test("createApiKeyCredential logs credential metadata without the API key", async () => {
+  const store = await memoryStore();
+  const logger = captureLogger();
+
+  const created = await createApiKeyCredential(
+    store,
+    { provider: "anthropic", apiKey: "PROVIDER_KEY_SENTINEL" },
+    logger,
+  );
+
+  expect(logger.records).toContainEqual(
+    expect.objectContaining({
+      level: "info",
+      msg: "credential added",
+      fields: expect.objectContaining({ credentialId: created.id, provider: "anthropic" }),
+    }),
+  );
+  expect(logger.lines.join("\n")).not.toContain("PROVIDER_KEY_SENTINEL");
+});
+
+test("patchCredential logs enabled-state transitions only", async () => {
+  const store = await memoryStore();
+  const logger = captureLogger();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  const deps = { store, now: () => NOW, logger };
+
+  await patchCredential(deps, "c1", { label: "renamed" });
+  await patchCredential(deps, "c1", { enabled: false });
+  await patchCredential(deps, "c1", { enabled: false });
+  await patchCredential(deps, "c1", { enabled: true });
+
+  expect(logger.records.map(({ msg }) => msg)).toEqual([
+    "credential disabled",
+    "credential enabled",
+  ]);
+  expect(logger.records[0]?.fields).toMatchObject({ credentialId: "c1", provider: "anthropic" });
 });
 
 test("createApiKeyCredential trims a custom label", async () => {

@@ -1,4 +1,4 @@
-import type { ProviderId } from "@omni/ir";
+import { type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { RequestLog, Store } from "@omni/store";
 
 type CompletedOverrides = Pick<RequestLog, "status"> &
@@ -54,8 +54,8 @@ export function newPendingRequestLog(input: PendingRequestLogInput): RequestLog 
   };
 }
 
-function report(what: string, requestId: string, error: unknown): void {
-  console.error(what, {
+function report(logger: Logger, what: string, requestId: string, error: unknown): void {
+  logger.warn(what, {
     requestId,
     // The message only; a store error must not drag a row's contents into stdout.
     reason: error instanceof Error ? error.message : "unknown",
@@ -73,11 +73,12 @@ export async function beginLog(
   store: Store,
   log: Omit<RequestLog, "state">,
   keyId: string | null,
+  logger: Logger = noopLogger,
 ): Promise<void> {
   try {
     await store.usage.begin({ ...log, state: "pending", apiKeyId: keyId });
   } catch (error) {
-    report("failed to record request start", log.id, error);
+    report(logger, "failed to record request start", log.id, error);
   }
 }
 
@@ -86,11 +87,12 @@ export async function routeLog(
   store: Store,
   requestId: string,
   target: { provider: ProviderId; model: string; credentialId: string },
+  logger: Logger = noopLogger,
 ): Promise<void> {
   try {
     await store.usage.route(requestId, target);
   } catch (error) {
-    report("failed to record request route", requestId, error);
+    report(logger, "failed to record request route", requestId, error);
   }
 }
 
@@ -105,10 +107,11 @@ export async function finishLog(
   store: Store,
   log: RequestLog,
   keyId: string | null,
+  logger: Logger = noopLogger,
 ): Promise<void> {
   try {
     await store.usage.append({ ...log, apiKeyId: keyId });
   } catch (error) {
-    report("failed to persist request log", log.id, error);
+    report(logger, "failed to persist request log", log.id, error);
   }
 }

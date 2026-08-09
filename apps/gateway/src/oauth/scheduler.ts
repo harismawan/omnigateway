@@ -1,5 +1,5 @@
 import { type Refresher, SCHEDULER_REFRESH_LEAD_MS } from "@omni/control";
-import { GatewayError } from "@omni/ir";
+import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import type { CredentialView, Store } from "@omni/store";
 
 /**
@@ -12,6 +12,7 @@ export type SchedulerDeps = {
   store: Store;
   refresh: Refresher;
   now: () => number;
+  logger?: Logger;
 };
 
 /** OAuth credentials that are enabled and inside the refresh lead. */
@@ -32,6 +33,7 @@ export function due(credentials: readonly CredentialView[], now: number): Creden
  * credentials it successfully refreshed.
  */
 export async function sweep(deps: SchedulerDeps): Promise<number> {
+  const logger = deps.logger ?? noopLogger;
   const credentials = await deps.store.credentials.list();
   let refreshed = 0;
 
@@ -62,10 +64,11 @@ export async function sweep(deps: SchedulerDeps): Promise<number> {
       // alone and try again next sweep. The interval is the rate limiter, so
       // there is no backoff to keep here.
       const code = error instanceof GatewayError ? error.code : "INTERNAL";
-      console.warn("scheduled token refresh failed", {
-        credentialId: credential.id,
+      logger.warn("scheduled token refresh failed", {
         provider: credential.provider,
+        credentialId: credential.id,
         code,
+        reason: error instanceof Error ? error.message : "unknown",
       });
     }
   }
@@ -75,6 +78,7 @@ export async function sweep(deps: SchedulerDeps): Promise<number> {
 
 /** Starts the sweep. Returns a function that stops it. */
 export function startRefreshScheduler(deps: SchedulerDeps): () => void {
+  const logger = deps.logger ?? noopLogger;
   let running = false;
 
   const timer = setInterval(() => {
@@ -85,7 +89,7 @@ export function startRefreshScheduler(deps: SchedulerDeps): () => void {
     running = true;
     void sweep(deps)
       .catch((error: unknown) => {
-        console.error("token refresh sweep failed", {
+        logger.error("token refresh sweep failed", {
           reason: error instanceof Error ? error.message : "unknown",
         });
       })

@@ -17,7 +17,7 @@ import {
   removeModel,
   revokeKey,
 } from "@omni/control";
-import { GatewayError } from "@omni/ir";
+import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
 import {
@@ -34,6 +34,7 @@ export type AdminDeps = {
   admin: AdminAuth;
   now: () => number;
   sessionTtlMs: number;
+  logger?: Logger;
 };
 
 /**
@@ -45,6 +46,7 @@ export type AdminDeps = {
  * package, so the CLI reaches them without going through a socket.
  */
 export function adminRoutes(deps: AdminDeps) {
+  const logger = deps.logger ?? noopLogger;
   return new Elysia()
     .onError(apiErrorHandler)
     .get("/api/status", async ({ request }) => {
@@ -82,6 +84,7 @@ export function adminRoutes(deps: AdminDeps) {
 
       const token = await deps.admin.login(body.password);
       if (token === null) throw new GatewayError("INTERNAL", "could not create admin session");
+      logger.info("admin setup completed");
       set.headers["set-cookie"] = sessionCookie(
         request,
         token,
@@ -94,7 +97,11 @@ export function adminRoutes(deps: AdminDeps) {
       const body = await readJsonRecord(request);
       const token =
         typeof body?.password === "string" ? await deps.admin.login(body.password) : null;
-      if (token === null) throw new GatewayError("AUTH", "invalid password");
+      if (token === null) {
+        logger.info("admin login failed", { reason: "invalid credentials" });
+        throw new GatewayError("AUTH", "invalid password");
+      }
+      logger.info("admin login succeeded");
 
       set.headers["set-cookie"] = sessionCookie(
         request,

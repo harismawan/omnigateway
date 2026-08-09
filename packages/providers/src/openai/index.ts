@@ -39,6 +39,7 @@ export const openaiAdapter: ProviderAdapter = {
     // The Codex endpoint only streams. Non-streaming client requests are served
     // by collecting the stream in dispatch, so always ask for SSE.
     const res = await req.http({
+      provider: "openai",
       url: oauth ? OAUTH_URL : API_URL,
       method: "POST",
       headers,

@@ -1,4 +1,4 @@
-import { GatewayError, type ProviderId } from "@omni/ir";
+import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { isAuthorizationPending } from "./oauth/kimi.ts";
@@ -13,6 +13,7 @@ export type ConnectDeps = {
   providers: Readonly<Record<ProviderId, OAuthProvider>>;
   http: HttpClient;
   now: () => number;
+  logger?: Logger;
 };
 
 /** What the operator needs in order to authorize, however they are shown it. */
@@ -49,6 +50,7 @@ function deviceIdFrom(start: ReturnType<OAuthProvider["start"]>): string {
  * in the console cannot be finished from the terminal.
  */
 export function createConnectFlows(deps: ConnectDeps) {
+  const logger = deps.logger ?? noopLogger;
   const flows = createPendingFlows({ now: deps.now, ttlMs: FLOW_TTL_MS });
   const pollsInFlight = new Map<string, Promise<{ id: string }>>();
   const callbackUri = (provider: ProviderId) =>
@@ -109,6 +111,10 @@ export function createConnectFlows(deps: ConnectDeps) {
       disabledReason: null,
       disabledAt: null,
       ...result.secrets,
+    });
+    logger.info("oauth connect completed", {
+      provider: flow.provider,
+      credentialId: id,
     });
     return { id };
   }

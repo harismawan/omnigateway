@@ -34,6 +34,7 @@ export const kimiAdapter: ProviderAdapter = {
     const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
 
     const res = await req.http({
+      provider: "kimi",
       url: BASE_URL,
       method: "POST",
       headers,

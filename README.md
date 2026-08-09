@@ -190,6 +190,19 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_DB_PATH` | No | `./omnigateway.db` | SQLite database path |
 | `OMNI_BASE_URL` | No | derived from host and port | Public origin for OAuth callbacks; set this behind a reverse proxy |
 | `OMNI_STATIC_DIR` | No | the console shipped with the server | Serve a different console build |
+| `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
+
+Gateway events are written to stdout as one greppable line each. At `info`, every completed
+request produces an access line alongside process lifecycle and error events. Use `debug` to see
+routing decisions, failover attempts, OAuth refreshes, quota probes, and upstream HTTP timing:
+
+```text
+2026-08-09T04:12:03.114Z INFO  request done  requestId=req_9f2 surface=anthropic status=200 provider=anthropic model=claude-opus-5 attempts=1 inputTokens=1204 outputTokens=88 durationMs=2100
+```
+
+Fields are a closed allowlist: logs never include request or response bodies, headers, OAuth
+tokens, API keys, admin passwords, or encryption keys. `OMNI_LOG_LEVEL` is read once at boot;
+an invalid value falls back to `info` and is reported in the boot log.
 
 Routing behaviour — weights, retry limits, request deadline, log retention,
 how often provider quota is polled — lives in the database, not the

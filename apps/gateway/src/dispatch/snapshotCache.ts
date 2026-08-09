@@ -1,3 +1,4 @@
+import { type Logger, noopLogger } from "@omni/ir";
 import { buildSnapshot, healthKey, type Snapshot } from "@omni/router";
 import type { RoutingChange, Store } from "@omni/store";
 
@@ -9,7 +10,10 @@ export type RoutingSnapshotCache = RoutingSnapshotSource & {
   close(): void;
 };
 
-export function createRoutingSnapshotCache(store: Store): RoutingSnapshotCache {
+export function createRoutingSnapshotCache(
+  store: Store,
+  logger: Logger = noopLogger,
+): RoutingSnapshotCache {
   let snapshot: Snapshot | null = null;
   let stale = true;
   let version = store.routing.version();
@@ -53,6 +57,7 @@ export function createRoutingSnapshotCache(store: Store): RoutingSnapshotCache {
 
     const buildGeneration = generation;
     const buildVersion = currentVersion;
+    logger.debug("routing snapshot cache miss");
     inFlight = buildSnapshot(store, now)
       .then(async (next) => {
         const completedVersion = store.routing.version();

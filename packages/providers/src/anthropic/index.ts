@@ -61,6 +61,7 @@ export const anthropicAdapter: ProviderAdapter = {
     );
 
     const res = await req.http({
+      provider: "anthropic",
       url: BASE_URL,
       method: "POST",
       headers,

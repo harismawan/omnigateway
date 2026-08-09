@@ -1,3 +1,4 @@
+import { type Logger, noopLogger } from "@omni/ir";
 import type { RoutingChange, Store } from "../types.ts";
 import { createConfigRepo } from "./config.ts";
 import { createCredentialRepo } from "./credentials.ts";
@@ -8,8 +9,11 @@ import { createUsageRepo } from "./usage.ts";
 export async function createStore(opts: {
   path: string;
   encryptionKey: CryptoKey;
+  logger?: Logger;
 }): Promise<Store> {
+  const logger = opts.logger ?? noopLogger;
   const db = openDb(opts.path);
+  logger.debug("store opened", { path: opts.path });
   const listeners = new Set<(change: RoutingChange) => void>();
   const emit = (change: RoutingChange): void => {
     for (const listener of listeners) {
