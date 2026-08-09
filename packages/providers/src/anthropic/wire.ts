@@ -90,6 +90,29 @@ function encodeSystemTurn(content: ContentBlock[]): string {
   return content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n");
 }
 
+function systemCacheControl(req: ChatRequest): {
+  promoted?: CacheControl;
+  lost: boolean;
+} {
+  const cacheable = req.messages.flatMap((message) =>
+    message.content.flatMap((block) =>
+      block.type === "thinking" ? [] : [{ role: message.role, block }],
+    ),
+  );
+  const markedSystemBlocks = cacheable.filter(
+    ({ role, block }) => role === "system" && cacheControlOf(block) !== undefined,
+  );
+  const final = markedSystemBlocks.at(-1);
+  const promoted =
+    final !== undefined && final.block.type === "text" && cacheable.at(-1) === final
+      ? cacheControlOf(final.block)
+      : undefined;
+  return {
+    ...(promoted === undefined ? {} : { promoted }),
+    lost: markedSystemBlocks.length > (promoted === undefined ? 0 : 1),
+  };
+}
+
 function encodeToolChoice(c: ToolChoice): unknown {
   switch (c.type) {
     case "auto":
@@ -130,6 +153,8 @@ export function toWire(
     note("anthropic:oauth-system-prefix");
   }
 
+  const systemCache = systemCacheControl(req);
+  if (systemCache.lost) note("anthropic:system-turn-cache-control-dropped");
   const body: AnthropicBody = {
     model,
     messages: req.messages.flatMap((m): { role: string; content: unknown }[] => {
@@ -142,16 +167,18 @@ export function toWire(
         if (replayable.length === 0) return [];
         return [{ role: m.role, content: replayable.map(encodeBlock) }];
       }
-      // Flattening to a string has nowhere to put a block-level breakpoint, so
-      // one the caller placed here is lost. Record it rather than let a caching
-      // intent disappear between the request log and the upstream body.
-      if (m.content.some((b) => cacheControlOf(b) !== undefined)) {
-        note("anthropic:system-turn-cache-control-dropped");
-      }
       return [{ role: m.role, content: encodeSystemTurn(m.content) }];
     }),
     max_tokens: req.maxTokens ?? 4096,
     stream: req.stream,
+    ...(systemCache.promoted === undefined
+      ? {}
+      : {
+          cache_control: {
+            type: systemCache.promoted.type,
+            ...(systemCache.promoted.ttl === undefined ? {} : { ttl: systemCache.promoted.ttl }),
+          },
+        }),
   };
 
   if (system !== undefined && system.length > 0) body.system = system;

@@ -204,7 +204,52 @@ test("leaves the caller's breakpoint on its own block after the oauth prefix", (
   });
 });
 
-test("records a degradation when a system turn's breakpoint cannot survive flattening", () => {
+test("promotes a final system-turn breakpoint to automatic caching", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "system",
+          content: [
+            {
+              type: "text",
+              text: "Write Go.",
+              cacheControl: { type: "ephemeral", ttl: "1h" },
+            },
+          ],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(body.messages?.[1]).toEqual({ role: "system", content: "Write Go." });
+  expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  expect(degradations).not.toContain("anthropic:system-turn-cache-control-dropped");
+});
+
+test("keeps degradation when content follows a marked system turn", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "system",
+          content: [{ type: "text", text: "Write Go.", cacheControl: { type: "ephemeral" } }],
+        },
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(body.cache_control).toBeUndefined();
+  expect(degradations).toContain("anthropic:system-turn-cache-control-dropped");
+});
+
+test("lets vendor passthrough override a promoted system-turn breakpoint", () => {
   const { body, degradations } = toWire(
     {
       ...base,
@@ -215,18 +260,17 @@ test("records a degradation when a system turn's breakpoint cannot survive flatt
           content: [{ type: "text", text: "Write Go.", cacheControl: { type: "ephemeral" } }],
         },
       ],
+      vendor: { anthropic: { cache_control: { type: "ephemeral", ttl: "1h" } } },
     },
     "m",
     { oauth: false },
   );
-  // The turn is a plain string on the wire, so a block-level marker has nowhere
-  // to go. Dropping it silently would hide a caching intent that never took.
-  expect(body.messages?.[1]).toEqual({ role: "system", content: "Write Go." });
-  expect(degradations).toContain("anthropic:system-turn-cache-control-dropped");
+  expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  expect(degradations).not.toContain("anthropic:system-turn-cache-control-dropped");
 });
 
 test("leaves an unmarked system turn free of degradations", () => {
-  const { degradations } = toWire(
+  const { body, degradations } = toWire(
     {
       ...base,
       messages: [
@@ -237,6 +281,7 @@ test("leaves an unmarked system turn free of degradations", () => {
     "m",
     { oauth: false },
   );
+  expect(body.cache_control).toBeUndefined();
   expect(degradations).not.toContain("anthropic:system-turn-cache-control-dropped");
 });
 
@@ -554,25 +599,51 @@ test("leaves the ttl split off when the upstream reports no breakdown", async ()
   expect(end).not.toHaveProperty("usage.cacheWrite1hTokens");
 });
 
-test("records a dropped system-turn breakpoint once, however many turns carried one", () => {
-  const marked = {
-    role: "system" as const,
-    content: [{ type: "text" as const, text: "x", cacheControl: { type: "ephemeral" as const } }],
-  };
-  const { degradations } = toWire(
+test("promotes the final system-turn breakpoint and records earlier losses once", () => {
+  const { body, degradations } = toWire(
     {
       ...base,
-      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }, marked, marked],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "system",
+          content: [
+            { type: "text", text: "first", cacheControl: { type: "ephemeral" } },
+            { type: "text", text: "last", cacheControl: { type: "ephemeral", ttl: "1h" } },
+          ],
+        },
+      ],
     },
     "m",
     { oauth: false },
   );
-  // A degradation names a thing the request lost, not how many times the
-  // encoder noticed. The other two encoders dedupe; this one should read the
-  // same in a request log.
+  expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   expect(degradations.filter((d) => d === "anthropic:system-turn-cache-control-dropped")).toEqual([
     "anthropic:system-turn-cache-control-dropped",
   ]);
+});
+
+test("promotes the final marker across several marked system turns", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "system",
+          content: [{ type: "text", text: "first", cacheControl: { type: "ephemeral" } }],
+        },
+        {
+          role: "system",
+          content: [{ type: "text", text: "last", cacheControl: { type: "ephemeral", ttl: "1h" } }],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  expect(degradations).toContain("anthropic:system-turn-cache-control-dropped");
 });
 
 test("drops an unsigned thinking block and records the loss", () => {
