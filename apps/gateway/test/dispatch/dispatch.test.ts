@@ -130,7 +130,7 @@ test("reads routing through the injected snapshot source", async () => {
   };
 
   const events = await drain(
-    (await dispatch(req, configured, new AbortController().signal)).events,
+    (await dispatch(req, configured, new AbortController().signal, "req_test")).events,
   );
 
   expect(events.at(-1)).toMatchObject({ type: "end" });
@@ -141,11 +141,17 @@ test("reads routing through the injected snapshot source", async () => {
 test("streams a successful response and logs it", async () => {
   const store = await seeded(1);
   const adapter = stubAdapter(() => textStream("hello"));
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_route_owned",
+  );
   const events = await drain(outcome.events);
 
   expect(events.at(-1)).toMatchObject({ type: "end" });
   const log = outcome.log();
+  expect(log.id).toBe("req_route_owned");
   expect(log.status).toBe(200);
   expect(log.attempts).toBe(1);
   expect(log.inputTokens).toBe(10);
@@ -170,7 +176,7 @@ test("an AUTH failure refreshes and retries the same OAuth credential once", asy
     };
   };
 
-  const outcome = await dispatch(req, configured, new AbortController().signal);
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_test");
   const events = await drain(outcome.events);
 
   expect(events.at(-1)).toMatchObject({ type: "end" });
@@ -199,7 +205,7 @@ test("a pre-emptive refresh followed by AUTH does not refresh twice", async () =
     };
   };
 
-  const outcome = await dispatch(req, configured, new AbortController().signal);
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_test");
   await drain(outcome.events);
 
   expect(refreshes).toBe(1);
@@ -224,7 +230,7 @@ test("a second AUTH after refresh falls through to the next candidate", async ()
     };
   };
 
-  const outcome = await dispatch(req, configured, new AbortController().signal);
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_test");
   await drain(outcome.events);
 
   expect(adapter.calls).toEqual(["test-token-1", "test-token-refreshed", "test-token-2"]);
@@ -243,7 +249,7 @@ test("a refresh failure proceeds to the next candidate", async () => {
     throw new GatewayError("UPSTREAM", "refresh unavailable");
   };
 
-  const outcome = await dispatch(req, configured, new AbortController().signal);
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_test");
   await drain(outcome.events);
 
   expect(adapter.calls).toEqual(["test-token-1", "test-token-2"]);
@@ -256,7 +262,12 @@ test("fails over to the next credential before the commit point", async () => {
   const adapter = stubAdapter((call) =>
     call === 1 ? new GatewayError("UPSTREAM", "boom") : textStream("recovered"),
   );
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   const events = await drain(outcome.events);
 
   expect(adapter.calls).toHaveLength(2);
@@ -282,7 +293,12 @@ test("a failure after the commit point surfaces as an error event, not a retry",
     })();
   });
 
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   const events = await drain(outcome.events);
 
   expect(adapter.calls).toHaveLength(1);
@@ -306,7 +322,12 @@ test("stops consuming an attempt after canonical end", async () => {
     })();
   });
 
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   const events = await drain(outcome.events);
 
   expect(adapter.calls).toHaveLength(1);
@@ -330,7 +351,12 @@ test("adapter exhaustion without end or error fails after stream commit", async 
     })(),
   );
 
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   const events = await drain(outcome.events);
 
   expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
@@ -352,7 +378,12 @@ test("adapter exhaustion without end or error fails over before stream commit", 
       : textStream("recovered"),
   );
 
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   const events = await drain(outcome.events);
 
   expect(adapter.calls).toHaveLength(2);
@@ -383,7 +414,12 @@ test("an in-stream non-retryable error is not mistaken for success", async () =>
     })();
   });
 
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   const events = await drain(outcome.events);
 
   expect(adapter.calls).toHaveLength(1);
@@ -396,7 +432,12 @@ test("an in-stream non-retryable error is not mistaken for success", async () =>
 test("a non-retryable error stops immediately without trying other credentials", async () => {
   const store = await seeded(3);
   const adapter = stubAdapter(() => new GatewayError("BAD_REQUEST", "malformed"));
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   const events = await drain(outcome.events);
 
   expect(adapter.calls).toHaveLength(1);
@@ -409,7 +450,12 @@ test("stops after maxAttempts even with candidates remaining", async () => {
   const store = await seeded(5);
   await store.config.putSettings({ maxAttempts: 2 });
   const adapter = stubAdapter(() => new GatewayError("UPSTREAM", "boom"));
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   await drain(outcome.events);
 
   expect(adapter.calls).toHaveLength(2);
@@ -420,7 +466,12 @@ test("stops after maxAttempts even with candidates remaining", async () => {
 test("emits NO_CANDIDATES when the pool is empty", async () => {
   const store = await seeded(0);
   const adapter = stubAdapter(() => textStream("x"));
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   const events = await drain(outcome.events);
 
   expect(events[0]).toMatchObject({ type: "error", code: "NO_CANDIDATES" });
@@ -432,7 +483,9 @@ test("a hard failure opens the breaker and persists it", async () => {
   const store = await seeded(1);
   await store.config.putSettings({ maxAttempts: 1, breakerThreshold: 1 });
   const adapter = stubAdapter(() => new GatewayError("UPSTREAM", "boom"));
-  await drain((await dispatch(req, deps(store, adapter), new AbortController().signal)).events);
+  await drain(
+    (await dispatch(req, deps(store, adapter), new AbortController().signal, "req_test")).events,
+  );
 
   const rows = await store.credentials.listHealth();
   expect(rows[0]?.breakerState).toBe("open");
@@ -446,7 +499,9 @@ test("a rate limit parks the credential without opening the breaker", async () =
   const adapter = stubAdapter(
     () => new GatewayError("RATE_LIMIT", "slow down", { retryAfterMs: 30_000 }),
   );
-  await drain((await dispatch(req, deps(store, adapter), new AbortController().signal)).events);
+  await drain(
+    (await dispatch(req, deps(store, adapter), new AbortController().signal, "req_test")).events,
+  );
 
   const rows = await store.credentials.listHealth();
   expect(rows[0]?.breakerState).toBe("closed");
@@ -457,7 +512,9 @@ test("a rate limit parks the credential without opening the breaker", async () =
 test("a success records latency and marks the credential used", async () => {
   const store = await seeded(1);
   const adapter = stubAdapter(() => textStream("hi"));
-  await drain((await dispatch(req, deps(store, adapter), new AbortController().signal)).events);
+  await drain(
+    (await dispatch(req, deps(store, adapter), new AbortController().signal, "req_test")).events,
+  );
 
   const rows = await store.credentials.listHealth();
   expect(rows[0]?.lastUsedAt).toBe(1_000_000);
@@ -469,7 +526,9 @@ test("refreshes an expired oauth credential before calling the adapter", async (
   const store = await seeded(1);
   await store.credentials.update("c1", { expiresAt: 500_000 });
   const adapter = stubAdapter(() => textStream("hi"));
-  await drain((await dispatch(req, deps(store, adapter), new AbortController().signal)).events);
+  await drain(
+    (await dispatch(req, deps(store, adapter), new AbortController().signal, "req_test")).events,
+  );
 
   expect(adapter.calls[0]).toBe("refreshed");
   store.close();
@@ -482,6 +541,7 @@ test("collects the stream for a non-streaming request", async () => {
     { ...req, stream: false },
     deps(store, adapter),
     new AbortController().signal,
+    "req_test",
   );
   const events = await drain(outcome.events);
   // The caller still receives events; egress folds them with collect().
@@ -493,7 +553,12 @@ test("the log records the excluded candidates and their reasons", async () => {
   const store = await seeded(2);
   await store.credentials.update("c1", { enabled: false });
   const adapter = stubAdapter(() => textStream("hi"));
-  const outcome = await dispatch(req, deps(store, adapter), new AbortController().signal);
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
   await drain(outcome.events);
 
   expect(outcome.log().degradations).toContain("excluded:c1:disabled");
@@ -532,6 +597,7 @@ test("request deadline is absolute across candidates", async () => {
     req,
     { ...deps(store, adapter), now: () => Date.now() },
     new AbortController().signal,
+    "req_test",
   );
   const events = await drain(outcome.events);
   expect(events.at(-1)).toMatchObject({ type: "error", code: "TIMEOUT" });
@@ -551,7 +617,7 @@ test("request deadline covers credential refresh", async () => {
   });
   const configured = { ...deps(store, adapter), now: () => Date.now() };
   configured.refresh = async () => await new Promise(() => {});
-  const outcome = await dispatch(req, configured, new AbortController().signal);
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_test");
   const events = await drain(outcome.events);
   expect(events.at(-1)).toMatchObject({ type: "error", code: "TIMEOUT" });
   expect(sends).toBe(0);
@@ -582,6 +648,7 @@ test("client abort remains distinct from request deadline", async () => {
     req,
     { ...deps(store, adapter), now: () => Date.now() },
     controller.signal,
+    "req_test",
   );
   const reason = new DOMException("client disconnected", "AbortError");
   const draining = drain(outcome.events);

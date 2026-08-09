@@ -24,6 +24,7 @@ import type {
   Store,
   VirtualModel,
 } from "@omni/store";
+import { newCompletedRequestLog } from "../logging.ts";
 import { attempt } from "./attempt.ts";
 import { classify } from "./classify.ts";
 import type { RoutingSnapshotSource } from "./snapshotCache.ts";
@@ -55,34 +56,19 @@ export async function dispatch(
   request: ChatRequest,
   deps: DispatchDeps,
   signal: AbortSignal,
+  requestId: string,
 ): Promise<DispatchOutcome> {
   const startedAt = deps.now();
   const snapshot = await deps.snapshots.get(startedAt);
   const deadlineAt = startedAt + snapshot.settings.requestDeadlineMs;
 
-  const log: RequestLog = {
-    id: crypto.randomUUID(),
-    // Dispatch only ever hands back a finished log; the pending row the console
-    // watches is written by the route, before this runs.
-    state: "done",
-    at: startedAt,
-    apiKeyId: null,
+  // Dispatch only ever hands back a finished log; the pending row the console
+  // watches is written by the route, before this runs.
+  const log: RequestLog = newCompletedRequestLog(requestId, startedAt, {
     requestedModel: request.model,
-    resolvedProvider: null,
-    resolvedModel: null,
-    credentialId: null,
-    attempts: 0,
-    status: 200,
-    errorCode: null,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    ttftMs: null,
-    durationMs: 0,
-    costUsd: 0,
-    degradations: [],
-  };
+    // Dispatch assigns the terminal HTTP status before exposing this log.
+    status: 0,
+  });
 
   const fail = (code: GatewayError["code"], message: string): DispatchOutcome => {
     log.errorCode = code;

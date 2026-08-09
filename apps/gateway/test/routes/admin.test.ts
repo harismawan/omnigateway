@@ -111,20 +111,25 @@ test("setup rejects null and malformed bodies as bad requests", async () => {
   ).toBe(400);
 });
 
-test("login rejects null and malformed bodies as invalid passwords", async () => {
-  const { app, call } = await harness();
+test("login rejects a missing password as invalid credentials", async () => {
+  const { call } = await harness();
   expect((await call("POST", "/api/login", null, false)).status).toBe(401);
-  expect(
-    (
-      await app.handle(
-        new Request("http://localhost/api/login", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: "not json",
-        }),
-      )
-    ).status,
-  ).toBe(401);
+});
+
+test("login rejects malformed JSON with the canonical API error", async () => {
+  const { app } = await harness();
+  const response = await app.handle(
+    new Request("http://localhost/api/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not json",
+    }),
+  );
+
+  expect(response.status).toBe(400);
+  expect((await response.json()) as { error: { code: string; message: string } }).toEqual({
+    error: { code: "BAD_REQUEST", message: "invalid JSON body" },
+  });
 });
 
 test("login sets a secure session cookie only over https", async () => {

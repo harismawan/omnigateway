@@ -8,7 +8,13 @@ import { anthropicErrorBody, anthropicResponse, anthropicStream } from "../egres
 import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.ts";
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
-import { beginLog, finishLog, routeLog } from "../logging.ts";
+import {
+  beginLog,
+  finishLog,
+  newCompletedRequestLog,
+  newPendingRequestLog,
+  routeLog,
+} from "../logging.ts";
 
 export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
   snapshots?: DispatchDeps["snapshots"];
@@ -167,37 +173,21 @@ async function handle(
             return;
           }
           began = true;
-          await beginLog(
-            deps.store,
-            {
-              id: requestId,
-              at: startedAt,
-              apiKeyId: keyId,
-              requestedModel,
-              resolvedProvider: target.provider,
-              resolvedModel: target.model,
-              credentialId: target.credentialId,
-              attempts: 0,
-              status: 0,
-              errorCode: null,
-              inputTokens: 0,
-              outputTokens: 0,
-              cacheReadTokens: 0,
-              cacheWriteTokens: 0,
-              ttftMs: null,
-              durationMs: 0,
-              costUsd: 0,
-              degradations: [],
-            },
-            keyId,
-          );
+          const log = newPendingRequestLog({
+            id: requestId,
+            at: startedAt,
+            requestedModel,
+            resolvedProvider: target.provider,
+            resolvedModel: target.model,
+            credentialId: target.credentialId,
+          });
+          await beginLog(deps.store, log, keyId);
         },
       },
       request.signal,
+      requestId,
     );
-    // Overrides dispatch's internally generated id with the route-level
-    // requestId so the client-visible response id and the log row id match.
-    const log = () => finishLog(deps.store, { ...outcome.log(), id: requestId }, keyId);
+    const log = () => finishLog(deps.store, outcome.log(), keyId);
 
     if (chatRequest.stream) {
       const frames =
@@ -230,29 +220,13 @@ async function handle(
     const gatewayError = asGatewayError(error);
     await finishLog(
       deps.store,
-      {
-        id: requestId,
-        // Completes a pending row if the request got as far as dispatch. The
-        // store keeps what beginning it recorded where this log carries nothing.
-        state: "done",
-        at: startedAt,
-        apiKeyId: keyId,
+      // Completes a pending row if the request got as far as dispatch. The
+      // store keeps what beginning it recorded where this log carries nothing.
+      newCompletedRequestLog(requestId, startedAt, {
         requestedModel,
-        resolvedProvider: null,
-        resolvedModel: null,
-        credentialId: null,
-        attempts: 0,
         status: HTTP_STATUS[gatewayError.code],
         errorCode: gatewayError.code,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        ttftMs: null,
-        durationMs: 0,
-        costUsd: 0,
-        degradations: [],
-      },
+      }),
       keyId,
     );
     return errorResponse(surface, gatewayError.code, gatewayError.message);

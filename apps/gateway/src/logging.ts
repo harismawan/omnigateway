@@ -1,6 +1,59 @@
 import type { ProviderId } from "@omni/ir";
 import type { RequestLog, Store } from "@omni/store";
 
+type CompletedOverrides = Pick<RequestLog, "status"> &
+  Partial<Omit<RequestLog, "id" | "state" | "at" | "status">>;
+
+type PendingRequestLogInput = Pick<
+  RequestLog,
+  "id" | "at" | "requestedModel" | "resolvedProvider" | "resolvedModel" | "credentialId"
+>;
+
+function requestLogDefaults(id: string, at: number): RequestLog {
+  return {
+    id,
+    state: "done",
+    at,
+    apiKeyId: null,
+    requestedModel: "",
+    resolvedProvider: null,
+    resolvedModel: null,
+    credentialId: null,
+    attempts: 0,
+    status: 0,
+    errorCode: null,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: null,
+    durationMs: 0,
+    costUsd: 0,
+    degradations: [],
+  };
+}
+
+export function newCompletedRequestLog(
+  id: string,
+  at: number,
+  overrides: CompletedOverrides,
+): RequestLog {
+  return { ...requestLogDefaults(id, at), ...overrides, id, state: "done", at };
+}
+
+export function newPendingRequestLog(input: PendingRequestLogInput): RequestLog {
+  const { id, at, requestedModel, resolvedProvider, resolvedModel, credentialId } = input;
+  return {
+    ...requestLogDefaults(id, at),
+    requestedModel,
+    resolvedProvider,
+    resolvedModel,
+    credentialId,
+    state: "pending",
+    status: 0,
+  };
+}
+
 function report(what: string, requestId: string, error: unknown): void {
   console.error(what, {
     requestId,

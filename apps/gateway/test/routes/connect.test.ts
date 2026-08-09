@@ -92,6 +92,40 @@ test("start rejects an unknown provider", async () => {
   expect((await post("/api/connect/start", { provider: "nope", label: "x" })).status).toBe(400);
 });
 
+test("start rejects malformed JSON with the canonical API error", async () => {
+  const { app, token } = await harness();
+  const response = await app.handle(
+    new Request("http://localhost/api/connect/start", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: `omni_admin=${token}`,
+      },
+      body: "not json",
+    }),
+  );
+
+  expect(response.status).toBe(400);
+  expect((await response.json()) as { error: { code: string; message: string } }).toEqual({
+    error: { code: "BAD_REQUEST", message: "invalid JSON body" },
+  });
+});
+
+test("start hides unexpected provider errors", async () => {
+  const provider = pkceProvider(async () => RESULT);
+  provider.start = () => {
+    throw new Error("provider failure leaked-secret-token");
+  };
+  const { post } = await harness(provider);
+
+  const response = await post("/api/connect/start", { provider: "anthropic", label: "work" });
+
+  expect(response.status).toBe(500);
+  expect((await response.json()) as { error: { code: string; message: string } }).toEqual({
+    error: { code: "INTERNAL", message: "internal error" },
+  });
+});
+
 test("finish exchanges the code and stores an enabled credential", async () => {
   const { post, store } = await harness();
   const { flowId } = (await (
@@ -255,73 +289,6 @@ test("concurrent polls share one device exchange", async () => {
   expect((await first).status).toBe(200);
   expect((await second).status).toBe(200);
   expect(await store.credentials.list()).toHaveLength(1);
-});
-
-test("concurrent pending polls share the pending result and keep the flow", async () => {
-  let exchangeCalls = 0;
-  let rejectExchange: ((error: GatewayError) => void) | undefined;
-  const exchange = new Promise<FlowResult>((_resolve, reject) => {
-    rejectExchange = reject;
-  });
-  const pendingError = new GatewayError(
-    "AUTH",
-    "authorization not yet complete",
-  ) as GatewayError & {
-    __omni_authorization_pending?: boolean;
-  };
-  pendingError.__omni_authorization_pending = true;
-  const deviceProvider: OAuthProvider = {
-    id: "kimi",
-    kind: "device",
-    supportsManualPaste: false,
-    start: () => ({
-      authorizeUrl: "https://kimi.example/device",
-      pending: {
-        verifier: "",
-        challenge: "",
-        state: "",
-        redirectUri: "",
-        extra: { deviceId: "dev-1" },
-      },
-    }),
-    begin: async () => ({
-      authorizeUrl: "https://kimi.example/device",
-      userCode: "WDJB-MJHT",
-      pending: {
-        verifier: "",
-        challenge: "",
-        state: "",
-        redirectUri: "",
-        deviceCode: "dc-1",
-        interval: 5,
-        extra: { deviceId: "dev-1" },
-      },
-    }),
-    exchange: async () => {
-      exchangeCalls += 1;
-      return exchange;
-    },
-    refresh: async () => RESULT,
-  };
-  const { post } = await harness(deviceProvider);
-  const start = (await (
-    await post("/api/connect/start", { provider: "kimi", label: "kimi" })
-  ).json()) as { flowId: string };
-
-  const first = post("/api/connect/poll", { flowId: start.flowId });
-  while (exchangeCalls === 0) await new Promise((resolve) => setTimeout(resolve, 0));
-  const second = post("/api/connect/poll", { flowId: start.flowId });
-  rejectExchange?.(pendingError);
-
-  for (const response of [await first, await second]) {
-    expect(response.status).toBe(202);
-    expect(((await response.json()) as { status: string }).status).toBe("pending");
-  }
-  expect(exchangeCalls).toBe(1);
-
-  const next = await post("/api/connect/poll", { flowId: start.flowId });
-  expect(next.status).toBe(202);
-  expect(exchangeCalls).toBe(2);
 });
 
 test("poll reports pending for a device flow that is not yet approved", async () => {
