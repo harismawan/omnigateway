@@ -7,6 +7,7 @@ import {
   KeyRound,
   ScrollText,
   SlidersHorizontal,
+  Terminal,
 } from "lucide-react";
 import type { ComponentType } from "react";
 import styled from "styled-components";
@@ -32,6 +33,12 @@ const DESTINATIONS: Destination[] = [
   { to: "/keys", label: "Keys", blurb: "Gateway API keys and their limits", Icon: KeyRound },
   { to: "/usage", label: "Usage", blurb: "Requests, tokens, and spend over time", Icon: Gauge },
   { to: "/logs", label: "Logs", blurb: "Recent requests, one row each", Icon: ScrollText },
+  {
+    to: "/console",
+    label: "Console",
+    blurb: "The gateway's own output, as it was printed",
+    Icon: Terminal,
+  },
   {
     to: "/settings",
     label: "Settings",

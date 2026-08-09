@@ -87,6 +87,35 @@ export type UsageResponse = { rows: UsageBucket[] };
 
 export type LogsResponse = { logs: RequestLog[] };
 
+/**
+ * One line of the gateway's own output.
+ *
+ * Every field but `raw` is nullable because not every line came from the
+ * gateway's logger: a journal carries systemd's own notices and anything the
+ * runtime printed outside it. Those are shown as they arrived.
+ */
+export type ConsoleLine = {
+  raw: string;
+  at: number | null;
+  level: "debug" | "info" | "warn" | "error" | null;
+  msg: string | null;
+};
+
+/**
+ * Which log the gateway found, and what it holds.
+ *
+ * `source` is part of the answer rather than an internal detail: the screen
+ * states where these lines came from, and cannot without being told. `none`
+ * means nothing captured the gateway's stdout — ordinary in development, not
+ * an error.
+ */
+export type ConsoleResponse = {
+  source: "file" | "journal" | "none";
+  /** Only for `file`. A journal has no path to name. */
+  path?: string;
+  lines: ConsoleLine[];
+};
+
 /** A capability-only probe: no prompt content ever reaches the control API. */
 export type DryRunNeed = { tools: boolean; images: boolean; reasoning: boolean };
 
