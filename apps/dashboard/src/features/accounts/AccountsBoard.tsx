@@ -74,8 +74,11 @@ const Note = styled.span`
   color: ${({ theme }) => theme.color.inkDim};
 `;
 
-const QuotaCell = styled(Row)`
-  min-width: 130px;
+const QuotaCell = styled.div`
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: center;
+  min-width: 208px;
   gap: 6px;
 `;
 
@@ -193,7 +196,7 @@ export function AccountsBoard() {
                           <Th $align="center" $width="86px">
                             Enabled
                           </Th>
-                          <Th $width="160px">Quota</Th>
+                          <Th $width="240px">Quota</Th>
                           <Th $align="right" $width="88px">
                             TTFT
                           </Th>

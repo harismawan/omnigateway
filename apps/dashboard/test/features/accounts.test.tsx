@@ -60,6 +60,31 @@ describe("AccountsBoard", () => {
     expect(screen.getByLabelText("7d window, 20% used")).toBeTruthy();
   });
 
+  test("gives every quota window the same wider bar track", async () => {
+    stubAccounts({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [
+          quota({ windowType: "fiveHour", used: 950, limit: 1_000 }),
+          quota({ windowType: "weekly", used: 200, limit: 1_000 }),
+        ],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    const fiveHour = await screen.findByLabelText("5h window, 95% used");
+    const weekly = screen.getByLabelText("7d window, 20% used");
+    const quotaHeader = screen.getAllByRole("columnheader", { name: "Quota" })[0];
+
+    expect(getComputedStyle(quotaHeader as HTMLElement).width).toBe("240px");
+    expect(getComputedStyle(fiveHour.parentElement as HTMLElement).gridTemplateColumns).toBe(
+      "96px 1fr",
+    );
+    expect(getComputedStyle(weekly.parentElement as HTMLElement).gridTemplateColumns).toBe(
+      "96px 1fr",
+    );
+  });
+
   test("turning an account off patches only that field", async () => {
     const user = userEvent.setup();
     const stub = stubAccounts({ "PATCH /api/credentials/cred-1": () => ({ ok: true }) });

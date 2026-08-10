@@ -47,6 +47,30 @@ describe("OverviewBoard", () => {
     ).toBeTruthy();
   });
 
+  test("uses the same progress-bar width for every quota window", async () => {
+    const now = Date.now();
+    stubOverview({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [
+          quota({ windowType: "fiveHour", resetsAt: now + 12 * 60_000 }),
+          quota({ windowType: "weekly", resetsAt: now + 2 * 86_400_000 }),
+        ],
+      }),
+    });
+    renderWithRouter(<OverviewBoard />);
+
+    const fiveHour = await screen.findByLabelText(/5h window/);
+    const weekly = screen.getByLabelText(/7d window/);
+
+    expect(getComputedStyle(fiveHour.parentElement as HTMLElement).gridTemplateColumns).toBe(
+      "72px 1fr",
+    );
+    expect(getComputedStyle(weekly.parentElement as HTMLElement).gridTemplateColumns).toBe(
+      "72px 1fr",
+    );
+  });
+
   test("names the number of accounts out of rotation", async () => {
     stubOverview({
       "GET /api/credentials/health": () => ({

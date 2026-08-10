@@ -31,10 +31,11 @@ const Note = styled.span`
 `;
 
 const QuotaCell = styled.div`
-  display: flex;
+  display: grid;
+  grid-template-columns: 72px 1fr;
   align-items: center;
   gap: 6px;
-  width: 118px;
+  min-width: 172px;
 `;
 
 /** One row per reported window, shortest first. */
