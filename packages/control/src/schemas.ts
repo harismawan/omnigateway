@@ -109,6 +109,7 @@ export const settingsSchema = z.object({
   logRetentionDays: z.number().int().min(1),
   /** Zero disables quota polling. Takes effect at the next restart. */
   quotaPollIntervalMs: z.number().int().min(0),
+  rtkEnabled: z.boolean(),
 });
 
 /** Only these credential fields are operator-editable. Secrets are not. */

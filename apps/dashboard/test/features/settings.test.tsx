@@ -25,6 +25,24 @@ describe("SettingsBoard", () => {
     expect((screen.getByLabelText("Recency") as HTMLInputElement).value).toBe("0.5");
   });
 
+  test("toggles deterministic lossy RTK compression and sends the setting", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });
+    renderWithProviders(<SettingsBoard />);
+
+    const toggle = await screen.findByRole("switch", { name: "Enable RTK compression" });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByText(/unknown-origin results may be compressed/i)).toBeTruthy();
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const body = JSON.parse(String(put?.init?.body)) as { rtkEnabled: boolean };
+      expect(body.rtkEnabled).toBe(true);
+    });
+  });
+
   test("the quota poll interval is editable and can be switched off", async () => {
     const user = userEvent.setup();
     const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });

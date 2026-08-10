@@ -54,14 +54,23 @@ export function createConfigRepo(
     async getSettings() {
       const raw = readRaw(SETTINGS_KEY);
       if (raw === null) return DEFAULT_SETTINGS;
-      const stored = JSON.parse(raw) as Partial<Settings>;
-      // Merge over defaults so a settings row written by an older version does
-      // not leave newly-added fields undefined.
-      return {
-        ...DEFAULT_SETTINGS,
-        ...stored,
-        weights: { ...DEFAULT_SETTINGS.weights, ...stored.weights },
-      };
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        const stored =
+          parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+            ? (parsed as Partial<Settings>)
+            : {};
+        // Only literal true enables this lossy transform. This runtime boundary
+        // must remain safe even if an old or manually-edited row is malformed.
+        return {
+          ...DEFAULT_SETTINGS,
+          ...stored,
+          rtkEnabled: stored.rtkEnabled === true,
+          weights: { ...DEFAULT_SETTINGS.weights, ...stored.weights },
+        };
+      } catch {
+        return DEFAULT_SETTINGS;
+      }
     },
 
     async putSettings(patch: Partial<Settings>) {

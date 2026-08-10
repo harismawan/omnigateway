@@ -1,5 +1,6 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { ProviderId } from "@omni/ir";
+import type { RtkFilterId } from "@omni/rtk";
 import type {
   RequestLog,
   RequestState,
@@ -31,7 +32,40 @@ type Row = {
   duration_ms: number;
   cost_usd: number;
   degradations: string;
+  rtk_applied: number;
+  rtk_filter_hits: number;
+  rtk_original_code_units: number;
+  rtk_compressed_code_units: number;
+  rtk_estimated_tokens_saved: number;
+  rtk_filters: string;
 };
+
+const RTK_FILTERS = new Set<RtkFilterId>([
+  "git-diff",
+  "git-status",
+  "git-log",
+  "grep",
+  "path-list",
+  "numbered-read",
+  "build-output",
+  "test-output",
+  "deduplicate-log",
+  "smart-truncate",
+]);
+
+function parseRtkFilters(raw: string): RtkFilterId[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (value): value is RtkFilterId =>
+            typeof value === "string" && RTK_FILTERS.has(value as RtkFilterId),
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
 
 const toLog = (r: Row): RequestLog => ({
   id: r.id,
@@ -53,6 +87,12 @@ const toLog = (r: Row): RequestLog => ({
   durationMs: r.duration_ms,
   costUsd: r.cost_usd,
   degradations: JSON.parse(r.degradations) as string[],
+  rtkApplied: r.rtk_applied === 1,
+  rtkFilterHits: r.rtk_filter_hits,
+  rtkOriginalCodeUnits: r.rtk_original_code_units,
+  rtkCompressedCodeUnits: r.rtk_compressed_code_units,
+  rtkEstimatedTokensSaved: r.rtk_estimated_tokens_saved,
+  rtkFilters: parseRtkFilters(r.rtk_filters),
 });
 
 /**
@@ -128,9 +168,10 @@ function label(value: string | number | null): string {
 const COLUMNS = `(id, state, at, api_key_id, requested_model, resolved_provider, resolved_model,
                   credential_id, attempts, status, error_code, input_tokens, output_tokens,
                   cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms, cost_usd,
-                  degradations)`;
+                  degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
+                  rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters)`;
 
-const PLACEHOLDERS = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+const PLACEHOLDERS = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
 function values(log: RequestLog, state: RequestState): SQLQueryBindings[] {
   return [
@@ -153,6 +194,12 @@ function values(log: RequestLog, state: RequestState): SQLQueryBindings[] {
     log.durationMs,
     log.costUsd,
     JSON.stringify(log.degradations),
+    log.rtkApplied === true ? 1 : 0,
+    log.rtkFilterHits ?? 0,
+    log.rtkOriginalCodeUnits ?? 0,
+    log.rtkCompressedCodeUnits ?? 0,
+    log.rtkEstimatedTokensSaved ?? 0,
+    JSON.stringify(log.rtkFilters ?? []),
   ];
 }
 
@@ -185,7 +232,13 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     ttft_ms = excluded.ttft_ms,
     duration_ms = excluded.duration_ms,
     cost_usd = excluded.cost_usd,
-    degradations = excluded.degradations`;
+    degradations = excluded.degradations,
+    rtk_applied = excluded.rtk_applied,
+    rtk_filter_hits = excluded.rtk_filter_hits,
+    rtk_original_code_units = excluded.rtk_original_code_units,
+    rtk_compressed_code_units = excluded.rtk_compressed_code_units,
+    rtk_estimated_tokens_saved = excluded.rtk_estimated_tokens_saved,
+    rtk_filters = excluded.rtk_filters`;
 
 export function createUsageRepo(db: Database): UsageRepo {
   /**

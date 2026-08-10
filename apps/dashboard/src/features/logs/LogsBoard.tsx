@@ -409,6 +409,16 @@ export function LogsBoard() {
               </Value>
               <Legend as="dt">Cost</Legend>
               <Value>{isPending(open) ? "—" : formatUsd(open.costUsd)}</Value>
+              <Legend as="dt">RTK compression</Legend>
+              <Value>
+                {isPending(open)
+                  ? "—"
+                  : open.rtkApplied
+                    ? `${formatCount(open.rtkFilterHits)} hits · ${formatCount(open.rtkOriginalCodeUnits)} → ${formatCount(open.rtkCompressedCodeUnits)} code units · ~${formatCount(open.rtkEstimatedTokensSaved)} tokens saved`
+                    : "not applied"}
+              </Value>
+              <Legend as="dt">RTK filters</Legend>
+              <Value>{open.rtkFilters.length === 0 ? "—" : open.rtkFilters.join(", ")}</Value>
             </Detail>
 
             {open.degradations.length === 0 ? null : (

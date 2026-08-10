@@ -30,6 +30,12 @@ function requestLogDefaults(id: string, at: number): RequestLog {
     durationMs: 0,
     costUsd: 0,
     degradations: [],
+    rtkApplied: false,
+    rtkFilterHits: 0,
+    rtkOriginalCodeUnits: 0,
+    rtkCompressedCodeUnits: 0,
+    rtkEstimatedTokensSaved: 0,
+    rtkFilters: [],
   };
 }
 

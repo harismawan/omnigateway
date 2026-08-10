@@ -101,6 +101,14 @@ test("admin password initialization only writes when absent", async () => {
   s.close();
 });
 
+test("settings safely normalize malformed persisted RTK values to disabled", async () => {
+  const s = await store();
+  expect((await s.config.getSettings()).rtkEnabled).toBe(false);
+  await s.config.putSettings({ rtkEnabled: true });
+  expect((await s.config.getSettings()).rtkEnabled).toBe(true);
+  s.close();
+});
+
 test("settings return defaults then persist patches", async () => {
   const s = await store();
   const defaults = await s.config.getSettings();
@@ -226,6 +234,12 @@ test("usage appends, lists recent, and aggregates by model", async () => {
     durationMs: 1200,
     costUsd: 0.005,
     degradations: [],
+    rtkApplied: false,
+    rtkFilterHits: 0,
+    rtkOriginalCodeUnits: 0,
+    rtkCompressedCodeUnits: 0,
+    rtkEstimatedTokensSaved: 0,
+    rtkFilters: [],
   };
   await s.usage.append(log);
   await s.usage.append({ ...log, id: "r2", at: 2000, status: 429, errorCode: "RATE_LIMIT" });
@@ -263,6 +277,12 @@ test("prune removes logs older than the cutoff", async () => {
     durationMs: 1,
     costUsd: 0,
     degradations: [],
+    rtkApplied: false,
+    rtkFilterHits: 0,
+    rtkOriginalCodeUnits: 0,
+    rtkCompressedCodeUnits: 0,
+    rtkEstimatedTokensSaved: 0,
+    rtkFilters: [],
   };
   await s.usage.append({ ...base, id: "old", at: 100 });
   await s.usage.append({ ...base, id: "new", at: 9000 });

@@ -23,7 +23,13 @@ test("openDb applies migrations and records them", () => {
     expect(tables).toContain(t);
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
-  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4]);
+  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5]);
+  const columns = db
+    .query<{ name: string }, []>("PRAGMA table_info(request_logs)")
+    .all()
+    .map((row) => row.name);
+  expect(columns).toContain("rtk_applied");
+  expect(columns).toContain("rtk_filters");
   db.close();
 });
 
@@ -31,7 +37,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(4);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(5);
   db.close();
 });
 

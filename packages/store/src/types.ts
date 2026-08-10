@@ -1,4 +1,5 @@
 import type { ProviderId } from "@omni/ir";
+import type { RtkFilterId } from "@omni/rtk";
 
 export type BreakerState = "closed" | "open" | "halfOpen";
 export type AuthType = "oauth" | "apiKey";
@@ -183,6 +184,12 @@ export type RequestLog = {
   costUsd: number;
   /** Capability degradations applied, e.g. ["droppedThinking"]. */
   degradations: string[];
+  rtkApplied: boolean;
+  rtkFilterHits: number;
+  rtkOriginalCodeUnits: number;
+  rtkCompressedCodeUnits: number;
+  rtkEstimatedTokensSaved: number;
+  rtkFilters: RtkFilterId[];
 };
 
 export type ScoringWeights = {
@@ -203,6 +210,7 @@ export type Settings = {
   logRetentionDays: number;
   /** How often provider quota is polled. Zero disables polling entirely. */
   quotaPollIntervalMs: number;
+  rtkEnabled: boolean;
 };
 
 export interface CredentialRepo {
@@ -356,4 +364,5 @@ export const DEFAULT_SETTINGS: Settings = {
   breakerCooldownMs: 30_000,
   logRetentionDays: 30,
   quotaPollIntervalMs: 300_000,
+  rtkEnabled: false,
 };

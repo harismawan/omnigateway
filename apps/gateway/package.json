@@ -13,6 +13,7 @@
     "@omni/ir": "workspace:*",
     "@omni/providers": "workspace:*",
     "@omni/router": "workspace:*",
+    "@omni/rtk": "workspace:*",
     "@omni/store": "workspace:*",
     "@omni/testkit": "workspace:*",
     "elysia": "1.4.29",

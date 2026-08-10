@@ -231,6 +231,12 @@ export function requestLog(overrides: Partial<RequestLog> & { id: string }): Req
     durationMs: 1,
     costUsd: 0,
     degradations: [],
+    rtkApplied: false,
+    rtkFilterHits: 0,
+    rtkOriginalCodeUnits: 0,
+    rtkCompressedCodeUnits: 0,
+    rtkEstimatedTokensSaved: 0,
+    rtkFilters: [],
     ...overrides,
   };
 }

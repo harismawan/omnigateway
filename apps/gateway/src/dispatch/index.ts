@@ -19,6 +19,7 @@ import {
   recordSuccess,
   resolveModel,
 } from "@omni/router";
+import { transformRequest } from "@omni/rtk";
 import type {
   CredentialSecrets,
   CredentialView,
@@ -75,6 +76,8 @@ export async function dispatch(
     status: 0,
   });
 
+  let dispatchRequest = request;
+
   const fail = (code: GatewayError["code"], message: string): DispatchOutcome => {
     log.errorCode = code;
     log.status = HTTP_STATUS[code];
@@ -109,7 +112,16 @@ export async function dispatch(
   let model: VirtualModel;
   try {
     checkCancellation();
-    model = resolveModel(request.model, snapshot);
+    const transformed = transformRequest(request, { enabled: snapshot.settings.rtkEnabled });
+    dispatchRequest = transformed.request;
+    log.rtkApplied = transformed.report.applied;
+    log.rtkFilterHits = transformed.report.filterHits;
+    log.rtkOriginalCodeUnits = transformed.report.originalCodeUnits;
+    log.rtkCompressedCodeUnits = transformed.report.compressedCodeUnits;
+    log.rtkEstimatedTokensSaved = transformed.report.estimatedTokensSaved;
+    log.rtkFilters = transformed.report.filters;
+    checkCancellation();
+    model = resolveModel(dispatchRequest.model, snapshot);
   } catch (error) {
     const { code } = classify(error);
     clearDeadline();
@@ -117,7 +129,7 @@ export async function dispatch(
   }
 
   const { candidates, excluded } = rank({
-    request,
+    request: dispatchRequest,
     model,
     snapshot,
     now: startedAt,
@@ -206,7 +218,7 @@ export async function dispatch(
             const result = await waitForCancellation(
               attempt({
                 candidate,
-                request,
+                request: dispatchRequest,
                 adapter: deps.adapters[candidate.target.provider],
                 http: deps.http,
                 now: attemptNow,
