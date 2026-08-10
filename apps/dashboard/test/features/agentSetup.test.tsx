@@ -7,20 +7,25 @@ import { renderWithProviders } from "../helpers/render.tsx";
 
 const CLAUDE_FILES = [
   {
-    path: "opus/settings.json",
+    path: "settings.json",
     contents: JSON.stringify(
       {
         env: {
           ANTHROPIC_BASE_URL: "http://localhost:9000",
           ANTHROPIC_AUTH_TOKEN: "<your OmniGateway key>",
           ANTHROPIC_MODEL: "opus",
-          CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1000000",
+          ANTHROPIC_DEFAULT_FABLE_MODEL: "opus",
         },
       },
       null,
       2,
     ),
   },
+];
+
+const MODELS = [
+  { id: "opus", label: "Opus", strategy: "priority", targets: [] },
+  { id: "haiku", label: "Haiku", strategy: "priority", targets: [] },
 ];
 
 const OPENCODE_FILES = [
@@ -32,6 +37,7 @@ const OPENCODE_FILES = [
 
 function stub() {
   return createFetchStub({
+    "GET /api/models": () => ({ models: MODELS }),
     "GET /api/agent-setup": ({ url }) =>
       url.includes("client=opencode")
         ? { client: "opencode", files: OPENCODE_FILES }
@@ -40,24 +46,41 @@ function stub() {
 }
 
 describe("AgentSetup", () => {
-  // The window is the entire reason this panel exists: an operator who copies a
-  // block without it gets a session sized by the client's default, not by the
-  // pool.
-  test("shows the generated profile, window included", async () => {
-    stub();
+  test("requires a default pool and sends explicit repeated class mappings", async () => {
+    const user = userEvent.setup();
+    const fetch = stub();
     renderWithProviders(<AgentSetup />);
 
+    const defaultSelect = await screen.findByRole("combobox", { name: "Default model" });
+    expect(defaultSelect).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Fable model" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Opus model" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Sonnet model" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Haiku model" })).toBeTruthy();
+
+    await user.selectOptions(defaultSelect, "opus");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Fable model" }), "opus");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Opus model" }), "opus");
+
     await waitFor(() => {
-      expect(screen.getByText(/CLAUDE_CODE_MAX_CONTEXT_TOKENS/)).toBeTruthy();
+      expect(
+        fetch.calls.some(
+          (call) =>
+            call.url.includes("defaultModel=opus") &&
+            call.url.includes("fableModel=opus") &&
+            call.url.includes("opusModel=opus"),
+        ),
+      ).toBe(true);
     });
-    expect(screen.getByText(/1000000/)).toBeTruthy();
-    expect(screen.getByText("opus/settings.json")).toBeTruthy();
+    expect(screen.getByText("settings.json")).toBeTruthy();
+    expect(screen.getByText(/ANTHROPIC_DEFAULT_FABLE_MODEL/)).toBeTruthy();
   });
 
   test("never renders a real key", async () => {
     stub();
     renderWithProviders(<AgentSetup />);
 
+    await userEvent.selectOptions(await screen.findByLabelText("Default model"), "opus");
     await waitFor(() => {
       expect(screen.getByText(/ANTHROPIC_AUTH_TOKEN/)).toBeTruthy();
     });
@@ -88,8 +111,9 @@ describe("AgentSetup", () => {
     stub();
     renderWithProviders(<AgentSetup />);
 
+    await user.selectOptions(await screen.findByLabelText("Default model"), "opus");
     await waitFor(() => {
-      expect(screen.getByText("opus/settings.json")).toBeTruthy();
+      expect(screen.getByText("settings.json")).toBeTruthy();
     });
 
     await user.click(screen.getByRole("button", { name: "opencode" }));
@@ -101,6 +125,7 @@ describe("AgentSetup", () => {
 
   test("says so when there is nothing to point a client at", async () => {
     createFetchStub({
+      "GET /api/models": () => ({ models: [] }),
       "GET /api/agent-setup": () => ({ client: "claude", files: [] }),
     });
     renderWithProviders(<AgentSetup />);

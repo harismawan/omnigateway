@@ -614,7 +614,7 @@ test("the console route reports that nothing captured stdout, and shells out to 
   expect(body).toEqual({ source: "none", lines: [] });
 });
 
-test("agent setup returns the files a client needs, with the window in them", async () => {
+test("agent setup returns one Claude settings file for the explicit mapping", async () => {
   const { call, store } = await harness();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
   await store.config.putModel(
@@ -624,16 +624,35 @@ test("agent setup returns the files a client needs, with the window in them", as
     }),
   );
 
-  const body = (await (await call("GET", "/api/agent-setup?client=claude")).json()) as {
+  const body = (await (
+    await call(
+      "GET",
+      "/api/agent-setup?client=claude&defaultModel=opus&fableModel=opus&opusModel=opus",
+    )
+  ).json()) as {
     client: string;
     files: { path: string; contents: string }[];
   };
 
   expect(body.client).toBe("claude");
-  expect(body.files.map((file) => file.path)).toEqual(["opus/settings.json"]);
-  // Without this the operator copies a block that leaves the session on the
-  // client's own default, which is the whole problem this surface exists for.
-  expect(body.files[0]?.contents).toContain('"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"');
+  expect(body.files.map((file) => file.path)).toEqual(["settings.json"]);
+  expect(body.files[0]?.contents).toContain('"ANTHROPIC_MODEL": "opus"');
+  expect(body.files[0]?.contents).toContain('"ANTHROPIC_DEFAULT_FABLE_MODEL": "opus"');
+  expect(body.files[0]?.contents).not.toContain("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
+});
+
+test("agent setup rejects missing and stale Claude mappings", async () => {
+  const { call, store } = await harness();
+  await store.config.putModel(virtualModel({ id: "opus" }));
+
+  const missing = await call("GET", "/api/agent-setup?client=claude");
+  expect(missing.status).toBe(400);
+  expect(await missing.text()).toContain("defaultModel");
+
+  const stale = await call("GET", "/api/agent-setup?client=claude&defaultModel=missing");
+  expect(stale.status).toBe(400);
+  expect(await stale.text()).toContain("defaultModel");
+  expect(await call("GET", "/api/agent-setup?client=opencode")).toHaveProperty("status", 200);
 });
 
 // The store keeps only hashes, so there is no real key to render — but a

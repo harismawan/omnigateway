@@ -1,17 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConsoleBoard } from "../../src/features/console/ConsoleBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
+const FIRST_LINE = {
+  raw: "2026-08-09T04:12:03.114Z INFO  omnigateway listening  port=9000",
+  at: 1_786_000_323_114,
+  level: "info",
+  msg: "omnigateway listening",
+};
+
 const LINES = [
-  {
-    raw: "2026-08-09T04:12:03.114Z INFO  omnigateway listening  port=9000",
-    at: 1_786_000_323_114,
-    level: "info",
-    msg: "omnigateway listening",
-  },
+  FIRST_LINE,
   {
     raw: "2026-08-09T04:12:04.000Z ERROR quota poll failed  reason=boom",
     at: 1_786_000_324_000,
@@ -106,6 +108,63 @@ describe("ConsoleBoard", () => {
     renderWithProviders(<ConsoleBoard />);
 
     expect(await screen.findByRole("button", { name: /try again/i })).toBeTruthy();
+  });
+
+  test("keeps the process header and source outside the terminal scroller", async () => {
+    stubConsole({ source: "file", path: "/var/log/omni.log", lines: LINES });
+    renderWithProviders(<ConsoleBoard />);
+
+    const terminal = await screen.findByTestId("console-terminal");
+    expect(terminal.contains(screen.getByText("Process output"))).toBe(false);
+    expect(terminal.contains(screen.getByText("/var/log/omni.log"))).toBe(false);
+  });
+
+  test("bounds the terminal and initially scrolls to the latest line", async () => {
+    const scrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get: () => 500,
+    });
+    stubConsole({ source: "file", path: "/var/log/omni.log", lines: LINES });
+    renderWithProviders(<ConsoleBoard />);
+
+    const terminal = await screen.findByTestId("console-terminal");
+    await act(async () => {});
+
+    expect(getComputedStyle(terminal).overflowY).toBe("auto");
+    expect(terminal.scrollTop).toBe(500);
+    if (scrollHeight !== undefined) {
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeight);
+    }
+  });
+
+  test("follows refreshes only while the operator is near the bottom", async () => {
+    let current = { source: "file", path: "/var/log/omni.log", lines: LINES };
+    const stub = createFetchStub({ "GET /api/console": () => current });
+    const rendered = renderWithProviders(<ConsoleBoard />);
+    const terminal = await screen.findByTestId("console-terminal");
+    Object.defineProperties(terminal, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: { configurable: true, get: () => (current.lines.length > 2 ? 700 : 500) },
+    });
+
+    terminal.scrollTop = 400;
+    fireEvent.scroll(terminal);
+    current = { ...current, lines: [...LINES, { ...FIRST_LINE, raw: "new latest" }] };
+    await rendered.client.invalidateQueries({ queryKey: ["console"] });
+    await screen.findByText("new latest");
+    expect(terminal.scrollTop).toBe(700);
+
+    terminal.scrollTop = 100;
+    fireEvent.scroll(terminal);
+    current = {
+      ...current,
+      lines: [...current.lines, { ...FIRST_LINE, raw: "another latest" }],
+    };
+    await rendered.client.invalidateQueries({ queryKey: ["console"] });
+    await screen.findByText("another latest");
+    expect(terminal.scrollTop).toBe(100);
+    expect(stub.calls.length).toBeGreaterThan(1);
   });
 });
 

@@ -1,6 +1,6 @@
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
-  claudeProfiles,
+  claudeSettings,
   describeModelsForSetup,
   KEY_PLACEHOLDER,
   opencodeConfig,
@@ -66,30 +66,56 @@ function at(dir: string, file: SetupFile): { path: string; contents: string } {
   return { path: join(dir, file.path), contents: file.contents };
 }
 
-/**
- * One profile per model, because `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is one number
- * for one process.
- */
+/** One settings file with the operator's explicit mapping for each Claude model class. */
 export const setupClaude: Command = {
   usage: "setup claude [--dir <path>] [--key <key>] [--dry-run]",
-  summary: "Write a Claude Code profile per virtual model",
+  summary: "Write Claude Code settings for this gateway",
   options: OPTIONS,
-  async run(args, { ctx, writer, setupFs }) {
+  async run(args, { ctx, writer, prompt, setupFs }) {
     const models = await described(ctx);
-    const dir = stringFlag(args.values, "dir") ?? join(setupFs.homeDir, ".claude", "profiles");
+    const dir = stringFlag(args.values, "dir") ?? join(setupFs.homeDir, ".claude");
     const key = stringFlag(args.values, "key");
     const dryRun = boolFlag(args.values, "dry-run");
-
-    const files = claudeProfiles(models, {
-      baseUrl: baseUrl(ctx),
-      discoveryMirrors: ctx.config().exposeClaudeCodeAliases,
-      ...(key === undefined ? {} : { apiKey: key }),
-    }).map((file) => at(dir, file));
-
-    finish(ctx, writer, files, dryRun, key, setupFs.write);
-    if (!dryRun) {
-      note(ctx, writer, `run one with: CLAUDE_CONFIG_DIR=${dirname(files[0]?.path ?? dir)} claude`);
+    const choices = models.map(({ model }) => model.id).join(", ");
+    if (prompt.input === undefined) {
+      throw new CliError("Claude model mapping requires an interactive terminal");
     }
+    const input = prompt.input;
+    const ask = async (label: string, required: boolean): Promise<string | undefined> => {
+      const answer = await input(
+        `${label} model${required ? "" : " (blank to omit)"} [${choices}]: `,
+      );
+      if (required && answer === "") throw new CliError("default model is required");
+      return answer === "" ? undefined : answer;
+    };
+    const defaultModel = await ask("Default", true);
+    if (defaultModel === undefined) throw new CliError("default model is required");
+    // Ask each optional slot once; spelling the values out keeps the mapping
+    // policy in the operator's answers rather than in pool naming conventions.
+    const fableModel = await ask("Fable", false);
+    const opusModel = await ask("Opus", false);
+    const sonnetModel = await ask("Sonnet", false);
+    const haikuModel = await ask("Haiku", false);
+    const path = join(dir, "settings.json");
+
+    const file = claudeSettings(
+      models,
+      {
+        baseUrl: baseUrl(ctx),
+        discoveryMirrors: ctx.config().exposeClaudeCodeAliases,
+        ...(key === undefined ? {} : { apiKey: key }),
+      },
+      {
+        defaultModel,
+        ...(fableModel === undefined ? {} : { fableModel }),
+        ...(opusModel === undefined ? {} : { opusModel }),
+        ...(sonnetModel === undefined ? {} : { sonnetModel }),
+        ...(haikuModel === undefined ? {} : { haikuModel }),
+      },
+      setupFs.read(path) ?? undefined,
+    );
+
+    finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write);
   },
 };
 

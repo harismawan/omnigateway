@@ -79,6 +79,14 @@ export type SetupClient = "claude" | "opencode";
 
 export type SetupFile = { path: string; contents: string };
 
+export type ClaudeModelMapping = {
+  defaultModel: string;
+  fableModel?: string;
+  opusModel?: string;
+  sonnetModel?: string;
+  haikuModel?: string;
+};
+
 export type SetupResponse = { client: SetupClient; files: SetupFile[] };
 
 export type UsageQuery = {

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import styled from "styled-components";
-import { useAgentSetup } from "../../api/queries.ts";
-import type { SetupClient } from "../../api/types.ts";
+import { useAgentSetup, useModels } from "../../api/queries.ts";
+import type { ClaudeModelMapping, SetupClient } from "../../api/types.ts";
 import { Button } from "../../ui/Button.tsx";
+import { Field, Select } from "../../ui/Field.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Mono, Row, Stack } from "../../ui/primitives.ts";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
@@ -10,16 +11,13 @@ import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
 /**
  * The configuration an agent needs to talk to this gateway.
  *
- * This exists because none of these agents reads its context window from
- * `GET /v1/models` — Claude Code ignores the field, opencode takes the number
- * from its own config — so an operator who does nothing here gets a session
- * sized by the client's default rather than by the pool. The files are
- * generated server-side, from the same resolution the listing uses, so what is
- * shown cannot drift from what the gateway would say.
+ * Claude Code needs explicit model-class mappings, while opencode takes model
+ * limits from its own config instead of `GET /v1/models`. Files are generated
+ * server-side so dashboard and CLI cannot drift.
  */
 
 const CLIENTS: ReadonlyArray<{ id: SetupClient; label: string; where: string }> = [
-  { id: "claude", label: "Claude Code", where: "one profile per model, under ~/.claude/profiles" },
+  { id: "claude", label: "Claude Code", where: "settings.json under ~/.claude" },
   { id: "opencode", label: "opencode", where: "opencode.json in your project" },
 ];
 
@@ -47,9 +45,33 @@ const Note = styled.p`
   margin: 0;
 `;
 
+const MappingGrid = styled.div`
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: ${({ theme }) => theme.space(2)};
+`;
+
+const MAPPING_FIELDS: ReadonlyArray<{
+  key: keyof ClaudeModelMapping;
+  label: string;
+  required: boolean;
+}> = [
+  { key: "defaultModel", label: "Default model", required: true },
+  { key: "fableModel", label: "Fable model", required: false },
+  { key: "opusModel", label: "Opus model", required: false },
+  { key: "sonnetModel", label: "Sonnet model", required: false },
+  { key: "haikuModel", label: "Haiku model", required: false },
+];
+
 export function AgentSetup() {
   const [client, setClient] = useState<SetupClient>("claude");
-  const files = useAgentSetup(client);
+  const [mapping, setMapping] = useState<Partial<ClaudeModelMapping>>({});
+  const models = useModels();
+  const claudeMapping =
+    typeof mapping.defaultModel === "string" && mapping.defaultModel !== ""
+      ? (mapping as ClaudeModelMapping)
+      : undefined;
+  const files = useAgentSetup(client, client === "claude" ? claudeMapping : undefined);
   const chosen = CLIENTS.find((entry) => entry.id === client);
 
   return (
@@ -73,10 +95,44 @@ export function AgentSetup() {
           <Mono>omni setup {client}</Mono> to write these files directly.
         </Note>
 
-        {files.isError ? (
+        {client === "claude" && (models.data?.length ?? 0) > 0 ? (
+          <MappingGrid>
+            {MAPPING_FIELDS.map((field) => (
+              <Field key={field.key} label={field.label}>
+                {(props) => (
+                  <Select
+                    {...props}
+                    value={mapping[field.key] ?? ""}
+                    onChange={(event) =>
+                      setMapping((current) => ({
+                        ...current,
+                        [field.key]: event.target.value || undefined,
+                      }))
+                    }
+                  >
+                    <option value="">{field.required ? "Choose a pool" : "Not mapped"}</option>
+                    {models.data?.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.id}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+            ))}
+          </MappingGrid>
+        ) : null}
+
+        {client === "claude" && models.isLoading ? (
+          <SkeletonRows rows={2} />
+        ) : files.isError ? (
           <Failure error={files.error} onRetry={() => void files.refetch()} />
         ) : files.isLoading ? (
           <SkeletonRows rows={4} />
+        ) : client === "claude" && (models.data?.length ?? 0) === 0 ? (
+          <Note>No virtual models configured yet, so there is nothing to point a client at.</Note>
+        ) : client === "claude" && claudeMapping === undefined ? (
+          <Note>Choose a default model to generate Claude Code settings.</Note>
         ) : files.data === undefined || files.data.length === 0 ? (
           <Note>No virtual models configured yet, so there is nothing to point a client at.</Note>
         ) : (
