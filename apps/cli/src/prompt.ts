@@ -2,6 +2,8 @@ import { CliError, type Context } from "./context.ts";
 import type { Writer } from "./output.ts";
 
 export type Prompt = {
+  /** Reads ordinary text from a terminal. */
+  input?: (question: string) => Promise<string>;
   /** Reads a secret without echoing it, or from stdin when piped. */
   secret: (question: string) => Promise<string>;
   /** Asks a yes/no question. */
@@ -66,6 +68,12 @@ export function createPrompt(ctx: Context, writer: Writer): Prompt {
 
   return {
     isTty,
+
+    async input(question) {
+      if (!isTty) throw new CliError(`${question} — refusing without a terminal`);
+      writer.err(question);
+      return (await readLine()).trim();
+    },
 
     async secret(question) {
       if (!isTty) return (await readAllStdin()).trim();

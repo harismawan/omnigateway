@@ -1,6 +1,5 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
 import { type ConnectFlows, createConnectFlows, OAUTH_PROVIDERS } from "@omni/control";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
@@ -14,6 +13,7 @@ import { createPrompt } from "./prompt.ts";
 import { resolveCommand } from "./registry.ts";
 import { createServiceDeps, runForeground } from "./runtime.ts";
 import type { ServiceDeps } from "./service.ts";
+import { atomicWriteFile } from "./setupFs.ts";
 
 export const VERSION = "0.0.0";
 
@@ -84,10 +84,14 @@ export async function run(
     setupFs: options.setupFs ?? {
       homeDir: homedir(),
       cwd: process.cwd(),
-      write: (path, contents) => {
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, contents);
-      },
+      read: (path) => (existsSync(path) ? readFileSync(path, "utf8") : null),
+      write: (path, contents) =>
+        atomicWriteFile(path, contents, {
+          mkdir: (directory) => mkdirSync(directory, { recursive: true }),
+          write: (temporary, data) => writeFileSync(temporary, data),
+          rename: renameSync,
+          remove: (temporary) => rmSync(temporary, { force: true }),
+        }),
     },
     service: () =>
       options.service?.({ root: ctx.root.root, env: ctx.env }) ??

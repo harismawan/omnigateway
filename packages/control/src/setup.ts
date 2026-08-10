@@ -7,10 +7,9 @@ import { listModels } from "./models.ts";
  * The configuration files an agent needs to talk to this gateway.
  *
  * Generated here rather than in the CLI or the console because both need the
- * same answer: none of these agents reads its context window from
- * `GET /v1/models`, so the window has to be written into what each one reads at
- * startup, and a console that showed one number while `omni setup claude` wrote
- * another would be worse than either alone.
+ * same answer. Claude Code needs explicit model-class mappings, while opencode
+ * needs each model's context window in its own configuration. A console that
+ * showed one value while the CLI wrote another would be worse than either alone.
  *
  * Nothing here touches a filesystem. A caller that writes files decides where
  * they go; a caller that renders them decides how.
@@ -22,6 +21,14 @@ export type SetupFile = {
   /** Where this belongs, relative to the client's own configuration root. */
   path: string;
   contents: string;
+};
+
+export type ClaudeModelMapping = {
+  defaultModel: string;
+  fableModel?: string;
+  opusModel?: string;
+  sonnetModel?: string;
+  haikuModel?: string;
 };
 
 export const KEY_PLACEHOLDER = "<your OmniGateway key>";
@@ -51,41 +58,68 @@ export async function describeModelsForSetup(store: Store): Promise<Described[]>
   }));
 }
 
-/** Injective encoding into one non-dot directory segment on every supported platform. */
-function slug(id: string): string {
-  return encodeURIComponent(id).replace(/\./g, "%2E");
+const CLAUDE_MAPPING_KEYS = {
+  defaultModel: "ANTHROPIC_MODEL",
+  fableModel: "ANTHROPIC_DEFAULT_FABLE_MODEL",
+  opusModel: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  sonnetModel: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  haikuModel: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+} as const;
+
+function settingsObject(existing: string | undefined): Record<string, unknown> {
+  if (existing === undefined) return {};
+  try {
+    const parsed: unknown = JSON.parse(existing);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("settings root is not an object");
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "invalid JSON";
+    throw new Error(`cannot parse existing settings.json: ${reason}`);
+  }
 }
 
-/**
- * One Claude Code profile per model.
- *
- * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is one number for one process, so a model
- * each needs a profile each — that is the whole reason this returns a directory
- * of files rather than one file.
- */
-export function claudeProfiles(described: readonly Described[], input: SetupInput): SetupFile[] {
-  const apiKey = input.apiKey ?? KEY_PLACEHOLDER;
-  return described.map(({ model, limits }) => {
-    const useMirror = input.discoveryMirrors === true && !/^(?:claude|anthropic)/i.test(model.id);
-    const modelId = useMirror ? `claude/${model.id}` : model.id;
-    const env: Record<string, string> = {
-      ANTHROPIC_BASE_URL: input.baseUrl,
-      ANTHROPIC_AUTH_TOKEN: apiKey,
-      ANTHROPIC_MODEL: modelId,
-      CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
-    };
-    // Written only where it would be read. The client consults this variable
-    // only for a model its built-in table does not know, and never for an id
-    // beginning `claude-`; writing it otherwise produces a file that looks like
-    // it configures something and does not.
-    if (limits.contextWindow !== undefined && !/^claude-/i.test(modelId)) {
-      env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(limits.contextWindow);
-    }
-    return {
-      path: `${slug(model.id)}/settings.json`,
-      contents: `${JSON.stringify({ env }, null, 2)}\n`,
-    };
-  });
+/** One Claude Code settings file with an explicit pool for each selected model class. */
+export function claudeSettings(
+  described: readonly Described[],
+  input: SetupInput,
+  mapping: ClaudeModelMapping,
+  existing?: string,
+): SetupFile {
+  if (mapping.defaultModel === "") throw new Error("default model is required");
+
+  const ids = new Set(described.map(({ model }) => model.id));
+  const visibleId = (slot: keyof ClaudeModelMapping, id: string): string => {
+    if (!ids.has(id)) throw new Error(`${slot} names unknown virtual model "${id}"`);
+    const useMirror = input.discoveryMirrors === true && !/^(?:claude|anthropic)/i.test(id);
+    return useMirror ? `claude/${id}` : id;
+  };
+
+  const settings = settingsObject(existing);
+  const currentEnv = settings.env;
+  const env: Record<string, unknown> =
+    typeof currentEnv === "object" && currentEnv !== null && !Array.isArray(currentEnv)
+      ? { ...(currentEnv as Record<string, unknown>) }
+      : {};
+
+  for (const key of Object.values(CLAUDE_MAPPING_KEYS)) delete env[key];
+  delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+  env.ANTHROPIC_BASE_URL = input.baseUrl;
+  env.ANTHROPIC_AUTH_TOKEN = input.apiKey ?? KEY_PLACEHOLDER;
+  env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
+
+  for (const [slot, key] of Object.entries(CLAUDE_MAPPING_KEYS) as Array<
+    [keyof ClaudeModelMapping, string]
+  >) {
+    const id = mapping[slot];
+    if (id !== undefined && id !== "") env[key] = visibleId(slot, id);
+  }
+
+  return {
+    path: "settings.json",
+    contents: `${JSON.stringify({ ...settings, env }, null, 2)}\n`,
+  };
 }
 
 /**
@@ -139,9 +173,10 @@ export async function setupFiles(
   store: Store,
   client: SetupClient,
   input: SetupInput,
+  mapping?: ClaudeModelMapping,
 ): Promise<SetupFile[]> {
   const described = await describeModelsForSetup(store);
-  return client === "claude"
-    ? claudeProfiles(described, input)
-    : [opencodeConfig(described, input)];
+  if (client === "opencode") return [opencodeConfig(described, input)];
+  if (mapping === undefined) throw new Error("defaultModel is required for Claude setup");
+  return [claudeSettings(described, input, mapping)];
 }

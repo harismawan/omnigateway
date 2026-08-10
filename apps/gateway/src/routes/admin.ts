@@ -182,10 +182,9 @@ export function adminRoutes(deps: AdminDeps) {
       /**
        * The configuration an agent needs to talk to this gateway.
        *
-       * Served rather than rendered in the browser because the numbers in it —
-       * each model's context window — are resolved exactly as `GET /v1/models`
-       * resolves them, and a console deriving them separately would eventually
-       * disagree with the gateway about what a pool holds.
+       * Served rather than rendered in the browser so Claude model mappings and
+       * opencode limits use the same pool descriptions as the CLI. A browser
+       * deriving either separately would eventually disagree with the gateway.
        *
        * The key is always a placeholder. The store keeps only hashes, so there is
        * no real key to render, and a snippet that carried one would leak it into
@@ -194,13 +193,37 @@ export function adminRoutes(deps: AdminDeps) {
       .get("/api/agent-setup", async ({ request, query }) => {
         await requireAdmin(request, deps.admin);
         const client = query.client === "opencode" ? "opencode" : "claude";
-        return {
-          client,
-          files: await setupFiles(deps.store, client, {
-            baseUrl: deps.baseUrl,
-            discoveryMirrors: deps.discoveryMirrors === true,
-          }),
-        };
+        const defaultModel = query.defaultModel;
+        if (client === "claude" && !defaultModel) {
+          throw new GatewayError("BAD_REQUEST", "defaultModel is required for Claude setup");
+        }
+        try {
+          return {
+            client,
+            files: await setupFiles(
+              deps.store,
+              client,
+              {
+                baseUrl: deps.baseUrl,
+                discoveryMirrors: deps.discoveryMirrors === true,
+              },
+              client === "opencode"
+                ? undefined
+                : {
+                    defaultModel: defaultModel as string,
+                    ...(query.fableModel ? { fableModel: query.fableModel } : {}),
+                    ...(query.opusModel ? { opusModel: query.opusModel } : {}),
+                    ...(query.sonnetModel ? { sonnetModel: query.sonnetModel } : {}),
+                    ...(query.haikuModel ? { haikuModel: query.haikuModel } : {}),
+                  },
+            ),
+          };
+        } catch (error) {
+          throw new GatewayError(
+            "BAD_REQUEST",
+            error instanceof Error ? error.message : "invalid Claude model mapping",
+          );
+        }
       })
 
       .get("/api/keys", async ({ request }) => {

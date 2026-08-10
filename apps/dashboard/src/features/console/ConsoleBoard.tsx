@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import styled from "styled-components";
 import { CONSOLE_CADENCE_MS, useConsole } from "../../api/queries.ts";
 import type { ConsoleLine, ConsoleResponse } from "../../api/types.ts";
@@ -28,13 +28,38 @@ const Narrow = styled(Select)`
   width: auto;
 `;
 
+const Board = styled.div`
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: ${({ theme }) => theme.space(4)};
+  min-height: 0;
+  flex: 1;
+`;
+
+const ConsoleModule = styled(Module)`
+  min-height: 0;
+
+  > div {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+`;
+
+const Terminal = styled.div`
+  flex: 1;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: auto;
+`;
+
 const Lines = styled.pre`
   margin: 0;
   padding: ${({ theme }) => theme.space(3)};
   font-family: ${({ theme }) => theme.font.mono};
   font-size: 12px;
   line-height: 1.65;
-  overflow-x: auto;
   white-space: pre;
 `;
 
@@ -105,9 +130,18 @@ export function ConsoleBoard() {
   const consoleLog = useConsole(lines, level, cadence(CONSOLE_CADENCE_MS));
   const read = consoleLog.data;
   const rows = read?.lines ?? [];
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
+
+  useLayoutEffect(() => {
+    const terminal = terminalRef.current;
+    if (terminal !== null && followLatest.current && read !== undefined) {
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+  }, [read]);
 
   return (
-    <>
+    <Board>
       <PageHead
         legend="Console"
         title="Gateway output"
@@ -144,54 +178,56 @@ export function ConsoleBoard() {
         }
       />
 
-      <Module
+      <ConsoleModule
         legend="Process output"
         meta={read === undefined ? undefined : <Muted>{sourceLabel(read)}</Muted>}
         flush
       >
-        {consoleLog.isError ? (
-          <Failure error={consoleLog.error} onRetry={() => void consoleLog.refetch()} />
-        ) : consoleLog.isLoading ? (
-          <div style={{ padding: 12 }}>
-            <SkeletonRows rows={10} />
-          </div>
-        ) : read !== undefined && read.source === "none" ? (
-          <Empty
-            legend="Nothing is capturing this gateway"
-            message="Its output is going to a terminal, so there is nothing to read back. To capture it, run the gateway under systemd with `omni service install`, or start it with `omni start`, which redirects output to a file and points OMNI_LOG_FILE at it."
-          />
-        ) : (
-          // The hint sits outside this branch on purpose. An operator reading an
-          // empty file who expected the journal needs to know which log they are
-          // looking at as much as one reading a full page — arguably more, since
-          // "empty" and "wrong log" look identical without it.
-          <>
-            {rows.length === 0 ? (
-              <Empty
-                legend="Nothing to show"
-                message={
-                  level === ""
-                    ? "This log is empty. The gateway writes here when it boots, refreshes a token, or polls a quota."
-                    : "No line in this window is at that level. Widen the filter to see everything."
-                }
-              />
-            ) : (
-              <Lines>
-                {rows.map((line, index) => (
-                  // Nothing in a line is unique — the same message can repeat at
-                  // the same millisecond — so position is the only honest key.
-                  // biome-ignore lint/suspicious/noArrayIndexKey: no stable id exists
-                  <Line key={`${line.at ?? 0}-${index}`} $level={line.level}>
-                    {line.raw}
-                  </Line>
-                ))}
-              </Lines>
-            )}
-            {read === undefined ? null : <SourceHint read={read} />}
-          </>
-        )}
-      </Module>
-    </>
+        {read === undefined ? null : <SourceHint read={read} />}
+        <Terminal
+          ref={terminalRef}
+          data-testid="console-terminal"
+          onScroll={(event) => {
+            const terminal = event.currentTarget;
+            followLatest.current =
+              terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight <= 8;
+          }}
+        >
+          {consoleLog.isError ? (
+            <Failure error={consoleLog.error} onRetry={() => void consoleLog.refetch()} />
+          ) : consoleLog.isLoading ? (
+            <div style={{ padding: 12 }}>
+              <SkeletonRows rows={10} />
+            </div>
+          ) : read !== undefined && read.source === "none" ? (
+            <Empty
+              legend="Nothing is capturing this gateway"
+              message="Its output is going to a terminal, so there is nothing to read back. To capture it, run the gateway under systemd with `omni service install`, or start it with `omni start`, which redirects output to a file and points OMNI_LOG_FILE at it."
+            />
+          ) : rows.length === 0 ? (
+            <Empty
+              legend="Nothing to show"
+              message={
+                level === ""
+                  ? "This log is empty. The gateway writes here when it boots, refreshes a token, or polls a quota."
+                  : "No line in this window is at that level. Widen the filter to see everything."
+              }
+            />
+          ) : (
+            <Lines>
+              {rows.map((line, index) => (
+                // Nothing in a line is unique — the same message can repeat at
+                // the same millisecond — so position is the only honest key.
+                // biome-ignore lint/suspicious/noArrayIndexKey: no stable id exists
+                <Line key={`${line.at ?? 0}-${index}`} $level={line.level}>
+                  {line.raw}
+                </Line>
+              ))}
+            </Lines>
+          )}
+        </Terminal>
+      </ConsoleModule>
+    </Board>
   );
 }
 

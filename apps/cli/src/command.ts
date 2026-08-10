@@ -11,6 +11,8 @@ import type { ServiceDeps } from "./service.ts";
 export type SetupFs = {
   homeDir: string;
   cwd: string;
+  /** Null means the file does not exist. */
+  read: (path: string) => string | null;
   write: (path: string, contents: string) => void;
 };
 

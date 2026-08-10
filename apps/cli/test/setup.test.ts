@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { seedCredential, target, virtualModel } from "@omni/testkit";
 import { cli, makeRoot, openStore } from "./helpers/harness.ts";
@@ -36,77 +36,126 @@ function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 }
 
-test("setup claude writes one profile per model, carrying that model's window", async () => {
+test("setup claude prompts for explicit mappings and writes one merged settings file", async () => {
   const root = await installation();
-  const dir = join(root, "profiles");
+  const dir = join(root, ".claude");
+  const answers = ["opus", "mystery", "opus", "", "haiku"];
+  const questions: string[] = [];
 
-  const result = await cli(["setup", "claude", "--dir", dir], { root });
+  const result = await cli(["setup", "claude", "--dir", dir], {
+    root,
+    prompt: {
+      isTty: true,
+      secret: async () => "",
+      confirm: async () => true,
+      input: async (question) => {
+        questions.push(question);
+        return answers.shift() ?? "";
+      },
+    },
+  });
   expect(result.code).toBe(0);
 
-  expect(readdirSync(dir).sort()).toEqual(["haiku", "mystery", "opus"]);
-  const opus = readJson(join(dir, "opus", "settings.json")).env as Record<string, string>;
-  const haiku = readJson(join(dir, "haiku", "settings.json")).env as Record<string, string>;
-
-  // One variable, one process: the whole reason these are separate profiles.
-  expect(opus.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe("1000000");
-  expect(haiku.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe("200000");
-  expect(opus.ANTHROPIC_MODEL).toBe("opus");
-  expect(opus.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe("1");
-});
-
-test("setup claude omits the window it does not know rather than guessing", async () => {
-  const root = await installation();
-  const dir = join(root, "profiles");
-  await cli(["setup", "claude", "--dir", dir], { root });
-
-  const env = readJson(join(dir, "mystery", "settings.json")).env as Record<string, string>;
+  const config = readJson(join(dir, "settings.json"));
+  const env = config.env as Record<string, string>;
+  expect(env).toMatchObject({
+    ANTHROPIC_MODEL: "opus",
+    ANTHROPIC_DEFAULT_FABLE_MODEL: "mystery",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "opus",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "haiku",
+    ANTHROPIC_AUTH_TOKEN: "<your OmniGateway key>",
+  });
+  expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined();
   expect(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
-  expect(env.ANTHROPIC_BASE_URL).toBeDefined();
+  expect(questions).toHaveLength(5);
+  expect(result.err).toContain("placeholder");
 });
 
-// The client consults the variable only for a model its built-in table does not
-// know, and never for an id beginning `claude-`. Writing it there produces a
-// file that looks like it configures something and does not.
-test("setup claude omits the window for an id the client resolves itself", async () => {
+test("setup claude preserves unrelated existing settings and removes stale mappings", async () => {
   const root = await installation();
-  const store = await openStore(root);
-  await store.config.putModel(
-    virtualModel({
-      id: "claude-sonnet-5",
-      targets: [target({ provider: "anthropic", model: "claude-sonnet-5" })],
-    }),
-  );
-  store.close();
+  const dir = join(root, ".claude");
+  const path = join(dir, "settings.json");
+  const writes: Array<{ path: string; contents: string }> = [];
+  const existing = JSON.stringify({
+    permissions: { allow: ["Read"] },
+    env: { KEEP_ME: "yes", ANTHROPIC_DEFAULT_SONNET_MODEL: "stale" },
+  });
+  const answers = ["opus", "", "", "", ""];
 
-  const dir = join(root, "profiles");
-  await cli(["setup", "claude", "--dir", dir], { root });
+  const result = await cli(["setup", "claude", "--dir", dir], {
+    root,
+    prompt: {
+      isTty: true,
+      secret: async () => "",
+      confirm: async () => true,
+      input: async () => answers.shift() ?? "",
+    },
+    setupFs: {
+      homeDir: root,
+      cwd: root,
+      read: (candidate) => (candidate === path ? existing : null),
+      write: (candidate, contents) => writes.push({ path: candidate, contents }),
+    },
+  });
 
-  const env = readJson(join(dir, "claude-sonnet-5", "settings.json")).env as Record<string, string>;
-  expect(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
-});
-
-test("setup writes a placeholder unless a key is given", async () => {
-  const root = await installation();
-  const dir = join(root, "profiles");
-
-  const placeheld = await cli(["setup", "claude", "--dir", dir], { root });
-  const env = readJson(join(dir, "opus", "settings.json")).env as Record<string, string>;
-  expect(env.ANTHROPIC_AUTH_TOKEN).toBe("<your OmniGateway key>");
-  expect(placeheld.err).toContain("placeholder");
-
-  await cli(["setup", "claude", "--dir", dir, "--key", "omni_live_secret"], { root });
-  const withKey = readJson(join(dir, "opus", "settings.json")).env as Record<string, string>;
-  expect(withKey.ANTHROPIC_AUTH_TOKEN).toBe("omni_live_secret");
-});
-
-test("a dry run writes nothing and shows everything", async () => {
-  const root = await installation();
-  const dir = join(root, "profiles");
-
-  const result = await cli(["setup", "claude", "--dir", dir, "--dry-run"], { root });
   expect(result.code).toBe(0);
-  expect(existsSync(dir)).toBe(false);
-  expect(result.out).toContain("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
+  expect(writes).toHaveLength(1);
+  const merged = JSON.parse(writes[0]?.contents ?? "") as {
+    permissions: { allow: string[] };
+    env: Record<string, string>;
+  };
+  expect(merged.permissions.allow).toEqual(["Read"]);
+  expect(merged.env.KEEP_ME).toBe("yes");
+  expect(merged.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined();
+});
+
+test("setup claude refuses malformed existing settings without writing", async () => {
+  const root = await installation();
+  const writes: string[] = [];
+  const answers = ["opus", "", "", "", ""];
+  const result = await cli(["setup", "claude"], {
+    root,
+    prompt: {
+      isTty: true,
+      secret: async () => "",
+      confirm: async () => true,
+      input: async () => answers.shift() ?? "",
+    },
+    setupFs: {
+      homeDir: root,
+      cwd: root,
+      read: () => "{",
+      write: (path) => writes.push(path),
+    },
+  });
+
+  expect(result.code).toBe(1);
+  expect(result.err).toContain("cannot parse existing settings.json");
+  expect(writes).toEqual([]);
+});
+
+test("a Claude dry run shows the real merge and writes nothing", async () => {
+  const root = await installation();
+  const answers = ["opus", "", "", "", ""];
+  const result = await cli(["setup", "claude", "--dry-run"], {
+    root,
+    prompt: {
+      isTty: true,
+      secret: async () => "",
+      confirm: async () => true,
+      input: async () => answers.shift() ?? "",
+    },
+    setupFs: {
+      homeDir: root,
+      cwd: root,
+      read: () => JSON.stringify({ theme: "dark" }),
+      write: () => expect.unreachable(),
+    },
+  });
+
+  expect(result.code).toBe(0);
+  expect(result.out).toContain('"theme": "dark"');
+  expect(result.out).toContain('"ANTHROPIC_MODEL": "opus"');
 });
 
 test("setup writes through the injected filesystem seam", async () => {
@@ -118,6 +167,7 @@ test("setup writes through the injected filesystem seam", async () => {
     setupFs: {
       homeDir: "/virtual/home",
       cwd: "/virtual/project",
+      read: () => null,
       write: (path, contents) => writes.push({ path, contents }),
     },
   });

@@ -8,6 +8,7 @@ import {
 import { del, get, patch, post, put, request, withQuery } from "./client.ts";
 import type {
   ApiKeySummary,
+  ClaudeModelMapping,
   ConnectPollResult,
   ConnectStart,
   ConsoleResponse,
@@ -45,7 +46,8 @@ export const queryKeys = {
   models: ["models"] as const,
   keys: ["keys"] as const,
   settings: ["settings"] as const,
-  agentSetup: (client: SetupClient) => ["agent-setup", client] as const,
+  agentSetup: (client: SetupClient, mapping?: ClaudeModelMapping) =>
+    ["agent-setup", client, mapping ?? null] as const,
   usage: (query: UsageQuery) =>
     [
       "usage",
@@ -121,11 +123,23 @@ export function useSettings(): UseQueryResult<Settings> {
  * would eventually disagree with the gateway about what a pool holds. The key
  * in these files is always a placeholder — the store keeps only hashes.
  */
-export function useAgentSetup(client: SetupClient): UseQueryResult<SetupFile[]> {
+export function useAgentSetup(
+  client: SetupClient,
+  mapping?: ClaudeModelMapping,
+): UseQueryResult<SetupFile[]> {
   return useQuery({
-    queryKey: queryKeys.agentSetup(client),
+    queryKey: queryKeys.agentSetup(client, mapping),
+    enabled: client === "opencode" || mapping !== undefined,
     queryFn: async ({ signal }) =>
-      (await get<SetupResponse>(`/api/agent-setup?client=${client}`, signal)).files,
+      (
+        await get<SetupResponse>(
+          withQuery("/api/agent-setup", {
+            client,
+            ...(mapping ?? {}),
+          }),
+          signal,
+        )
+      ).files,
   });
 }
 

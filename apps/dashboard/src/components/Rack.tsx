@@ -11,7 +11,9 @@ const Frame = styled.div`
     "rail main";
   grid-template-columns: 168px minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
-  min-height: 100%;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
 
   @media (max-width: 720px) {
     grid-template-areas:
@@ -30,6 +32,8 @@ const Main = styled.main`
   flex-direction: column;
   gap: ${({ theme }) => theme.space(4)};
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
 
   @media (max-width: 720px) {
     padding: ${({ theme }) => theme.space(3)};
@@ -38,7 +42,7 @@ const Main = styled.main`
 
 export function Rack({ children }: { children: ReactNode }) {
   return (
-    <Frame>
+    <Frame data-testid="rack-shell">
       <ChassisBar />
       <RailNav />
       <Main>{children}</Main>

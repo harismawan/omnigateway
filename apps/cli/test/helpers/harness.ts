@@ -110,6 +110,7 @@ export function fakeService(input: {
 
 export const silentPrompt: Prompt = {
   isTty: false,
+  input: async () => "",
   secret: async () => "",
   confirm: async () => true,
 };
