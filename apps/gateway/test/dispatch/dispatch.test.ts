@@ -623,6 +623,26 @@ test("the log records the excluded candidates and their reasons", async () => {
   store.close();
 });
 
+test("injected clock enforces deadline without waiting for the timer", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 10 });
+  const adapter = stubAdapter(() => textStream("unexpected"));
+  const times = [1_000, 1_000, 1_011, 1_011];
+  let index = 0;
+  const configured = {
+    ...deps(store, adapter),
+    now: () => times[index++] ?? 1_011,
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_clock");
+  const events = await drain(outcome.events);
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "TIMEOUT" });
+  expect(adapter.calls).toHaveLength(0);
+  expect(outcome.log().attempts).toBe(0);
+  store.close();
+});
+
 test("request deadline is absolute across candidates", async () => {
   const store = await seeded(2);
   await store.config.putSettings({ requestDeadlineMs: 20 });

@@ -78,6 +78,91 @@ describe("transformRequest", () => {
     expect(transformRequest(input, { enabled: true }).request).toBe(input);
   });
 
+  test("format filters preserve semantic anchors from the middle", () => {
+    const padding = Array.from({ length: 100 }, (_, i) => `routine line ${i}`);
+    const cases = [
+      {
+        command: "git diff",
+        content: [
+          "diff --git a/a.ts b/a.ts",
+          "--- a/a.ts",
+          "+++ b/a.ts",
+          ...padding,
+          "@@ -200,2 +200,2 @@",
+          "-old middle value",
+          "+new middle value",
+          ...padding,
+          " 1 file changed, 1 insertion(+), 1 deletion(-)",
+        ].join("\n"),
+        anchors: ["@@ -200,2 +200,2 @@", "+new middle value"],
+      },
+      {
+        command: "bun build src/index.ts",
+        content: [
+          "$ bun build src/index.ts",
+          "Bundled 100 modules",
+          ...padding,
+          "src/middle.ts:42:7 error: cannot assign string to number",
+          "    at compile (src/compiler.ts:9:2)",
+          ...padding,
+          "error: build failed with 1 error",
+        ].join("\n"),
+        anchors: ["src/middle.ts:42:7 error: cannot assign string to number", "at compile"],
+      },
+      {
+        command: "bun test",
+        content: [
+          "bun test v1.4.0",
+          "10 pass",
+          ...padding,
+          "FAIL middle behavior preserves data",
+          "    at test/middle.test.ts:42:7",
+          ...padding,
+          "1 fail",
+        ].join("\n"),
+        anchors: ["FAIL middle behavior preserves data", "at test/middle.test.ts:42:7"],
+      },
+    ];
+
+    for (const fixture of cases) {
+      const input = request("bash", fixture.content);
+      const use = input.messages[0]?.content[0];
+      if (use?.type === "toolUse") use.input = { command: fixture.command };
+      const output = resultContent(transformRequest(input, { enabled: true }).request);
+      for (const anchor of fixture.anchors) expect(output).toContain(anchor);
+      expect(output.length).toBeLessThan(fixture.content.length);
+    }
+  });
+
+  test("unknown origin requires multiple build or test anchors", () => {
+    const weak = [
+      `const message = "error: build failed";\n${"source code\n".repeat(80)}`,
+      `${JSON.stringify({ status: "10 pass" })}\n${"json payload\n".repeat(80)}`,
+      `The prose says Compiling is useful.\n${"paragraph text\n".repeat(80)}`,
+      `ordinary log\nwarning: one transient event\n${"service healthy\n".repeat(80)}`,
+    ];
+    for (const content of weak) {
+      const input = request("mystery", content);
+      expect(transformRequest(input, { enabled: true }).request).toBe(input);
+    }
+
+    const strong = `bun test v1.4.0\n${"case passed\n".repeat(30)}10 pass\n0 fail\n${"detail line\n".repeat(50)}`;
+    expect(
+      transformRequest(request("mystery", strong), { enabled: true }).report.filters,
+    ).toContain("test-output");
+  });
+
+  test("numbered-read requires confirmed shell origin", () => {
+    const content = Array.from({ length: 300 }, (_, i) => `${i + 1} | source line`).join("\n");
+    const unknown = request("mystery", content);
+    expect(transformRequest(unknown, { enabled: true }).request).toBe(unknown);
+
+    const shell = request("bash", content);
+    const use = shell.messages[0]?.content[0];
+    if (use?.type === "toolUse") use.input = { command: "sed -n '1,300p' file.ts" };
+    expect(transformRequest(shell, { enabled: true }).report.filters).toContain("numbered-read");
+  });
+
   test("preserves oversized input and transforms deterministically", () => {
     expect(
       transformRequest(request("bash", "x".repeat(1_000_001)), { enabled: true }).request,

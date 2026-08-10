@@ -104,9 +104,9 @@ export async function dispatch(
     signal.removeEventListener("abort", abortFromClient);
   };
   const checkCancellation = () => {
-    if (!dispatchSignal.aborted) return;
     if (signal.aborted) throw signal.reason;
-    throw new GatewayError("TIMEOUT", "request deadline exceeded");
+    if (dispatchSignal.aborted || deps.now() >= deadlineAt)
+      throw new GatewayError("TIMEOUT", "request deadline exceeded");
   };
 
   let model: VirtualModel;
@@ -173,11 +173,16 @@ export async function dispatch(
       let lastError: GatewayError | null = null;
 
       candidateLoop: for (let i = 0; i < maxAttempts; i++) {
-        if (dispatchSignal.aborted && !signal.aborted) {
-          lastError = new GatewayError("TIMEOUT", "request deadline exceeded");
+        try {
+          checkCancellation();
+        } catch (error) {
+          if (signal.aborted) throw signal.reason;
+          lastError =
+            error instanceof GatewayError
+              ? error
+              : new GatewayError("TIMEOUT", "request deadline exceeded");
           break;
         }
-        checkCancellation();
         const candidate = candidates[i] as Candidate;
         log.attempts = i + 1;
         log.credentialId = candidate.credential.id;

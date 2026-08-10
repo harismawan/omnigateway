@@ -88,7 +88,20 @@ function prefix(content: string): string {
   return content.slice(0, 4_096).split(/\r?\n/, 64).join("\n");
 }
 
-function detect(content: string, command: string | undefined): RtkFilterId | undefined {
+function hasAtLeast(sample: string, patterns: readonly RegExp[], count: number): boolean {
+  let matches = 0;
+  for (const pattern of patterns) {
+    if (pattern.test(sample)) matches++;
+    if (matches >= count) return true;
+  }
+  return false;
+}
+
+function detect(
+  content: string,
+  command: string | undefined,
+  origin: Origin,
+): RtkFilterId | undefined {
   const sample = prefix(content);
   const cmd = command?.trim().toLowerCase() ?? "";
   if (cmd.startsWith("git diff") || /^diff --git /m.test(sample)) return "git-diff";
@@ -98,19 +111,36 @@ function detect(content: string, command: string | undefined): RtkFilterId | und
   )
     return "git-status";
   if (cmd.startsWith("git log") || /^commit [0-9a-f]{7,}/m.test(sample)) return "git-log";
-  if (
-    /^(?:bun (?:run|build|install)|npm (?:run|install)|cargo (?:build|check)|tsc\b)/.test(cmd) ||
-    /(?:^|\n)(?:Bundled |Compiling |error(?:\[|:)|warning:|installed \d+ packages)/m.test(sample)
-  )
-    return "build-output";
-  if (
-    /^(?:bun test|npm test|cargo test)\b/.test(cmd) ||
-    /(?:\d+ pass|\d+ fail|Tests?:\s+\d+|test result:)/m.test(sample)
-  )
-    return "test-output";
+
+  const buildCommand =
+    /^(?:bun (?:run|build|install)|npm (?:run|install)|cargo (?:build|check)|tsc\b)/.test(cmd);
+  const buildOutput = hasAtLeast(
+    sample,
+    [
+      /^\$?\s*bun (?:run|build|install)\b/m,
+      /(?:^|\n)(?:Bundled |Compiling |installed \d+ packages)/m,
+      /(?:^|\n)(?:error(?:\[|:)|warning:)/m,
+      /(?:build (?:failed|completed|finished)|Finished .+ target)/m,
+    ],
+    2,
+  );
+  if (buildCommand || buildOutput) return "build-output";
+
+  const testCommand = /^(?:bun test|npm test|cargo test)\b/.test(cmd);
+  const testOutput = hasAtLeast(
+    sample,
+    [
+      /(?:^|\n)(?:bun test|npm test|cargo test|TAP version)\b/m,
+      /(?:^|\n)(?:\d+ pass|Tests?:\s+\d+|test result:)/m,
+      /(?:^|\n)(?:\d+ fail|FAIL\b|failed tests?)/m,
+    ],
+    2,
+  );
+  if (testCommand || testOutput) return "test-output";
   if ((sample.match(/^[^\n:]+:\d+:.+$/gm)?.length ?? 0) >= 3) return "grep";
   if ((sample.match(/^(?:[./~]|[A-Za-z]:\\)[^\n]+$/gm)?.length ?? 0) >= 5) return "path-list";
-  if ((sample.match(/^\s*\d+[\t |:].+$/gm)?.length ?? 0) >= 10) return "numbered-read";
+  if (origin === "shell" && (sample.match(/^\s*\d+[\t |:].+$/gm)?.length ?? 0) >= 10)
+    return "numbered-read";
   return undefined;
 }
 
@@ -144,20 +174,79 @@ function deduplicate(content: string): string {
   return out.join("\n");
 }
 
+function keepAnchors(
+  lines: string[],
+  isAnchor: (line: string) => boolean,
+  head: number,
+  tail: number,
+): string {
+  if (lines.length <= head + tail + 1) return lines.join("\n");
+  const kept = new Set<number>();
+  for (let i = 0; i < head; i++) kept.add(i);
+  for (let i = Math.max(head, lines.length - tail); i < lines.length; i++) kept.add(i);
+  for (let i = head; i < lines.length - tail; i++) {
+    const line = lines[i];
+    if (line === undefined || !isAnchor(line)) continue;
+    kept.add(i);
+    if (i > 0) kept.add(i - 1);
+    if (i + 1 < lines.length) kept.add(i + 1);
+  }
+
+  const output: string[] = [];
+  let previous = -1;
+  for (const index of [...kept].sort((a, b) => a - b)) {
+    if (previous >= 0 && index > previous + 1) output.push(marker(index - previous - 1));
+    const line = lines[index];
+    if (line !== undefined) output.push(line);
+    previous = index;
+  }
+  return output.join("\n");
+}
+
 function specialized(content: string, id: RtkFilterId): string {
   const lines = content.split(/\r?\n/);
   switch (id) {
     case "git-diff":
+      return keepAnchors(
+        lines,
+        (line) => /^(?:diff --git |--- |\+\+\+ |@@ |[-+](?![-+])| .+files? changed)/.test(line),
+        20,
+        12,
+      );
     case "git-status":
+      return keepAnchors(
+        lines,
+        (line) =>
+          /^(?:On branch |Changes |Untracked files:|\s+(?:modified|deleted|new file):)/.test(line),
+        20,
+        12,
+      );
     case "git-log":
+      return keepAnchors(
+        lines,
+        (line) => /^(?:commit [0-9a-f]+|Author:|Date:|\s{4}\S| .+files? changed)/.test(line),
+        20,
+        12,
+      );
     case "grep":
     case "path-list":
       return keepRegions(lines, 40, 20);
     case "numbered-read":
       return lines.length >= 250 ? keepRegions(lines, 100, 50) : content;
     case "build-output":
+      return keepAnchors(
+        lines,
+        (line) => /(?:\berror(?:\[|:)|\bwarning:|failed|panic|at .+?:\d+|.+?:\d+:\d+)/i.test(line),
+        35,
+        20,
+      );
     case "test-output":
-      return keepRegions(lines, 50, 30);
+      return keepAnchors(
+        lines,
+        (line) => /(?:\bFAIL\b|\bfail(?:ed)?\b|\berror\b|at .+?:\d+|\d+ (?:pass|fail))/i.test(line),
+        35,
+        20,
+      );
     case "deduplicate-log":
       return deduplicate(content);
     case "smart-truncate":
@@ -178,7 +267,7 @@ function filter(
   origin: Origin,
   command: string | undefined,
 ): FilterResult | undefined {
-  const id = detect(content, command);
+  const id = detect(content, command, origin);
   if (id !== undefined) {
     const first = accept(content, specialized(content, id));
     if (first === undefined) return undefined;
