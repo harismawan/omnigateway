@@ -4,7 +4,6 @@
     "jsx": "react-jsx",
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "types": ["bun-types"],
-    "baseUrl": ".",
     "paths": { "@/*": ["./src/*"] },
     "noEmit": true,
     "allowImportingTsExtensions": true
