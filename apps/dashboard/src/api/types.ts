@@ -79,7 +79,7 @@ export type SetupClient = "claude" | "opencode";
 
 export type SetupFile = { path: string; contents: string };
 
-export type ClaudeModelMapping = {
+export type AgentModelMapping = {
   defaultModel: string;
   fableModel?: string;
   opusModel?: string;

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import styled from "styled-components";
 import { useAgentSetup, useModels } from "../../api/queries.ts";
-import type { ClaudeModelMapping, SetupClient } from "../../api/types.ts";
+import type { AgentModelMapping, SetupClient } from "../../api/types.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Field, Select } from "../../ui/Field.tsx";
 import { Module } from "../../ui/Panel.tsx";
@@ -52,7 +52,7 @@ const MappingGrid = styled.div`
 `;
 
 const MAPPING_FIELDS: ReadonlyArray<{
-  key: keyof ClaudeModelMapping;
+  key: keyof AgentModelMapping;
   label: string;
   required: boolean;
 }> = [
@@ -65,13 +65,17 @@ const MAPPING_FIELDS: ReadonlyArray<{
 
 export function AgentSetup() {
   const [client, setClient] = useState<SetupClient>("claude");
-  const [mapping, setMapping] = useState<Partial<ClaudeModelMapping>>({});
+  const [mappings, setMappings] = useState<Record<SetupClient, Partial<AgentModelMapping>>>(() => ({
+    claude: {},
+    opencode: {},
+  }));
   const models = useModels();
-  const claudeMapping =
+  const mapping = mappings[client];
+  const completeMapping =
     typeof mapping.defaultModel === "string" && mapping.defaultModel !== ""
-      ? (mapping as ClaudeModelMapping)
+      ? (mapping as AgentModelMapping)
       : undefined;
-  const files = useAgentSetup(client, client === "claude" ? claudeMapping : undefined);
+  const files = useAgentSetup(client, completeMapping);
   const chosen = CLIENTS.find((entry) => entry.id === client);
 
   return (
@@ -95,7 +99,7 @@ export function AgentSetup() {
           <Mono>omni setup {client}</Mono> to write these files directly.
         </Note>
 
-        {client === "claude" && (models.data?.length ?? 0) > 0 ? (
+        {(models.data?.length ?? 0) > 0 ? (
           <MappingGrid>
             {MAPPING_FIELDS.map((field) => (
               <Field key={field.key} label={field.label}>
@@ -104,9 +108,12 @@ export function AgentSetup() {
                     {...props}
                     value={mapping[field.key] ?? ""}
                     onChange={(event) =>
-                      setMapping((current) => ({
+                      setMappings((current) => ({
                         ...current,
-                        [field.key]: event.target.value || undefined,
+                        [client]: {
+                          ...current[client],
+                          [field.key]: event.target.value || undefined,
+                        },
                       }))
                     }
                   >
@@ -123,16 +130,16 @@ export function AgentSetup() {
           </MappingGrid>
         ) : null}
 
-        {client === "claude" && models.isLoading ? (
+        {models.isLoading ? (
           <SkeletonRows rows={2} />
         ) : files.isError ? (
           <Failure error={files.error} onRetry={() => void files.refetch()} />
         ) : files.isLoading ? (
           <SkeletonRows rows={4} />
-        ) : client === "claude" && (models.data?.length ?? 0) === 0 ? (
+        ) : (models.data?.length ?? 0) === 0 ? (
           <Note>No virtual models configured yet, so there is nothing to point a client at.</Note>
-        ) : client === "claude" && claudeMapping === undefined ? (
-          <Note>Choose a default model to generate Claude Code settings.</Note>
+        ) : completeMapping === undefined ? (
+          <Note>Choose a default model to generate {chosen?.label} settings.</Note>
         ) : files.data === undefined || files.data.length === 0 ? (
           <Note>No virtual models configured yet, so there is nothing to point a client at.</Note>
         ) : (

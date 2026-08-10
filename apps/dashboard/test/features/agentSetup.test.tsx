@@ -106,21 +106,39 @@ describe("AgentSetup", () => {
     });
   });
 
-  test("switches to the other client's file", async () => {
+  test("keeps separate mappings and sends opencode selections", async () => {
     const user = userEvent.setup();
-    stub();
+    const fetch = stub();
     renderWithProviders(<AgentSetup />);
 
     await user.selectOptions(await screen.findByLabelText("Default model"), "opus");
+    await user.selectOptions(screen.getByLabelText("Haiku model"), "haiku");
     await waitFor(() => {
       expect(screen.getByText("settings.json")).toBeTruthy();
     });
 
     await user.click(screen.getByRole("button", { name: "opencode" }));
+    expect(((await screen.findByLabelText("Default model")) as HTMLSelectElement).value).toBe("");
+    await user.selectOptions(screen.getByLabelText("Default model"), "haiku");
+    await user.selectOptions(screen.getByLabelText("Fable model"), "haiku");
 
     await waitFor(() => {
+      expect(
+        fetch.calls.some(
+          (call) =>
+            call.url.includes("client=opencode") &&
+            call.url.includes("defaultModel=haiku") &&
+            call.url.includes("fableModel=haiku"),
+        ),
+      ).toBe(true);
       expect(screen.getByText("opencode.json")).toBeTruthy();
     });
+
+    await user.click(screen.getByRole("button", { name: "Claude Code" }));
+    expect(((await screen.findByLabelText("Default model")) as HTMLSelectElement).value).toBe(
+      "opus",
+    );
+    expect((screen.getByLabelText("Haiku model") as HTMLSelectElement).value).toBe("haiku");
   });
 
   test("says so when there is nothing to point a client at", async () => {

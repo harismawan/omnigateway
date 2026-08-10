@@ -86,6 +86,63 @@ test("Claude setup refuses malformed existing JSON", () => {
   );
 });
 
+test("opencode setup selects unique mapped pools and uses the default pool", () => {
+  const models = [
+    {
+      model: virtualModel({ id: "opus" }),
+      limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+      label: "Opus",
+    },
+    {
+      model: virtualModel({ id: "haiku" }),
+      limits: { contextWindow: 200_000 },
+      label: "Haiku",
+    },
+    ...described("unused"),
+  ];
+  const file = opencodeConfig(models, input, {
+    defaultModel: "opus",
+    fableModel: "opus",
+    haikuModel: "haiku",
+  });
+  const config = JSON.parse(file.contents) as {
+    model: string;
+    provider: {
+      omnigateway: {
+        models: Record<string, { name: string; limit?: { context: number; output?: number } }>;
+      };
+    };
+  };
+
+  expect(config.model).toBe("omnigateway/opus");
+  expect(Object.keys(config.provider.omnigateway.models)).toEqual(["opus", "haiku"]);
+  expect(config.provider.omnigateway.models.opus).toEqual({
+    name: "Opus",
+    limit: { context: 1_000_000, output: 128_000 },
+  });
+  expect(config.provider.omnigateway.models.haiku?.limit).toEqual({ context: 200_000 });
+});
+
+test("opencode setup allows only the required default slot", () => {
+  const file = opencodeConfig(described("model"), input, { defaultModel: "model" });
+  const config = JSON.parse(file.contents) as {
+    provider: { omnigateway: { models: Record<string, unknown> } };
+  };
+  expect(Object.keys(config.provider.omnigateway.models)).toEqual(["model"]);
+});
+
+test("opencode setup rejects empty and unknown mappings", () => {
+  expect(() => opencodeConfig(described("model"), input, { defaultModel: "" })).toThrow(
+    "default model is required",
+  );
+  expect(() =>
+    opencodeConfig(described("model"), input, {
+      defaultModel: "model",
+      sonnetModel: "missing",
+    }),
+  ).toThrow('sonnetModel names unknown virtual model "missing"');
+});
+
 test.each([
   "https://gateway.example",
   "https://gateway.example/",
@@ -94,7 +151,7 @@ test.each([
   "https://gateway.example/v1/v1",
   "https://gateway.example/v1/v1/",
 ])("OpenCode base URL has exactly one /v1 for %s", (baseUrl) => {
-  const file = opencodeConfig(described("model"), { baseUrl });
+  const file = opencodeConfig(described("model"), { baseUrl }, { defaultModel: "model" });
   const config = JSON.parse(file.contents) as {
     provider: { omnigateway: { options: { baseURL: string } } };
   };

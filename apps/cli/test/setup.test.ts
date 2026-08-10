@@ -36,6 +36,18 @@ function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 }
 
+function mappingPrompt(answers: string[], questions?: string[]) {
+  return {
+    isTty: true,
+    secret: async () => "",
+    confirm: async () => true,
+    input: async (question: string) => {
+      questions?.push(question);
+      return answers.shift() ?? "";
+    },
+  };
+}
+
 test("setup claude prompts for explicit mappings and writes one merged settings file", async () => {
   const root = await installation();
   const dir = join(root, ".claude");
@@ -164,6 +176,7 @@ test("setup writes through the injected filesystem seam", async () => {
 
   const result = await cli(["setup", "opencode"], {
     root,
+    prompt: mappingPrompt(["opus", "", "", "", ""]),
     setupFs: {
       homeDir: "/virtual/home",
       cwd: "/virtual/project",
@@ -178,17 +191,24 @@ test("setup writes through the injected filesystem seam", async () => {
   expect(writes[0]?.contents).toContain('"OmniGateway"');
 });
 
-test("setup opencode describes the whole catalog in one file", async () => {
+test("setup opencode prompts for mappings and writes only selected pools", async () => {
   const root = await installation();
-  const result = await cli(["setup", "opencode", "--dir", root], { root });
+  const questions: string[] = [];
+  const result = await cli(["setup", "opencode", "--dir", root], {
+    root,
+    prompt: mappingPrompt(["opus", "opus", "", "", "haiku"], questions),
+  });
   expect(result.code).toBe(0);
+  expect(questions).toHaveLength(5);
 
   const config = readJson(join(root, "opencode.json"));
+  expect(config.model).toBe("omnigateway/opus");
   const provider = (config.provider as Record<string, Record<string, unknown>>).omnigateway;
   expect(provider?.npm).toBe("@ai-sdk/openai-compatible");
   expect((provider?.options as { baseURL: string } | undefined)?.baseURL).toEndWith("/v1");
 
   const models = provider?.models as Record<string, { name: string; limit?: { context: number } }>;
+  expect(Object.keys(models)).toEqual(["opus", "haiku"]);
   expect(models.opus?.limit?.context).toBe(1_000_000);
   expect(models.haiku?.limit?.context).toBe(200_000);
 });
@@ -197,7 +217,10 @@ test("setup opencode describes the whole catalog in one file", async () => {
 // compaction, so an unknown window must be absent rather than zero.
 test("setup opencode omits a limit it does not know rather than writing zero", async () => {
   const root = await installation();
-  await cli(["setup", "opencode", "--dir", root], { root });
+  await cli(["setup", "opencode", "--dir", root], {
+    root,
+    prompt: mappingPrompt(["mystery", "", "", "", ""]),
+  });
 
   const config = readJson(join(root, "opencode.json"));
   const provider = (config.provider as Record<string, Record<string, unknown>>).omnigateway;

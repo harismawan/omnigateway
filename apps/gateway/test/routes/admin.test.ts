@@ -641,7 +641,30 @@ test("agent setup returns one Claude settings file for the explicit mapping", as
   expect(body.files[0]?.contents).not.toContain("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
 });
 
-test("agent setup rejects missing and stale Claude mappings", async () => {
+test("agent setup requires and forwards opencode mappings", async () => {
+  const { call, store } = await harness();
+  await store.config.putModel(virtualModel({ id: "opus" }));
+  await store.config.putModel(virtualModel({ id: "haiku" }));
+
+  const missing = await call("GET", "/api/agent-setup?client=opencode");
+  expect(missing.status).toBe(400);
+  expect(await missing.text()).toContain("defaultModel");
+
+  const response = await call(
+    "GET",
+    "/api/agent-setup?client=opencode&defaultModel=opus&fableModel=opus&haikuModel=haiku",
+  );
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as { files: { contents: string }[] };
+  const config = JSON.parse(body.files[0]?.contents ?? "") as {
+    model: string;
+    provider: { omnigateway: { models: Record<string, unknown> } };
+  };
+  expect(config.model).toBe("omnigateway/opus");
+  expect(Object.keys(config.provider.omnigateway.models)).toEqual(["opus", "haiku"]);
+});
+
+test("agent setup rejects missing and stale mappings", async () => {
   const { call, store } = await harness();
   await store.config.putModel(virtualModel({ id: "opus" }));
 
@@ -652,7 +675,12 @@ test("agent setup rejects missing and stale Claude mappings", async () => {
   const stale = await call("GET", "/api/agent-setup?client=claude&defaultModel=missing");
   expect(stale.status).toBe(400);
   expect(await stale.text()).toContain("defaultModel");
-  expect(await call("GET", "/api/agent-setup?client=opencode")).toHaveProperty("status", 200);
+  const staleOpencode = await call(
+    "GET",
+    "/api/agent-setup?client=opencode&defaultModel=opus&haikuModel=missing",
+  );
+  expect(staleOpencode.status).toBe(400);
+  expect(await staleOpencode.text()).toContain("haikuModel");
 });
 
 // The store keeps only hashes, so there is no real key to render — but a
@@ -668,7 +696,9 @@ test("agent setup never renders a key", async () => {
   );
   const { raw } = await seedApiKey(store, { label: "live" });
 
-  const body = (await (await call("GET", "/api/agent-setup?client=opencode")).json()) as {
+  const body = (await (
+    await call("GET", "/api/agent-setup?client=opencode&defaultModel=opus")
+  ).json()) as {
     files: { contents: string }[];
   };
   const contents = body.files.map((file) => file.contents).join("");
