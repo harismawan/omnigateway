@@ -50,7 +50,7 @@
       "devDependencies": {
         "@happy-dom/global-registrator": "^20.11.2",
         "@tanstack/react-query-devtools": "^5.101.4",
-        "@tanstack/router-cli": "^1.167.27",
+        "@tanstack/router-cli": "1.167.27",
         "@tanstack/router-plugin": "^1.168.29",
         "@testing-library/react": "^16.3.2",
         "@testing-library/user-event": "^14.6.1",
@@ -70,6 +70,7 @@
         "@omni/ir": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/router": "workspace:*",
+        "@omni/rtk": "workspace:*",
         "@omni/store": "workspace:*",
         "@omni/testkit": "workspace:*",
         "elysia": "1.4.29",
@@ -114,11 +115,19 @@
         "@omni/testkit": "workspace:*",
       },
     },
+    "packages/rtk": {
+      "name": "@omni/rtk",
+      "version": "0.0.0",
+      "dependencies": {
+        "@omni/ir": "workspace:*",
+      },
+    },
     "packages/store": {
       "name": "@omni/store",
       "version": "0.0.0",
       "dependencies": {
         "@omni/ir": "workspace:*",
+        "@omni/rtk": "workspace:*",
       },
     },
     "packages/testkit": {
@@ -280,6 +289,8 @@
     "@omni/providers": ["@omni/providers@workspace:packages/providers"],
 
     "@omni/router": ["@omni/router@workspace:packages/router"],
+
+    "@omni/rtk": ["@omni/rtk@workspace:packages/rtk"],
 
     "@omni/store": ["@omni/store@workspace:packages/store"],
 

@@ -33,6 +33,12 @@ function log(patch: Partial<RequestLog> & { id: string; at: number }): RequestLo
     durationMs: 1200,
     costUsd: 0.005,
     degradations: [],
+    rtkApplied: false,
+    rtkFilterHits: 0,
+    rtkOriginalCodeUnits: 0,
+    rtkCompressedCodeUnits: 0,
+    rtkEstimatedTokensSaved: 0,
+    rtkFilters: [],
     ...patch,
   };
 }
@@ -41,6 +47,28 @@ function log(patch: Partial<RequestLog> & { id: string; at: number }): RequestLo
 function noon(daysAgo: number): number {
   return startOfLocalDay(Date.now() - daysAgo * DAY_MS) + 12 * 3_600_000;
 }
+
+test("request logs round-trip RTK aggregate metrics", async () => {
+  const s = await store();
+  await s.usage.append(
+    log({
+      id: "rtk",
+      at: noon(0),
+      rtkApplied: true,
+      rtkFilterHits: 2,
+      rtkOriginalCodeUnits: 2_000,
+      rtkCompressedCodeUnits: 700,
+      rtkEstimatedTokensSaved: 325,
+      rtkFilters: ["test-output", "deduplicate-log"],
+    }),
+  );
+  expect((await s.usage.recent(1))[0]).toMatchObject({
+    rtkApplied: true,
+    rtkFilterHits: 2,
+    rtkFilters: ["test-output", "deduplicate-log"],
+  });
+  s.close();
+});
 
 test("appending a log rolls it into the day it happened on", async () => {
   const s = await store();

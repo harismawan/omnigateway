@@ -9,6 +9,7 @@ import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
+import { Toggle } from "../../ui/Toggle.tsx";
 import { AgentSetup } from "./AgentSetup.tsx";
 
 type WeightKey = keyof Settings["weights"];
@@ -27,7 +28,7 @@ const WEIGHTS: ReadonlyArray<{ id: WeightKey; label: string; blurb: string }> = 
 ];
 
 const LIMITS: ReadonlyArray<{
-  id: Exclude<keyof Settings, "weights">;
+  id: Exclude<keyof Settings, "weights" | "rtkEnabled">;
   label: string;
   hint: string;
   unit: string;
@@ -109,12 +110,13 @@ const Saved = styled.p`
   color: ${({ theme }) => theme.color.ok};
 `;
 
-type Draft = Record<string, string>;
+type Draft = Record<string, string> & { rtkEnabled?: string };
 
 function toDraft(settings: Settings): Draft {
   const draft: Draft = {};
   for (const weight of WEIGHTS) draft[`w.${weight.id}`] = String(settings.weights[weight.id]);
   for (const limit of LIMITS) draft[limit.id] = String(settings[limit.id]);
+  draft.rtkEnabled = String(settings.rtkEnabled);
   return draft;
 }
 
@@ -133,7 +135,7 @@ function parseDraft(
     weights[weight.id] = value;
   }
 
-  const limits = {} as Record<Exclude<keyof Settings, "weights">, number>;
+  const limits = {} as Record<Exclude<keyof Settings, "weights" | "rtkEnabled">, number>;
   for (const limit of LIMITS) {
     const raw = (draft[limit.id] ?? "").trim();
     const value = Number(raw);
@@ -149,7 +151,7 @@ function parseDraft(
     return { ok: false, problem: "Attempts per request cannot exceed 10." };
   }
 
-  return { ok: true, settings: { weights, ...limits } };
+  return { ok: true, settings: { weights, ...limits, rtkEnabled: draft.rtkEnabled === "true" } };
 }
 
 /**
@@ -285,6 +287,22 @@ export function SettingsBoard() {
                 </Cell>
               ))}
             </Weights>
+          </Module>
+
+          <Module legend="Historical tool results">
+            <Row $gap={3} $align="start">
+              <Toggle
+                checked={draft.rtkEnabled === "true"}
+                onCheckedChange={(checked) => setDraft({ ...draft, rtkEnabled: String(checked) })}
+                label="Enable RTK compression"
+              />
+              <Blurb>
+                Compress recognized historical non-error tool results before provider dispatch.
+                Confirmed non-shell tools are excluded; unknown-origin results may be compressed
+                only when a built-in detector recognizes a high-confidence shell-output format.
+                Compression is deterministic and lossy. Disabled by default.
+              </Blurb>
+            </Row>
           </Module>
 
           {problem === null ? null : <Problem role="alert">{problem}</Problem>}

@@ -165,6 +165,34 @@ describe("LogsBoard", () => {
     expect(screen.getByText("deep")).toBeTruthy();
   });
 
+  test("request detail shows RTK aggregate metrics without content", async () => {
+    const user = userEvent.setup();
+    createFetchStub({
+      "GET /api/logs": () => ({
+        logs: [
+          log({
+            rtkApplied: true,
+            rtkFilterHits: 2,
+            rtkOriginalCodeUnits: 2_000,
+            rtkCompressedCodeUnits: 700,
+            rtkEstimatedTokensSaved: 325,
+            rtkFilters: ["test-output", "deduplicate-log"],
+          }),
+        ],
+      }),
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText("2 hits · 2,000 → 700 code units · ~325 tokens saved"),
+    ).toBeTruthy();
+    expect(within(dialog).getByText("test-output, deduplicate-log")).toBeTruthy();
+  });
+
   test("the detail shows the key's label rather than its id", async () => {
     const user = userEvent.setup();
     stubLogs();

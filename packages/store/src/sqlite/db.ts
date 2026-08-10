@@ -3,6 +3,7 @@ import init001 from "./migrations/001_init.sql" with { type: "text" };
 import usageDaily002 from "./migrations/002_usage_daily.sql" with { type: "text" };
 import quotaSnapshot003 from "./migrations/003_quota_snapshot.sql" with { type: "text" };
 import requestState004 from "./migrations/004_request_state.sql" with { type: "text" };
+import rtkMetrics005 from "./migrations/005_rtk_metrics.sql" with { type: "text" };
 import { backfillDaily } from "./rollup.ts";
 
 /**
@@ -15,6 +16,7 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
   { id: 2, sql: usageDaily002, after: backfillDaily },
   { id: 3, sql: quotaSnapshot003 },
   { id: 4, sql: requestState004 },
+  { id: 5, sql: rtkMetrics005 },
 ];
 
 /**

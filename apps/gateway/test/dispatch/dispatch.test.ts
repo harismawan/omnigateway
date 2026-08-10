@@ -139,6 +139,48 @@ test("reads routing through the injected snapshot source", async () => {
   store.close();
 });
 
+test("compresses once from the dispatch snapshot and sends identical content on failover", async () => {
+  const store = await seeded(2);
+  await store.config.putSettings({ rtkEnabled: true });
+  const received: string[] = [];
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("UPSTREAM", "retry") : textStream("ok"),
+  );
+  const originalSend = adapter.send.bind(adapter);
+  adapter.send = async (input) => {
+    const block = input.request.messages[1]?.content[0];
+    received.push(block?.type === "toolResult" ? block.content : "");
+    return originalSend(input);
+  };
+  const repeated = Array.from({ length: 600 }, () => "same output").join("\n");
+  const input: ChatRequest = {
+    model: "fast",
+    stream: false,
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "toolUse", id: "t1", name: "bash", input: "bun test" }],
+      },
+      { role: "user", content: [{ type: "toolResult", toolUseId: "t1", content: repeated }] },
+    ],
+  };
+
+  const outcome = await dispatch(
+    input,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_rtk",
+  );
+  await drain(outcome.events);
+
+  expect(received).toHaveLength(2);
+  expect(received[0]).toBe(received[1]);
+  expect(received[0]?.length).toBeLessThan(repeated.length);
+  expect(input.messages[1]?.content[0]).toMatchObject({ content: repeated });
+  expect(outcome.log()).toMatchObject({ rtkApplied: true, rtkFilterHits: 2 });
+  store.close();
+});
+
 test("streams a successful response and logs it", async () => {
   const store = await seeded(1);
   const adapter = stubAdapter(() => textStream("hello"));
@@ -578,6 +620,26 @@ test("the log records the excluded candidates and their reasons", async () => {
   await drain(outcome.events);
 
   expect(outcome.log().degradations).toContain("excluded:c1:disabled");
+  store.close();
+});
+
+test("injected clock enforces deadline without waiting for the timer", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 10 });
+  const adapter = stubAdapter(() => textStream("unexpected"));
+  const times = [1_000, 1_000, 1_011, 1_011];
+  let index = 0;
+  const configured = {
+    ...deps(store, adapter),
+    now: () => times[index++] ?? 1_011,
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_clock");
+  const events = await drain(outcome.events);
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "TIMEOUT" });
+  expect(adapter.calls).toHaveLength(0);
+  expect(outcome.log().attempts).toBe(0);
   store.close();
 });
 

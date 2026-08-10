@@ -114,6 +114,12 @@ export function log(patch: Partial<RequestLog> = {}): RequestLog {
     durationMs: 1_400,
     costUsd: 0.012,
     degradations: [],
+    rtkApplied: false,
+    rtkFilterHits: 0,
+    rtkOriginalCodeUnits: 0,
+    rtkCompressedCodeUnits: 0,
+    rtkEstimatedTokensSaved: 0,
+    rtkFilters: [],
     ...patch,
   };
 }
@@ -141,6 +147,7 @@ export const settings: Settings = {
   breakerCooldownMs: 30_000,
   logRetentionDays: 30,
   quotaPollIntervalMs: 300_000,
+  rtkEnabled: false,
 };
 
 export const dryRunResult: DryRunResult = {
