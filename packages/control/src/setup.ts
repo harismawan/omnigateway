@@ -23,7 +23,7 @@ export type SetupFile = {
   contents: string;
 };
 
-export type ClaudeModelMapping = {
+export type AgentModelMapping = {
   defaultModel: string;
   fableModel?: string;
   opusModel?: string;
@@ -84,13 +84,13 @@ function settingsObject(existing: string | undefined): Record<string, unknown> {
 export function claudeSettings(
   described: readonly Described[],
   input: SetupInput,
-  mapping: ClaudeModelMapping,
+  mapping: AgentModelMapping,
   existing?: string,
 ): SetupFile {
   if (mapping.defaultModel === "") throw new Error("default model is required");
 
   const ids = new Set(described.map(({ model }) => model.id));
-  const visibleId = (slot: keyof ClaudeModelMapping, id: string): string => {
+  const visibleId = (slot: keyof AgentModelMapping, id: string): string => {
     if (!ids.has(id)) throw new Error(`${slot} names unknown virtual model "${id}"`);
     const useMirror = input.discoveryMirrors === true && !/^(?:claude|anthropic)/i.test(id);
     return useMirror ? `claude/${id}` : id;
@@ -110,7 +110,7 @@ export function claudeSettings(
   env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
 
   for (const [slot, key] of Object.entries(CLAUDE_MAPPING_KEYS) as Array<
-    [keyof ClaudeModelMapping, string]
+    [keyof AgentModelMapping, string]
   >) {
     const id = mapping[slot];
     if (id !== undefined && id !== "") env[key] = visibleId(slot, id);
@@ -128,9 +128,29 @@ export function claudeSettings(
  * opencode names a window per model inside its own config, so unlike Claude
  * Code one file describes every pool.
  */
-export function opencodeConfig(described: readonly Described[], input: SetupInput): SetupFile {
+export function opencodeConfig(
+  described: readonly Described[],
+  input: SetupInput,
+  mapping: AgentModelMapping,
+): SetupFile {
+  if (mapping.defaultModel === "") throw new Error("default model is required");
+
+  const byId = new Map(described.map((entry) => [entry.model.id, entry]));
+  const selected: Described[] = [];
+  const seen = new Set<string>();
+  for (const slot of Object.keys(CLAUDE_MAPPING_KEYS) as Array<keyof AgentModelMapping>) {
+    const id = mapping[slot];
+    if (id === undefined || id === "") continue;
+    const entry = byId.get(id);
+    if (entry === undefined) throw new Error(`${slot} names unknown virtual model "${id}"`);
+    if (!seen.has(id)) {
+      seen.add(id);
+      selected.push(entry);
+    }
+  }
+
   const models: Record<string, unknown> = {};
-  for (const { model, limits, label } of described) {
+  for (const { model, limits, label } of selected) {
     // An unknown window is left out entirely rather than written as zero:
     // opencode reads `limit.context: 0` as no limit and disables its own
     // compaction, which is worse than falling back to its default.
@@ -147,6 +167,7 @@ export function opencodeConfig(described: readonly Described[], input: SetupInpu
   const contents = `${JSON.stringify(
     {
       $schema: "https://opencode.ai/config.json",
+      model: `omnigateway/${mapping.defaultModel}`,
       provider: {
         omnigateway: {
           npm: "@ai-sdk/openai-compatible",
@@ -173,10 +194,11 @@ export async function setupFiles(
   store: Store,
   client: SetupClient,
   input: SetupInput,
-  mapping?: ClaudeModelMapping,
+  mapping?: AgentModelMapping,
 ): Promise<SetupFile[]> {
   const described = await describeModelsForSetup(store);
-  if (client === "opencode") return [opencodeConfig(described, input)];
-  if (mapping === undefined) throw new Error("defaultModel is required for Claude setup");
-  return [claudeSettings(described, input, mapping)];
+  if (mapping === undefined) throw new Error(`defaultModel is required for ${client} setup`);
+  return client === "opencode"
+    ? [opencodeConfig(described, input, mapping)]
+    : [claudeSettings(described, input, mapping)];
 }

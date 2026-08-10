@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import {
+  type AgentModelMapping,
   claudeSettings,
   describeModelsForSetup,
   KEY_PLACEHOLDER,
@@ -66,6 +67,36 @@ function at(dir: string, file: SetupFile): { path: string; contents: string } {
   return { path: join(dir, file.path), contents: file.contents };
 }
 
+async function promptMapping(
+  models: Awaited<ReturnType<typeof described>>,
+  prompt: { input?: (question: string) => Promise<string> },
+): Promise<AgentModelMapping> {
+  const choices = models.map(({ model }) => model.id).join(", ");
+  if (prompt.input === undefined) {
+    throw new CliError("model mapping requires an interactive terminal");
+  }
+  const ask = async (label: string, required: boolean): Promise<string | undefined> => {
+    const answer = await prompt.input?.(
+      `${label} model${required ? "" : " (blank to omit)"} [${choices}]: `,
+    );
+    if (required && answer === "") throw new CliError("default model is required");
+    return answer === "" ? undefined : answer;
+  };
+  const defaultModel = await ask("Default", true);
+  if (defaultModel === undefined) throw new CliError("default model is required");
+  const fableModel = await ask("Fable", false);
+  const opusModel = await ask("Opus", false);
+  const sonnetModel = await ask("Sonnet", false);
+  const haikuModel = await ask("Haiku", false);
+  return {
+    defaultModel,
+    ...(fableModel === undefined ? {} : { fableModel }),
+    ...(opusModel === undefined ? {} : { opusModel }),
+    ...(sonnetModel === undefined ? {} : { sonnetModel }),
+    ...(haikuModel === undefined ? {} : { haikuModel }),
+  };
+}
+
 /** One settings file with the operator's explicit mapping for each Claude model class. */
 export const setupClaude: Command = {
   usage: "setup claude [--dir <path>] [--key <key>] [--dry-run]",
@@ -76,26 +107,7 @@ export const setupClaude: Command = {
     const dir = stringFlag(args.values, "dir") ?? join(setupFs.homeDir, ".claude");
     const key = stringFlag(args.values, "key");
     const dryRun = boolFlag(args.values, "dry-run");
-    const choices = models.map(({ model }) => model.id).join(", ");
-    if (prompt.input === undefined) {
-      throw new CliError("Claude model mapping requires an interactive terminal");
-    }
-    const input = prompt.input;
-    const ask = async (label: string, required: boolean): Promise<string | undefined> => {
-      const answer = await input(
-        `${label} model${required ? "" : " (blank to omit)"} [${choices}]: `,
-      );
-      if (required && answer === "") throw new CliError("default model is required");
-      return answer === "" ? undefined : answer;
-    };
-    const defaultModel = await ask("Default", true);
-    if (defaultModel === undefined) throw new CliError("default model is required");
-    // Ask each optional slot once; spelling the values out keeps the mapping
-    // policy in the operator's answers rather than in pool naming conventions.
-    const fableModel = await ask("Fable", false);
-    const opusModel = await ask("Opus", false);
-    const sonnetModel = await ask("Sonnet", false);
-    const haikuModel = await ask("Haiku", false);
+    const mapping = await promptMapping(models, prompt);
     const path = join(dir, "settings.json");
 
     const file = claudeSettings(
@@ -105,13 +117,7 @@ export const setupClaude: Command = {
         discoveryMirrors: ctx.config().exposeClaudeCodeAliases,
         ...(key === undefined ? {} : { apiKey: key }),
       },
-      {
-        defaultModel,
-        ...(fableModel === undefined ? {} : { fableModel }),
-        ...(opusModel === undefined ? {} : { opusModel }),
-        ...(sonnetModel === undefined ? {} : { sonnetModel }),
-        ...(haikuModel === undefined ? {} : { haikuModel }),
-      },
+      mapping,
       setupFs.read(path) ?? undefined,
     );
 
@@ -124,16 +130,21 @@ export const setupOpencode: Command = {
   usage: "setup opencode [--dir <path>] [--key <key>] [--dry-run]",
   summary: "Write an opencode.json provider entry for this gateway",
   options: OPTIONS,
-  async run(args, { ctx, writer, setupFs }) {
+  async run(args, { ctx, writer, prompt, setupFs }) {
     const models = await described(ctx);
     const dir = stringFlag(args.values, "dir") ?? setupFs.cwd;
     const key = stringFlag(args.values, "key");
     const dryRun = boolFlag(args.values, "dry-run");
+    const mapping = await promptMapping(models, prompt);
 
-    const file = opencodeConfig(models, {
-      baseUrl: baseUrl(ctx),
-      ...(key === undefined ? {} : { apiKey: key }),
-    });
+    const file = opencodeConfig(
+      models,
+      {
+        baseUrl: baseUrl(ctx),
+        ...(key === undefined ? {} : { apiKey: key }),
+      },
+      mapping,
+    );
 
     finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write);
   },

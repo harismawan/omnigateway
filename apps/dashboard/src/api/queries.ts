@@ -7,8 +7,8 @@ import {
 } from "@tanstack/react-query";
 import { del, get, patch, post, put, request, withQuery } from "./client.ts";
 import type {
+  AgentModelMapping,
   ApiKeySummary,
-  ClaudeModelMapping,
   ConnectPollResult,
   ConnectStart,
   ConsoleResponse,
@@ -46,7 +46,7 @@ export const queryKeys = {
   models: ["models"] as const,
   keys: ["keys"] as const,
   settings: ["settings"] as const,
-  agentSetup: (client: SetupClient, mapping?: ClaudeModelMapping) =>
+  agentSetup: (client: SetupClient, mapping?: AgentModelMapping) =>
     ["agent-setup", client, mapping ?? null] as const,
   usage: (query: UsageQuery) =>
     [
@@ -125,11 +125,11 @@ export function useSettings(): UseQueryResult<Settings> {
  */
 export function useAgentSetup(
   client: SetupClient,
-  mapping?: ClaudeModelMapping,
+  mapping?: AgentModelMapping,
 ): UseQueryResult<SetupFile[]> {
   return useQuery({
     queryKey: queryKeys.agentSetup(client, mapping),
-    enabled: client === "opencode" || mapping !== undefined,
+    enabled: mapping !== undefined,
     queryFn: async ({ signal }) =>
       (
         await get<SetupResponse>(

@@ -88,7 +88,7 @@ export {
 } from "./schemas.ts";
 export { getSettings, putSettings } from "./settings.ts";
 export {
-  type ClaudeModelMapping,
+  type AgentModelMapping,
   claudeSettings,
   describeModelsForSetup,
   KEY_PLACEHOLDER,

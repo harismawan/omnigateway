@@ -194,8 +194,8 @@ export function adminRoutes(deps: AdminDeps) {
         await requireAdmin(request, deps.admin);
         const client = query.client === "opencode" ? "opencode" : "claude";
         const defaultModel = query.defaultModel;
-        if (client === "claude" && !defaultModel) {
-          throw new GatewayError("BAD_REQUEST", "defaultModel is required for Claude setup");
+        if (!defaultModel) {
+          throw new GatewayError("BAD_REQUEST", `defaultModel is required for ${client} setup`);
         }
         try {
           return {
@@ -207,15 +207,13 @@ export function adminRoutes(deps: AdminDeps) {
                 baseUrl: deps.baseUrl,
                 discoveryMirrors: deps.discoveryMirrors === true,
               },
-              client === "opencode"
-                ? undefined
-                : {
-                    defaultModel: defaultModel as string,
-                    ...(query.fableModel ? { fableModel: query.fableModel } : {}),
-                    ...(query.opusModel ? { opusModel: query.opusModel } : {}),
-                    ...(query.sonnetModel ? { sonnetModel: query.sonnetModel } : {}),
-                    ...(query.haikuModel ? { haikuModel: query.haikuModel } : {}),
-                  },
+              {
+                defaultModel,
+                ...(query.fableModel ? { fableModel: query.fableModel } : {}),
+                ...(query.opusModel ? { opusModel: query.opusModel } : {}),
+                ...(query.sonnetModel ? { sonnetModel: query.sonnetModel } : {}),
+                ...(query.haikuModel ? { haikuModel: query.haikuModel } : {}),
+              },
             ),
           };
         } catch (error) {
