@@ -66,7 +66,10 @@ export async function dispatch(
   const logger = deps.logger ?? noopLogger;
   const startedAt = deps.now();
   const snapshot = await deps.snapshots.get(startedAt);
-  const deadlineAt = startedAt + snapshot.settings.requestDeadlineMs;
+  const deadlineAt =
+    snapshot.settings.requestDeadlineMs === 0
+      ? null
+      : startedAt + snapshot.settings.requestDeadlineMs;
 
   // Dispatch only ever hands back a finished log; the pending row the console
   // watches is written by the route, before this runs.
@@ -90,22 +93,25 @@ export async function dispatch(
     };
   };
 
-  const deadlineController = new AbortController();
-  const abortFromClient = () => deadlineController.abort(signal.reason);
+  const dispatchController = new AbortController();
+  const abortFromClient = () => dispatchController.abort(signal.reason);
   if (signal.aborted) abortFromClient();
   else signal.addEventListener("abort", abortFromClient, { once: true });
-  const deadlineTimer = setTimeout(
-    () => deadlineController.abort(new GatewayError("TIMEOUT", "request deadline exceeded")),
-    Math.max(0, deadlineAt - deps.now()),
-  );
-  const dispatchSignal = deadlineController.signal;
+  const deadlineTimer =
+    deadlineAt === null
+      ? null
+      : setTimeout(
+          () => dispatchController.abort(new GatewayError("TIMEOUT", "request deadline exceeded")),
+          Math.max(0, deadlineAt - deps.now()),
+        );
+  const dispatchSignal = dispatchController.signal;
   const clearDeadline = () => {
-    clearTimeout(deadlineTimer);
+    if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     signal.removeEventListener("abort", abortFromClient);
   };
   const checkCancellation = () => {
     if (signal.aborted) throw signal.reason;
-    if (dispatchSignal.aborted || deps.now() >= deadlineAt)
+    if (deadlineAt !== null && (dispatchSignal.aborted || deps.now() >= deadlineAt))
       throw new GatewayError("TIMEOUT", "request deadline exceeded");
   };
 
@@ -331,9 +337,10 @@ export async function dispatch(
             return;
           } catch (error) {
             if (signal.aborted) throw signal.reason;
-            const classifiedError = dispatchSignal.aborted
-              ? { code: "TIMEOUT" as const }
-              : classify(error);
+            const classifiedError =
+              deadlineAt !== null && dispatchSignal.aborted
+                ? { code: "TIMEOUT" as const }
+                : classify(error);
             const { code, retryAfterMs } = classifiedError;
             const message = error instanceof Error ? error.message : "attempt failed";
             lastError =
@@ -366,9 +373,10 @@ export async function dispatch(
                 continue;
               } catch (refreshError) {
                 if (signal.aborted) throw signal.reason;
-                const classified = dispatchSignal.aborted
-                  ? { code: "TIMEOUT" as const }
-                  : classify(refreshError);
+                const classified =
+                  deadlineAt !== null && dispatchSignal.aborted
+                    ? { code: "TIMEOUT" as const }
+                    : classify(refreshError);
                 const refreshMessage =
                   refreshError instanceof Error
                     ? refreshError.message
@@ -446,7 +454,7 @@ export async function dispatch(
       };
     } finally {
       clearDeadline();
-      if (!deadlineController.signal.aborted) deadlineController.abort();
+      if (!dispatchController.signal.aborted) dispatchController.abort();
     }
   }
 

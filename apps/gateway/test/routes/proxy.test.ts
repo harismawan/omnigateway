@@ -62,6 +62,32 @@ async function harness(events: StreamEvent[] = EVENTS, overrides: Partial<ProxyD
   return { store, app, raw, call };
 }
 
+test("disables Bun's request timeout for both inference routes before authentication", async () => {
+  const { app } = await harness();
+  app.listen(0);
+  const server = app.server;
+  if (server === null) throw new Error("expected Elysia to start a Bun server");
+  const calls: Array<{ path: string; seconds: number }> = [];
+  const originalTimeout = server.timeout.bind(server);
+  server.timeout = (request, seconds) => {
+    calls.push({ path: new URL(request.url).pathname, seconds });
+    originalTimeout(request, seconds);
+  };
+
+  try {
+    for (const path of ["/v1/messages", "/v1/chat/completions"] as const) {
+      const response = await fetch(`http://localhost:${server.port}${path}`, { method: "POST" });
+      expect(response.status).toBe(401);
+    }
+    expect(calls).toEqual([
+      { path: "/v1/messages", seconds: 0 },
+      { path: "/v1/chat/completions", seconds: 0 },
+    ]);
+  } finally {
+    await app.stop(true);
+  }
+});
+
 test("proxies a non-streaming anthropic request", async () => {
   const { call } = await harness();
   const res = await call("/v1/messages", {

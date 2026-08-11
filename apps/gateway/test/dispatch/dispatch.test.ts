@@ -712,6 +712,74 @@ test("request deadline covers credential refresh", async () => {
   store.close();
 });
 
+test("unlimited request has no dispatch deadline and ends on client cancellation", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 0 });
+  const started = Promise.withResolvers<void>();
+  const adapter: ProviderAdapter = {
+    id: "anthropic",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send(request) {
+      return {
+        events: (async function* () {
+          started.resolve();
+          await new Promise<void>((_resolve, reject) =>
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), {
+              once: true,
+            }),
+          );
+        })(),
+        degradations: [],
+      };
+    },
+  };
+  const controller = new AbortController();
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), now: () => Date.now() },
+    controller.signal,
+    "req_unlimited",
+  );
+  const reason = new DOMException("client disconnected", "AbortError");
+  let settled = false;
+  const draining = drain(outcome.events).finally(() => {
+    settled = true;
+  });
+  await started.promise;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(settled).toBe(false);
+
+  controller.abort(reason);
+  await expect(draining).rejects.toBe(reason);
+  store.close();
+});
+
+test("unlimited request releases its upstream lifecycle after normal completion", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 0 });
+  let lifecycleAborts = 0;
+  const adapter: ProviderAdapter = {
+    id: "anthropic",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send(request) {
+      request.signal.addEventListener("abort", () => lifecycleAborts++, { once: true });
+      return { events: textStream("done"), degradations: [] };
+    },
+  };
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), now: () => Date.now() },
+    new AbortController().signal,
+    "req_unlimited_complete",
+  );
+  const events = await drain(outcome.events);
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  expect(outcome.log()).toMatchObject({ status: 200, errorCode: null });
+  expect(lifecycleAborts).toBe(1);
+  store.close();
+});
+
 test("client abort remains distinct from request deadline", async () => {
   const store = await seeded(1);
   await store.config.putSettings({ requestDeadlineMs: 60_000 });

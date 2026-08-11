@@ -1,7 +1,16 @@
 import { expect, test } from "bun:test";
+import { DEFAULT_SETTINGS } from "@omni/store/types";
 import { loadConfig } from "../src/config.ts";
+import { settingsSchema } from "../src/schemas.ts";
 
 const base = { OMNI_ENCRYPTION_KEY: "a-key-that-is-long-enough-000000" };
+
+test("request deadline accepts zero and rejects negative values", () => {
+  expect(
+    settingsSchema.parse({ ...DEFAULT_SETTINGS, requestDeadlineMs: 0 }).requestDeadlineMs,
+  ).toBe(0);
+  expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, requestDeadlineMs: -1 })).toThrow();
+});
 
 test("applies defaults for everything but the encryption key", () => {
   const config = loadConfig(base);
