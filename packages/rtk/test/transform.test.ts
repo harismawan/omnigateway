@@ -35,11 +35,18 @@ describe("transformRequest", () => {
   });
 
   test("immutably compresses confirmed shell output and reports savings", () => {
-    const input = request("bash");
+    const content = [
+      "bun test v1.4.0",
+      ...Array.from({ length: 300 }, () => "case passed"),
+      "300 pass",
+      "0 fail",
+      "Ran 300 tests across 10 files",
+    ].join("\n");
+    const input = request("bash", content);
     const result = transformRequest(input, { enabled: true });
     expect(result.request).not.toBe(input);
-    expect(resultContent(result.request).length).toBeLessThan(repeated.length);
-    expect(resultContent(input)).toBe(repeated);
+    expect(resultContent(result.request).length).toBeLessThan(content.length);
+    expect(resultContent(input)).toBe(content);
     expect(result.report.applied).toBe(true);
     expect(result.report.filterHits).toBeGreaterThan(0);
     expect(result.report.estimatedTokensSaved).toBeGreaterThan(0);
@@ -99,13 +106,13 @@ describe("transformRequest", () => {
       {
         command: "bun build src/index.ts",
         content: [
-          "$ bun build src/index.ts",
+          "bun build v1.4.0",
           "Bundled 100 modules",
-          ...padding,
+          ...Array.from({ length: 100 }, (_, i) => `progress ${i}`),
           "src/middle.ts:42:7 error: cannot assign string to number",
           "    at compile (src/compiler.ts:9:2)",
-          ...padding,
-          "error: build failed with 1 error",
+          ...Array.from({ length: 100 }, (_, i) => `progress ${i + 100}`),
+          "Build failed with 1 error",
         ].join("\n"),
         anchors: ["src/middle.ts:42:7 error: cannot assign string to number", "at compile"],
       },

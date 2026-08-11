@@ -1,6 +1,6 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { ProviderId } from "@omni/ir";
-import type { RtkFilterId } from "@omni/rtk";
+import { isRtkFilterId } from "@omni/rtk/catalog";
 import type {
   RequestLog,
   RequestState,
@@ -40,28 +40,10 @@ type Row = {
   rtk_filters: string;
 };
 
-const RTK_FILTERS = new Set<RtkFilterId>([
-  "git-diff",
-  "git-status",
-  "git-log",
-  "grep",
-  "path-list",
-  "numbered-read",
-  "build-output",
-  "test-output",
-  "deduplicate-log",
-  "smart-truncate",
-]);
-
-function parseRtkFilters(raw: string): RtkFilterId[] {
+function parseRtkFilters(raw: string): import("@omni/rtk/catalog").RtkFilterId[] {
   try {
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (value): value is RtkFilterId =>
-            typeof value === "string" && RTK_FILTERS.has(value as RtkFilterId),
-        )
-      : [];
+    return Array.isArray(parsed) ? parsed.filter(isRtkFilterId) : [];
   } catch {
     return [];
   }

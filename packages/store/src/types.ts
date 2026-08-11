@@ -1,5 +1,5 @@
 import type { ProviderId } from "@omni/ir";
-import type { RtkFilterId } from "@omni/rtk";
+import type { RtkFilterId } from "@omni/rtk/catalog";
 
 export type BreakerState = "closed" | "open" | "halfOpen";
 export type AuthType = "oauth" | "apiKey";

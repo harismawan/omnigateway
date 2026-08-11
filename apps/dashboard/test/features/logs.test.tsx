@@ -193,6 +193,37 @@ describe("LogsBoard", () => {
     expect(within(dialog).getByText("test-output, deduplicate-log")).toBeTruthy();
   });
 
+  test("request detail renders every RTK family ID without prompt content", async () => {
+    const user = userEvent.setup();
+    const families = [
+      "git-diff",
+      "git-status",
+      "git-log",
+      "grep",
+      "path-list",
+      "numbered-read",
+      "build-output",
+      "test-output",
+      "deduplicate-log",
+      "smart-truncate",
+      "lint-output",
+      "package-output",
+      "tree-output",
+      "git-operation",
+      "docker-build",
+    ] as const;
+    createFetchStub({
+      "GET /api/logs": () => ({ logs: [log({ rtkApplied: true, rtkFilters: [...families] })] }),
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+    });
+    renderWithProviders(<LogsBoard />);
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(families.join(", "))).toBeTruthy();
+    expect(within(dialog).queryByText(/prompt|command|toolUseId/i)).toBeNull();
+  });
+
   test("the detail shows the key's label rather than its id", async () => {
     const user = userEvent.setup();
     stubLogs();
