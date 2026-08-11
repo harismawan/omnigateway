@@ -70,18 +70,64 @@ const nativeBase = {
   cache_control: cacheControl.nullable().optional(),
 };
 
+const caller = z
+  .discriminatedUnion("type", [
+    z.object({ type: z.literal("direct") }).strict(),
+    z
+      .object({
+        type: z.enum([
+          "code_execution_20250825",
+          "code_execution_20260120",
+          "code_execution_20260521",
+        ]),
+        tool_id: z.string(),
+      })
+      .strict(),
+  ])
+  .optional();
+
+const documentSource = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("base64"),
+      media_type: z.literal("application/pdf"),
+      data: z.string(),
+    })
+    .strict(),
+  z
+    .object({ type: z.literal("text"), media_type: z.literal("text/plain"), data: z.string() })
+    .strict(),
+  z.object({ type: z.literal("content"), content: z.array(z.unknown()) }).strict(),
+  z.object({ type: z.literal("url"), url: z.string() }).strict(),
+  z.object({ type: z.literal("file"), file_id: z.string() }).strict(),
+]);
+
+const citationsConfig = z.object({ enabled: z.boolean().optional() }).strict();
+const fallbackModel = z.object({ model: z.string() }).strict();
+const toolReference = z.object({ type: z.literal("tool_reference"), name: z.string() }).strict();
+
 const nativeSchemas: Readonly<Record<string, z.ZodType<Record<string, unknown>>>> = {
   server_tool_use: z
     .object({
       type: z.literal("server_tool_use"),
       id: z.string(),
-      name: z.string(),
-      input: z.record(z.string(), z.unknown()),
+      name: z.enum([
+        "advisor",
+        "web_search",
+        "web_fetch",
+        "code_execution",
+        "bash_code_execution",
+        "text_editor_code_execution",
+        "tool_search_tool_regex",
+        "tool_search_tool_bm25",
+      ]),
+      input: z.unknown(),
+      caller,
       ...nativeBase,
     })
-    .passthrough(),
-  web_search_tool_result: nativeResult("web_search_tool_result"),
-  web_fetch_tool_result: nativeResult("web_fetch_tool_result"),
+    .strict(),
+  web_search_tool_result: nativeResult("web_search_tool_result", true),
+  web_fetch_tool_result: nativeResult("web_fetch_tool_result", true),
   code_execution_tool_result: nativeResult("code_execution_tool_result"),
   bash_code_execution_tool_result: nativeResult("bash_code_execution_tool_result"),
   text_editor_code_execution_tool_result: nativeResult("text_editor_code_execution_tool_result"),
@@ -93,55 +139,72 @@ const nativeSchemas: Readonly<Record<string, z.ZodType<Record<string, unknown>>>
       id: z.string(),
       name: z.string(),
       server_name: z.string(),
-      input: z.record(z.string(), z.unknown()),
+      input: z.unknown(),
       ...nativeBase,
     })
-    .passthrough(),
+    .strict(),
   mcp_tool_result: z
-    .object({ type: z.literal("mcp_tool_result"), tool_use_id: z.string(), ...nativeBase })
-    .passthrough(),
+    .object({
+      type: z.literal("mcp_tool_result"),
+      tool_use_id: z.string(),
+      content: z.union([z.string(), z.array(z.unknown())]).optional(),
+      is_error: z.boolean().optional(),
+      ...nativeBase,
+    })
+    .strict(),
   container_upload: z
     .object({ type: z.literal("container_upload"), file_id: z.string(), ...nativeBase })
-    .passthrough(),
-  compaction: z.object({ type: z.literal("compaction"), ...nativeBase }).passthrough(),
+    .strict(),
+  compaction: z
+    .object({
+      type: z.literal("compaction"),
+      content: z.string().nullable(),
+      encrypted_content: z.string().nullable().optional(),
+      ...nativeBase,
+    })
+    .strict(),
   search_result: z
     .object({
       type: z.literal("search_result"),
       source: z.string(),
       title: z.string(),
       content: z.array(z.unknown()),
+      citations: citationsConfig.optional(),
       ...nativeBase,
     })
-    .passthrough(),
-  redacted_thinking: z
-    .object({ type: z.literal("redacted_thinking"), data: z.string() })
-    .passthrough(),
+    .strict(),
+  redacted_thinking: z.object({ type: z.literal("redacted_thinking"), data: z.string() }).strict(),
   document: z
-    .object({ type: z.literal("document"), source: z.object({}).passthrough(), ...nativeBase })
-    .passthrough(),
-  mid_conv_system: z
-    .object({ type: z.literal("mid_conv_system"), content: z.array(z.unknown()), ...nativeBase })
-    .passthrough(),
+    .object({
+      type: z.literal("document"),
+      source: documentSource,
+      citations: citationsConfig.nullable().optional(),
+      context: z.string().nullable().optional(),
+      title: z.string().nullable().optional(),
+      ...nativeBase,
+    })
+    .strict(),
   tool_addition: nativeToolChange("tool_addition"),
   tool_removal: nativeToolChange("tool_removal"),
-  fallback: z.object({ type: z.literal("fallback"), to: z.object({}).passthrough() }).passthrough(),
+  fallback: z
+    .object({ type: z.literal("fallback"), from: fallbackModel, to: fallbackModel })
+    .strict(),
 };
 
-function nativeResult(type: string): z.ZodType<Record<string, unknown>> {
+function nativeResult(type: string, hasCaller = false): z.ZodType<Record<string, unknown>> {
   return z
     .object({
       type: z.literal(type),
       tool_use_id: z.string(),
       content: z.unknown(),
+      ...(hasCaller ? { caller } : {}),
       ...nativeBase,
     })
-    .passthrough();
+    .strict();
 }
 
 function nativeToolChange(type: string): z.ZodType<Record<string, unknown>> {
-  return z
-    .object({ type: z.literal(type), tool: z.object({}).passthrough(), ...nativeBase })
-    .passthrough();
+  return z.object({ type: z.literal(type), tool: toolReference, ...nativeBase }).strict();
 }
 
 /**
@@ -273,21 +336,51 @@ function toIrBlock(b: z.infer<typeof block>): ContentBlock {
  * than dropped: a silently discarded block changes the conversation the model
  * sees, and the client has no way to tell.
  */
-function readBlock(raw: unknown, path: string): ContentBlock {
+const nativeRoles: Readonly<Record<string, Message["role"]>> = {
+  server_tool_use: "assistant",
+  web_search_tool_result: "assistant",
+  web_fetch_tool_result: "assistant",
+  code_execution_tool_result: "assistant",
+  bash_code_execution_tool_result: "assistant",
+  text_editor_code_execution_tool_result: "assistant",
+  tool_search_tool_result: "assistant",
+  advisor_tool_result: "assistant",
+  mcp_tool_use: "assistant",
+  mcp_tool_result: "user",
+  container_upload: "user",
+  compaction: "assistant",
+  search_result: "user",
+  redacted_thinking: "assistant",
+  document: "user",
+  tool_addition: "system",
+  tool_removal: "system",
+  fallback: "assistant",
+};
+
+function readBlock(raw: unknown, role: Message["role"], path: string): ContentBlock {
   if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
     const type = (raw as { type?: unknown }).type;
     if (typeof type === "string" && ANTHROPIC_NATIVE_BLOCK_TYPES.has(type)) {
       const nativeSchema = nativeSchemas[type];
-      if (nativeSchema === undefined) {
+      const nativeRole = nativeRoles[type];
+      if (nativeSchema === undefined || nativeRole === undefined) {
         throw new GatewayError(
           "BAD_REQUEST",
           `${path}.type: block type "${type}" is not legal in request history`,
         );
       }
+      if (role !== nativeRole) {
+        throw new GatewayError(
+          "BAD_REQUEST",
+          `${path}: block type "${type}" is not legal in ${role} messages`,
+        );
+      }
       const parsed = nativeSchema.safeParse(raw);
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
-        const suffix = issue?.path.length ? `.${issue.path.join(".")}` : "";
+        const issuePath =
+          issue?.code === "unrecognized_keys" ? [...issue.path, issue.keys[0]] : issue?.path;
+        const suffix = issuePath?.length ? `.${issuePath.join(".")}` : "";
         throw new GatewayError(
           "BAD_REQUEST",
           `${path}${suffix}: ${issue?.message ?? "invalid native content block"}`,
@@ -384,13 +477,23 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
 
   const parsed = parseOrThrow(schema, body);
 
-  const messages: Message[] = parsed.messages.map((m, i) => ({
-    role: m.role,
-    content:
+  const messages: Message[] = parsed.messages.map((m, i) => {
+    const content =
       typeof m.content === "string"
-        ? [{ type: "text", text: m.content }]
-        : m.content.map((b, j) => readBlock(b, `messages.${i}.content.${j}`)),
-  }));
+        ? [{ type: "text" as const, text: m.content }]
+        : m.content.map((b, j) => readBlock(b, m.role, `messages.${i}.content.${j}`));
+    if (m.role === "system") {
+      const previous = parsed.messages[i - 1];
+      const next = parsed.messages[i + 1];
+      if (previous === undefined || (next !== undefined && next.role !== "assistant")) {
+        throw new GatewayError(
+          "BAD_REQUEST",
+          `messages.${i}: system message must follow another message and be last or precede an assistant message`,
+        );
+      }
+    }
+    return { role: m.role, content };
+  });
 
   const system =
     parsed.system === undefined

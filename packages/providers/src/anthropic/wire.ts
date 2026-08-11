@@ -93,13 +93,15 @@ function encodeBlock(b: ContentBlock): unknown {
 }
 
 /**
- * Flattens a mid-conversation system turn to the plain string the API
- * documents for it. That role is text-only on the wire, and a string is the
- * shape Anthropic's own examples use; whether it also accepts a block array
- * there is unstated, so this takes the form that is known to work.
+ * Keeps plain mid-conversation instructions in the documented string form.
+ * Tool changes share the system role but require block arrays, so any mixed or
+ * native content is encoded block-for-block rather than silently discarded.
  */
-function encodeSystemTurn(content: ContentBlock[]): string {
-  return content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n");
+function encodeSystemTurn(content: ContentBlock[]): string | unknown[] {
+  if (content.every((block) => block.type === "text")) {
+    return content.map((block) => block.text).join("\n");
+  }
+  return content.map(encodeBlock);
 }
 
 function systemCacheControl(req: ChatRequest): {
