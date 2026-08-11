@@ -45,6 +45,14 @@ describe("LogsBoard", () => {
     ).toBeTruthy();
   });
 
+  test("scrolls request rows inside the bounded log module", async () => {
+    stubLogs();
+    renderWithProviders(<LogsBoard />);
+
+    const scroller = await screen.findByTestId("request-log-scroller");
+    expect(getComputedStyle(scroller).overflowY).toBe("auto");
+  });
+
   test("resolves a credential id to the account's label", async () => {
     stubLogs();
     renderWithProviders(<LogsBoard />);
@@ -314,8 +322,14 @@ describe("LogsBoard", () => {
     expect(rule).toContain("color:var(--accent)");
     expect(rule).toContain("background:var(--accent-wash)");
     // Provider-reported measurements stay unavailable until completion:
-    // attempts, TTFT, tokens, and cost. Total is live elapsed wall-clock time.
-    expect(screen.getAllByText("—")).toHaveLength(4);
+    // attempts, TTFT, and cost. Total is live elapsed wall-clock time, while
+    // tokens name the work still underway.
+    const processing = screen.getByRole("cell", { name: "processing" });
+    expect(processing.textContent).toBe("processing...");
+    const dots = processing.querySelector("span span");
+    if (dots === null) throw new Error("processing text has no dot slot");
+    expect(getComputedStyle(dots).width).toBe("3ch");
+    expect(screen.getAllByText("—")).toHaveLength(3);
   });
 
   test("a request still in flight updates its elapsed total", async () => {
@@ -331,13 +345,13 @@ describe("LogsBoard", () => {
     try {
       const row = (await screen.findByLabelText("in flight")).closest("tr");
       if (row === null) throw new Error("live request has no table row");
-      expect(within(row).getByText("1.0s")).toBeTruthy();
+      expect(within(row).getByText("1s")).toBeTruthy();
 
       setSystemTime(NOW + 1_000);
       await act(async () => {
         await new Promise((resolve) => window.setTimeout(resolve, 1_050));
       });
-      expect(within(row).getByText("2.0s")).toBeTruthy();
+      expect(within(row).getByText("2s")).toBeTruthy();
 
       request.state = "done";
       request.durationMs = 1_500;

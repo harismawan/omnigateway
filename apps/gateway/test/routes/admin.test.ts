@@ -364,13 +364,33 @@ test("settings round-trip and reject an unknown weight", async () => {
 test("usage aggregates by the requested dimension", async () => {
   const { call, store } = await harness();
   await store.usage.append(
-    requestLog({ id: "r1", at: NOW, inputTokens: 10, outputTokens: 5, ttftMs: 40 }),
+    requestLog({
+      id: "r1",
+      at: NOW,
+      inputTokens: 10,
+      outputTokens: 5,
+      ttftMs: 40,
+      rtkApplied: true,
+      rtkEstimatedTokensSaved: 25,
+    }),
   );
 
   const body = (await (await call("GET", "/api/usage?groupBy=model")).json()) as {
-    rows: Array<{ key: string; requests: number; outputTokens: number }>;
+    rows: Array<{
+      key: string;
+      requests: number;
+      outputTokens: number;
+      rtkSavedTokens: number;
+      rtkAppliedRequests: number;
+    }>;
   };
-  expect(body.rows[0]).toMatchObject({ key: "claude-opus-4", requests: 1, outputTokens: 5 });
+  expect(body.rows[0]).toMatchObject({
+    key: "claude-opus-4",
+    requests: 1,
+    outputTokens: 5,
+    rtkSavedTokens: 25,
+    rtkAppliedRequests: 1,
+  });
 });
 
 test("usage rejects an unknown groupBy rather than passing it to sql", async () => {

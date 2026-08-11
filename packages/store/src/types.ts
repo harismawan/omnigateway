@@ -297,6 +297,8 @@ export type UsageBucket = {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  rtkSavedTokens: number;
+  rtkAppliedRequests: number;
   costUsd: number;
   errors: number;
   /** Summed request durations; divide by `requests` for the window's mean. */

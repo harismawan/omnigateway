@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { RTK_FILTER_IDS } from "@omni/rtk/catalog";
 import { deriveKey } from "../src/encryption.ts";
 import { openDb } from "../src/sqlite/db.ts";
-import { backfillDaily, startOfLocalDay } from "../src/sqlite/rollup.ts";
+import { backfillDaily, backfillRtkUsage, startOfLocalDay } from "../src/sqlite/rollup.ts";
 import { createStore } from "../src/sqlite/store.ts";
 import type { RequestLog, Store } from "../src/types.ts";
 
@@ -90,8 +90,38 @@ test("appending a log rolls it into the day it happened on", async () => {
   expect(today?.errors).toBe(1);
   expect(today?.inputTokens).toBe(200);
   expect(today?.cacheReadTokens).toBe(40);
+  expect(today?.rtkSavedTokens).toBe(0);
+  expect(today?.rtkAppliedRequests).toBe(0);
   expect(today?.durationMsSum).toBe(2400);
   expect(days.find((row) => row.key === String(startOfLocalDay(noon(1))))?.requests).toBe(1);
+  s.close();
+});
+
+test("usage aggregates RTK savings and applied request counts", async () => {
+  const s = await store();
+  await s.usage.append(
+    log({
+      id: "rtk-1",
+      at: noon(0),
+      rtkApplied: true,
+      rtkEstimatedTokensSaved: 325,
+    }),
+  );
+  await s.usage.append(
+    log({
+      id: "rtk-2",
+      at: noon(0),
+      rtkApplied: true,
+      rtkEstimatedTokensSaved: 75,
+    }),
+  );
+  await s.usage.append(log({ id: "plain", at: noon(0) }));
+
+  for (const grain of ["raw", "daily"] as const) {
+    const [bucket] = await s.usage.aggregate({ since: noon(2), grain, groupBy: "provider" });
+    expect(bucket?.rtkSavedTokens).toBe(400);
+    expect(bucket?.rtkAppliedRequests).toBe(2);
+  }
   s.close();
 });
 
@@ -353,6 +383,44 @@ test("sweepPending retires rows the last process left behind", async () => {
   expect(days[0]?.requests).toBe(2);
   expect(days[0]?.errors).toBe(1);
   s.close();
+});
+
+test("the RTK migration backfills saved tokens without recounting usage", () => {
+  const db = openDb(":memory:");
+  const at = startOfLocalDay(Date.now()) + 3_600_000;
+  db.run(
+    `INSERT INTO request_logs
+       (id, at, api_key_id, requested_model, resolved_provider, resolved_model, credential_id,
+        attempts, status, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+        duration_ms, cost_usd, degradations, rtk_applied, rtk_estimated_tokens_saved)
+     VALUES ('rtk',?,'k1','fast','anthropic','claude-opus-4','c1',1,200,10,5,0,0,100,0.01,'[]',1,325)`,
+    [at],
+  );
+  db.run("DELETE FROM usage_daily");
+  expect(backfillDaily(db)).toBe(1);
+
+  backfillRtkUsage(db);
+  const row = db
+    .query<
+      {
+        requests: number;
+        input_tokens: number;
+        rtk_saved_tokens: number;
+        rtk_applied_requests: number;
+      },
+      []
+    >(
+      `SELECT requests, input_tokens, rtk_saved_tokens, rtk_applied_requests
+         FROM usage_daily`,
+    )
+    .get();
+  expect(row).toEqual({
+    requests: 1,
+    input_tokens: 10,
+    rtk_saved_tokens: 325,
+    rtk_applied_requests: 1,
+  });
+  db.close();
 });
 
 test("the migration seeds the rollup from logs already on disk", () => {

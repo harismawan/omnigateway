@@ -34,7 +34,10 @@ import { TrafficPanel } from "./TrafficPanel.tsx";
 
 const Deck = styled.div`
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(max(180px, calc((100% - 4 * ${({ theme }) => theme.space(3)}) / 5)), 1fr)
+  );
   gap: ${({ theme }) => theme.space(3)};
 `;
 
@@ -119,7 +122,12 @@ export function UsageBoard() {
 
   const buckets = series.data ?? [];
   const totals = totalsOf(buckets);
-  const tokens = totals.inputTokens + totals.outputTokens;
+  const promptInput = totals.inputTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
+  const tokens = promptInput + totals.outputTokens;
+  const meanOutput = totals.requests === 0 ? 0 : totals.outputTokens / totals.requests;
+  const cacheReadRate = promptInput === 0 ? 0 : totals.cacheReadTokens / promptInput;
+  const cacheWriteRate = promptInput === 0 ? 0 : totals.cacheWriteTokens / promptInput;
+  const meanCost = totals.requests === 0 ? 0 : totals.costUsd / totals.requests;
 
   // The vitals traces share the window's ticks with the charts below them.
   const ticks = timeTicks(since, until, range.by);
@@ -163,7 +171,7 @@ export function UsageBoard() {
         }
       />
 
-      <Deck>
+      <Deck data-testid="usage-summary-deck">
         <Readout
           legend="Requests"
           value={formatCount(totals.requests)}
@@ -183,23 +191,76 @@ export function UsageBoard() {
           tone={totals.requests === 0 ? "ink" : errorTone(errorRate)}
           trace={
             <Sparkline
-              values={trace((at) => byTick.get(at)?.errors ?? 0)}
-              scaleTo={Math.max(...trace((at) => byTick.get(at)?.requests ?? 0), 1)}
+              values={trace((at) => {
+                const bucket = byTick.get(at);
+                return bucket === undefined || bucket.requests === 0
+                  ? 0
+                  : bucket.errors / bucket.requests;
+              })}
               color="var(--down)"
               label={`${totals.errors} failed requests against ${totals.requests} total`}
             />
           }
         />
         <Readout
-          legend="Tokens"
-          value={formatCount(tokens)}
-          unit={`${formatCount(totals.cacheReadTokens)} cached`}
+          legend="Prompt input"
+          value={formatCount(promptInput)}
+          unit={`${formatCount(totals.inputTokens)} uncached`}
           trace={
             <Sparkline
-              values={trace(
-                (at) => (byTick.get(at)?.inputTokens ?? 0) + (byTick.get(at)?.outputTokens ?? 0),
-              )}
-              label={`${tokens} tokens over the window`}
+              values={trace((at) => {
+                const bucket = byTick.get(at);
+                return (
+                  (bucket?.inputTokens ?? 0) +
+                  (bucket?.cacheReadTokens ?? 0) +
+                  (bucket?.cacheWriteTokens ?? 0)
+                );
+              })}
+              label={`${promptInput} prompt input tokens over the window`}
+            />
+          }
+        />
+        <Readout
+          legend="Output"
+          value={formatCount(totals.outputTokens)}
+          unit={`mean ${formatCount(meanOutput)}/request`}
+          trace={
+            <Sparkline
+              values={trace((at) => byTick.get(at)?.outputTokens ?? 0)}
+              label={`${totals.outputTokens} output tokens over the window`}
+            />
+          }
+        />
+        <Readout
+          legend="Cache reads"
+          value={formatCount(totals.cacheReadTokens)}
+          unit={`${formatPercent(cacheReadRate, 0)} of prompt`}
+          trace={
+            <Sparkline
+              values={trace((at) => byTick.get(at)?.cacheReadTokens ?? 0)}
+              label={`${totals.cacheReadTokens} cache-read tokens over the window`}
+            />
+          }
+        />
+        <Readout
+          legend="Cache writes"
+          value={formatCount(totals.cacheWriteTokens)}
+          unit={`${formatPercent(cacheWriteRate, 0)} of prompt`}
+          trace={
+            <Sparkline
+              values={trace((at) => byTick.get(at)?.cacheWriteTokens ?? 0)}
+              label={`${totals.cacheWriteTokens} cache-write tokens over the window`}
+            />
+          }
+        />
+        <Readout
+          legend="RTK saved"
+          value={formatCount(totals.rtkSavedTokens)}
+          unit={`${formatCount(totals.rtkAppliedRequests)} requests`}
+          trace={
+            <Sparkline
+              values={trace((at) => byTick.get(at)?.rtkSavedTokens ?? 0)}
+              label={`${totals.rtkSavedTokens} estimated tokens saved by RTK over the window`}
             />
           }
         />
@@ -229,6 +290,23 @@ export function UsageBoard() {
               values={trace((at) => byTick.get(at)?.costUsd ?? 0)}
               color="var(--warn)"
               label={`spend over the window, ${formatUsd(totals.costUsd)} total`}
+            />
+          }
+        />
+        <Readout
+          legend="Cost / request"
+          value={formatUsd(meanCost)}
+          unit="mean"
+          trace={
+            <Sparkline
+              values={trace((at) => {
+                const bucket = byTick.get(at);
+                return bucket === undefined || bucket.requests === 0
+                  ? 0
+                  : bucket.costUsd / bucket.requests;
+              })}
+              color="var(--warn)"
+              label={`${formatUsd(meanCost)} mean cost per request over the window`}
             />
           }
         />
@@ -309,7 +387,7 @@ export function UsageBoard() {
         <Stack $gap={4}>
           <Section
             legend="Token mix"
-            meta={formatCount(tokens + totals.cacheReadTokens + totals.cacheWriteTokens)}
+            meta={formatCount(tokens)}
             query={series}
             isEmpty={buckets.length === 0}
             empty={empty}

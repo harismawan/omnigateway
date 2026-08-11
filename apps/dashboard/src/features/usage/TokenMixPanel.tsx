@@ -27,7 +27,7 @@ import {
  * spends hue only on provider identity.
  */
 const CLASSES = [
-  { id: "inputTokens", label: "Input", opacity: 0.95 },
+  { id: "inputTokens", label: "Uncached input", opacity: 0.95 },
   { id: "outputTokens", label: "Output", opacity: 0.7 },
   { id: "cacheReadTokens", label: "Cache read", opacity: 0.45 },
   { id: "cacheWriteTokens", label: "Cache write", opacity: 0.22 },

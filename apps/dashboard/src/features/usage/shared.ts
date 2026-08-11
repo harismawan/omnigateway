@@ -135,6 +135,8 @@ export type Totals = {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  rtkSavedTokens: number;
+  rtkAppliedRequests: number;
   durationMsSum: number;
 };
 
@@ -146,6 +148,8 @@ export const ZERO_TOTALS: Totals = {
   outputTokens: 0,
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
+  rtkSavedTokens: 0,
+  rtkAppliedRequests: 0,
   durationMsSum: 0,
 };
 
@@ -158,6 +162,8 @@ export function addTotals(sum: Totals, bucket: UsageBucket): Totals {
     outputTokens: sum.outputTokens + bucket.outputTokens,
     cacheReadTokens: sum.cacheReadTokens + bucket.cacheReadTokens,
     cacheWriteTokens: sum.cacheWriteTokens + bucket.cacheWriteTokens,
+    rtkSavedTokens: sum.rtkSavedTokens + bucket.rtkSavedTokens,
+    rtkAppliedRequests: sum.rtkAppliedRequests + bucket.rtkAppliedRequests,
     durationMsSum: sum.durationMsSum + bucket.durationMsSum,
   };
 }

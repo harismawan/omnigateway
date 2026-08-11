@@ -152,6 +152,8 @@ export function ActivityGrid({ days, now }: ActivityGridProps) {
         outputTokens: bucket.outputTokens,
         cacheReadTokens: bucket.cacheReadTokens,
         cacheWriteTokens: bucket.cacheWriteTokens,
+        rtkSavedTokens: bucket.rtkSavedTokens,
+        rtkAppliedRequests: bucket.rtkAppliedRequests,
         durationMsSum: bucket.durationMsSum,
       });
     }
