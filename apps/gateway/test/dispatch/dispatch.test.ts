@@ -152,7 +152,13 @@ test("compresses once from the dispatch snapshot and sends identical content on 
     received.push(block?.type === "toolResult" ? block.content : "");
     return originalSend(input);
   };
-  const repeated = Array.from({ length: 600 }, () => "same output").join("\n");
+  const repeated = [
+    "bun test v1.4.0",
+    ...Array.from({ length: 600 }, () => "case passed"),
+    "600 pass",
+    "0 fail",
+    "Ran 600 tests across 20 files",
+  ].join("\n");
   const input: ChatRequest = {
     model: "fast",
     stream: false,
@@ -177,7 +183,11 @@ test("compresses once from the dispatch snapshot and sends identical content on 
   expect(received[0]).toBe(received[1]);
   expect(received[0]?.length).toBeLessThan(repeated.length);
   expect(input.messages[1]?.content[0]).toMatchObject({ content: repeated });
-  expect(outcome.log()).toMatchObject({ rtkApplied: true, rtkFilterHits: 2 });
+  expect(outcome.log()).toMatchObject({
+    rtkApplied: true,
+    rtkFilterHits: 1,
+    rtkFilters: ["test-output"],
+  });
   store.close();
 });
 

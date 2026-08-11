@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { RTK_FILTER_IDS } from "@omni/rtk/catalog";
 import { deriveKey } from "../src/encryption.ts";
 import { openDb } from "../src/sqlite/db.ts";
 import { backfillDaily, startOfLocalDay } from "../src/sqlite/rollup.ts";
@@ -67,6 +68,13 @@ test("request logs round-trip RTK aggregate metrics", async () => {
     rtkFilterHits: 2,
     rtkFilters: ["test-output", "deduplicate-log"],
   });
+  s.close();
+});
+
+test("every catalog filter ID round-trips while invalid values are excluded", async () => {
+  const s = await store();
+  await s.usage.append(log({ id: "catalog", at: noon(0), rtkFilters: [...RTK_FILTER_IDS] }));
+  expect((await s.usage.recent(1))[0]?.rtkFilters).toEqual([...RTK_FILTER_IDS]);
   s.close();
 });
 
