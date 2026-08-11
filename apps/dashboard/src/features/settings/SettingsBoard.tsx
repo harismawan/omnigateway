@@ -46,7 +46,7 @@ const LIMITS: ReadonlyArray<{
   {
     id: "requestDeadlineMs",
     label: "Request deadline",
-    hint: "How long a request may take across all attempts. 0 disables only OmniGateway's deadline. Streaming responses send a keepalive every 10 seconds after the response begins; non-streaming and waits before the response begins remain subject to intermediary origin-read timeouts.",
+    hint: "How long a request may take across all attempts. 0 disables only OmniGateway's deadline.",
     unit: "ms",
     step: 1000,
     min: 0,

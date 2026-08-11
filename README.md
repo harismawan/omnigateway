@@ -24,6 +24,9 @@ omni start
 - **Speaks both dialects.** `POST /v1/messages` (Anthropic) and
   `POST /v1/chat/completions` (OpenAI), including streaming, translated to
   whichever provider actually serves the request.
+- **Filters bulky tool history, optionally.** Built-in RTK filters shorten
+  eligible large or repetitive shell and recognizable command output before
+  provider dispatch, preserve errors and non-tool-result content, and default off.
 - **Routes across your accounts.** Define a virtual model like `fast` or
   `smart` with several targets; the gateway ranks them by tier, health,
   remaining quota, cost, and latency.
@@ -118,6 +121,7 @@ Everything above is also available in the browser at
 | --- | --- | --- |
 | `POST` | `/v1/messages` | Anthropic Messages API |
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions API |
+| `POST` | `/v1/messages/count_tokens` | Anthropic-compatible local token estimation (authenticated) |
 | `GET` | `/v1/models` | Listing in both dialects, filtered by your key's allowlist |
 | `GET` | `/health` | Unauthenticated liveness check |
 
@@ -134,23 +138,7 @@ Ask for one of your virtual models by name. A bare provider model
 `GET /v1/models` answers both client families from one listing: each entry
 carries the OpenAI keys (`object`, `created`, `owned_by`) and the Anthropic ones
 (`type`, `display_name`, `created_at`, `max_input_tokens`, `max_tokens`) at
-once. `max_input_tokens` is the one worth knowing about — a client that is told
-no context window assumes its own default, which is 200K whatever the model
-really holds, so a 1M-context target would be used as if it were a fifth of its
-size. The figure is the smallest window any of that model's targets can hold,
-because failover can land on any of them.
-
-A client reads these figures once, when it starts, and caches them — so
-raising a limit here can take a client restart to show up.
-
-The figures come from the published limits for the model each target names, and
-from how the credential that would serve it signs in: an OpenAI account
-connected by OAuth is served through the Codex backend, which takes a 272,000
-token prompt where the API takes 922,000, so a gateway with both kinds of
-OpenAI credential advertises the smaller. Leave the fields in the console (or
-the CLI) empty to keep that worked out for you, and fill them in per target only
-when your own account's limits differ. A model outside the built-in catalog with
-nothing stated is left undescribed, and its clients keep their own defaults.
+once.
 
 Most tools that accept a custom base URL work unchanged: set it to
 `http://127.0.0.1:9000` and use a gateway key where the provider key goes.
@@ -216,22 +204,7 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
 
 Gateway events are written to stdout as one greppable line each: process lifecycle, OAuth
-refreshes, quota probes, failover, and errors. Completed requests are *not* among them — they
-are recorded in the database and read back through `omni logs` and the console's Logs screen.
-Use `debug` to add routing decisions, per-attempt tracing, and upstream HTTP timing:
-
-```text
-2026-08-09T04:12:04.881Z WARN  attempt failed; retrying  requestId=req_9f2 provider=anthropic attempt=1 code=UPSTREAM retryable=true
-```
-
-Fields are a closed allowlist: logs never include request or response bodies, headers, OAuth
-tokens, API keys, admin passwords, or encryption keys. `OMNI_LOG_LEVEL` is read once at boot;
-an invalid value falls back to `info` and is reported in the boot log.
-
-The Console screen and `omni console` show these lines. A process cannot read back its own
-stdout, so both read whatever captured it: `OMNI_LOG_FILE` if set, otherwise the systemd
-journal. Run the gateway in the foreground and its output goes to your terminal, where nothing
-captured it — both surfaces say so rather than showing an empty log.
+refreshes, quota probes, failover, and errors.
 
 `OMNI_LOG_FILE` *names* where output was captured; it does not redirect it. Setting it alone
 leaves the log empty, because the gateway still writes to stdout. Redirect the output and name
@@ -247,14 +220,6 @@ setup.
 Routing behaviour — weights, retry limits, request deadline, log retention,
 how often provider quota is polled — lives in the database, not the
 environment. Edit it with `omni settings set` or in the console.
-
-The request deadline defaults to 120 seconds. Setting it to `0` disables only
-OmniGateway's dispatch deadline; it does not disable timeouts imposed by a reverse
-proxy or other intermediary. Once a streaming response begins, OmniGateway sends
-an SSE keepalive comment every 10 seconds to protect it from intermediary read-idle
-timeouts. Non-streaming requests, and provider connection or header waits before a
-response begins, cannot receive those keepalives and remain subject to the
-intermediary's origin-read timeout.
 
 `.env.example` in the repository documents the optional provider
 client-identity overrides.

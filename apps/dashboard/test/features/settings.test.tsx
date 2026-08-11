@@ -50,11 +50,7 @@ describe("SettingsBoard", () => {
 
     const field = (await screen.findByLabelText("Request deadline")) as HTMLInputElement;
     expect(field.min).toBe("0");
-    expect(
-      screen.getByText(
-        /0 disables only OmniGateway's deadline.*streaming responses send a keepalive every 10 seconds after the response begins.*non-streaming and waits before the response begins remain subject to intermediary origin-read timeouts/i,
-      ),
-    ).toBeTruthy();
+    expect(screen.getByText(/0 disables only OmniGateway's deadline/i)).toBeTruthy();
 
     await user.clear(field);
     await user.type(field, "0");
