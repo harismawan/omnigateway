@@ -8,6 +8,7 @@ import { Lamp } from "../../ui/Lamp.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Mono, Spacer, Truncate } from "../../ui/primitives.ts";
 import { Empty } from "../../ui/States.tsx";
+import { ProcessingTokens, TokenBreakdown } from "../../ui/TokenBreakdown.tsx";
 
 const List = styled.ul`
   display: flex;
@@ -69,12 +70,17 @@ export function ActivityTail({ logs }: { logs: readonly RequestLog[] }) {
                 </Mono>
               )}
               <Spacer />
-              {/* Nothing to the right of here has been measured yet on a
-                  request still running; the lamp carries it instead. */}
-              {isPending(log) ? null : (
+              {isPending(log) ? (
+                <Mono $dim aria-label="processing">
+                  <ProcessingTokens />
+                </Mono>
+              ) : (
                 <>
                   {log.errorCode === null ? null : <Fault>{log.errorCode}</Fault>}
                   {log.attempts > 1 ? <Mono $dim>{log.attempts}×</Mono> : null}
+                  <Mono $dim>
+                    <TokenBreakdown tokens={log} />
+                  </Mono>
                   <Mono $dim>{formatMs(log.durationMs)}</Mono>
                   <Mono $dim>{formatUsd(log.costUsd)}</Mono>
                 </>

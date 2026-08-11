@@ -46,7 +46,7 @@ const Trace = styled.div`
 export type ReadoutProps = {
   legend: string;
   value: string;
-  unit?: string;
+  unit?: ReactNode;
   tone?: "ink" | "ok" | "warn" | "down";
   /** A sparkline or meter beneath the number. */
   trace?: ReactNode;

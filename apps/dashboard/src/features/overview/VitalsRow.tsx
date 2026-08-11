@@ -4,6 +4,7 @@ import { formatCount, formatMs, formatPercent, formatUsd } from "../../lib/forma
 import { bucketLogs, summarize } from "../../lib/vitals.ts";
 import { Readout } from "../../ui/Readout.tsx";
 import { Sparkline } from "../../ui/Sparkline.tsx";
+import { TokenBreakdown } from "../../ui/TokenBreakdown.tsx";
 
 const Deck = styled.div`
   display: grid;
@@ -24,6 +25,8 @@ export function VitalsRow({ logs, windowMs, now }: VitalsRowProps) {
   const buckets = bucketLogs(inWindow, { now, spanMs: windowMs, count: 32 });
 
   const errorTone = vitals.errorRate >= 0.25 ? "down" : vitals.errorRate >= 0.05 ? "warn" : "ok";
+  const totalTokens =
+    vitals.inputTokens + vitals.outputTokens + vitals.cacheReadTokens + vitals.cacheWriteTokens;
 
   return (
     <Deck>
@@ -52,6 +55,17 @@ export function VitalsRow({ logs, windowMs, now }: VitalsRowProps) {
             scaleTo={Math.max(...buckets.map((b) => b.total))}
             color="var(--down)"
             label={`${vitals.errors} failed requests against ${vitals.requests} total`}
+          />
+        }
+      />
+      <Readout
+        legend="Total tokens"
+        value={formatCount(totalTokens)}
+        unit={<TokenBreakdown tokens={vitals} />}
+        trace={
+          <Sparkline
+            values={buckets.map((b) => b.tokens)}
+            label={`token volume over the window, ${totalTokens.toLocaleString("en-US")} total`}
           />
         }
       />

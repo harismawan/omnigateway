@@ -1,6 +1,5 @@
-import { ArrowDown, ArrowUp, Database } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import styled, { keyframes } from "styled-components";
+import styled from "styled-components";
 import { LOG_CADENCE_MS, useCredentials, useKeys, useLogs } from "../../api/queries.ts";
 import type { RequestLog } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
@@ -24,15 +23,11 @@ import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Row, ScrollX, Stack, Truncate } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
+import { ProcessingTokens, TokenBreakdown, tokenBreakdownLabel } from "../../ui/TokenBreakdown.tsx";
 
 const LIMITS = [50, 100, 250, 500] as const;
-const TOKEN_COUNT = new Intl.NumberFormat("en-US");
 
 type Filter = "all" | "failed";
-
-function tokenBreakdownLabel(log: RequestLog): string {
-  return `${TOKEN_COUNT.format(log.inputTokens)} input, ${TOKEN_COUNT.format(log.outputTokens)} output, ${TOKEN_COUNT.format(log.cacheReadTokens)} cache read, ${TOKEN_COUNT.format(log.cacheWriteTokens)} cache write tokens`;
-}
 
 const Controls = styled(Row)`
   gap: ${({ theme }) => theme.space(2)};
@@ -65,41 +60,6 @@ const RequestLogScroller = styled(ScrollX)`
   overflow-y: auto;
 `;
 
-const TokenBreakdown = styled.span`
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-`;
-
-const TokenPart = styled.span`
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-
-  svg {
-    width: 12px;
-    height: 12px;
-    stroke-width: 1.75;
-  }
-`;
-
-const revealDots = keyframes`
-  from { clip-path: inset(0 2ch 0 0); }
-  to { clip-path: inset(0 0 0 0); }
-`;
-
-const ProcessingDots = styled.span`
-  display: inline-block;
-  width: 3ch;
-  vertical-align: bottom;
-  animation: ${revealDots} 1.5s steps(2, end) infinite;
-
-  @media (prefers-reduced-motion: reduce) {
-    animation: none;
-  }
-`;
-
 function useCurrentTime(active: boolean): number {
   const [now, setNow] = useState(Date.now);
 
@@ -114,39 +74,13 @@ function useCurrentTime(active: boolean): number {
 }
 
 function TokenCell({ log }: { log: RequestLog }) {
-  if (isPending(log)) {
-    return (
-      <Td $align="right" $mono aria-label="processing">
-        <span aria-hidden="true">
-          processing<ProcessingDots>...</ProcessingDots>
-        </span>
-      </Td>
-    );
-  }
-
-  const label = tokenBreakdownLabel(log);
   return (
-    <Td $align="right" $mono aria-label={label} title={label}>
-      <TokenBreakdown aria-hidden="true">
-        <TokenPart>
-          <ArrowDown />
-          {formatCount(log.inputTokens)}
-        </TokenPart>
-        <TokenPart>
-          <ArrowUp />
-          {formatCount(log.outputTokens)}
-        </TokenPart>
-        <TokenPart>
-          <Database />
-          <ArrowDown />
-          {formatCount(log.cacheReadTokens)}
-        </TokenPart>
-        <TokenPart>
-          <Database />
-          <ArrowUp />
-          {formatCount(log.cacheWriteTokens)}
-        </TokenPart>
-      </TokenBreakdown>
+    <Td
+      $align="right"
+      $mono
+      {...(isPending(log) ? { "aria-label": "processing" } : { title: tokenBreakdownLabel(log) })}
+    >
+      {isPending(log) ? <ProcessingTokens /> : <TokenBreakdown tokens={log} />}
     </Td>
   );
 }
