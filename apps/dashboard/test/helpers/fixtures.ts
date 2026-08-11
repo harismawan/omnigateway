@@ -132,6 +132,8 @@ export function usageBucket(patch: Partial<UsageBucket> = {}): UsageBucket {
     outputTokens: 30_000,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    rtkSavedTokens: 0,
+    rtkAppliedRequests: 0,
     costUsd: 3.5,
     errors: 2,
     durationMsSum: 42_000,

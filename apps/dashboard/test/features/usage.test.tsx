@@ -100,6 +100,8 @@ function rowsFor(url: string): { rows: unknown[] } {
         outputTokens: 2_000,
         cacheReadTokens: 5_000,
         cacheWriteTokens: 1_000,
+        rtkSavedTokens: 600,
+        rtkAppliedRequests: 3,
         durationMsSum: 12_000,
       }),
     ],
@@ -121,6 +123,42 @@ describe("UsageBoard", () => {
     renderWithProviders(<UsageBoard />);
 
     expect(await screen.findByText("10 requests and $0.50 over the last 24 hours.")).toBeTruthy();
+  });
+
+  test("flows summary metrics responsively without exceeding five columns", async () => {
+    stubUsage();
+    renderWithProviders(<UsageBoard />);
+
+    const deck = await screen.findByTestId("usage-summary-deck");
+    const columns = getComputedStyle(deck).gridTemplateColumns;
+    expect(columns).toMatch(/repeat\(\s*auto-fit/);
+    expect(columns).toContain("max(180px");
+    expect(columns).toContain("/ 5");
+  });
+
+  test("shows ten summary metrics with explicit token classes and RTK savings", async () => {
+    stubUsage();
+    renderWithProviders(<UsageBoard />);
+
+    await screen.findByText("Prompt input");
+    const cardText = (legend: string): string => {
+      const label = screen.getAllByText(legend).find((node) => node.tagName === "SPAN");
+      if (label?.parentElement === null || label?.parentElement === undefined) {
+        throw new Error(`${legend} has no summary card`);
+      }
+      return label.parentElement.textContent ?? "";
+    };
+    expect(cardText("Requests")).toContain("10");
+    expect(cardText("Error rate")).toContain("10.0%");
+    expect(cardText("Prompt input")).toContain("14k8,000 uncached");
+    expect(cardText("Output")).toContain("2,000mean 200/request");
+    expect(cardText("Cache reads")).toContain("5,00036% of prompt");
+    expect(cardText("Cache writes")).toContain("1,0007% of prompt");
+    expect(cardText("RTK saved")).toContain("6003 requests");
+    expect(cardText("Mean duration")).toContain("1.2s");
+    expect(cardText("Spend")).toContain("$0.50");
+    expect(cardText("Cost / request")).toContain("$0.05mean");
+    expect(screen.getByText("Uncached input")).toBeTruthy();
   });
 
   test("draws a year of days, one cell per day, labelled with its traffic", async () => {

@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, Database } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import styled from "styled-components";
+import styled, { keyframes } from "styled-components";
 import { LOG_CADENCE_MS, useCredentials, useKeys, useLogs } from "../../api/queries.ts";
 import type { RequestLog } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
@@ -8,6 +8,7 @@ import {
   formatClock,
   formatCount,
   formatDateTime,
+  formatDuration,
   formatMs,
   formatUsd,
   shortId,
@@ -46,6 +47,24 @@ const Narrow = styled(Select)`
   width: auto;
 `;
 
+const RequestLogModule = styled(Module)`
+  flex: 1;
+  min-height: 0;
+
+  > div {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+`;
+
+const RequestLogScroller = styled(ScrollX)`
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+`;
+
 const TokenBreakdown = styled.span`
   display: inline-flex;
   align-items: center;
@@ -65,6 +84,22 @@ const TokenPart = styled.span`
   }
 `;
 
+const revealDots = keyframes`
+  from { clip-path: inset(0 2ch 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+`;
+
+const ProcessingDots = styled.span`
+  display: inline-block;
+  width: 3ch;
+  vertical-align: bottom;
+  animation: ${revealDots} 1.5s steps(2, end) infinite;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+`;
+
 function useCurrentTime(active: boolean): number {
   const [now, setNow] = useState(Date.now);
 
@@ -81,8 +116,10 @@ function useCurrentTime(active: boolean): number {
 function TokenCell({ log }: { log: RequestLog }) {
   if (isPending(log)) {
     return (
-      <Td $align="right" $mono>
-        —
+      <Td $align="right" $mono aria-label="processing">
+        <span aria-hidden="true">
+          processing<ProcessingDots>...</ProcessingDots>
+        </span>
       </Td>
     );
   }
@@ -221,7 +258,7 @@ export function LogsBoard() {
         }
       />
 
-      <Module legend="Request log" meta={`${rows.length} shown`} flush>
+      <RequestLogModule legend="Request log" meta={`${rows.length} shown`} flush>
         {logs.isError ? (
           <Failure error={logs.error} onRetry={() => void logs.refetch()} />
         ) : logs.isLoading ? (
@@ -238,7 +275,7 @@ export function LogsBoard() {
             }
           />
         ) : (
-          <ScrollX>
+          <RequestLogScroller data-testid="request-log-scroller">
             <Table>
               <thead>
                 <tr>
@@ -314,7 +351,9 @@ export function LogsBoard() {
                       {isPending(log) ? "—" : formatMs(log.ttftMs)}
                     </Td>
                     <Td $align="right" $mono>
-                      {formatMs(isPending(log) ? Math.max(0, now - log.at) : log.durationMs)}
+                      {isPending(log)
+                        ? formatDuration(Math.max(0, now - log.at))
+                        : formatMs(log.durationMs)}
                     </Td>
                     <TokenCell log={log} />
                     <Td $align="right" $mono>
@@ -333,9 +372,9 @@ export function LogsBoard() {
                 ))}
               </tbody>
             </Table>
-          </ScrollX>
+          </RequestLogScroller>
         )}
-      </Module>
+      </RequestLogModule>
 
       <Modal
         open={open !== null}

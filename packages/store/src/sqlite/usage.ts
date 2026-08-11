@@ -135,6 +135,8 @@ type Agg = {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  rtk_saved_tokens: number;
+  rtk_applied_requests: number;
   cost_usd: number;
   errors: number;
   duration_ms_sum: number;
@@ -300,6 +302,8 @@ export function createUsageRepo(db: Database): UsageRepo {
                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
                   COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
                   COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                  COALESCE(SUM(${daily ? "rtk_saved_tokens" : "rtk_estimated_tokens_saved"}), 0) AS rtk_saved_tokens,
+                  COALESCE(SUM(${daily ? "rtk_applied_requests" : "CASE WHEN rtk_applied = 1 THEN 1 ELSE 0 END"}), 0) AS rtk_applied_requests,
                   COALESCE(SUM(cost_usd), 0) AS cost_usd
              FROM ${daily ? "usage_daily" : "request_logs"}
             WHERE ${daily ? "" : "state = 'done' AND "}${timeColumn} >= ? AND ${timeColumn} <= ?
@@ -316,6 +320,8 @@ export function createUsageRepo(db: Database): UsageRepo {
           outputTokens: r.output_tokens,
           cacheReadTokens: r.cache_read_tokens,
           cacheWriteTokens: r.cache_write_tokens,
+          rtkSavedTokens: r.rtk_saved_tokens,
+          rtkAppliedRequests: r.rtk_applied_requests,
           costUsd: r.cost_usd,
           errors: r.errors,
           durationMsSum: r.duration_ms_sum,

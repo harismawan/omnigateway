@@ -4,7 +4,8 @@ import usageDaily002 from "./migrations/002_usage_daily.sql" with { type: "text"
 import quotaSnapshot003 from "./migrations/003_quota_snapshot.sql" with { type: "text" };
 import requestState004 from "./migrations/004_request_state.sql" with { type: "text" };
 import rtkMetrics005 from "./migrations/005_rtk_metrics.sql" with { type: "text" };
-import { backfillDaily } from "./rollup.ts";
+import rtkUsage006 from "./migrations/006_rtk_usage.sql" with { type: "text" };
+import { backfillDaily, backfillRtkUsage } from "./rollup.ts";
 
 /**
  * `after` runs inside the migration's own transaction, for the cases where the
@@ -17,6 +18,7 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
   { id: 3, sql: quotaSnapshot003 },
   { id: 4, sql: requestState004 },
   { id: 5, sql: rtkMetrics005 },
+  { id: 6, sql: rtkUsage006, after: backfillRtkUsage },
 ];
 
 /**
