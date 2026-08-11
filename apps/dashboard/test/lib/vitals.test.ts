@@ -104,6 +104,23 @@ describe("bucketLogs", () => {
     expect(buckets.at(-1)?.ttftMs).toBe(100);
   });
 
+  test("adds every token class to the bucket volume", () => {
+    const buckets = bucketLogs(
+      [
+        log({
+          at: NOW - 30_000,
+          inputTokens: 1_000,
+          outputTokens: 200,
+          cacheReadTokens: 3_000,
+          cacheWriteTokens: 400,
+        }),
+      ],
+      { now: NOW, spanMs: 600_000, count: 10 },
+    );
+
+    expect(buckets.at(-1)?.tokens).toBe(4_600);
+  });
+
   test("ignores a request that has not finished", () => {
     const buckets = bucketLogs(
       [

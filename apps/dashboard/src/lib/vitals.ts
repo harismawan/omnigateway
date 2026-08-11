@@ -18,6 +18,7 @@ export type Vitals = {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
 };
 
 export function percentile(values: readonly number[], p: number): number | null {
@@ -88,6 +89,7 @@ export function summarize(all: readonly RequestLog[], windowMs: number): Vitals 
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
 
   for (const log of logs) {
     if (isError(log)) errors += 1;
@@ -96,6 +98,7 @@ export function summarize(all: readonly RequestLog[], windowMs: number): Vitals 
     inputTokens += log.inputTokens;
     outputTokens += log.outputTokens;
     cacheReadTokens += log.cacheReadTokens;
+    cacheWriteTokens += log.cacheWriteTokens;
   }
 
   const minutes = windowMs / 60_000;
@@ -110,6 +113,7 @@ export function summarize(all: readonly RequestLog[], windowMs: number): Vitals 
     inputTokens,
     outputTokens,
     cacheReadTokens,
+    cacheWriteTokens,
   };
 }
 
@@ -118,6 +122,7 @@ export type Bucket = {
   total: number;
   errors: number;
   costUsd: number;
+  tokens: number;
   /** Median first-token latency inside the bucket, or null if nothing streamed. */
   ttftMs: number | null;
 };
@@ -140,6 +145,7 @@ export function bucketLogs(
     total: 0,
     errors: 0,
     costUsd: 0,
+    tokens: 0,
     ttftMs: null,
   }));
   const latencies: number[][] = Array.from({ length: count }, () => []);
@@ -151,6 +157,8 @@ export function bucketLogs(
     if (bucket === undefined) continue;
     bucket.total += 1;
     bucket.costUsd += log.costUsd;
+    bucket.tokens +=
+      log.inputTokens + log.outputTokens + log.cacheReadTokens + log.cacheWriteTokens;
     if (isError(log)) bucket.errors += 1;
     if (log.ttftMs !== null && Number.isFinite(log.ttftMs)) latencies[index]?.push(log.ttftMs);
   }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import { OverviewBoard } from "../../src/features/overview/OverviewBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { credential, health, log, model, quota, usageBucket } from "../helpers/fixtures.ts";
@@ -92,6 +92,97 @@ describe("OverviewBoard", () => {
     expect(screen.getByText("1 failed")).toBeTruthy();
     // p50 of 200ms and 400ms, with the failed request contributing no latency.
     expect(screen.getByText("200ms")).toBeTruthy();
+  });
+
+  test("counts every token class in the one-hour total and sparkline", async () => {
+    const now = Date.now();
+    stubOverview({
+      "GET /api/logs": () => ({
+        logs: [
+          log({
+            id: "tokens",
+            at: now - 30_000,
+            inputTokens: 1_000,
+            outputTokens: 200,
+            cacheReadTokens: 3_000,
+            cacheWriteTokens: 400,
+          }),
+          log({
+            id: "old",
+            at: now - 3_700_000,
+            inputTokens: 90_000,
+            outputTokens: 90_000,
+            cacheReadTokens: 90_000,
+            cacheWriteTokens: 90_000,
+          }),
+        ],
+      }),
+    });
+    renderWithRouter(<OverviewBoard />);
+
+    expect(await screen.findByText("Total tokens")).toBeTruthy();
+    expect(screen.getByText("4,600")).toBeTruthy();
+    const tokenLabel = "1,000 input, 200 output, 3,000 cache read, 400 cache write tokens";
+    const tokenCard = screen.getByText("Total tokens").parentElement;
+    if (tokenCard === null) throw new Error("Total tokens card was not rendered");
+    expect(within(tokenCard).getByRole("img", { name: tokenLabel })).toBeTruthy();
+    expect(screen.getByLabelText("token volume over the window, 4,600 total")).toBeTruthy();
+
+    const cardLabels = ["Requests", "Error rate", "Total tokens", "Time to first token", "Spend"];
+    const deck = tokenCard?.parentElement;
+    const cards = cardLabels.map((label) =>
+      screen.getAllByText(label).find((match) => match.parentElement?.parentElement === deck),
+    );
+    expect(cards.every((card) => card !== undefined)).toBe(true);
+    expect(cards.map((card) => card?.parentElement)).toEqual(
+      Array.from(deck?.children ?? []).filter(
+        (child): child is HTMLElement => child instanceof HTMLElement,
+      ),
+    );
+  });
+
+  test("shows token detail for completed activity and processing for pending activity", async () => {
+    const now = Date.now();
+    stubOverview({
+      "GET /api/logs": () => ({
+        logs: [
+          log({
+            id: "pending",
+            state: "pending",
+            at: now - 2_000,
+            durationMs: 0,
+            costUsd: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+          }),
+          log({
+            id: "done",
+            at: now - 30_000,
+            durationMs: 1_400,
+            costUsd: 0.012,
+            inputTokens: 1_200,
+            outputTokens: 340,
+            cacheReadTokens: 8_400,
+            cacheWriteTokens: 120,
+          }),
+        ],
+      }),
+    });
+    renderWithRouter(<OverviewBoard />);
+
+    const tokenLabel = "1,200 input, 340 output, 8,400 cache read, 120 cache write tokens";
+    await screen.findByText("Activity");
+    const activity = screen.getByText("Activity").closest("section");
+    const completedTokens = activity?.querySelector(`[aria-label="${tokenLabel}"]`);
+    expect(completedTokens).toBeTruthy();
+    expect(completedTokens?.getAttribute("title")).toBe(tokenLabel);
+    expect(completedTokens?.textContent).toBe("1,2003408,400120");
+
+    const processing = screen.getByLabelText("processing");
+    expect(processing.textContent).toBe("processing...");
+    const pendingRow = processing.closest("li");
+    expect(pendingRow?.textContent).not.toContain("$0.00");
+    expect(pendingRow?.textContent).not.toContain("0ms");
   });
 
   test("an unconfigured gateway is called out rather than shown as healthy", async () => {
