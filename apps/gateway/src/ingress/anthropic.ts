@@ -70,6 +70,10 @@ const nativeBase = {
   cache_control: cacheControl.nullable().optional(),
 };
 
+const nativeResultContent = z.unknown().refine((value) => value !== null, {
+  message: "expected native result content",
+});
+
 const caller = z
   .discriminatedUnion("type", [
     z.object({ type: z.literal("direct") }).strict(),
@@ -104,7 +108,27 @@ const documentSource = z.discriminatedUnion("type", [
 
 const citationsConfig = z.object({ enabled: z.boolean().optional() }).strict();
 const fallbackModel = z.object({ model: z.string() }).strict();
-const toolReference = z.object({ type: z.literal("tool_reference"), name: z.string() }).strict();
+const toolChangeReference = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("tool_reference"), name: z.string() }).strict(),
+  z
+    .object({ type: z.literal("mcp_tool_reference"), server_name: z.string(), name: z.string() })
+    .strict(),
+  z.object({ type: z.literal("mcp_toolset_reference"), server_name: z.string() }).strict(),
+]);
+
+function nativeToolChange(type: "tool_addition" | "tool_removal") {
+  return z.object({ type: z.literal(type), tool: toolChangeReference, ...nativeBase }).strict();
+}
+
+const toolAddition = nativeToolChange("tool_addition");
+const toolRemoval = nativeToolChange("tool_removal");
+const midConversationSystem = z
+  .object({
+    type: z.literal("mid_conv_system"),
+    content: z.array(z.discriminatedUnion("type", [textBlock.strict(), toolAddition, toolRemoval])),
+    ...nativeBase,
+  })
+  .strict();
 
 const nativeSchemas: Readonly<Record<string, z.ZodType<Record<string, unknown>>>> = {
   server_tool_use: z
@@ -184,10 +208,16 @@ const nativeSchemas: Readonly<Record<string, z.ZodType<Record<string, unknown>>>
       ...nativeBase,
     })
     .strict(),
-  tool_addition: nativeToolChange("tool_addition"),
-  tool_removal: nativeToolChange("tool_removal"),
+  mid_conv_system: midConversationSystem,
+  tool_addition: toolAddition,
+  tool_removal: toolRemoval,
   fallback: z
-    .object({ type: z.literal("fallback"), from: fallbackModel, to: fallbackModel })
+    .object({
+      type: z.literal("fallback"),
+      from: fallbackModel,
+      to: fallbackModel,
+      trigger: z.unknown().optional(),
+    })
     .strict(),
 };
 
@@ -196,15 +226,11 @@ function nativeResult(type: string, hasCaller = false): z.ZodType<Record<string,
     .object({
       type: z.literal(type),
       tool_use_id: z.string(),
-      content: z.unknown(),
+      content: nativeResultContent,
       ...(hasCaller ? { caller } : {}),
       ...nativeBase,
     })
     .strict();
-}
-
-function nativeToolChange(type: string): z.ZodType<Record<string, unknown>> {
-  return z.object({ type: z.literal(type), tool: toolReference, ...nativeBase }).strict();
 }
 
 /**
@@ -352,6 +378,7 @@ const nativeRoles: Readonly<Record<string, Message["role"]>> = {
   search_result: "user",
   redacted_thinking: "assistant",
   document: "user",
+  mid_conv_system: "system",
   tool_addition: "system",
   tool_removal: "system",
   fallback: "assistant",

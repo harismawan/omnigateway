@@ -430,6 +430,88 @@ test("system turns accept text and tool changes without dropping either", () => 
   expect(body.system).toBeUndefined();
 });
 
+test("mid-conversation system block preserves nested text and cache markers", () => {
+  const block = {
+    type: "mid_conv_system",
+    content: [{ type: "text", text: "operator instruction", cache_control: { type: "ephemeral" } }],
+    cache_control: { type: "ephemeral", ttl: "1h" },
+  };
+  const request = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "before" },
+      { role: "system", content: [block] },
+    ],
+  });
+  const { body } = toWire(request, "claude-opus-5", { oauth: false });
+  expect(body.messages[1]).toEqual({ role: "system", content: [block] });
+});
+
+test("mid-conversation system block supports beta nested tool changes", () => {
+  const block = {
+    type: "mid_conv_system",
+    content: [
+      {
+        type: "tool_addition",
+        tool: { type: "mcp_tool_reference", server_name: "docs", name: "lookup" },
+      },
+      {
+        type: "tool_removal",
+        tool: { type: "mcp_toolset_reference", server_name: "archive" },
+      },
+    ],
+  };
+  const request = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "before" },
+      { role: "system", content: [block] },
+    ],
+  });
+  const { body } = toWire(request, "claude-opus-5", { oauth: false });
+  expect(body.messages[1]).toEqual({ role: "system", content: [block] });
+});
+
+test("mid-conversation system block rejects malformed nested content and illegal roles", () => {
+  for (const [block, path] of [
+    [{ type: "mid_conv_system" }, "content"],
+    [{ type: "mid_conv_system", content: [{ type: "text" }] }, "content.0.text"],
+    [{ type: "mid_conv_system", content: [{ type: "image", source: {} }] }, "content.0.type"],
+    [{ type: "mid_conv_system", content: [], metadata: {} }, "metadata"],
+    [
+      {
+        type: "mid_conv_system",
+        content: [{ type: "tool_addition", tool: { type: "mcp_tool_reference", name: "lookup" } }],
+      },
+      "content.0.tool.server_name",
+    ],
+  ] as const) {
+    expect(
+      reason({
+        ...minimal,
+        messages: [
+          { role: "user", content: "before" },
+          { role: "system", content: [block] },
+        ],
+      }),
+    ).toContain(`messages.1.content.0.${path}`);
+  }
+
+  for (const role of ["user", "assistant"] as const) {
+    expect(
+      reason({
+        ...minimal,
+        messages: [
+          {
+            role,
+            content: [{ type: "mid_conv_system", content: [{ type: "text", text: "no" }] }],
+          },
+        ],
+      }),
+    ).toContain(`not legal in ${role} messages`);
+  }
+});
+
 test("system turns reject illegal history position with message paths", () => {
   expect(
     reason({
@@ -457,7 +539,6 @@ test("response-only and nested-only native blocks stay illegal in request histor
     { type: "advisor_result", text: "answer" },
     { type: "advisor_redacted_result", data: "opaque" },
     { type: "tool_reference", tool_name: "lookup" },
-    { type: "mid_conv_system", content: [{ type: "text", text: "instruction" }] },
   ]) {
     const message = reason({
       ...minimal,
@@ -632,6 +713,85 @@ test("every request-history native block rejects unknown top-level fields", () =
   }
 });
 
+test("tool changes round-trip every current beta reference variant", () => {
+  for (const tool of [
+    { type: "tool_reference", name: "lookup" },
+    { type: "mcp_tool_reference", server_name: "docs", name: "lookup" },
+    { type: "mcp_toolset_reference", server_name: "docs" },
+  ]) {
+    for (const type of ["tool_addition", "tool_removal"] as const) {
+      const block = { type, tool };
+      const request = parseAnthropicRequest({
+        ...minimal,
+        messages: [
+          { role: "user", content: "before" },
+          { role: "system", content: [block] },
+        ],
+      });
+      const { body } = toWire(request, "claude-opus-5", { oauth: false });
+      expect(body.messages[1]).toEqual({ role: "system", content: [block] });
+    }
+  }
+});
+
+test("tool changes reject malformed references at exact paths", () => {
+  for (const [tool, path] of [
+    [{ type: "tool_reference" }, "name"],
+    [{ type: "mcp_tool_reference", name: "lookup" }, "server_name"],
+    [{ type: "mcp_tool_reference", server_name: "docs" }, "name"],
+    [{ type: "mcp_toolset_reference" }, "server_name"],
+    [{ type: "tool_reference", name: "lookup", server_name: "docs" }, "server_name"],
+    [{ type: "unknown_reference", name: "lookup" }, "type"],
+  ] as const) {
+    expect(
+      reason({
+        ...minimal,
+        messages: [
+          { role: "user", content: "before" },
+          { role: "system", content: [{ type: "tool_addition", tool }] },
+        ],
+      }),
+    ).toContain(`messages.1.content.0.tool.${path}`);
+  }
+});
+
+test("fallback round-trips optional opaque trigger including null", () => {
+  for (const trigger of [{ type: "refusal", category: "cyber", future: { opaque: true } }, null]) {
+    const block = {
+      type: "fallback",
+      from: { model: "claude-fable-5" },
+      to: { model: "claude-opus-5" },
+      trigger,
+    };
+    const request = parseAnthropicRequest({
+      ...minimal,
+      messages: [{ role: "assistant", content: [block] }],
+    });
+    const { body } = toWire(request, "claude-opus-5", { oauth: false });
+    expect(body.messages[0]).toEqual({ role: "assistant", content: [block] });
+  }
+});
+
+test("fallback rejects unknown top-level metadata", () => {
+  const message = reason({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "fallback",
+            from: { model: "claude-fable-5" },
+            to: { model: "claude-opus-5" },
+            metadata: {},
+          },
+        ],
+      },
+    ],
+  });
+  expect(message).toContain("messages.0.content.0.metadata");
+});
+
 test("native structured fields validate discriminators and required properties", () => {
   for (const [role, block, path] of [
     ["user", { type: "document", source: {} }, "source.type"],
@@ -665,6 +825,61 @@ test("native blocks validate required top-level fields at precise paths", () => 
     expect(reason({ ...minimal, messages: [{ role, content: [block] }] })).toContain(
       `messages.0.content.0.${field}`,
     );
+  }
+});
+
+test("required opaque native fields reject omission at their exact paths", () => {
+  for (const [block, field] of [
+    [{ type: "server_tool_use", id: "srvtoolu_1", name: "web_search" }, "input"],
+    [{ type: "mcp_tool_use", id: "mcptoolu_1", name: "lookup", server_name: "docs" }, "input"],
+    [{ type: "web_search_tool_result", tool_use_id: "srvtoolu_1" }, "content"],
+    [{ type: "web_fetch_tool_result", tool_use_id: "srvtoolu_1" }, "content"],
+    [{ type: "code_execution_tool_result", tool_use_id: "srvtoolu_1" }, "content"],
+    [{ type: "bash_code_execution_tool_result", tool_use_id: "srvtoolu_1" }, "content"],
+    [{ type: "text_editor_code_execution_tool_result", tool_use_id: "srvtoolu_1" }, "content"],
+    [{ type: "tool_search_tool_result", tool_use_id: "srvtoolu_1" }, "content"],
+    [{ type: "advisor_tool_result", tool_use_id: "srvtoolu_1" }, "content"],
+  ] as const) {
+    expect(reason({ ...minimal, messages: [{ role: "assistant", content: [block] }] })).toContain(
+      `messages.0.content.0.${field}`,
+    );
+  }
+});
+
+test("required native result content rejects explicit null", () => {
+  for (const type of [
+    "web_search_tool_result",
+    "web_fetch_tool_result",
+    "code_execution_tool_result",
+    "bash_code_execution_tool_result",
+    "text_editor_code_execution_tool_result",
+    "tool_search_tool_result",
+    "advisor_tool_result",
+  ]) {
+    expect(
+      reason({
+        ...minimal,
+        messages: [
+          { role: "assistant", content: [{ type, tool_use_id: "srvtoolu_1", content: null }] },
+        ],
+      }),
+    ).toContain("messages.0.content.0.content");
+  }
+});
+
+test("required unknown inputs preserve explicit null", () => {
+  for (const block of [
+    { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: null },
+    { type: "mcp_tool_use", id: "mcptoolu_1", name: "lookup", server_name: "docs", input: null },
+  ]) {
+    const request = parseAnthropicRequest({
+      ...minimal,
+      messages: [{ role: "assistant", content: [block] }],
+    });
+    expect(request.messages[0]?.content[0]).toMatchObject({
+      type: "anthropicNative",
+      data: { input: null },
+    });
   }
 });
 
