@@ -103,6 +103,31 @@ test("a server tool error result is carried, not rejected", () => {
   });
 });
 
+test("text citations survive request-history replay", () => {
+  const citation = {
+    type: "char_location",
+    cited_text: "source",
+    document_index: 0,
+    document_title: "doc",
+    start_char_index: 1,
+    end_char_index: 7,
+  };
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "answer", citations: [citation] }],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content[0]).toEqual({
+    type: "text",
+    text: "answer",
+    citations: [citation],
+  });
+});
+
 test("redacted thinking survives instead of being flattened to empty text", () => {
   const req = parseAnthropicRequest({
     ...minimal,
@@ -115,6 +140,43 @@ test("redacted thinking survives instead of being flattened to empty text", () =
     blockType: "redacted_thinking",
     data: { data: "EncryptedBlob" },
   });
+});
+
+test("current request-history native block types survive ingress", () => {
+  const blocks = [
+    {
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: "doc" },
+      title: "title",
+    },
+    { type: "mid_conv_system", content: [{ type: "text", text: "instruction" }] },
+    { type: "tool_addition", tool: { type: "tool_reference", tool_name: "lookup" } },
+    { type: "tool_removal", tool: { type: "tool_reference", tool_name: "lookup" } },
+    { type: "fallback", to: { model: "claude-sonnet-5" }, trigger: null },
+  ];
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [{ role: "assistant", content: blocks }],
+  });
+  expect(
+    req.messages[0]?.content.map((content) =>
+      content.type === "anthropicNative" ? content.blockType : content.type,
+    ),
+  ).toEqual(blocks.map((block) => block.type));
+});
+
+test("response-only native blocks stay illegal in request history", () => {
+  const message = reason({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "advisor_result", text: "answer" }],
+      },
+    ],
+  });
+  expect(message).toContain("messages.0.content.0.type");
+  expect(message).toContain("not legal in request history");
 });
 
 test("a native block keeps its cache breakpoint as a canonical field", () => {
@@ -150,6 +212,68 @@ test("an unknown block type is refused with its path", () => {
   });
   expect(message).toContain("messages.0.content.0");
   expect(message).toContain("quantum_result");
+});
+
+test("native blocks validate required top-level fields at precise paths", () => {
+  for (const [block, field] of [
+    [{ type: "server_tool_use", name: "web_search", input: {} }, "id"],
+    [{ type: "web_search_tool_result", content: [] }, "tool_use_id"],
+    [{ type: "document" }, "source"],
+    [{ type: "mid_conv_system" }, "content"],
+    [{ type: "tool_addition" }, "tool"],
+    [{ type: "fallback" }, "to"],
+  ] as const) {
+    expect(reason({ ...minimal, messages: [{ role: "assistant", content: [block] }] })).toContain(
+      `messages.0.content.0.${field}`,
+    );
+  }
+});
+
+test("native blocks reject malformed cache control instead of discarding it", () => {
+  const message = reason({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "server_tool_use",
+            id: "srvtoolu_1",
+            name: "web_search",
+            input: {},
+            cache_control: { type: "forever" },
+          },
+        ],
+      },
+    ],
+  });
+  expect(message).toContain("messages.0.content.0.cache_control.type");
+});
+
+test("native block validation preserves nested provider payloads", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "web_search_tool_result",
+            tool_use_id: "srvtoolu_1",
+            content: [{ type: "future_nested_result", opaque: { x: 1 } }],
+            caller: { type: "code_execution_20260521", tool_id: "srvtoolu_2" },
+          },
+        ],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content[0]).toMatchObject({
+    type: "anthropicNative",
+    data: {
+      content: [{ type: "future_nested_result", opaque: { x: 1 } }],
+      caller: { type: "code_execution_20260521", tool_id: "srvtoolu_2" },
+    },
+  });
 });
 
 test("a malformed native block is refused with its path", () => {

@@ -107,7 +107,8 @@ export type Delta =
    * portable `toolUse` accumulator, which is what would send its input onward
    * as a custom function call.
    */
-  | { type: "anthropicNativeJson"; partial: string };
+  | { type: "anthropicNativeJson"; partial: string }
+  | { type: "anthropicNative"; deltaType: string; data: Record<string, unknown> };
 
 /**
  * Usage rides on `end` rather than being its own event.
@@ -135,7 +136,7 @@ export type CollectedResponse = {
 };
 
 type Accum =
-  | { kind: "text"; text: string }
+  | { kind: "text"; text: string; citations: unknown[] }
   | { kind: "thinking"; text: string; signature?: string }
   | { kind: "toolUse"; id: string; name: string; json: string }
   | {
@@ -143,6 +144,7 @@ type Accum =
       blockType: string;
       data: Record<string, unknown>;
       json: string;
+      deltas: Array<{ deltaType: string; data: Record<string, unknown> }>;
     };
 
 /**
@@ -181,8 +183,9 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
                     blockType: ev.block.blockType,
                     data: ev.block.data,
                     json: "",
+                    deltas: [],
                   }
-                : { kind: "text", text: "" },
+                : { kind: "text", text: "", citations: [] },
         );
         break;
       case "blockDelta": {
@@ -199,6 +202,11 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
           acc.json += ev.delta.partial;
         else if (ev.delta.type === "anthropicNativeJson" && acc.kind === "anthropicNative")
           acc.json += ev.delta.partial;
+        else if (ev.delta.type === "anthropicNative") {
+          if (acc.kind === "anthropicNative") acc.deltas.push(ev.delta);
+          else if (acc.kind === "text" && ev.delta.deltaType === "citations_delta")
+            acc.citations.push(ev.delta.data.citation);
+        }
         break;
       }
       case "end":
@@ -213,22 +221,25 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
   const content: ContentBlock[] = [...blocks.entries()]
     .sort(([a], [b]) => a - b)
     .map(([, acc]): ContentBlock => {
-      if (acc.kind === "text") return { type: "text", text: acc.text };
+      if (acc.kind === "text")
+        return {
+          type: "text",
+          text: acc.text,
+          ...(acc.citations.length === 0 ? {} : { citations: acc.citations }),
+        };
       if (acc.kind === "thinking")
         return {
           type: "thinking",
           text: acc.text,
           ...(acc.signature === undefined ? {} : { signature: acc.signature }),
         };
-      if (acc.kind === "anthropicNative")
-        return {
-          type: "anthropicNative",
-          blockType: acc.blockType,
-          // Deltas only ever fill `input` — that is the one field Anthropic
-          // streams incrementally on a native block. A block that got none
-          // keeps the payload it opened with, untouched.
-          data: acc.json === "" ? acc.data : { ...acc.data, input: parseJson(acc.json) },
-        };
+      if (acc.kind === "anthropicNative") {
+        let data = acc.json === "" ? acc.data : { ...acc.data, input: parseJson(acc.json) };
+        for (const delta of acc.deltas) {
+          if (delta.deltaType === "compaction_delta") data = { ...data, ...delta.data };
+        }
+        return { type: "anthropicNative", blockType: acc.blockType, data };
+      }
       return { type: "toolUse", id: acc.id, name: acc.name, input: parseJson(acc.json) };
     });
 

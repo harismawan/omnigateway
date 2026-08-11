@@ -45,6 +45,22 @@ test("each version pins the fixed name Anthropic pairs with it", () => {
   expect(anthropicToolSpec("mcp_toolset")?.name).toBeUndefined();
 });
 
+test("latest tool versions expose their exact version-specific options", () => {
+  expect(anthropicToolSpec("web_search_20260318")).toMatchObject({
+    family: "webSearch",
+    name: "web_search",
+  });
+  expect(anthropicToolSpec("web_search_20260318")?.optional).toContain("response_inclusion");
+  expect(anthropicToolSpec("web_fetch_20260318")?.optional).toEqual(
+    expect.arrayContaining(["response_inclusion", "use_cache"]),
+  );
+  expect(anthropicToolSpec("code_execution_20260521")).toMatchObject({
+    family: "codeExecution",
+    name: "code_execution",
+  });
+  expect(anthropicToolSpec("advisor_20260301")?.optional).toContain("max_tokens");
+});
+
 test("version-specific options are restricted to the versions that define them", () => {
   expect(anthropicToolSpec("computer_20251124")?.optional).toContain("enable_zoom");
   expect(anthropicToolSpec("computer_20250124")?.optional).not.toContain("enable_zoom");
@@ -88,6 +104,11 @@ test("native block types cover server tool use and every documented result famil
     "tool_reference",
     "advisor_tool_result",
     "container_upload",
+    "document",
+    "mid_conv_system",
+    "tool_addition",
+    "tool_removal",
+    "fallback",
     "redacted_thinking",
   ]) {
     expect(ANTHROPIC_NATIVE_BLOCK_TYPES.has(t)).toBe(true);

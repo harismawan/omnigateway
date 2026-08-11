@@ -147,6 +147,54 @@ test("a field belonging to another version is refused", () => {
   ).toContain("use_cache");
 });
 
+test("latest tool versions validate and preserve new fields", () => {
+  const req = parseAnthropicRequest({
+    ...minimal,
+    tools: [
+      {
+        type: "web_search_20260318",
+        name: "web_search",
+        response_inclusion: "excluded",
+        allowed_callers: ["code_execution_20260521"],
+      },
+      {
+        type: "web_fetch_20260318",
+        name: "web_fetch",
+        response_inclusion: "full",
+        use_cache: false,
+      },
+      { type: "code_execution_20260521", name: "code_execution" },
+      { type: "advisor_20260301", name: "advisor", model: "claude-opus-4", max_tokens: 512 },
+    ],
+  });
+  expect(
+    req.tools?.map((tool) => ({
+      type: tool.provider === "anthropic" ? tool.type : "",
+      wire: tool.provider === "anthropic" ? tool.wire : {},
+    })),
+  ).toEqual([
+    {
+      type: "web_search_20260318",
+      wire: {
+        response_inclusion: "excluded",
+        allowed_callers: ["code_execution_20260521"],
+      },
+    },
+    { type: "web_fetch_20260318", wire: { response_inclusion: "full", use_cache: false } },
+    { type: "code_execution_20260521", wire: {} },
+    { type: "advisor_20260301", wire: { model: "claude-opus-4", max_tokens: 512 } },
+  ]);
+});
+
+test("response inclusion rejects values outside the exact enum", () => {
+  expect(
+    reason({
+      ...minimal,
+      tools: [{ type: "web_search_20260318", name: "web_search", response_inclusion: "summary" }],
+    }),
+  ).toContain("tools.0.response_inclusion");
+});
+
 test("the version that defines an option accepts it", () => {
   expect(
     parseAnthropicRequest({

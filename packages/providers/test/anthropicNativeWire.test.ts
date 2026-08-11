@@ -35,6 +35,65 @@ test("emits an Anthropic-defined tool with its exact version and options", () =>
   ]);
 });
 
+test("emits latest tool versions and options without normalization", () => {
+  const { body } = toWire(
+    {
+      ...base,
+      tools: [
+        {
+          provider: "anthropic",
+          family: "webSearch",
+          type: "web_search_20260318",
+          name: "web_search",
+          wire: {
+            response_inclusion: "excluded",
+            allowed_callers: ["code_execution_20260521"],
+          },
+        },
+        {
+          provider: "anthropic",
+          family: "webFetch",
+          type: "web_fetch_20260318",
+          name: "web_fetch",
+          wire: { response_inclusion: "full", use_cache: false },
+        },
+        {
+          provider: "anthropic",
+          family: "codeExecution",
+          type: "code_execution_20260521",
+          name: "code_execution",
+          wire: {},
+        },
+        {
+          provider: "anthropic",
+          family: "advisor",
+          type: "advisor_20260301",
+          name: "advisor",
+          wire: { model: "claude-opus-4", max_tokens: 512 },
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(body.tools).toEqual([
+    {
+      type: "web_search_20260318",
+      name: "web_search",
+      response_inclusion: "excluded",
+      allowed_callers: ["code_execution_20260521"],
+    },
+    {
+      type: "web_fetch_20260318",
+      name: "web_fetch",
+      response_inclusion: "full",
+      use_cache: false,
+    },
+    { type: "code_execution_20260521", name: "code_execution" },
+    { type: "advisor_20260301", name: "advisor", model: "claude-opus-4", max_tokens: 512 },
+  ]);
+});
+
 test("a toolset entry carries no name", () => {
   const { body } = toWire(
     {
@@ -105,6 +164,34 @@ test("carries Anthropic-only custom tool options through", () => {
   expect(body.tools).toEqual([
     { name: "a", input_schema: { type: "object" }, strict: true, defer_loading: true },
   ]);
+});
+
+test("replays citations collected on text blocks", () => {
+  const citation = {
+    type: "char_location",
+    cited_text: "source",
+    document_index: 0,
+    document_title: "doc",
+    start_char_index: 1,
+    end_char_index: 7,
+  };
+  const { body } = toWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "answer", citations: [citation] }],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(body.messages[0]).toEqual({
+    role: "assistant",
+    content: [{ type: "text", text: "answer", citations: [citation] }],
+  });
 });
 
 test("replays a native history block as itself, not as a function call", () => {

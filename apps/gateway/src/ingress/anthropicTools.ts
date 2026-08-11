@@ -44,6 +44,7 @@ const TOOL_FIELDS: Readonly<Record<string, z.ZodType>> = {
   citations: z.object({ enabled: z.boolean() }).nullable(),
   max_content_tokens: z.number().int().positive().nullable(),
   use_cache: z.boolean().nullable(),
+  response_inclusion: z.enum(["full", "excluded"]).nullable(),
 
   display_width_px: z.number().int().positive(),
   display_height_px: z.number().int().positive(),
@@ -54,6 +55,7 @@ const TOOL_FIELDS: Readonly<Record<string, z.ZodType>> = {
 
   model: z.string().min(1),
   caching: cacheControlSchema.nullable(),
+  max_tokens: z.number().int().positive().nullable(),
 
   mcp_server_name: z.string().min(1),
   configs: z.record(z.string(), z.unknown()).nullable(),

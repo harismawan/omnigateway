@@ -122,7 +122,9 @@ export async function* anthropicStream(
               ? { type: "thinking_delta", thinking: d.text }
               : d.type === "thinkingSignature"
                 ? { type: "signature_delta", signature: d.signature }
-                : { type: "input_json_delta", partial_json: d.partial };
+                : d.type === "anthropicNative"
+                  ? { type: d.deltaType, ...d.data }
+                  : { type: "input_json_delta", partial_json: d.partial };
         yield frame("content_block_delta", {
           type: "content_block_delta",
           index: outIndex.get(event.index) ?? event.index,
@@ -180,7 +182,11 @@ export function anthropicResponse(collected: CollectedResponse, requestId: strin
       .map((b) => {
         switch (b.type) {
           case "text":
-            return { type: "text", text: b.text };
+            return {
+              type: "text",
+              text: b.text,
+              ...(b.citations === undefined ? {} : { citations: b.citations }),
+            };
           case "thinking":
             return { type: "thinking", thinking: b.text, signature: b.signature };
           case "toolUse":

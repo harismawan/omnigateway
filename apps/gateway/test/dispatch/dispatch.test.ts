@@ -617,6 +617,77 @@ test("collects the stream for a non-streaming request", async () => {
   store.close();
 });
 
+test("Anthropic-native capability exclusions omit credential IDs from degradations", async () => {
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "sensitive-openai-id",
+    provider: "openai",
+    label: "openai",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "synthetic-key",
+    idToken: null,
+  });
+  await store.config.putModel({
+    id: "native",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "openai",
+        model: "gpt-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  const outcome = await dispatch(
+    {
+      ...req,
+      model: "native",
+      tools: [
+        {
+          provider: "anthropic",
+          family: "webSearch",
+          type: "web_search_20260318",
+          name: "web_search",
+          wire: {},
+        },
+      ],
+    },
+    deps(
+      store,
+      stubAdapter(() => textStream("hi")),
+    ),
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(outcome.log().degradations).toContain("excluded:capability:anthropicTools");
+  expect(outcome.log().degradations.join(" ")).not.toContain("sensitive-openai-id");
+  store.close();
+});
+
 test("the log records the excluded candidates and their reasons", async () => {
   const store = await seeded(2);
   await store.credentials.update("c1", { enabled: false });

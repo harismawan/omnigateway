@@ -10,7 +10,13 @@ export type ProviderId = "anthropic" | "openai" | "kimi";
  */
 export type CacheControl = { type: "ephemeral"; ttl?: "5m" | "1h" };
 
-export type TextBlock = { type: "text"; text: string; cacheControl?: CacheControl };
+export type TextBlock = {
+  type: "text";
+  text: string;
+  cacheControl?: CacheControl;
+  /** Anthropic citation payloads, preserved verbatim when present. */
+  citations?: unknown[];
+};
 export type ImageBlock = {
   type: "image";
   mediaType: string;

@@ -40,6 +40,8 @@ const KNOWN_DELTAS: ReadonlySet<string> = new Set([
   "thinking_delta",
   "signature_delta",
   "input_json_delta",
+  "citations_delta",
+  "compaction_delta",
 ]);
 
 const ERROR_TYPE: Readonly<Record<string, ErrorCode>> = {
@@ -80,6 +82,9 @@ type AnthropicEvent = {
     thinking?: string;
     signature?: string;
     partial_json?: string;
+    citation?: unknown;
+    content?: string;
+    encrypted_content?: string;
     stop_reason?: string;
   };
   usage?: { input_tokens?: number; output_tokens?: number };
@@ -203,6 +208,31 @@ export async function* decodeAnthropic(
               ? { type: "anthropicNativeJson", partial: delta.partial_json ?? "" }
               : { type: "toolJson", partial: delta.partial_json ?? "" },
           };
+        else if (delta.type === "citations_delta")
+          yield {
+            type: "blockDelta",
+            index,
+            delta: {
+              type: "anthropicNative",
+              deltaType: delta.type,
+              data: { citation: delta.citation },
+            },
+          };
+        else if (delta.type === "compaction_delta")
+          yield {
+            type: "blockDelta",
+            index,
+            delta: {
+              type: "anthropicNative",
+              deltaType: delta.type,
+              data: {
+                ...(delta.content === undefined ? {} : { content: delta.content }),
+                ...(delta.encrypted_content === undefined
+                  ? {}
+                  : { encrypted_content: delta.encrypted_content }),
+              },
+            },
+          };
         else if (delta.type === undefined || !KNOWN_DELTAS.has(delta.type)) {
           yield protocolError(`unrecognized Anthropic content block delta "${String(delta.type)}"`);
           return;
@@ -217,7 +247,14 @@ export async function* decodeAnthropic(
 
       case "message_delta": {
         const reason = d.delta?.stop_reason;
-        if (typeof reason === "string") stopReason = STOP_REASON[reason] ?? "endTurn";
+        if (typeof reason === "string") {
+          const mapped = STOP_REASON[reason];
+          if (mapped === undefined) {
+            yield protocolError(`unrecognized Anthropic stop reason "${reason}"`);
+            return;
+          }
+          stopReason = mapped;
+        }
         inputTokens = d.usage?.input_tokens ?? inputTokens;
         outputTokens = d.usage?.output_tokens ?? outputTokens;
         break;

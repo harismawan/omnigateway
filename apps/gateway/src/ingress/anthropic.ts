@@ -23,6 +23,7 @@ const textBlock = z.object({
   type: z.literal("text"),
   text: z.string(),
   cache_control: cacheControl.optional(),
+  citations: z.array(z.unknown()).optional(),
 });
 
 const imageBlock = z.object({
@@ -64,6 +65,84 @@ const block = z.discriminatedUnion("type", [
   toolUseBlock,
   toolResultBlock,
 ]);
+
+const nativeBase = {
+  cache_control: cacheControl.nullable().optional(),
+};
+
+const nativeSchemas: Readonly<Record<string, z.ZodType<Record<string, unknown>>>> = {
+  server_tool_use: z
+    .object({
+      type: z.literal("server_tool_use"),
+      id: z.string(),
+      name: z.string(),
+      input: z.record(z.string(), z.unknown()),
+      ...nativeBase,
+    })
+    .passthrough(),
+  web_search_tool_result: nativeResult("web_search_tool_result"),
+  web_fetch_tool_result: nativeResult("web_fetch_tool_result"),
+  code_execution_tool_result: nativeResult("code_execution_tool_result"),
+  bash_code_execution_tool_result: nativeResult("bash_code_execution_tool_result"),
+  text_editor_code_execution_tool_result: nativeResult("text_editor_code_execution_tool_result"),
+  tool_search_tool_result: nativeResult("tool_search_tool_result"),
+  advisor_tool_result: nativeResult("advisor_tool_result"),
+  mcp_tool_use: z
+    .object({
+      type: z.literal("mcp_tool_use"),
+      id: z.string(),
+      name: z.string(),
+      server_name: z.string(),
+      input: z.record(z.string(), z.unknown()),
+      ...nativeBase,
+    })
+    .passthrough(),
+  mcp_tool_result: z
+    .object({ type: z.literal("mcp_tool_result"), tool_use_id: z.string(), ...nativeBase })
+    .passthrough(),
+  container_upload: z
+    .object({ type: z.literal("container_upload"), file_id: z.string(), ...nativeBase })
+    .passthrough(),
+  compaction: z.object({ type: z.literal("compaction"), ...nativeBase }).passthrough(),
+  search_result: z
+    .object({
+      type: z.literal("search_result"),
+      source: z.string(),
+      title: z.string(),
+      content: z.array(z.unknown()),
+      ...nativeBase,
+    })
+    .passthrough(),
+  redacted_thinking: z
+    .object({ type: z.literal("redacted_thinking"), data: z.string() })
+    .passthrough(),
+  document: z
+    .object({ type: z.literal("document"), source: z.object({}).passthrough(), ...nativeBase })
+    .passthrough(),
+  mid_conv_system: z
+    .object({ type: z.literal("mid_conv_system"), content: z.array(z.unknown()), ...nativeBase })
+    .passthrough(),
+  tool_addition: nativeToolChange("tool_addition"),
+  tool_removal: nativeToolChange("tool_removal"),
+  fallback: z.object({ type: z.literal("fallback"), to: z.object({}).passthrough() }).passthrough(),
+};
+
+function nativeResult(type: string): z.ZodType<Record<string, unknown>> {
+  return z
+    .object({
+      type: z.literal(type),
+      tool_use_id: z.string(),
+      content: z.unknown(),
+      ...nativeBase,
+    })
+    .passthrough();
+}
+
+function nativeToolChange(type: string): z.ZodType<Record<string, unknown>> {
+  return z
+    .object({ type: z.literal(type), tool: z.object({}).passthrough(), ...nativeBase })
+    .passthrough();
+}
 
 /**
  * `system` here is Anthropic's mid-conversation system message, not the
@@ -146,7 +225,12 @@ function flattenToolResult(content: string | unknown[] | undefined): string {
 function toIrBlock(b: z.infer<typeof block>): ContentBlock {
   switch (b.type) {
     case "text":
-      return { type: "text", text: b.text, ...irCacheControl(b.cache_control) };
+      return {
+        type: "text",
+        text: b.text,
+        ...(b.citations === undefined ? {} : { citations: b.citations }),
+        ...irCacheControl(b.cache_control),
+      };
     case "image":
       return {
         type: "image",
@@ -193,15 +277,30 @@ function readBlock(raw: unknown, path: string): ContentBlock {
   if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
     const type = (raw as { type?: unknown }).type;
     if (typeof type === "string" && ANTHROPIC_NATIVE_BLOCK_TYPES.has(type)) {
-      const { type: _type, cache_control, ...data } = raw as Record<string, unknown>;
-      const control = cacheControl.safeParse(cache_control);
+      const nativeSchema = nativeSchemas[type];
+      if (nativeSchema === undefined) {
+        throw new GatewayError(
+          "BAD_REQUEST",
+          `${path}.type: block type "${type}" is not legal in request history`,
+        );
+      }
+      const parsed = nativeSchema.safeParse(raw);
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        const suffix = issue?.path.length ? `.${issue.path.join(".")}` : "";
+        throw new GatewayError(
+          "BAD_REQUEST",
+          `${path}${suffix}: ${issue?.message ?? "invalid native content block"}`,
+        );
+      }
+      const { type: _type, cache_control, ...data } = parsed.data;
       return {
         type: "anthropicNative",
         blockType: type,
         data,
-        ...(cache_control === undefined || cache_control === null || !control.success
+        ...(cache_control === undefined || cache_control === null
           ? {}
-          : irCacheControl(control.data)),
+          : irCacheControl(cache_control as z.infer<typeof cacheControl>)),
       };
     }
   }

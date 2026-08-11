@@ -135,6 +135,37 @@ test("a server tool failure stays a content block, not a transport error", async
   expect(events.at(-1)?.type).toBe("end");
 });
 
+test("unknown non-null stop reasons fail as non-retryable protocol errors", async () => {
+  const events = await run(
+    start,
+    {
+      event: "message_delta",
+      data: JSON.stringify({ delta: { stop_reason: "teleport" }, usage: { output_tokens: 3 } }),
+    },
+    stop,
+  );
+  expect(events.at(-1)).toMatchObject({
+    type: "error",
+    code: "UPSTREAM",
+    retryable: false,
+  });
+  const last = events.at(-1);
+  expect(last?.type === "error" ? last.message : "").toContain("teleport");
+  expect(events.some((event) => event.type === "end")).toBe(false);
+});
+
+test("null stop reason remains allowed until a later terminal reason", async () => {
+  const events = await run(
+    start,
+    {
+      event: "message_delta",
+      data: JSON.stringify({ delta: { stop_reason: null }, usage: { output_tokens: 1 } }),
+    },
+    stop,
+  );
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+});
+
 test("pause_turn decodes as its own stop reason", async () => {
   const events = await run(
     start,
@@ -169,6 +200,60 @@ test("an unrecognized SSE event type fails visibly", async () => {
   const err = events.find((e) => e.type === "error");
   expect(err).toMatchObject({ type: "error", code: "UPSTREAM" });
   expect(err && "message" in err ? err.message : "").toContain("message_teleport");
+});
+
+test("citation and compaction deltas preserve their canonical payloads", async () => {
+  const citation = {
+    type: "char_location",
+    cited_text: "source",
+    document_index: 0,
+    document_title: "doc",
+    start_char_index: 1,
+    end_char_index: 7,
+  };
+  const events = await run(
+    start,
+    {
+      event: "content_block_start",
+      data: JSON.stringify({ index: 0, content_block: { type: "text", text: "answer" } }),
+    },
+    {
+      event: "content_block_delta",
+      data: JSON.stringify({ index: 0, delta: { type: "citations_delta", citation } }),
+    },
+    { event: "content_block_stop", data: JSON.stringify({ index: 0 }) },
+    {
+      event: "content_block_start",
+      data: JSON.stringify({ index: 1, content_block: { type: "compaction", content: "" } }),
+    },
+    {
+      event: "content_block_delta",
+      data: JSON.stringify({
+        index: 1,
+        delta: {
+          type: "compaction_delta",
+          content: "summary",
+          encrypted_content: "opaque",
+        },
+      }),
+    },
+    { event: "content_block_stop", data: JSON.stringify({ index: 1 }) },
+    stop,
+  );
+  expect(events).toContainEqual({
+    type: "blockDelta",
+    index: 0,
+    delta: { type: "anthropicNative", deltaType: "citations_delta", data: { citation } },
+  });
+  expect(events).toContainEqual({
+    type: "blockDelta",
+    index: 1,
+    delta: {
+      type: "anthropicNative",
+      deltaType: "compaction_delta",
+      data: { content: "summary", encrypted_content: "opaque" },
+    },
+  });
 });
 
 test("an unrecognized block delta type fails visibly", async () => {

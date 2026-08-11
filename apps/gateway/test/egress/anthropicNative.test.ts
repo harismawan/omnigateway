@@ -107,6 +107,61 @@ test("non-streaming collection returns the same block structures", () => {
   expect(body.stop_reason).toBe("pause_turn");
 });
 
+test("citation and compaction deltas survive collection and streaming egress", async () => {
+  const citation = {
+    type: "char_location",
+    cited_text: "source",
+    document_index: 0,
+    document_title: "doc",
+    start_char_index: 1,
+    end_char_index: 7,
+  };
+  const events: StreamEvent[] = [
+    { type: "start", id: "m", model: "claude-opus-4" },
+    { type: "blockStart", index: 0, block: { type: "text" } },
+    {
+      type: "blockDelta",
+      index: 0,
+      delta: { type: "anthropicNative", deltaType: "citations_delta", data: { citation } },
+    },
+    { type: "blockEnd", index: 0 },
+    {
+      type: "blockStart",
+      index: 1,
+      block: { type: "anthropicNative", blockType: "compaction", data: { content: "" } },
+    },
+    {
+      type: "blockDelta",
+      index: 1,
+      delta: {
+        type: "anthropicNative",
+        deltaType: "compaction_delta",
+        data: { content: "summary", encrypted_content: "opaque" },
+      },
+    },
+    { type: "blockEnd", index: 1 },
+    { type: "end", stopReason: "endTurn", usage },
+  ];
+  const streamed = await frames(...events);
+  expect(streamed).toContainEqual({
+    event: "content_block_delta",
+    data: { type: "content_block_delta", index: 0, delta: { type: "citations_delta", citation } },
+  });
+  expect(streamed).toContainEqual({
+    event: "content_block_delta",
+    data: {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "compaction_delta", content: "summary", encrypted_content: "opaque" },
+    },
+  });
+  const body = anthropicResponse(collect(events), "req_1") as { content: unknown[] };
+  expect(body.content).toEqual([
+    { type: "text", text: "", citations: [citation] },
+    { type: "compaction", content: "summary", encrypted_content: "opaque" },
+  ]);
+});
+
 test("a suppressed thinking block still renumbers around a native one", async () => {
   const out = await frames(
     { type: "start", id: "m", model: "x" },

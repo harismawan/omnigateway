@@ -52,6 +52,12 @@ export const ANTHROPIC_TOOL_SPECS: Readonly<Record<string, AnthropicToolSpec>> =
     required: [],
     optional: [...COMMON, ...searchDomains, "user_location"],
   },
+  web_search_20260318: {
+    family: "webSearch",
+    name: "web_search",
+    required: [],
+    optional: [...COMMON, ...searchDomains, "user_location", "response_inclusion"],
+  },
 
   web_fetch_20250910: {
     family: "webFetch",
@@ -71,6 +77,19 @@ export const ANTHROPIC_TOOL_SPECS: Readonly<Record<string, AnthropicToolSpec>> =
     required: [],
     optional: [...COMMON, ...searchDomains, "citations", "max_content_tokens", "use_cache"],
   },
+  web_fetch_20260318: {
+    family: "webFetch",
+    name: "web_fetch",
+    required: [],
+    optional: [
+      ...COMMON,
+      ...searchDomains,
+      "citations",
+      "max_content_tokens",
+      "use_cache",
+      "response_inclusion",
+    ],
+  },
 
   code_execution_20250522: {
     family: "codeExecution",
@@ -85,6 +104,12 @@ export const ANTHROPIC_TOOL_SPECS: Readonly<Record<string, AnthropicToolSpec>> =
     optional: [...COMMON],
   },
   code_execution_20260120: {
+    family: "codeExecution",
+    name: "code_execution",
+    required: [],
+    optional: [...COMMON],
+  },
+  code_execution_20260521: {
     family: "codeExecution",
     name: "code_execution",
     required: [],
@@ -186,7 +211,7 @@ export const ANTHROPIC_TOOL_SPECS: Readonly<Record<string, AnthropicToolSpec>> =
     family: "advisor",
     name: "advisor",
     required: ["model"],
-    optional: [...COMMON, "caching", "max_uses"],
+    optional: [...COMMON, "caching", "max_uses", "max_tokens"],
   },
 
   mcp_toolset: {
@@ -206,6 +231,7 @@ export const ANTHROPIC_TOOL_CALLERS = [
   "direct",
   "code_execution_20250825",
   "code_execution_20260120",
+  "code_execution_20260521",
 ] as const;
 
 /**
@@ -252,5 +278,10 @@ export const ANTHROPIC_NATIVE_BLOCK_TYPES: ReadonlySet<string> = new Set([
   "container_upload",
   "compaction",
   "search_result",
+  "document",
+  "mid_conv_system",
+  "tool_addition",
+  "tool_removal",
+  "fallback",
   "redacted_thinking",
 ]);

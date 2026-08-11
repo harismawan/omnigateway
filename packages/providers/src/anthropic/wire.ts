@@ -59,7 +59,12 @@ function encodeBlock(b: ContentBlock): unknown {
   const cache = wireCacheControl(cacheControlOf(b));
   switch (b.type) {
     case "text":
-      return { type: "text", text: b.text, ...cache };
+      return {
+        type: "text",
+        text: b.text,
+        ...(b.citations === undefined ? {} : { citations: b.citations }),
+        ...cache,
+      };
     case "image":
       return {
         type: "image",
