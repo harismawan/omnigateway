@@ -447,6 +447,38 @@ test("mid-conversation system block preserves nested text and cache markers", ()
   expect(body.messages[1]).toEqual({ role: "system", content: [block] });
 });
 
+test("mid-conversation system block preserves null nested text cache control", () => {
+  const block = {
+    type: "mid_conv_system",
+    content: [{ type: "text", text: "operator instruction", cache_control: null }],
+  };
+  const request = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "before" },
+      { role: "system", content: [block] },
+    ],
+  });
+  const { body } = toWire(request, "claude-opus-5", { oauth: false });
+  expect(body.messages[1]).toEqual({ role: "system", content: [block] });
+});
+
+test("mid-conversation system block preserves null nested text citations", () => {
+  const block = {
+    type: "mid_conv_system",
+    content: [{ type: "text", text: "operator instruction", citations: null }],
+  };
+  const request = parseAnthropicRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "before" },
+      { role: "system", content: [block] },
+    ],
+  });
+  const { body } = toWire(request, "claude-opus-5", { oauth: false });
+  expect(body.messages[1]).toEqual({ role: "system", content: [block] });
+});
+
 test("mid-conversation system block supports beta nested tool changes", () => {
   const block = {
     type: "mid_conv_system",

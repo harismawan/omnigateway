@@ -26,6 +26,11 @@ const textBlock = z.object({
   citations: z.array(z.unknown()).optional(),
 });
 
+const midConversationTextBlock = textBlock.extend({
+  cache_control: cacheControl.nullable().optional(),
+  citations: z.array(z.unknown()).nullable().optional(),
+});
+
 const imageBlock = z.object({
   type: z.literal("image"),
   source: z.object({
@@ -125,7 +130,9 @@ const toolRemoval = nativeToolChange("tool_removal");
 const midConversationSystem = z
   .object({
     type: z.literal("mid_conv_system"),
-    content: z.array(z.discriminatedUnion("type", [textBlock.strict(), toolAddition, toolRemoval])),
+    content: z.array(
+      z.discriminatedUnion("type", [midConversationTextBlock.strict(), toolAddition, toolRemoval]),
+    ),
     ...nativeBase,
   })
   .strict();
