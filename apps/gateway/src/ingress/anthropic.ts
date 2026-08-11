@@ -7,7 +7,9 @@ import type {
   ToolChoice,
 } from "@omni/ir";
 import { GatewayError, validateRequest } from "@omni/ir";
+import { ANTHROPIC_NATIVE_BLOCK_TYPES } from "@omni/providers";
 import { z } from "zod";
+import { mcpServerNames, parseTools } from "./anthropicTools.ts";
 import { normalizeClientModel } from "./model.ts";
 import {
   cacheControlSchema as cacheControl,
@@ -71,7 +73,10 @@ const block = z.discriminatedUnion("type", [
  */
 const message = z.object({
   role: z.enum(["user", "assistant", "system"]),
-  content: z.union([z.string(), z.array(block)]),
+  // Blocks stay opaque here and are dispatched below: the portable five are
+  // parsed by the union above, and Anthropic's own block types are recognised
+  // by discriminator and carried whole.
+  content: z.union([z.string(), z.array(z.unknown())]),
 });
 
 const schema = z.object({
@@ -82,16 +87,10 @@ const schema = z.object({
   temperature: z.number().optional(),
   stop_sequences: z.array(z.string()).optional(),
   stream: z.boolean().optional(),
-  tools: z
-    .array(
-      z.object({
-        name: z.string(),
-        description: z.string().optional(),
-        input_schema: z.record(z.string(), z.unknown()),
-        cache_control: cacheControl.optional(),
-      }),
-    )
-    .optional(),
+  // Read as opaque entries and validated per family in `anthropicTools.ts`:
+  // the legal fields depend on the exact versioned `type`, which a single
+  // object schema cannot express without flattening every version together.
+  tools: z.array(z.unknown()).optional(),
   tool_choice: z
     .union([
       z.object({ type: z.enum(["auto", "any", "none"]) }),
@@ -180,6 +179,53 @@ function toIrBlock(b: z.infer<typeof block>): ContentBlock {
   }
 }
 
+/**
+ * Reads one content block, at a path precise enough to act on.
+ *
+ * Anthropic's own block types are recognised before the portable union is
+ * tried, and their payloads are kept whole — a `web_search_tool_result` carries
+ * citations, encrypted page content and error objects this gateway has no
+ * schema for and no reason to rewrite. A type in neither set is refused rather
+ * than dropped: a silently discarded block changes the conversation the model
+ * sees, and the client has no way to tell.
+ */
+function readBlock(raw: unknown, path: string): ContentBlock {
+  if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+    const type = (raw as { type?: unknown }).type;
+    if (typeof type === "string" && ANTHROPIC_NATIVE_BLOCK_TYPES.has(type)) {
+      const { type: _type, cache_control, ...data } = raw as Record<string, unknown>;
+      const control = cacheControl.safeParse(cache_control);
+      return {
+        type: "anthropicNative",
+        blockType: type,
+        data,
+        ...(cache_control === undefined || cache_control === null || !control.success
+          ? {}
+          : irCacheControl(control.data)),
+      };
+    }
+  }
+  const parsed = block.safeParse(raw);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    // A block whose discriminator is simply unrecognised is reported by name.
+    // Zod's own message lists the five portable types, which reads as though
+    // the native ones were never supported at all.
+    if (issue?.code === "invalid_union" || issue?.path.at(-1) === "type") {
+      const type = (raw as { type?: unknown } | null)?.type;
+      if (typeof type === "string") {
+        throw new GatewayError("BAD_REQUEST", `${path}.type: unrecognized block type "${type}"`);
+      }
+    }
+    const suffix = issue?.path.length ? `.${issue.path.join(".")}` : "";
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `${path}${suffix}: ${issue?.message ?? "invalid content block"}`,
+    );
+  }
+  return toIrBlock(parsed.data);
+}
+
 function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): ToolChoice {
   return c.type === "tool" ? { type: "tool", name: c.name } : { type: c.type };
 }
@@ -239,12 +285,12 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
 
   const parsed = parseOrThrow(schema, body);
 
-  const messages: Message[] = parsed.messages.map((m) => ({
+  const messages: Message[] = parsed.messages.map((m, i) => ({
     role: m.role,
     content:
       typeof m.content === "string"
         ? [{ type: "text", text: m.content }]
-        : m.content.map(toIrBlock),
+        : m.content.map((b, j) => readBlock(b, `messages.${i}.content.${j}`)),
   }));
 
   const system =
@@ -270,12 +316,7 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
   if (parsed.temperature !== undefined) request.temperature = parsed.temperature;
   if (parsed.stop_sequences !== undefined) request.stopSequences = parsed.stop_sequences;
   if (parsed.tools !== undefined) {
-    request.tools = parsed.tools.map((t) => ({
-      name: t.name,
-      ...(t.description !== undefined && { description: t.description }),
-      inputSchema: t.input_schema,
-      ...irCacheControl(t.cache_control),
-    }));
+    request.tools = parseTools(parsed.tools, mcpServerNames(body as Record<string, unknown>));
   }
   if (parsed.tool_choice !== undefined) request.toolChoice = toIrToolChoice(parsed.tool_choice);
   // `output_config` stays out of KNOWN so the whole object still reaches

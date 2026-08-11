@@ -1,7 +1,22 @@
 import type { ErrorCode } from "./errors.ts";
 import type { ContentBlock } from "./request.ts";
 
-export type StopReason = "endTurn" | "maxTokens" | "toolUse" | "stopSequence" | "contentFilter";
+/**
+ * `pauseTurn` is its own reason, not a flavour of `endTurn` or `toolUse`.
+ *
+ * Anthropic pauses a long-running server tool and expects the client to append
+ * the assistant turn verbatim and resend it. Reported as `endTurn` the client
+ * would stop; reported as `toolUse` it would look for a tool call to answer and
+ * synthesize a `Continue` message that changes the conversation. Both produce a
+ * different exchange than the one the caller asked for.
+ */
+export type StopReason =
+  | "endTurn"
+  | "maxTokens"
+  | "toolUse"
+  | "stopSequence"
+  | "contentFilter"
+  | "pauseTurn";
 
 /**
  * All four counts are required. Cache fields being optional would mean every
@@ -74,13 +89,25 @@ export type ContentBlockStart =
    * send a block the upstream will reject.
    */
   | { type: "thinking"; signed?: boolean }
-  | { type: "toolUse"; id: string; name: string };
+  | { type: "toolUse"; id: string; name: string }
+  /**
+   * `data` is the block's opening payload, which for a result block is the
+   * whole block: Anthropic sends those complete in `content_block_start` and
+   * never deltas them.
+   */
+  | { type: "anthropicNative"; blockType: string; data: Record<string, unknown> };
 
 export type Delta =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
   | { type: "thinkingSignature"; signature: string }
-  | { type: "toolJson"; partial: string };
+  | { type: "toolJson"; partial: string }
+  /**
+   * Kept apart from `toolJson` so a native block can never be folded into a
+   * portable `toolUse` accumulator, which is what would send its input onward
+   * as a custom function call.
+   */
+  | { type: "anthropicNativeJson"; partial: string };
 
 /**
  * Usage rides on `end` rather than being its own event.
@@ -110,7 +137,13 @@ export type CollectedResponse = {
 type Accum =
   | { kind: "text"; text: string }
   | { kind: "thinking"; text: string; signature?: string }
-  | { kind: "toolUse"; id: string; name: string; json: string };
+  | { kind: "toolUse"; id: string; name: string; json: string }
+  | {
+      kind: "anthropicNative";
+      blockType: string;
+      data: Record<string, unknown>;
+      json: string;
+    };
 
 /**
  * Folds a canonical event stream into a single response. The gateway always
@@ -142,7 +175,14 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
             ? { kind: "toolUse", id: ev.block.id, name: ev.block.name, json: "" }
             : ev.block.type === "thinking"
               ? { kind: "thinking", text: "" }
-              : { kind: "text", text: "" },
+              : ev.block.type === "anthropicNative"
+                ? {
+                    kind: "anthropicNative",
+                    blockType: ev.block.blockType,
+                    data: ev.block.data,
+                    json: "",
+                  }
+                : { kind: "text", text: "" },
         );
         break;
       case "blockDelta": {
@@ -156,6 +196,8 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
         else if (ev.delta.type === "thinkingSignature" && acc.kind === "thinking")
           acc.signature = (acc.signature ?? "") + ev.delta.signature;
         else if (ev.delta.type === "toolJson" && acc.kind === "toolUse")
+          acc.json += ev.delta.partial;
+        else if (ev.delta.type === "anthropicNativeJson" && acc.kind === "anthropicNative")
           acc.json += ev.delta.partial;
         break;
       }
@@ -177,6 +219,15 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
           type: "thinking",
           text: acc.text,
           ...(acc.signature === undefined ? {} : { signature: acc.signature }),
+        };
+      if (acc.kind === "anthropicNative")
+        return {
+          type: "anthropicNative",
+          blockType: acc.blockType,
+          // Deltas only ever fill `input` — that is the one field Anthropic
+          // streams incrementally on a native block. A block that got none
+          // keeps the payload it opened with, untouched.
+          data: acc.json === "" ? acc.data : { ...acc.data, input: parseJson(acc.json) },
         };
       return { type: "toolUse", id: acc.id, name: acc.name, input: parseJson(acc.json) };
     });

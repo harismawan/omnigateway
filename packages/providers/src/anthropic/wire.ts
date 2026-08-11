@@ -1,4 +1,4 @@
-import type { CacheControl, ChatRequest, ContentBlock, ToolChoice } from "@omni/ir";
+import type { CacheControl, ChatRequest, ContentBlock, ToolChoice, ToolDef } from "@omni/ir";
 import { cacheControlOf } from "@omni/ir";
 
 export const OAUTH_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -13,12 +13,13 @@ export type AnthropicBody = {
   stream: boolean;
   temperature?: number;
   stop_sequences?: string[];
-  tools?: {
-    name: string;
-    description?: string;
-    input_schema: unknown;
-    cache_control?: WireCacheControl;
-  }[];
+  /**
+   * Two shapes share this array: a portable tool sends a schema, an
+   * Anthropic-defined one sends a versioned `type` and its options. Typed as a
+   * record because the second shape's legal keys differ per version, and the
+   * table that knows them lives in `tools.ts`.
+   */
+  tools?: Record<string, unknown>[];
   tool_choice?: unknown;
   thinking?:
     | { type: "adaptive"; display?: "summarized" | "omitted" }
@@ -77,6 +78,12 @@ function encodeBlock(b: ContentBlock): unknown {
         is_error: b.isError,
         ...cache,
       };
+    // Rebuilt from the payload the decoder kept, so citations, container ids,
+    // caller metadata and error objects go back exactly as they arrived. The
+    // discriminator is spread last so a stray `type` inside `data` cannot
+    // rename the block on its way out.
+    case "anthropicNative":
+      return { ...b.data, type: b.blockType, ...cache };
   }
 }
 
@@ -110,6 +117,33 @@ function systemCacheControl(req: ChatRequest): {
   return {
     ...(promoted === undefined ? {} : { promoted }),
     lost: markedSystemBlocks.length > (promoted === undefined ? 0 : 1),
+  };
+}
+
+/**
+ * Renders one tool entry.
+ *
+ * An Anthropic-defined tool is emitted with the version the caller wrote and
+ * the options ingress validated against that version — the gateway never
+ * upgrades a date or supplies a default, because either would send Anthropic a
+ * different tool than the one the client declared. `mcp_toolset` is the one
+ * entry with no name, so an empty one is omitted rather than sent as `""`.
+ */
+function encodeTool(t: ToolDef): Record<string, unknown> {
+  if (t.provider === "anthropic") {
+    return {
+      type: t.type,
+      ...(t.name === "" ? {} : { name: t.name }),
+      ...t.wire,
+      ...wireCacheControl(t.cacheControl),
+    };
+  }
+  return {
+    name: t.name,
+    ...(t.description === undefined ? {} : { description: t.description }),
+    input_schema: t.inputSchema,
+    ...(t.options ?? {}),
+    ...wireCacheControl(t.cacheControl),
   };
 }
 
@@ -184,14 +218,9 @@ export function toWire(
   if (system !== undefined && system.length > 0) body.system = system;
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.stopSequences !== undefined) body.stop_sequences = req.stopSequences;
-  if (req.tools !== undefined) {
-    body.tools = req.tools.map((t) => ({
-      name: t.name,
-      ...(t.description === undefined ? {} : { description: t.description }),
-      input_schema: t.inputSchema,
-      ...wireCacheControl(t.cacheControl),
-    }));
-  }
+  // Order is preserved: Anthropic places cache breakpoints by position in this
+  // array, so reordering the two kinds would move a breakpoint the caller set.
+  if (req.tools !== undefined) body.tools = req.tools.map(encodeTool);
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {

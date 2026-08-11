@@ -1,9 +1,26 @@
 import type { ChatRequest, ProviderCapabilities } from "@omni/ir";
+import { ANTHROPIC_NATIVE_TOOLS } from "@omni/ir";
 import type { CredentialView, Target } from "@omni/store";
 import { healthKey } from "./snapshot.ts";
 import type { Excluded, RankInput } from "./types.ts";
 
 export type Pair = { credential: CredentialView; target: Target };
+
+/**
+ * Whether the request can only be served by a provider that speaks Anthropic's
+ * own tool and block formats.
+ *
+ * History counts, not just the tool list. A client that ran a web search on one
+ * turn replays the `server_tool_use` and its result on the next, often without
+ * redeclaring the tool — routing that turn elsewhere would drop the blocks and
+ * change the conversation the model sees. Asking here, before dispatch, is what
+ * turns "no target can do this" into one clear routing failure rather than an
+ * adapter discovering it mid-encode.
+ */
+export function needsAnthropicNative(request: ChatRequest): boolean {
+  if (request.tools?.some((t) => t.provider === "anthropic") === true) return true;
+  return request.messages.some((m) => m.content.some((b) => b.type === "anthropicNative"));
+}
 
 /** What the request actually needs, so targets can be filtered on it. */
 export function requiredCapabilities(request: ChatRequest): ProviderCapabilities {
@@ -29,14 +46,22 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
   const { request, model, snapshot, now } = input;
   const { breakerThreshold, breakerCooldownMs } = snapshot.settings;
   const need = requiredCapabilities(request);
+  const needNative = needsAnthropicNative(request);
 
   const pairs: Pair[] = [];
   const excluded: Excluded[] = [];
 
   for (const target of model.targets) {
-    const missing = (["tools", "images", "reasoning"] as const).find(
-      (cap) => need[cap] && !target.capabilities[cap],
-    );
+    // Read from the provider table rather than the stored target: whether a
+    // target speaks Anthropic's wire format is decided by the adapter serving
+    // it, not by a setting an operator could switch on for a provider that
+    // cannot honour it.
+    const missing =
+      needNative && !ANTHROPIC_NATIVE_TOOLS[target.provider]
+        ? "anthropicTools"
+        : (["tools", "images", "reasoning"] as const).find(
+            (cap) => need[cap] && !target.capabilities[cap],
+          );
 
     for (const credential of snapshot.credentials) {
       if (credential.provider !== target.provider) continue;

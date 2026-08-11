@@ -106,7 +106,7 @@ test("parses tools and the required tool choice", () => {
     tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
     tool_choice: "required",
   });
-  expect(req.tools).toEqual([{ name: "f", inputSchema: { type: "object" } }]);
+  expect(req.tools).toEqual([{ provider: "custom", name: "f", inputSchema: { type: "object" } }]);
   expect(req.toolChoice).toEqual({ type: "any" });
 });
 
@@ -322,7 +322,12 @@ test("keeps a breakpoint on a tool definition, at either level", () => {
     ],
   });
   expect(outer.tools).toEqual([
-    { name: "f", inputSchema: { type: "object" }, cacheControl: { type: "ephemeral", ttl: "1h" } },
+    {
+      provider: "custom",
+      name: "f",
+      inputSchema: { type: "object" },
+      cacheControl: { type: "ephemeral", ttl: "1h" },
+    },
   ]);
 
   // Some clients put it inside `function` instead; the outer one wins.
@@ -340,7 +345,12 @@ test("keeps a breakpoint on a tool definition, at either level", () => {
     ],
   });
   expect(inner.tools).toEqual([
-    { name: "f", inputSchema: { type: "object" }, cacheControl: { type: "ephemeral" } },
+    {
+      provider: "custom",
+      name: "f",
+      inputSchema: { type: "object" },
+      cacheControl: { type: "ephemeral" },
+    },
   ]);
 });
 
@@ -385,7 +395,12 @@ test("a malformed marker at one tool level does not mask a good one at the other
     ],
   });
   expect(req.tools).toEqual([
-    { name: "f", inputSchema: { type: "object" }, cacheControl: { type: "ephemeral", ttl: "1h" } },
+    {
+      provider: "custom",
+      name: "f",
+      inputSchema: { type: "object" },
+      cacheControl: { type: "ephemeral", ttl: "1h" },
+    },
   ]);
 });
 

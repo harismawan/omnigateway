@@ -58,7 +58,7 @@ test("counts tool definitions, including their schemas", () => {
   };
   const withTools = estimateInputTokens({
     ...base,
-    tools: [{ name: "read", description: "reads a file", inputSchema: schema }],
+    tools: [{ provider: "custom", name: "read", description: "reads a file", inputSchema: schema }],
   });
   expect(withTools).toBeGreaterThan(estimateInputTokens(base) + 200);
 });
