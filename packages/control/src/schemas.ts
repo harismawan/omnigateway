@@ -103,7 +103,7 @@ export const settingsSchema = z.object({
     })
     .strict(),
   maxAttempts: z.number().int().min(1).max(10),
-  requestDeadlineMs: z.number().int().positive(),
+  requestDeadlineMs: z.number().int().min(0),
   breakerThreshold: z.number().int().min(1),
   breakerCooldownMs: z.number().int().positive(),
   logRetentionDays: z.number().int().min(1),

@@ -43,6 +43,31 @@ describe("SettingsBoard", () => {
     });
   });
 
+  test("the request deadline can be disabled with zero", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });
+    renderWithProviders(<SettingsBoard />);
+
+    const field = (await screen.findByLabelText("Request deadline")) as HTMLInputElement;
+    expect(field.min).toBe("0");
+    expect(
+      screen.getByText(
+        /0 disables only OmniGateway's deadline.*streaming responses send a keepalive every 10 seconds after the response begins.*non-streaming and waits before the response begins remain subject to intermediary origin-read timeouts/i,
+      ),
+    ).toBeTruthy();
+
+    await user.clear(field);
+    await user.type(field, "0");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put).toBeTruthy();
+      const body = JSON.parse(String(put?.init?.body)) as { requestDeadlineMs: number };
+      expect(body.requestDeadlineMs).toBe(0);
+    });
+  });
+
   test("the quota poll interval is editable and can be switched off", async () => {
     const user = userEvent.setup();
     const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });

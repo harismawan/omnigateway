@@ -310,12 +310,14 @@ export function proxyRoutes(deps: ProxyDeps) {
   };
   return (
     new Elysia()
-      .post("/v1/messages", ({ request }) =>
-        handle(dispatchDeps, rateLimiter, "anthropic", request),
-      )
-      .post("/v1/chat/completions", ({ request }) =>
-        handle(dispatchDeps, rateLimiter, "openai", request),
-      )
+      .post("/v1/messages", ({ request, server }) => {
+        server?.timeout(request, 0);
+        return handle(dispatchDeps, rateLimiter, "anthropic", request);
+      })
+      .post("/v1/chat/completions", ({ request, server }) => {
+        server?.timeout(request, 0);
+        return handle(dispatchDeps, rateLimiter, "openai", request);
+      })
       .get("/v1/models", async ({ request }) => {
         try {
           const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));

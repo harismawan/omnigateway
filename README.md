@@ -248,6 +248,14 @@ Routing behaviour — weights, retry limits, request deadline, log retention,
 how often provider quota is polled — lives in the database, not the
 environment. Edit it with `omni settings set` or in the console.
 
+The request deadline defaults to 120 seconds. Setting it to `0` disables only
+OmniGateway's dispatch deadline; it does not disable timeouts imposed by a reverse
+proxy or other intermediary. Once a streaming response begins, OmniGateway sends
+an SSE keepalive comment every 10 seconds to protect it from intermediary read-idle
+timeouts. Non-streaming requests, and provider connection or header waits before a
+response begins, cannot receive those keepalives and remain subject to the
+intermediary's origin-read timeout.
+
 `.env.example` in the repository documents the optional provider
 client-identity overrides.
 
