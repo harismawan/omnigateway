@@ -52,8 +52,9 @@ In scope: all four defects above.
 
 Out of scope, with reasons:
 
-- **Cache-read pricing.** `Target.costPerMTok` has no cache-read field; adding one is a catalog
-  change with its own migration.
+- **Predicting cache hits.** Routing prices a request's cache-marked prefix at the target's
+  cache-read rate, but cannot know whether that prefix will actually hit. See "Cache-read pricing"
+  below.
 - **Multi-replica load sharing.** The gateway runs as a single process. The in-flight counter is
   authoritative because of that, and this design does not try to preserve correctness if that
   changes. A multi-replica deployment would need a different mechanism, not a tuned version of this
@@ -183,10 +184,47 @@ Request-aware cost:
 ```ts
 const EXPECTED_OUTPUT_TOKENS = 1000;
 
-const inTok = estimateInputTokens(request);
+const cachedTok = estimateCachedInputTokens(request);
+const freshTok = Math.max(0, estimateInputTokens(request) - cachedTok);
 const outTok = Math.min(request.maxTokens ?? EXPECTED_OUTPUT_TOKENS, EXPECTED_OUTPUT_TOKENS);
-const cost = inTok * target.costPerMTok.input + outTok * target.costPerMTok.output;
+
+const cost =
+  freshTok * target.costPerMTok.input +
+  cachedTok * cacheReadRate(target.costPerMTok) +
+  outTok * target.costPerMTok.output;
 ```
+
+### Cache-read pricing
+
+**Correction.** An earlier draft of this spec put cache pricing out of scope, on the grounds that
+`Target.costPerMTok` had no cache-read field. That was wrong. `TargetPricing`
+(`packages/store/src/types.ts:108`) carries `cacheRead`, `cacheWrite5m` and `cacheWrite1h`, and
+billing has always used all three through `priceOf`.
+
+So the real defect was not an absent field but a **disagreement**. Pricing every input token at
+`costPerMTok.input` while billing charged roughly a tenth of that for cache reads meant routing
+chose targets using a cost model the billing path contradicted — overstating a long cached
+conversation by about ten times, and blind to the difference between two targets whose cache rates
+differ. On an agentic workload, where most input tokens are cache reads, that is the common case
+rather than an edge one.
+
+Two pieces:
+
+- `estimateCachedInputTokens` (`packages/ir/src/tokens.ts`) walks the prompt in the order it is
+  assembled — tools, then system, then the conversation — and returns the running total up to and
+  including the last block carrying a `cache_control` marker. That is what a breakpoint covers.
+- `cacheReadRate` (`packages/store/src/types.ts`) resolves `cacheRead ?? input * 0.1`, and is
+  **shared** by `priceOf` and by routing. Duplicating the fallback is what let the two drift the
+  first time.
+
+Cache *writes* stay out of routing. Their rates are per-provider (`WRITE_OVER_INPUT` in `price.ts`:
+Anthropic bills a write above fresh input, OpenAI and Kimi bill no premium), and a write is a
+first-turn cost that says little about which target should serve the turns after it.
+
+What remains unknowable: whether the marked prefix will hit. The first turn of a conversation marks
+the same blocks the second one does and pays to write them, so routing under-estimates that turn.
+Assuming the hit is still much closer than assuming the miss, because a marked prefix exists
+precisely because a client expects to reuse it.
 
 `UNKNOWN = 0.5` semantics are unchanged: an unmeasured latency and a fully unpriced target still
 score neutral rather than best or worst. A zero-priced target still means "unpriced", not "free".
@@ -261,6 +299,9 @@ Router — pure, so these are cheap and are the primary coverage:
   priced candidates' cost scores unchanged, rather than collapsing them all to zero.
 - Request-aware cost: the same pool ranks differently for a small request and a 200k-token request.
   `maxTokens: 100` shifts the blend towards input.
+- Cache-aware cost: two targets identical on `input` and `output` but differing on `cacheRead` rank
+  by their cache rate for a prompt carrying a breakpoint. A prompt with no breakpoint has no cached
+  prefix, and a breakpoint on system covers the tools before it.
 - `roundRobin` with in-flight `{a: 0, b: 2, c: 1}` orders `a, c, b` regardless of `lastUsedAt`.
 - `weighted` never draws a breaker-open candidate at full configured weight.
 - **Herd regression.** Rank repeatedly against a registry that acquires without releasing; assert the
@@ -283,8 +324,9 @@ and anything asserting `reasons.recency`.
 
 ## Known gaps
 
-- Cache-read and cache-write pricing are invisible to the cost term. For a heavily cached workload
-  the estimate overstates input cost, since cache reads are priced well below fresh input.
+- Routing assumes a cache-marked prefix hits. The first turn of a conversation marks the same blocks
+  as later ones but pays to write them, so that turn is under-estimated.
+- Cache-write pricing is invisible to the cost term, deliberately.
 - `EXPECTED_OUTPUT_TOKENS` is a fixed prior. It is wrong for any specific request and only aims to be
   unbiased across a mixed workload.
 - In-flight counts are process-local and reset on restart, like the existing rate limits and quota

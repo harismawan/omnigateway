@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "../src/index.ts";
-import { estimateInputTokens } from "../src/index.ts";
+import { estimateCachedInputTokens, estimateInputTokens } from "../src/index.ts";
 
 const base: ChatRequest = {
   model: "fast",
@@ -111,4 +111,58 @@ test("tool arguments that cannot be serialized do not throw", () => {
       ],
     }),
   ).not.toThrow();
+});
+
+test("cached prefix counts everything up to the last cache breakpoint", () => {
+  const request: ChatRequest = {
+    model: "m",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "a".repeat(4_000), cacheControl: { type: "ephemeral" } },
+          { type: "text", text: "b".repeat(4_000) },
+        ],
+      },
+    ],
+    stream: false,
+  };
+
+  const cached = estimateCachedInputTokens(request);
+  const total = estimateInputTokens(request);
+  // The marked block and its framing are cached; the trailing block is not.
+  expect(cached).toBeGreaterThan(1_000);
+  expect(cached).toBeLessThan(total);
+  expect(total - cached).toBeGreaterThan(1_000);
+});
+
+test("cached prefix spans tools and system before the conversation", () => {
+  const request: ChatRequest = {
+    model: "m",
+    system: [{ type: "text", text: "s".repeat(4_000), cacheControl: { type: "ephemeral" } }],
+    messages: [{ role: "user", content: [{ type: "text", text: "u".repeat(4_000) }] }],
+    tools: [
+      {
+        provider: "custom",
+        name: "search",
+        description: "d".repeat(4_000),
+        inputSchema: { type: "object" },
+      },
+    ],
+    stream: false,
+  };
+
+  // Tools precede system in the cache prefix, so a marker on system covers both.
+  const cached = estimateCachedInputTokens(request);
+  expect(cached).toBeGreaterThan(2_000);
+  expect(cached).toBeLessThan(estimateInputTokens(request));
+});
+
+test("a request with no cache breakpoint has no cached prefix", () => {
+  const request: ChatRequest = {
+    model: "m",
+    messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    stream: false,
+  };
+  expect(estimateCachedInputTokens(request)).toBe(0);
 });

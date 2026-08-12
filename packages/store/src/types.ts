@@ -115,6 +115,27 @@ export type TargetPricing = {
   cacheWrite1h?: number | undefined;
 };
 
+/**
+ * What a provider charges to read a cache entry, as a multiple of its base
+ * input price, for a target that names no rate of its own.
+ *
+ * A tenth is what every provider the gateway speaks to charges, and a target
+ * saved before cache pricing existed carries only `input` and `output`.
+ */
+const READ_OVER_INPUT = 0.1;
+
+/**
+ * The cache-read price for a target, falling back to a multiple of its input.
+ *
+ * Shared by billing and by routing on purpose. The two priced the same request
+ * differently once — routing charged fresh input for tokens billing charged a
+ * tenth of that — and a pool of targets whose cache rates differ is exactly
+ * where that gap changes which target gets picked.
+ */
+export function cacheReadRate(prices: TargetPricing): number {
+  return prices.cacheRead ?? prices.input * READ_OVER_INPUT;
+}
+
 type TargetBase = {
   model: string;
   tier: number;

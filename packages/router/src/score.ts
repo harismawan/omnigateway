@@ -1,5 +1,5 @@
-import { type ChatRequest, estimateInputTokens } from "@omni/ir";
-import type { CredentialHealth, Target } from "@omni/store";
+import { type ChatRequest, estimateCachedInputTokens, estimateInputTokens } from "@omni/ir";
+import { type CredentialHealth, cacheReadRate, type Target } from "@omni/store";
 import type { Pair } from "./filters.ts";
 import { quotaHeadroom } from "./quota.ts";
 import { healthKey } from "./snapshot.ts";
@@ -59,9 +59,19 @@ const EXPECTED_OUTPUT_TOKENS = 1000;
  * cancel and the absolute number does not need to mean currency.
  */
 function requestCost(target: Target, request: ChatRequest): number {
-  const inTok = estimateInputTokens(request);
+  const cachedTok = estimateCachedInputTokens(request);
+  const freshTok = Math.max(0, estimateInputTokens(request) - cachedTok);
   const outTok = Math.min(request.maxTokens ?? EXPECTED_OUTPUT_TOKENS, EXPECTED_OUTPUT_TOKENS);
-  return inTok * target.costPerMTok.input + outTok * target.costPerMTok.output;
+
+  // Cache reads are priced at their own rate rather than at fresh input, which
+  // is how the request will actually bill. Charging a cached prefix at full
+  // input price overstates a long conversation by roughly ten times, and hides
+  // the difference between two targets whose cache rates differ.
+  return (
+    freshTok * target.costPerMTok.input +
+    cachedTok * cacheReadRate(target.costPerMTok) +
+    outTok * target.costPerMTok.output
+  );
 }
 
 /**

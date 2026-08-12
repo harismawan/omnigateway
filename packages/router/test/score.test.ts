@@ -123,3 +123,40 @@ test("prefers the credential with fewer requests in flight", () => {
   });
   expect(candidates[0]?.credential.id).toBe("idle");
 });
+
+test("prefers the target with the cheaper cache read for a cached prompt", () => {
+  const cachedPrompt: ChatRequest = {
+    model: "fast",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "x".repeat(400_000), cacheControl: { type: "ephemeral" } },
+          { type: "text", text: "and now the new turn" },
+        ],
+      },
+    ],
+    stream: true,
+  };
+
+  const { candidates } = rank({
+    request: cachedPrompt,
+    model: {
+      id: "fast",
+      strategy: "score",
+      isAlias: false,
+      targets: [
+        // Identical on fresh input and output; they differ only on cache reads,
+        // which is exactly what the old fixed blend could not see.
+        target({ model: "dear-cache", costPerMTok: { input: 3, output: 15, cacheRead: 3 } }),
+        target({ model: "cheap-cache", costPerMTok: { input: 3, output: 15, cacheRead: 0.3 } }),
+      ],
+    },
+    snapshot: snapshot({ credentials: [credential({ id: "a" })], settings: only("cost") }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(candidates[0]?.target.model).toBe("cheap-cache");
+});
