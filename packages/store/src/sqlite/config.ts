@@ -1,9 +1,40 @@
 import type { Database } from "bun:sqlite";
-import type { ConfigRepo, Settings, Strategy, Target, VirtualModel } from "../types.ts";
+import type {
+  ConfigRepo,
+  ScoringWeights,
+  Settings,
+  Strategy,
+  Target,
+  VirtualModel,
+} from "../types.ts";
 import { DEFAULT_SETTINGS } from "../types.ts";
 
 const SETTINGS_KEY = "settings";
 const ADMIN_HASH_KEY = "adminPasswordHash";
+
+/**
+ * Takes only the weights the router still scores, defaulting the rest.
+ *
+ * Spreading the stored object instead would carry a retired term forward
+ * forever — `recency` was dropped when the load term replaced it — and the
+ * settings schema is strict, so a stale key would fail validation on the next
+ * edit rather than being quietly ignored.
+ */
+function knownWeights(stored: Partial<ScoringWeights> | undefined): ScoringWeights {
+  const d = DEFAULT_SETTINGS.weights;
+  const pick = (key: keyof ScoringWeights): number => {
+    const value = stored?.[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : d[key];
+  };
+  return {
+    tier: pick("tier"),
+    health: pick("health"),
+    quota: pick("quota"),
+    load: pick("load"),
+    cost: pick("cost"),
+    latency: pick("latency"),
+  };
+}
 
 export function createConfigRepo(
   db: Database,
@@ -66,7 +97,7 @@ export function createConfigRepo(
           ...DEFAULT_SETTINGS,
           ...stored,
           rtkEnabled: stored.rtkEnabled === true,
-          weights: { ...DEFAULT_SETTINGS.weights, ...stored.weights },
+          weights: knownWeights(stored.weights),
         };
       } catch {
         return DEFAULT_SETTINGS;

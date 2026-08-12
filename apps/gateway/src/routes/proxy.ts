@@ -12,6 +12,7 @@ import { Elysia } from "elysia";
 import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
 import { ApiKeyRateLimiter } from "../auth/rateLimit.ts";
 import { type DispatchDeps, dispatch } from "../dispatch/index.ts";
+import { createLoadRegistry } from "../dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "../dispatch/snapshotCache.ts";
 import { anthropicErrorBody, anthropicResponse, anthropicStream } from "../egress/anthropic.ts";
 import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.ts";
@@ -26,8 +27,9 @@ import {
 } from "../logging.ts";
 import { modelListBody } from "./models.ts";
 
-export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
+export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
   snapshots?: DispatchDeps["snapshots"];
+  loadRegistry?: DispatchDeps["loadRegistry"];
   requestId: () => string;
   rateLimiter?: ApiKeyRateLimiter;
   keepaliveMs?: number;
@@ -306,6 +308,10 @@ export function proxyRoutes(deps: ProxyDeps) {
     ...deps,
     logger,
     snapshots: deps.snapshots ?? createRoutingSnapshotCache(deps.store, logger),
+    // One registry for the process. Built here rather than per request, because
+    // a fresh registry per request would always read zero and rank as if the
+    // gateway were idle.
+    loadRegistry: deps.loadRegistry ?? createLoadRegistry(logger),
     keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
   };
   return (

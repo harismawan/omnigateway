@@ -47,6 +47,14 @@ export type RankInput = {
   now: number;
   /** Injected so weighted selection stays a pure function. Range [0, 1). */
   rand: number;
+  /**
+   * In-flight request count per `healthKey(credentialId, model)`.
+   *
+   * Read-only, and deliberately not part of `Snapshot`: the snapshot is cached
+   * across requests, while this changes many times a second. A missing key
+   * means zero.
+   */
+  load: ReadonlyMap<string, number>;
 };
 
 export type RankResult = {

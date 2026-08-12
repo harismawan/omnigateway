@@ -203,7 +203,8 @@ export type ScoringWeights = {
   quota: number;
   cost: number;
   latency: number;
-  recency: number;
+  /** Requests in flight right now, which is what separates a simultaneous burst. */
+  load: number;
 };
 
 export type Settings = {
@@ -364,7 +365,7 @@ export type Store = {
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  weights: { tier: 10, health: 3, quota: 2, cost: 1, latency: 1, recency: 0.5 },
+  weights: { tier: 10, health: 3, quota: 2, load: 2, cost: 1, latency: 1 },
   maxAttempts: 3,
   requestDeadlineMs: 120_000,
   breakerThreshold: 3,

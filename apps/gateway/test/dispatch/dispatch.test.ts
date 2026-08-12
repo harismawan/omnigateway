@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
-import { buildSnapshot } from "@omni/router";
+import { buildSnapshot, healthKey } from "@omni/router";
 import type { Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
 import { captureLogger } from "@omni/testkit";
 import { dispatch } from "../../src/dispatch/index.ts";
+import { createLoadRegistry } from "../../src/dispatch/loadRegistry.ts";
 
 const req: ChatRequest = {
   model: "fast",
@@ -99,6 +100,7 @@ function deps(store: Store, adapter: ProviderAdapter) {
     http: noHttp,
     now: () => 1_000_000,
     rand: () => 0,
+    loadRegistry: createLoadRegistry(),
     refresh: async () => ({
       accessToken: "refreshed",
       refreshToken: "r",
@@ -955,5 +957,77 @@ test("client abort remains distinct from request deadline", async () => {
   const draining = drain(outcome.events);
   controller.abort(reason);
   await expect(draining).rejects.toBe(reason);
+  store.close();
+});
+
+test("counts a request as in flight only while it is in flight", async () => {
+  const store = await seeded(1);
+  const registry = createLoadRegistry();
+  const key = healthKey("c1", "claude-opus-4");
+  let duringSend: number | undefined;
+
+  const adapter = stubAdapter(() => textStream("hello"));
+  const observing: ProviderAdapter = {
+    ...adapter,
+    async send(r) {
+      duringSend = registry.counts().get(key);
+      return adapter.send(r);
+    },
+  };
+
+  const events = await drain(
+    (
+      await dispatch(
+        req,
+        { ...deps(store, observing), loadRegistry: registry },
+        new AbortController().signal,
+        "req_test",
+      )
+    ).events,
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  expect(duringSend).toBe(1);
+  expect(registry.counts().get(key) ?? 0).toBe(0);
+  store.close();
+});
+
+test("releases the slot when every candidate fails", async () => {
+  const store = await seeded(1);
+  const registry = createLoadRegistry();
+  const adapter = stubAdapter(() => new Error("upstream exploded"));
+
+  await drain(
+    (
+      await dispatch(
+        req,
+        { ...deps(store, adapter), loadRegistry: registry },
+        new AbortController().signal,
+        "req_test",
+      )
+    ).events,
+  );
+
+  expect(registry.counts().get(healthKey("c1", "claude-opus-4")) ?? 0).toBe(0);
+  store.close();
+});
+
+test("releases the slot when the client hangs up mid-stream", async () => {
+  const store = await seeded(1);
+  const registry = createLoadRegistry();
+  const adapter = stubAdapter(() => textStream("hello"));
+
+  const { events } = await dispatch(
+    req,
+    { ...deps(store, adapter), loadRegistry: registry },
+    new AbortController().signal,
+    "req_test",
+  );
+  // Read one event, then walk away without draining — the generator's finally
+  // is the only thing that can free the slot.
+  await events.next();
+  await events.return(undefined);
+
+  expect(registry.counts().get(healthKey("c1", "claude-opus-4")) ?? 0).toBe(0);
   store.close();
 });

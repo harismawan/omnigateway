@@ -1,7 +1,7 @@
 # Router Load Balancing — Design
 
 Date: 2026-08-12
-Status: approved, not yet implemented
+Status: implemented
 
 ## Problem
 

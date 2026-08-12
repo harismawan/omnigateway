@@ -44,6 +44,7 @@ test("pairs each target with every credential of its provider", () => {
     snapshot: snapshot({ credentials: [a, k] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(1);
   expect(pairs[0]?.credential.id).toBe("a");
@@ -68,6 +69,7 @@ test("pairs custom targets only with credentials for the same endpoint", () => {
     snapshot: snapshot({ credentials: [matching, other] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
 
   expect(pairs.map((pair) => pair.credential.id)).toEqual(["matching"]);
@@ -80,6 +82,7 @@ test("excludes disabled credentials", () => {
     snapshot: snapshot({ credentials: [credential({ id: "a", enabled: false })] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(0);
   expect(excluded[0]).toEqual({ credentialId: "a", model: "claude-opus-4", reason: "disabled" });
@@ -92,6 +95,7 @@ test("excludes targets that lack a required capability", () => {
     snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(0);
   expect(excluded[0]?.reason).toBe("capability:tools");
@@ -114,6 +118,7 @@ test("excludes an open breaker inside its cooldown", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(0);
   expect(excluded[0]?.reason).toBe("breaker:open");
@@ -136,6 +141,7 @@ test("admits an open breaker whose cooldown has elapsed as a half-open probe", (
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(1);
 });
@@ -160,6 +166,7 @@ test("cooldown grows exponentially with consecutive failures", () => {
       }),
       now: NOW,
       rand: 0,
+      load: new Map(),
     });
   expect(build(3).pairs).toHaveLength(1);
   expect(build(8).pairs).toHaveLength(0);
@@ -175,6 +182,7 @@ test("excludes a credential inside an observed rate-limit window", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(excluded[0]?.reason).toBe("rateLimited");
 });
@@ -189,6 +197,7 @@ test("an expired rate-limit window no longer excludes", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(1);
 });
@@ -206,6 +215,7 @@ test("a spent window past its reported reset no longer excludes", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(1);
 });
@@ -220,6 +230,7 @@ test("a spent window whose reset is still ahead keeps excluding", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(excluded[0]?.reason).toBe("quota:fiveHour");
 });
@@ -234,6 +245,7 @@ test("excludes a credential whose reported quota is spent", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(excluded[0]?.reason).toBe("quota:fiveHour");
 });
@@ -248,6 +260,7 @@ test("a quota window with no configured limit never excludes", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(1);
 });
@@ -260,6 +273,7 @@ test("excludes an expired credential that cannot be refreshed", () => {
     snapshot: snapshot({ credentials: [dead] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(excluded[0]?.reason).toBe("expired");
 });
@@ -271,6 +285,7 @@ test("keeps an expired credential that has a refresh token", () => {
     snapshot: snapshot({ credentials: [credential({ id: "a", expiresAt: NOW - 1 })] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(1);
 });
@@ -290,6 +305,7 @@ test("api-key credentials are never treated as expired", () => {
       snapshot: snapshot({ credentials: [key] }),
       now: NOW,
       rand: 0,
+      load: new Map(),
     }).pairs,
   ).toHaveLength(1);
 });

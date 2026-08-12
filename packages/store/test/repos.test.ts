@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { deriveKey } from "../src/encryption.ts";
 import { generateApiKey, hashApiKey } from "../src/sqlite/keys.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import type { Store } from "../src/types.ts";
+import type { Settings, Store } from "../src/types.ts";
 
 async function store(): Promise<Store> {
   return createStore({
@@ -119,6 +119,19 @@ test("settings return defaults then persist patches", async () => {
   expect(patched.maxAttempts).toBe(5);
   expect(patched.weights.tier).toBe(10);
   expect((await s.config.getSettings()).maxAttempts).toBe(5);
+  s.close();
+});
+
+test("settings drop the retired recency weight and adopt the load default", async () => {
+  const s = await store();
+  // A row written before load-aware routing: recency present, load absent.
+  await s.config.putSettings({
+    weights: { tier: 10, health: 3, quota: 2, cost: 1, latency: 1, recency: 0.5 },
+  } as unknown as Partial<Settings>);
+
+  const weights: Record<string, number> = (await s.config.getSettings()).weights;
+  expect(weights.load).toBe(2);
+  expect(weights).not.toHaveProperty("recency");
   s.close();
 });
 

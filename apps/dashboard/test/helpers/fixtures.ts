@@ -142,7 +142,7 @@ export function usageBucket(patch: Partial<UsageBucket> = {}): UsageBucket {
 }
 
 export const settings: Settings = {
-  weights: { tier: 10, health: 3, quota: 2, cost: 1, latency: 1, recency: 0.5 },
+  weights: { tier: 10, health: 3, quota: 2, load: 2, cost: 1, latency: 1 },
   maxAttempts: 3,
   requestDeadlineMs: 120_000,
   breakerThreshold: 3,
@@ -165,7 +165,7 @@ export const dryRunResult: DryRunResult = {
       model: "claude-haiku-4-5",
       tier: 1,
       score: 13.5,
-      reasons: { tier: 1, health: 1, quota: 0.5, cost: 0.2, latency: 0.8, recency: 0.4 },
+      reasons: { tier: 1, health: 1, quota: 0.5, cost: 0.2, latency: 0.8, load: 0.4 },
     },
   ],
   excluded: [{ credentialId: "cred-2", model: "gpt-5.6", reason: "breaker:open" }],

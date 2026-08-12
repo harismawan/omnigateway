@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
 import { credential, health, quota, snapshot, target } from "@omni/testkit";
-import { rank } from "../src/index.ts";
+import { healthKey, rank } from "../src/index.ts";
 
 const NOW = 1_000_000;
 
@@ -36,6 +36,7 @@ test("ranking never decrypts a credential", async () => {
     snapshot: snapshot({ credentials: [spy] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(opened).toBe(0);
 });
@@ -47,6 +48,7 @@ test("prefers the lower tier when everything else is equal", () => {
     snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates[0]?.target.model).toBe("premium");
 });
@@ -61,6 +63,7 @@ test("prefers the healthier credential at the same tier", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates[0]?.credential.id).toBe("well");
 });
@@ -74,10 +77,11 @@ test("prefers the cheaper target when cost is the only weighted term", () => {
     ]),
     snapshot: snapshot({
       credentials: [credential({ id: "a" })],
-      settings: { weights: { tier: 0, health: 0, quota: 0, cost: 1, latency: 0, recency: 0 } },
+      settings: { weights: { tier: 0, health: 0, quota: 0, cost: 1, latency: 0, load: 0 } },
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates[0]?.target.model).toBe("thrifty");
 });
@@ -92,10 +96,11 @@ test("prefers the faster credential when latency is the only weighted term", () 
         health({ credentialId: "slow", ewmaTtftMs: 3000 }),
         health({ credentialId: "quick", ewmaTtftMs: 200 }),
       ],
-      settings: { weights: { tier: 0, health: 0, quota: 0, cost: 0, latency: 1, recency: 0 } },
+      settings: { weights: { tier: 0, health: 0, quota: 0, cost: 0, latency: 1, load: 0 } },
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates[0]?.credential.id).toBe("quick");
 });
@@ -110,30 +115,13 @@ test("prefers the credential with more quota headroom", () => {
         quota({ credentialId: "drained", used: 90, limit: 100, observedAt: NOW }),
         quota({ credentialId: "fresh", used: 10, limit: 100, observedAt: NOW }),
       ],
-      settings: { weights: { tier: 0, health: 0, quota: 1, cost: 0, latency: 0, recency: 0 } },
+      settings: { weights: { tier: 0, health: 0, quota: 1, cost: 0, latency: 0, load: 0 } },
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates[0]?.credential.id).toBe("fresh");
-});
-
-test("recency spreads load toward the least recently used credential", () => {
-  const { candidates } = rank({
-    request: req,
-    model: model(),
-    snapshot: snapshot({
-      credentials: [credential({ id: "hot" }), credential({ id: "cold" })],
-      health: [
-        health({ credentialId: "hot", lastUsedAt: NOW - 1_000 }),
-        health({ credentialId: "cold", lastUsedAt: NOW - 600_000 }),
-      ],
-      settings: { weights: { tier: 0, health: 0, quota: 0, cost: 0, latency: 0, recency: 1 } },
-    }),
-    now: NOW,
-    rand: 0,
-  });
-  expect(candidates[0]?.credential.id).toBe("cold");
 });
 
 test("credential weight multiplies the final score", () => {
@@ -145,6 +133,7 @@ test("credential weight multiplies the final score", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates[0]?.credential.id).toBe("heavy");
 });
@@ -162,6 +151,7 @@ test("priority strategy sorts by tier and ignores other terms", () => {
     snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates.map((c) => c.target.model)).toEqual(["tier1", "tier2"]);
 });
@@ -179,6 +169,7 @@ test("roundRobin puts the least recently used credential first", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates[0]?.credential.id).toBe("b");
 });
@@ -188,8 +179,14 @@ test("weighted selection is deterministic in the injected random value", () => {
     credentials: [credential({ id: "a", weight: 1 }), credential({ id: "b", weight: 9 })],
   });
   const pick = (rand: number) =>
-    rank({ request: req, model: model([target()], "weighted"), snapshot: snap, now: NOW, rand })
-      .candidates[0]?.credential.id;
+    rank({
+      request: req,
+      model: model([target()], "weighted"),
+      snapshot: snap,
+      now: NOW,
+      rand,
+      load: new Map(),
+    }).candidates[0]?.credential.id;
   expect(pick(0.05)).toBe("a");
   expect(pick(0.5)).toBe("b");
   expect(pick(0.05)).toBe("a");
@@ -204,6 +201,7 @@ test("weighted ranking still returns every candidate for failover", () => {
     }),
     now: NOW,
     rand: 0.5,
+    load: new Map(),
   });
   expect(candidates).toHaveLength(3);
   expect(new Set(candidates.map((c) => c.credential.id)).size).toBe(3);
@@ -216,6 +214,7 @@ test("returns an empty list with reasons when nothing is eligible", () => {
     snapshot: snapshot({ credentials: [credential({ id: "a", enabled: false })] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates).toEqual([]);
   expect(excluded).toHaveLength(1);
@@ -228,13 +227,14 @@ test("candidates carry their per-term reasons", () => {
     snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(Object.keys(candidates[0]?.reasons ?? {}).sort()).toEqual([
     "cost",
     "health",
     "latency",
+    "load",
     "quota",
-    "recency",
     "tier",
   ]);
 });
@@ -244,9 +244,14 @@ test("ranking is stable for identical inputs", () => {
     credentials: [credential({ id: "a" }), credential({ id: "b" }), credential({ id: "c" })],
   });
   const ids = () =>
-    rank({ request: req, model: model(), snapshot: snap, now: NOW, rand: 0 }).candidates.map(
-      (c) => c.credential.id,
-    );
+    rank({
+      request: req,
+      model: model(),
+      snapshot: snap,
+      now: NOW,
+      rand: 0,
+      load: new Map(),
+    }).candidates.map((c) => c.credential.id);
   expect(ids()).toEqual(ids());
 });
 
@@ -271,6 +276,7 @@ test("the weighted lottery draws a near-spent account less often than its weight
     snapshot: snapshotWith(),
     now: NOW,
     rand: 0.04,
+    load: new Map(),
   });
   expect(early.candidates[0]?.credential.id).toBe("drained");
 
@@ -280,6 +286,7 @@ test("the weighted lottery draws a near-spent account less often than its weight
     snapshot: snapshotWith(),
     now: NOW,
     rand: 0.06,
+    load: new Map(),
   });
   expect(later.candidates[0]?.credential.id).toBe("fresh");
 });
@@ -299,6 +306,7 @@ test("a candidate with no headroom left is never drawn by the lottery", () => {
     }),
     now: NOW,
     rand: 0.999,
+    load: new Map(),
   });
   expect(candidates[0]?.credential.id).toBe("fresh");
 });
@@ -326,6 +334,7 @@ test("round robin skips past an account close to exhaustion", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
 
   // Strict least-recently-used would pick the idle account and spend the rest
@@ -351,6 +360,51 @@ test("round robin still rotates when both accounts have headroom", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(candidates[0]?.credential.id).toBe("idle");
+});
+
+test("round robin counts requests in flight, not requests already finished", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model([target()], "roundRobin"),
+    snapshot: snapshot({
+      credentials: [credential({ id: "serving" }), credential({ id: "free" })],
+      health: [
+        // The free credential looks *less* idle by the old measure, because it
+        // finished its last request recently rather than being mid-burst.
+        health({ credentialId: "serving", lastUsedAt: NOW - 600_000 }),
+        health({ credentialId: "free", lastUsedAt: NOW - 1_000 }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+    load: new Map([[healthKey("serving", "claude-opus-4"), 3]]),
+  });
+  expect(candidates[0]?.credential.id).toBe("free");
+});
+
+test("weighted selection will not draw a failing credential at full weight", () => {
+  const { candidates } = rank({
+    request: req,
+    model: model([target()], "weighted"),
+    snapshot: snapshot({
+      credentials: [credential({ id: "well" }), credential({ id: "sick" })],
+      health: [
+        health({
+          credentialId: "sick",
+          consecutiveFailures: 3,
+          breakerState: "open",
+          // Long past cooldown, so the filter admits it as a half-open probe.
+          openedAt: NOW - 10_000_000,
+        }),
+      ],
+    }),
+    now: NOW,
+    // A draw that lands on the sick credential while both carry equal weight.
+    rand: 0.6,
+    load: new Map(),
+  });
+  expect(candidates[0]?.credential.id).toBe("well");
 });
