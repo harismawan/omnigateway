@@ -230,6 +230,75 @@ test("credentials add-key stores a key read from a prompt, never from argv", asy
   expect(listed.out).not.toContain("sk-ant-secret");
 });
 
+test("credentials add-key stores custom endpoint metadata from flags", async () => {
+  const root = await installation();
+
+  const result = await cli(
+    [
+      "credentials",
+      "add-key",
+      "custom",
+      "--endpoint-id",
+      "local-vllm",
+      "--endpoint-label",
+      "Local vLLM",
+      "--origin",
+      "http://localhost:8000",
+      "--protocol",
+      "chat-completions",
+    ],
+    {
+      root,
+      prompt: { isTty: false, secret: async () => "test-key", confirm: async () => true },
+    },
+  );
+  expect(result.code).toBe(0);
+  expect(result.out).not.toContain("test-key");
+
+  const listed = JSON.parse((await cli(["credentials", "list", "--json"], { root })).out) as {
+    credentials: Array<{ providerData: Record<string, unknown> }>;
+  };
+  expect(listed.credentials[0]?.providerData).toEqual({
+    endpointId: "local-vllm",
+    endpointLabel: "Local vLLM",
+    origin: "http://localhost:8000",
+    protocol: "chat_completions",
+  });
+});
+
+test("credentials add-key reuses metadata for an existing custom endpoint", async () => {
+  const root = await installation();
+  const prompt = { isTty: false, secret: async () => "test-key", confirm: async () => true };
+  await cli(
+    [
+      "credentials",
+      "add-key",
+      "custom",
+      "--endpoint-id",
+      "local-vllm",
+      "--endpoint-label",
+      "Local vLLM",
+      "--origin",
+      "http://localhost:8000",
+      "--protocol",
+      "responses",
+    ],
+    { root, prompt },
+  );
+
+  const result = await cli(["credentials", "add-key", "custom", "--endpoint-id", "local-vllm"], {
+    root,
+    prompt,
+  });
+  expect(result.code).toBe(0);
+
+  const listed = JSON.parse((await cli(["credentials", "list", "--json"], { root })).out) as {
+    credentials: Array<{ providerData: Record<string, unknown> }>;
+  };
+  expect(listed.credentials).toHaveLength(2);
+  expect(listed.credentials[1]?.providerData).toEqual(listed.credentials[0]?.providerData);
+});
+
 test("credentials add-key treats a blank label as the provider default", async () => {
   const root = await installation();
 

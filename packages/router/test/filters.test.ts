@@ -49,6 +49,30 @@ test("pairs each target with every credential of its provider", () => {
   expect(pairs[0]?.credential.id).toBe("a");
 });
 
+test("pairs custom targets only with credentials for the same endpoint", () => {
+  const matching = credential({
+    id: "matching",
+    provider: "custom",
+    authType: "apiKey",
+    providerData: { endpointId: "local" },
+  });
+  const other = credential({
+    id: "other",
+    provider: "custom",
+    authType: "apiKey",
+    providerData: { endpointId: "remote" },
+  });
+  const { pairs } = eligible({
+    request: req,
+    model: model([target({ provider: "custom", endpointId: "local", model: "llama" })]),
+    snapshot: snapshot({ credentials: [matching, other] }),
+    now: NOW,
+    rand: 0,
+  });
+
+  expect(pairs.map((pair) => pair.credential.id)).toEqual(["matching"]);
+});
+
 test("excludes disabled credentials", () => {
   const { pairs, excluded } = eligible({
     request: req,

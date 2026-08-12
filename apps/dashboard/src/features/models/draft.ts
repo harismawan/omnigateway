@@ -12,6 +12,7 @@ export type TargetDraft = {
   /** Stable across reorders so React keeps input focus. */
   key: string;
   provider: ProviderId;
+  endpointId: string;
   model: string;
   tier: string;
   weight: string;
@@ -147,6 +148,7 @@ export function blankTarget(provider: ProviderId = "anthropic"): TargetDraft {
   return {
     key: nextKey(),
     provider,
+    endpointId: "",
     model,
     tier: "1",
     weight: "1",
@@ -181,6 +183,7 @@ export function toDraft(model: VirtualModel): ModelDraft {
     targets: model.targets.map((target) => ({
       key: nextKey(),
       provider: target.provider,
+      endpointId: target.provider === "custom" ? (target.endpointId ?? "") : "",
       model: target.model,
       tier: String(target.tier),
       weight: String(target.weight),
@@ -218,6 +221,10 @@ export function parseDraft(draft: ModelDraft): Parsed {
   const targets: Target[] = [];
   for (const [index, target] of draft.targets.entries()) {
     const position = `Target ${index + 1}`;
+    const endpointId = target.endpointId.trim();
+    if (target.provider === "custom" && endpointId.length === 0) {
+      return { ok: false, problem: `${position} needs a custom endpoint.` };
+    }
     const model = target.model.trim();
     if (model.length === 0)
       return { ok: false, problem: `${position} needs a provider model name.` };
@@ -282,6 +289,7 @@ export function parseDraft(draft: ModelDraft): Parsed {
 
     targets.push({
       provider: target.provider,
+      ...(target.provider === "custom" ? { endpointId } : {}),
       model,
       tier,
       weight,

@@ -65,6 +65,12 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
 
     for (const credential of snapshot.credentials) {
       if (credential.provider !== target.provider) continue;
+      if (
+        target.provider === "custom" &&
+        credential.providerData.endpointId !== target.endpointId
+      ) {
+        continue;
+      }
 
       const drop = (reason: string): void => {
         excluded.push({ credentialId: credential.id, model: target.model, reason });

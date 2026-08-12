@@ -5,12 +5,12 @@ import { isAuthorizationPending } from "./oauth/kimi.ts";
 import { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
 import type { OAuthProvider } from "./oauth/types.ts";
 
-const PROVIDER_IDS: readonly ProviderId[] = ["anthropic", "openai", "kimi"];
+const PROVIDER_IDS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "custom"];
 const FLOW_TTL_MS = 600_000;
 
 export type ConnectDeps = {
   store: Store;
-  providers: Readonly<Record<ProviderId, OAuthProvider>>;
+  providers: Readonly<Partial<Record<ProviderId, OAuthProvider>>>;
   http: HttpClient;
   now: () => number;
   logger?: Logger;
@@ -91,6 +91,8 @@ export function createConnectFlows(deps: ConnectDeps) {
   /** Runs the exchange and persists the resulting credential. */
   async function complete(flow: StoredFlow, code: string): Promise<{ id: string }> {
     const provider = deps.providers[flow.provider];
+    if (provider === undefined)
+      throw new GatewayError("BAD_REQUEST", "provider does not support OAuth");
     const result = await provider.exchange(
       { code, pending: flow.pending },
       { http: deps.http, now: deps.now },
@@ -145,6 +147,9 @@ export function createConnectFlows(deps: ConnectDeps) {
           : providerInput;
 
       const provider = deps.providers[providerInput];
+      if (provider === undefined) {
+        throw new GatewayError("BAD_REQUEST", "provider does not support OAuth");
+      }
       const redirectUri = callbackUri(providerInput);
       const start =
         provider.begin === undefined

@@ -43,6 +43,7 @@ export const BODY_ORDER: Readonly<Record<ProviderId, readonly string[]>> = {
   // own serializer emits, and this gateway adds that field for usage reporting
   // rather than copying it from one. Unlisted keys append in insertion order.
   kimi: ["model", "messages", "tools", "tool_choice", "max_tokens", "temperature", "stream"],
+  custom: [],
 };
 
 /**

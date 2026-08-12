@@ -1,7 +1,7 @@
 import { Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import styled from "styled-components";
-import { useDeleteModel, useSaveModel } from "../../api/queries.ts";
+import { useCredentials, useDeleteModel, useSaveModel } from "../../api/queries.ts";
 import type { Strategy, VirtualModel } from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { Button } from "../../ui/Button.tsx";
@@ -62,6 +62,20 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
 
   const save = useSaveModel();
   const remove = useDeleteModel();
+  const credentials = useCredentials();
+  const endpoints = (credentials.data ?? [])
+    .filter((credential) => credential.provider === "custom")
+    .map((credential) => ({
+      id: String(credential.providerData.endpointId ?? ""),
+      label: String(
+        credential.providerData.endpointLabel ?? credential.providerData.endpointId ?? "",
+      ),
+    }))
+    .filter(
+      (endpoint, index, all) =>
+        endpoint.id.length > 0 &&
+        all.findIndex((candidate) => candidate.id === endpoint.id) === index,
+    );
 
   // Keyed on the id, not the object: the models query refetches in the
   // background, and a new object for the same model must not discard an edit
@@ -196,6 +210,7 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
                 target={target}
                 index={index}
                 removable={draft.targets.length > 1}
+                endpoints={endpoints}
                 onChange={(next) =>
                   setDraft({
                     ...draft,

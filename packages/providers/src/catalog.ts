@@ -33,6 +33,7 @@ export const PROVIDER_MODEL_CATALOG = {
   anthropic: ANTHROPIC_MODELS,
   openai: OPENAI_MODELS,
   kimi: KIMI_MODELS,
+  custom: { defaultModel: "", models: [] },
 } as const satisfies Readonly<
   Record<ProviderId, { defaultModel: string; models: readonly ProviderModelChoice[] }>
 >;

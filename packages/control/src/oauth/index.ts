@@ -4,11 +4,11 @@ import { kimiOAuth } from "./kimi.ts";
 import { openaiOAuth } from "./openai.ts";
 import type { OAuthProvider } from "./types.ts";
 
-export const OAUTH_PROVIDERS: Readonly<Record<ProviderId, OAuthProvider>> = {
+export const OAUTH_PROVIDERS = {
   anthropic: anthropicOAuth,
   openai: openaiOAuth,
   kimi: kimiOAuth,
-};
+} as const satisfies Readonly<Partial<Record<ProviderId, OAuthProvider>>>;
 
 export { isAuthorizationPending } from "./kimi.ts";
 export type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider, PendingFlow } from "./types.ts";

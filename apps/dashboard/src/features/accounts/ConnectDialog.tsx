@@ -2,8 +2,13 @@ import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import styled from "styled-components";
-import { pollConnect, useConnectFinish, useConnectStart } from "../../api/queries.ts";
-import type { ConnectStart, ProviderId } from "../../api/types.ts";
+import {
+  pollConnect,
+  useConnectFinish,
+  useConnectStart,
+  useCreateApiKeyCredential,
+} from "../../api/queries.ts";
+import type { ConnectStart, Credential, ProviderId } from "../../api/types.ts";
 import { CopyValue } from "../../components/CopyValue.tsx";
 import { Button } from "../../ui/Button.tsx";
 import { Field, Input, Select } from "../../ui/Field.tsx";
@@ -17,6 +22,7 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   kimi: "Kimi",
+  custom: "OpenAI Compatible",
 };
 
 /** What the operator has to do next, in their words, per flow shape. */
@@ -24,6 +30,7 @@ const PASTE_HINT: Record<ProviderId, string> = {
   anthropic: "Authorize in the browser, then paste the code Anthropic shows you.",
   openai: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
   kimi: "Enter the code on Kimi's device page. This dialog finishes on its own.",
+  custom: "Enter endpoint metadata and API key.",
 };
 
 const Step = styled.ol`
@@ -55,6 +62,7 @@ const Waiting = styled.p`
 
 export type ConnectDialogProps = {
   open: boolean;
+  credentials?: Credential[];
   onOpenChange: (open: boolean) => void;
   onConnected: () => void;
 };
@@ -66,24 +74,50 @@ export type ConnectDialogProps = {
  * until the operator finishes on their phone. Both end the same way — a stored
  * credential — so the dialog keeps one shape and swaps only the middle step.
  */
-export function ConnectDialog({ open, onOpenChange, onConnected }: ConnectDialogProps) {
+export function ConnectDialog({
+  open,
+  credentials,
+  onOpenChange,
+  onConnected,
+}: ConnectDialogProps) {
   const [provider, setProvider] = useState<ProviderId>("anthropic");
   const [label, setLabel] = useState("");
   const [flow, setFlow] = useState<ConnectStart | null>(null);
   const [code, setCode] = useState("");
+  const [endpointId, setEndpointId] = useState("");
+  const customEndpoints = (credentials ?? []).filter(
+    (credential, index, all) =>
+      credential.provider === "custom" &&
+      all.findIndex(
+        (candidate) =>
+          candidate.provider === "custom" &&
+          candidate.providerData.endpointId === credential.providerData.endpointId,
+      ) === index,
+  );
+  const [endpointLabel, setEndpointLabel] = useState("");
+  const [origin, setOrigin] = useState("");
+  const [protocol, setProtocol] = useState<"chat_completions" | "responses">("chat_completions");
+  const [apiKey, setApiKey] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
 
   const start = useConnectStart();
   const finish = useConnectFinish();
+  const createKey = useCreateApiKeyCredential();
 
   const reset = useCallback(() => {
     setFlow(null);
     setCode("");
+    setEndpointId("");
+    setEndpointLabel("");
+    setOrigin("");
+    setProtocol("chat_completions");
+    setApiKey("");
     setProblem(null);
     setLabel("");
     start.reset();
     finish.reset();
-  }, [start, finish]);
+    createKey.reset();
+  }, [start, finish, createKey]);
 
   const close = useCallback(
     (next: boolean) => {
@@ -127,6 +161,28 @@ export function ConnectDialog({ open, onOpenChange, onConnected }: ConnectDialog
 
   const begin = () => {
     setProblem(null);
+    if (provider === "custom") {
+      createKey.mutate(
+        {
+          provider,
+          apiKey,
+          endpointId,
+          endpointLabel,
+          origin,
+          protocol,
+          label: label.trim() || undefined,
+        },
+        {
+          onSuccess: () => {
+            reset();
+            onOpenChange(false);
+            onConnected();
+          },
+          onError: (error) => setProblem(describeError(error)),
+        },
+      );
+      return;
+    }
     start.mutate(
       { provider, label: label.trim().length === 0 ? PROVIDER_LABEL[provider] : label.trim() },
       {
@@ -164,8 +220,19 @@ export function ConnectDialog({ open, onOpenChange, onConnected }: ConnectDialog
             <Button type="button" onClick={() => close(false)}>
               Cancel
             </Button>
-            <Button type="button" $variant="primary" disabled={start.isPending} onClick={begin}>
-              {start.isPending ? "Starting…" : "Start authorization"}
+            <Button
+              type="button"
+              $variant="primary"
+              disabled={start.isPending || createKey.isPending}
+              onClick={begin}
+            >
+              {provider === "custom"
+                ? createKey.isPending
+                  ? "Adding…"
+                  : "Add API key"
+                : start.isPending
+                  ? "Starting…"
+                  : "Start authorization"}
             </Button>
           </>
         ) : flow.kind === "device" ? (
@@ -207,6 +274,109 @@ export function ConnectDialog({ open, onOpenChange, onConnected }: ConnectDialog
                 </Select>
               )}
             </Field>
+            {provider === "custom" ? (
+              <>
+                {customEndpoints.length === 0 ? null : (
+                  <Field label="Existing endpoint">
+                    {(props) => (
+                      <Select
+                        {...props}
+                        value={endpointId}
+                        onChange={(event) => {
+                          const selected = customEndpoints.find(
+                            (credential) =>
+                              credential.providerData.endpointId === event.target.value,
+                          );
+                          if (selected === undefined) {
+                            setEndpointId("");
+                            setEndpointLabel("");
+                            setOrigin("");
+                            setProtocol("chat_completions");
+                            return;
+                          }
+                          setEndpointId(String(selected.providerData.endpointId));
+                          setEndpointLabel(String(selected.providerData.endpointLabel));
+                          setOrigin(String(selected.providerData.origin));
+                          setProtocol(
+                            selected.providerData.protocol === "responses"
+                              ? "responses"
+                              : "chat_completions",
+                          );
+                        }}
+                      >
+                        <option value="">Create new endpoint</option>
+                        {customEndpoints.map((credential) => (
+                          <option
+                            key={String(credential.providerData.endpointId)}
+                            value={String(credential.providerData.endpointId)}
+                          >
+                            {String(credential.providerData.endpointLabel)}
+                          </option>
+                        ))}
+                      </Select>
+                    )}
+                  </Field>
+                )}
+                <Field label="Endpoint ID">
+                  {(props) => (
+                    <Input
+                      {...props}
+                      value={endpointId}
+                      onChange={(event) => setEndpointId(event.target.value)}
+                    />
+                  )}
+                </Field>
+                <Field label="Endpoint label">
+                  {(props) => (
+                    <Input
+                      {...props}
+                      value={endpointLabel}
+                      onChange={(event) => setEndpointLabel(event.target.value)}
+                    />
+                  )}
+                </Field>
+                <Field label="Server origin">
+                  {(props) => (
+                    <Input
+                      {...props}
+                      value={origin}
+                      placeholder="https://server.example"
+                      onChange={(event) => setOrigin(event.target.value)}
+                    />
+                  )}
+                </Field>
+                {origin.trim().toLowerCase().startsWith("http://") ? (
+                  <Problem>Plaintext transport sends prompts and API keys without TLS.</Problem>
+                ) : null}
+                <Field label="Protocol">
+                  {(props) => (
+                    <Select
+                      {...props}
+                      value={protocol}
+                      onChange={(event) =>
+                        setProtocol(event.target.value as "chat_completions" | "responses")
+                      }
+                    >
+                      <option value="chat_completions">
+                        Chat Completions (/v1/chat/completions)
+                      </option>
+                      <option value="responses">Responses (/v1/responses)</option>
+                    </Select>
+                  )}
+                </Field>
+                <Field label="API key">
+                  {(props) => (
+                    <Input
+                      {...props}
+                      type="password"
+                      value={apiKey}
+                      autoComplete="off"
+                      onChange={(event) => setApiKey(event.target.value)}
+                    />
+                  )}
+                </Field>
+              </>
+            ) : null}
             <Field
               label="Label"
               hint="How this account is named in the rack. Defaults to the provider."

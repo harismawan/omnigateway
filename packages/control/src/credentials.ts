@@ -43,17 +43,91 @@ export async function getCredential(store: Store, id: string): Promise<Credentia
   return summarizeCredential(credential);
 }
 
+export type CustomProviderData = {
+  endpointId: string;
+  endpointLabel: string;
+  origin: string;
+  protocol: "chat_completions" | "responses";
+};
+
+export type ApiKeyCredentialInput = {
+  provider: unknown;
+  apiKey: unknown;
+  label?: unknown;
+  endpointId?: unknown;
+  endpointLabel?: unknown;
+  origin?: unknown;
+  protocol?: unknown;
+};
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new GatewayError("BAD_REQUEST", `${field}: must not be empty`);
+  }
+  return value.trim();
+}
+
+function customProviderData(input: ApiKeyCredentialInput): CustomProviderData {
+  const endpointId = requiredString(input.endpointId, "endpointId");
+  const endpointLabel = requiredString(input.endpointLabel, "endpointLabel");
+  const originInput = requiredString(input.origin, "origin");
+  if (input.protocol !== "chat_completions" && input.protocol !== "responses") {
+    throw new GatewayError("BAD_REQUEST", "protocol: unsupported protocol");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(originInput);
+  } catch {
+    throw new GatewayError("BAD_REQUEST", "origin: must be a valid URL");
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.hostname.length === 0 ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    (url.pathname !== "" && url.pathname !== "/") ||
+    url.search.length > 0 ||
+    url.hash.length > 0
+  ) {
+    throw new GatewayError("BAD_REQUEST", "origin: must be an HTTP(S) server origin");
+  }
+
+  return { endpointId, endpointLabel, origin: url.origin, protocol: input.protocol };
+}
+
+function sameCustomEndpoint(a: Record<string, unknown>, b: CustomProviderData): boolean {
+  return (
+    a.endpointId === b.endpointId &&
+    a.endpointLabel === b.endpointLabel &&
+    a.origin === b.origin &&
+    a.protocol === b.protocol
+  );
+}
+
 export async function createApiKeyCredential(
   store: Store,
-  input: { provider: unknown; apiKey: unknown; label?: unknown },
+  input: ApiKeyCredentialInput,
   logger: Logger = noopLogger,
 ): Promise<CredentialSummary> {
   const provider = parseOrThrow(providerIdSchema, input.provider);
-  if (typeof input.apiKey !== "string" || input.apiKey.trim().length === 0) {
-    throw new GatewayError("BAD_REQUEST", "apiKey: must not be empty");
-  }
+  const apiKey = requiredString(input.apiKey, "apiKey");
   if (input.label !== undefined && typeof input.label !== "string") {
     throw new GatewayError("BAD_REQUEST", "label: must be a string");
+  }
+
+  let providerData: Record<string, unknown> = {};
+  if (provider === "custom") {
+    const custom = customProviderData(input);
+    const existing = (await store.credentials.list()).filter(
+      (credential) =>
+        credential.provider === "custom" &&
+        credential.providerData.endpointId === custom.endpointId,
+    );
+    if (existing.some((credential) => !sameCustomEndpoint(credential.providerData, custom))) {
+      throw new GatewayError("CONFLICT", `endpointId: metadata conflicts with existing endpoint`);
+    }
+    providerData = custom;
   }
 
   const label = input.label?.trim() || `${provider} api key`;
@@ -67,12 +141,12 @@ export async function createApiKeyCredential(
     weight: 1,
     expiresAt: null,
     accountEmail: null,
-    providerData: {},
+    providerData,
     disabledReason: null,
     disabledAt: null,
     accessToken: null,
     refreshToken: null,
-    apiKey: input.apiKey,
+    apiKey,
     idToken: null,
   });
   logger.info("credential added", { credentialId: created.id, provider: created.provider });

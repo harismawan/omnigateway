@@ -345,6 +345,80 @@ test("fails over to the next credential before the commit point", async () => {
   store.close();
 });
 
+test("custom failover stays within the target endpoint", async () => {
+  const store = await createStore({
+    path: ":memory:",
+    encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
+  });
+  for (const [id, endpointId] of [
+    ["local-1", "local"],
+    ["remote-1", "remote"],
+    ["local-2", "local"],
+  ] as const) {
+    await store.credentials.create({
+      id,
+      provider: "custom",
+      label: id,
+      authType: "apiKey",
+      enabled: true,
+      tier: 1,
+      weight: endpointId === "remote" ? 100 : 1,
+      expiresAt: null,
+      accountEmail: null,
+      providerData: {
+        endpointId,
+        endpointLabel: endpointId,
+        origin: `https://${endpointId}.example.com`,
+        protocol: "chat_completions",
+      },
+      disabledReason: null,
+      disabledAt: null,
+      accessToken: null,
+      refreshToken: null,
+      apiKey: `key-${id}`,
+      idToken: null,
+    });
+  }
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "custom",
+        endpointId: "local",
+        model: "local-model",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  const calls: string[] = [];
+  const adapter: ProviderAdapter = {
+    id: "custom",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send(input) {
+      calls.push(input.credentials.apiKey ?? "none");
+      if (calls.length === 1) throw new GatewayError("UPSTREAM", "retry");
+      return { events: textStream("recovered"), degradations: [] };
+    },
+  };
+  const configured = {
+    ...deps(store, adapter),
+    adapters: { custom: adapter },
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_custom");
+  const events = await drain(outcome.events);
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  expect(calls).toEqual(["key-local-1", "key-local-2"]);
+  expect(outcome.log()).toMatchObject({ attempts: 2, credentialId: "local-2", status: 200 });
+  store.close();
+});
+
 test("a failure after the commit point surfaces as an error event, not a retry", async () => {
   const store = await seeded(2);
   const adapter = stubAdapter((call) => {

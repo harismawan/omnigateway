@@ -30,6 +30,7 @@ function encodeToolChoice(c: ToolChoice): unknown {
 export function toChatWire(
   req: ChatRequest,
   model: string,
+  vendor: "kimi" | "openai" = "kimi",
 ): { body: ChatBody; degradations: string[] } {
   const degradations: string[] = [];
   const note = (d: string): void => {
@@ -117,7 +118,7 @@ export function toChatWire(
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
   if (req.reasoning !== undefined) note("kimi:reasoning-dropped");
 
-  Object.assign(body, req.vendor?.kimi ?? {});
+  Object.assign(body, req.vendor?.[vendor] ?? {});
 
   return { body, degradations };
 }

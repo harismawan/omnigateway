@@ -5,6 +5,7 @@ export * from "./anthropic/tools.ts";
 export * from "./betas.ts";
 export * from "./body.ts";
 export * from "./catalog.ts";
+export { customAdapter } from "./custom/index.ts";
 export { httpError, parseRetryAfter } from "./http.ts";
 export * from "./http-client.ts";
 export { decodeChat, kimiAdapter, toChatWire } from "./kimi/index.ts";

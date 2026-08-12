@@ -117,6 +117,77 @@ test("createApiKeyCredential rejects invalid provider and blank keys", async () 
   ).rejects.toBeInstanceOf(GatewayError);
 });
 
+test("createApiKeyCredential normalizes custom endpoint metadata", async () => {
+  const store = await memoryStore();
+
+  const created = await createApiKeyCredential(store, {
+    provider: "custom",
+    apiKey: "test-provider-key",
+    endpointId: " local-vllm ",
+    endpointLabel: " Local vLLM ",
+    origin: "http://localhost:8000/",
+    protocol: "chat_completions",
+  });
+
+  expect(created).toMatchObject({
+    provider: "custom",
+    providerData: {
+      endpointId: "local-vllm",
+      endpointLabel: "Local vLLM",
+      origin: "http://localhost:8000",
+      protocol: "chat_completions",
+    },
+  });
+});
+
+test("createApiKeyCredential rejects forbidden origins and endpoint conflicts", async () => {
+  const store = await memoryStore();
+  const base = {
+    provider: "custom",
+    apiKey: "test-provider-key",
+    endpointId: "local-vllm",
+    endpointLabel: "Local vLLM",
+    protocol: "responses",
+  };
+
+  for (const origin of [
+    "ftp://localhost",
+    "https://user:pass@example.com",
+    "https://example.com/v1",
+    "https://example.com?x=1",
+    "https://example.com#x",
+  ]) {
+    await expect(createApiKeyCredential(store, { ...base, origin })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+    });
+  }
+
+  await createApiKeyCredential(store, { ...base, origin: "https://example.com" });
+  await expect(
+    createApiKeyCredential(store, {
+      ...base,
+      apiKey: "second-test-key",
+      origin: "https://other.example.com",
+    }),
+  ).rejects.toMatchObject({ code: "CONFLICT" });
+});
+
+test("createApiKeyCredential permits matching metadata for multiple keys", async () => {
+  const store = await memoryStore();
+  const endpoint = {
+    provider: "custom",
+    endpointId: "local-vllm",
+    endpointLabel: "Local vLLM",
+    origin: "https://example.com/",
+    protocol: "responses",
+  };
+
+  await createApiKeyCredential(store, { ...endpoint, apiKey: "first-test-key" });
+  await createApiKeyCredential(store, { ...endpoint, apiKey: "second-test-key" });
+
+  expect(await store.credentials.list()).toHaveLength(2);
+});
+
 test("refreshCredential refreshes OAuth metadata and returns current expiry", async () => {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", expiresAt: NOW - 1 });

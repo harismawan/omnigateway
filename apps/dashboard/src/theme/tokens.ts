@@ -42,6 +42,7 @@ export const theme = {
     anthropic: "var(--p-anthropic)",
     openai: "var(--p-openai)",
     kimi: "var(--p-kimi)",
+    custom: "var(--p-custom)",
   },
   font: {
     sans: '"Archivo Variable", ui-sans-serif, system-ui, sans-serif',
@@ -66,13 +67,14 @@ export const theme = {
 export type AppTheme = typeof theme;
 
 /** Provider ids the gateway can hold credentials for. */
-export const PROVIDER_IDS = ["anthropic", "openai", "kimi"] as const;
+export const PROVIDER_IDS = ["anthropic", "openai", "kimi", "custom"] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 
 export const PROVIDER_LABEL: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   kimi: "Kimi",
+  custom: "OpenAI Compatible",
 };
 
 export function providerColor(provider: ProviderId): string {

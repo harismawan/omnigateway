@@ -24,6 +24,23 @@ export async function putModel(store: Store, id: string, input: unknown): Promis
   if (model.id !== id) {
     throw new GatewayError("BAD_REQUEST", "model id in the path and body must match");
   }
+  const customEndpointIds = new Set(
+    (await store.credentials.list())
+      .filter((credential) => credential.provider === "custom")
+      .map((credential) => credential.providerData.endpointId)
+      .filter((endpointId): endpointId is string => typeof endpointId === "string"),
+  );
+  const missing = model.targets.find(
+    (target) =>
+      target.provider === "custom" &&
+      (target.endpointId === undefined || !customEndpointIds.has(target.endpointId)),
+  );
+  if (missing !== undefined) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `custom endpoint "${missing.endpointId}" has no credential`,
+    );
+  }
   await store.config.putModel(model);
 }
 

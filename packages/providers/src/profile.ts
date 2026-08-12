@@ -206,4 +206,5 @@ export const PROFILES: Readonly<Record<ProviderId, ClientProfile>> = {
   anthropic: { ...anthropic, order: envOrder("OMNI_ORDER_ANTHROPIC", anthropic.order) },
   openai: { ...openai, order: envOrder("OMNI_ORDER_OPENAI", openai.order) },
   kimi: { ...kimi, order: envOrder("OMNI_ORDER_KIMI", kimi.order) },
+  custom: { headers: [], order: [] },
 };

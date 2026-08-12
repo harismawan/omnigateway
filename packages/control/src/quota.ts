@@ -34,7 +34,7 @@ export function resetQuotaCooldowns(): void {
 
 export type PollerDeps = {
   store: Store;
-  providers: Readonly<Record<ProviderId, OAuthProvider>>;
+  providers: Readonly<Partial<Record<ProviderId, OAuthProvider>>>;
   http: HttpClient;
   refresh: Refresher;
   now: () => number;
@@ -55,7 +55,7 @@ export async function probe(
 ): Promise<QuotaWindow[] | null> {
   if (credential.authType !== "oauth") return null;
   const provider = deps.providers[credential.provider];
-  if (provider.usage === undefined) return null;
+  if (provider?.usage === undefined) return null;
 
   // A probe with a stale token would read as an auth failure and report
   // nothing, so refresh first on the same lead the scheduler uses.
@@ -113,7 +113,7 @@ export async function poll(deps: PollerDeps): Promise<number> {
     (c) =>
       c.enabled &&
       c.authType === "oauth" &&
-      deps.providers[c.provider].usage !== undefined &&
+      deps.providers[c.provider]?.usage !== undefined &&
       (cooldowns.get(c.id) ?? 0) <= now,
   );
 

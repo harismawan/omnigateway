@@ -208,22 +208,51 @@ export const credentialsRefresh: Command = {
 };
 
 export const credentialsAddKey: Command = {
-  usage: "credentials add-key <provider> [--label L]",
+  usage:
+    "credentials add-key <provider> [--label L] [--endpoint-id ID --endpoint-label L --origin URL --protocol P]",
   summary: "Store a provider API key, read from a prompt or stdin",
-  options: { label: { type: "string" } },
+  options: {
+    label: { type: "string" },
+    "endpoint-id": { type: "string" },
+    "endpoint-label": { type: "string" },
+    origin: { type: "string" },
+    protocol: { type: "string" },
+  },
   async run(args, { ctx, writer, prompt }) {
     const providerId = requirePositional(args, 0, "provider");
     if (!isProviderId(providerId)) {
-      throw new UsageError("provider must be one of anthropic, openai, kimi");
+      throw new UsageError("provider must be one of anthropic, openai, kimi, custom");
     }
 
+    const protocolFlag = stringFlag(args.values, "protocol");
+    const protocol =
+      protocolFlag === "chat-completions"
+        ? "chat_completions"
+        : protocolFlag === "responses"
+          ? "responses"
+          : protocolFlag;
     const key = await prompt.secret(`${providerId} API key: `);
     if (key.length === 0) throw new CliError("no API key given");
 
-    const created = await createApiKeyCredential(await ctx.store(), {
+    const store = await ctx.store();
+    const endpointId = stringFlag(args.values, "endpoint-id");
+    const existingEndpoint =
+      providerId === "custom" && endpointId !== undefined
+        ? (await listCredentials(store)).find(
+            (credential) =>
+              credential.provider === "custom" &&
+              credential.providerData.endpointId === endpointId.trim(),
+          )
+        : undefined;
+    const created = await createApiKeyCredential(store, {
       provider: providerId,
       apiKey: key,
       label: stringFlag(args.values, "label"),
+      endpointId,
+      endpointLabel:
+        stringFlag(args.values, "endpoint-label") ?? existingEndpoint?.providerData.endpointLabel,
+      origin: stringFlag(args.values, "origin") ?? existingEndpoint?.providerData.origin,
+      protocol: protocol ?? existingEndpoint?.providerData.protocol,
     });
 
     emit(
