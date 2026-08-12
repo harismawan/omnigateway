@@ -1,5 +1,7 @@
 import { type ChatRequest, estimateCachedInputTokens, estimateInputTokens } from "@omni/ir";
-import { type CredentialHealth, cacheReadRate, type Target } from "@omni/store";
+// The types subpath, not the package root: the root re-exports `openDb`, which
+// imports `bun:sqlite`, and the router must not pull a database driver in.
+import { type CredentialHealth, cacheReadRate, type Target } from "@omni/store/types";
 import type { Pair } from "./filters.ts";
 import { quotaHeadroom } from "./quota.ts";
 import { healthKey } from "./snapshot.ts";
@@ -129,8 +131,13 @@ export function score(pairs: Pair[], input: RankInput): Candidate[] {
     const ownCost = costs[i] as number;
     const cost = ownCost <= 0 || bestCost === null ? UNKNOWN : ratio(ownCost, bestCost);
 
+    // Zero is "no useful measurement", the same as absent: `bestPositive`
+    // already refuses it as a denominator, and passing it as a numerator would
+    // score it 1 off a reading that means nothing.
     const latency =
-      h?.ewmaTtftMs == null || bestLatency === null ? UNKNOWN : ratio(h.ewmaTtftMs, bestLatency);
+      h?.ewmaTtftMs == null || h.ewmaTtftMs <= 0 || bestLatency === null
+        ? UNKNOWN
+        : ratio(h.ewmaTtftMs, bestLatency);
 
     const reasons = { tier, health, quota, cost, latency, load: loadTerm };
     const base =

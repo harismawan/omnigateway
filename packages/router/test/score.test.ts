@@ -160,3 +160,28 @@ test("prefers the target with the cheaper cache read for a cached prompt", () =>
 
   expect(candidates[0]?.target.model).toBe("cheap-cache");
 });
+
+test("a zero first-token measurement is unknown, not instant", () => {
+  const reasons = byId(
+    rank({
+      request: req,
+      model: model(),
+      snapshot: snapshot({
+        credentials: [credential({ id: "unmeasured" }), credential({ id: "slow" })],
+        health: [
+          // A sub-millisecond first token seeds the EWMA at zero. That means
+          // "no useful measurement", exactly as a null does.
+          health({ credentialId: "unmeasured", ewmaTtftMs: 0 }),
+          health({ credentialId: "slow", ewmaTtftMs: 400 }),
+        ],
+        settings: only("latency"),
+      }),
+      now: NOW,
+      rand: 0,
+      load: new Map(),
+    }).candidates,
+  );
+
+  expect(reasons.get("unmeasured")?.latency).toBe(0.5);
+  expect(reasons.get("slow")?.latency).toBe(1);
+});

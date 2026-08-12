@@ -173,6 +173,23 @@ export async function dispatch(
 
   const maxAttempts = Math.min(snapshot.settings.maxAttempts, candidates.length);
 
+  // Claimed here rather than at the first attempt, because `run()` is a
+  // generator: its body does not start until the response is drained, several
+  // turns later. A burst that arrives together would otherwise all rank before
+  // any of them had claimed anything, read zero in flight, and pick the same
+  // credential — the exact stacking this accounting exists to prevent.
+  //
+  // Ownership passes to the first attempt if it uses this candidate, and every
+  // release is idempotent, so the attempt, the outer `finally` and the wrapper
+  // below can all call it and the slot is still freed exactly once.
+  const head = candidates[0] as Candidate;
+  const eager = {
+    credentialId: head.credential.id,
+    model: head.target.model,
+    release: deps.loadRegistry.acquire(head.credential.id, head.target.model),
+  };
+  let eagerHeld = true;
+
   const persistHealth = async (next: ReturnType<typeof recordSuccess>): Promise<void> => {
     await deps.store.credentials.saveHealth([next]);
   };
@@ -244,10 +261,18 @@ export async function dispatch(
         // the loop below unwinds through the `finally` — return, break and
         // continue to the labelled loop, a throw, and the generator being
         // closed early when a client hangs up mid-stream.
-        const releaseSlot = deps.loadRegistry.acquire(
-          candidate.credential.id,
-          candidate.target.model,
-        );
+        //
+        // The first attempt normally adopts the slot claimed at rank time
+        // rather than claiming a second one. Failover moves to a different
+        // credential, so from the second attempt on this claims its own.
+        const adoptable =
+          eagerHeld &&
+          eager.credentialId === candidate.credential.id &&
+          eager.model === candidate.target.model;
+        if (adoptable) eagerHeld = false;
+        const releaseSlot = adoptable
+          ? eager.release
+          : deps.loadRegistry.acquire(candidate.credential.id, candidate.target.model);
         try {
           while (true) {
             try {
@@ -485,11 +510,43 @@ export async function dispatch(
       };
     } finally {
       clearDeadline();
+      // Covers the paths that never reach an attempt — cancellation at the top
+      // of the loop breaks straight past the point where the slot is adopted.
+      // Idempotent, so an adopted-and-already-released slot is untouched.
+      eager.release();
       if (!dispatchController.signal.aborted) dispatchController.abort();
     }
   }
 
-  return { events: run(), log: () => log };
+  const inner = run();
+
+  // A slot is claimed before `run()`'s body can start, and closing a generator
+  // that was never iterated skips its body entirely — so no `finally` inside
+  // it can free that claim. `return`/`throw` are intercepted here instead,
+  // which a consumer that walks away does call. Releases are idempotent, so
+  // this and the attempt that adopted the slot still free it exactly once.
+  const events: AsyncGenerator<StreamEvent, void, undefined> = {
+    next: (...args) => inner.next(...args),
+    return: (value) => {
+      eager.release();
+      return inner.return(value);
+    },
+    throw: (error) => {
+      eager.release();
+      return inner.throw(error);
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    // `await using` disposes without going through `return`, so it needs the
+    // same release.
+    async [Symbol.asyncDispose]() {
+      eager.release();
+      await inner[Symbol.asyncDispose]();
+    },
+  };
+
+  return { events, log: () => log };
 }
 
 function waitForCancellation<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

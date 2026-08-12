@@ -247,8 +247,10 @@ crashing.
 - **`score`** — sort unchanged; behaviour changes only through scoring.
 - **`priority`** — unchanged.
 - **`roundRobin`** — sort key becomes `spent → inflight ascending → idle descending`. This is the
-  herd fix: twenty simultaneous requests see in-flight counts 0, 1, 2, 3 … and fan out, instead of
-  reading one stale `lastUsedAt` and stacking.
+  herd fix: simultaneous requests see in-flight counts 0, 1, 2, 3 … and fan out, instead of reading
+  one stale `lastUsedAt` and stacking. It only holds because the claim is taken before `run()`
+  starts — see the dispatch section below, where acquiring at the first attempt instead leaves every
+  request in a burst reading zero.
 - **`weighted`** — `drawWeight` gains health:
 
   ```ts
@@ -266,10 +268,27 @@ snapshot = snapshotCache.get(now)          // cached, shared, unchanged
 load     = loadRegistry.counts()           // fresh, per request
 rank({ request, model, snapshot, now, rand, load })
 
-candidateLoop:
-  release = loadRegistry.acquire(candidate.credential.id, candidate.target.model)
+eager = loadRegistry.acquire(candidates[0])   // claimed before run() can start
+events = wrap(run())                          // return/throw release `eager`
+
+candidateLoop:                                // inside run()
+  release = adopts `eager` when the candidate matches, else acquires its own
   try { attempt } finally { release() }
+outer finally: eager.release()                // paths that never reach an attempt
 ```
+
+**The claim must be acquired before `run()` starts, not at the first attempt.** `run()` is an async
+generator: its body does not execute until a consumer calls `.next()`, which happens once the
+response body is drained — several turns after `dispatch()` returns. Acquiring inside it means a
+burst arriving together all reach `rank()` first, all read zero in flight, and all pick the same
+credential. Measured before the fix: nine simultaneous requests across three healthy identical
+credentials went nine-for-nine to one of them.
+
+That earlier claim is the reason for the wrapper. A `finally` inside a generator cannot free a claim
+made before the generator starts, because closing an un-started generator skips its body entirely.
+So `return`/`throw` are intercepted on the returned object. Three places can release the eager
+claim — the adopting attempt, the outer `finally`, and the wrapper — and all three are correct
+precisely because `release` is idempotent.
 
 `Candidate.reasons` gains `load` and loses `recency`, flowing to the request log and to `dryRun`.
 
@@ -304,9 +323,11 @@ Router — pure, so these are cheap and are the primary coverage:
   prefix, and a breakpoint on system covers the tools before it.
 - `roundRobin` with in-flight `{a: 0, b: 2, c: 1}` orders `a, c, b` regardless of `lastUsedAt`.
 - `weighted` never draws a breaker-open candidate at full configured weight.
-- **Herd regression.** Rank repeatedly against a registry that acquires without releasing; assert the
-  head rotates rather than pinning. This is the test that would have caught the original defect, and
-  it is the one to write first.
+- **Herd regression.** Dispatch a burst through the real registry with every request issued before
+  any stream is drained, and assert the work spreads across every credential. This has to go through
+  `dispatch`, not `rank` with a hand-built map: a hand-built map cannot see *when* the claim is
+  taken, which is where the defect actually lived. Write it first — the hand-injected version was
+  written instead, and it passed against code that sent a nine-request burst to one credential.
 
 Gateway:
 
@@ -324,6 +345,14 @@ and anything asserting `reasons.recency`.
 
 ## Known gaps
 
+- `load` cannot move traffic across tiers. With `tier: 10` against `load: 2`, a busy tier-1
+  credential still outranks an idle tier-2 one, so load-awareness operates within a tier rather than
+  across the pool. Consistent with tier dominance being intended, but worth knowing before tuning.
+- `1/(1+n)` saturates. The weighted gap between 0 and 20 in flight is 2.0; between 10 and 11 it is
+  0.013. Spreading is decisive when a credential is idle and nearly indifferent once several are
+  deep in a queue.
+- A stalled upstream plus a client hangup holds a slot until the adapter's stream settles. Real
+  adapters go through `HttpClient` with the dispatch signal, so this needs a misbehaving adapter.
 - Routing assumes a cache-marked prefix hits. The first turn of a conversation marks the same blocks
   as later ones but pays to write them, so that turn is under-estimated.
 - Cache-write pricing is invisible to the cost term, deliberately.
