@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { ProviderId } from "@omni/ir";
 import { catalogPricing, PROVIDER_MODEL_CATALOG } from "../src/catalog.ts";
 
-const PROVIDERS: readonly ProviderId[] = ["anthropic", "openai", "kimi"];
+const PROVIDERS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "custom"];
 
 const EXPECTED = {
   anthropic: {
@@ -17,6 +17,7 @@ const EXPECTED = {
     defaultModel: "k3-256k",
     ids: ["k3-256k", "k3", "kimi-for-coding", "kimi-for-coding-highspeed"],
   },
+  custom: { defaultModel: "", ids: [] },
 } as const;
 
 test("catalog covers every provider with ordered curated IDs", () => {
@@ -34,6 +35,11 @@ test("catalog entries have non-empty unique values and exactly one default", () 
     const entry = PROVIDER_MODEL_CATALOG[provider];
     const ids = entry.models.map((model) => model.id);
 
+    if (provider === "custom") {
+      expect(entry.defaultModel).toBe("");
+      expect(ids).toEqual([]);
+      continue;
+    }
     expect(entry.defaultModel.length).toBeGreaterThan(0);
     expect(entry.models.every((model) => model.id.length > 0 && model.label.length > 0)).toBe(true);
     expect(new Set(ids).size).toBe(ids.length);

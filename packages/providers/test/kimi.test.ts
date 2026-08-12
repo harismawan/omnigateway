@@ -259,8 +259,8 @@ test("OAuth inference uses the Kimi Coding API", async () => {
   expect((sent as HttpRequest).url).toBe("https://api.kimi.com/coding/v1/chat/completions");
 });
 
-test("the registry exposes exactly the three v1 providers", () => {
-  expect(Object.keys(ADAPTERS).sort()).toEqual(["anthropic", "kimi", "openai"]);
+test("the registry exposes every provider", () => {
+  expect(Object.keys(ADAPTERS).sort()).toEqual(["anthropic", "custom", "kimi", "openai"]);
   expect(ADAPTERS.kimi.capabilities.images).toBe(false);
   expect(ADAPTERS.anthropic.capabilities.reasoning).toBe(true);
 });

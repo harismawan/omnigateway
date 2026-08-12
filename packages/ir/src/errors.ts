@@ -18,6 +18,7 @@ export type ErrorCode =
   | "QUOTA_EXHAUSTED"
   | "OVERLOADED"
   | "BAD_REQUEST"
+  | "CONFLICT"
   | "CONTENT_FILTER"
   | "CAPABILITY_MISMATCH"
   | "MODEL_UNAVAILABLE"
@@ -47,6 +48,7 @@ export const RETRYABLE: Readonly<Record<ErrorCode, boolean>> = {
   TIMEOUT: true,
   NETWORK: true,
   BAD_REQUEST: false,
+  CONFLICT: false,
   CONTENT_FILTER: false,
   NO_CANDIDATES: false,
   ALL_CANDIDATES_FAILED: false,
@@ -67,6 +69,7 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
   QUOTA_EXHAUSTED: 429,
   OVERLOADED: 503,
   BAD_REQUEST: 400,
+  CONFLICT: 409,
   CONTENT_FILTER: 400,
   CAPABILITY_MISMATCH: 400,
   MODEL_UNAVAILABLE: 404,

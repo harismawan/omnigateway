@@ -32,12 +32,13 @@ import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { ConnectDialog } from "./ConnectDialog.tsx";
 
-const PROVIDER_ORDER: ProviderId[] = ["anthropic", "openai", "kimi"];
+const PROVIDER_ORDER: ProviderId[] = ["anthropic", "openai", "kimi", "custom"];
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   kimi: "Kimi",
+  custom: "OpenAI Compatible",
 };
 
 /** Carries the provider's identity on the module edge, so the tables need not. */
@@ -351,6 +352,7 @@ export function AccountsBoard() {
 
       <ConnectDialog
         open={connecting}
+        credentials={credentials.data ?? []}
         onOpenChange={setConnecting}
         onConnected={() => void credentials.refetch()}
       />

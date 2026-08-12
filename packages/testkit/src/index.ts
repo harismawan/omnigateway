@@ -284,7 +284,12 @@ export function stubAdapters(events: StreamEvent[]): Readonly<Record<ProviderId,
       };
     },
   });
-  return { anthropic: make("anthropic"), openai: make("openai"), kimi: make("kimi") };
+  return {
+    anthropic: make("anthropic"),
+    openai: make("openai"),
+    kimi: make("kimi"),
+    custom: make("custom"),
+  };
 }
 
 export function virtualModel(overrides: Partial<VirtualModel> & { id: string }): VirtualModel {

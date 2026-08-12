@@ -4,6 +4,7 @@ import {
   type ConsoleDeps,
   type ConsoleSource,
   consoleLimit,
+  createApiKeyCredential,
   createKey,
   credentialHealth,
   dryRun,
@@ -143,6 +144,19 @@ export function adminRoutes(deps: AdminDeps) {
       .get("/api/credentials", async ({ request }) => {
         await requireAdmin(request, deps.admin);
         return { credentials: await listCredentials(deps.store) };
+      })
+
+      .post("/api/credentials", async ({ request }) => {
+        await requireAdmin(request, deps.admin);
+        const body = await readJsonRecord(request);
+        if (body === null) throw new GatewayError("BAD_REQUEST", "credential body is required");
+        return {
+          credential: await createApiKeyCredential(
+            deps.store,
+            { provider: body.provider, apiKey: body.apiKey, ...body },
+            logger,
+          ),
+        };
       })
 
       .get("/api/credentials/health", async ({ request }) => {

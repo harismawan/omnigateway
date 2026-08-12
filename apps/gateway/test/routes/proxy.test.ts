@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import type { ProviderId, StreamEvent } from "@omni/ir";
-import type { HttpClient, ProviderAdapter } from "@omni/providers";
+import {
+  customAdapter,
+  type HttpClient,
+  type HttpRequest,
+  type ProviderAdapter,
+} from "@omni/providers";
 import {
   captureLogger,
   memoryStore,
@@ -99,6 +104,84 @@ test("proxies a non-streaming anthropic request", async () => {
   const body = (await res.json()) as { content: unknown; id: string };
   expect(body.content).toEqual([{ type: "text", text: "Hi" }]);
   expect(body.id).toBe("req_1");
+});
+
+test("preserves OpenAI passthrough fields through a custom chat target", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, {
+    id: "custom-1",
+    provider: "custom",
+    authType: "apiKey",
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "custom-key",
+    providerData: {
+      endpointId: "local",
+      endpointLabel: "Local",
+      origin: "http://localhost:8000",
+      protocol: "chat_completions",
+    },
+  });
+  await store.config.putModel(
+    virtualModel({
+      id: "local",
+      targets: [target({ provider: "custom", endpointId: "local", model: "upstream-model" })],
+    }),
+  );
+  const { raw } = await seedApiKey(store);
+  const sent: HttpRequest[] = [];
+  const http: HttpClient = async (request) => {
+    sent.push(request);
+    const frames = [
+      `data: ${JSON.stringify({
+        id: "chat_1",
+        model: "upstream-model",
+        choices: [{ index: 0, delta: { role: "assistant", content: "Hi" } }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("");
+    return {
+      status: 200,
+      headers: new Headers({ "content-type": "text/event-stream" }),
+      body: new Response(frames).body,
+      text: async () => frames,
+    };
+  };
+  const adapters: Readonly<Record<ProviderId, ProviderAdapter>> = {
+    ...stubAdapters(EVENTS),
+    custom: customAdapter,
+  };
+  const app = proxyRoutes({
+    store,
+    adapters,
+    http,
+    now: () => 1_000_000,
+    rand: () => 0.5,
+    refresh: async (credential) => await credential.secrets(),
+    requestId: () => "req_custom",
+  });
+
+  const response = await app.handle(
+    new Request("http://localhost/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({
+        model: "local",
+        messages: [{ role: "user", content: "hi" }],
+        top_p: 0.25,
+      }),
+    }),
+  );
+
+  expect(response.status).toBe(200);
+  await response.text();
+  const upstream = sent[0];
+  if (upstream === undefined) throw new Error("custom adapter did not send request");
+  expect(JSON.parse(upstream.body)).toMatchObject({ top_p: 0.25 });
 });
 
 /** The lines that used to restate a `request_logs` row on stdout. */
@@ -680,6 +763,7 @@ test("writes exactly one log row when the client disconnects mid-stream after th
     anthropic: hangingAdapter("anthropic"),
     openai: hangingAdapter("openai"),
     kimi: hangingAdapter("kimi"),
+    custom: hangingAdapter("custom"),
   };
 
   let n = 0;

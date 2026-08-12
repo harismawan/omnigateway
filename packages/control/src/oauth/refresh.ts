@@ -5,7 +5,7 @@ import type { OAuthProvider } from "./types.ts";
 
 export type RefreshDeps = {
   store: Store;
-  providers: Readonly<Record<ProviderId, OAuthProvider>>;
+  providers: Readonly<Partial<Record<ProviderId, OAuthProvider>>>;
   http: HttpClient;
   now: () => number;
   logger?: Logger;
@@ -41,6 +41,9 @@ export function createRefresher(deps: RefreshDeps): Refresher {
     }
 
     const provider = deps.providers[credential.provider];
+    if (provider === undefined) {
+      throw new GatewayError("BAD_REQUEST", "provider does not support OAuth refresh");
+    }
     logger.debug("refreshing credential", {
       provider: credential.provider,
       credentialId: credential.id,

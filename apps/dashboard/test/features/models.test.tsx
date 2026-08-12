@@ -135,6 +135,20 @@ describe("catalog token limits", () => {
 });
 
 describe("parseDraft", () => {
+  test("requires and preserves endpoint id for custom targets", () => {
+    const custom = { ...blankTarget("custom"), model: "local-model" };
+    const missing = parseDraft({ ...blankModel(), id: "local", targets: [custom] });
+    expect(missing).toEqual({ ok: false, problem: "Target 1 needs a custom endpoint." });
+
+    const parsed = parseDraft({
+      ...blankModel(),
+      id: "local",
+      targets: [{ ...custom, endpointId: "local-vllm" }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.model.targets[0]).toMatchObject({ endpointId: "local-vllm" });
+  });
+
   test("round-trips a model without inventing fields", () => {
     const original = model();
     const parsed = parseDraft(toDraft(original));
@@ -270,6 +284,46 @@ describe("ModelsBoard", () => {
       "Give the model a name clients will ask for.",
     );
     expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+  });
+
+  test("custom targets choose an endpoint from connected credentials", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({
+      "GET /api/credentials": () => ({
+        credentials: [
+          {
+            id: "custom-1",
+            provider: "custom",
+            providerData: {
+              endpointId: "local-vllm",
+              endpointLabel: "Local vLLM",
+              origin: "http://localhost:8000",
+              protocol: "chat_completions",
+            },
+          },
+        ],
+      }),
+      "PUT /api/models/fast": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    const provider = screen.getByLabelText("Provider") as HTMLSelectElement;
+    expect(within(provider).getByRole("option", { name: "OpenAI Compatible" })).toBeTruthy();
+    await user.selectOptions(provider, "custom");
+    expect(provider.selectedOptions[0]?.textContent).toBe("OpenAI Compatible");
+    await user.selectOptions(screen.getByLabelText("Endpoint"), "local-vllm");
+    await user.type(screen.getByLabelText("Provider model"), "local-model");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body)).targets[0]).toMatchObject({
+        provider: "custom",
+        endpointId: "local-vllm",
+        model: "local-model",
+      });
+    });
   });
 
   test("adding a target and saving includes it", async () => {

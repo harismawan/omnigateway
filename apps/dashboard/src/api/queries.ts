@@ -339,6 +339,26 @@ export function useConnectStart(): UseMutationResult<
   });
 }
 
+export function useCreateApiKeyCredential(): UseMutationResult<
+  { credential: Credential },
+  Error,
+  {
+    provider: "custom";
+    apiKey: string;
+    endpointId: string;
+    endpointLabel: string;
+    origin: string;
+    protocol: "chat_completions" | "responses";
+    label?: string | undefined;
+  }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input) => post<{ credential: Credential }>("/api/credentials", input),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.credentials }),
+  });
+}
+
 export function useConnectFinish(): UseMutationResult<
   { id: string },
   Error,

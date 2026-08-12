@@ -35,6 +35,12 @@ test("accepts a colon separator as well as a slash", () => {
   expect(resolveModel("kimi:kimi-k2", snapshot({})).targets[0]?.model).toBe("kimi-k2");
 });
 
+test("does not synthesize custom targets without endpoint metadata", () => {
+  for (const name of ["custom/model", "custom:model"]) {
+    expect(() => resolveModel(name, snapshot({}))).toThrow(GatewayError);
+  }
+});
+
 test("keeps slashes inside the model portion intact", () => {
   const resolved = resolveModel("openai/org/gpt-5", snapshot({}));
   expect(resolved.targets[0]?.provider).toBe("openai");

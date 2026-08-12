@@ -196,6 +196,44 @@ test("every data route requires a session", async () => {
   }
 });
 
+test("custom API-key credentials are created behind admin auth", async () => {
+  const { call, store } = await harness();
+  const input = {
+    provider: "custom",
+    apiKey: "test-provider-key",
+    endpointId: "local",
+    endpointLabel: "Local",
+    origin: "http://localhost:8000",
+    protocol: "chat_completions",
+  };
+
+  expect((await call("POST", "/api/credentials", input, false)).status).toBe(401);
+  const response = await call("POST", "/api/credentials", input);
+  expect(response.status).toBe(200);
+  expect(await response.text()).not.toContain("test-provider-key");
+  expect((await store.credentials.list())[0]?.providerData).toMatchObject({ endpointId: "local" });
+});
+
+test("custom credential endpoint conflicts return 409", async () => {
+  const { call } = await harness();
+  const input = {
+    provider: "custom",
+    apiKey: "first-test-key",
+    endpointId: "local",
+    endpointLabel: "Local",
+    origin: "https://example.com",
+    protocol: "responses",
+  };
+  expect((await call("POST", "/api/credentials", input)).status).toBe(200);
+  const conflict = await call("POST", "/api/credentials", {
+    ...input,
+    apiKey: "second-test-key",
+    origin: "https://other.example.com",
+  });
+  expect(conflict.status).toBe(409);
+  expect(await conflict.text()).not.toContain("second-test-key");
+});
+
 test("credentials are listed without their secrets", async () => {
   const { call, store } = await harness();
   await seedCredential(store, {

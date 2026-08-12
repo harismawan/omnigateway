@@ -115,8 +115,7 @@ export type TargetPricing = {
   cacheWrite1h?: number | undefined;
 };
 
-export type Target = {
-  provider: ProviderId;
+type TargetBase = {
   model: string;
   tier: number;
   weight: number;
@@ -132,6 +131,12 @@ export type Target = {
   contextWindow?: number | undefined;
   maxOutputTokens?: number | undefined;
   capabilities: { tools: boolean; images: boolean; reasoning: boolean };
+};
+
+export type Target = TargetBase & {
+  provider: ProviderId;
+  /** Required for custom targets by the control schema; absent on built-in targets. */
+  endpointId?: string | undefined;
 };
 
 export type Strategy = "score" | "priority" | "roundRobin" | "weighted";

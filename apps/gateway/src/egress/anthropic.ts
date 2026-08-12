@@ -19,6 +19,7 @@ const ERROR_TYPE: Readonly<Record<ErrorCode, string>> = {
   QUOTA_EXHAUSTED: "rate_limit_error",
   OVERLOADED: "overloaded_error",
   BAD_REQUEST: "invalid_request_error",
+  CONFLICT: "invalid_request_error",
   CONTENT_FILTER: "invalid_request_error",
   CAPABILITY_MISMATCH: "invalid_request_error",
   MODEL_UNAVAILABLE: "not_found_error",

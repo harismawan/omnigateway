@@ -146,6 +146,115 @@ describe("AccountsBoard", () => {
     });
   });
 
+  test("keeps the selected existing custom endpoint visible", async () => {
+    const user = userEvent.setup();
+    stubAccounts({
+      "GET /api/credentials": () => ({
+        credentials: [
+          credential({
+            id: "custom-1",
+            provider: "custom",
+            providerData: {
+              endpointId: "local-vllm",
+              endpointLabel: "Local vLLM",
+              origin: "http://localhost:8000",
+              protocol: "chat_completions",
+            },
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(
+      (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
+    );
+    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+    const endpoint = screen.getByLabelText("Existing endpoint") as HTMLSelectElement;
+    await user.selectOptions(endpoint, "local-vllm");
+
+    expect(endpoint.value).toBe("local-vllm");
+    expect(endpoint.selectedOptions[0]?.textContent).toBe("Local vLLM");
+  });
+
+  test("returns to a blank endpoint form after reselecting create new endpoint", async () => {
+    const user = userEvent.setup();
+    stubAccounts({
+      "GET /api/credentials": () => ({
+        credentials: [
+          credential({
+            id: "custom-1",
+            provider: "custom",
+            providerData: {
+              endpointId: "local-vllm",
+              endpointLabel: "Local vLLM",
+              origin: "http://localhost:8000",
+              protocol: "chat_completions",
+            },
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(
+      (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
+    );
+    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+    const endpoint = screen.getByLabelText("Existing endpoint") as HTMLSelectElement;
+    await user.selectOptions(endpoint, "local-vllm");
+    await user.selectOptions(endpoint, "");
+
+    expect(endpoint.value).toBe("");
+    expect((screen.getByLabelText("Endpoint ID") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Endpoint label") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Server origin") as HTMLInputElement).value).toBe("");
+  });
+
+  test("names the upstream path each protocol calls", async () => {
+    const user = userEvent.setup();
+    stubAccounts({});
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(
+      (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
+    );
+    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+
+    const protocol = screen.getByLabelText("Protocol") as HTMLSelectElement;
+    expect(
+      within(protocol).getByRole("option", { name: "Chat Completions (/v1/chat/completions)" }),
+    ).toBeTruthy();
+    expect(
+      within(protocol).getByRole("option", { name: "Responses (/v1/responses)" }),
+    ).toBeTruthy();
+  });
+
+  test("creates an OpenAI-compatible credential and warns for HTTP", async () => {
+    const user = userEvent.setup();
+    const stub = stubAccounts({ "POST /api/credentials": () => ({ credential: credential() }) });
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(
+      (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
+    );
+    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+    await user.type(screen.getByLabelText("Endpoint ID"), "local-vllm");
+    await user.type(screen.getByLabelText("Endpoint label"), "Local vLLM");
+    await user.type(screen.getByLabelText("Server origin"), "http://localhost:8000");
+    await user.selectOptions(screen.getByLabelText("Protocol"), "chat_completions");
+    await user.type(screen.getByLabelText("API key"), "test-provider-key");
+
+    expect(screen.getByText(/plaintext transport/i)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Add API key" }));
+    await waitFor(() => {
+      const call = stub.calls.find(
+        (entry) => entry.url === "/api/credentials" && entry.init?.method === "POST",
+      );
+      expect(call?.init?.body as string).toContain('"endpointId":"local-vllm"');
+    });
+  });
+
   test("an empty gateway says what to do instead of showing a bare table", async () => {
     createFetchStub({
       "GET /api/credentials": () => ({ credentials: [] }),

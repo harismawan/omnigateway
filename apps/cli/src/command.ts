@@ -47,6 +47,7 @@ const PROVIDER_TONE: Record<ProviderId, Tone> = {
   anthropic: "magenta",
   openai: "green",
   kimi: "blue",
+  custom: "cyan",
 };
 
 export function provider(ctx: Context, id: ProviderId): string {

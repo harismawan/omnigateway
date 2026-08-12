@@ -68,7 +68,7 @@ export function resolveModel(name: string, snapshot: Snapshot): VirtualModel {
   if (sep > 0) {
     const prefix = name.slice(0, sep);
     const rest = name.slice(sep + 1);
-    if (PROVIDERS.has(prefix) && rest.length > 0) {
+    if (PROVIDERS.has(prefix) && prefix !== "custom" && rest.length > 0) {
       return synthesize(prefix as ProviderId, rest);
     }
     throw new GatewayError("NO_CANDIDATES", `unknown provider "${prefix}" in model "${name}"`);

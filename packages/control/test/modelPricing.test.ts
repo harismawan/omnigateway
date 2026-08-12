@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
+import { memoryStore } from "@omni/testkit";
+import { putModel } from "../src/models.ts";
 import { modelSchema } from "../src/schemas.ts";
 
-const target = (costPerMTok: Record<string, number>) => ({
+const target = (
+  costPerMTok: Record<string, number>,
+): Record<string, unknown> & {
+  targets: Array<Record<string, unknown>>;
+} => ({
   id: "m",
   strategy: "score" as const,
   isAlias: false,
@@ -49,4 +55,33 @@ test("rejects a negative write price", () => {
   expect(() =>
     modelSchema.parse(target({ input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: -1 })),
   ).toThrow();
+});
+
+test("putModel rejects a custom endpoint not represented by credentials", async () => {
+  const store = await memoryStore();
+  const custom = target({ input: 0, output: 0 });
+  custom.targets[0] = {
+    ...custom.targets[0],
+    provider: "custom",
+    endpointId: "missing",
+    model: "local-model",
+  };
+
+  await expect(putModel(store, "m", custom)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+});
+
+test("requires an endpoint id only for custom targets", () => {
+  const custom = target({ input: 0, output: 0 });
+  custom.targets[0] = { ...custom.targets[0], provider: "custom", model: "local-model" };
+  expect(() => modelSchema.parse(custom)).toThrow(/endpointId/);
+
+  custom.targets[0] = { ...custom.targets[0], endpointId: "local-vllm" };
+  expect(modelSchema.parse(custom).targets[0]).toMatchObject({
+    provider: "custom",
+    endpointId: "local-vllm",
+  });
+
+  const builtIn = target({ input: 5, output: 25 });
+  builtIn.targets[0] = { ...builtIn.targets[0], endpointId: "not-allowed" };
+  expect(() => modelSchema.parse(builtIn)).toThrow(/unrecognized key/i);
 });

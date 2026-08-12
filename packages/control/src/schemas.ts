@@ -19,7 +19,7 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
   throw new GatewayError("BAD_REQUEST", `${path}: ${issue?.message ?? "invalid request"}`);
 }
 
-export const providerIdSchema = z.enum(["anthropic", "openai", "kimi"]);
+export const providerIdSchema = z.enum(["anthropic", "openai", "kimi", "custom"]);
 
 /**
  * A hypothetical request, described only by required capabilities. This keeps
@@ -32,6 +32,54 @@ export const dryRunSchema = z
     reasoning: z.boolean().default(false),
   })
   .strict();
+
+const targetSchema = z.discriminatedUnion("provider", [
+  z
+    .object({
+      provider: z.enum(["anthropic", "openai", "kimi"]),
+      model: z.string().min(1),
+      tier: z.number().int().min(1),
+      weight: z.number().positive(),
+      costPerMTok: z.object({
+        input: z.number().min(0),
+        output: z.number().min(0),
+        cacheRead: z.number().min(0).optional(),
+        cacheWrite5m: z.number().min(0).optional(),
+        cacheWrite1h: z.number().min(0).optional(),
+      }),
+      contextWindow: z.number().int().positive().optional(),
+      maxOutputTokens: z.number().int().positive().optional(),
+      capabilities: z.object({
+        tools: z.boolean(),
+        images: z.boolean(),
+        reasoning: z.boolean(),
+      }),
+    })
+    .strict(),
+  z
+    .object({
+      provider: z.literal("custom"),
+      endpointId: z.string().trim().min(1),
+      model: z.string().min(1),
+      tier: z.number().int().min(1),
+      weight: z.number().positive(),
+      costPerMTok: z.object({
+        input: z.number().min(0),
+        output: z.number().min(0),
+        cacheRead: z.number().min(0).optional(),
+        cacheWrite5m: z.number().min(0).optional(),
+        cacheWrite1h: z.number().min(0).optional(),
+      }),
+      contextWindow: z.number().int().positive().optional(),
+      maxOutputTokens: z.number().int().positive().optional(),
+      capabilities: z.object({
+        tools: z.boolean(),
+        images: z.boolean(),
+        reasoning: z.boolean(),
+      }),
+    })
+    .strict(),
+]);
 
 export const modelSchema = z.object({
   // `claude/` is reserved: `GET /v1/models` advertises a mirror of every pool
@@ -48,38 +96,7 @@ export const modelSchema = z.object({
     }),
   strategy: z.enum(["score", "priority", "roundRobin", "weighted"]),
   isAlias: z.boolean(),
-  targets: z
-    .array(
-      z.object({
-        provider: providerIdSchema,
-        model: z.string().min(1),
-        tier: z.number().int().min(1),
-        weight: z.number().positive(),
-        // One object with optional prices rather than a union of shapes: a
-        // union lets a malformed `cacheRead` fall through to the branch that
-        // does not name it, so a bad price is dropped instead of rejected.
-        costPerMTok: z.object({
-          input: z.number().min(0),
-          output: z.number().min(0),
-          cacheRead: z.number().min(0).optional(),
-          // A zero is a provider that bills no premium for creating a cache
-          // entry — a price, not a missing one — so it has to survive parsing.
-          cacheWrite5m: z.number().min(0).optional(),
-          cacheWrite1h: z.number().min(0).optional(),
-        }),
-        // Advertised on GET /v1/models, never enforced here. Optional so a
-        // target for a model the catalog does not list can stay silent rather
-        // than claim a window nobody checked.
-        contextWindow: z.number().int().positive().optional(),
-        maxOutputTokens: z.number().int().positive().optional(),
-        capabilities: z.object({
-          tools: z.boolean(),
-          images: z.boolean(),
-          reasoning: z.boolean(),
-        }),
-      }),
-    )
-    .min(1, "a virtual model needs at least one target"),
+  targets: z.array(targetSchema).min(1, "a virtual model needs at least one target"),
 });
 
 export const keyCreateSchema = z

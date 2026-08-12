@@ -3,6 +3,7 @@ import { RotateCcw, Trash2 } from "lucide-react";
 import { useId } from "react";
 import styled from "styled-components";
 import type { ProviderId } from "../../api/types.ts";
+import { PROVIDER_LABEL } from "../../theme/tokens.ts";
 import { Button, IconButton } from "../../ui/Button.tsx";
 import { Input, NumberInput, Select } from "../../ui/Field.tsx";
 import { Legend, Row, Spacer, Stack } from "../../ui/primitives.ts";
@@ -67,6 +68,7 @@ export type TargetEditorProps = {
   onChange: (next: TargetDraft) => void;
   onRemove: () => void;
   removable: boolean;
+  endpoints: Array<{ id: string; label: string }>;
 };
 
 /**
@@ -74,7 +76,14 @@ export type TargetEditorProps = {
  * in the router — a target that cannot do tools is dropped from a tool request
  * rather than downgraded — so they are stated as switches, not as a note.
  */
-export function TargetEditor({ target, index, onChange, onRemove, removable }: TargetEditorProps) {
+export function TargetEditor({
+  target,
+  index,
+  onChange,
+  onRemove,
+  removable,
+  endpoints,
+}: TargetEditorProps) {
   const listId = useId();
   const catalog = PROVIDER_MODEL_CATALOG[target.provider];
 
@@ -130,11 +139,31 @@ export function TargetEditor({ target, index, onChange, onRemove, removable }: T
           >
             {PROVIDER_IDS.map((id) => (
               <option key={id} value={id}>
-                {id}
+                {PROVIDER_LABEL[id]}
               </option>
             ))}
           </Select>
         </Cell>
+
+        {target.provider === "custom" ? (
+          <Cell>
+            <Legend as="label" htmlFor={`${listId}-endpoint`}>
+              Endpoint
+            </Legend>
+            <Select
+              id={`${listId}-endpoint`}
+              value={target.endpointId}
+              onChange={(event) => set("endpointId", event.target.value)}
+            >
+              <option value="">Choose endpoint</option>
+              {endpoints.map((endpoint) => (
+                <option key={endpoint.id} value={endpoint.id}>
+                  {endpoint.label}
+                </option>
+              ))}
+            </Select>
+          </Cell>
+        ) : null}
 
         <Cell>
           <Legend as="label" htmlFor={`${listId}-model`}>

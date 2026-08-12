@@ -24,6 +24,7 @@ export const ANTHROPIC_NATIVE_TOOLS: Readonly<Record<ProviderId, boolean>> = {
   anthropic: true,
   openai: false,
   kimi: false,
+  custom: false,
 };
 
 /**
@@ -39,4 +40,5 @@ export const PROVIDER_CAPABILITIES: Readonly<Record<ProviderId, ProviderCapabili
   anthropic: { tools: true, images: true, reasoning: true },
   openai: { tools: true, images: true, reasoning: true },
   kimi: { tools: true, images: false, reasoning: false },
+  custom: { tools: true, images: true, reasoning: true },
 };

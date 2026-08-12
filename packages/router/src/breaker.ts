@@ -20,6 +20,7 @@ export const PENALTY: Readonly<Record<ErrorCode, Penalty>> = {
   QUOTA_EXHAUSTED: "soft",
   OVERLOADED: "soft",
   BAD_REQUEST: "none",
+  CONFLICT: "none",
   CONTENT_FILTER: "none",
   CAPABILITY_MISMATCH: "none",
   NO_CANDIDATES: "none",

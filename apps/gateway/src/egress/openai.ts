@@ -39,6 +39,7 @@ const ERROR_TYPE: Readonly<Record<ErrorCode, { type: string; code: string }>> = 
   QUOTA_EXHAUSTED: { type: "insufficient_quota", code: "insufficient_quota" },
   OVERLOADED: { type: "server_error", code: "server_error" },
   BAD_REQUEST: { type: "invalid_request_error", code: "invalid_request" },
+  CONFLICT: { type: "invalid_request_error", code: "conflict" },
   CONTENT_FILTER: { type: "invalid_request_error", code: "content_policy_violation" },
   CAPABILITY_MISMATCH: { type: "invalid_request_error", code: "invalid_request" },
   MODEL_UNAVAILABLE: { type: "invalid_request_error", code: "model_not_found" },

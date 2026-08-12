@@ -34,6 +34,7 @@ export const GlobalStyle = createGlobalStyle`
     --p-anthropic: oklch(0.56 0.13 45);
     --p-openai: oklch(0.5 0.09 190);
     --p-kimi: oklch(0.53 0.17 330);
+    --p-custom: oklch(0.5 0.03 258);
 
     --grid-line: oklch(0.22 0.017 258 / 0.055);
     --shadow: 0 1px 2px oklch(0.22 0.017 258 / 0.06);
@@ -67,6 +68,7 @@ export const GlobalStyle = createGlobalStyle`
     --p-anthropic: oklch(0.74 0.12 48);
     --p-openai: oklch(0.76 0.1 190);
     --p-kimi: oklch(0.72 0.16 330);
+    --p-custom: oklch(0.72 0.03 258);
 
     --grid-line: oklch(0.94 0.006 250 / 0.045);
     --shadow: 0 1px 2px oklch(0 0 0 / 0.3);

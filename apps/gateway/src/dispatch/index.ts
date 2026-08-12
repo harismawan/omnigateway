@@ -36,7 +36,7 @@ import type { RoutingSnapshotSource } from "./snapshotCache.ts";
 export type DispatchDeps = {
   store: Store;
   snapshots: RoutingSnapshotSource;
-  adapters: Readonly<Record<ProviderId, ProviderAdapter>>;
+  adapters: Readonly<Partial<Record<ProviderId, ProviderAdapter>>>;
   /** Order-preserving transport. Never globalThis.fetch — see Global Constraints. */
   http: HttpClient;
   now: () => number;
@@ -227,13 +227,21 @@ export async function dispatch(
           candidate.credential.expiresAt !== null &&
           candidate.credential.expiresAt - DISPATCH_REFRESH_LEAD_MS <= attemptNow;
 
+        const adapter = deps.adapters[candidate.target.provider];
+        if (adapter === undefined) {
+          throw new GatewayError(
+            "INTERNAL",
+            `no adapter for provider ${candidate.target.provider}`,
+          );
+        }
+
         while (true) {
           try {
             const result = await waitForCancellation(
               attempt({
                 candidate,
                 request: dispatchRequest,
-                adapter: deps.adapters[candidate.target.provider],
+                adapter,
                 http: deps.http,
                 now: attemptNow,
                 signal: dispatchSignal,
