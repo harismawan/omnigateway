@@ -65,7 +65,14 @@ test("translates tools and tool choice", () => {
   const { body } = toWire(
     {
       ...base,
-      tools: [{ name: "get_weather", description: "d", inputSchema: { type: "object" } }],
+      tools: [
+        {
+          provider: "custom",
+          name: "get_weather",
+          description: "d",
+          inputSchema: { type: "object" },
+        },
+      ],
       toolChoice: { type: "tool", name: "get_weather" },
     },
     "m",
@@ -167,6 +174,7 @@ test("renders a cache breakpoint on a tool definition", () => {
       ...base,
       tools: [
         {
+          provider: "custom",
           name: "f",
           inputSchema: { type: "object" },
           cacheControl: { type: "ephemeral", ttl: "1h" },

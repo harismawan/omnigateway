@@ -112,6 +112,13 @@ export function toResponsesWire(
             output: block.content,
           });
           break;
+        case "anthropicNative":
+          // Unreachable in practice: the router excludes this provider from any
+          // request carrying Anthropic-native history. Recorded rather than
+          // ignored so that if it ever does arrive, the request log says what
+          // was lost instead of the client seeing a turn quietly rewritten.
+          note("openai:anthropic-native-block-dropped");
+          break;
       }
     }
     flush();
@@ -134,7 +141,11 @@ export function toResponsesWire(
     else body.temperature = req.temperature;
   }
   if (req.tools !== undefined) {
-    body.tools = req.tools.map((t) => ({
+    // Same reasoning as the native block above: an Anthropic-defined tool has
+    // no function schema to send, and the router never routes one here.
+    const custom = req.tools.filter((t) => t.provider === "custom");
+    if (custom.length !== req.tools.length) note("openai:anthropic-tool-dropped");
+    body.tools = custom.map((t) => ({
       type: "function",
       name: t.name,
       description: t.description,

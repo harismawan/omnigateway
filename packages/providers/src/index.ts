@@ -1,6 +1,7 @@
 // The codec is exported alongside the adapter so the round-trip tests in
 // Task 17 can drive it without a live HTTP call.
 export { anthropicAdapter, decodeAnthropic, toWire as toAnthropicWire } from "./anthropic/index.ts";
+export * from "./anthropic/tools.ts";
 export * from "./betas.ts";
 export * from "./body.ts";
 export * from "./catalog.ts";

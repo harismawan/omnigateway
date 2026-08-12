@@ -125,6 +125,7 @@ const REQUEST: ChatRequest = {
   ],
   tools: [
     {
+      provider: "custom",
       name: "get_weather",
       description: "look up weather",
       inputSchema: { type: "object", properties: { city: { type: "string" } } },
@@ -192,4 +193,135 @@ test("the responses format round-trips a request through openai encoding", () =>
   expect(JSON.stringify(body.input)).toContain("weather in SF?");
   expect(JSON.stringify(body.input)).toContain("sunny");
   expect(body.tools?.[0]).toMatchObject({ name: "get_weather" });
+});
+
+/**
+ * The Anthropic-native loop, end to end.
+ *
+ * A server tool run only works if the blocks survive every hop: upstream SSE ->
+ * decoder -> client egress -> the client's stored history -> ingress -> encoder
+ * -> upstream again. A single hop that drops or reshapes one block breaks the
+ * continuation, and the failure shows up as a confused model rather than an
+ * error, so the whole circuit is asserted at once.
+ */
+const NATIVE_UPSTREAM = [
+  {
+    event: "message_start",
+    data: JSON.stringify({
+      message: { id: "msg_3", model: "claude-opus-4", usage: { input_tokens: 5 } },
+    }),
+  },
+  {
+    event: "content_block_start",
+    data: JSON.stringify({
+      index: 0,
+      content_block: { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: {} },
+    }),
+  },
+  {
+    event: "content_block_delta",
+    data: JSON.stringify({
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: '{"query":"bun"}' },
+    }),
+  },
+  { event: "content_block_stop", data: JSON.stringify({ index: 0 }) },
+  {
+    event: "content_block_start",
+    data: JSON.stringify({
+      index: 1,
+      content_block: {
+        type: "web_search_tool_result",
+        tool_use_id: "srvtoolu_1",
+        content: [
+          { type: "web_search_result", url: "https://x.test", encrypted_content: "OPAQUE" },
+        ],
+      },
+    }),
+  },
+  { event: "content_block_stop", data: JSON.stringify({ index: 1 }) },
+  {
+    event: "message_delta",
+    data: JSON.stringify({ delta: { stop_reason: "pause_turn" }, usage: { output_tokens: 4 } }),
+  },
+  { event: "message_stop", data: "{}" },
+];
+
+test("a paused server tool run survives the whole client round trip", async () => {
+  async function* upstream(): AsyncGenerator<{ event: string; data: string }> {
+    for (const m of NATIVE_UPSTREAM) yield m;
+  }
+
+  const decoded = await drain(decodeAnthropic(upstream()));
+  const collected = collect(decoded);
+  expect(collected.stopReason).toBe("pauseTurn");
+
+  // What the client is handed for a non-streaming request.
+  const rendered = anthropicResponse(collected, "req_1") as {
+    content: Record<string, unknown>[];
+    stop_reason: string;
+  };
+  expect(rendered.stop_reason).toBe("pause_turn");
+  expect(rendered.content.map((b) => b.type)).toEqual([
+    "server_tool_use",
+    "web_search_tool_result",
+  ]);
+
+  // The client appends that turn verbatim and resends, which is the documented
+  // way to continue a paused run — no synthetic `Continue` message.
+  const resent = parseAnthropicRequest({
+    model: "claude-opus-4",
+    max_tokens: 64,
+    messages: [
+      { role: "user", content: "search" },
+      { role: "assistant", content: rendered.content },
+    ],
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+  });
+  expect(resent.messages[1]?.content).toEqual(collected.content);
+
+  // And the encoder puts the blocks back on the wire exactly as they arrived.
+  const { body, degradations } = toAnthropicWire(resent, "claude-opus-4", { oauth: false });
+  expect(degradations).toEqual([]);
+  expect(body.messages[1]).toEqual({
+    role: "assistant",
+    content: [
+      { id: "srvtoolu_1", name: "web_search", input: { query: "bun" }, type: "server_tool_use" },
+      {
+        tool_use_id: "srvtoolu_1",
+        content: [
+          { type: "web_search_result", url: "https://x.test", encrypted_content: "OPAQUE" },
+        ],
+        type: "web_search_tool_result",
+      },
+    ],
+  });
+  expect(body.tools).toEqual([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]);
+});
+
+test("the streaming path renders the same native blocks", async () => {
+  async function* upstream(): AsyncGenerator<{ event: string; data: string }> {
+    for (const m of NATIVE_UPSTREAM) yield m;
+  }
+  const frames: { event: string; data: unknown }[] = [];
+  for await (const f of anthropicStream(decodeAnthropic(upstream()), "req_1")) {
+    frames.push({ event: f.event, data: JSON.parse(f.data) as unknown });
+  }
+  const starts = frames.filter((f) => f.event === "content_block_start");
+  expect(
+    starts.map((f) => (f.data as { content_block: { type: string } }).content_block.type),
+  ).toEqual(["server_tool_use", "web_search_tool_result"]);
+});
+
+test("beta names the client opted into survive to the request", () => {
+  const req = parseAnthropicRequest(
+    {
+      model: "claude-opus-4",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "web_fetch_20250910", name: "web_fetch" }],
+    },
+    new Headers({ "anthropic-beta": "web-fetch-2025-09-10, context-management-2025-06-27" }),
+  );
+  expect(req.betas).toEqual(["web-fetch-2025-09-10", "context-management-2025-06-27"]);
 });

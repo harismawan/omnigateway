@@ -132,7 +132,15 @@ Preserve these translation invariants:
 - Keep mid-conversation system messages in place; never fold them into request-level `system`.
 - Forward `thinking` forms exactly. Never derive budgets from effort. Drop unsigned thinking before
   Anthropic replay; preserve and accumulate Anthropic signatures.
-- Carry `anthropic-beta` as both header and body passthrough.
+- Carry `anthropic-beta` as both header and body passthrough. Never synthesize a missing beta.
+- `ToolDef` is a union. `CustomToolDef` stays portable; `AnthropicToolDef` carries an exact
+  versioned `type` that is never normalized or upgraded. Versions live in
+  `packages/providers/src/anthropic/tools.ts`; unknown dated types are rejected, not prefix-matched.
+- Anthropic-native content blocks use the `anthropicNative` IR variant, keep their payload verbatim,
+  and stay out of tool-id correlation, orphan removal, cross-provider translation, and RTK.
+- An `AnthropicToolDef` or `anthropicNative` history block excludes OpenAI and Kimi at routing.
+- `pauseTurn` is its own stop reason; never fold it into `endTurn` or `toolUse`.
+- Unknown Anthropic block types and SSE events fail visibly rather than being skipped.
 - Preserve cache-control breakpoint block, TTL, and order when target can express them. Record
   degradations for requested features a provider cannot express.
 - `Usage.inputTokens` is uncached input. Cache reads and 5m/1h writes are disjoint classes priced

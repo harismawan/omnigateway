@@ -143,6 +143,27 @@ once.
 Most tools that accept a custom base URL work unchanged: set it to
 `http://127.0.0.1:9000` and use a gateway key where the provider key goes.
 
+### Tools and routing
+
+Two kinds of tool behave differently, and the difference decides where a
+request can go.
+
+A **custom tool** — a name, a description, and a JSON Schema — is portable. It
+translates to every provider, so a request using one routes across your whole
+pool as usual.
+
+An **Anthropic-defined tool** — web search, web fetch, code execution, Bash,
+text editor, computer use, memory, tool search, advisor, or an MCP toolset —
+has a schema Anthropic owns. No other provider can express it, so any request
+declaring one, *or replaying the blocks a previous one produced*, is routed to
+an Anthropic account only. If the virtual model you asked for has no Anthropic
+target, the request fails at routing with the unsupported requirement named,
+rather than quietly losing the tool.
+
+The gateway forwards the tool version you send and never upgrades it. Betas
+stay yours: send `anthropic-beta` yourself, as the tool requires — the gateway
+carries the header through but does not add one on your behalf.
+
 ## The CLI
 
 `omni --help` lists everything; `omni <command> --help` explains one. Every

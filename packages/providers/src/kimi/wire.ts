@@ -75,6 +75,11 @@ export function toChatWire(
             content: block.content,
           });
           break;
+        case "anthropicNative":
+          // Unreachable: the router excludes this provider from any request
+          // carrying Anthropic-native history. Recorded, not ignored.
+          note("kimi:anthropic-native-block-dropped");
+          break;
       }
     }
 
@@ -102,7 +107,9 @@ export function toChatWire(
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.stopSequences !== undefined) body.stop = req.stopSequences;
   if (req.tools !== undefined) {
-    body.tools = req.tools.map((t) => ({
+    const custom = req.tools.filter((t) => t.provider === "custom");
+    if (custom.length !== req.tools.length) note("kimi:anthropic-tool-dropped");
+    body.tools = custom.map((t) => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.inputSchema },
     }));

@@ -54,7 +54,11 @@ export async function dryRun(
     ],
     stream: false,
     ...(need.tools
-      ? { tools: [{ name: "probe", description: "", inputSchema: { type: "object" } }] }
+      ? {
+          tools: [
+            { provider: "custom", name: "probe", description: "", inputSchema: { type: "object" } },
+          ],
+        }
       : {}),
     ...(need.reasoning ? { reasoning: { mode: "adaptive" as const } } : {}),
   };

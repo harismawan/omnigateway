@@ -151,10 +151,13 @@ export async function dispatch(
   });
 
   for (const e of excluded) {
-    log.degradations.push(`excluded:${e.credentialId}:${e.reason}`);
+    const capabilityOnly = e.reason === "capability:anthropicTools";
+    log.degradations.push(
+      capabilityOnly ? `excluded:${e.reason}` : `excluded:${e.credentialId}:${e.reason}`,
+    );
     logger.debug("routing candidate excluded", {
       requestId,
-      credentialId: e.credentialId,
+      ...(capabilityOnly ? {} : { credentialId: e.credentialId }),
       reason: e.reason,
     });
   }

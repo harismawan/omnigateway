@@ -1,5 +1,6 @@
 import { type ErrorCode, RETRYABLE, type StopReason, type StreamEvent } from "@omni/ir";
 import type { SseMessage } from "../sse.ts";
+import { ANTHROPIC_NATIVE_BLOCK_TYPES } from "./tools.ts";
 
 const STOP_REASON: Readonly<Record<string, StopReason>> = {
   end_turn: "endTurn",
@@ -7,7 +8,41 @@ const STOP_REASON: Readonly<Record<string, StopReason>> = {
   stop_sequence: "stopSequence",
   tool_use: "toolUse",
   refusal: "contentFilter",
+  // Kept distinct so a client can append the turn and resend it as-is. Folding
+  // it into `endTurn` would end a server tool run half-finished.
+  pause_turn: "pauseTurn",
 };
+
+/**
+ * Every SSE event this decoder understands.
+ *
+ * An event outside this set is surfaced rather than skipped: silence here means
+ * a block the client never sees, or a `content_block_stop` with no matching
+ * start, and both look like a gateway bug from the outside. The failure names
+ * the event so an operator can tell a new upstream feature apart from
+ * corruption.
+ */
+const KNOWN_EVENTS: ReadonlySet<string> = new Set([
+  "message_start",
+  "content_block_start",
+  "content_block_delta",
+  "content_block_stop",
+  "message_delta",
+  "message_stop",
+  "error",
+  // Heartbeat, carries nothing.
+  "ping",
+]);
+
+/** Block deltas this decoder maps. Anything else is a protocol change. */
+const KNOWN_DELTAS: ReadonlySet<string> = new Set([
+  "text_delta",
+  "thinking_delta",
+  "signature_delta",
+  "input_json_delta",
+  "citations_delta",
+  "compaction_delta",
+]);
 
 const ERROR_TYPE: Readonly<Record<string, ErrorCode>> = {
   overloaded_error: "OVERLOADED",
@@ -35,13 +70,21 @@ type AnthropicEvent = {
     };
   };
   index?: number;
-  content_block?: { type?: string; id?: string; name?: string };
+  /**
+   * Read structurally for the three portable shapes and carried whole for the
+   * native ones, which is why the extra keys are typed as unknown rather than
+   * enumerated — the payload belongs to Anthropic.
+   */
+  content_block?: { type?: string; id?: string; name?: string } & Record<string, unknown>;
   delta?: {
     type?: string;
     text?: string;
     thinking?: string;
     signature?: string;
     partial_json?: string;
+    citation?: unknown;
+    content?: string;
+    encrypted_content?: string;
     stop_reason?: string;
   };
   usage?: { input_tokens?: number; output_tokens?: number };
@@ -71,10 +114,27 @@ export async function* decodeAnthropic(
   let outputTokens = 0;
   let stopReason: StopReason = "endTurn";
   let terminal = false;
+  // Which open block indexes are Anthropic-native, so an `input_json_delta`
+  // fills the right accumulator. A native block's input must never land in a
+  // portable `toolUse`, which is what would send it onward as a function call.
+  const nativeBlocks = new Set<number>();
+
+  /** A protocol surprise: reported, and the stream ends rather than guessing. */
+  const protocolError = (message: string): StreamEvent => ({
+    type: "error",
+    code: "UPSTREAM",
+    message,
+    retryable: false,
+  });
 
   for await (const msg of messages) {
     const d = json(msg.data);
     if (d === null) continue;
+
+    if (!KNOWN_EVENTS.has(msg.event)) {
+      yield protocolError(`unrecognized Anthropic stream event "${msg.event}"`);
+      return;
+    }
 
     switch (msg.event) {
       case "message_start": {
@@ -100,6 +160,23 @@ export async function* decodeAnthropic(
             index,
             block: { type: "toolUse", id: String(cb.id), name: String(cb.name) },
           };
+        else if (cb.type !== undefined && ANTHROPIC_NATIVE_BLOCK_TYPES.has(cb.type)) {
+          nativeBlocks.add(index);
+          // `type` is dropped from the payload because `blockType` now holds
+          // it; the encoder puts it back. Everything else — including a
+          // `content` that is an error object rather than results — is kept
+          // untouched, so an upstream tool failure stays a successful response
+          // carrying a failed result, which is what Anthropic does.
+          const { type: _blockType, ...data } = cb;
+          yield {
+            type: "blockStart",
+            index,
+            block: { type: "anthropicNative", blockType: cb.type, data },
+          };
+        } else {
+          yield protocolError(`unrecognized Anthropic content block type "${String(cb.type)}"`);
+          return;
+        }
         break;
       }
 
@@ -127,18 +204,57 @@ export async function* decodeAnthropic(
           yield {
             type: "blockDelta",
             index,
-            delta: { type: "toolJson", partial: delta.partial_json ?? "" },
+            delta: nativeBlocks.has(index)
+              ? { type: "anthropicNativeJson", partial: delta.partial_json ?? "" }
+              : { type: "toolJson", partial: delta.partial_json ?? "" },
           };
+        else if (delta.type === "citations_delta")
+          yield {
+            type: "blockDelta",
+            index,
+            delta: {
+              type: "anthropicNative",
+              deltaType: delta.type,
+              data: { citation: delta.citation },
+            },
+          };
+        else if (delta.type === "compaction_delta")
+          yield {
+            type: "blockDelta",
+            index,
+            delta: {
+              type: "anthropicNative",
+              deltaType: delta.type,
+              data: {
+                ...(delta.content === undefined ? {} : { content: delta.content }),
+                ...(delta.encrypted_content === undefined
+                  ? {}
+                  : { encrypted_content: delta.encrypted_content }),
+              },
+            },
+          };
+        else if (delta.type === undefined || !KNOWN_DELTAS.has(delta.type)) {
+          yield protocolError(`unrecognized Anthropic content block delta "${String(delta.type)}"`);
+          return;
+        }
         break;
       }
 
       case "content_block_stop":
+        nativeBlocks.delete(d.index ?? 0);
         yield { type: "blockEnd", index: d.index ?? 0 };
         break;
 
       case "message_delta": {
         const reason = d.delta?.stop_reason;
-        if (typeof reason === "string") stopReason = STOP_REASON[reason] ?? "endTurn";
+        if (typeof reason === "string") {
+          const mapped = STOP_REASON[reason];
+          if (mapped === undefined) {
+            yield protocolError(`unrecognized Anthropic stop reason "${reason}"`);
+            return;
+          }
+          stopReason = mapped;
+        }
         inputTokens = d.usage?.input_tokens ?? inputTokens;
         outputTokens = d.usage?.output_tokens ?? outputTokens;
         break;
@@ -173,7 +289,7 @@ export async function* decodeAnthropic(
       }
 
       default:
-        // ping and any future event types are ignored by design.
+        // Only `ping` reaches here; anything unrecognized already returned.
         break;
     }
   }

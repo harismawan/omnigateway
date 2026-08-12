@@ -8,6 +8,9 @@ const STOP_REASON: Readonly<Record<StopReason, string>> = {
   stopSequence: "stop_sequence",
   toolUse: "tool_use",
   contentFilter: "refusal",
+  // Reported as itself so the client appends the turn and resends it, which is
+  // how a paused server tool run continues.
+  pauseTurn: "pause_turn",
 };
 
 const ERROR_TYPE: Readonly<Record<ErrorCode, string>> = {
@@ -90,7 +93,12 @@ export async function* anthropicStream(
             ? { type: "text", text: "" }
             : b.type === "thinking"
               ? { type: "thinking", thinking: "" }
-              : { type: "tool_use", id: b.id, name: b.name, input: {} };
+              : b.type === "anthropicNative"
+                ? // Emitted whole: a result block arrives complete in its start
+                  // frame, and a client that reconstructs the message from the
+                  // stream needs the payload, not a placeholder.
+                  { ...b.data, type: b.blockType }
+                : { type: "tool_use", id: b.id, name: b.name, input: {} };
         const index = nextOutIndex++;
         outIndex.set(event.index, index);
         yield frame("content_block_start", {
@@ -104,6 +112,9 @@ export async function* anthropicStream(
       case "blockDelta": {
         if (suppressed.has(event.index)) break;
         const d = event.delta;
+        // A native block's input streams on the same wire delta as a custom
+        // tool's; the two are only kept apart inside the gateway so a native
+        // block never becomes a function call.
         const delta =
           d.type === "text"
             ? { type: "text_delta", text: d.text }
@@ -111,7 +122,9 @@ export async function* anthropicStream(
               ? { type: "thinking_delta", thinking: d.text }
               : d.type === "thinkingSignature"
                 ? { type: "signature_delta", signature: d.signature }
-                : { type: "input_json_delta", partial_json: d.partial };
+                : d.type === "anthropicNative"
+                  ? { type: d.deltaType, ...d.data }
+                  : { type: "input_json_delta", partial_json: d.partial };
         yield frame("content_block_delta", {
           type: "content_block_delta",
           index: outIndex.get(event.index) ?? event.index,
@@ -169,11 +182,17 @@ export function anthropicResponse(collected: CollectedResponse, requestId: strin
       .map((b) => {
         switch (b.type) {
           case "text":
-            return { type: "text", text: b.text };
+            return {
+              type: "text",
+              text: b.text,
+              ...(b.citations === undefined ? {} : { citations: b.citations }),
+            };
           case "thinking":
             return { type: "thinking", thinking: b.text, signature: b.signature };
           case "toolUse":
             return { type: "tool_use", id: b.id, name: b.name, input: b.input };
+          case "anthropicNative":
+            return { ...b.data, type: b.blockType };
           default:
             return { type: "text", text: "" };
         }

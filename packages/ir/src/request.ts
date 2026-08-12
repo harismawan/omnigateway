@@ -10,7 +10,13 @@ export type ProviderId = "anthropic" | "openai" | "kimi";
  */
 export type CacheControl = { type: "ephemeral"; ttl?: "5m" | "1h" };
 
-export type TextBlock = { type: "text"; text: string; cacheControl?: CacheControl };
+export type TextBlock = {
+  type: "text";
+  text: string;
+  cacheControl?: CacheControl;
+  /** Anthropic citation payloads, preserved verbatim when present. */
+  citations?: unknown[];
+};
 export type ImageBlock = {
   type: "image";
   mediaType: string;
@@ -43,7 +49,40 @@ export type ToolResultBlock = {
   cacheControl?: CacheControl;
 };
 
-export type ContentBlock = TextBlock | ImageBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock;
+/**
+ * A content block Anthropic owns end to end, carried through unread.
+ *
+ * Server tool use, web-search and web-fetch results, code-execution output,
+ * tool-search references, advisor results and MCP server-tool blocks are all
+ * produced by Anthropic and replayed to Anthropic. Their payloads carry
+ * citations, container state, caller metadata and signatures the gateway has no
+ * business rewriting, and no other provider in this set can express them — so
+ * the canonical form holds the discriminator it needs to route on and keeps the
+ * rest of the payload byte-identical.
+ *
+ * Deliberately *not* a `toolUse`/`toolResult` pair: those two are the portable
+ * shape, and they are the ones that enter tool-id correlation, orphan removal,
+ * cross-provider translation and RTK compression. A native block does none of
+ * that. Folding the two together would mean the gateway invents an `id` for a
+ * block Anthropic already identified, or drops a result whose matching use it
+ * never registered.
+ */
+export type AnthropicNativeBlock = {
+  type: "anthropicNative";
+  /** Anthropic's own `type` string, e.g. `server_tool_use`. Never normalized. */
+  blockType: string;
+  /** The whole wire object minus `type`, structurally intact. */
+  data: Record<string, unknown>;
+  cacheControl?: CacheControl;
+};
+
+export type ContentBlock =
+  | TextBlock
+  | ImageBlock
+  | ThinkingBlock
+  | ToolUseBlock
+  | ToolResultBlock
+  | AnthropicNativeBlock;
 
 /**
  * Reads a block's cache breakpoint without every caller narrowing the union.
@@ -72,12 +111,66 @@ export function cacheControlOf(block: ContentBlock): CacheControl | undefined {
  */
 export type Message = { role: "user" | "assistant" | "system"; content: ContentBlock[] };
 
-export type ToolDef = {
+/**
+ * A portable tool: a name, a description and a JSON Schema every provider in
+ * this set can express. Unchanged in meaning from when it was the only shape.
+ */
+export type CustomToolDef = {
+  provider: "custom";
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
   cacheControl?: CacheControl;
+  /**
+   * Anthropic-only definition options that do not change what the tool *is* —
+   * `strict`, `defer_loading`, `input_examples` and friends. Carried so an
+   * Anthropic target sees the request the client wrote, and ignored by the two
+   * encoders that have no such fields, which is why they cannot cost
+   * portability.
+   */
+  options?: Record<string, unknown>;
 };
+
+/**
+ * The conceptual families Anthropic defines. Named rather than versioned
+ * because a family is stable across the dated `type` strings inside it, and
+ * routing and capability questions are asked of the family, never the date.
+ */
+export type AnthropicToolFamily =
+  | "webSearch"
+  | "webFetch"
+  | "codeExecution"
+  | "bash"
+  | "textEditor"
+  | "computer"
+  | "memory"
+  | "toolSearchRegex"
+  | "toolSearchBm25"
+  | "advisor"
+  | "mcpToolset";
+
+/**
+ * A tool whose schema Anthropic owns.
+ *
+ * The version is the contract: `bash_20241022` and `bash_20250124` are
+ * different tools with different inputs, so `type` is carried exactly as the
+ * caller wrote it and is never upgraded on their behalf. `name` is fixed by
+ * Anthropic per type and validated at ingress rather than defaulted, because a
+ * mismatched pair is a request the client got wrong, not one to repair.
+ */
+export type AnthropicToolDef = {
+  provider: "anthropic";
+  family: AnthropicToolFamily;
+  /** Exact versioned wire `type`. */
+  type: string;
+  /** The fixed name Anthropic pairs with `type`. */
+  name: string;
+  /** Every other validated wire field, verbatim, minus `type` and `name`. */
+  wire: Record<string, unknown>;
+  cacheControl?: CacheControl;
+};
+
+export type ToolDef = CustomToolDef | AnthropicToolDef;
 
 /**
  * Tagged rather than a bare string union, so every encoder can `switch` on

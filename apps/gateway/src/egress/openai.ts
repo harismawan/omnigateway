@@ -26,6 +26,11 @@ const FINISH: Readonly<Record<StopReason, string>> = {
   stopSequence: "stop",
   toolUse: "tool_calls",
   contentFilter: "content_filter",
+  // This surface has no pause: the router keeps Anthropic-native requests off
+  // OpenAI targets, so a paused turn cannot reach an OpenAI-shaped client. If
+  // one somehow did, `stop` is the reading that does not invent a tool call for
+  // the client to answer.
+  pauseTurn: "stop",
 };
 
 const ERROR_TYPE: Readonly<Record<ErrorCode, { type: string; code: string }>> = {

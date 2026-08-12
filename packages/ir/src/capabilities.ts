@@ -10,6 +10,23 @@ import type { ProviderId } from "./request.ts";
 export type ProviderCapabilities = { tools: boolean; images: boolean; reasoning: boolean };
 
 /**
+ * Whether a provider can accept Anthropic-defined tools and Anthropic-native
+ * content blocks.
+ *
+ * Separate from the operator-editable `tools` capability on a stored target,
+ * and deliberately not stored: a target either speaks Anthropic's wire format
+ * or it does not, and that is decided by which adapter serves it, not by a
+ * setting an operator could turn on. Keeping it here — rather than having the
+ * router ask `target.provider === "anthropic"` — is what stops a provider name
+ * from becoming routing logic.
+ */
+export const ANTHROPIC_NATIVE_TOOLS: Readonly<Record<ProviderId, boolean>> = {
+  anthropic: true,
+  openai: false,
+  kimi: false,
+};
+
+/**
  * One canonical capabilities value per provider.
  *
  * Each adapter in `packages/providers` sets its `capabilities` from this

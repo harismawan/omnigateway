@@ -20,9 +20,10 @@ const model = (targets = [target()]) => ({
 
 test("derives required capabilities from the request", () => {
   expect(requiredCapabilities(req)).toEqual({ tools: false, images: false, reasoning: false });
-  expect(requiredCapabilities({ ...req, tools: [{ name: "f", inputSchema: {} }] }).tools).toBe(
-    true,
-  );
+  expect(
+    requiredCapabilities({ ...req, tools: [{ provider: "custom", name: "f", inputSchema: {} }] })
+      .tools,
+  ).toBe(true);
   expect(
     requiredCapabilities({ ...req, reasoning: { mode: "adaptive", effort: "low" } }).reasoning,
   ).toBe(true);
@@ -62,7 +63,7 @@ test("excludes disabled credentials", () => {
 
 test("excludes targets that lack a required capability", () => {
   const { pairs, excluded } = eligible({
-    request: { ...req, tools: [{ name: "f", inputSchema: {} }] },
+    request: { ...req, tools: [{ provider: "custom", name: "f", inputSchema: {} }] },
     model: model([target({ capabilities: { tools: false, images: true, reasoning: true } })]),
     snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
     now: NOW,
