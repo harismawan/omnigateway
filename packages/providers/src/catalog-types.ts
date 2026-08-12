@@ -50,6 +50,16 @@ export type ProviderModelLimits = {
   maxOutputTokens: number;
 };
 
+/**
+ * Which shape of thinking request a model accepts.
+ *
+ * The two forms are not interchangeable: a model on the older fixed-budget API
+ * rejects `{type:"adaptive"}` outright, so an adaptive request routed there
+ * fails upstream rather than degrading. Recorded per model because the split
+ * runs by model generation, not by provider or by credential.
+ */
+export type ProviderReasoningForm = "adaptive" | "budget";
+
 export type ProviderModelChoice = {
   id: string;
   label: string;
@@ -63,6 +73,12 @@ export type ProviderModelChoice = {
    * Absent means one set of limits covers both ways in.
    */
   oauthLimits?: ProviderModelLimits;
+  /**
+   * The thinking wire form this model speaks. Absent means `"adaptive"`, which
+   * is the current form and the one a newly published model uses; only a model
+   * left behind on the fixed-budget API states it.
+   */
+  reasoningForm?: ProviderReasoningForm;
 };
 
 export type ProviderModelCatalogEntry = {

@@ -1,5 +1,6 @@
 import type { CacheControl, ChatRequest, ContentBlock, ToolChoice, ToolDef } from "@omni/ir";
 import { cacheControlOf } from "@omni/ir";
+import { anthropicReasoningForm } from "./models.ts";
 
 export const OAUTH_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -25,7 +26,12 @@ export type AnthropicBody = {
     | { type: "adaptive"; display?: "summarized" | "omitted" }
     | { type: "enabled"; budget_tokens: number }
     | { type: "disabled" };
-  output_config?: Record<string, unknown>;
+  /**
+   * Set by this encoder as an object, but vendor passthrough merges whatever a
+   * client sent under the same key, and a client can send anything. Declared as
+   * it actually arrives so reading it has to narrow first.
+   */
+  output_config?: unknown;
   [key: string]: unknown;
 };
 
@@ -167,6 +173,48 @@ function encodeToolChoice(c: ToolChoice): unknown {
   }
 }
 
+/**
+ * Whether a value is a plain JSON object, which is the only shape whose keys
+ * this encoder reads. Arrays and `null` are objects to `typeof` and neither is
+ * one here.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The vendor block minus an `output_config.effort` this model cannot express.
+ *
+ * Ingress keeps the client's raw `output_config` out of the known fields, so it
+ * reaches the body through passthrough even after the encoder has downgraded
+ * the thinking form. A budget-form model rejects `effort` outright. The gateway
+ * does not generally validate request shape per model, but here it already
+ * knows the field is unexpressible and records the loss, so forwarding a
+ * request it knows will be rejected buys the caller nothing.
+ *
+ * Only that one key moves. Everything else — other `output_config` keys, other
+ * vendor fields — is passed on as given, and an `output_config` that is not an
+ * object is left alone rather than rewritten into a shape nobody asked for.
+ */
+function withoutEffort(
+  vendor: Record<string, unknown>,
+  note: (d: string) => void,
+): Record<string, unknown> {
+  const config = vendor.output_config;
+  if (!isRecord(config)) return vendor;
+  const entries = Object.entries(config);
+  const kept = entries.filter(([key]) => key !== "effort");
+  if (kept.length === entries.length) return vendor;
+
+  note("anthropic:effort-unsupported");
+  // An `output_config` that held nothing but `effort` is dropped rather than
+  // sent as an empty object.
+  if (kept.length === 0) {
+    return Object.fromEntries(Object.entries(vendor).filter(([key]) => key !== "output_config"));
+  }
+  return { ...vendor, output_config: Object.fromEntries(kept) };
+}
+
 export function toWire(
   req: ChatRequest,
   model: string,
@@ -232,13 +280,25 @@ export function toWire(
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {
       case "adaptive":
+        if (anthropicReasoningForm(model) === "budget") {
+          // This model only speaks the older fixed-budget API and rejects the
+          // adaptive form outright. Turning thinking off keeps the request
+          // working; the one thing not done is inventing a `budget_tokens` from
+          // the effort level, which would be a number no client ever asked for.
+          body.thinking = { type: "disabled" };
+          note("anthropic:adaptive-thinking-unsupported");
+          break;
+        }
         body.thinking = {
           type: "adaptive",
           ...(req.reasoning.display === undefined ? {} : { display: req.reasoning.display }),
         };
         // Depth is an output-level control here, not a thinking-level one.
         if (req.reasoning.effort !== undefined) {
-          body.output_config = { ...(body.output_config ?? {}), effort: req.reasoning.effort };
+          body.output_config = {
+            ...(isRecord(body.output_config) ? body.output_config : {}),
+            effort: req.reasoning.effort,
+          };
         }
         break;
       case "budget":
@@ -254,7 +314,11 @@ export function toWire(
 
   // Vendor passthrough is applied last: an operator setting a raw Anthropic
   // field is stating an explicit intent that outranks our mapping.
-  Object.assign(body, req.vendor?.anthropic ?? {});
+  const vendor = req.vendor?.anthropic ?? {};
+  Object.assign(
+    body,
+    anthropicReasoningForm(model) === "budget" ? withoutEffort(vendor, note) : vendor,
+  );
 
   return { body, degradations };
 }
