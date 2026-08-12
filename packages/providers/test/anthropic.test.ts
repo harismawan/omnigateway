@@ -190,9 +190,7 @@ test("passes a non-object output_config through rather than rewriting it", () =>
     "claude-haiku-4-5",
     { oauth: false },
   );
-  // Typed as an object on the body, so the passthrough value is read as the
-  // `unknown` a client can actually send.
-  expect(body.output_config as unknown).toBe("effort");
+  expect(body.output_config).toBe("effort");
   expect(degradations).toEqual([]);
 });
 

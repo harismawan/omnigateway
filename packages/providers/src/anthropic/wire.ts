@@ -26,7 +26,12 @@ export type AnthropicBody = {
     | { type: "adaptive"; display?: "summarized" | "omitted" }
     | { type: "enabled"; budget_tokens: number }
     | { type: "disabled" };
-  output_config?: Record<string, unknown>;
+  /**
+   * Set by this encoder as an object, but vendor passthrough merges whatever a
+   * client sent under the same key, and a client can send anything. Declared as
+   * it actually arrives so reading it has to narrow first.
+   */
+  output_config?: unknown;
   [key: string]: unknown;
 };
 
@@ -169,6 +174,15 @@ function encodeToolChoice(c: ToolChoice): unknown {
 }
 
 /**
+ * Whether a value is a plain JSON object, which is the only shape whose keys
+ * this encoder reads. Arrays and `null` are objects to `typeof` and neither is
+ * one here.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
  * The vendor block minus an `output_config.effort` this model cannot express.
  *
  * Ingress keeps the client's raw `output_config` out of the known fields, so it
@@ -186,9 +200,9 @@ function withoutEffort(
   vendor: Record<string, unknown>,
   note: (d: string) => void,
 ): Record<string, unknown> {
-  const config: unknown = vendor.output_config;
-  if (config === null || typeof config !== "object" || Array.isArray(config)) return vendor;
-  const entries = Object.entries(config as Record<string, unknown>);
+  const config = vendor.output_config;
+  if (!isRecord(config)) return vendor;
+  const entries = Object.entries(config);
   const kept = entries.filter(([key]) => key !== "effort");
   if (kept.length === entries.length) return vendor;
 
@@ -281,7 +295,10 @@ export function toWire(
         };
         // Depth is an output-level control here, not a thinking-level one.
         if (req.reasoning.effort !== undefined) {
-          body.output_config = { ...(body.output_config ?? {}), effort: req.reasoning.effort };
+          body.output_config = {
+            ...(isRecord(body.output_config) ? body.output_config : {}),
+            effort: req.reasoning.effort,
+          };
         }
         break;
       case "budget":
