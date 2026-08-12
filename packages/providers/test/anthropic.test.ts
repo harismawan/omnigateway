@@ -149,6 +149,73 @@ test("leaves an explicit budget and an explicit opt-out alone on a budget-form m
   expect(off.degradations).toEqual([]);
 });
 
+test("drops an effort a budget-form model cannot express, downgrade or not", () => {
+  // No `reasoning` at all: the strip does not depend on the thinking downgrade
+  // having fired.
+  const { body, degradations } = toWire(
+    { ...base, vendor: { anthropic: { output_config: { effort: "high" } } } },
+    "claude-haiku-4-5",
+    { oauth: false },
+  );
+  expect(body.output_config).toBeUndefined();
+  expect(degradations).toContain("anthropic:effort-unsupported");
+});
+
+test("keeps the rest of an output_config when only effort is unsupported", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      vendor: { anthropic: { output_config: { effort: "high", format: { type: "json_schema" } } } },
+    },
+    "claude-haiku-4-5",
+    { oauth: false },
+  );
+  expect(body.output_config).toEqual({ format: { type: "json_schema" } });
+  expect(degradations).toContain("anthropic:effort-unsupported");
+});
+
+test("leaves vendor effort alone on a model that accepts it", () => {
+  const { body, degradations } = toWire(
+    { ...base, vendor: { anthropic: { output_config: { effort: "high" } } } },
+    "claude-opus-5",
+    { oauth: false },
+  );
+  expect(body.output_config).toEqual({ effort: "high" });
+  expect(degradations).toEqual([]);
+});
+
+test("passes a non-object output_config through rather than rewriting it", () => {
+  const { body, degradations } = toWire(
+    { ...base, vendor: { anthropic: { output_config: "effort" } } },
+    "claude-haiku-4-5",
+    { oauth: false },
+  );
+  // Typed as an object on the body, so the passthrough value is read as the
+  // `unknown` a client can actually send.
+  expect(body.output_config as unknown).toBe("effort");
+  expect(degradations).toEqual([]);
+});
+
+test("strips an effort a client sent without any thinking field", () => {
+  // What ingress produces from `output_config.effort` alone: reasoning is
+  // synthesized as adaptive, and the raw object still rides along in vendor.
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      reasoning: { mode: "adaptive", effort: "high" },
+      vendor: { anthropic: { output_config: { effort: "high" } } },
+    },
+    "claude-haiku-4-5",
+    { oauth: false },
+  );
+  expect(body.thinking).toEqual({ type: "disabled" });
+  expect(body.output_config).toBeUndefined();
+  expect(degradations).toEqual([
+    "anthropic:adaptive-thinking-unsupported",
+    "anthropic:effort-unsupported",
+  ]);
+});
+
 test("lets vendor passthrough override the adaptive-thinking downgrade", () => {
   const { body } = toWire(
     {

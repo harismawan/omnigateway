@@ -168,6 +168,39 @@ function encodeToolChoice(c: ToolChoice): unknown {
   }
 }
 
+/**
+ * The vendor block minus an `output_config.effort` this model cannot express.
+ *
+ * Ingress keeps the client's raw `output_config` out of the known fields, so it
+ * reaches the body through passthrough even after the encoder has downgraded
+ * the thinking form. A budget-form model rejects `effort` outright. The gateway
+ * does not generally validate request shape per model, but here it already
+ * knows the field is unexpressible and records the loss, so forwarding a
+ * request it knows will be rejected buys the caller nothing.
+ *
+ * Only that one key moves. Everything else — other `output_config` keys, other
+ * vendor fields — is passed on as given, and an `output_config` that is not an
+ * object is left alone rather than rewritten into a shape nobody asked for.
+ */
+function withoutEffort(
+  vendor: Record<string, unknown>,
+  note: (d: string) => void,
+): Record<string, unknown> {
+  const config: unknown = vendor.output_config;
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return vendor;
+  const entries = Object.entries(config as Record<string, unknown>);
+  const kept = entries.filter(([key]) => key !== "effort");
+  if (kept.length === entries.length) return vendor;
+
+  note("anthropic:effort-unsupported");
+  // An `output_config` that held nothing but `effort` is dropped rather than
+  // sent as an empty object.
+  if (kept.length === 0) {
+    return Object.fromEntries(Object.entries(vendor).filter(([key]) => key !== "output_config"));
+  }
+  return { ...vendor, output_config: Object.fromEntries(kept) };
+}
+
 export function toWire(
   req: ChatRequest,
   model: string,
@@ -264,7 +297,11 @@ export function toWire(
 
   // Vendor passthrough is applied last: an operator setting a raw Anthropic
   // field is stating an explicit intent that outranks our mapping.
-  Object.assign(body, req.vendor?.anthropic ?? {});
+  const vendor = req.vendor?.anthropic ?? {};
+  Object.assign(
+    body,
+    anthropicReasoningForm(model) === "budget" ? withoutEffort(vendor, note) : vendor,
+  );
 
   return { body, degradations };
 }
