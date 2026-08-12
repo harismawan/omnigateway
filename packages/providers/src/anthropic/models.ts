@@ -1,4 +1,4 @@
-import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
+import type { ProviderModelCatalogEntry, ProviderReasoningForm } from "../catalog-types.ts";
 
 /**
  * Anthropic's curated models and their list prices.
@@ -40,6 +40,31 @@ export const ANTHROPIC_MODELS: ProviderModelCatalogEntry = {
       label: "Claude Haiku 4.5",
       pricing: { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
       limits: { contextWindow: 200_000, maxOutputTokens: 64_000 },
+      // Predates adaptive thinking: this one still takes a fixed budget and
+      // rejects the adaptive form.
+      reasoningForm: "budget",
     },
   ],
 };
+
+/** The 1M-context marker an operator may leave on a stored model string. */
+const ONE_M_SUFFIX = "[1m]";
+
+/** A dated snapshot suffix, as in `claude-haiku-4-5-20251001`. */
+const DATED_SUFFIX = /-\d{8}$/;
+
+/**
+ * Resolves a configured model string to the thinking form it accepts.
+ *
+ * Operators store the model verbatim, so the same catalog entry arrives spelled
+ * several ways: bare, dated, or with the 1M marker still attached. Those two
+ * suffixes are stripped and nothing else is guessed — a name that is not in the
+ * catalog is assumed to be a model published after this table was written, and
+ * new models speak the current form.
+ */
+export function anthropicReasoningForm(model: string): ProviderReasoningForm {
+  let id = model.trim();
+  if (id.toLowerCase().endsWith(ONE_M_SUFFIX)) id = id.slice(0, -ONE_M_SUFFIX.length).trim();
+  id = id.replace(DATED_SUFFIX, "");
+  return ANTHROPIC_MODELS.models.find((m) => m.id === id)?.reasoningForm ?? "adaptive";
+}

@@ -1,5 +1,6 @@
 import type { CacheControl, ChatRequest, ContentBlock, ToolChoice, ToolDef } from "@omni/ir";
 import { cacheControlOf } from "@omni/ir";
+import { anthropicReasoningForm } from "./models.ts";
 
 export const OAUTH_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -232,6 +233,15 @@ export function toWire(
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {
       case "adaptive":
+        if (anthropicReasoningForm(model) === "budget") {
+          // This model only speaks the older fixed-budget API and rejects the
+          // adaptive form outright. Turning thinking off keeps the request
+          // working; the one thing not done is inventing a `budget_tokens` from
+          // the effort level, which would be a number no client ever asked for.
+          body.thinking = { type: "disabled" };
+          note("anthropic:adaptive-thinking-unsupported");
+          break;
+        }
         body.thinking = {
           type: "adaptive",
           ...(req.reasoning.display === undefined ? {} : { display: req.reasoning.display }),
