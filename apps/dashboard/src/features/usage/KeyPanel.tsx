@@ -5,6 +5,7 @@ import { Sparkline } from "../../ui/Sparkline.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import {
   addTotals,
+  allTokens,
   asBucket,
   keyToTime,
   type Metric,
@@ -89,7 +90,7 @@ export function KeyPanel({ buckets, by, since, until, metric, names }: KeyPanelP
                   {formatPercent(entry.requests === 0 ? 0 : entry.errors / entry.requests, 0)}
                 </Td>
                 <Td $align="right" $mono>
-                  {formatCount(entry.inputTokens + entry.outputTokens)}
+                  {formatCount(allTokens(entry))}
                 </Td>
                 <Td $align="right" $mono>
                   {formatMs(entry.requests === 0 ? null : entry.durationMsSum / entry.requests)}

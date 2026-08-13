@@ -16,6 +16,7 @@ import { RankPanel } from "./RankPanel.tsx";
 import { Section } from "./Section.tsx";
 import {
   ACTIVITY_DAYS,
+  allTokens,
   Controls,
   keyToTime,
   METRICS,
@@ -123,7 +124,7 @@ export function UsageBoard() {
   const buckets = series.data ?? [];
   const totals = totalsOf(buckets);
   const promptInput = totals.inputTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
-  const tokens = promptInput + totals.outputTokens;
+  const tokens = allTokens(totals);
   const meanOutput = totals.requests === 0 ? 0 : totals.outputTokens / totals.requests;
   const cacheReadRate = promptInput === 0 ? 0 : totals.cacheReadTokens / promptInput;
   const cacheWriteRate = promptInput === 0 ? 0 : totals.cacheWriteTokens / promptInput;
