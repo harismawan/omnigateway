@@ -108,9 +108,13 @@ export async function dispatch(
           Math.max(0, deadlineAt - deps.now()),
         );
   const dispatchSignal = dispatchController.signal;
+  // Set once a slot is claimed; see the acquire below for why the claim cannot
+  // rely on a consumer to free it.
+  let releaseOnAbort: (() => void) | null = null;
   const clearDeadline = () => {
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     signal.removeEventListener("abort", abortFromClient);
+    if (releaseOnAbort !== null) signal.removeEventListener("abort", releaseOnAbort);
   };
   const checkCancellation = () => {
     if (signal.aborted) throw signal.reason;
@@ -190,6 +194,17 @@ export async function dispatch(
   };
   let eagerHeld = true;
 
+  // A claim taken before the generator starts has no owner until a consumer
+  // touches it, and a consumer that wraps this generator in another one may
+  // never touch it at all: closing an un-started wrapper skips its body, so the
+  // `return` below is never reached. That is how the egress SSE wrapper behaves
+  // when a client disconnects before the first pull. Client disconnect always
+  // aborts this signal, so the abort is the one event that does not depend on
+  // who is consuming.
+  releaseOnAbort = () => eager.release();
+  if (signal.aborted) eager.release();
+  else signal.addEventListener("abort", releaseOnAbort, { once: true });
+
   const persistHealth = async (next: ReturnType<typeof recordSuccess>): Promise<void> => {
     await deps.store.credentials.saveHealth([next]);
   };
@@ -214,53 +229,11 @@ export async function dispatch(
           break;
         }
         const candidate = candidates[i] as Candidate;
-        log.attempts = i + 1;
-        log.credentialId = candidate.credential.id;
-        log.resolvedProvider = candidate.target.provider;
-        log.resolvedModel = candidate.target.model;
-        await deps.onRoute?.({
-          provider: candidate.target.provider,
-          model: candidate.target.model,
-          credentialId: candidate.credential.id,
-        });
-        logger.debug("attempt started", {
-          requestId,
-          provider: candidate.target.provider,
-          model: candidate.target.model,
-          credentialId: candidate.credential.id,
-          attempt: i + 1,
-        });
 
-        // Reset per-attempt: a failed attempt's partial usage must not leak into
-        // the next one's log.
-        log.inputTokens = 0;
-        log.outputTokens = 0;
-        log.cacheReadTokens = 0;
-        log.cacheWriteTokens = 0;
-        log.ttftMs = null;
-
-        let committed = false;
-        let authRefreshRetried = false;
-        let retrySecrets: CredentialSecrets | undefined;
-        const attemptNow = deps.now();
-        const preemptiveRefreshRequired =
-          candidate.credential.authType === "oauth" &&
-          candidate.credential.expiresAt !== null &&
-          candidate.credential.expiresAt - DISPATCH_REFRESH_LEAD_MS <= attemptNow;
-
-        const adapter = deps.adapters[candidate.target.provider];
-        if (adapter === undefined) {
-          throw new GatewayError(
-            "INTERNAL",
-            `no adapter for provider ${candidate.target.provider}`,
-          );
-        }
-
-        // Held for the whole attempt, including the stream drain, so ranking
-        // sees this request as in flight until the last byte. Every way out of
-        // the loop below unwinds through the `finally` — return, break and
-        // continue to the labelled loop, a throw, and the generator being
-        // closed early when a client hangs up mid-stream.
+        // Claimed before the first await of the attempt. `onRoute` writes a row
+        // in production, and claiming after it would leave the request counted
+        // nowhere for the length of that write — visible to concurrent ranking
+        // as a credential with less load than it really has.
         //
         // The first attempt normally adopts the slot claimed at rank time
         // rather than claiming a second one. Failover moves to a different
@@ -273,7 +246,55 @@ export async function dispatch(
         const releaseSlot = adoptable
           ? eager.release
           : deps.loadRegistry.acquire(candidate.credential.id, candidate.target.model);
+
+        // Held for the whole attempt, including the stream drain, so ranking
+        // sees this request as in flight until the last byte. Every way out of
+        // the block below unwinds through the `finally` — return, break and
+        // continue to the labelled loop, a throw from `onRoute` or a missing
+        // adapter, and the generator being closed early mid-stream.
         try {
+          log.attempts = i + 1;
+          log.credentialId = candidate.credential.id;
+          log.resolvedProvider = candidate.target.provider;
+          log.resolvedModel = candidate.target.model;
+          await deps.onRoute?.({
+            provider: candidate.target.provider,
+            model: candidate.target.model,
+            credentialId: candidate.credential.id,
+          });
+          logger.debug("attempt started", {
+            requestId,
+            provider: candidate.target.provider,
+            model: candidate.target.model,
+            credentialId: candidate.credential.id,
+            attempt: i + 1,
+          });
+
+          // Reset per-attempt: a failed attempt's partial usage must not leak into
+          // the next one's log.
+          log.inputTokens = 0;
+          log.outputTokens = 0;
+          log.cacheReadTokens = 0;
+          log.cacheWriteTokens = 0;
+          log.ttftMs = null;
+
+          let committed = false;
+          let authRefreshRetried = false;
+          let retrySecrets: CredentialSecrets | undefined;
+          const attemptNow = deps.now();
+          const preemptiveRefreshRequired =
+            candidate.credential.authType === "oauth" &&
+            candidate.credential.expiresAt !== null &&
+            candidate.credential.expiresAt - DISPATCH_REFRESH_LEAD_MS <= attemptNow;
+
+          const adapter = deps.adapters[candidate.target.provider];
+          if (adapter === undefined) {
+            throw new GatewayError(
+              "INTERNAL",
+              `no adapter for provider ${candidate.target.provider}`,
+            );
+          }
+
           while (true) {
             try {
               const result = await waitForCancellation(
@@ -525,15 +546,26 @@ export async function dispatch(
   // it can free that claim. `return`/`throw` are intercepted here instead,
   // which a consumer that walks away does call. Releases are idempotent, so
   // this and the attempt that adopted the slot still free it exactly once.
+  // Each releases *after* the inner generator has unwound. Releasing first
+  // would drop the count to zero while the attempt and its upstream connection
+  // were still closing, and a request ranked in that window would read a live
+  // request as absent. The `finally` still covers the un-started case, where
+  // `inner.return` returns immediately without running anything.
   const events: AsyncGenerator<StreamEvent, void, undefined> = {
     next: (...args) => inner.next(...args),
-    return: (value) => {
-      eager.release();
-      return inner.return(value);
+    return: async (value) => {
+      try {
+        return await inner.return(value);
+      } finally {
+        eager.release();
+      }
     },
-    throw: (error) => {
-      eager.release();
-      return inner.throw(error);
+    throw: async (error) => {
+      try {
+        return await inner.throw(error);
+      } finally {
+        eager.release();
+      }
     },
     [Symbol.asyncIterator]() {
       return this;
@@ -541,8 +573,11 @@ export async function dispatch(
     // `await using` disposes without going through `return`, so it needs the
     // same release.
     async [Symbol.asyncDispose]() {
-      eager.release();
-      await inner[Symbol.asyncDispose]();
+      try {
+        await inner[Symbol.asyncDispose]();
+      } finally {
+        eager.release();
+      }
     },
   };
 

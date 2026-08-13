@@ -1200,3 +1200,73 @@ test("releases the slot when an attempt fails after committing bytes", async () 
   expect(registry.counts().size).toBe(0);
   store.close();
 });
+
+test("a wrapper closed before its first pull still frees the slot on disconnect", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 0 });
+  const registry = createLoadRegistry();
+  const adapter = stubAdapter(() => textStream("hello"));
+  const controller = new AbortController();
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), loadRegistry: registry, now: () => Date.now() },
+    controller.signal,
+    "req_wrapped",
+  );
+
+  // The egress layer wraps this generator in another generator. Closing that
+  // wrapper before anything pulls it skips its body, so its `for await` never
+  // exists and the close never reaches the generator below — the same blind
+  // spot one layer up. Nothing here has run, so nothing here can release.
+  const wrapper = (async function* () {
+    for await (const event of outcome.events) yield event;
+  })();
+  await wrapper.return(undefined);
+  expect(registry.counts().get(healthKey("c1", "claude-opus-4"))).toBe(1);
+
+  // A real disconnect aborts the request signal, and that does not depend on
+  // which layer happened to be consuming.
+  controller.abort(new DOMException("client disconnected", "AbortError"));
+
+  expect(registry.counts().size).toBe(0);
+  store.close();
+});
+
+test("failover counts the credential it moves to, and frees it after", async () => {
+  const store = await seeded(2);
+  const registry = createLoadRegistry();
+  const seen: Array<[string, number]> = [];
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("UPSTREAM", "retry") : textStream("ok"),
+  );
+  const observing: ProviderAdapter = {
+    ...adapter,
+    async send(r) {
+      // Which credential the registry believes is busy while this attempt runs.
+      for (const [key, n] of registry.counts()) seen.push([key, n]);
+      return adapter.send(r);
+    },
+  };
+
+  const events = await drain(
+    (
+      await dispatch(
+        req,
+        { ...deps(store, observing), loadRegistry: registry },
+        new AbortController().signal,
+        "req_failover",
+      )
+    ).events,
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  // Attempt 0 counted c1; attempt 1 counted c2 and not c1 — the eager slot is
+  // handed back when its attempt ends, not held across the failover.
+  expect(seen).toEqual([
+    [healthKey("c1", "claude-opus-4"), 1],
+    [healthKey("c2", "claude-opus-4"), 1],
+  ]);
+  expect(registry.counts().size).toBe(0);
+  store.close();
+});

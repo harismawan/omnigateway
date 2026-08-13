@@ -286,9 +286,30 @@ credentials went nine-for-nine to one of them.
 
 That earlier claim is the reason for the wrapper. A `finally` inside a generator cannot free a claim
 made before the generator starts, because closing an un-started generator skips its body entirely.
-So `return`/`throw` are intercepted on the returned object. Three places can release the eager
-claim — the adopting attempt, the outer `finally`, and the wrapper — and all three are correct
-precisely because `release` is idempotent.
+So `return`/`throw`/`asyncDispose` are intercepted on the returned object, each releasing *after*
+the inner generator unwinds rather than before — releasing first would show a zero count while the
+attempt and its upstream connection were still closing.
+
+**The wrapper alone is not enough, because the consumer is itself a generator.** `proxyRoutes` wraps
+`outcome.events` in `anthropicStream`/`openaiStream`, and `sseResponse`'s `cancel()` closes *that*.
+A wrapper generator closed before its own first pull skips its body, so its `for await` never exists
+and the close never reaches `outcome.events` — the identical blind spot, one layer up. A client
+disconnecting before the first pull therefore held a slot for the life of the process, silently.
+
+Two changes close it, and the important one does not depend on the consumer at all:
+
+- `dispatch` releases the claim on `signal` abort. A real disconnect always aborts it, whoever is
+  consuming. This is the backstop and the thing to keep if the layering ever changes.
+- `sseResponse` also closes the generator it was handed, so the composition is correct on its own
+  terms rather than only via the backstop.
+
+Four places can now release the eager claim — the adopting attempt, `run()`'s outer `finally`, the
+wrapper, and the abort listener — and all four are correct precisely because `release` is
+idempotent.
+
+The per-attempt claim is taken **before the attempt's first await**, not after `onRoute`. `onRoute`
+writes a row in production, and claiming after it would leave the request counted nowhere for the
+length of that write.
 
 `Candidate.reasons` gains `load` and loses `recency`, flowing to the request log and to `dryRun`.
 
@@ -353,6 +374,12 @@ and anything asserting `reasons.recency`.
   deep in a queue.
 - A stalled upstream plus a client hangup holds a slot until the adapter's stream settles. Real
   adapters go through `HttpClient` with the dispatch signal, so this needs a misbehaving adapter.
+- A claim has no owner between `acquire` and the first thing that touches the request — no
+  finalizer exists. Every reachable path is covered by the four releases above, but a future
+  consumer that neither iterates, closes, nor aborts would leak, and nothing would report it.
+- The route-level tests cannot reach the disconnect-before-first-pull window: by the time
+  `app.handle` resolves, the stream has been pulled. That window is pinned at the dispatch level
+  instead.
 - Routing assumes a cache-marked prefix hits. The first turn of a conversation marks the same blocks
   as later ones but pays to write them, so that turn is under-estimated.
 - Cache-write pricing is invisible to the cost term, deliberately.
