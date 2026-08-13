@@ -141,6 +141,44 @@ describe("OverviewBoard", () => {
     );
   });
 
+  test("keeps a large token breakdown inside its card instead of overflowing it", async () => {
+    const now = Date.now();
+    createFetchStub({
+      "GET /api/logs": () => ({
+        // A window where cache reads dwarf everything else, which is what pushes
+        // the breakdown past the width of a 168px card column.
+        logs: [
+          log({
+            id: "busy",
+            at: now - 1_000,
+            inputTokens: 2_485,
+            outputTokens: 90_000,
+            cacheReadTokens: 25_600_000,
+            cacheWriteTokens: 668_200,
+          }),
+        ],
+      }),
+    });
+    renderWithRouter(<OverviewBoard />);
+
+    await screen.findByText("Total tokens");
+    const label = "2,485 input, 90,000 output, 25,600,000 cache read, 668,200 cache write tokens";
+    // The same log also draws a breakdown in the activity tail, so the card is
+    // what this assertion is about, not the first match on the page.
+    const tokenCard = screen.getByText("Total tokens").parentElement;
+    if (tokenCard === null) throw new Error("Total tokens card was not rendered");
+    const breakdown = within(tokenCard).getByRole("img", { name: label });
+    const valueRow = breakdown.parentElement?.parentElement;
+    if (valueRow === null || valueRow === undefined) throw new Error("breakdown has no value row");
+
+    // Neither the number nor the breakdown can shrink, so the only thing that
+    // keeps them inside the card is being allowed onto a second line.
+    expect(getComputedStyle(valueRow).flexWrap).toBe("wrap");
+    expect(getComputedStyle(breakdown).flexWrap).toBe("wrap");
+    // A count still never splits away from the arrow that names it.
+    expect(getComputedStyle(breakdown).whiteSpace).toBe("nowrap");
+  });
+
   test("shows token detail for completed activity and processing for pending activity", async () => {
     const now = Date.now();
     stubOverview({

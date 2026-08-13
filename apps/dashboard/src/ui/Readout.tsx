@@ -16,6 +16,10 @@ const Frame = styled.div`
 const Value = styled.div<{ $tone?: "ink" | "ok" | "warn" | "down" }>`
   display: flex;
   align-items: baseline;
+  /* A unit is usually a word beside the number, but it is allowed to be a
+     whole breakdown. Wrapping keeps a long one inside the card instead of
+     running past its edge, since neither the number nor the unit can shrink. */
+  flex-wrap: wrap;
   gap: 4px;
   font-family: ${({ theme }) => theme.font.mono};
   font-variant-numeric: tabular-nums;
