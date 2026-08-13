@@ -1,4 +1,10 @@
-import type { ChatRequest, ContentBlock, Message, ToolDef } from "./request.ts";
+import {
+  type ChatRequest,
+  type ContentBlock,
+  cacheControlOf,
+  type Message,
+  type ToolDef,
+} from "./request.ts";
 
 /**
  * Characters per token.
@@ -115,4 +121,44 @@ export function estimateInputTokens(request: ChatRequest): number {
   for (const message of request.messages) total += messageTokens(message);
   for (const tool of request.tools ?? []) total += toolTokens(tool);
   return total;
+}
+
+/**
+ * Estimates how much of a request's prompt a cache breakpoint covers.
+ *
+ * A breakpoint caches everything before it, in the order the prompt is
+ * assembled: tools, then system, then the conversation. So the answer is the
+ * running total up to and including the last block carrying one, and a request
+ * with no breakpoint has no cached prefix at all.
+ *
+ * Two things this is not. It is not a prediction that the prefix will *hit* —
+ * the first turn of a conversation marks the same blocks the second one does
+ * and pays to write them. And it is never billed from: dispatch prices a
+ * request from the token classes the provider reported. It exists so routing
+ * can tell apart two targets whose cache-read prices differ, which comparing
+ * fresh input prices alone cannot do.
+ */
+export function estimateCachedInputTokens(request: ChatRequest): number {
+  let running = 0;
+  let cached = 0;
+
+  for (const tool of request.tools ?? []) {
+    running += toolTokens(tool);
+    if (tool.cacheControl !== undefined) cached = running;
+  }
+  for (const block of request.system ?? []) {
+    running += blockTokens(block);
+    if (cacheControlOf(block) !== undefined) cached = running;
+  }
+  for (const message of request.messages) {
+    // Framing is charged whether or not a block inside carries the marker, so
+    // it joins the running total before the blocks it wraps.
+    running += MESSAGE_OVERHEAD;
+    for (const block of message.content) {
+      running += blockTokens(block);
+      if (cacheControlOf(block) !== undefined) cached = running;
+    }
+  }
+
+  return cached;
 }

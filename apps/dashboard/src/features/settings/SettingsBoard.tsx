@@ -24,7 +24,11 @@ const WEIGHTS: ReadonlyArray<{ id: WeightKey; label: string; blurb: string }> = 
   },
   { id: "cost", label: "Cost", blurb: "Preference for the cheaper target of the candidates." },
   { id: "latency", label: "Latency", blurb: "Preference for the faster observed first token." },
-  { id: "recency", label: "Recency", blurb: "Preference for accounts that have been idle." },
+  {
+    id: "load",
+    label: "Load",
+    blurb: "Preference for accounts with fewer requests in flight right now.",
+  },
 ];
 
 const LIMITS: ReadonlyArray<{

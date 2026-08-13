@@ -62,7 +62,10 @@ export async function dryRun(
       : {}),
     ...(need.reasoning ? { reasoning: { mode: "adaptive" as const } } : {}),
   };
-  const result = rank({ request: probe, model, snapshot, now, rand: 0 });
+  // No load: this request is hypothetical, so it has no peers in flight. A
+  // dry run answers "where would this go on an idle gateway", which is the
+  // question an operator reading it is asking.
+  const result = rank({ request: probe, model, snapshot, now, rand: 0, load: new Map() });
 
   return {
     modelId: model.id,

@@ -57,8 +57,8 @@ test("dry-run ranks healthy candidates and names their score terms", async () =>
     "cost",
     "health",
     "latency",
+    "load",
     "quota",
-    "recency",
     "tier",
   ]);
   expect(body.excluded).toEqual([]);

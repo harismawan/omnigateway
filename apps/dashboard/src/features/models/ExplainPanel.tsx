@@ -12,16 +12,16 @@ import { describeError, Empty } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 
 /** The order the router itself lists them in, so the two read the same way. */
-const TERMS = ["tier", "health", "quota", "cost", "latency", "recency"] as const;
+const TERMS = ["tier", "health", "quota", "cost", "latency", "load"] as const;
 type Term = (typeof TERMS)[number];
 
 const TERM_BLURB: Record<Term, string> = {
   tier: "How preferred this tier is",
   health: "Consecutive failures and breaker state",
   quota: "Headroom in the tightest window, against how much of it is left",
-  cost: "Price against the other candidates",
+  cost: "Price of this request against the other candidates",
   latency: "Observed time to first token",
-  recency: "How long this pair has been idle",
+  load: "Requests in flight on this pair right now",
 };
 
 const Candidate = styled.li`

@@ -76,6 +76,7 @@ test("an Anthropic-native request excludes OpenAI and Kimi targets", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs.map((p) => p.credential.id)).toEqual(["a"]);
   expect(excluded.map((e) => e.reason)).toEqual([
@@ -91,6 +92,7 @@ test("a pool with no Anthropic target yields no candidates at all", () => {
     snapshot: snapshot({ credentials: [credential({ id: "o", provider: "openai" })] }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs).toHaveLength(0);
 });
@@ -110,6 +112,7 @@ test("a portable custom tool still routes to every provider", () => {
     }),
     now: NOW,
     rand: 0,
+    load: new Map(),
   });
   expect(pairs.map((p) => p.credential.id).sort()).toEqual(["a", "o"]);
 });

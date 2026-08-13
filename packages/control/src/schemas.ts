@@ -116,7 +116,7 @@ export const settingsSchema = z.object({
       quota: z.number(),
       cost: z.number(),
       latency: z.number(),
-      recency: z.number(),
+      load: z.number(),
     })
     .strict(),
   maxAttempts: z.number().int().min(1).max(10),

@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
-import { buildSnapshot } from "@omni/router";
+import { buildSnapshot, healthKey } from "@omni/router";
 import type { Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
 import { captureLogger } from "@omni/testkit";
 import { dispatch } from "../../src/dispatch/index.ts";
+import { createLoadRegistry } from "../../src/dispatch/loadRegistry.ts";
 
 const req: ChatRequest = {
   model: "fast",
@@ -99,6 +100,7 @@ function deps(store: Store, adapter: ProviderAdapter) {
     http: noHttp,
     now: () => 1_000_000,
     rand: () => 0,
+    loadRegistry: createLoadRegistry(),
     refresh: async () => ({
       accessToken: "refreshed",
       refreshToken: "r",
@@ -955,5 +957,316 @@ test("client abort remains distinct from request deadline", async () => {
   const draining = drain(outcome.events);
   controller.abort(reason);
   await expect(draining).rejects.toBe(reason);
+  store.close();
+});
+
+test("counts a request as in flight only while it is in flight", async () => {
+  const store = await seeded(1);
+  const registry = createLoadRegistry();
+  const key = healthKey("c1", "claude-opus-4");
+  let duringSend: number | undefined;
+
+  const adapter = stubAdapter(() => textStream("hello"));
+  const observing: ProviderAdapter = {
+    ...adapter,
+    async send(r) {
+      duringSend = registry.counts().get(key);
+      return adapter.send(r);
+    },
+  };
+
+  const events = await drain(
+    (
+      await dispatch(
+        req,
+        { ...deps(store, observing), loadRegistry: registry },
+        new AbortController().signal,
+        "req_test",
+      )
+    ).events,
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  expect(duringSend).toBe(1);
+  expect(registry.counts().get(key) ?? 0).toBe(0);
+  store.close();
+});
+
+test("releases the slot when every candidate fails", async () => {
+  const store = await seeded(1);
+  const registry = createLoadRegistry();
+  const adapter = stubAdapter(() => new Error("upstream exploded"));
+
+  await drain(
+    (
+      await dispatch(
+        req,
+        { ...deps(store, adapter), loadRegistry: registry },
+        new AbortController().signal,
+        "req_test",
+      )
+    ).events,
+  );
+
+  expect(registry.counts().get(healthKey("c1", "claude-opus-4")) ?? 0).toBe(0);
+  store.close();
+});
+
+test("releases the slot when the client hangs up mid-stream", async () => {
+  const store = await seeded(1);
+  const registry = createLoadRegistry();
+  const adapter = stubAdapter(() => textStream("hello"));
+
+  const { events } = await dispatch(
+    req,
+    { ...deps(store, adapter), loadRegistry: registry },
+    new AbortController().signal,
+    "req_test",
+  );
+  // Read one event, then walk away without draining — the generator's finally
+  // is the only thing that can free the slot.
+  await events.next();
+  await events.return(undefined);
+
+  expect(registry.counts().get(healthKey("c1", "claude-opus-4")) ?? 0).toBe(0);
+  store.close();
+});
+
+test("a burst arriving together fans out across credentials", async () => {
+  const store = await seeded(3);
+  await store.config.putModel({
+    id: "fast",
+    strategy: "roundRobin",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const registry = createLoadRegistry();
+  const chosen: string[] = [];
+  const adapter = stubAdapter(() => textStream("hello"));
+  const configured = {
+    ...deps(store, adapter),
+    loadRegistry: registry,
+    onRoute: async (t: { credentialId: string }) => {
+      chosen.push(t.credentialId);
+    },
+  };
+
+  // Every request is dispatched before any stream is drained. This is the case
+  // lastUsedAt cannot see and the whole change exists for: nothing has
+  // *finished*, so only in-flight accounting can tell these apart.
+  const outcomes = await Promise.all(
+    Array.from({ length: 9 }, () =>
+      dispatch(req, configured, new AbortController().signal, "req_burst"),
+    ),
+  );
+  await Promise.all(outcomes.map((o) => drain(o.events)));
+
+  expect(new Set(chosen).size).toBe(3);
+  expect(registry.counts().size).toBe(0);
+  store.close();
+});
+
+test("abandoning the stream without reading it releases the slot", async () => {
+  const store = await seeded(1);
+  const registry = createLoadRegistry();
+  const adapter = stubAdapter(() => textStream("hello"));
+
+  const { events } = await dispatch(
+    req,
+    { ...deps(store, adapter), loadRegistry: registry },
+    new AbortController().signal,
+    "req_test",
+  );
+  // Closed without a single next(), so no generator body ever runs and no
+  // finally inside one can fire. A slot claimed before the body starts has to
+  // be freed by something else.
+  await events.return(undefined);
+
+  expect(registry.counts().size).toBe(0);
+  store.close();
+});
+
+test("releases the slot when the client aborts mid-stream", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 0 });
+  const registry = createLoadRegistry();
+  const started = Promise.withResolvers<void>();
+  const adapter: ProviderAdapter = {
+    id: "anthropic",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send(request) {
+      return {
+        events: (async function* () {
+          started.resolve();
+          await new Promise<void>((_resolve, reject) =>
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), {
+              once: true,
+            }),
+          );
+        })(),
+        degradations: [],
+      };
+    },
+  };
+
+  const controller = new AbortController();
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), loadRegistry: registry, now: () => Date.now() },
+    controller.signal,
+    "req_abort",
+  );
+  const reason = new DOMException("client disconnected", "AbortError");
+  const draining = drain(outcome.events);
+  await started.promise;
+  expect(registry.counts().get(healthKey("c1", "claude-opus-4"))).toBe(1);
+
+  controller.abort(reason);
+  await expect(draining).rejects.toBe(reason);
+
+  expect(registry.counts().size).toBe(0);
+  store.close();
+});
+
+test("releases the slot when the request deadline expires", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 10 });
+  const registry = createLoadRegistry();
+  const adapter = stubAdapter(() => textStream("unexpected"));
+  // The clock must stay inside the deadline until the slot has been claimed and
+  // then pass it at the top of the attempt loop. Expiring earlier returns
+  // before anything is claimed, which would make this assertion vacuous.
+  const times = [1_000, 1_000, 1_000, 1_000, 1_011];
+  let index = 0;
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), loadRegistry: registry, now: () => times[index++] ?? 1_011 },
+    new AbortController().signal,
+    "req_deadline",
+  );
+  const events = await drain(outcome.events);
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "TIMEOUT" });
+  expect(adapter.calls).toHaveLength(0);
+  // Nothing inside the attempt loop ran, so only the outer release can free the
+  // slot claimed at rank time.
+  expect(registry.counts().size).toBe(0);
+  store.close();
+});
+
+test("releases the slot when an attempt fails after committing bytes", async () => {
+  const store = await seeded(2);
+  const registry = createLoadRegistry();
+  const adapter: ProviderAdapter = {
+    id: "anthropic",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send() {
+      return {
+        events: (async function* () {
+          yield { type: "start", id: "m", model: "claude-opus-4" };
+          yield { type: "blockStart", index: 0, block: { type: "text" } };
+          // Past the commit point: failover is impossible from here.
+          yield { type: "blockDelta", index: 0, delta: { type: "text", text: "partial" } };
+          throw new GatewayError("UPSTREAM", "died mid-stream");
+        })(),
+        degradations: [],
+      };
+    },
+  };
+
+  const events = await drain(
+    (
+      await dispatch(
+        req,
+        { ...deps(store, adapter), loadRegistry: registry },
+        new AbortController().signal,
+        "req_postcommit",
+      )
+    ).events,
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(registry.counts().size).toBe(0);
+  store.close();
+});
+
+test("a wrapper closed before its first pull still frees the slot on disconnect", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ requestDeadlineMs: 0 });
+  const registry = createLoadRegistry();
+  const adapter = stubAdapter(() => textStream("hello"));
+  const controller = new AbortController();
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), loadRegistry: registry, now: () => Date.now() },
+    controller.signal,
+    "req_wrapped",
+  );
+
+  // The egress layer wraps this generator in another generator. Closing that
+  // wrapper before anything pulls it skips its body, so its `for await` never
+  // exists and the close never reaches the generator below — the same blind
+  // spot one layer up. Nothing here has run, so nothing here can release.
+  const wrapper = (async function* () {
+    for await (const event of outcome.events) yield event;
+  })();
+  await wrapper.return(undefined);
+  expect(registry.counts().get(healthKey("c1", "claude-opus-4"))).toBe(1);
+
+  // A real disconnect aborts the request signal, and that does not depend on
+  // which layer happened to be consuming.
+  controller.abort(new DOMException("client disconnected", "AbortError"));
+
+  expect(registry.counts().size).toBe(0);
+  store.close();
+});
+
+test("failover counts the credential it moves to, and frees it after", async () => {
+  const store = await seeded(2);
+  const registry = createLoadRegistry();
+  const seen: Array<[string, number]> = [];
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("UPSTREAM", "retry") : textStream("ok"),
+  );
+  const observing: ProviderAdapter = {
+    ...adapter,
+    async send(r) {
+      // Which credential the registry believes is busy while this attempt runs.
+      for (const [key, n] of registry.counts()) seen.push([key, n]);
+      return adapter.send(r);
+    },
+  };
+
+  const events = await drain(
+    (
+      await dispatch(
+        req,
+        { ...deps(store, observing), loadRegistry: registry },
+        new AbortController().signal,
+        "req_failover",
+      )
+    ).events,
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  // Attempt 0 counted c1; attempt 1 counted c2 and not c1 — the eager slot is
+  // handed back when its attempt ends, not held across the failover.
+  expect(seen).toEqual([
+    [healthKey("c1", "claude-opus-4"), 1],
+    [healthKey("c2", "claude-opus-4"), 1],
+  ]);
+  expect(registry.counts().size).toBe(0);
   store.close();
 });

@@ -1,5 +1,5 @@
 import type { ProviderId, Usage } from "@omni/ir";
-import type { TargetPricing } from "@omni/store/types";
+import { cacheReadRate, type TargetPricing } from "@omni/store/types";
 
 /**
  * What a provider charges to create a cache entry, as a multiple of its base
@@ -20,8 +20,6 @@ const WRITE_OVER_INPUT: Readonly<Record<ProviderId, { fiveMinute: number; oneHou
   kimi: { fiveMinute: 0, oneHour: 0 },
   custom: { fiveMinute: 0, oneHour: 0 },
 };
-
-const READ_OVER_INPUT = 0.1;
 
 /**
  * Splits cache-creation tokens by the TTL each write bought.
@@ -55,7 +53,7 @@ function splitWrites(usage: Usage): { fiveMinute: number; oneHour: number } {
  */
 export function priceOf(prices: TargetPricing, usage: Usage, provider: ProviderId): number {
   const fallback = WRITE_OVER_INPUT[provider];
-  const readRate = prices.cacheRead ?? prices.input * READ_OVER_INPUT;
+  const readRate = cacheReadRate(prices);
   const write5mRate = prices.cacheWrite5m ?? prices.input * fallback.fiveMinute;
   const write1hRate = prices.cacheWrite1h ?? prices.input * fallback.oneHour;
   const writes = splitWrites(usage);

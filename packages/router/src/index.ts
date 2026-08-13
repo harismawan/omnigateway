@@ -1,6 +1,6 @@
 import { eligible } from "./filters.ts";
 import { QUOTA_FLOOR, quotaHeadroom } from "./quota.ts";
-import { score } from "./score.ts";
+import { healthScore, score } from "./score.ts";
 import { healthKey } from "./snapshot.ts";
 import type { Candidate, RankInput, RankResult } from "./types.ts";
 
@@ -21,13 +21,23 @@ import type { Candidate, RankInput, RankResult } from "./types.ts";
  * proportionally less often rather than at its configured weight right up to
  * the moment the filter excludes it. A candidate with no headroom left is not
  * drawn at all, which is the same verdict the filter is about to reach.
+ *
+ * It is scaled by health for the same reason. A credential whose breaker has
+ * just come out of cooldown is admitted as a probe, and a probe drawing at its
+ * full configured weight is not a probe — it is the whole pool's traffic
+ * betting on a credential that has already failed.
+ *
+ * Load is deliberately left out: the lottery already spreads work statistically,
+ * and multiplying by both makes the resulting distribution hard to predict.
  */
 function weightedShuffle(
   candidates: Candidate[],
   rand: number,
   headroom: (c: Candidate) => number,
+  health: (c: Candidate) => number,
 ): Candidate[] {
-  const drawWeight = (c: Candidate): number => c.credential.weight * c.target.weight * headroom(c);
+  const drawWeight = (c: Candidate): number =>
+    c.credential.weight * c.target.weight * headroom(c) * health(c);
 
   const total = candidates.reduce((sum, c) => sum + drawWeight(c), 0);
   if (total <= 0) return [...candidates].sort((a, b) => b.score - a.score);
@@ -61,6 +71,12 @@ export function rank(input: RankInput): RankResult {
       input.snapshot.settings.quotaPollIntervalMs,
     );
 
+  const health = (c: Candidate): number =>
+    healthScore(input.snapshot.health.get(healthKey(c.credential.id, c.target.model)));
+
+  const inflight = (c: Candidate): number =>
+    input.load.get(healthKey(c.credential.id, c.target.model)) ?? 0;
+
   switch (input.model.strategy) {
     case "priority":
       // Tier is the only signal; score breaks ties within a tier.
@@ -72,16 +88,22 @@ export function rank(input: RankInput): RankResult {
         const h = input.snapshot.health.get(healthKey(c.credential.id, c.target.model));
         return h?.lastUsedAt == null ? Number.POSITIVE_INFINITY : input.now - h.lastUsedAt;
       };
-      // Least-recently-used, except that an account close to exhaustion drops
-      // to the tail. Strict rotation would keep handing work to the account
-      // about to be excluded, and spend the rest of its window on retries.
+      // Least-loaded first, then least-recently-used, except that an account
+      // close to exhaustion drops to the tail. Strict rotation would keep
+      // handing work to the account about to be excluded, and spend the rest of
+      // its window on retries.
+      //
+      // In-flight has to outrank idle time. `lastUsedAt` only moves when a
+      // request *finishes*, so a burst that arrives together reads identical
+      // idle times and stacks onto one credential — the exact opposite of what
+      // this strategy is for. Idle time still breaks ties once nothing is busy.
       const spent = (c: Candidate): number => (headroom(c) < QUOTA_FLOOR ? 1 : 0);
-      scored.sort((a, b) => spent(a) - spent(b) || idle(b) - idle(a));
+      scored.sort((a, b) => spent(a) - spent(b) || inflight(a) - inflight(b) || idle(b) - idle(a));
       break;
     }
 
     case "weighted":
-      return { candidates: weightedShuffle(scored, input.rand, headroom), excluded };
+      return { candidates: weightedShuffle(scored, input.rand, headroom, health), excluded };
 
     case "score":
       scored.sort((a, b) => b.score - a.score);

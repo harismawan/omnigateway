@@ -13,6 +13,7 @@ import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from 
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
+import type { LoadRegistry } from "./dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectRoutes } from "./routes/connect.ts";
@@ -27,6 +28,8 @@ export type AppDeps = {
   http?: HttpClient;
   adapters?: Readonly<Record<ProviderId, ProviderAdapter>>;
   requestId?: () => string;
+  /** Overridden by tests that assert in-flight accounting; one per process otherwise. */
+  loadRegistry?: LoadRegistry;
   /**
    * Shared with the background loops by the bootstrap.
    *
@@ -96,6 +99,7 @@ export function createApp(deps: AppDeps) {
         requestId,
         rateLimiter,
         logger,
+        ...(deps.loadRegistry === undefined ? {} : { loadRegistry: deps.loadRegistry }),
         discoveryMirrors: deps.discoveryMirrors === true,
       }),
     )

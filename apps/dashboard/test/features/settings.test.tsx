@@ -22,7 +22,7 @@ describe("SettingsBoard", () => {
       expect((screen.getByLabelText("Tier") as HTMLInputElement).value).toBe("10");
     });
     expect((screen.getByLabelText("Request deadline") as HTMLInputElement).value).toBe("120000");
-    expect((screen.getByLabelText("Recency") as HTMLInputElement).value).toBe("0.5");
+    expect((screen.getByLabelText("Load") as HTMLInputElement).value).toBe("2");
   });
 
   test("toggles deterministic lossy RTK compression and sends the setting", async () => {

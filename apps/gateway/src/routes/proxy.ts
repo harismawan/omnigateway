@@ -12,6 +12,7 @@ import { Elysia } from "elysia";
 import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
 import { ApiKeyRateLimiter } from "../auth/rateLimit.ts";
 import { type DispatchDeps, dispatch } from "../dispatch/index.ts";
+import { createLoadRegistry } from "../dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "../dispatch/snapshotCache.ts";
 import { anthropicErrorBody, anthropicResponse, anthropicStream } from "../egress/anthropic.ts";
 import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.ts";
@@ -26,8 +27,9 @@ import {
 } from "../logging.ts";
 import { modelListBody } from "./models.ts";
 
-export type ProxyDeps = Omit<DispatchDeps, "snapshots"> & {
+export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
   snapshots?: DispatchDeps["snapshots"];
+  loadRegistry?: DispatchDeps["loadRegistry"];
   requestId: () => string;
   rateLimiter?: ApiKeyRateLimiter;
   keepaliveMs?: number;
@@ -98,6 +100,16 @@ function sseResponse(
   frames: AsyncGenerator<{ event: string; data: string }, void, undefined>,
   onDone: (cancelled: boolean) => Promise<void>,
   keepaliveMs: number,
+  /**
+   * The generator `frames` wraps.
+   *
+   * Closed explicitly on cancel because closing `frames` is not enough: a
+   * generator that never received a `next` skips its body entirely, so its own
+   * `for await` — and the close it would propagate — never happens. Without
+   * this, a client that disconnects before the first pull leaves whatever
+   * dispatch claimed for the request held.
+   */
+  source: AsyncGenerator<StreamEvent, void, undefined>,
 ): Response {
   const encoder = new TextEncoder();
 
@@ -143,6 +155,7 @@ function sseResponse(
       // The client hung up. Close the upstream generator so the provider
       // connection is released, then still write the log (exactly once).
       await frames.return(undefined);
+      await source.return(undefined);
       await runOnce(true);
     },
   });
@@ -250,7 +263,7 @@ async function handle(
         surface === "anthropic"
           ? anthropicStream(outcome.events, requestId)
           : openaiStream(outcome.events, requestId, Math.floor(deps.now() / 1000));
-      return sseResponse(frames, log, deps.keepaliveMs);
+      return sseResponse(frames, log, deps.keepaliveMs, outcome.events);
     }
 
     const events: StreamEvent[] = [];
@@ -306,6 +319,10 @@ export function proxyRoutes(deps: ProxyDeps) {
     ...deps,
     logger,
     snapshots: deps.snapshots ?? createRoutingSnapshotCache(deps.store, logger),
+    // One registry for the process. Built here rather than per request, because
+    // a fresh registry per request would always read zero and rank as if the
+    // gateway were idle.
+    loadRegistry: deps.loadRegistry ?? createLoadRegistry(logger),
     keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
   };
   return (

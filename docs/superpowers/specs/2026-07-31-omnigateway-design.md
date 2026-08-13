@@ -256,6 +256,11 @@ score = w.tier    * tierScore(c)      // 1/tier; w.tier is much larger than the 
       + w.recency * recencyScore(c)   // LRU spread; breaks ties
 ```
 
+> **Superseded.** `recency` was replaced by a `load` term measuring requests in
+> flight, and cost and latency now normalise against the best candidate rather
+> than across the eligible set. See
+> `docs/superpowers/specs/2026-08-12-router-load-balancing-design.md`.
+
 Default weights make tier dominant and recency a tiebreaker, so out-of-the-box
 behavior is priority tiers with LRU spread inside a tier — predictable and easy
 to reason about. Raising `w.cost` or `w.latency` shifts behavior smoothly. The
