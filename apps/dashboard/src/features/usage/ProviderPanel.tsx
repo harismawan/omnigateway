@@ -13,6 +13,7 @@ import { PROVIDER_IDS, PROVIDER_LABEL, providerColor } from "../../theme/tokens.
 import { Stack } from "../../ui/primitives.ts";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import {
+  allTokens,
   bySplit,
   ChartBox,
   LegendRow,
@@ -158,7 +159,7 @@ export function ProviderPanel({ buckets, by, since, until, metric }: ProviderPan
                   {formatCount(entry.errors)}
                 </Td>
                 <Td $align="right" $mono>
-                  {formatCount(entry.inputTokens + entry.outputTokens)}
+                  {formatCount(allTokens(entry))}
                 </Td>
                 <Td $align="right" $mono>
                   {formatUsd(entry.costUsd)}

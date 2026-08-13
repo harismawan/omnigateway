@@ -17,7 +17,10 @@ export function tokenBreakdownLabel(tokens: TokenCounts): string {
 const Breakdown = styled.span`
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+  /* Wrapping happens between the four classes, never inside one: a count
+     broken across lines from its own arrow reads as a different number. */
   white-space: nowrap;
 `;
 

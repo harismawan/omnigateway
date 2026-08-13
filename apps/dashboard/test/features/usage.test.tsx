@@ -108,6 +108,58 @@ function rowsFor(url: string): { rows: unknown[] } {
   };
 }
 
+/**
+ * One query shape per row, and within a row one order of magnitude per token
+ * class. A panel that drops a class or counts one twice lands on a uniquely
+ * wrong number rather than a plausible one, and no two panels can pass on each
+ * other's total. Every sum stays under 10,000, which is where `formatCount`
+ * stops compacting, so the assertions read exact digits.
+ */
+const CLASSES = {
+  provider: { inputTokens: 1, outputTokens: 20, cacheReadTokens: 300, cacheWriteTokens: 4_000 },
+  apiKey: { inputTokens: 2, outputTokens: 30, cacheReadTokens: 400, cacheWriteTokens: 5_000 },
+  day: { inputTokens: 3, outputTokens: 40, cacheReadTokens: 500, cacheWriteTokens: 6_000 },
+} as const;
+
+function stubTokenClasses() {
+  return createFetchStub({
+    "GET /api/usage": ({ url }) => {
+      const one = { key: THIS_HOUR, requests: 1, errors: 0, costUsd: 1 };
+      if (url.includes("splitBy=provider")) {
+        return { rows: [usageBucket({ ...one, split: "anthropic", ...CLASSES.provider })] };
+      }
+      if (url.includes("splitBy=apiKey")) {
+        return { rows: [usageBucket({ ...one, split: "key-1", ...CLASSES.apiKey })] };
+      }
+      if (url.includes("groupBy=day")) {
+        return { rows: [usageBucket({ ...one, key: String(TODAY), ...CLASSES.day })] };
+      }
+      return { rows: [usageBucket({ ...one, ...CLASSES.provider })] };
+    },
+    "GET /api/credentials": () => ({ credentials: [credential()] }),
+    "GET /api/keys": () => ({ keys: [apiKey()] }),
+    "GET /api/models": () => ({ models: [model()] }),
+  });
+}
+
+/** A table row's cells, found by the name in it. Scoped so an axis tick or a
+ * legend entry carrying the same digits cannot answer for the table. */
+function cellsOf(label: string): string[] {
+  const row = screen
+    .getAllByText(label)
+    .map((node) => node.closest("tr"))
+    .find((found): found is HTMLTableRowElement => found !== null);
+  if (row === undefined) throw new Error(`${label} has no table row`);
+  return [...row.querySelectorAll("td")].map((cell) => cell.textContent ?? "");
+}
+
+/** A panel header's meta reading, which sits beside its legend in the head row. */
+function metaOf(legend: string): string {
+  const meta = screen.getByText(legend).nextElementSibling;
+  if (meta === null) throw new Error(`${legend} has no panel head`);
+  return meta.textContent ?? "";
+}
+
 function stubUsage() {
   return createFetchStub({
     "GET /api/usage": ({ url }) => rowsFor(url),
@@ -386,5 +438,39 @@ describe("UsageBoard", () => {
     renderWithProviders(<UsageBoard />);
 
     expect((await screen.findAllByText("internal error")).length).toBeGreaterThan(0);
+  });
+
+  test("counts every token class, cache included, wherever the board says tokens", async () => {
+    stubTokenClasses();
+    renderWithProviders(<UsageBoard />);
+
+    // Named twice: once in the legend, once in the table.
+    await screen.findAllByText("Anthropic");
+    expect(cellsOf("Anthropic")).toContain("4,321");
+    expect(cellsOf("laptop")).toContain("5,432");
+
+    const today = new Date(TODAY).toLocaleDateString("en-GB", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+    expect(screen.getByLabelText(`${today}: 1 requests, 6,543 tokens, $1.00`)).toBeTruthy();
+
+    // The token-mix header totals the window from the ungrouped query, which is
+    // the one reading not reached through the shared metric.
+    expect(metaOf("Token mix")).toBe("4,321");
+  });
+
+  test("keeps the uncached input reading its own thing, next to the totals that include cache", async () => {
+    stubTokenClasses();
+    renderWithProviders(<UsageBoard />);
+
+    const label = (await screen.findAllByText("Prompt input")).find(
+      (node) => node.tagName === "SPAN",
+    );
+    // 1 uncached + 300 cache read + 4,000 cache write, and the uncached class
+    // still named on its own beneath it.
+    expect(label?.parentElement?.textContent).toContain("4,3011 uncached");
   });
 });

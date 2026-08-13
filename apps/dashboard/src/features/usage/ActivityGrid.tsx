@@ -6,6 +6,7 @@ import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Row, ScrollX, Stack } from "../../ui/primitives.ts";
 import {
   addTotals,
+  allTokens,
   asBucket,
   Controls,
   dayLabel,
@@ -182,7 +183,7 @@ export function ActivityGrid({ days, now }: ActivityGridProps) {
   // off the grid changes the subject rather than the reading.
   const describe = (label: string, totals: Totals): string =>
     `${label}: ${formatCount(totals.requests)} requests, ` +
-    `${formatCount(totals.inputTokens + totals.outputTokens)} tokens, ` +
+    `${formatCount(allTokens(totals))} tokens, ` +
     `${formatUsd(totals.costUsd)}`;
 
   return (

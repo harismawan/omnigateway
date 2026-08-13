@@ -12,6 +12,7 @@ import type { UsageBucket } from "../../api/types.ts";
 import { formatCount, formatUsd } from "../../lib/format.ts";
 import { Stack } from "../../ui/primitives.ts";
 import {
+  allTokens,
   ChartBox,
   keyToTime,
   LegendRow,
@@ -56,7 +57,7 @@ export function TrafficPanel({ buckets, by, since, until }: TrafficPanelProps) {
       requests: bucket?.requests ?? 0,
       errors: bucket?.errors ?? 0,
       costUsd: bucket?.costUsd ?? 0,
-      tokens: (bucket?.inputTokens ?? 0) + (bucket?.outputTokens ?? 0),
+      tokens: bucket === undefined ? 0 : allTokens(bucket),
     };
   });
 

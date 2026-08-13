@@ -38,10 +38,30 @@ export const ACTIVITY_DAYS = 371;
 
 export type MetricId = "requests" | "tokens" | "cost";
 
+/** The four classes every token count on this board is built from. */
+type TokenCounts = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+
 /**
- * The three lenses every panel can be read through. `tokens` stays at
- * input + output — the two the operator is charged for per request — while the
- * token-mix panel is where cache traffic gets its own reading.
+ * Every token the window moved. `inputTokens` is uncached input only and the
+ * two cache classes are disjoint from it, so the four sum without counting a
+ * token twice. Defined once because a panel summing its own subset is how two
+ * readings of "tokens" on one page end up disagreeing.
+ */
+export function allTokens(tokens: TokenCounts): number {
+  return (
+    tokens.inputTokens + tokens.outputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens
+  );
+}
+
+/**
+ * The three lenses every panel can be read through. `tokens` counts all four
+ * classes, cache included — it reads as traffic moved, not as what was billed
+ * at full rate. The token-mix panel is where the classes separate again.
  */
 export const METRICS = [
   {
@@ -53,7 +73,7 @@ export const METRICS = [
   {
     id: "tokens",
     label: "Tokens",
-    of: (bucket: UsageBucket) => bucket.inputTokens + bucket.outputTokens,
+    of: allTokens,
     format: formatCount,
   },
   { id: "cost", label: "Cost", of: (bucket: UsageBucket) => bucket.costUsd, format: formatUsd },
