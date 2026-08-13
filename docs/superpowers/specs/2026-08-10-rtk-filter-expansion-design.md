@@ -534,7 +534,8 @@ implemented unless the search pattern can be extracted unambiguously.
 
 Existing eligibility remains:
 
-- minimum 500 UTF-16 code units;
+- no minimum input size; small blocks are rejected by the filters' own line minimums and by the
+  acceptance guard rather than by a size test (see the compression design's block safety gates);
 - maximum 1,000,000 code units;
 - maximum accepted transformed output 250,000 code units;
 - cache-controlled and explicit error results remain byte-identical.

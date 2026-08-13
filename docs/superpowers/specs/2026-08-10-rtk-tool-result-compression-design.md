@@ -173,7 +173,7 @@ origin.
 
 Constants use UTF-16 code units because JavaScript indexes strings that way:
 
-- minimum input: 500 code units;
+- minimum input: 0 code units (no floor; see below);
 - maximum processable input: 1,000,000 code units;
 - detection prefix: 4,096 code units and at most 64 lines;
 - generic duplicate-log minimum: 20 lines;
@@ -187,11 +187,29 @@ A tool result is ineligible when any condition holds:
 - `isError === true`;
 - block has `cacheControl`;
 - origin is confirmed non-shell;
-- content is below 500 code units;
 - content exceeds 1,000,000 code units;
 - no permitted detector matches.
 
 Inputs over the processing cap remain unchanged; truncation does not bypass the cap.
+
+#### Why there is no minimum input size
+
+The original 500-code-unit floor was carried over from OmniRoute without a stated rationale, and
+measurement showed it was redundant with the acceptance guard. Each filter already has its own line
+minimum, and every candidate must be strictly shorter than its input to be accepted, so small blocks
+are rejected by the filters themselves rather than by a size test. Removing the floor left realistic
+short outputs — `git status --short`, a three-row grep, a fourteen-path listing, a twenty-two-line
+duplicate log — byte-identical.
+
+One class does change: a block over roughly 32 lines that is still under 500 code units, which means
+very short lines. A 242-code-unit, 44-line diff compresses to 207 units, eliding twelve rows under an
+omission marker. That is the whole of the trade — about nine tokens against twelve rows the model no
+longer sees — and it is the reason the floor is not worth restoring in either direction: it bought
+nothing measurable, and it hid nothing dangerous.
+
+The floor's removal does not widen what may be compressed. Origin policy, detector permissions, and
+the acceptance guard are unchanged, so a block that was ineligible for any reason other than its size
+remains ineligible.
 
 Explicit error and cache-controlled blocks remain byte-identical, including their object identity
 when no surrounding change requires cloning.

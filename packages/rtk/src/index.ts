@@ -43,7 +43,7 @@ export type RtkTransformResult = { request: ChatRequest; report: RtkReport };
 type Origin = "shell" | "non-shell" | "unknown";
 type FilterResult = { content: string; filters: RtkFilterId[] };
 
-const MIN_INPUT = 500;
+const MIN_INPUT = 0;
 const MAX_INPUT = 1_000_000;
 const MAX_OUTPUT = 250_000;
 const SHELL = new Set(["bash", "shell", "terminal", "exec", "run_command", "execute_command"]);

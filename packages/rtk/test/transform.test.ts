@@ -180,3 +180,62 @@ describe("transformRequest", () => {
     );
   });
 });
+
+/**
+ * Pins the absence of a minimum input size.
+ *
+ * Nothing asserted the old 500-code-unit floor, which is how the constant and the
+ * spec were free to drift apart. These two cases are the measured boundary: short
+ * blocks are already rejected by each filter's own line minimum and by the
+ * acceptance guard, and the only class the floor ever suppressed is a block with
+ * enough rows to elide but few enough code units to fall under it.
+ */
+describe("eligibility has no minimum input size", () => {
+  function diffRequest(rows: number): ChatRequest {
+    const content = [
+      "diff --git a/x b/x",
+      "--- a/x",
+      "+++ b/x",
+      `@@ -1,${rows} +1,${rows} @@`,
+      ...Array.from({ length: rows }, (_, i) => ` L${i}`),
+    ].join("\n");
+    return {
+      model: "fast",
+      stream: false,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "toolUse", id: "call-1", name: "bash", input: { command: "git diff" } },
+          ],
+        },
+        { role: "user", content: [{ type: "toolResult", toolUseId: "call-1", content }] },
+      ],
+    };
+  }
+
+  test("compresses a diff that is under 500 code units but long enough to elide", () => {
+    const input = diffRequest(40);
+    const original = resultContent(input);
+    expect(original.length).toBeLessThan(500);
+
+    const result = transformRequest(input, { enabled: true });
+    expect(result.report.applied).toBe(true);
+    expect(result.report.filters).toContain("git-diff");
+
+    // Head, tail, and an omission marker: the loss is declared, never silent.
+    const output = resultContent(result.request);
+    expect(output.length).toBeLessThan(original.length);
+    expect(output).toContain(" L0");
+    expect(output).toContain(" L39");
+    expect(output).toMatch(/\.\.\. \d+ lines omitted \.\.\./);
+  });
+
+  test("leaves a short diff untouched because no filter shrinks it", () => {
+    const input = diffRequest(4);
+    expect(resultContent(input).length).toBeLessThan(500);
+    // Rejected by the acceptance guard rather than by a size test — head plus
+    // tail already covers every row, so the candidate is not shorter.
+    expect(transformRequest(input, { enabled: true }).request).toBe(input);
+  });
+});
