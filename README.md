@@ -29,7 +29,7 @@ omni start
   provider dispatch, preserve errors and non-tool-result content, and default off.
 - **Routes across your accounts.** Define a virtual model like `fast` or
   `smart` with several targets; the gateway ranks them by tier, health,
-  remaining quota, cost, and latency.
+  remaining quota, cost, latency, and current load.
 - **Fails over.** A rate-limited or broken account is skipped, its circuit
   breaker opens, and the next candidate is tried — before the response starts
   streaming.
@@ -44,6 +44,60 @@ omni start
   day — metadata only.
 - **Ships an admin console and a CLI.** Both cover the same ground; use
   whichever suits the machine you are on.
+
+## How it is built
+
+A Bun workspace monorepo. The layering is deliberate and enforced by what each
+package is allowed to import: a provider-neutral core at the bottom, provider
+knowledge in one place, pure routing above that, and every side effect pushed up
+into the gateway process.
+
+```mermaid
+graph TD
+  subgraph frontends[Front ends]
+    gateway["apps/gateway<br/><i>Elysia server, dispatch, loops</i>"]
+    cli["apps/cli<br/><i>the omni binary</i>"]
+    dashboard["apps/dashboard<br/><i>React console</i>"]
+  end
+
+  control["@omni/control<br/><i>every operator action;<br/>no HTTP, argv or terminal</i>"]
+  router["@omni/router<br/><i>pure ranking;<br/>no I/O, no timers</i>"]
+  store["@omni/store<br/><i>SQLite + field encryption</i>"]
+  providers["@omni/providers<br/><i>adapters, wire codecs,<br/>catalog, HTTP client</i>"]
+  rtk["@omni/rtk<br/><i>tool-result filters</i>"]
+  ir["@omni/ir<br/><i>domain model — depends on nothing</i>"]
+
+  gateway --> control
+  gateway --> rtk
+  cli --> control
+  dashboard -. "types + catalog only" .-> providers
+  dashboard -. "types only" .-> store
+  control --> router
+  router --> store
+  router --> providers
+  store --> rtk
+  providers --> ir
+  rtk --> ir
+  store --> ir
+```
+
+Arrows read *depends on*, and the direction never reverses. Two rules do most of
+the work: `@omni/ir` is side-effect free and imports nothing, and `@omni/router`
+is a pure function — no network, no database, no timers. Everything that has to
+touch the world is pushed up into the gateway process.
+
+The dashboard's edges are dotted because they are type-level only.
+`@omni/providers/catalog` is deliberately kept import-free so model lists can be
+bundled into the browser without dragging in the HTTP client.
+
+The gateway and the CLI are two front ends over the same `@omni/control`
+functions. The CLI does not call the running server's API — it opens the same
+SQLite file directly, which is why it still works when the gateway is down.
+
+**[ARCHITECTURE.md](ARCHITECTURE.md)** goes a level deeper: a request traced end
+to end, how routing ranks and excludes accounts, the commit point that decides
+whether failover is still possible, the provider adapter shape, the database
+schema and its encryption boundary, and the background loops.
 
 ## Requirements
 
@@ -295,9 +349,11 @@ Worth knowing before you deploy it:
 
 ## Development
 
-Contributing, or running from a checkout? See [CLAUDE.md](CLAUDE.md) for the
-repository map, architectural boundaries, and conventions, and
-`docs/superpowers/specs/` for the design documents behind each feature.
+Contributing, or running from a checkout? See
+[ARCHITECTURE.md](ARCHITECTURE.md) for how the system fits together,
+[CLAUDE.md](CLAUDE.md) for the repository map, architectural boundaries, and
+conventions, and `docs/superpowers/specs/` for the design documents behind each
+feature.
 
 ```bash
 git clone https://github.com/harismawan/omnigateway.git

@@ -1,7 +1,8 @@
 # OmniGateway Repository Guidance
 
 Agent guidance for repository work: architecture, boundaries, conventions, and durable traps.
-`README.md` serves operators; this file serves contributors. Update both when changes affect both.
+`README.md` serves operators; `ARCHITECTURE.md` explains how the system fits together; this file
+serves contributors. Update all that a change affects.
 
 ## Scope
 
@@ -14,6 +15,7 @@ OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway:
 - `packages/ir`: provider-neutral domain model
 - `packages/providers`: provider adapters and catalog
 - `packages/router`: pure routing
+- `packages/rtk`: tool-result filters, applied in dispatch before routing
 - `packages/store`: persistence and encryption
 - `packages/testkit`: shared test fixtures
 
@@ -77,6 +79,9 @@ and `bun run lint`.
     effect so tests never start processes or write outside temp directories.
 12. Dashboard calls `/api/*` only. It may import `@omni/store/types`, `@omni/ir`, and catalog subpath,
     but not provider adapters, HTTP client, or runtime store code.
+13. `packages/rtk` stays pure like `ir` and `router`: no I/O, clocks, or randomness. It rewrites
+    tool-result content only and preserves errors and non-tool-result blocks. `@omni/rtk/catalog` is
+    a leaf holding the filter-id union; `@omni/store` imports that subpath alone.
 
 ## TypeScript and dashboard style
 
@@ -166,6 +171,9 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   `usage_daily`. Pending rows contain placeholder metrics; inspect `state`, not `status`.
 - `quota_windows` stores provider observations, not gateway counts. Missing data means unknown, not
   unlimited. Probe failure must never disable a credential.
+- RTK filter ids are persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is a storage
+  contract, not an internal enum. `isRtkFilterId` drops unknown ids on read, so renaming one loses
+  history silently rather than failing. Add ids freely; rename or remove only with a migration.
 - Streaming responses need downstream `: keepalive` comments because provider heartbeats are
   decoded away. Keep server idle timeout above request deadline.
 - Stdout holds operational events; `request_logs` holds completed requests. Do not restore duplicate
