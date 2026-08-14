@@ -3,7 +3,7 @@
 One endpoint in front of the AI accounts you already pay for.
 
 OmniGateway is a self-hosted gateway that speaks the Anthropic and OpenAI APIs
-and answers them using your own Anthropic, OpenAI, and Kimi Coding
+and answers them using your own Anthropic, OpenAI, Kimi Coding, and xAI
 subscriptions. Point any compatible client at it, ask for a model you defined,
 and the gateway picks an account that can serve it — falling back to another
 when one is rate-limited, expired, or out of quota.
@@ -104,7 +104,7 @@ schema and its encryption boundary, and the background loops.
 - [Bun](https://bun.sh/) 1.4 or later. Bun is the runtime, not just the
   installer, so a Node-only machine cannot run OmniGateway.
 - A directory that persists, for the SQLite database.
-- At least one Anthropic, OpenAI, or Kimi Coding account to connect.
+- At least one Anthropic, OpenAI, Kimi Coding, or xAI account to connect.
 
 ## Install
 
@@ -140,7 +140,7 @@ omni start                 # serves the API and the console on 127.0.0.1:9000
 Connect an account. The CLI prints a URL to open, and waits:
 
 ```bash
-omni connect anthropic     # or: openai, kimi
+omni connect anthropic     # or: openai, kimi, grok
 ```
 
 Define a virtual model your clients will ask for, seeding its pricing and
@@ -150,6 +150,14 @@ capabilities from the built-in catalog:
 omni models catalog                                  # what is available
 omni models put fast --from-catalog anthropic:claude-sonnet-5
 ```
+
+**A note on grok pricing.** xAI charges by request size: at or above 200K
+context the rate roughly doubles, and the higher rate applies to *every token
+in the request*, not just the tokens past the mark. A target holds one flat
+price, so the catalog carries xAI's sub-200K figures and long-context traffic
+is reported cheaper than it was billed. Catalog pricing is only the default a
+new target starts from — if you run grok at long context, edit the saved
+target's price to match the tier you are actually paying.
 
 Mint a key for your client. **It is printed once and stored only as a hash:**
 

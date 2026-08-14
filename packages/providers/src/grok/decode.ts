@@ -109,9 +109,16 @@ export async function* decodeGrokResponses(
   const ownsBlock = new Set<number>();
 
   for await (const msg of messages) {
-    const d = json(msg.data);
-    if (d === null) continue;
+    // The Responses API terminates on `response.completed`, not on a sentinel,
+    // but nothing stops the proxy from closing with the OpenAI-style one. It
+    // carries no event name, so `parseSse` labels it "message" and the check
+    // below would read a benign close as an unknown event. Skipped, not treated
+    // as terminal: only a real completion may end the stream without an error.
+    if (msg.data === "[DONE]") continue;
 
+    // Checked before the payload is parsed. The other order lets an unknown
+    // event whose data is not JSON fall into the `null` skip and end the stream
+    // clean and short — the silent truncation this set exists to prevent.
     if (!KNOWN_EVENTS.has(msg.event)) {
       yield {
         type: "error",
@@ -121,6 +128,9 @@ export async function* decodeGrokResponses(
       };
       return;
     }
+
+    const d = json(msg.data);
+    if (d === null) continue;
 
     switch (msg.event) {
       case "response.created":

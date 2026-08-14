@@ -139,13 +139,13 @@ the next request's ranking reflects this one.
 
 ## Providers
 
-Four adapters, each a directory of the same four files:
+Five adapters, each a directory of the same four files:
 
 ```mermaid
 flowchart LR
   ir(["ChatRequest<br/>(IR)"]) --> wire["wire.ts<br/><i>IR → provider body</i>"]
   wire --> http["http-client.ts<br/><b>node:http, not fetch</b>"]
-  http --> up[("Anthropic · OpenAI Responses<br/>Kimi · custom origin")]
+  http --> up[("Anthropic · OpenAI Responses<br/>Kimi · xAI · custom origin")]
   up --> dec["decode.ts<br/><i>SSE → StreamEvent</i>"]
   dec --> ev(["StreamEvent<br/>(IR)"])
   cat["models.ts → catalog<br/><i>pricing + limits, defaults only</i>"] -.-> wire

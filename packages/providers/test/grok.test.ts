@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { ChatRequest, StreamEvent } from "@omni/ir";
+import type { ChatRequest, StreamEvent, ToolChoice } from "@omni/ir";
 import { decodeGrokResponses } from "../src/grok/decode.ts";
 import { grokDeviceHeaders, mintGrokDevice } from "../src/grok/device.ts";
 import { grokAdapter } from "../src/grok/index.ts";
@@ -188,6 +188,98 @@ test("records nothing when the tool list fits", () => {
   const { body, degradations } = toGrokWire({ ...base, tools }, "grok-4.6");
   expect(body.tools).toHaveLength(200);
   expect(degradations).not.toContain("grok:tools-truncated");
+});
+
+test("round-trips a tool call and its result as top-level input items", () => {
+  const { body, degradations } = toGrokWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "looking" },
+            { type: "toolUse", id: "call_1", name: "search", input: { q: "x" } },
+          ],
+        },
+        { role: "user", content: [{ type: "toolResult", toolUseId: "call_1", content: "found" }] },
+      ],
+    },
+    "grok-4.6",
+  );
+
+  // Both halves are siblings of the message items, not content inside one, and
+  // the call has to be flushed out of the surrounding message in order. Losing
+  // the result half leaves the model an unanswered call it will keep retrying.
+  expect(body.input).toEqual([
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "looking" }] },
+    { type: "function_call", call_id: "call_1", name: "search", arguments: '{"q":"x"}' },
+    { type: "function_call_output", call_id: "call_1", output: "found" },
+  ]);
+  expect(degradations).toEqual([]);
+});
+
+test("serializes a tool result carrying a broken escape sequence as valid JSON", () => {
+  // The proxy answers `input[N].output: unexpected end of hex escape` when the
+  // body is not strictly valid JSON, so a tool result holding a bare backslash
+  // or a truncated \u sequence has to survive the serializer unchanged.
+  const content = "path C:\\temp and a truncated \\u00 tail";
+  const { body } = toGrokWire(
+    {
+      ...base,
+      messages: [{ role: "user", content: [{ type: "toolResult", toolUseId: "call_1", content }] }],
+    },
+    "grok-4.6",
+  );
+
+  const reparsed: unknown = JSON.parse(JSON.stringify(body));
+  const input = (reparsed as { input: { type: string; output?: string }[] }).input;
+  const output = input.find((item) => item.type === "function_call_output");
+  expect(output?.output).toBe(content);
+});
+
+test("encodes every tool_choice form in the proxy's own spelling", () => {
+  const encoded = (choice: ToolChoice): unknown =>
+    toGrokWire({ ...base, toolChoice: choice }, "grok-4.6").body.tool_choice;
+
+  // The IR uses neither vendor's word, so `any` -> `required` is a translation
+  // and not a rename: sending `auto` instead lets the model answer with prose
+  // where the client demanded a call.
+  expect(encoded({ type: "auto" })).toBe("auto");
+  expect(encoded({ type: "any" })).toBe("required");
+  expect(encoded({ type: "none" })).toBe("none");
+  expect(encoded({ type: "tool", name: "search" })).toEqual({ type: "function", name: "search" });
+  expect(toGrokWire(base, "grok-4.6").body.tool_choice).toBeUndefined();
+});
+
+test("keeps a mid-conversation system turn where the client put it", () => {
+  const { body, degradations } = toGrokWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "system", content: [{ type: "text", text: "be brief" }] },
+        { role: "user", content: [{ type: "text", text: "more" }] },
+      ],
+    },
+    "grok-4.6",
+  );
+
+  // A system turn applies from its position forward, so folding it into
+  // `instructions` would move it to the front of the history and change when it
+  // takes effect. No xAI source says the proxy accepts a `system` role inside
+  // `input`, so it keeps its slot as a marked user turn instead.
+  expect(body.input).toEqual([
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "<system-reminder>\nbe brief\n</system-reminder>" }],
+    },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "more" }] },
+  ]);
+  expect(body.instructions).toBeUndefined();
+  expect(degradations).toContain("grok:system-turn-inlined");
 });
 
 test("encodes an image with image_url as a plain string", () => {
@@ -431,6 +523,48 @@ test("fails visibly on an SSE event it does not know", async () => {
   // reported rather than skipped: skipping would drop content silently.
   expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
   expect(events.some((e) => e.type === "end")).toBe(false);
+});
+
+test("fails visibly on an unknown SSE event whose data is not JSON", async () => {
+  const events = await collect(
+    decodeGrokResponses(
+      msgs(
+        {
+          event: "response.created",
+          data: JSON.stringify({ response: { id: "resp_1", model: "grok-4.6" } }),
+        },
+        { event: "response.tool_call.invented", data: "not json at all" },
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+      ),
+    ),
+  );
+
+  // Parsing before checking the event name would let an unrecognized event hide
+  // behind its own payload: the stream would end clean and short, which is the
+  // exact silent-truncation this decoder refuses.
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(events.some((e) => e.type === "end")).toBe(false);
+});
+
+test("accepts the [DONE] sentinel instead of reading it as an unknown event", async () => {
+  const events = await collect(
+    decodeGrokResponses(
+      msgs(
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+        // `parseSse` names an unlabelled record "message", so the transport
+        // sentinel would otherwise arrive as an event outside the known set.
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+  expect(events.some((e) => e.type === "error")).toBe(false);
 });
 
 test("emits UPSTREAM when EOF arrives before response completion", async () => {

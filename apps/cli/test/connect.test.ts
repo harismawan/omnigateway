@@ -130,7 +130,9 @@ test("an unknown provider is refused before a flow is started", async () => {
   });
 
   expect(result.code).toBe(2);
-  expect(result.err).toContain("anthropic, openai, kimi");
+  // The full string, not a prefix: "anthropic, openai, kimi" still matches a
+  // message that has since grown a provider, so it would stop noticing drift.
+  expect(result.err).toContain("provider must be one of anthropic, openai, kimi, grok");
   expect(started).toBe(false);
 });
 

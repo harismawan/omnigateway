@@ -24,6 +24,12 @@ export function grokDeviceHeaders(providerData: Record<string, unknown>): Header
   const agentId = providerData.agentId;
   // Credentials created before the field existed carry nothing; sending a fresh
   // id per request would be a visible behavioural difference, so send none.
+  //
+  // The same branch means an API-key credential never sends the header at all:
+  // only the OAuth flow mints an id, and `createApiKeyCredential` stores an
+  // empty providerData. That split is intended — the fingerprint identifies an
+  // installation of xAI's CLI to the cli-chat-proxy host, and api.x.ai neither
+  // expects it nor knows what it means.
   if (typeof agentId !== "string" || agentId.length === 0) return [];
   return [["x-grok-agent-id", agentId]];
 }

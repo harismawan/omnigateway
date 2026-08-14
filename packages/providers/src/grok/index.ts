@@ -19,14 +19,17 @@ import { toGrokWire } from "./wire.ts";
 const PROXY_URL = "https://cli-chat-proxy.grok.com/v1/responses"; // OAuth
 const API_URL = "https://api.x.ai/v1/responses"; // apiKey
 
+/** Domain separator, so this hash can never collide with another use of a request id. */
+const CONV_NAMESPACE = "omni-grok-conv";
+
 /**
  * Derives a stable UUID from a value, in the v5 shape xAI's own ids use.
  *
  * Derived rather than minted so adapter behaviour stays deterministic without
  * threading a random source through every request.
  */
-function derivedUuid(namespace: string, value: string): string {
-  const h = createHash("sha256").update(`${namespace}:${value}`).digest("hex");
+function derivedUuid(value: string): string {
+  const h = createHash("sha256").update(`${CONV_NAMESPACE}:${value}`).digest("hex");
   // Version nibble 5 and the RFC 4122 variant bits, so the id reads as the kind
   // of name-based UUID it actually is rather than as a random one.
   const variant = ((Number.parseInt(h[16] as string, 16) & 0x3) | 0x8).toString(16);
@@ -51,7 +54,7 @@ function derivedUuid(namespace: string, value: string): string {
 function requestIdentityHeaders(model: string, requestId: string | undefined): HeaderPair[] {
   const headers: HeaderPair[] = [["x-grok-model-override", model]];
   if (requestId === undefined || requestId.length === 0) return headers;
-  const conversation = derivedUuid("omni-grok-conv", requestId);
+  const conversation = derivedUuid(requestId);
   return [
     ...headers,
     ["x-grok-req-id", requestId],

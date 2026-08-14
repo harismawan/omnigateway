@@ -412,11 +412,21 @@ and the second `PROVIDER_LABEL` copy in `AccountsBoard.tsx:35,37`, and a `PASTE_
 
 ## Error Handling
 
-Errors flow through the existing `httpError(res, "grok")`. `Retry-After` is honoured as integer
-seconds capped at 120, and `x-should-retry` is read as an explicit upstream retry signal; an
-HTTP-date `Retry-After` falls back to exponential backoff. Client-facing errors carry no bearer
-token, refresh token, credential id, or internal stack — a 402 from `api.x.ai` surfaces as an upstream
-error with its status and nothing more.
+Errors flow through the existing `httpError(res, "grok")`, and grok accepts that helper's behaviour
+unchanged. Client-facing errors carry no bearer token, refresh token, credential id, or internal
+stack — a 402 from `api.x.ai` surfaces as an upstream error with its status and nothing more.
+
+An earlier draft of this section specified xAI's own retry semantics — `Retry-After` capped at 120
+seconds, an HTTP-date falling back to exponential backoff, and `x-should-retry` read as an explicit
+signal (`xai-grok-sampler/src/client.rs:231-252`). None of that is implemented, deliberately.
+`parseRetryAfter` (`packages/providers/src/http.ts:17-23`) applies no cap and does honour an
+HTTP-date, and no provider reads `x-should-retry`. Diverging for grok alone would give one provider
+different retry semantics from the rest for no reason a reader could infer from the code.
+
+The missing cap is a real if minor exposure, and it is **not specific to xAI**: any upstream sending
+`Retry-After: 86400` parks a candidate for a day. That belongs in `packages/providers/src/http.ts`
+as a cross-provider change with its own tests, not smuggled in beside a new provider. Recorded as a
+follow-up below.
 
 ## Testing
 
@@ -473,6 +483,13 @@ the proxy genuinely rejects are enumerated above with a verbatim error message b
 
 ## Follow-ups
 
+- Cap `Retry-After` in `packages/providers/src/http.ts` for every provider, and decide whether an
+  HTTP-date should fall back to exponential backoff. Optionally read `x-should-retry`, which xAI
+  emits and the shared retry path currently ignores.
+- Probe whether xAI's proxy accepts a `system` role inside `input`. The adapter currently inlines
+  mid-conversation system turns as marked user turns and records `grok:system-turn-inlined`, which is
+  inherited caution from the Codex fork rather than a quoted xAI constraint — if xAI accepts them,
+  that degradation is recorded on every request carrying one, for nothing.
 - Round-trip xAI's encrypted reasoning content instead of dropping thinking blocks.
 - Server-side tools (`web_search`, `x_search`, `code_execution`) as Anthropic-native-style
   provider-owned tool definitions.
