@@ -14,6 +14,7 @@ OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway:
 - `packages/ir`: provider-neutral domain model
 - `packages/providers`: provider adapters and catalog
 - `packages/router`: pure routing
+- `packages/rtk`: tool-result filters, applied in dispatch before routing
 - `packages/store`: persistence and encryption
 - `packages/testkit`: shared test fixtures
 
