@@ -79,6 +79,9 @@ and `bun run lint`.
     effect so tests never start processes or write outside temp directories.
 12. Dashboard calls `/api/*` only. It may import `@omni/store/types`, `@omni/ir`, and catalog subpath,
     but not provider adapters, HTTP client, or runtime store code.
+13. `packages/rtk` stays pure like `ir` and `router`: no I/O, clocks, or randomness. It rewrites
+    tool-result content only and preserves errors and non-tool-result blocks. `@omni/rtk/catalog` is
+    a leaf holding the filter-id union; `@omni/store` imports that subpath alone.
 
 ## TypeScript and dashboard style
 
@@ -168,6 +171,9 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   `usage_daily`. Pending rows contain placeholder metrics; inspect `state`, not `status`.
 - `quota_windows` stores provider observations, not gateway counts. Missing data means unknown, not
   unlimited. Probe failure must never disable a credential.
+- RTK filter ids are persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is a storage
+  contract, not an internal enum. `isRtkFilterId` drops unknown ids on read, so renaming one loses
+  history silently rather than failing. Add ids freely; rename or remove only with a migration.
 - Streaming responses need downstream `: keepalive` comments because provider heartbeats are
   decoded away. Keep server idle timeout above request deadline.
 - Stdout holds operational events; `request_logs` holds completed requests. Do not restore duplicate
