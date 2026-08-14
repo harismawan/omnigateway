@@ -215,6 +215,56 @@ function withoutEffort(
   return { ...vendor, output_config: Object.fromEntries(kept) };
 }
 
+/** The context edits that upstream rejects unless thinking is on. */
+const THINKING_ONLY_EDITS = new Set(["clear_thinking_20251015"]);
+
+/**
+ * Whether the merged body asks the model to think.
+ *
+ * An absent `thinking` is not an answer either way — it leaves the provider
+ * default in place — so only a form that is present and off counts as off.
+ */
+function thinkingIsOff(thinking: unknown): boolean {
+  if (!isRecord(thinking)) return thinking !== undefined;
+  return thinking.type !== "adaptive" && thinking.type !== "enabled";
+}
+
+/**
+ * The body minus a context edit that needs a thinking mode this body lacks.
+ *
+ * Ingress keeps `context_management` out of the known fields, so a client's
+ * `clear_thinking_*` edit rides through passthrough even after the encoder has
+ * turned thinking off — which upstream answers with `` `clear_thinking_...`
+ * strategy requires `thinking` to be enabled or adaptive ``. Same shape as
+ * `withoutEffort`, and the same reasoning: the gateway does not generally
+ * validate request shape per model, but it already knows this pairing is
+ * rejected.
+ *
+ * Read after the vendor merge, not before: passthrough can set `thinking`
+ * itself, and it outranks the mapping. Edit types are matched exactly — an
+ * unfamiliar dated version is left for upstream to rule on rather than
+ * prefix-matched into something this table has never seen.
+ */
+function stripUnsupportedEdits(body: AnthropicBody, note: (d: string) => void): void {
+  if (!thinkingIsOff(body.thinking)) return;
+  const config = body.context_management;
+  if (!isRecord(config) || !Array.isArray(config.edits)) return;
+
+  const kept = config.edits.filter(
+    (e) => !(isRecord(e) && THINKING_ONLY_EDITS.has(String(e.type))),
+  );
+  if (kept.length === config.edits.length) return;
+
+  note("anthropic:clear-thinking-unsupported");
+  // A `context_management` that held nothing else is dropped rather than sent
+  // as an empty edit list.
+  if (kept.length === 0 && Object.keys(config).length === 1) {
+    delete body.context_management;
+    return;
+  }
+  body.context_management = { ...config, edits: kept };
+}
+
 export function toWire(
   req: ChatRequest,
   model: string,
@@ -319,6 +369,7 @@ export function toWire(
     body,
     anthropicReasoningForm(model) === "budget" ? withoutEffort(vendor, note) : vendor,
   );
+  stripUnsupportedEdits(body, note);
 
   return { body, degradations };
 }
