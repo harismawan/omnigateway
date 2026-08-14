@@ -232,6 +232,128 @@ test("merges vendor passthrough last so it can override", () => {
   expect(body.top_k).toBe(40);
 });
 
+const clearThinking = { type: "clear_thinking_20251015" };
+const clearToolUses = { type: "clear_tool_uses_20250919" };
+
+test("drops a clear_thinking edit when the downgrade turned thinking off", () => {
+  // What Claude Code sends against a haiku target: adaptive thinking plus a
+  // context edit that upstream rejects unless thinking is on.
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      reasoning: { mode: "adaptive" },
+      vendor: { anthropic: { context_management: { edits: [clearThinking] } } },
+    },
+    "claude-haiku-4-5",
+    { oauth: false },
+  );
+  expect(body.thinking).toEqual({ type: "disabled" });
+  // Nothing left to edit, so the container goes rather than being sent empty.
+  expect(body.context_management).toBeUndefined();
+  expect(degradations).toContain("anthropic:clear-thinking-unsupported");
+});
+
+test("keeps the other edits when only clear_thinking is unsupported", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      reasoning: { mode: "adaptive" },
+      vendor: {
+        anthropic: { context_management: { edits: [clearToolUses, clearThinking], other: 1 } },
+      },
+    },
+    "claude-haiku-4-5",
+    { oauth: false },
+  );
+  expect(body.context_management).toEqual({ edits: [clearToolUses], other: 1 });
+  expect(degradations).toContain("anthropic:clear-thinking-unsupported");
+});
+
+test("drops a clear_thinking edit a client paired with its own opt-out", () => {
+  // Not a downgrade: the client asked for thinking off itself, on a model that
+  // has no trouble with the adaptive form.
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      reasoning: { mode: "off" },
+      vendor: { anthropic: { context_management: { edits: [clearThinking] } } },
+    },
+    "claude-opus-5",
+    { oauth: false },
+  );
+  expect(body.context_management).toBeUndefined();
+  expect(degradations).toContain("anthropic:clear-thinking-unsupported");
+});
+
+test("leaves a clear_thinking edit alone while thinking is on", () => {
+  for (const model of ["claude-opus-5", "claude-haiku-4-5"]) {
+    const { body, degradations } = toWire(
+      {
+        ...base,
+        // Budget form on haiku, adaptive on opus: both are thinking-on.
+        reasoning:
+          model === "claude-haiku-4-5"
+            ? { mode: "budget", budgetTokens: 8000 }
+            : { mode: "adaptive" },
+        vendor: { anthropic: { context_management: { edits: [clearThinking] } } },
+      },
+      model,
+      { oauth: false },
+    );
+    expect(body.context_management).toEqual({ edits: [clearThinking] });
+    expect(degradations).toEqual([]);
+  }
+});
+
+test("keeps a clear_thinking edit when vendor passthrough re-enables thinking", () => {
+  // Passthrough outranks the mapping, so the strip reads the merged body rather
+  // than the downgrade decision that preceded it.
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      reasoning: { mode: "adaptive" },
+      vendor: {
+        anthropic: {
+          thinking: { type: "enabled", budget_tokens: 2048 },
+          context_management: { edits: [clearThinking] },
+        },
+      },
+    },
+    "claude-haiku-4-5",
+    { oauth: false },
+  );
+  expect(body.context_management).toEqual({ edits: [clearThinking] });
+  expect(degradations).not.toContain("anthropic:clear-thinking-unsupported");
+});
+
+test("leaves a clear_thinking edit alone when no thinking field is sent at all", () => {
+  // No `reasoning` means no `thinking` key on the body, which is the provider
+  // default rather than an opt-out — the gateway does not decide it for them.
+  const { body, degradations } = toWire(
+    { ...base, vendor: { anthropic: { context_management: { edits: [clearThinking] } } } },
+    "claude-opus-5",
+    { oauth: false },
+  );
+  expect(body.context_management).toEqual({ edits: [clearThinking] });
+  expect(degradations).toEqual([]);
+});
+
+test("passes a context_management this encoder cannot read through unchanged", () => {
+  for (const value of ["edits", { edits: "all" }]) {
+    const { body, degradations } = toWire(
+      {
+        ...base,
+        reasoning: { mode: "off" },
+        vendor: { anthropic: { context_management: value } },
+      },
+      "claude-opus-5",
+      { oauth: false },
+    );
+    expect(body.context_management).toEqual(value);
+    expect(degradations).toEqual([]);
+  }
+});
+
 test("renders a cache breakpoint on a system block, ttl and all", () => {
   const { body } = toWire(
     {
