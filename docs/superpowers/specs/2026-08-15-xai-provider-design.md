@@ -34,9 +34,11 @@ quote, this document says so.
 enumerate every exhaustive `Record<ProviderId, …>` in the monorepo, which is the intended way to find
 the work rather than a list maintained by hand.
 
-- `PROVIDER_CAPABILITIES.grok = { tools: true, images: false, reasoning: true }`.
-  `images: false` is a deliberate under-claim: the Responses wire has an `input_image` form, but
-  nothing in the sources confirms xAI accepts it. Flipping it on is a small, testable follow-up.
+- `PROVIDER_CAPABILITIES.grok = { tools: true, images: true, reasoning: true }`. Every current text
+  model is documented `Modalities: text, image → text`. Under-claiming here would be costly rather
+  than safe: `router/src/filters.ts:27` excludes a target whose provider lacks `images` from *any*
+  request containing an image block, so a wrong `false` would silently make grok targets unreachable
+  the moment a client pastes a screenshot.
 - `ANTHROPIC_NATIVE_TOOLS.grok = false`, so the router excludes grok from any request carrying an
   `AnthropicToolDef` or an `anthropicNative` history block, per the existing invariant.
 - `WRITE_OVER_INPUT.grok = 0` (`apps/gateway/src/dispatch/price.ts:17`) — xAI bills no cache-write
@@ -90,18 +92,25 @@ differences from `openai/wire.ts` are load-bearing:
 
 | Concern | `openai/wire.ts` | `grok/wire.ts` |
 | --- | --- | --- |
-| reasoning effort | clamps `xhigh`/`max` to `high` (`:160-165`) | sends `xhigh`; maps `max` to `xhigh` |
+| reasoning effort | clamps `xhigh`/`max` to `high` (`:160-165`) | forwards unclamped |
 | reasoning summary | `"auto"` | `"concise"` |
-| OAuth parameter drops | drops `max_output_tokens`, `temperature` (`:134,140`) | sends both |
+| OAuth parameter drops | drops `max_output_tokens`, `temperature` (`:134,140`) | sends both on both routes |
 | `include` | absent | `["reasoning.encrypted_content"]` |
 | `prompt_cache_key` | absent | set, for cache affinity |
+| tool count | unbounded | capped at 200, with a degradation |
 | vendor passthrough | `req.vendor?.openai` | `req.vendor?.grok` |
 | degradation prefix | `openai:` | `grok:` |
 
 The OAuth-drop row is the clearest argument for the fork: those two drops exist because the *Codex*
-backend rejects the parameters, which has nothing to do with xAI. Nothing in xAI's client suggests
-its proxy rejects them, so grok sends both — and this is recorded as unverified rather than as
-known-good.
+backend rejects the parameters, which has nothing to do with xAI. Three independent implementations
+send `temperature` and `max_output_tokens` to the cli-chat-proxy — CLIProxyAPI re-injects both after
+translation specifically to preserve them (`internal/runtime/executor/xai_executor_request.go:505-528`),
+and CLIProxyAPI-local uses `max_output_tokens: 1` against the proxy as its credential liveness probe
+(`credential_import_probe.go:361-367`). Grok therefore sends both.
+
+Effort is forwarded rather than clamped because xAI clamps server-side: *"On models that do not
+support it, such as `grok-4.5`, requests with `"xhigh"` are treated as `"high"`."* A second clamp in
+the gateway would only be able to get it wrong as the model line moves.
 
 Shared infrastructure is still shared. `usageFromPromptTotal` comes from `@omni/ir`, `parseSse` from
 `../sse.ts`, `httpError` from `../http.ts`. Only provider-shaped code is duplicated.
@@ -117,11 +126,53 @@ Set on every request, following xAI's own client:
 - `prompt_cache_key`, which pins requests to a server and raises the cache hit rate
   (`responses.rs:141-144`).
 
-Not sent: `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`. xAI's client hardcodes
-these to `None` rather than stripping them, and reasoning models reject them outright.
+Never sent, because the proxy returns a 400 for them —
+`400 'Model does not support parameter presencePenalty'` is quoted verbatim in OmniRoute's regression
+test (`tests/unit/grok-cli-strip-params.test.ts:5-8`):
+
+- `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs` — also rejected outright by
+  reasoning models per xAI's docs.
+- `stop` — supported by Chat Completions but not by xAI's Responses API
+  (`CLIProxyAPI/internal/runtime/executor/xai_executor_request.go:531-544`).
+
+The encoder never emits any of these, so the live risk is the `vendor.grok` passthrough, which merges
+operator-supplied fields last. That is the operator's own escape hatch and stays unfiltered, but the
+field list belongs in the passthrough's documentation so a 400 is diagnosable.
+
+**Tools are capped at 200**, above which the proxy answers `Maximum tools limit reached`
+(`OmniRoute/open-sse/executors/grok-cli.ts:20,307-310`). The encoder truncates and records a
+`grok:tools-truncated` degradation rather than letting the request fail, since a silent 400 on tool
+count is far harder to diagnose than a recorded degradation.
+
+`function_call_output.output` must be strictly valid JSON — the proxy rejects malformed escapes with
+`Failed to parse the request body as JSON: input[N].output: unexpected end of hex escape`. Tool
+results flow through untouched today; a decode test covers a tool result carrying an incomplete
+escape sequence.
 
 `BODY_ORDER.grok` mirrors `BODY_ORDER.openai`, which already lists `include` and `prompt_cache_key`
 (`body.ts:31,34`), so no new field vocabulary is needed.
+
+### Images
+
+xAI's `input_image` takes `image_url` as a **plain string**, not OpenAI's `{ "url": … }` object:
+
+```json
+{ "type": "input_image", "image_url": "data:image/jpeg;base64,<base64>" }
+```
+
+This is byte-identical to what `openai/wire.ts:85-89` already emits, so the forked encoder needs no
+adaptation. Constraints: 20MiB per image, `jpg`/`jpeg`/`png` only, no limit on count, any ordering of
+text and image parts. xAI also accepts a public URL in that field; the gateway never sends one,
+because ingress already refuses remote images (`apps/gateway/src/ingress/schemas.ts:103`) rather than
+fetching on a client's behalf.
+
+A client sending `webp` or `gif` will be rejected upstream. That is left as an upstream error, per the
+existing rule that the gateway does not validate request-shape support per model.
+
+xAI's image documentation independently recommends `store: false` — *"When sending images, it is
+advised to not store request/response history on the server. Otherwise the request may fail."* The
+adapter already sets it for zero-data-retention reasons; this is a second, unrelated reason it must
+stay set.
 
 ### Usage accounting
 
@@ -167,11 +218,22 @@ The gateway presents as xAI's own CLI. Two corrections to what third-party clien
 Proxy-only, injected when the credential is OAuth (`agent/config.rs:5235-5247`):
 `X-XAI-Token-Auth: xai-grok-cli` and `x-authenticateresponse: authenticate-response`.
 
-The version is the weakest constant here. `x-grok-client-version` exists specifically for version
-gating at the proxy (`client.rs:623`); this source drop reports `1.0.3` while shipped third-party
-clients pin `0.2.93`, `0.2.106`, and `0.2.120`. The default is `1.0.3` behind `OMNI_GROK_CLI_VERSION`
-so an operator can move it without a release, and `PROFILES.grok` carries a comment saying the value
-is a guess — the same honesty `profile.ts:179-180` already applies to kimi.
+The version is the weakest constant here, and the obvious value is the wrong one.
+`x-grok-client-version` exists specifically for version gating at the proxy (`client.rs:623`,
+`mvp_agent/mod.rs:1288`). xAI's source resolves it as `option_env!("GROK_VERSION")` falling back to
+`CARGO_PKG_VERSION` (`xai-grok-version/src/lib.rs:7-10`), and the crate manifest reads `1.0.3` — but
+release builds export `GROK_VERSION`, so `1.0.3` is the *fallback*, not what a shipped binary reports.
+
+That is consistent with what everyone who actually talks to the proxy observed on the wire:
+CLIProxyAPI pins `0.2.120` under the comment *"Keep in sync with the current Grok CLI client version
+that chat-proxy expects"*, OmniRoute `0.2.106`, grok-build-auth `0.2.93`. No implementation pins
+`1.0.3`. The default here is therefore **`0.2.120`** — the newest observed on-the-wire value — behind
+`OMNI_GROK_CLI_VERSION`, with a comment recording that it is an observation rather than a quote and
+that `1.0.3` is a source-tree artefact.
+
+No captured rejection message exists in any source, so the gate's actual behaviour is unknown; the env
+override is what makes a stale value an operator fix rather than a release. `PROFILES.grok` carries
+the same explicit weaker-guarantee note that `profile.ts:179-180` already applies to kimi.
 
 ### Per-request headers
 
@@ -275,16 +337,32 @@ catalog pricing is only a default for newly created targets — the router price
 target. An operator running long-context traffic edits the target's stored price. The under-report is
 a real limitation and belongs in `README.md` rather than only here.
 
-### Unpublished limits
+### Output limits
 
-`maxOutputTokens` is not published for any model. The proxy reports `x-grok-max-completion-tokens` on
-live responses (`client.rs:254-279`), but the catalog needs a static default. Every entry carries
-**32768**, with a comment stating the figure is unpublished, that it is a floor rather than a quoted
-limit, and that `x-grok-max-completion-tokens` on any live response confirms the real value.
+There is no per-model maximum output figure, because for these models there effectively isn't one —
+grok-4.6's overview page states `Output limit | No text output limit`. What is published is an API
+default: `max_output_tokens` *"Defaults to 128,000 when unset; set a larger value to allow longer
+generations"* (`docs.x.ai/developers/rest-api-reference/inference/chat`).
 
-Under-claiming is the safe direction here: these limits are advertised through `GET /v1/models` and
-never enforced by the gateway, so a low figure costs a client some headroom while a high one would
-invite an upstream 400 on a request the client believed was fine.
+Every catalog entry therefore carries **128000** — the documented default ceiling rather than a
+guessed cap — with a comment recording that it is a default an operator may raise, not a hard model
+limit, and that the proxy confirms the live value via `x-grok-max-completion-tokens`
+(`client.rs:254-279`).
+
+### Per-model quirks
+
+Three of these cannot be expressed in `PROVIDER_CAPABILITIES`, which is per-provider rather than
+per-model. They surface as upstream errors and are recorded here so the behaviour is not mistaken for
+a gateway bug:
+
+- `grok-4.20-multi-agent-0309` does not accept `max_tokens`, does not work on Chat Completions, and
+  takes no custom function calling. Its `reasoning_effort` selects *agent count* (4 or 16), not depth.
+- `grok-4.20-0309-non-reasoning` reports `Reasoning: No`.
+- `none` effort exists only on `grok-4.3`; reasoning cannot be disabled on `grok-4.6` or `grok-4.5`.
+
+xAI's own docs contradict themselves on which models take `reasoning_effort` — the capabilities page
+lists 4.6 and 4.5, the REST reference says "only supported by `grok-4.3`". Forwarding the parameter
+and letting upstream decide is the correct response to that ambiguity, and is what the adapter does.
 
 ## Adjacent Cleanups
 
@@ -343,7 +421,10 @@ error with its status and nothing more.
 ## Testing
 
 **Adapter** (`packages/providers/test/grok.test.ts`). Wire encoding: `store: false`, the `include`
-entry, `prompt_cache_key`, `reasoning.summary`, and effort mapping including `xhigh` and `max`.
+entry, `prompt_cache_key`, `reasoning.summary`, and effort forwarded **unclamped** for `xhigh` and
+`max`. An image block encodes to `input_image` with `image_url` as a plain string, not an object —
+the one shape difference from OpenAI that a copy-paste fork could silently get wrong. A request with
+more than 200 tools truncates and records `grok:tools-truncated`.
 Decoding: a fake `SseMessage` generator covering text deltas, reasoning deltas, tool calls, usage on
 `response.completed`, and an unknown event failing visibly rather than being skipped. Transport: a
 captured `HttpRequest` asserting **URL selection by credential type** — OAuth to the proxy, API key to
@@ -376,21 +457,23 @@ credentials.
 
 Recorded so a future reader knows which numbers were quoted and which were chosen:
 
-1. **`maxOutputTokens`** — unpublished for every model; the catalog's 32768 is a chosen floor, not a
-   quoted limit.
-2. **Image support** — `PROVIDER_CAPABILITIES.grok.images` is `false` pending confirmation that xAI
-   accepts `input_image`.
-3. **`temperature` / `max_output_tokens` on the proxy** — sent, on the reasoning that the Codex-driven
-   drops do not apply here. Nothing confirms the proxy accepts them.
-4. **`x-grok-client-version: 1.0.3`** — the proxy version-gates on this, and shipped clients disagree.
-   Env-overridable for this reason.
-5. **Responses SSE event set** — assumed to match OpenAI's. No authoritative enumeration exists, which
+1. **`temperature` / `max_output_tokens` on the proxy** — sent. The evidence is strong but indirect:
+   three implementations send them and none wrote a workaround, yet no captured proxy response
+   confirms acceptance. The one first-hand probe in the corpus (pi-xai-oauth ADR 0002) never got past
+   a 402 entitlement gate, which is itself worth knowing — **entitlement is checked before schema
+   validation**, so an unentitled account cannot be used to test parameter support.
+2. **`x-grok-client-version: 0.2.120`** — an observed wire value, not a quoted constant, and no
+   captured rejection shows what the gate actually enforces. Env-overridable for this reason.
+3. **Responses SSE event set** — assumed to match OpenAI's. No authoritative enumeration exists, which
    is why unknown events must fail visibly.
+
+Resolved since the first draft, and recorded here so the reasoning is not repeated: image input is
+documented for all six models; `maxOutputTokens` is a published 128,000 API default; and the params
+the proxy genuinely rejects are enumerated above with a verbatim error message behind them.
 
 ## Follow-ups
 
 - Round-trip xAI's encrypted reasoning content instead of dropping thinking blocks.
-- Confirm image support and flip the capability.
 - Server-side tools (`web_search`, `x_search`, `code_execution`) as Anthropic-native-style
   provider-owned tool definitions.
 - Untangle `custom`'s cross-provider imports now that forked-per-provider is the established pattern.
