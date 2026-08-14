@@ -1,7 +1,8 @@
 # OmniGateway Repository Guidance
 
 Agent guidance for repository work: architecture, boundaries, conventions, and durable traps.
-`README.md` serves operators; this file serves contributors. Update both when changes affect both.
+`README.md` serves operators; `ARCHITECTURE.md` explains how the system fits together; this file
+serves contributors. Update all that a change affects.
 
 ## Scope
 
