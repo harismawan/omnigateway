@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { ProviderId } from "@omni/ir";
 import { catalogPricing, PROVIDER_MODEL_CATALOG } from "../src/catalog.ts";
 
-const PROVIDERS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "custom"];
+const PROVIDERS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "grok", "custom"];
 
 const EXPECTED = {
   anthropic: {
@@ -16,6 +16,17 @@ const EXPECTED = {
   kimi: {
     defaultModel: "k3-256k",
     ids: ["k3-256k", "k3", "kimi-for-coding", "kimi-for-coding-highspeed"],
+  },
+  grok: {
+    defaultModel: "grok-4.6",
+    ids: [
+      "grok-4.6",
+      "grok-4.5",
+      "grok-4.3",
+      "grok-4.20-0309-reasoning",
+      "grok-4.20-0309-non-reasoning",
+      "grok-4.20-multi-agent-0309",
+    ],
   },
   custom: { defaultModel: "", ids: [] },
 } as const;

@@ -1,4 +1,4 @@
-import { CONTEXT_1M_BETA } from "@omni/providers";
+import { CONTEXT_1M_BETA } from "@omni/ir";
 
 /**
  * The prefix `GET /v1/models` puts on a discovery mirror.

@@ -22,6 +22,7 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   kimi: "Kimi",
+  grok: "Grok",
   custom: "OpenAI Compatible",
 };
 
@@ -30,6 +31,7 @@ const PASTE_HINT: Record<ProviderId, string> = {
   anthropic: "Authorize in the browser, then paste the code Anthropic shows you.",
   openai: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
   kimi: "Enter the code on Kimi's device page. This dialog finishes on its own.",
+  grok: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
   custom: "Enter endpoint metadata and API key.",
 };
 

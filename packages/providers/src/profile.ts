@@ -48,6 +48,16 @@ export function stainlessHost(platform: string, arch: string): { os: string; arc
 }
 
 /**
+ * Grok spells the platform differently again: lowercase OS, and `arm64` under
+ * its GNU name. Deliberately not folded into {@link stainlessHost} — the two
+ * agree on nothing but the input, and one helper serving both would have to
+ * branch on the caller anyway.
+ */
+export function grokHost(platform: string, arch: string): { os: string; arch: string } {
+  return { os: platform.toLowerCase(), arch: arch === "arm64" ? "aarch64" : arch };
+}
+
+/**
  * Reorders headers to a canonical wire order.
  *
  * Names are matched case-insensitively but emitted with the casing they were
@@ -202,9 +212,51 @@ const kimi: ClientProfile = {
   ],
 };
 
+// The version is the weakest constant in this file. xAI's source resolves it
+// from a build-time env var and falls back to its crate version, so the 1.0.3 in
+// the manifest is a source-tree artefact rather than what a shipped binary
+// reports. 0.2.120 is the newest value observed on the wire by implementations
+// that actually talk to the proxy — an observation, not a quote. The proxy gates
+// on this header, and no captured rejection exists, so the env override is what
+// makes a stale value an operator fix rather than a release. Treat this as a
+// weaker guarantee than the Anthropic and OpenAI profiles, as with kimi above.
+const GROK_CLI_VERSION = env("OMNI_GROK_CLI_VERSION", "0.2.120");
+const grokUa = grokHost(process.platform, process.arch);
+
+const grok: ClientProfile = {
+  headers: [
+    [
+      "User-Agent",
+      env("OMNI_UA_GROK", `grok-shell/${GROK_CLI_VERSION} (${grokUa.os}; ${grokUa.arch})`),
+    ],
+    // `grok-shell`, not `grok-cli`: no `grok-cli/<version>` identity exists
+    // anywhere in xAI's own source.
+    ["x-grok-client-identifier", "grok-shell"],
+    ["x-grok-client-version", GROK_CLI_VERSION],
+    ["x-grok-client-mode", "headless"],
+    ["Accept", "text/event-stream"],
+  ],
+  // TODO(phase 2): the per-request ids (`x-grok-req-id`, `x-grok-conv-id`,
+  // `x-grok-session-id`, `x-grok-model-override`, `x-grok-agent-id`) and the
+  // OAuth-only pair belong in this order too; unlisted names only append.
+  order: [
+    "Host",
+    "Content-Type",
+    "Authorization",
+    "x-grok-client-identifier",
+    "x-grok-client-version",
+    "x-grok-client-mode",
+    "User-Agent",
+    "Accept",
+    "Accept-Encoding",
+    "Content-Length",
+  ],
+};
+
 export const PROFILES: Readonly<Record<ProviderId, ClientProfile>> = {
   anthropic: { ...anthropic, order: envOrder("OMNI_ORDER_ANTHROPIC", anthropic.order) },
   openai: { ...openai, order: envOrder("OMNI_ORDER_OPENAI", openai.order) },
   kimi: { ...kimi, order: envOrder("OMNI_ORDER_KIMI", kimi.order) },
+  grok: { ...grok, order: envOrder("OMNI_ORDER_GROK", grok.order) },
   custom: { headers: [], order: [] },
 };

@@ -6,6 +6,7 @@ import type {
   ProviderModelLimits,
   ProviderModelPricing,
 } from "./catalog-types.ts";
+import { GROK_MODELS } from "./grok/models.ts";
 import { KIMI_MODELS } from "./kimi/models.ts";
 import { OPENAI_MODELS } from "./openai/models.ts";
 
@@ -33,6 +34,7 @@ export const PROVIDER_MODEL_CATALOG = {
   anthropic: ANTHROPIC_MODELS,
   openai: OPENAI_MODELS,
   kimi: KIMI_MODELS,
+  grok: GROK_MODELS,
   custom: { defaultModel: "", models: [] },
 } as const satisfies Readonly<
   Record<ProviderId, { defaultModel: string; models: readonly ProviderModelChoice[] }>

@@ -17,6 +17,7 @@ const PREFIX_PROVIDER: ReadonlyArray<readonly [string, ProviderId]> = [
   ["o4", "openai"],
   ["kimi-", "kimi"],
   ["moonshot", "kimi"],
+  ["grok-", "grok"],
 ];
 
 function synthesize(provider: ProviderId, model: string): VirtualModel {

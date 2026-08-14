@@ -1,11 +1,11 @@
 import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
 import { BODY_ORDER, orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
-import { kimiDeviceHeaders } from "../kimi-device.ts";
 import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeChat } from "./decode.ts";
+import { kimiDeviceHeaders } from "./device.ts";
 import { toChatWire } from "./wire.ts";
 
 const BASE_URL = "https://api.kimi.com/coding/v1/chat/completions";

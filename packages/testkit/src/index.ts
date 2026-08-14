@@ -288,6 +288,7 @@ export function stubAdapters(events: StreamEvent[]): Readonly<Record<ProviderId,
     anthropic: make("anthropic"),
     openai: make("openai"),
     kimi: make("kimi"),
+    grok: make("grok"),
     custom: make("custom"),
   };
 }

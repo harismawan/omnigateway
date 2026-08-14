@@ -1,5 +1,4 @@
-import type { ChatRequest, ToolChoice } from "@omni/ir";
-import { CONTEXT_1M_BETA } from "../betas.ts";
+import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 
 export type ChatBody = {
   model: string;

@@ -5,7 +5,7 @@ import { isAuthorizationPending } from "./oauth/kimi.ts";
 import { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
 import type { OAuthProvider } from "./oauth/types.ts";
 
-const PROVIDER_IDS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "custom"];
+const PROVIDER_IDS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "grok", "custom"];
 const FLOW_TTL_MS = 600_000;
 
 export type ConnectDeps = {

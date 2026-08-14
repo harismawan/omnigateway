@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { CONTEXT_1M_BETA } from "@omni/providers";
+import { CONTEXT_1M_BETA } from "@omni/ir";
 import { parseAnthropicRequest } from "../../src/ingress/anthropic.ts";
 import { normalizeClientModel } from "../../src/ingress/model.ts";
 

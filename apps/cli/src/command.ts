@@ -47,6 +47,9 @@ const PROVIDER_TONE: Record<ProviderId, Tone> = {
   anthropic: "magenta",
   openai: "green",
   kimi: "blue",
+  // Not red: that tone is the failure half of `state()` below, and a provider
+  // name wearing it would read as a broken credential in the same table.
+  grok: "yellow",
   custom: "cyan",
 };
 

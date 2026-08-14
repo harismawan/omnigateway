@@ -43,6 +43,24 @@ export const BODY_ORDER: Readonly<Record<ProviderId, readonly string[]>> = {
   // own serializer emits, and this gateway adds that field for usage reporting
   // rather than copying it from one. Unlisted keys append in insertion order.
   kimi: ["model", "messages", "tools", "tool_choice", "max_tokens", "temperature", "stream"],
+  // xAI's Responses surface takes the same field vocabulary as OpenAI's, so the
+  // order mirrors it rather than inventing a second spelling of the same body.
+  grok: [
+    "model",
+    "stream",
+    "input",
+    "instructions",
+    "store",
+    "reasoning",
+    "prompt_cache_key",
+    "tools",
+    "tool_choice",
+    "include",
+    "service_tier",
+    "client_metadata",
+    "parallel_tool_calls",
+    "metadata",
+  ],
   custom: [],
 };
 
