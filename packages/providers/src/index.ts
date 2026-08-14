@@ -5,6 +5,8 @@ export * from "./anthropic/tools.ts";
 export * from "./body.ts";
 export * from "./catalog.ts";
 export { customAdapter } from "./custom/index.ts";
+export * from "./grok/device.ts";
+export { decodeGrokResponses, grokAdapter, toGrokWire } from "./grok/index.ts";
 export { httpError, parseRetryAfter } from "./http.ts";
 export * from "./http-client.ts";
 export * from "./kimi/device.ts";

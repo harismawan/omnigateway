@@ -41,8 +41,16 @@ const OPENAI_TOKEN_HEADERS = [
   ["User-Agent", "codex-cli/0.144.1 (Windows 10.0.26200; x64)"],
 ] as const;
 
-test("builds an authorize url against the openai auth host", () => {
-  const start = openaiOAuth.start({ redirectUri: "http://localhost:8787/oauth/callback" });
+/** OpenAI's endpoints are compiled in, so `start` must not reach the network. */
+const offline: HttpClient = () => {
+  throw new Error("start reached transport");
+};
+
+test("builds an authorize url against the openai auth host", async () => {
+  const start = await openaiOAuth.start(
+    { redirectUri: "http://localhost:8787/oauth/callback" },
+    { http: offline, now: () => NOW },
+  );
   const url = new URL(start.authorizeUrl);
   expect(url.origin + url.pathname).toBe("https://auth.openai.com/oauth/authorize");
   expect(url.searchParams.get("code_challenge_method")).toBe("S256");

@@ -3,10 +3,33 @@ import type { HttpClient } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { isAuthorizationPending } from "./oauth/kimi.ts";
 import { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
-import type { OAuthProvider } from "./oauth/types.ts";
+import type { AuthorizeStart, OAuthProvider } from "./oauth/types.ts";
 
 const PROVIDER_IDS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "grok", "custom"];
 const FLOW_TTL_MS = 600_000;
+
+/**
+ * Where a redirect flow sends the operator's browser, per provider.
+ *
+ * Nothing here binds a port. The gateway is as often as not on a different
+ * machine than the browser, so the redirect is *expected* to fail to connect:
+ * the operator copies the resulting URL out of the address bar and pastes it
+ * back, and `normalizeAuthorizationCode` unpicks it. The value therefore only
+ * has to be a redirect the provider itself accepts.
+ *
+ * xAI binds an ephemeral loopback port in its own client, which nothing here
+ * can reproduce, so the port is the fixed one its local-dev path uses. The
+ * `/callback` path is not a guess and must not be "tidied" to match OpenAI's
+ * `/auth/callback` above: xAI's own client redirects to
+ * `http://127.0.0.1:PORT/callback` (`auth/oidc/login.rs`), and redirect URIs are
+ * matched exactly, so the wrong path fails at the authorize step rather than at
+ * the exchange. A provider absent from this table redirects nowhere and hands
+ * the operator a code directly.
+ */
+const CALLBACKS: Readonly<Partial<Record<ProviderId, { uri: string; label: string }>>> = {
+  openai: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
+  grok: { uri: "http://127.0.0.1:56121/callback", label: "Grok" },
+};
 
 export type ConnectDeps = {
   store: Store;
@@ -33,7 +56,7 @@ export function isProviderId(value: unknown): value is ProviderId {
   return typeof value === "string" && PROVIDER_IDS.includes(value as ProviderId);
 }
 
-function deviceIdFrom(start: ReturnType<OAuthProvider["start"]>): string {
+function deviceIdFrom(start: AuthorizeStart): string {
   const deviceId = start.pending.extra?.deviceId;
   if (typeof deviceId !== "string" || deviceId.trim().length === 0) {
     throw new GatewayError("INTERNAL", "device authorization did not provide a device id");
@@ -53,18 +76,20 @@ export function createConnectFlows(deps: ConnectDeps) {
   const logger = deps.logger ?? noopLogger;
   const flows = createPendingFlows({ now: deps.now, ttlMs: FLOW_TTL_MS });
   const pollsInFlight = new Map<string, Promise<{ id: string }>>();
-  const callbackUri = (provider: ProviderId) =>
-    provider === "openai" ? "http://localhost:1455/auth/callback" : "";
+  const callbackUri = (provider: ProviderId) => CALLBACKS[provider]?.uri ?? "";
 
   /**
    * Accepts what the operator actually has in hand.
    *
-   * OpenAI's flow ends at a localhost URL the operator copies out of the
-   * browser, so the whole URL is accepted and unpicked here rather than asking
-   * them to extract the code themselves.
+   * A loopback flow ends at a URL the operator copies out of the browser, so
+   * the whole URL is accepted and unpicked here rather than asking them to
+   * extract the code themselves. Anything that is not a URL — the `code#state`
+   * an Anthropic-style flow shows — passes through untouched.
    */
   function normalizeAuthorizationCode(flow: StoredFlow, input: string): string {
-    if (flow.provider !== "openai") return input;
+    const callback = CALLBACKS[flow.provider];
+    if (callback === undefined) return input;
+    const expected = new URL(callback.uri);
 
     let url: URL;
     try {
@@ -73,14 +98,17 @@ export function createConnectFlows(deps: ConnectDeps) {
       return input;
     }
 
-    if (url.origin !== "http://localhost:1455" || url.pathname !== "/auth/callback") {
-      throw new GatewayError("BAD_REQUEST", "invalid OpenAI callback URL");
+    if (url.origin !== expected.origin || url.pathname !== expected.pathname) {
+      throw new GatewayError("BAD_REQUEST", `invalid ${callback.label} callback URL`);
     }
 
     const code = url.searchParams.get("code")?.trim() ?? "";
     const state = url.searchParams.get("state")?.trim() ?? "";
     if (code.length === 0 || state.length === 0) {
-      throw new GatewayError("BAD_REQUEST", "OpenAI callback URL must contain code and state");
+      throw new GatewayError(
+        "BAD_REQUEST",
+        `${callback.label} callback URL must contain code and state`,
+      );
     }
     if (state !== flow.pending.state) {
       throw new GatewayError("AUTH", "authorization state mismatch");
@@ -139,7 +167,10 @@ export function createConnectFlows(deps: ConnectDeps) {
       flows.sweep();
 
       if (!isProviderId(providerInput)) {
-        throw new GatewayError("BAD_REQUEST", "provider must be one of anthropic, openai, kimi");
+        throw new GatewayError(
+          "BAD_REQUEST",
+          "provider must be one of anthropic, openai, kimi, grok",
+        );
       }
       const label =
         typeof labelInput === "string" && labelInput.trim().length > 0
@@ -151,15 +182,13 @@ export function createConnectFlows(deps: ConnectDeps) {
         throw new GatewayError("BAD_REQUEST", "provider does not support OAuth");
       }
       const redirectUri = callbackUri(providerInput);
+      const oauthDeps = { http: deps.http, now: deps.now };
       const start =
         provider.begin === undefined
-          ? provider.start({ redirectUri })
+          ? await provider.start({ redirectUri }, oauthDeps)
           : await (async () => {
-              const initial = provider.start({ redirectUri });
-              return provider.begin?.(
-                { deviceId: deviceIdFrom(initial) },
-                { http: deps.http, now: deps.now },
-              );
+              const initial = await provider.start({ redirectUri }, oauthDeps);
+              return provider.begin?.({ deviceId: deviceIdFrom(initial) }, oauthDeps);
             })();
       if (start === undefined) {
         throw new GatewayError("INTERNAL", "device authorization could not start");

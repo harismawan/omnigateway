@@ -70,7 +70,15 @@ export type OAuthProvider = {
   /** Whether the operator can paste a code by hand instead of using a redirect. */
   readonly supportsManualPaste: boolean;
 
-  start(opts: { redirectUri: string }): AuthorizeStart;
+  /**
+   * Builds what the operator has to act on.
+   *
+   * Awaited and handed `deps` because an endpoint is not always a constant: xAI
+   * publishes its authorize endpoint through OIDC discovery, so there is a
+   * network read standing between "connect grok" and there being a URL to open.
+   * Providers whose endpoints are compiled-in ignore `deps` and stay synchronous.
+   */
+  start(opts: { redirectUri: string }, deps: OAuthDeps): AuthorizeStart | Promise<AuthorizeStart>;
 
   /**
    * Device flows only: requests a device code before the operator is shown

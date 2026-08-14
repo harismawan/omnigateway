@@ -47,6 +47,14 @@ export type AdapterRequest = {
   /** Injected so tests can capture the exact bytes an adapter puts on the wire. */
   http: HttpClient;
   signal: AbortSignal;
+  /**
+   * The gateway's own request id, when there is one.
+   *
+   * Carried so an adapter whose upstream expects a correlation id can reuse the
+   * value stdout and `request_logs` already join on, instead of minting a third
+   * unrelated identifier. Optional because callers outside dispatch have none.
+   */
+  requestId?: string;
 };
 
 export type AdapterResult = {

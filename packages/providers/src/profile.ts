@@ -236,16 +236,24 @@ const grok: ClientProfile = {
     ["x-grok-client-mode", "headless"],
     ["Accept", "text/event-stream"],
   ],
-  // TODO(phase 2): the per-request ids (`x-grok-req-id`, `x-grok-conv-id`,
-  // `x-grok-session-id`, `x-grok-model-override`, `x-grok-agent-id`) and the
-  // OAuth-only pair belong in this order too; unlisted names only append.
+  // The OAuth-only pair sits with `Authorization` because it qualifies it, and
+  // the per-request ids follow the client identity they belong to. A header the
+  // adapter does not send is simply skipped, so listing all of them costs
+  // nothing on the API-key route.
   order: [
     "Host",
     "Content-Type",
     "Authorization",
+    "X-XAI-Token-Auth",
+    "x-authenticateresponse",
     "x-grok-client-identifier",
     "x-grok-client-version",
     "x-grok-client-mode",
+    "x-grok-agent-id",
+    "x-grok-req-id",
+    "x-grok-conv-id",
+    "x-grok-session-id",
+    "x-grok-model-override",
     "User-Agent",
     "Accept",
     "Accept-Encoding",

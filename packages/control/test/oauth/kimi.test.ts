@@ -41,8 +41,11 @@ test("is registered as a device flow that cannot be pasted", () => {
   expect(kimiOAuth.supportsManualPaste).toBe(false);
 });
 
-test("start returns a verification url and a stable device id", () => {
-  const start = kimiOAuth.start({ redirectUri: "" });
+test("start returns a verification url and a stable device id", async () => {
+  const offline: HttpClient = () => {
+    throw new Error("start reached transport");
+  };
+  const start = await kimiOAuth.start({ redirectUri: "" }, { http: offline, now: () => NOW });
   expect(start.authorizeUrl).toContain("https://");
   expect(typeof start.pending.extra?.deviceId).toBe("string");
 });
@@ -274,6 +277,6 @@ test("refresh preserves the stored token when the new refresh token is blank", a
 });
 
 test("the registry exposes one flow per provider", () => {
-  expect(Object.keys(OAUTH_PROVIDERS).sort()).toEqual(["anthropic", "kimi", "openai"]);
+  expect(Object.keys(OAUTH_PROVIDERS).sort()).toEqual(["anthropic", "grok", "kimi", "openai"]);
   expect(OAUTH_PROVIDERS.kimi.id).toBe("kimi");
 });
