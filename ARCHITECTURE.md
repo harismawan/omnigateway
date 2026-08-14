@@ -96,11 +96,6 @@ flowchart LR
   mult --> strat{strategy}
   strat --> out["ordered candidates<br/><i>walked on failover</i>"]
   strat -.- opts["priority · roundRobin<br/>weighted · score"]
-
-  classDef bad fill:#fdeeee,stroke:#c66
-  classDef good fill:#eef7ee,stroke:#4a7
-  class excl bad
-  class out good
 ```
 
 Weights shown are the defaults and are configurable. A request carrying an
@@ -133,11 +128,6 @@ flowchart TD
   stream --> late{error now?}
   late -- yes --> inband(["reported in-band<br/><i>no failover possible</i>"])
   late -- no --> done(["end · usage · cost"])
-
-  classDef pre fill:#eef2fb,stroke:#57c
-  classDef post fill:#fdf4e8,stroke:#c93,stroke-width:2px
-  class next,retryable,fail pre
-  class commit,inband post
 ```
 
 Everything left of the commit point is invisible to the client: a rate-limited or
@@ -159,9 +149,6 @@ flowchart LR
   up --> dec["decode.ts<br/><i>SSE → StreamEvent</i>"]
   dec --> ev(["StreamEvent<br/>(IR)"])
   cat["models.ts → catalog<br/><i>pricing + limits, defaults only</i>"] -.-> wire
-
-  classDef odd fill:#fdf4e8,stroke:#c93,stroke-width:2px
-  class http odd
 ```
 
 The `custom` adapter points another provider's codec at a different origin.
@@ -202,9 +189,6 @@ flowchart TB
   cred --- health
   cred --- quota
   logs == "same transaction" ==> daily
-
-  classDef sec fill:#fdf4e8,stroke:#c93,stroke-width:2px
-  class cred,keys sec
 ```
 
 Writing the rollup in the *same transaction* as the log row is what lets a year of

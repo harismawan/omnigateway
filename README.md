@@ -79,11 +79,6 @@ graph TD
   providers --> ir
   rtk --> ir
   store --> ir
-
-  classDef leaf fill:#eef7ee,stroke:#4a7,stroke-width:2px
-  classDef pure fill:#eef2fb,stroke:#5577cc,stroke-width:2px
-  class ir leaf
-  class router pure
 ```
 
 Arrows read *depends on*, and the direction never reverses. Two rules do most of
