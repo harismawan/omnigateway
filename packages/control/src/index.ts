@@ -67,14 +67,13 @@ export type {
   PendingFlow,
   UsageReport,
 } from "./oauth/types.ts";
+export { type BurnEstimate, type BurnInput, burnEstimates, burnFor } from "./quota/burn.ts";
 export {
-  type BurnDeps,
-  type BurnEstimate,
-  type BurnInput,
-  burnEstimates,
-  burnFor,
-} from "./quota/burn.ts";
-export { type QuotaHistoryInput, quotaHistory } from "./quota/history.ts";
+  type GatewayRate,
+  type QuotaHistoryInput,
+  type QuotaHistoryResult,
+  quotaHistory,
+} from "./quota/history.ts";
 export {
   type PollerDeps,
   poll,

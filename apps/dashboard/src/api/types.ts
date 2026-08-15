@@ -70,9 +70,21 @@ export type BurnEstimate = {
   exhaustsAt: number | null;
   /** Whether the window outlives its own reset. Null only when suppressed. */
   survives: boolean | null;
-  /** Tokens per hour this gateway can account for over the same span. */
-  gatewayRatePerHour: number | null;
   stale: boolean;
+};
+
+/**
+ * What this gateway accounts for over the same span the provider rate covers.
+ *
+ * On the history response rather than beside the estimate, because it costs a
+ * request-log aggregate per window and the health route is refetched every ten
+ * seconds. Only the Accounts disclosure shows it, and only while expanded.
+ */
+export type GatewayRate = {
+  credentialId: string;
+  windowType: QuotaWindow["windowType"];
+  /** Null when the window start is unknown, so there is no span to divide by. */
+  gatewayRatePerHour: number | null;
 };
 
 export type CredentialHealthResponse = {
@@ -88,8 +100,8 @@ export type QuotaHistoryQuery = {
   until?: number;
 };
 
-/** Samples only. The estimate rides the health endpoint and is not repeated. */
-export type QuotaHistoryResponse = { samples: QuotaSample[] };
+/** The estimate itself rides the health endpoint and is not repeated here. */
+export type QuotaHistoryResponse = { samples: QuotaSample[]; gatewayRates: GatewayRate[] };
 
 export type CredentialPatch = {
   label?: string;

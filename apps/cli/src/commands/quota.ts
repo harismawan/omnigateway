@@ -47,7 +47,10 @@ export async function burnIndex(
   windows: readonly QuotaWindow[],
 ): Promise<BurnIndex> {
   const settings = await getSettings(store);
-  const estimates = await burnEstimates({ store, now }, windows, settings.quotaPollIntervalMs);
+  const estimates = burnEstimates(windows, {
+    now: now(),
+    pollIntervalMs: settings.quotaPollIntervalMs,
+  });
   return new Map(estimates.map((e) => [burnKey(e.credentialId, e.windowType), e]));
 }
 
@@ -119,10 +122,13 @@ export const quota: Command = {
     const windows = credentials.flatMap((credential) => credential.quota);
     const burn = await burnIndex(store, ctx.now, windows);
 
-    // Samples are the scripting half of this command and run to a row per
-    // movement per window; the table never shows them, so they are read only
-    // when something is going to parse them.
-    const samples = ctx.json ? await quotaHistory({ store, now: ctx.now }, {}) : [];
+    // Samples and the gateway rate are the scripting half of this command: the
+    // samples run to a row per movement per window and the rate costs a
+    // request-log aggregate each, and the table shows neither. Read only when
+    // something is going to parse them.
+    const history = ctx.json
+      ? await quotaHistory({ store, now: ctx.now }, {})
+      : { samples: [], gatewayRates: [] };
 
     const data = {
       credentials: credentials.map((credential) => ({
@@ -132,7 +138,8 @@ export const quota: Command = {
         windows: credential.quota,
       })),
       burn: [...burn.values()],
-      samples,
+      samples: history.samples,
+      gatewayRates: history.gatewayRates,
     };
 
     emit(ctx, writer, data, () => {

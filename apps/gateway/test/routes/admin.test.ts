@@ -572,7 +572,6 @@ test("credential health carries the burn estimate beside the reading", async () 
       ratePerHour: number | null;
       exhaustsAt: number | null;
       survives: boolean | null;
-      gatewayRatePerHour: number | null;
       stale: boolean;
     }>;
   };
@@ -586,7 +585,6 @@ test("credential health carries the burn estimate beside the reading", async () 
       ratePerHour: 50,
       exhaustsAt: NOW + 18 * 3_600_000,
       survives: true,
-      gatewayRatePerHour: 0,
       stale: false,
     },
   ]);
@@ -647,6 +645,28 @@ test("quota history clamps a span reaching past the retention window", async () 
   ).json()) as { samples: Array<{ used: number }> };
 
   expect(body.samples.map((s) => s.used)).toEqual([20]);
+});
+
+test("quota history carries the gateway rate the health route no longer does", async () => {
+  const { store, call } = await harness({ now: CLOCK });
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await reading(store, "c1", CLOCK, 20);
+
+  const history = (await (
+    await call("GET", "/api/credentials/quota/history?since=0&credentialId=c1")
+  ).json()) as {
+    gatewayRates: Array<{ credentialId: string; windowType: string; gatewayRatePerHour: number }>;
+  };
+  const health = (await (await call("GET", "/api/credentials/health")).json()) as {
+    burn: Array<Record<string, unknown>>;
+  };
+
+  expect(history.gatewayRates).toEqual([
+    { credentialId: "c1", windowType: "fiveHour", gatewayRatePerHour: 0 },
+  ]);
+  // The estimate stays on the health route; only the request-log aggregate moved.
+  expect(health.burn[0]).not.toHaveProperty("gatewayRatePerHour");
+  expect(health.burn[0]).toHaveProperty("ratePerHour");
 });
 
 test("credential health hides unexpected repository errors", async () => {

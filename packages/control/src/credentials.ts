@@ -175,10 +175,11 @@ export async function refreshCredential(
  * Everything the console draws per credential: breaker state, the newest quota
  * reading, and what that reading implies.
  *
- * `burn` is derived rather than stored, over rows this call already loads. It
- * costs no sample lookup, which is what lets the Overview rack, the Accounts
- * table, and `omni status` all read the estimate from a query they were making
- * anyway.
+ * `burn` is derived rather than stored, over rows this call already loads, and
+ * that is the whole budget for this route. The console refetches it every ten
+ * seconds against the same synchronous connection that serves `/v1/messages`,
+ * so nothing here may touch `request_logs`: the gateway-rate corroboration
+ * lives on the history endpoint, where it is asked for once per expanded row.
  */
 export async function credentialHealth(deps: {
   store: Store;
@@ -189,7 +190,10 @@ export async function credentialHealth(deps: {
     deps.store.credentials.listQuota(),
     deps.store.config.getSettings(),
   ]);
-  const burn = await burnEstimates(deps, quota, settings.quotaPollIntervalMs);
+  const burn = burnEstimates(quota, {
+    now: deps.now(),
+    pollIntervalMs: settings.quotaPollIntervalMs,
+  });
   return { health, quota, burn };
 }
 

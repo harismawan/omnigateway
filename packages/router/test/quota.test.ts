@@ -102,3 +102,26 @@ test("the tightest usable window decides", () => {
 test("a window the provider reported without a limit cannot be measured", () => {
   expect(read([quota({ used: 5_000, limit: null, observedAt: NOW })])).toBe(UNKNOWN_QUOTA);
 });
+
+test("the router imports no runtime value from the store package root", async () => {
+  // `@omni/store` resolves to `src/index.ts`, which re-exports `openDb`,
+  // `createStore`, and `encryption.ts` — importing a *value* from it puts
+  // `bun:sqlite` and `node:crypto` in the router's module graph and evaluates
+  // both at import time. `@omni/store/types` is the leaf, and is where
+  // `WINDOW_DURATION_MS` and `cacheReadRate` are read from. A type-only import
+  // of the root is erased and so is left alone.
+  const sources = new Bun.Glob("**/*.ts").scan({
+    cwd: new URL("../src", import.meta.url).pathname,
+    absolute: true,
+  });
+
+  const offenders: string[] = [];
+  for await (const path of sources) {
+    const text = await Bun.file(path).text();
+    for (const match of text.matchAll(/^import\s+(type\s+)?[^;]*?from\s+"@omni\/store";/gm)) {
+      if (match[1] === undefined) offenders.push(`${path}: ${match[0].replace(/\s+/g, " ")}`);
+    }
+  }
+
+  expect(offenders).toEqual([]);
+});

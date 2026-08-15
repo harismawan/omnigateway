@@ -28,7 +28,6 @@ import type {
   ProviderId,
   QuotaHistoryQuery,
   QuotaHistoryResponse,
-  QuotaSample,
   QuotaWindow,
   RequestLog,
   Settings,
@@ -106,32 +105,32 @@ export function useCredentialHealth(cadence: Cadence = 10_000): UseQueryResult<H
 }
 
 /**
- * The retained readings behind one account's quota chart.
+ * The retained readings behind one account's quota chart, and the gateway rate
+ * that corroborates them.
  *
  * Deliberately without a refetch interval, unlike credential health: this is
  * read only while a row is expanded, and the rows it draws are appended at the
- * provider poll interval rather than at request speed. `enabled` is false when
- * no window can be placed on a timeline, so a span that means nothing is never
- * asked for.
+ * provider poll interval rather than at request speed. That is also why the
+ * gateway rate is here — it costs a request-log aggregate per window, which a
+ * ten-second poll cannot afford. `enabled` is false when no window can be
+ * placed on a timeline, so a span that means nothing is never asked for.
  */
 export function useQuotaHistory(
   query: QuotaHistoryQuery,
   enabled = true,
-): UseQueryResult<QuotaSample[]> {
+): UseQueryResult<QuotaHistoryResponse> {
   return useQuery({
     queryKey: queryKeys.quotaHistory(query),
     enabled,
-    queryFn: async ({ signal }) =>
-      (
-        await get<QuotaHistoryResponse>(
-          withQuery("/api/credentials/quota/history", {
-            credentialId: query.credentialId,
-            since: query.since,
-            ...(query.until === undefined ? {} : { until: query.until }),
-          }),
-          signal,
-        )
-      ).samples,
+    queryFn: ({ signal }) =>
+      get<QuotaHistoryResponse>(
+        withQuery("/api/credentials/quota/history", {
+          credentialId: query.credentialId,
+          since: query.since,
+          ...(query.until === undefined ? {} : { until: query.until }),
+        }),
+        signal,
+      ),
     refetchInterval: false,
   });
 }

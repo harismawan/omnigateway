@@ -73,7 +73,6 @@ export function burn(patch: Partial<BurnEstimate> = {}): BurnEstimate {
     ratePerHour: 500,
     exhaustsAt: NOW + 1_800_000,
     survives: false,
-    gatewayRatePerHour: 120_000,
     stale: false,
     ...patch,
   };

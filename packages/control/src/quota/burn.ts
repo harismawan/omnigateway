@@ -1,5 +1,5 @@
 import { quotaStaleAfterMs } from "@omni/router";
-import { durationFor, type QuotaWindow, type Store, type WindowType } from "@omni/store";
+import { durationFor, type QuotaWindow, type WindowType } from "@omni/store";
 
 /**
  * How fast a quota window is being spent, and whether it will last.
@@ -23,8 +23,6 @@ export type BurnEstimate = {
   exhaustsAt: number | null;
   /** Whether the window outlives its own reset. Null only when the estimate is suppressed. */
   survives: boolean | null;
-  /** Tokens per hour this gateway can account for over the same span. */
-  gatewayRatePerHour: number | null;
   /** True when the reading is too old to believe; every estimate above is then null. */
   stale: boolean;
 };
@@ -33,8 +31,6 @@ export type BurnInput = {
   /** Used for the staleness verdict and nothing else. See the note below. */
   now: number;
   pollIntervalMs: number;
-  /** Gateway tokens billed to this credential across the same span. */
-  gatewayTokens?: number | null;
 };
 
 /** Where the window began, or null when the provider named no reset to count back from. */
@@ -50,7 +46,6 @@ const suppressed = (window: QuotaWindow): BurnEstimate => ({
   ratePerHour: null,
   exhaustsAt: null,
   survives: null,
-  gatewayRatePerHour: null,
   stale: true,
 });
 
@@ -93,12 +88,6 @@ export function burnFor(window: QuotaWindow, input: BurnInput): BurnEstimate {
         // some instant in the past.
         window.observedAt + (Math.max(0, window.limit - window.used) / ratePerHour) * HOUR_MS;
 
-  const gatewayTokens = input.gatewayTokens ?? null;
-  const gatewayRatePerHour =
-    gatewayTokens === null || elapsedHours === null || elapsedHours <= 0
-      ? null
-      : gatewayTokens / elapsedHours;
-
   return {
     credentialId: window.credentialId,
     windowType: window.windowType,
@@ -106,62 +95,20 @@ export function burnFor(window: QuotaWindow, input: BurnInput): BurnEstimate {
     ratePerHour,
     exhaustsAt,
     survives: exhaustsAt === null || window.resetsAt === null || exhaustsAt >= window.resetsAt,
-    gatewayRatePerHour,
     stale: false,
   };
 }
 
-export type BurnDeps = { store: Store; now: () => number };
-
-const spanKey = (since: number, until: number) => `${since}:${until}`;
-
 /**
- * The estimate for a set of snapshot windows, with the gateway's own rate
- * attached.
+ * The estimate for a set of snapshot windows.
  *
- * The gateway side is one aggregate per distinct span rather than per window:
- * accounts sharing a reset — the common case for one provider polled in one
- * sweep — share a query. Spans come from the readings, not from the clock, so
- * the two rates always cover the same hours and are comparable.
+ * Pure and synchronous, and deliberately so: this rides
+ * `/api/credentials/health`, which the console refetches every ten seconds
+ * against the same connection that serves inference. Nothing here may read a
+ * table. The gateway-rate corroboration that used to be attached here now lives
+ * on the history endpoint, which is fetched once per expanded row and scoped to
+ * one credential.
  */
-export async function burnEstimates(
-  deps: BurnDeps,
-  windows: readonly QuotaWindow[],
-  pollIntervalMs: number,
-): Promise<BurnEstimate[]> {
-  const now = deps.now();
-  const spans = new Map<string, { since: number; until: number }>();
-  for (const window of windows) {
-    const since = windowStartOf(window);
-    if (since === null || window.observedAt <= since) continue;
-    spans.set(spanKey(since, window.observedAt), { since, until: window.observedAt });
-  }
-
-  const tokens = new Map<string, number>();
-  for (const [key, span] of spans) {
-    const rows = await deps.store.usage.aggregate({
-      grain: "raw",
-      groupBy: "credential",
-      since: span.since,
-      until: span.until,
-    });
-    for (const row of rows) {
-      // Every class the provider's own counter is charged for. Dropping the
-      // cached ones would understate what this gateway accounts for and
-      // manufacture a divergence from the provider rate that is not there.
-      tokens.set(
-        `${key}|${row.key}`,
-        row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens,
-      );
-    }
-  }
-
-  return windows.map((window) => {
-    const since = windowStartOf(window);
-    const gatewayTokens =
-      since === null || window.observedAt <= since
-        ? null
-        : (tokens.get(`${spanKey(since, window.observedAt)}|${window.credentialId}`) ?? 0);
-    return burnFor(window, { now, pollIntervalMs, gatewayTokens });
-  });
+export function burnEstimates(windows: readonly QuotaWindow[], input: BurnInput): BurnEstimate[] {
+  return windows.map((window) => burnFor(window, input));
 }

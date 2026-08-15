@@ -1,4 +1,7 @@
-import { type CredentialView, type QuotaWindow, WINDOW_DURATION_MS } from "@omni/store";
+// The types subpath, not the package root: `@omni/store` pulls `openDb`,
+// `createStore`, and `encryption.ts`, which would put `bun:sqlite` and
+// `node:crypto` in the router's module graph. The router stays pure.
+import { type CredentialView, type QuotaWindow, WINDOW_DURATION_MS } from "@omni/store/types";
 
 /**
  * How the router reads a quota snapshot.

@@ -393,12 +393,16 @@ function liveWindow(now: number) {
       ratePerHour: 500,
       exhaustsAt: now + 1_800_000,
       survives: false,
-      gatewayRatePerHour: 120_000,
     }),
   };
 }
 
 describe("AccountsBoard quota history", () => {
+  /** The gateway rate rides the history response, not the ten-second health poll. */
+  const gatewayRates = [
+    { credentialId: "cred-1", windowType: "fiveHour", gatewayRatePerHour: 120_000 },
+  ];
+
   function stubHistory(samples: unknown[], now = Date.now()) {
     const live = liveWindow(now);
     return stubAccounts({
@@ -407,7 +411,7 @@ describe("AccountsBoard quota history", () => {
         quota: [live.quota],
         burn: [live.burn],
       }),
-      "GET /api/credentials/quota/history": () => ({ samples }),
+      "GET /api/credentials/quota/history": () => ({ samples, gatewayRates }),
     });
   }
 
@@ -537,6 +541,92 @@ describe("AccountsBoard quota history", () => {
 
     expect(await screen.findAllByText("unknown")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /quota history/i })).toBeNull();
+  });
+
+  test("asks for the current window and the one before it, not the whole retention window", async () => {
+    // The chart's range is the range in which the estimate means anything. A
+    // five-hour window drawn over thirty days is noise, and asking for thirty
+    // days of samples to draw five hours of them is the cost of that noise.
+    const user = userEvent.setup();
+    const now = Date.now();
+    const stub = stubHistory([quotaSample({ observedAt: now - 600_000, used: 400 })], now);
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+    );
+    await screen.findByText("Window average");
+
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.url.startsWith("/api/credentials/quota/history"))).toBe(
+        true,
+      );
+    });
+    const call = stub.calls.find((c) => c.url.startsWith("/api/credentials/quota/history"));
+    const since = Number(new URL(call?.url ?? "", "http://x").searchParams.get("since"));
+
+    // The window began an hour ago and runs five hours, so itself plus the one
+    // before it reaches back six hours from now — not to the epoch.
+    expect(since).toBe(now - 6 * 3_600_000);
+  });
+
+  test("a panel charts only its own span, not everything the request returned", async () => {
+    // One request covers every window on the row, so its span is the widest
+    // one asked for. A weekly window reaches back eleven days, and that
+    // response carries five-hour samples from windows that ended days ago —
+    // which belong on no chart drawn here.
+    const user = userEvent.setup();
+    const now = Date.now();
+    const fiveHour = quota({
+      used: 500,
+      limit: 1_000,
+      observedAt: now - 30_000,
+      resetsAt: now + 4 * 3_600_000,
+    });
+    const weekly = quota({
+      windowType: "weekly",
+      used: 100,
+      limit: 1_000,
+      observedAt: now - 30_000,
+      resetsAt: now + 3 * 86_400_000,
+    });
+    stubAccounts({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [fiveHour, weekly],
+        burn: [
+          burn({ windowStartsAt: now - 3_600_000, ratePerHour: 500, exhaustsAt: now + 1_800_000 }),
+          burn({
+            windowType: "weekly",
+            windowStartsAt: now - 4 * 86_400_000,
+            ratePerHour: 10,
+            exhaustsAt: now + 30 * 86_400_000,
+            survives: true,
+          }),
+        ],
+      }),
+      "GET /api/credentials/quota/history": () => ({
+        samples: [
+          // A five-hour window that rolled over eight days ago: inside the
+          // weekly panel's span, and long outside this one's.
+          quotaSample({
+            observedAt: now - 8 * 86_400_000,
+            used: 900,
+            resetsAt: now - 8 * 86_400_000 + 600_000,
+          }),
+        ],
+        gatewayRates,
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+    );
+    await screen.findAllByText("Window average");
+
+    // Neither panel has a reading inside its own span, so neither draws.
+    await waitFor(() => expect(screen.getAllByText("not yet observed")).toHaveLength(2));
   });
 
   test("a snapshot with no samples yet still carries the estimate", async () => {

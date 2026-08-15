@@ -9,7 +9,7 @@ import {
 } from "recharts";
 import styled from "styled-components";
 import { useQuotaHistory } from "../../api/queries.ts";
-import type { BurnEstimate, QuotaSample, QuotaWindow } from "../../api/types.ts";
+import type { BurnEstimate, GatewayRate, QuotaSample, QuotaWindow } from "../../api/types.ts";
 import { formatClock, formatCount, formatDuration } from "../../lib/format.ts";
 import { burnOf, isQuotaStale, quotaSegments, WINDOW_LABEL } from "../../lib/vitals.ts";
 import { Legend, Mono, Row, Stack } from "../../ui/primitives.ts";
@@ -78,7 +78,8 @@ export function QuotaHistory({
   // Nothing can be placed on a timeline, so nothing is asked for. Each panel
   // still says why it has no chart.
   const history = useQuotaHistory({ credentialId, since }, starts.length > 0);
-  const samples = history.data ?? [];
+  const samples = history.data?.samples ?? [];
+  const gatewayRates = history.data?.gatewayRates ?? [];
 
   return (
     <Stack $gap={4}>
@@ -93,6 +94,7 @@ export function QuotaHistory({
               sample.windowType === panel.window.windowType &&
               sample.observedAt >= (panel.since ?? 0),
           )}
+          gatewayRate={gatewayRates.find((rate) => rate.windowType === panel.window.windowType)}
           pollIntervalMs={pollIntervalMs}
           now={now}
         />
@@ -106,6 +108,8 @@ type WindowPanelProps = {
   estimate: BurnEstimate | undefined;
   since: number | null;
   samples: readonly QuotaSample[];
+  /** Absent until the history request lands, and null when it has no span. */
+  gatewayRate: GatewayRate | undefined;
   pollIntervalMs: number;
   now: number;
 };
@@ -118,7 +122,15 @@ function estimateText(estimate: BurnEstimate, now: number): string {
   return `empty ~${formatDuration(estimate.exhaustsAt - now)} before it resets`;
 }
 
-function WindowPanel({ window, estimate, since, samples, pollIntervalMs, now }: WindowPanelProps) {
+function WindowPanel({
+  window,
+  estimate,
+  since,
+  samples,
+  gatewayRate,
+  pollIntervalMs,
+  now,
+}: WindowPanelProps) {
   const label = WINDOW_LABEL[window.windowType];
   const spent =
     window.limit === null
@@ -169,9 +181,10 @@ function WindowPanel({ window, estimate, since, samples, pollIntervalMs, now }: 
               second rate beside the first, never a share of it. */}
           <Legend>This gateway accounts for</Legend>
           <Mono>
-            {estimate.gatewayRatePerHour === null
+            {gatewayRate?.gatewayRatePerHour === undefined ||
+            gatewayRate.gatewayRatePerHour === null
               ? "unknown"
-              : `${formatCount(estimate.gatewayRatePerHour)} tokens/h`}
+              : `${formatCount(gatewayRate.gatewayRatePerHour)} tokens/h`}
           </Mono>
         </Fact>
       </Facts>

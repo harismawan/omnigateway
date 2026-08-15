@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { QuotaWindow, RequestLog, Store } from "@omni/store";
-import { memoryStore, quota, requestLog, seedCredential } from "@omni/testkit";
+import type { QuotaWindow } from "@omni/store";
+import { memoryStore, quota, seedCredential } from "@omni/testkit";
 import { type BurnInput, burnEstimates, burnFor } from "../../src/quota/burn.ts";
 
 const HOUR = 3_600_000;
@@ -22,8 +22,8 @@ function window(overrides: Partial<QuotaWindow> = {}): QuotaWindow {
   });
 }
 
-function at(now: number, gatewayTokens: number | null = null): BurnInput {
-  return { now, pollIntervalMs: POLL_MS, gatewayTokens };
+function at(now: number): BurnInput {
+  return { now, pollIntervalMs: POLL_MS };
 }
 
 test("rate and exhaustion are derived from the reading alone", () => {
@@ -39,7 +39,6 @@ test("rate and exhaustion are derived from the reading alone", () => {
     // 900 left at 50/h is eighteen hours away.
     exhaustsAt: OBSERVED + 18 * HOUR,
     survives: true,
-    gatewayRatePerHour: null,
     stale: false,
   });
 });
@@ -69,12 +68,11 @@ test("a window with no limit reports no exhaustion estimate", () => {
 });
 
 test("a window with no reset reports no rate at all, rather than zero", () => {
-  const estimate = burnFor(window({ resetsAt: null }), at(OBSERVED, 6_000));
+  const estimate = burnFor(window({ resetsAt: null }), at(OBSERVED));
 
   expect(estimate.windowStartsAt).toBeNull();
   expect(estimate.ratePerHour).toBeNull();
   expect(estimate.exhaustsAt).toBeNull();
-  expect(estimate.gatewayRatePerHour).toBeNull();
 });
 
 test("a window that just rolled over reads as not burning rather than as infinite", () => {
@@ -99,7 +97,7 @@ test("a window with nothing used yet reports a zero rate and no estimate", () =>
 });
 
 test("a reading nobody believes is suppressed rather than extrapolated", () => {
-  const estimate = burnFor(window(), at(OBSERVED + STALE_AFTER + 1, 6_000));
+  const estimate = burnFor(window(), at(OBSERVED + STALE_AFTER + 1));
 
   expect(estimate).toEqual({
     credentialId: "c1",
@@ -108,7 +106,6 @@ test("a reading nobody believes is suppressed rather than extrapolated", () => {
     ratePerHour: null,
     exhaustsAt: null,
     survives: null,
-    gatewayRatePerHour: null,
     stale: true,
   });
 });
@@ -137,7 +134,7 @@ test("a provider-reported duration overrides the nominal one, and its absence fa
 test("the estimate is invariant under now, and only the staleness verdict flips", () => {
   const row = window();
   const fresh = [0, 1_000, POLL_MS, 2 * POLL_MS, STALE_AFTER].map((ahead) =>
-    burnFor(row, at(OBSERVED + ahead, 6_000)),
+    burnFor(row, at(OBSERVED + ahead)),
   );
 
   // Byte-identical across five reads spanning three poll intervals: the
@@ -147,84 +144,36 @@ test("the estimate is invariant under now, and only the staleness verdict flips"
     expect(estimate.windowStartsAt).toBe(OBSERVED - 2 * HOUR);
     expect(estimate.ratePerHour).toBe(50);
     expect(estimate.exhaustsAt).toBe(OBSERVED + 18 * HOUR);
-    expect(estimate.gatewayRatePerHour).toBe(3_000);
     expect(estimate.stale).toBe(false);
     expect(estimate).toEqual(fresh[0] as typeof estimate);
   }
 
-  const past = burnFor(row, at(OBSERVED + STALE_AFTER + 1, 6_000));
+  const past = burnFor(row, at(OBSERVED + STALE_AFTER + 1));
   expect(past.stale).toBe(true);
 });
 
-async function log(store: Store, id: string, at: number, overrides: Partial<RequestLog> = {}) {
-  await store.usage.append(requestLog({ id, at, credentialId: "c1", ...overrides }));
-}
-
-test("the gateway rate counts every token class this credential spent in the span", async () => {
-  const store = await memoryStore();
-  await seedCredential(store, { id: "c1" });
-  await seedCredential(store, { id: "c2" });
-  const row = window();
-  const start = OBSERVED - 2 * HOUR;
-
-  await log(store, "in", start + HOUR, {
-    inputTokens: 100,
-    outputTokens: 200,
-    cacheReadTokens: 400,
-    cacheWriteTokens: 300,
-  });
-  // Another credential's traffic, before the window, and after the reading.
-  await log(store, "other", start + HOUR, { credentialId: "c2", inputTokens: 9_000 });
-  await log(store, "before", start - 1, { inputTokens: 9_000 });
-  await log(store, "after", OBSERVED + 1, { inputTokens: 9_000 });
-
-  // Read one poll interval after the snapshot: the span ends at the reading,
-  // not at the clock, so the two rates cover the same hours.
-  const [estimate] = await burnEstimates({ store, now: () => OBSERVED + POLL_MS }, [row], POLL_MS);
-
-  // 1000 tokens over the same two hours the provider rate divides by.
-  expect(estimate?.gatewayRatePerHour).toBe(500);
-  expect(estimate?.ratePerHour).toBe(50);
-});
-
-test("a credential with no gateway traffic in the span reports a zero gateway rate", async () => {
-  const store = await memoryStore();
-  await seedCredential(store, { id: "c1" });
-
-  const [estimate] = await burnEstimates({ store, now: () => OBSERVED }, [window()], POLL_MS);
-
-  expect(estimate?.gatewayRatePerHour).toBe(0);
-});
-
-test("in-flight requests are left out of the gateway rate", async () => {
-  const store = await memoryStore();
-  await seedCredential(store, { id: "c1" });
-  await store.usage.begin(
-    requestLog({ id: "pending", at: OBSERVED - HOUR, credentialId: "c1", inputTokens: 9_000 }),
-  );
-
-  const [estimate] = await burnEstimates({ store, now: () => OBSERVED }, [window()], POLL_MS);
-
-  expect(estimate?.gatewayRatePerHour).toBe(0);
-});
-
-test("a snapshot with no retained samples still yields an estimate", async () => {
+test("the estimate reads no table at all", async () => {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1" });
   await store.credentials.saveQuota([window()]);
+  const windows = await store.credentials.listQuota();
   expect(
     await store.credentials.listQuotaSamples({ since: 0, until: OBSERVED + HOUR }),
   ).not.toHaveLength(0);
-  // The estimate must not consult them either way.
+
+  // Two claims at once, and only a throw can make either. The estimate is a
+  // whole-window average of one reading, so it must not consult the sample
+  // series — that is what lets it appear on a freshly upgraded install. And it
+  // rides a route the console refetches every ten seconds, so it must not
+  // aggregate `request_logs` either.
   store.credentials.listQuotaSamples = async () => {
     throw new Error("the estimate must not read the sample series");
   };
+  store.usage.aggregate = () => {
+    throw new Error("the estimate must not aggregate request logs");
+  };
 
-  const [estimate] = await burnEstimates(
-    { store, now: () => OBSERVED },
-    await store.credentials.listQuota(),
-    POLL_MS,
-  );
+  const [estimate] = burnEstimates(windows, { now: OBSERVED, pollIntervalMs: POLL_MS });
 
   expect(estimate?.ratePerHour).toBe(50);
   expect(estimate?.exhaustsAt).toBe(OBSERVED + 18 * HOUR);

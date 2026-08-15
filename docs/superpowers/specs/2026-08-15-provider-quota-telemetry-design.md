@@ -203,7 +203,9 @@ so the estimate is available from the first successful probe and does not wait f
 accumulate. `quota_samples` exists to draw the chart, not to derive the rate. This is what lets the
 estimate ride the existing health endpoint and appear on a freshly upgraded install immediately.
 
-`gatewayRatePerHour` is computed separately: all four token classes summed —
+`gatewayRatePerHour` is not part of `BurnEstimate` and is not served by the health endpoint; it is
+computed for the history endpoint alone, for the reasons in the API section. All four token classes
+summed —
 `input + output + cacheRead + cacheWrite` — from completed `request_logs` for that `credential_id`
 between `windowStartsAt` and `observedAt`, divided by the same elapsed hours the provider rate uses.
 The two rates are only comparable if they cover the same span, so the gateway rate is anchored to the
@@ -213,6 +215,25 @@ understate what the gateway accounts for and manufacture a divergence that is no
 rows are excluded, matching `aggregate` (`packages/store/src/sqlite/usage.ts:309`). It is null when
 the window start is unknown.
 
+### The gateway rate is not on the health endpoint
+
+The estimate above costs one derivation over a row the caller already loaded. The gateway rate does
+not: it is a `request_logs` aggregate over the window's whole span, which for a weekly window is a
+seven-day scan.
+
+Putting it beside the estimate priced it as if it were free. Spans are keyed off `observedAt`, which
+the poller stamps per credential, so no two credentials ever share one and no query can be shared
+either — six accounts across two windows is twelve week-scale aggregates, on the synchronous
+`bun:sqlite` connection that also serves `/v1/messages`, every ten seconds while a console tab is
+open. Measured at 290ms per call against 200k request rows.
+
+So it moves to the history endpoint, where it is scoped to one credential — one to three aggregates,
+asked for once when a row is expanded, on a query with no refetch interval. What it is is
+corroboration shown in one disclosure; where it lives now matches that.
+
+`credentialHealth` consequently reads no request logs at all, and that is the property a test pins
+directly by making `usage.aggregate` throw.
+
 ## API
 
 Two surfaces, because the estimate and the history have different costs and different consumers.
@@ -221,13 +242,19 @@ Two surfaces, because the estimate and the history have different costs and diff
 
 `GET /api/credentials/health` returns `{ health, quota }` today. It gains a third member, `burn`:
 one entry per `(credentialId, windowType)` carrying `windowStartsAt`, `ratePerHour`, `exhaustsAt`,
-`survives`, and `gatewayRatePerHour`.
+and `survives`.
 
-This costs one derivation per window over rows the route already loads, needs no sample lookup, and
-means the Overview rack, the Accounts table, and `omni status` all read the estimate from a query
-they were already making. The dashboard refetches this every 10s
-(`apps/dashboard/src/api/queries.ts:89`), and since the burn block is invariant under `now`, the
-values it returns are stable between probes.
+Every one of those is derived from the snapshot rows the route already loads. The route must read
+`request_logs` **not at all** — that is a cost property, not an implementation detail, and it is
+asserted by making `usage.aggregate` throw and confirming the route still succeeds. A value
+assertion would not prove the call was never made.
+
+An earlier draft of this spec put `gatewayRatePerHour` here too, priced as if it were free. It is
+not; see "The gateway rate is not on the health endpoint" above for the measurement and the move.
+
+Since the burn block is invariant under `now`, the values this returns are stable between probes.
+The dashboard refetches this endpoint every 10s (`apps/dashboard/src/api/queries.ts:89`), so the
+numbers it renders change only when a probe lands, and the call itself stays cheap enough to poll.
 
 `HealthSnapshot` in `apps/dashboard/src/api/types.ts` gains the matching member. This is an additive
 JSON change.
@@ -240,20 +267,28 @@ Admin session required, matching every other `/api/*` route outside the document
 flows. `credentialId` is optional; omitting it returns every credential. `since` and `until` are
 epoch milliseconds and are clamped to the retention window.
 
-The response carries samples only — the derived block is on the health endpoint and is not repeated
-here:
+The response carries the samples and the gateway rate. The estimate itself is on the health endpoint
+and is not repeated here:
 
 ```json
 {
   "samples": [
     { "credentialId": "…", "windowType": "fiveHour", "observedAt": 0,
       "used": 62, "limit": 100, "resetsAt": 0, "windowMs": null }
+  ],
+  "gatewayRates": [
+    { "credentialId": "…", "windowType": "fiveHour", "gatewayRatePerHour": 41000 }
   ]
 }
 ```
 
-Only the Accounts expansion calls this, and only while a row is expanded. It is not on a refetch
-interval.
+The gateway rate lives here rather than on health because this is where it is *shown* — only in the
+Accounts disclosure, only while a row is expanded, with no refetch interval, and scoped to one
+credential. That makes it one to three aggregates on demand instead of twelve every ten seconds.
+
+It stays anchored to `observedAt` over the same span the provider rate uses. Moving it to a cheaper
+endpoint must not be allowed to quietly re-anchor it to `now`; the two rates are comparable only if
+they cover the same hours.
 
 Derivation is server-side on purpose. The dashboard cannot import `@omni/control` — it is limited to
 `@omni/store/types`, `@omni/ir`, and the catalog subpath — so shipping raw samples would force the
@@ -383,7 +418,11 @@ Control:
   mutation-test — swapping `observedAt` for `now` in the denominator must fail it.
 - `windowMs` overrides the nominal duration, and its absence falls back
 - OpenAI's parser populates `windowMs` from `limit_window_seconds`; Anthropic and Kimi leave it null
-- `gatewayRatePerHour` counts only the credential's own logs within the window span
+- `credentialHealth` calls `usage.aggregate` zero times. Assert it by making `usage.aggregate`
+  throw, for the same reason the sample lookup is asserted that way
+- `gatewayRatePerHour`, on the history endpoint, counts only the credential's own logs within the
+  window span, and naming a credential scopes the rates to its own windows
+- an empty query param is absent rather than zero: `?until=` must not clamp the span to the epoch
 
 Gateway: the history route requires an admin session, clamps its range, and filters by credential.
 `/api/credentials/health` returns `burn` alongside `health` and `quota`.
@@ -395,6 +434,8 @@ Dashboard, under happy-dom with the existing helpers:
 - the Overview rack shows the estimate and gains no chart, no disclosure, and no extra column
 - the rack's row order is unchanged by burn rate
 - the Accounts row expands and collapses by accessible name
+- the charted span is the current window plus the preceding one, and each panel filters the shared
+  response down to its own span
 - the chart is step-held
 - a rollover renders as separate segments rather than one line falling to zero
 - a provider reporting nothing offers no disclosure and keeps its `unknown` legend
