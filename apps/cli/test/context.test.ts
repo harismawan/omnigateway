@@ -82,6 +82,123 @@ test("--db overrides the configured database path", () => {
   expect(ctx.databasePath).toBe(join(dir, "other.db"));
 });
 
+/** The ambient environment of a checkout: Bun preloads the repository's .env. */
+const AMBIENT = {
+  OMNI_ENCRYPTION_KEY: "ambient-key-0123456789",
+  OMNI_DB_PATH: "/home/operator/.config/omnigateway/omnigateway.db",
+};
+
+test("an ambient OMNI_DB_PATH never follows --root into another installation", () => {
+  // The incident: `omni --root /tmp/x settings set …` run from the repository
+  // wrote to the operator's real database, because Bun had preloaded the
+  // repository's .env and the temp root had no .env to displace it. The flag
+  // names the installation; an absolute path from somewhere else cannot outrank
+  // it, or --root selects a root and a stranger selects its data.
+  const dir = tempDir();
+
+  const ctx = createContext(parse(["--root", dir]), { env: { ...AMBIENT }, cwd: "/cwd" });
+
+  expect(ctx.databasePath).toBe(join(dir, "omnigateway.db"));
+  expect(ctx.databasePath).not.toBe(AMBIENT.OMNI_DB_PATH);
+  // Whatever the CLI refused to obey, a gateway it starts must refuse too.
+  expect(ctx.env.OMNI_DB_PATH).toBeUndefined();
+});
+
+test("suppressing an ambient OMNI_DB_PATH is said out loud, naming both paths", () => {
+  const dir = tempDir();
+
+  const ctx = createContext(parse(["--root", dir]), { env: { ...AMBIENT }, cwd: "/cwd" });
+
+  expect(ctx.warnings).toHaveLength(1);
+  expect(ctx.warnings[0]).toContain(AMBIENT.OMNI_DB_PATH);
+  expect(ctx.warnings[0]).toContain(join(dir, "omnigateway.db"));
+  expect(ctx.warnings[0]).toContain("--root");
+});
+
+test("a root's own .env still outranks an ambient OMNI_DB_PATH, silently", () => {
+  const dir = tempDir();
+  writeFileSync(
+    join(dir, ".env"),
+    "OMNI_ENCRYPTION_KEY=root-key-0123456789abcdef\nOMNI_DB_PATH=/srv/omni/omnigateway.db",
+  );
+
+  const ctx = createContext(parse(["--root", dir]), { env: { ...AMBIENT }, cwd: "/cwd" });
+
+  // The root spoke for itself, so nothing was ignored and there is nothing to
+  // warn about.
+  expect(ctx.databasePath).toBe("/srv/omni/omnigateway.db");
+  expect(ctx.warnings).toEqual([]);
+});
+
+test("a relative OMNI_DB_PATH in a root's .env still resolves against that root", () => {
+  const dir = tempDir();
+  writeFileSync(
+    join(dir, ".env"),
+    "OMNI_ENCRYPTION_KEY=root-key-0123456789abcdef\nOMNI_DB_PATH=./data/omnigateway.db",
+  );
+
+  const ctx = createContext(parse(["--root", dir]), { env: { ...AMBIENT }, cwd: "/cwd" });
+
+  expect(ctx.databasePath).toBe(join(dir, "data", "omnigateway.db"));
+  expect(ctx.warnings).toEqual([]);
+});
+
+test("--db still outranks everything, including an ambient path under --root", () => {
+  const dir = tempDir();
+
+  const ctx = createContext(parse(["--root", dir, "--db", "/tmp/chosen.db"]), {
+    env: { ...AMBIENT },
+    cwd: "/cwd",
+  });
+
+  expect(ctx.databasePath).toBe("/tmp/chosen.db");
+  expect(ctx.warnings).toEqual([]);
+});
+
+test("without --root an ambient OMNI_DB_PATH is still obeyed", () => {
+  const dir = tempDir();
+  writeFileSync(join(dir, ".env"), "OMNI_ENCRYPTION_KEY=root-key-0123456789abcdef");
+
+  // The cwd holds an installation, so the root is not an explicit statement and
+  // the environment is the only thing that spoke about the database.
+  const ctx = createContext(parse([]), { env: { ...AMBIENT }, cwd: dir });
+
+  expect(ctx.root.source).toBe("cwd");
+  expect(ctx.databasePath).toBe(AMBIENT.OMNI_DB_PATH);
+  expect(ctx.warnings).toEqual([]);
+});
+
+test("OMNI_ROOT and an ambient OMNI_DB_PATH are the same tier, so neither is refused", () => {
+  const dir = tempDir();
+
+  const ctx = createContext(parse([]), { env: { ...AMBIENT, OMNI_ROOT: dir }, cwd: "/cwd" });
+
+  expect(ctx.root.source).toBe("env");
+  expect(ctx.databasePath).toBe(AMBIENT.OMNI_DB_PATH);
+  expect(ctx.warnings).toEqual([]);
+});
+
+test("a blank --db reads as an absent flag, not as the root directory itself", () => {
+  const dir = tempDir();
+  writeFileSync(join(dir, ".env"), "OMNI_ENCRYPTION_KEY=root-key-0123456789abcdef");
+
+  // `omni --db "$DB"` with an unset variable is a shell handing us "", and an
+  // empty configured path resolves to the root *directory*, which the store
+  // then tries to open as a database file.
+  for (const blank of ["", "   "]) {
+    const ctx = createContext(parse(["--root", dir, "--db", blank]), { env: {}, cwd: "/cwd" });
+    expect(ctx.databasePath).toBe(join(dir, "omnigateway.db"));
+  }
+});
+
+test("a --db value of 0 is still a path, not a blank", () => {
+  const dir = tempDir();
+  writeFileSync(join(dir, ".env"), "OMNI_ENCRYPTION_KEY=root-key-0123456789abcdef");
+
+  const ctx = createContext(parse(["--root", dir, "--db", "0"]), { env: {}, cwd: "/cwd" });
+  expect(ctx.databasePath).toBe(join(dir, "0"));
+});
+
 test("a missing encryption key is reported rather than thrown at construction", () => {
   const dir = tempDir();
   mkdirSync(join(dir, "empty"), { recursive: true });

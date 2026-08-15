@@ -484,6 +484,50 @@ test("doctor reports the encryption key's presence, never the key", async () => 
   expect(body).toMatchObject({ rootSource: "flag", databaseExists: true, running: false });
 });
 
+test("a command run under --root says so when it refuses an ambient OMNI_DB_PATH", async () => {
+  const root = await installation();
+  const ambient = "/home/operator/.config/omnigateway/omnigateway.db";
+
+  // `--json` keeps stdout parseable, so the warning has to reach stderr or it
+  // reaches nobody: this is the operator's only sign that the database they
+  // exported is not the one being read.
+  const result = await cli(["keys", "list", "--json"], {
+    root,
+    env: { OMNI_ENCRYPTION_KEY: TEST_KEY, OMNI_DB_PATH: ambient },
+  });
+
+  expect(result.code).toBe(0);
+  expect(result.err).toContain(ambient);
+  expect(result.err).toContain(`${root}/omnigateway.db`);
+  expect(result.out).not.toContain(ambient);
+});
+
+test("doctor reports the ambient database path it refused", async () => {
+  const root = await installation();
+  const ambient = "/home/operator/.config/omnigateway/omnigateway.db";
+  const service = fakeService({ root });
+
+  const result = await cli(["doctor", "--json"], {
+    root,
+    service,
+    env: { OMNI_ENCRYPTION_KEY: TEST_KEY, OMNI_DB_PATH: ambient },
+  });
+  const body = JSON.parse(result.out) as { databasePath: string; warnings: string[] };
+
+  expect(body.databasePath).toBe(`${root}/omnigateway.db`);
+  expect(body.warnings).toHaveLength(1);
+  expect(body.warnings[0]).toContain(ambient);
+});
+
+test("doctor reports no warnings when nothing was refused", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  const result = await cli(["doctor", "--json"], { root, service });
+
+  expect((JSON.parse(result.out) as { warnings: string[] }).warnings).toEqual([]);
+});
+
 test("doctor still works when the installation has no encryption key", async () => {
   const root = makeRoot();
   await Bun.write(`${root}/.env`, "OMNI_PORT=8787\n");

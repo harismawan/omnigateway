@@ -74,6 +74,13 @@ export async function run(
   }
 
   const ctx = createContext(args, options);
+
+  // Written straight to stderr rather than through `note`, for the same reason
+  // `connect` prints its URL there: this is not progress chatter but a report
+  // that the invocation differs from what was typed, and a `--json` run that
+  // swallowed it would leave an operator reading the wrong database's rows.
+  for (const warning of ctx.warnings) writer.err(warning);
+
   const prompt = options.prompt ?? createPrompt(ctx, writer);
   const scope = boolFlag(args.values, "system") ? ("system" as const) : ("user" as const);
 

@@ -232,6 +232,10 @@ carries the header through but does not add one on your behalf.
 command takes `--json` for scripting, and `--root <path>` to manage an
 installation other than the default.
 
+`--root` names the installation, so an `OMNI_DB_PATH` exported in your shell is
+ignored alongside it and said so on stderr; that root's own `.env` still decides.
+Use `--db <path>` to point one command somewhere else.
+
 | | |
 | --- | --- |
 | `omni status` | the gateway, its accounts, and their quota, on one screen |
