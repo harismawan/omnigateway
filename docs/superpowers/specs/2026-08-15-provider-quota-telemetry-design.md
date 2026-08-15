@@ -436,9 +436,21 @@ Everything below is what expanding reveals.
 Expanding inserts a second `<Tr>` immediately below, with a single `<Td colSpan={9}>` holding, per
 reported window:
 
-- A recharts line of `used` as a percentage of `limit` over the selected span. The line uses
-  `type="stepAfter"`. Dedup means a flat stretch in the data is a flat stretch in reality;
-  interpolating between two stored points would draw a slope that never happened.
+- A recharts line of `used` as a percentage of `limit` over the selected span, `type="monotone"`,
+  matching how the usage panels draw their series. A quota counter climbs as requests land rather
+  than in one jump at the instant it happened to be read, and monotone cubic will not overshoot a
+  reading on the way to the next.
+
+  An earlier draft specified `type="stepAfter"`, arguing that dedup makes a flat stretch in the data
+  a flat stretch in reality. That argument does not hold. Dedup skips writing the *unchanged*
+  reading, which is precisely the record that would have proved the stretch flat, and only the
+  snapshot's own `observed_at` survives to say when a probe last ran. A gap in the past therefore
+  cannot be told apart from "no probe ran", so a step asserted no more than a slope does — while
+  additionally claiming that everything consumed between two readings arrived at the instant of the
+  second one, which for a counter fed by many requests is false.
+
+  What the curve does between two readings is drawing, not evidence. The readings themselves are
+  untouched: a test asserts the path arrives once per stored sample and nowhere else.
 - A break at each rollover rather than a line falling to zero. A rollover is detected by
   `resetsAt` changing between adjacent samples, and the segments are drawn as separate series so no
   line connects the end of one window to the start of the next.
@@ -450,10 +462,40 @@ reported window:
   branched on it first would print "lasts the window" beside a panel simultaneously reporting that
   nothing is known.
 - The gateway rate beneath, labelled as what this gateway accounts for.
+- Two pace overlays on the same axes, both from `budgetPace`/`projectedPace` in `lib/vitals.ts` so
+  the arithmetic is testable without rendering:
+  - **Budget**, one per window drawn including the preceding one: a straight line from
+    `(windowStart, 0%)` to `(resetsAt, 100%)`, the pace that spends the allowance exactly as the
+    window resets. Each run counts back from its own `resetsAt` by
+    `durationFor(windowType, windowMs)` — the same duration `@omni/control` infers a window start
+    from, never a second constant — and a historical run uses its own reset, never the current
+    window's, which would slope its pace across a span it never occupied.
+  - **Projection**, one per panel, for the window still being spent: from `(observedAt,
+    usedPercent)` to `(resetsAt, usedPercent + ratePerHour/limit × 100 × hours)`. Note the
+    conversion: the rate is provider units per hour and the axis is a percentage of the same
+    ceiling. Anchored to `observedAt` and never to `now`, for the reason `burnFor` is: `used` is the
+    provider's count as of that instant and the rate is averaged to it, and the console refetches
+    far more often than the provider is probed. Because both are drawn from that anchor and that
+    rate, this line crosses 100% exactly at `exhaustsAt` — the two are one claim, and a disagreement
+    between them is a bug in one of them. That equality is the panel's own cross-check and is
+    asserted in both the unit and the render test.
+- A fourth fact, `Projected — N% of limit by reset`, and a y-axis of `[0, max(100, projected)]` with
+  `allowDataOverflow` so an overshoot reads as one. The domain is stated rather than inferred:
+  recharts silently stretches a numeric domain to whatever the data reached, which would leave the
+  axis describing the samples instead of the window.
+
+Colour is not available to separate the overlays — on this console it means provider identity or
+state, and a pace is neither — so they are told apart by dash pattern in the existing ink tokens:
+budget dotted, projection dashed. Dashed also carries the meaning, being inferred rather than
+measured, and the caption names both.
 
 Windows with no limit, no reset, or a stale snapshot render the corresponding unavailable state
 rather than a blank space. A credential whose provider reports nothing keeps today's `unknown`
-legend and offers no disclosure.
+legend and offers no disclosure. Each overlay is suppressed on the same terms rather than drawn at
+zero: no limit and no reset leave 100% and the endpoint undefined, so neither line is drawn and the
+projected fact reads `unknown`; a rate that is null or zero suppresses the projection alone, because
+zero is what one reading into a window reports and a flat line would promise the account never
+spends again; a run whose provider named no reset gets no budget rather than the current window's.
 
 Range selection is per-window rather than borrowing the Usage page's traffic-shaped
 `1h/24h/7d/30d/90d/1y` set: a five-hour window charted over ninety days is noise. The span shown is
@@ -553,7 +595,8 @@ Dashboard, under happy-dom with the existing helpers:
 - the Accounts row expands and collapses by accessible name
 - the charted span is the current window plus the preceding one, and each panel filters the shared
   response down to its own span
-- the chart is step-held
+- the chart is a smooth curve that arrives once per stored reading and nowhere else, so smoothing
+  stays a rendering choice rather than becoming a claim about the data
 - a rollover renders as separate segments rather than one line falling to zero
 - a provider reporting nothing offers no disclosure and keeps its `unknown` legend
 - a fresh install with a snapshot but no samples still shows the estimate on both boards, and shows

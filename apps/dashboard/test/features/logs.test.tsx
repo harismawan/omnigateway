@@ -363,7 +363,13 @@ describe("LogsBoard", () => {
     } finally {
       setSystemTime();
     }
-  });
+    // `setSystemTime` moves the clock, not the timers, so the wait for
+    // LogsBoard's own 1s tick (`LogsBoard.tsx:69`) is real wall time. The
+    // default 5s budget leaves under four seconds for a render, three queries
+    // and a refetch, which holds on a developer's machine and does not hold on
+    // a loaded CI runner. The number says what the test actually needs rather
+    // than how long it usually takes.
+  }, 20_000);
 
   test("a request still in flight is counted as running, not as failed", async () => {
     createFetchStub({

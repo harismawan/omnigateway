@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { BurnEstimate, QuotaSample, QuotaWindow } from "../../src/api/types.ts";
 import { AccountsBoard } from "../../src/features/accounts/AccountsBoard.tsx";
-import { linePaths, measureCharts, vertices } from "../helpers/chart.ts";
+import { PACE_DASH } from "../../src/features/accounts/QuotaHistory.tsx";
+import { axisTicks, curvePoints, dashedPaths, measureCharts, vertices } from "../helpers/chart.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import {
   burn,
@@ -458,10 +460,12 @@ describe("AccountsBoard quota history", () => {
     expect(screen.getByText("120k tokens/h")).toBeTruthy();
   });
 
-  test("holds each reading until the next one instead of sloping between them", async () => {
-    // Readings are stored only when something moved, so a flat stretch in the
-    // data is a flat stretch in reality; interpolating would draw a climb that
-    // never happened.
+  test("draws every reading as one smooth curve, inventing none of them", async () => {
+    // Smoothing is a rendering choice and must stay one: the curve passes
+    // through the readings that were stored and through nothing else. What it
+    // does between them is not a claim, because a gap cannot be read as "the
+    // probe ran and nothing moved" anyway — dedup discards the reading that
+    // would have said so, and only the snapshot's own `observedAt` survives.
     const restore = measureCharts();
     try {
       const user = userEvent.setup();
@@ -482,17 +486,28 @@ describe("AccountsBoard quota history", () => {
       );
       await screen.findByText("Window average");
 
-      await waitFor(() => expect(linePaths(container)).toHaveLength(1));
-      const drawn = linePaths(container)[0] ?? "";
-      expect(drawn).not.toContain("C");
-      const corners = vertices(drawn);
-      expect(corners.length).toBeGreaterThan(3);
-      for (const [index, corner] of corners.entries()) {
-        const previous = corners[index - 1];
-        if (previous === undefined) continue;
-        // Every segment is flat or a vertical step; nothing runs diagonally.
-        expect(previous[0] === corner[0] || previous[1] === corner[1]).toBe(true);
-      }
+      // Solid lines only: the dashed overlays are drawn pace, not readings.
+      await waitFor(() => expect(dashedPaths(container, null)).toHaveLength(1));
+      const drawn = dashedPaths(container, null)[0] ?? "";
+      // Curved, not stepped: a step path is all `M`/`L` and has no `C` at all.
+      expect(drawn).toContain("C");
+
+      // One arrival per stored reading, and no extra. A curve that smoothed the
+      // data rather than the drawing would not land on this count.
+      const points = curvePoints(drawn);
+      expect(points).toHaveLength(3);
+
+      // 100, 100, 400: flat, then up. Screen y grows downward, so a rising
+      // reading is a falling coordinate, and the flat pair must not drift.
+      const [first, second, third] = points as [
+        [number, number],
+        [number, number],
+        [number, number],
+      ];
+      expect(second[1]).toBeCloseTo(first[1], 5);
+      expect(third[1]).toBeLessThan(second[1]);
+      expect(first[0]).toBeLessThan(second[0]);
+      expect(second[0]).toBeLessThan(third[0]);
     } finally {
       restore();
     }
@@ -523,8 +538,10 @@ describe("AccountsBoard quota history", () => {
 
       // One series per window: nothing joins the end of one to the start of
       // the next, so the rollover is a break rather than a cliff.
-      await waitFor(() => expect(linePaths(container)).toHaveLength(2));
-      const [first, second] = linePaths(container).map((d) => vertices(d).map(([, y]) => y));
+      await waitFor(() => expect(dashedPaths(container, null)).toHaveLength(2));
+      const [first, second] = dashedPaths(container, null).map((d) =>
+        vertices(d).map(([, y]) => y),
+      );
       if (first === undefined || second === undefined) throw new Error("both windows draw a line");
       // Y grows downward, so the spent window stays above the fresh one.
       expect(Math.max(...first)).toBeLessThan(Math.min(...second));
@@ -718,5 +735,283 @@ describe("AccountsBoard quota history", () => {
     );
 
     expect(await screen.findByText("reading is stale")).toBeTruthy();
+  });
+});
+
+describe("AccountsBoard quota pace", () => {
+  const HOUR = 3_600_000;
+  const gatewayRates = [
+    { credentialId: "cred-1", windowType: "fiveHour", gatewayRatePerHour: 120_000 },
+  ];
+
+  type PacePatch = {
+    window?: Partial<QuotaWindow>;
+    burn?: Partial<BurnEstimate>;
+    samples?: QuotaSample[];
+  };
+
+  /**
+   * A five-hour window at 62%, burning 240 units an hour, read five minutes ago.
+   *
+   * The reading is deliberately old enough to tell apart from `now`: the
+   * projection is anchored to `observedAt`, and a fixture where the two nearly
+   * coincide cannot say whether it was.
+   */
+  function stubPace(now: number, patch: PacePatch = {}) {
+    const resetsAt = now + 4 * HOUR;
+    const observedAt = now - 5 * 60_000;
+    return stubAccounts({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [quota({ used: 620, limit: 1_000, observedAt, resetsAt, ...patch.window })],
+        burn: [
+          burn({
+            windowStartsAt: resetsAt - 5 * HOUR,
+            ratePerHour: 240,
+            exhaustsAt: observedAt + ((1_000 - 620) / 240) * HOUR,
+            survives: false,
+            ...patch.burn,
+          }),
+        ],
+      }),
+      "GET /api/credentials/quota/history": () => ({
+        samples: patch.samples ?? [
+          quotaSample({ observedAt: resetsAt - 5 * HOUR + 600_000, used: 200, resetsAt }),
+          quotaSample({ observedAt: now - 600_000, used: 500, resetsAt }),
+        ],
+        gatewayRates,
+      }),
+    });
+  }
+
+  async function openPace(now: number, patch: PacePatch = {}) {
+    const user = userEvent.setup();
+    stubPace(now, patch);
+    const view = renderWithProviders(<AccountsBoard />);
+    await user.click(
+      await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+    );
+    await screen.findByText("Window average");
+    return view;
+  }
+
+  /** What one fact reads, without the legend that names it. */
+  function factValue(label: string): string {
+    const legend = screen.getByText(label);
+    return (legend.parentElement?.textContent ?? "").replace(label, "");
+  }
+
+  function corners(paths: string[], index: number): Array<[number, number]> {
+    const path = paths[index];
+    if (path === undefined) throw new Error(`no line at ${index}`);
+    return vertices(path);
+  }
+
+  function corner(paths: string[], index: number, at: number): [number, number] {
+    const point = corners(paths, index)[at];
+    if (point === undefined) throw new Error(`no vertex ${at} of line ${index}`);
+    return point;
+  }
+
+  test("draws the budget as a straight climb from empty at the start to full at the reset", async () => {
+    const restore = measureCharts();
+    try {
+      const now = Date.now();
+      const { container } = await openPace(now);
+
+      await waitFor(() => expect(dashedPaths(container, PACE_DASH.budget)).toHaveLength(1));
+      const budget = dashedPaths(container, PACE_DASH.budget);
+      expect(corners(budget, 0)).toHaveLength(2);
+
+      const [startX, startY] = corner(budget, 0, 0);
+      const [endX, endY] = corner(budget, 0, 1);
+      expect(startX).toBeLessThan(endX);
+      // Y grows downward, so a budget that reaches the ceiling ends above the
+      // floor it started on.
+      expect(startY).toBeGreaterThan(endY);
+    } finally {
+      restore();
+    }
+  });
+
+  test("gives the window before this one a budget of its own, and no projection", async () => {
+    // The preceding window reset on its own schedule and ran its own length.
+    // Drawing it against the current window's reset would slope its pace
+    // across a span it never occupied.
+    const restore = measureCharts();
+    try {
+      const now = Date.now();
+      const resetsAt = now + 4 * HOUR;
+      const previous = resetsAt - 5 * HOUR;
+      const { container } = await openPace(now, {
+        samples: [
+          quotaSample({ observedAt: previous - 2 * HOUR, used: 300, resetsAt: previous }),
+          quotaSample({ observedAt: previous - 600_000, used: 900, resetsAt: previous }),
+          quotaSample({ observedAt: previous + 600_000, used: 200, resetsAt }),
+          quotaSample({ observedAt: now - 600_000, used: 500, resetsAt }),
+        ],
+      });
+
+      await waitFor(() => expect(dashedPaths(container, PACE_DASH.budget)).toHaveLength(2));
+      const budgets = dashedPaths(container, PACE_DASH.budget);
+      const [beforeEndX, beforeEndY] = corner(budgets, 0, 1);
+      const [currentStartX, currentStartY] = corner(budgets, 1, 0);
+      const [currentEndX] = corner(budgets, 1, 1);
+
+      // The two windows abut: the earlier budget reaches full exactly where the
+      // current one starts empty, and finishes well short of this reset.
+      expect(Math.abs(beforeEndX - currentStartX)).toBeLessThan(0.5);
+      expect(beforeEndX).toBeLessThan(currentEndX - 1);
+      expect(beforeEndY).toBeLessThan(currentStartY);
+
+      // Only the live window is carried forward; the one before it is over.
+      expect(dashedPaths(container, PACE_DASH.projection)).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+
+  test("the projection crosses the ceiling exactly where the estimate empties the window", async () => {
+    // The projection and `exhaustsAt` are one claim drawn two ways: both start
+    // at `observedAt` and both run at `ratePerHour`. Reading the crossing back
+    // off the rendered chart is the only check that catches a projection
+    // anchored to `now`, which every other assertion here would still pass.
+    const restore = measureCharts();
+    try {
+      const now = Date.now();
+      const resetsAt = now + 4 * HOUR;
+      const windowStart = resetsAt - 5 * HOUR;
+      const exhaustsAt = now - 5 * 60_000 + ((1_000 - 620) / 240) * HOUR;
+      const { container } = await openPace(now);
+
+      await waitFor(() => expect(dashedPaths(container, PACE_DASH.projection)).toHaveLength(1));
+      // The budget's ends are two known instants at two known percentages,
+      // which is scale enough to read every other pixel on the chart.
+      const budget = dashedPaths(container, PACE_DASH.budget);
+      const [emptyX] = corner(budget, 0, 0);
+      const [fullX, fullY] = corner(budget, 0, 1);
+      const projection = dashedPaths(container, PACE_DASH.projection);
+      const [headX, headY] = corner(projection, 0, 0);
+      const [tailX, tailY] = corner(projection, 0, 1);
+
+      const ceilingX = headX + ((fullY - headY) / (tailY - headY)) * (tailX - headX);
+      const crossesAt =
+        windowStart + ((ceilingX - emptyX) / (fullX - emptyX)) * (resetsAt - windowStart);
+
+      expect(Math.abs(crossesAt - exhaustsAt)).toBeLessThan(30_000);
+    } finally {
+      restore();
+    }
+  });
+
+  test("names what the reading projects to by the reset", async () => {
+    const now = Date.now();
+    await openPace(now);
+
+    // 62% already spent, 24 points an hour, four hours and five minutes to go.
+    expect(screen.getByText("Projected")).toBeTruthy();
+    expect(factValue("Projected")).toBe("160% of limit by reset");
+  });
+
+  test("lifts the ceiling of the chart so an overshoot is visible rather than clipped", async () => {
+    const restore = measureCharts();
+    try {
+      const now = Date.now();
+      const { container } = await openPace(now);
+
+      await waitFor(() => expect(axisTicks(container, "yAxis").length).toBeGreaterThan(0));
+      const top = Math.max(...axisTicks(container, "yAxis").map((tick) => Number.parseFloat(tick)));
+      expect(top).toBeGreaterThanOrEqual(160);
+    } finally {
+      restore();
+    }
+  });
+
+  test("keeps the axis at one full window when the projection stays under it", async () => {
+    const restore = measureCharts();
+    try {
+      const now = Date.now();
+      const { container } = await openPace(now, {
+        window: { used: 200 },
+        burn: { ratePerHour: 100, exhaustsAt: null, survives: true },
+      });
+
+      await waitFor(() => expect(axisTicks(container, "yAxis").length).toBeGreaterThan(0));
+      const top = Math.max(...axisTicks(container, "yAxis").map((tick) => Number.parseFloat(tick)));
+      expect(top).toBe(100);
+      expect(factValue("Projected")).toBe("61% of limit by reset");
+    } finally {
+      restore();
+    }
+  });
+
+  test("a window with no inferable rate keeps its budget and projects nothing", async () => {
+    const restore = measureCharts();
+    try {
+      const now = Date.now();
+      const { container } = await openPace(now, {
+        burn: { ratePerHour: null, exhaustsAt: null, survives: null },
+      });
+
+      await waitFor(() => expect(dashedPaths(container, PACE_DASH.budget)).toHaveLength(1));
+      expect(dashedPaths(container, PACE_DASH.projection)).toHaveLength(0);
+      expect(factValue("Projected")).toBe("unknown");
+    } finally {
+      restore();
+    }
+  });
+
+  test("a rate of zero is not projected as a flat line", async () => {
+    // One reading into a window reports zero, which is "nothing measured yet",
+    // not "this account will never spend another token".
+    const restore = measureCharts();
+    try {
+      const now = Date.now();
+      const { container } = await openPace(now, {
+        burn: { ratePerHour: 0, exhaustsAt: null, survives: true },
+      });
+
+      await waitFor(() => expect(dashedPaths(container, PACE_DASH.budget)).toHaveLength(1));
+      expect(dashedPaths(container, PACE_DASH.projection)).toHaveLength(0);
+      expect(factValue("Projected")).toBe("unknown");
+    } finally {
+      restore();
+    }
+  });
+
+  test("a window with no ceiling draws neither pace and projects nothing", async () => {
+    const restore = measureCharts();
+    try {
+      const now = Date.now();
+      const { container } = await openPace(now, {
+        window: { limit: null },
+        burn: { exhaustsAt: null, survives: true },
+      });
+
+      expect(await screen.findByText("no ceiling reported")).toBeTruthy();
+      expect(dashedPaths(container, PACE_DASH.budget)).toHaveLength(0);
+      expect(dashedPaths(container, PACE_DASH.projection)).toHaveLength(0);
+      expect(factValue("Projected")).toBe("unknown");
+    } finally {
+      restore();
+    }
+  });
+
+  test("a window with no reported reset draws neither pace and projects nothing", async () => {
+    const restore = measureCharts();
+    try {
+      const now = Date.now();
+      const { container } = await openPace(now, {
+        window: { resetsAt: null },
+        burn: { windowStartsAt: null, ratePerHour: null, exhaustsAt: null, survives: null },
+      });
+
+      expect(await screen.findByText("no reset reported")).toBeTruthy();
+      expect(dashedPaths(container, PACE_DASH.budget)).toHaveLength(0);
+      expect(dashedPaths(container, PACE_DASH.projection)).toHaveLength(0);
+      expect(factValue("Projected")).toBe("unknown");
+    } finally {
+      restore();
+    }
   });
 });

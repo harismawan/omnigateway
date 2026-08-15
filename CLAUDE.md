@@ -32,6 +32,7 @@ bun install
 bun run dev              # gateway with file watching
 bun run start
 bun test                 # excludes dashboard tests
+bun run test:all         # both suites; what CI runs
 bun run typecheck        # core and dashboard
 bun run lint
 bun run fmt

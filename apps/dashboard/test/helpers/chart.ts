@@ -41,6 +41,47 @@ export function linePaths(container: HTMLElement): string[] {
   );
 }
 
+/**
+ * The `d` of every line drawn with one dash pattern; `null` selects the solid
+ * ones. A chart that overlays inferred lines on measured ones tells them apart
+ * by pattern rather than by colour, so this is how a test asks for one of them.
+ */
+export function dashedPaths(container: HTMLElement, pattern: string | null): string[] {
+  return [...container.querySelectorAll("path.recharts-line-curve")]
+    .filter((path) => (path.getAttribute("stroke-dasharray") ?? null) === pattern)
+    .map((path) => path.getAttribute("d") ?? "");
+}
+
+/**
+ * The tick labels one axis rendered, in document order.
+ *
+ * Labels sit in their own z-index layer rather than inside the axis group, and
+ * the measurement sentinel makes every one of them look 480px wide, so recharts
+ * drops all but the ones that still fit. What is left is enough to read the
+ * end of a scale off, which is what a domain assertion needs.
+ */
+export function axisTicks(container: HTMLElement, axis: "xAxis" | "yAxis"): string[] {
+  return [
+    ...container.querySelectorAll(
+      `.recharts-${axis}-tick-labels .recharts-cartesian-axis-tick-value`,
+    ),
+  ].map((tick) => tick.textContent ?? "");
+}
+
+/**
+ * Where a path actually arrives, one point per command.
+ *
+ * `vertices` reads corners, which a smooth curve does not have. This reads the
+ * endpoint of every `M`/`L`/`C` instead, so a test can still ask which readings
+ * a curve passes through without caring how it got between them.
+ */
+export function curvePoints(d: string): Array<[x: number, y: number]> {
+  return [...d.matchAll(/[MLC][^MLC]*?(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*(?=[MLC]|$)/g)].map((match) => [
+    Number(match[1]),
+    Number(match[2]),
+  ]);
+}
+
 /** The corners of a path. Only `M`/`L` commands have them; a curve has none. */
 export function vertices(d: string): Array<[x: number, y: number]> {
   return [...d.matchAll(/[ML]\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)/g)].map((match) => [

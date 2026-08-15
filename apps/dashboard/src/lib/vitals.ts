@@ -2,7 +2,7 @@
 // them. `sameWindow` is imported rather than reimplemented because the store
 // dedups on it, and a chart that disagreed with storage about what a window is
 // would be a worse bug than either being wrong alone.
-import { sameWindow } from "@omni/store/types";
+import { durationFor, sameWindow } from "@omni/store/types";
 import type {
   BurnEstimate,
   CredentialHealth,
@@ -343,7 +343,14 @@ export function quotaLegend(
 export type QuotaPoint = { at: number; percent: number };
 
 /** One unbroken run of readings inside a single window. */
-export type QuotaSegment = { key: string; points: QuotaPoint[] };
+export type QuotaSegment = {
+  key: string;
+  points: QuotaPoint[];
+  /** The reset these readings were counting down to, as the provider stated it. */
+  resetsAt: number | null;
+  /** Where this run's own window began, or null when no reset was stated. */
+  startsAt: number | null;
+};
 
 /**
  * Retained readings as percentages of their own ceiling, split per window.
@@ -376,19 +383,89 @@ export function quotaSegments(samples: readonly QuotaSample[]): QuotaSegment[] {
       at: sample.observedAt,
       percent: Math.min(100, (sample.used / (sample.limit as number)) * 100),
     };
+    // Each run carries its own window, taken from its newest reading: a
+    // historical run reset hours ago and against its own length, and reusing
+    // the current window's would place it on somebody else's timeline.
+    const bounds = {
+      resetsAt: sample.resetsAt,
+      startsAt:
+        sample.resetsAt === null
+          ? null
+          : sample.resetsAt - durationFor(sample.windowType, sample.windowMs),
+    };
     const last = segments[segments.length - 1];
     if (
       last === undefined ||
       previous === undefined ||
       !sameWindow(sample.resetsAt, previous.resetsAt)
     ) {
-      segments.push({ key: `window-${segments.length}`, points: [point] });
+      segments.push({ key: `window-${segments.length}`, points: [point], ...bounds });
     } else {
       last.points.push(point);
+      last.resetsAt = bounds.resetsAt;
+      last.startsAt = bounds.startsAt;
     }
     previous = sample;
   }
   return segments;
+}
+
+/** A straight run between two instants, as a percentage of the same ceiling. */
+export type QuotaPace = { from: QuotaPoint; to: QuotaPoint };
+
+/**
+ * The pace that spends one window's allowance exactly as it resets.
+ *
+ * Drawn per run rather than once per panel, because the window before this one
+ * had its own start and its own reset and the reading in it means nothing
+ * against this window's. Null where the provider stated no reset: there is
+ * neither an endpoint to draw to nor a start to count back from, and borrowing
+ * the current window's would draw a pace nothing was measured against.
+ */
+export function budgetPace(segment: QuotaSegment): QuotaPace | null {
+  if (segment.startsAt === null || segment.resetsAt === null) return null;
+  return {
+    from: { at: segment.startsAt, percent: 0 },
+    to: { at: segment.resetsAt, percent: 100 },
+  };
+}
+
+const HOUR_MS = 3_600_000;
+
+/**
+ * Where the current reading lands by the reset if it keeps going as it has.
+ *
+ * Anchored to `observedAt`, never to `now`: `used` is the provider's count as
+ * of that instant and `ratePerHour` is averaged to it, so a projection started
+ * anywhere else describes a reading that was never taken. The console refetches
+ * far more often than the provider is probed, so anchoring to `now` would also
+ * walk the line's start away from its own data between probes.
+ *
+ * Because both are drawn from that one anchor and that one rate, this line
+ * crosses the ceiling exactly at the estimate's `exhaustsAt` — the two are the
+ * same claim, and any disagreement between them is a bug in one of them.
+ *
+ * The rate is provider units per hour and the chart is a percentage, so it is
+ * converted against the same ceiling the readings are drawn against. Staleness
+ * is the caller's guard: a panel that does not believe its reading draws none
+ * of this.
+ */
+export function projectedPace(window: QuotaWindow, estimate: BurnEstimate): QuotaPace | null {
+  const { limit, resetsAt, observedAt, used } = window;
+  const rate = estimate.ratePerHour;
+  // Zero is not "holds steady": it is what a window with one reading reports,
+  // and a flat line would promise it never moves again.
+  if (limit === null || limit <= 0 || resetsAt === null || rate === null || rate <= 0) return null;
+
+  const usedPercent = (used / limit) * 100;
+  const percentPerHour = (rate / limit) * 100;
+  return {
+    from: { at: observedAt, percent: usedPercent },
+    to: {
+      at: resetsAt,
+      percent: usedPercent + percentPerHour * ((resetsAt - observedAt) / HOUR_MS),
+    },
+  };
 }
 
 /** Shortest window first, so a row reads left-to-right from soonest to latest. */

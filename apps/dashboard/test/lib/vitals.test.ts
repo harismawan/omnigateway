@@ -3,6 +3,7 @@ import { SAME_WINDOW_TOLERANCE_MS } from "@omni/store/types";
 import { formatRelative } from "../../src/lib/format.ts";
 import {
   bucketLogs,
+  budgetPace,
   burnOf,
   credentialStatus,
   groupBy,
@@ -10,6 +11,7 @@ import {
   lampLabel,
   lampState,
   percentile,
+  projectedPace,
   quotaLegend,
   quotaSegments,
   quotaUsage,
@@ -398,6 +400,116 @@ describe("quotaSegments", () => {
     const segments = quotaSegments([quotaSample({ used: 4_000, limit: 1_000 })]);
 
     expect(segments[0]?.points[0]?.percent).toBe(100);
+  });
+});
+
+const HOUR = 3_600_000;
+
+/** The one run of readings in a set of samples, or a failure saying so. */
+function onlySegment(samples: Parameters<typeof quotaSegments>[0]) {
+  const segments = quotaSegments(samples);
+  const segment = segments[0];
+  if (segments.length !== 1 || segment === undefined) throw new Error("expected one segment");
+  return segment;
+}
+
+describe("budgetPace", () => {
+  test("runs from empty at the window start to full at the reset", () => {
+    const resetsAt = NOW + HOUR;
+    const pace = budgetPace(onlySegment([quotaSample({ observedAt: NOW - 600_000, resetsAt })]));
+
+    // Five hours back from the reset, which is where this window began.
+    expect(pace).toEqual({
+      from: { at: resetsAt - 5 * HOUR, percent: 0 },
+      to: { at: resetsAt, percent: 100 },
+    });
+  });
+
+  test("believes a provider that stated its own window length", () => {
+    // A three-hour window read as five puts the budget two hours too early, and
+    // every reading then looks ahead of a pace it was never on.
+    const resetsAt = NOW + HOUR;
+    const pace = budgetPace(onlySegment([quotaSample({ resetsAt, windowMs: 3 * HOUR })]));
+
+    expect(pace?.from.at).toBe(resetsAt - 3 * HOUR);
+  });
+
+  test("gives the preceding window the budget of its own window, not the current one's", () => {
+    const resetsAt = NOW + HOUR;
+    const previous = resetsAt - 5 * HOUR;
+    const segments = quotaSegments([
+      quotaSample({ observedAt: previous - HOUR, used: 400, resetsAt: previous }),
+      quotaSample({ observedAt: previous + HOUR, used: 100, resetsAt }),
+    ]);
+    const [before, current] = segments.map((segment) => budgetPace(segment));
+
+    expect(before).toEqual({
+      from: { at: previous - 5 * HOUR, percent: 0 },
+      to: { at: previous, percent: 100 },
+    });
+    expect(current?.to.at).toBe(resetsAt);
+  });
+
+  test("has no budget for a run the provider named no reset for", () => {
+    // Nothing to count back from and no endpoint to draw to. Falling back to
+    // the current window's reset would draw a pace for a different window.
+    expect(budgetPace(onlySegment([quotaSample({ resetsAt: null })]))).toBeNull();
+  });
+});
+
+describe("projectedPace", () => {
+  test("carries the reading forward at the rate it was read at", () => {
+    const window = quota({ used: 500, limit: 1_000, observedAt: NOW, resetsAt: NOW + 2 * HOUR });
+    const pace = projectedPace(window, burn({ ratePerHour: 100 }));
+
+    // 100 units an hour against a thousand-unit ceiling is ten points an hour.
+    expect(pace).toEqual({
+      from: { at: NOW, percent: 50 },
+      to: { at: NOW + 2 * HOUR, percent: 70 },
+    });
+  });
+
+  test("crosses the ceiling at the instant the estimate names", () => {
+    // The projection and `exhaustsAt` are the same claim drawn two ways: both
+    // start at `observedAt` and both run at `ratePerHour`. If they disagree,
+    // one of them is anchored to the wrong instant — which is what reaching for
+    // `now` here would do, and what nothing else in this panel would catch.
+    const observedAt = NOW - 5 * 60_000;
+    const resetsAt = NOW + 3 * HOUR;
+    const ratePerHour = 240;
+    const window = quota({ used: 620, limit: 1_000, observedAt, resetsAt });
+    // As `@omni/control` defines it: the remaining allowance at that rate.
+    const exhaustsAt = observedAt + ((1_000 - 620) / ratePerHour) * HOUR;
+
+    const pace = projectedPace(window, burn({ ratePerHour, exhaustsAt }));
+    if (pace === null) throw new Error("expected a projection");
+    const crossesAt =
+      pace.from.at +
+      ((100 - pace.from.percent) / (pace.to.percent - pace.from.percent)) *
+        (pace.to.at - pace.from.at);
+
+    expect(Math.abs(crossesAt - exhaustsAt)).toBeLessThan(1);
+  });
+
+  test("says nothing when there is no ceiling to be a percentage of", () => {
+    const window = quota({ used: 500, limit: null, observedAt: NOW, resetsAt: NOW + HOUR });
+
+    expect(projectedPace(window, burn({ ratePerHour: 100 }))).toBeNull();
+  });
+
+  test("says nothing when the provider named no reset to project to", () => {
+    const window = quota({ used: 500, limit: 1_000, observedAt: NOW, resetsAt: null });
+
+    expect(projectedPace(window, burn({ ratePerHour: 100 }))).toBeNull();
+  });
+
+  test("says nothing when the rate is unknown or standing still", () => {
+    // Zero is not a projection of "stays where it is": it is what an account
+    // with one reading reports, and a flat line would claim it will never move.
+    const window = quota({ used: 500, limit: 1_000, observedAt: NOW, resetsAt: NOW + HOUR });
+
+    expect(projectedPace(window, burn({ ratePerHour: null }))).toBeNull();
+    expect(projectedPace(window, burn({ ratePerHour: 0 }))).toBeNull();
   });
 });
 

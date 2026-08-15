@@ -12,7 +12,16 @@ import styled from "styled-components";
 import { useQuotaHistory } from "../../api/queries.ts";
 import type { BurnEstimate, GatewayRate, QuotaSample, QuotaWindow } from "../../api/types.ts";
 import { formatClock, formatCount, formatDuration } from "../../lib/format.ts";
-import { burnOf, isQuotaStale, quotaSegments, WINDOW_LABEL } from "../../lib/vitals.ts";
+import {
+  budgetPace,
+  burnOf,
+  isQuotaStale,
+  projectedPace,
+  type QuotaPace,
+  type QuotaPoint,
+  quotaSegments,
+  WINDOW_LABEL,
+} from "../../lib/vitals.ts";
 import { Legend, Mono, Row, Stack } from "../../ui/primitives.ts";
 import { ChartBox, TipCard } from "../usage/shared.ts";
 
@@ -32,6 +41,64 @@ const Absent = styled.span`
   font-size: 11.5px;
   color: ${({ theme }) => theme.color.inkDim};
 `;
+
+/**
+ * How the two pace lines are told apart.
+ *
+ * By dash rather than by hue: colour on this console means provider identity or
+ * state, and neither of these is either. Dashed also reads as inferred rather
+ * than measured, which is exactly what separates a projection from the solid
+ * line of readings underneath it.
+ */
+export const PACE_DASH = { budget: "1 4", projection: "6 4" } as const;
+
+/** The series the projection is drawn as. One per panel, never per window. */
+const PROJECTION_KEY = "projected";
+
+type BudgetSeries = { key: string; pace: QuotaPace };
+
+/** A chart row is one instant and whatever each series had to say at it. */
+type PanelRow = { at: number; [series: string]: number };
+
+/**
+ * One row per instant, so a pace endpoint landing on a reading shares its row
+ * rather than sitting beside it as a second point at the same x.
+ *
+ * Series are sparse by construction — a row carries the one key it came from —
+ * and each pace contributes only its two ends. Those ends bracket their own
+ * window, so they never fall inside another series' run and never break it.
+ */
+function chartRows(
+  series: ReadonlyArray<{ key: string; points: readonly QuotaPoint[] }>,
+): PanelRow[] {
+  const rows = new Map<number, PanelRow>();
+  for (const { key, points } of series) {
+    for (const point of points) {
+      const row = rows.get(point.at) ?? { at: point.at };
+      row[key] = point.percent;
+      rows.set(point.at, row);
+    }
+  }
+  return [...rows.values()].sort((a, b) => a.at - b.at);
+}
+
+/**
+ * The span the chart covers.
+ *
+ * The requested span, widened to whatever a pace reaches past it. A preceding
+ * window that ran longer than this one begins before the span was asked for,
+ * and its budget would otherwise be drawn outside the plot.
+ */
+function paceDomain(
+  since: number,
+  resetsAt: number,
+  budgets: readonly BudgetSeries[],
+): [number, number] {
+  return [
+    Math.min(since, ...budgets.map((budget) => budget.pace.from.at)),
+    Math.max(resetsAt, ...budgets.map((budget) => budget.pace.to.at)),
+  ];
+}
 
 /**
  * The span a window is charted over: itself, plus the one before it.
@@ -163,11 +230,35 @@ function WindowPanel({
   }
 
   const segments = quotaSegments(samples);
-  const rows = segments
-    .flatMap((segment) =>
-      segment.points.map((point) => ({ at: point.at, [segment.key]: point.percent })),
-    )
-    .sort((a, b) => a.at - b.at);
+  // One budget per window drawn, the preceding one included: each is the pace
+  // that spends its own allowance exactly as its own window resets.
+  const budgets = segments.flatMap((segment) => {
+    const pace = budgetPace(segment);
+    return pace === null ? [] : [{ key: `${segment.key}-budget`, pace }];
+  });
+  // One projection, for the window still being spent. The windows before it
+  // are settled, and a forecast drawn onto one would be a forecast of the past.
+  const projection = projectedPace(window, estimate);
+  const rows = chartRows([
+    ...segments,
+    ...budgets.map((budget) => ({ key: budget.key, points: [budget.pace.from, budget.pace.to] })),
+    ...(projection === null
+      ? []
+      : [{ key: PROJECTION_KEY, points: [projection.from, projection.to] }]),
+  ]);
+  // Only a measured reading gets a tooltip; the pace lines are figures the
+  // facts row already states in words.
+  const measured = new Set(segments.map((segment) => segment.key));
+  // Room for an overshoot, so a projection past the ceiling reads as one rather
+  // than being clipped flat against it. Readings are already capped at a full
+  // window, and both ends of the projection are named here because a window
+  // read past its own reset projects downward from where it already is.
+  const ceiling = Math.max(
+    100,
+    ...(projection === null
+      ? []
+      : [projection.from.percent, projection.to.percent].map((percent) => Math.ceil(percent))),
+  );
 
   return (
     <Stack $gap={2}>
@@ -186,6 +277,14 @@ function WindowPanel({
         <Fact>
           <Legend>Estimate</Legend>
           <Mono>{estimateText(window, estimate, now)}</Mono>
+        </Fact>
+        <Fact>
+          <Legend>Projected</Legend>
+          <Mono>
+            {projection === null
+              ? "unknown"
+              : `${Math.round(projection.to.percent)}% of limit by reset`}
+          </Mono>
         </Fact>
         <Fact>
           {/* Provider units and gateway tokens do not convert, so this is a
@@ -208,7 +307,15 @@ function WindowPanel({
         <Absent>not yet observed</Absent>
       ) : (
         <>
-          <Legend>Used, this window and the one before</Legend>
+          {/* Named because the two overlays cannot be told apart by colour,
+              and only where they were actually drawn. */}
+          <Legend>
+            {[
+              "Used, this window and the one before",
+              ...(budgets.length === 0 ? [] : ["budget dotted"]),
+              ...(projection === null ? [] : ["projection dashed"]),
+            ].join(" · ")}
+          </Legend>
           <ChartBox $height={160}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={rows} margin={{ top: 4, right: 8, bottom: 4, left: 4 }}>
@@ -217,15 +324,21 @@ function WindowPanel({
                   dataKey="at"
                   type="number"
                   scale="time"
-                  domain={[since, window.resetsAt]}
+                  domain={paceDomain(since, window.resetsAt, budgets)}
                   tickFormatter={(at: number) => formatClock(at)}
                   tick={{ fill: "var(--ink-faint)", fontSize: 10 }}
                   stroke="var(--rule-strong)"
                   minTickGap={40}
                 />
+                {/* The scale is stated, not inferred. Left to itself recharts
+                    stretches a numeric domain to whatever the data reached, so
+                    the axis would be describing the samples rather than the
+                    window, and nothing would hold it to a full window when the
+                    readings stay well below one. */}
                 <YAxis
-                  domain={[0, 100]}
-                  tickFormatter={(percent: number) => `${percent}%`}
+                  domain={[0, ceiling]}
+                  allowDataOverflow
+                  tickFormatter={(percent: number) => `${Math.round(percent)}%`}
                   tick={{ fill: "var(--ink-faint)", fontSize: 10 }}
                   stroke="var(--rule-strong)"
                   width={40}
@@ -236,7 +349,7 @@ function WindowPanel({
                     if (active !== true || payload === undefined || payload.length === 0) {
                       return null;
                     }
-                    const point = payload[0];
+                    const point = payload.find((entry) => measured.has(String(entry.dataKey)));
                     if (point === undefined || typeof point.value !== "number") return null;
                     const at = (point.payload as { at: number }).at;
                     return (
@@ -249,12 +362,20 @@ function WindowPanel({
                 />
                 {/* One series per window. A single series drawn across a
                     rollover would fall to the floor and read as a refund.
-                    `stepAfter` because a reading holds until the next one:
-                    interpolating would draw a climb that never happened. */}
+                    `monotone`, as the usage panels draw theirs: a quota counter
+                    climbs as requests land, not in one jump at the instant it
+                    happened to be read, and monotone cubic will not overshoot a
+                    reading on the way to the next.
+
+                    What the curve does between two readings is drawing, not
+                    evidence. A step claimed no more: dedup drops the unchanged
+                    reading that would have made a flat stretch provable, and
+                    only the snapshot's own `observed_at` survives, so a past
+                    gap cannot be read as "probed, and nothing moved". */}
                 {segments.map((segment) => (
                   <Line
                     key={segment.key}
-                    type="stepAfter"
+                    type="monotone"
                     dataKey={segment.key}
                     stroke="var(--accent)"
                     strokeWidth={2}
@@ -263,6 +384,34 @@ function WindowPanel({
                     isAnimationActive={false}
                   />
                 ))}
+                {/* Two ends and nothing between them, so each pace connects
+                    across the readings it is drawn over rather than breaking
+                    on every instant it has no value for. */}
+                {budgets.map((budget) => (
+                  <Line
+                    key={budget.key}
+                    type="linear"
+                    dataKey={budget.key}
+                    stroke="var(--ink-faint)"
+                    strokeWidth={1.5}
+                    strokeDasharray={PACE_DASH.budget}
+                    dot={false}
+                    connectNulls
+                    isAnimationActive={false}
+                  />
+                ))}
+                {projection === null ? null : (
+                  <Line
+                    type="linear"
+                    dataKey={PROJECTION_KEY}
+                    stroke="var(--ink-dim)"
+                    strokeWidth={1.5}
+                    strokeDasharray={PACE_DASH.projection}
+                    dot={false}
+                    connectNulls
+                    isAnimationActive={false}
+                  />
+                )}
               </LineChart>
             </ResponsiveContainer>
           </ChartBox>
