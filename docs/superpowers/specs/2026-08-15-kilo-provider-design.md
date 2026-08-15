@@ -38,6 +38,9 @@ documentation:
 Both agree on hosts, paths, and auth shape, which is the strongest corroboration available short of
 capturing traffic. Where a value below is inferred rather than quoted, this document says so.
 
+The model catalog is not from either: `GET https://api.kilo.ai/api/gateway/models` answers
+unauthenticated, and every id, price, and limit in *Catalog* was read from it on 2026-08-15.
+
 Note that both references model Kilo as **two** provider ids (`kilocode` for OAuth,
 `kilo-gateway` for API keys). This design deliberately does not — see *Provider Identity*.
 
@@ -173,16 +176,76 @@ observations; recording a non-observation there is worse than recording nothing.
 `PROVIDER_MODEL_CATALOG` at `packages/providers/src/catalog.ts:33`. It stays a browser-safe leaf:
 model lists and types only, no runtime imports.
 
-Kilo proxies a catalog of several hundred models that changes without notice. The catalog holds a
-curated subset in Kilo's OpenRouter-style `vendor/model` id form. The intended starting list, to be
-confirmed against a live `/models` read before it is written down:
+Kilo proxies a catalog of 361 models (read live on 2026-08-15) that changes without notice. The
+catalog holds a curated subset in Kilo's OpenRouter-style `vendor/model` id form: the newest model
+of each class, every free model Kilo serves, and the `kilo-auto/*` routers.
 
-`anthropic/claude-opus-4.7` · `anthropic/claude-sonnet-4.6` · `anthropic/claude-haiku-4.5` ·
-`openai/gpt-5.5` · `openai/gpt-5.4-mini` · `google/gemini-3.1-pro-preview` ·
-`google/gemini-3-flash-preview` · `deepseek/deepseek-v4-pro` · `moonshotai/kimi-k2.6` ·
-`kilo-auto/frontier` · `kilo-auto/balanced` · `kilo-auto/free`
+Prices are `$` per million tokens and limits are tokens, both as `GET /api/gateway/models` reported
+them on 2026-08-15. Kilo passes list price through unchanged — its Anthropic rows match Anthropic's
+own published rates exactly, including Sonnet 5's introductory $2/$10 — so these figures are the
+upstream vendor's, not a Kilo markup.
 
-Anything outside the list is still reachable: an operator
+**Frontier, one per class**
+
+| id | in | out | cache read | context | max out |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `anthropic/claude-fable-5` | 10 | 50 | 1 | 1M | 128K |
+| `anthropic/claude-opus-5` | 5 | 25 | 0.5 | 1M | 128K |
+| `anthropic/claude-sonnet-5` | 2 | 10 | 0.2 | 1M | 128K |
+| `anthropic/claude-haiku-4.5` | 1 | 5 | 0.1 | 200K | 64K |
+| `openai/gpt-5.6-sol` | 5 | 30 | 0.5 | 1.05M | 128K |
+| `openai/gpt-5.6-terra` | 2 | 12 | 0.2 | 1.05M | 128K |
+| `openai/gpt-5.6-luna` | 0.2 | 1.2 | 0.02 | 1.05M | 128K |
+| `google/gemini-3.1-pro-preview` | 2 | 12 | 0.2 | 1.05M | 64K |
+| `google/gemini-3.7-flash` | 0.75 | 3.75 | 0.075 | 1.05M | 64K |
+| `moonshotai/kimi-k3` | 3 | 15 | 0.3 | 1.05M | — |
+
+Kilo also serves `-pro` variants of each `gpt-5.6-*` and `-fast` variants of the Anthropic models.
+They are left out: an operator who wants one types the id into a target, and listing every variant
+turns a curated table into a mirror of a catalog that moves weekly.
+
+**Free tier** — all twelve models Kilo currently serves at zero cost, priced `0` because that is
+their real price:
+
+| id | context | max out |
+| --- | ---: | ---: |
+| `nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | 64K |
+| `nvidia/nemotron-3.5-lightning:free` | 1M | 64K |
+| `dots-studio/dots-3-note-preview:free` | 512K | 512K |
+| `cohere/north-mini-code:free` | 256K | 64K |
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256K | 64K |
+| `stepfun/step-3.7-flash:free` | 256K | 256K |
+| `nvidia/nemotron-3-super-120b-a12b:free` | 256K | 256K |
+| `tencent/hy3:free` | 256K | 128K |
+| `poolside/laguna-s-2.1:free` | 256K | 32K |
+| `poolside/laguna-xs-2.1:free` | 256K | 32K |
+| `liquid/lfm-2.5-2.6b:free` | 128K | 8K |
+| `nvidia/nemotron-3.5-content-safety:free` | 128K | 8K |
+
+**Routers** — `kilo-auto/*`, which pick an upstream per request:
+
+| id | in | out | context | max out |
+| --- | ---: | ---: | ---: | ---: |
+| `kilo-auto/frontier` | *unpriced* | *unpriced* | 1M | 128K |
+| `kilo-auto/balanced` | *unpriced* | *unpriced* | 1M | 64K |
+| `kilo-auto/efficient` | *unpriced* | *unpriced* | 1M | 64K |
+| `kilo-auto/small` | 0.05 | 0.4 | 256K | 32K |
+| `kilo-auto/free` | 0 | 0 | 256K | 10K |
+
+`frontier`, `balanced`, and `efficient` report `"prompt": "-1"` upstream — Kilo declines to state a
+price because the model is chosen per request. The catalog records `0`, which the router's scorer
+reads as *unpriced* and drops from the cost term rather than treating as free
+(`packages/router/src/resolve.ts:24-29`). That is the correct behaviour and the reason this design
+does not invent a tier figure, but it makes `kilo-auto/free` and `kilo-auto/frontier` carry the same
+stored price for opposite reasons — each needs a comment saying which it is, and `README.md` warns
+operators to set a real `costPerMTok` on any `kilo-auto` target they intend to cost-rank.
+
+Cache-write prices are recorded from the single `input_cache_write` figure Kilo reports, with
+`cacheWrite5m` and `cacheWrite1h` set equal. The split is nominal: the OpenAI chat wire cannot
+express a cache-control TTL at all, so a request carrying breakpoints records a degradation and
+neither figure is ever charged (see *Adapter*).
+
+Anything outside these tables is still reachable: an operator
 creates a target with a hand-typed model id, and the router prices it from the target rather than
 from this table. This is how `kimi` and `grok` already work; the only difference is that Kilo's
 upstream list is larger and moves faster.
@@ -190,16 +253,10 @@ upstream list is larger and moves faster.
 `CatalogAuth` on each `ProviderModelChoice` records which backend serves it. `kilo-auto/*` and the
 `:free` models are gateway-only (`apiKey`); the vendor-namespaced models are available on both.
 
-Two pricing notes:
-
-- Prices and limits are **not invented in this document**. They are read from
-  `GET /api/openrouter/models` and `GET /api/gateway/models` — both return per-model pricing — at
-  implementation time, and the catalog records the figures observed. The plan carries this as an
-  explicit step; a spec that guessed numbers would have them silently wrong.
-- `kilo-auto/frontier`, `kilo-auto/balanced`, and `kilo-auto/free` route to an upstream Kilo chooses
-  per request, so no single price is correct for them. Per `CLAUDE.md` rule 8 the catalog picks the
-  balanced tier, states in a comment that the figure is a default an operator should override, and
-  `README.md` warns operators of the same.
+Every figure above was read from the live endpoint rather than recalled, but a proxied catalog moves:
+re-read `GET /api/gateway/models` when the catalog file is written and record what it says then. The
+implementation plan carries that as an explicit step, and the table above carries its read date so a
+later reader can tell how stale it is.
 
 ## Routing
 
