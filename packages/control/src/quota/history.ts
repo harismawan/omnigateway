@@ -1,4 +1,5 @@
 import type { QuotaSample, QuotaWindow, Store, WindowType } from "@omni/store";
+import { optionalNumber } from "../schemas.ts";
 import { windowStartOf } from "./burn.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -29,20 +30,6 @@ export type QuotaHistoryResult = {
   samples: QuotaSample[];
   gatewayRates: GatewayRate[];
 };
-
-/**
- * A finite number, or the fallback. Both callers hand this function strings.
- *
- * An empty or blank param is absent, not zero. `Number("")` is 0, and a zero
- * upper bound clamps the span to the epoch and returns nothing — so `?until=`
- * would silently answer "no history" where the operator asked for all of it.
- */
-function instant(value: string | number | undefined, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (typeof value === "string" && value.trim().length === 0) return fallback;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
 
 /**
  * The gateway's own rate for each snapshot window, over that window's span.
@@ -123,8 +110,8 @@ export async function quotaHistory(
   const settings = await deps.store.config.getSettings();
   const oldest = now - settings.logRetentionDays * DAY_MS;
 
-  const since = Math.max(instant(input.since, oldest), oldest);
-  const until = Math.min(instant(input.until, now), now);
+  const since = Math.max(optionalNumber(input.since, oldest), oldest);
+  const until = Math.min(optionalNumber(input.until, now), now);
   const raw = input.credentialId?.trim();
   const credentialId = raw === undefined || raw.length === 0 ? undefined : raw;
 

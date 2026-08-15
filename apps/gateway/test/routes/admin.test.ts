@@ -472,6 +472,25 @@ test("usage splits one time series into a bucket per provider", async () => {
   expect(new Set(body.rows.map((row) => row.key)).size).toBe(1);
 });
 
+test("an empty span param reads as absent rather than as the epoch", async () => {
+  const { call, store } = await harness();
+  await store.usage.append(requestLog({ id: "r1", at: NOW }));
+
+  // `?since=&until=` is what a form or a hand-built query string produces.
+  // `Number("")` is 0, so an unguarded upper bound clamps to the epoch and
+  // answers "no usage" where the operator asked for all of it.
+  const body = (await (await call("GET", "/api/usage?groupBy=model&since=&until=")).json()) as {
+    rows: Array<{ requests: number }>;
+  };
+  expect(body.rows[0]?.requests).toBe(1);
+
+  // A zero the operator actually sent is still a bound.
+  const zero = (await (await call("GET", "/api/usage?groupBy=model&until=0")).json()) as {
+    rows: unknown[];
+  };
+  expect(zero.rows).toEqual([]);
+});
+
 test("usage refuses a dimension the grain cannot answer", async () => {
   const { call } = await harness();
   expect((await call("GET", "/api/usage?grain=daily&groupBy=hour")).status).toBe(400);
@@ -496,6 +515,13 @@ test("logs are returned newest first, capped, and normalize fractional limits", 
   expect(fractional.status).toBe(200);
   const fractionalBody = (await fractional.json()) as { logs: Array<{ id: string }> };
   expect(fractionalBody.logs).toHaveLength(2);
+
+  // `Number("")` is 0, and the floor turns that into a page of one row rather
+  // than the default page the operator asked for by sending nothing.
+  const blank = (await (await call("GET", "/api/logs?limit=")).json()) as {
+    logs: Array<{ id: string }>;
+  };
+  expect(blank.logs).toHaveLength(3);
 });
 
 test("credential health returns the health and quota rows the dashboard renders", async () => {
@@ -796,6 +822,11 @@ test("the console route clamps the page size", async () => {
   for (const query of ["lines=100000", "lines=0", "lines=-5", "lines=abc"]) {
     expect((await call("GET", `/api/console?${query}`)).status).toBe(200);
   }
+
+  // An empty param is absent, not zero: the floor would otherwise answer one
+  // line where the operator asked for the default page.
+  const blank = (await (await call("GET", "/api/console?lines=")).json()) as { lines: unknown[] };
+  expect(blank.lines).toHaveLength(3);
 });
 
 test("the console route reports that nothing captured stdout, and shells out to nothing", async () => {

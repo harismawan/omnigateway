@@ -1,5 +1,11 @@
 import type { RequestLog, Store, UsageBucket } from "@omni/store";
-import { dimensionSchema, grainSchema, parseOrThrow, requireDimension } from "./schemas.ts";
+import {
+  dimensionSchema,
+  grainSchema,
+  optionalNumber,
+  parseOrThrow,
+  requireDimension,
+} from "./schemas.ts";
 
 /** A single page of logs, capped so one query cannot read the whole table. */
 export const MAX_LOG_LIMIT = 500;
@@ -30,22 +36,18 @@ export async function queryUsage(
       ? undefined
       : requireDimension(grain, parseOrThrow(dimensionSchema, input.splitBy));
 
-  const since = input.since === undefined ? 0 : Number(input.since);
-  const until = input.until === undefined ? deps.now() : Number(input.until);
-
   return deps.store.usage.aggregate({
     grain,
     groupBy,
     ...(splitBy === undefined ? {} : { splitBy }),
-    since: Number.isFinite(since) ? since : 0,
-    until: Number.isFinite(until) ? until : deps.now(),
+    since: optionalNumber(input.since, 0),
+    until: optionalNumber(input.until, deps.now()),
   });
 }
 
 /** Clamps a requested page size into `1..MAX_LOG_LIMIT`. */
 export function logLimit(requested: string | number | undefined): number {
-  const value = requested === undefined ? DEFAULT_LOG_LIMIT : Number(requested);
-  if (!Number.isFinite(value)) return DEFAULT_LOG_LIMIT;
+  const value = optionalNumber(requested, DEFAULT_LOG_LIMIT);
   return Math.floor(Math.min(Math.max(1, value), MAX_LOG_LIMIT));
 }
 

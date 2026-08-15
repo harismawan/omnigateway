@@ -1,4 +1,5 @@
 import { LEVELS, type LogLevel, type ParsedLine, parseLine } from "@omni/ir";
+import { optionalNumber } from "./schemas.ts";
 
 /**
  * The unit the CLI installs, and the only one this reads.
@@ -83,8 +84,7 @@ export function resolveConsoleSource(input: {
 
 /** Clamps a requested page size into `1..MAX_CONSOLE_LINES`. */
 export function consoleLimit(requested: string | number | undefined): number {
-  const value = requested === undefined ? DEFAULT_CONSOLE_LINES : Number(requested);
-  if (!Number.isFinite(value)) return DEFAULT_CONSOLE_LINES;
+  const value = optionalNumber(requested, DEFAULT_CONSOLE_LINES);
   return Math.floor(Math.min(Math.max(1, value), MAX_CONSOLE_LINES));
 }
 
