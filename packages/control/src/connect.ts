@@ -1,11 +1,18 @@
 import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { Store } from "@omni/store";
-import { isAuthorizationPending } from "./oauth/kimi.ts";
 import { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
 import type { AuthorizeStart, OAuthProvider } from "./oauth/types.ts";
+import { isAuthorizationPending } from "./oauth/types.ts";
 
-const PROVIDER_IDS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "grok", "custom"];
+const PROVIDER_IDS: readonly ProviderId[] = [
+  "anthropic",
+  "openai",
+  "kimi",
+  "kilo",
+  "grok",
+  "custom",
+];
 const FLOW_TTL_MS = 600_000;
 
 /**
@@ -56,12 +63,18 @@ export function isProviderId(value: unknown): value is ProviderId {
   return typeof value === "string" && PROVIDER_IDS.includes(value as ProviderId);
 }
 
+/**
+ * The device identity `start` minted, if the provider mints one.
+ *
+ * Not every device flow has one: Kimi ties a session to a device fingerprint it
+ * has to mint before asking for a code, while Kilo identifies an editor and has
+ * no per-machine identity at all. A provider that needs a device id rejects a
+ * blank one itself — `kimiOAuth.begin` does, before it touches the transport —
+ * which keeps the requirement stated where it is true rather than here.
+ */
 function deviceIdFrom(start: AuthorizeStart): string {
   const deviceId = start.pending.extra?.deviceId;
-  if (typeof deviceId !== "string" || deviceId.trim().length === 0) {
-    throw new GatewayError("INTERNAL", "device authorization did not provide a device id");
-  }
-  return deviceId;
+  return typeof deviceId === "string" ? deviceId : "";
 }
 
 /**
@@ -169,7 +182,7 @@ export function createConnectFlows(deps: ConnectDeps) {
       if (!isProviderId(providerInput)) {
         throw new GatewayError(
           "BAD_REQUEST",
-          "provider must be one of anthropic, openai, kimi, grok",
+          "provider must be one of anthropic, openai, kimi, kilo, grok",
         );
       }
       const label =

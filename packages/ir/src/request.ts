@@ -1,4 +1,4 @@
-export type ProviderId = "anthropic" | "openai" | "kimi" | "grok" | "custom";
+export type ProviderId = "anthropic" | "openai" | "kimi" | "kilo" | "grok" | "custom";
 
 /**
  * A caller-placed cache breakpoint, in the only shape providers accept.

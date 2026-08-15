@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { createConnectFlows, type FlowResult, type OAuthProvider } from "@omni/control";
 import { GatewayError } from "@omni/ir";
-import type { HttpClient } from "@omni/providers";
+import type { HttpClient, HttpRequest } from "@omni/providers";
 import { memoryStore } from "@omni/testkit";
+import { kiloOAuth } from "../src/oauth/kilo.ts";
 
 const RESULT: FlowResult = {
   secrets: {
@@ -83,7 +84,7 @@ test("a forged state in a pasted grok callback is refused", async () => {
   });
 
   const start = await flows.start("grok", "grok");
-  expect(
+  await expect(
     flows.finish(start.flowId, "http://127.0.0.1:56121/callback?code=auth-code&state=forged"),
   ).rejects.toThrow(GatewayError);
 });
@@ -147,4 +148,71 @@ test("concurrent pending polls share one device exchange", async () => {
   expect(exchangeCalls).toBe(1);
   expect(await flows.poll(start.flowId)).toEqual({ status: "pending" });
   expect(exchangeCalls).toBe(2);
+});
+
+/** Answers by URL so one client can serve a whole device flow. */
+function kiloHttp(replies: readonly { status: number; body: unknown }[]): HttpClient {
+  let call = 0;
+  return async (req: HttpRequest) => {
+    const reply = replies[call++];
+    if (reply === undefined) throw new Error(`unexpected request to ${req.url}`);
+    return {
+      status: reply.status,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: null,
+      text: async () => JSON.stringify(reply.body),
+    };
+  };
+}
+
+test("a kilo device flow starts with no device identity to mint", async () => {
+  // Kimi's `begin` needs a device id that `start` minted first. Kilo has no
+  // device identity at all, and the flow must not demand one on its behalf.
+  const store = await memoryStore();
+  const flows = createConnectFlows({
+    store,
+    providers: { kilo: kiloOAuth },
+    http: kiloHttp([
+      {
+        status: 200,
+        body: { code: "KILO-1", verificationUrl: "https://kilo.ai/d", expiresIn: 300 },
+      },
+      { status: 202, body: {} },
+      { status: 200, body: { status: "approved", token: "kilo-token-1", userEmail: "u@e.com" } },
+      { status: 200, body: { organizations: [{ id: "org-42" }] } },
+    ]),
+    now: () => 1_000_000,
+  });
+
+  const start = await flows.start("kilo", "kilo");
+  expect(start.kind).toBe("device");
+  expect(start.userCode).toBe("KILO-1");
+  expect(start.authorizeUrl).toBe("https://kilo.ai/d");
+  expect(start.pollIntervalMs).toBe(3000);
+
+  expect(await flows.poll(start.flowId)).toEqual({ status: "pending" });
+  const done = await flows.poll(start.flowId);
+  expect(done.status).toBe("complete");
+
+  const rows = await store.credentials.list();
+  const stored = rows[0];
+  expect(stored?.provider).toBe("kilo");
+  expect(stored?.accountEmail).toBe("u@e.com");
+  expect(stored?.providerData.orgId).toBe("org-42");
+  // The two facts the scheduler and the refresher both read.
+  expect(stored?.expiresAt).toBeNull();
+  expect(stored?.hasRefreshToken).toBe(false);
+});
+
+test("the provider list an operator is shown names kilo", async () => {
+  const flows = createConnectFlows({
+    store: await memoryStore(),
+    providers: { kilo: kiloOAuth },
+    http: noHttp,
+    now: () => 0,
+  });
+
+  const error = await flows.start("kilocode").catch((e: unknown) => e);
+
+  expect((error as GatewayError).message).toContain("kilo,");
 });

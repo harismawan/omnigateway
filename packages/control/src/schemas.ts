@@ -38,7 +38,7 @@ export function optionalNumber(value: string | number | undefined, fallback: num
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-export const providerIdSchema = z.enum(["anthropic", "openai", "kimi", "grok", "custom"]);
+export const providerIdSchema = z.enum(["anthropic", "openai", "kimi", "kilo", "grok", "custom"]);
 
 /**
  * A hypothetical request, described only by required capabilities. This keeps
@@ -55,7 +55,7 @@ export const dryRunSchema = z
 const targetSchema = z.discriminatedUnion("provider", [
   z
     .object({
-      provider: z.enum(["anthropic", "openai", "kimi", "grok"]),
+      provider: z.enum(["anthropic", "openai", "kimi", "kilo", "grok"]),
       model: z.string().min(1),
       tier: z.number().int().min(1),
       weight: z.number().positive(),

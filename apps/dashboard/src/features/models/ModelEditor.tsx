@@ -13,6 +13,7 @@ import { Toggle } from "../../ui/Toggle.tsx";
 import {
   blankModel,
   blankTarget,
+  heldAuths,
   type ModelDraft,
   parseDraft,
   STRATEGIES,
@@ -63,6 +64,10 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
   const save = useSaveModel();
   const remove = useDeleteModel();
   const credentials = useCredentials();
+  // The same list answers two questions: which custom endpoints exist, and
+  // which ways in each provider has. The second decides what the model picker
+  // may offer, because Kilo serves part of its catalog to an API key only.
+  const held = heldAuths(credentials.data ?? []);
   const endpoints = (credentials.data ?? [])
     .filter((credential) => credential.provider === "custom")
     .map((credential) => ({
@@ -211,6 +216,7 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
                 index={index}
                 removable={draft.targets.length > 1}
                 endpoints={endpoints}
+                held={held}
                 onChange={(next) =>
                   setDraft({
                     ...draft,

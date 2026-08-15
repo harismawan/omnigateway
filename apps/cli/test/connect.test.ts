@@ -130,9 +130,13 @@ test("an unknown provider is refused before a flow is started", async () => {
   });
 
   expect(result.code).toBe(2);
-  // The full string, not a prefix: "anthropic, openai, kimi" still matches a
-  // message that has since grown a provider, so it would stop noticing drift.
-  expect(result.err).toContain("provider must be one of anthropic, openai, kimi, grok");
+  // The whole line, matched exactly. `toContain` of the current message is a
+  // prefix check wearing a disguise: it passes unchanged against a message that
+  // has grown a provider on the end, which is precisely the drift the list is
+  // here to catch. Only equality notices both a provider added and one dropped.
+  expect(result.err.split("\n")[0]).toBe(
+    "provider must be one of anthropic, openai, kimi, kilo, grok",
+  );
   expect(started).toBe(false);
 });
 

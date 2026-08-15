@@ -47,6 +47,10 @@ const PROVIDER_TONE: Record<ProviderId, Tone> = {
   anthropic: "magenta",
   openai: "green",
   kimi: "blue",
+  // Deliberately nowhere near kimi's blue: the two names are one letter apart
+  // and print next to each other, so hue is the only thing separating them at
+  // a glance.
+  kilo: "orange",
   // Not red: that tone is the failure half of `state()` below, and a provider
   // name wearing it would read as a broken credential in the same table.
   grok: "yellow",

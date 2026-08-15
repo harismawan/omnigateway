@@ -1,8 +1,12 @@
 import { GatewayError } from "@omni/ir";
 import { type KimiDevice, kimiDeviceHeaders, mintKimiDevice, PROFILES } from "@omni/providers";
 import type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider, UsageReport } from "./types.ts";
-import { getJson, postJson, tokenErrorCode, tokenErrorMessage } from "./types.ts";
+import { getJson, pendingError, postJson, tokenErrorCode, tokenErrorMessage } from "./types.ts";
 import { recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
+
+// Re-exported because the pending marker moved to `types.ts` when kilo became
+// the second device flow, and this module's existing callers ask kimi for it.
+export { isAuthorizationPending } from "./types.ts";
 
 /** Public client ID of the Kimi CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
@@ -13,9 +17,7 @@ const DEFAULT_INTERVAL_SECONDS = 5;
 
 /** Errors that mean "keep polling" rather than "this flow failed". */
 const PENDING_ERRORS = new Set(["authorization_pending", "slow_down"]);
-const PENDING_MARKER = "__omni_authorization_pending";
 
-type MarkedPendingError = GatewayError & { [PENDING_MARKER]?: boolean };
 type TokenResponse = {
   accessToken: string;
   refreshToken: string | null;
@@ -29,19 +31,6 @@ type DeviceCodeResponse = {
   verificationUri: string;
   interval: number;
 };
-
-export function isAuthorizationPending(error: unknown): boolean {
-  return error instanceof GatewayError && (error as MarkedPendingError)[PENDING_MARKER] === true;
-}
-
-function pendingError(code: string): GatewayError {
-  const error = new GatewayError(
-    "AUTH",
-    `authorization not yet complete: ${code}`,
-  ) as MarkedPendingError;
-  error[PENDING_MARKER] = true;
-  return error;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -198,8 +187,14 @@ export const kimiOAuth: OAuthProvider = {
   },
 
   async begin({ deviceId }, deps): Promise<AuthorizeStart> {
+    // `INTERNAL`, not a bare `Error`: this invariant used to live in
+    // `connect.ts`'s `deviceIdFrom` and was classified there. It moved here
+    // when Kilo, which mints no device identity, made the shared check wrong,
+    // and the classification has to move with it — an unclassified throw is
+    // rewritten to the flat "internal error" by `apiErrorResponse`, so the
+    // operator reads a 500 with no hint of which half of the flow broke.
     if (deviceId.trim().length === 0) {
-      throw new Error("kimi begin requires a non-blank deviceId");
+      throw new GatewayError("INTERNAL", "kimi begin requires a non-blank deviceId");
     }
     const device = deviceForBegin(deviceId);
     const response = deviceCodeFrom(await post(DEVICE_CODE_URL, {}, device, deps));

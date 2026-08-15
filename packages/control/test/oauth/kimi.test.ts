@@ -57,9 +57,15 @@ test("begin rejects a blank device id before making an HTTP request", async () =
     throw new Error("begin should reject before calling HttpClient");
   }) as HttpClient;
 
-  await expect(kimiOAuth.begin?.({ deviceId: "  " }, { http, now: () => NOW })).rejects.toThrow(
-    "kimi begin requires a non-blank deviceId",
-  );
+  // `toMatchObject`, not `toThrow`: the message alone passes for a bare `Error`
+  // too, and a bare `Error` reaches the console as a flat "internal error" with
+  // the message thrown away. The classification is the part worth pinning.
+  await expect(
+    kimiOAuth.begin?.({ deviceId: "  " }, { http, now: () => NOW }),
+  ).rejects.toMatchObject({
+    code: "INTERNAL",
+    message: "kimi begin requires a non-blank deviceId",
+  });
   expect(calls).toBe(0);
 });
 
@@ -277,6 +283,13 @@ test("refresh preserves the stored token when the new refresh token is blank", a
 });
 
 test("the registry exposes one flow per provider", () => {
-  expect(Object.keys(OAUTH_PROVIDERS).sort()).toEqual(["anthropic", "grok", "kimi", "openai"]);
+  expect(Object.keys(OAUTH_PROVIDERS).sort()).toEqual([
+    "anthropic",
+    "grok",
+    "kilo",
+    "kimi",
+    "openai",
+  ]);
   expect(OAUTH_PROVIDERS.kimi.id).toBe("kimi");
+  expect(OAUTH_PROVIDERS.kilo.id).toBe("kilo");
 });

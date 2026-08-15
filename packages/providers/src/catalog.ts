@@ -2,11 +2,12 @@ import type { ProviderId } from "@omni/ir";
 import { ANTHROPIC_MODELS } from "./anthropic/models.ts";
 import type {
   CatalogAuth,
-  ProviderModelChoice,
+  ProviderModelCatalogEntry,
   ProviderModelLimits,
   ProviderModelPricing,
 } from "./catalog-types.ts";
 import { GROK_MODELS } from "./grok/models.ts";
+import { KILO_MODELS } from "./kilo/models.ts";
 import { KIMI_MODELS } from "./kimi/models.ts";
 import { OPENAI_MODELS } from "./openai/models.ts";
 
@@ -34,17 +35,39 @@ export const PROVIDER_MODEL_CATALOG = {
   anthropic: ANTHROPIC_MODELS,
   openai: OPENAI_MODELS,
   kimi: KIMI_MODELS,
+  kilo: KILO_MODELS,
   grok: GROK_MODELS,
-  custom: { defaultModel: "", models: [] },
-} as const satisfies Readonly<
-  Record<ProviderId, { defaultModel: string; models: readonly ProviderModelChoice[] }>
->;
+  // No catalog: the models an operator's own endpoint serves are not knowable
+  // from here. It is still the one provider with no way in but a key, which is
+  // exactly why `authTypes` is stated per provider and not read off `models`.
+  custom: { defaultModel: "", authTypes: ["apiKey"], models: [] },
+} as const satisfies Readonly<Record<ProviderId, ProviderModelCatalogEntry>>;
 
 /** The catalog's price for one provider model, or null if it is not listed. */
 export function catalogPricing(provider: ProviderId, model: string): ProviderModelPricing | null {
   return (
     PROVIDER_MODEL_CATALOG[provider]?.models.find((entry) => entry.id === model)?.pricing ?? null
   );
+}
+
+/**
+ * Which credential types can reach one provider model.
+ *
+ * The *fact*, not the rule: this says what the catalog knows, and callers
+ * decide what to do about it. The rule that refuses an unreachable target lives
+ * in `@omni/control`, because whether a way in exists is installation state,
+ * not catalog state.
+ *
+ * Two answers collapse to "the provider's whole set". A choice with no `auth`
+ * is served either way, which is the normal case. A model the catalog does not
+ * list at all is *unknown*, never *forbidden* — the curated list is a subset of
+ * what a provider serves and an operator reaches the rest by typing an id, so
+ * reading an absent entry as a restriction would lock them out of most of
+ * Kilo's several hundred models.
+ */
+export function catalogModelAuths(provider: ProviderId, model: string): readonly CatalogAuth[] {
+  const entry = PROVIDER_MODEL_CATALOG[provider];
+  return entry.models.find((choice) => choice.id === model)?.auth ?? entry.authTypes;
 }
 
 /**

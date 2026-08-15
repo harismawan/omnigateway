@@ -1,5 +1,12 @@
-import { catalogLimits, catalogPricing, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
-import type { ProviderId, Strategy, Target, VirtualModel } from "../../api/types.ts";
+import {
+  type CatalogAuth,
+  catalogLimits,
+  catalogModelAuths,
+  catalogPricing,
+  PROVIDER_MODEL_CATALOG,
+  type ProviderModelChoice,
+} from "@omni/providers/catalog";
+import type { Credential, ProviderId, Strategy, Target, VirtualModel } from "../../api/types.ts";
 
 /**
  * The editor holds numbers as strings.
@@ -113,6 +120,87 @@ export function catalogTokenLimits(
     contextWindow: String(listed.contextWindow),
     maxOutputTokens: String(listed.maxOutputTokens),
   };
+}
+
+/** Which ways in the installation holds, per provider. Absent means none. */
+export type HeldAuths = Partial<Record<ProviderId, readonly CatalogAuth[]>>;
+
+const AUTH_NOUN: Readonly<Record<CatalogAuth, string>> = {
+  oauth: "OAuth",
+  apiKey: "an API key",
+};
+
+function phrase(auths: readonly CatalogAuth[]): string {
+  return auths.map((auth) => AUTH_NOUN[auth]).join(" or ");
+}
+
+/**
+ * Reads the connected accounts as a set of ways in per provider.
+ *
+ * `enabled` is deliberately not consulted, matching the control rule this
+ * mirrors: a credential the gateway disabled after one rejected token is still
+ * the operator's way into that provider, and hiding models behind a transient
+ * failure would be worse than showing them.
+ */
+export function heldAuths(credentials: readonly Credential[]): HeldAuths {
+  const held: Record<string, CatalogAuth[]> = {};
+  for (const credential of credentials) {
+    const ways = held[credential.provider] ?? [];
+    if (!ways.includes(credential.authType)) ways.push(credential.authType);
+    held[credential.provider] = ways;
+  }
+  return held;
+}
+
+/**
+ * Whether any credential this installation holds could serve a model.
+ *
+ * Two things read as "yes" rather than "no", both on purpose. A provider with
+ * no credential at all is unknown, not blocked — an operator composing models
+ * before connecting accounts is working in a normal order. And a model the
+ * catalog does not list is also unknown: the curated list is a subset of what
+ * a provider serves, and Kilo's is a few dozen rows out of several hundred.
+ */
+export function reachable(provider: ProviderId, model: string, held: HeldAuths): boolean {
+  const have = held[provider];
+  if (have === undefined || have.length === 0) return true;
+  return catalogModelAuths(provider, model).some((auth) => have.includes(auth));
+}
+
+/** The catalog choices worth offering: the ones a connected account can serve. */
+export function reachableChoices(
+  provider: ProviderId,
+  held: HeldAuths,
+): readonly ProviderModelChoice[] {
+  return PROVIDER_MODEL_CATALOG[provider].models.filter((choice) =>
+    reachable(provider, choice.id, held),
+  );
+}
+
+/**
+ * Why no connected account can serve a typed model, or null when one can.
+ *
+ * The picker only hides unreachable choices, and hiding teaches nothing to an
+ * operator who typed the id or is editing a target saved when the other account
+ * still existed.
+ *
+ * Deliberately states the routing consequence rather than predicting the save.
+ * A target already stored under this id is exempt from the control-side refusal
+ * — removing an account must not make an unrelated edit impossible — so "saving
+ * will be refused" would be a lie in exactly the case an operator is most
+ * likely to be reading this.
+ */
+export function unreachableNote(
+  provider: ProviderId,
+  model: string,
+  held: HeldAuths,
+): string | null {
+  if (model.trim().length === 0 || reachable(provider, model, held)) return null;
+  const have = held[provider] ?? [];
+  return (
+    `${provider} serves this model to ${phrase(catalogModelAuths(provider, model))} only, ` +
+    `and every ${provider} account here is ${phrase(have)}. Requests routed here will fail.`
+  );
 }
 
 /**

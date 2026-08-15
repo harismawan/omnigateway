@@ -384,12 +384,17 @@ export function useCreateApiKeyCredential(): UseMutationResult<
   { credential: Credential },
   Error,
   {
-    provider: "custom";
+    provider: ProviderId;
     apiKey: string;
-    endpointId: string;
-    endpointLabel: string;
-    origin: string;
-    protocol: "chat_completions" | "responses";
+    /**
+     * Custom's endpoint metadata, absent for every other provider: the gateway
+     * reads these only when the provider is `custom` and the adapter supplies
+     * its own address otherwise.
+     */
+    endpointId?: string;
+    endpointLabel?: string;
+    origin?: string;
+    protocol?: "chat_completions" | "responses";
     label?: string | undefined;
   }
 > {

@@ -9,6 +9,7 @@ export * from "./grok/device.ts";
 export { decodeGrokResponses, grokAdapter, toGrokWire } from "./grok/index.ts";
 export { httpError, parseRetryAfter } from "./http.ts";
 export * from "./http-client.ts";
+export { decodeKiloChat, kiloAdapter, toKiloWire } from "./kilo/index.ts";
 export * from "./kimi/device.ts";
 export { decodeChat, kimiAdapter, toChatWire } from "./kimi/index.ts";
 export { decodeResponses, openaiAdapter, toResponsesWire } from "./openai/index.ts";

@@ -27,6 +27,9 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  */
 export const OPENAI_MODELS: ProviderModelCatalogEntry = {
   defaultModel: "gpt-5.6",
+  // OAuth reaches the narrower Codex surface; a platform key reaches the API.
+  // Both are bearer tokens, and the adapter picks the URL from which it has.
+  authTypes: ["oauth", "apiKey"],
   models: [
     {
       id: "gpt-5.6",

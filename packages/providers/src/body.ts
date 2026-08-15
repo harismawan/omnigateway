@@ -43,6 +43,19 @@ export const BODY_ORDER: Readonly<Record<ProviderId, readonly string[]>> = {
   // own serializer emits, and this gateway adds that field for usage reporting
   // rather than copying it from one. Unlisted keys append in insertion order.
   kimi: ["model", "messages", "tools", "tool_choice", "max_tokens", "temperature", "stream"],
+  // Constructed, not captured, like the kimi profile. `reasoning` is
+  // OpenRouter's field, which Kilo's surface takes; `stream_options` is absent
+  // for the same reason it is absent above.
+  kilo: [
+    "model",
+    "messages",
+    "tools",
+    "tool_choice",
+    "max_tokens",
+    "temperature",
+    "reasoning",
+    "stream",
+  ],
   // xAI's Responses surface takes the same field vocabulary as OpenAI's, so the
   // order mirrors it rather than inventing a second spelling of the same body.
   grok: [

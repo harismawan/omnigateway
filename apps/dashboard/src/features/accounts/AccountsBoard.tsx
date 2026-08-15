@@ -34,12 +34,13 @@ import { Toggle } from "../../ui/Toggle.tsx";
 import { ConnectDialog } from "./ConnectDialog.tsx";
 import { QuotaHistory } from "./QuotaHistory.tsx";
 
-const PROVIDER_ORDER: ProviderId[] = ["anthropic", "openai", "kimi", "grok", "custom"];
+const PROVIDER_ORDER: ProviderId[] = ["anthropic", "openai", "kimi", "kilo", "grok", "custom"];
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   kimi: "Kimi",
+  kilo: "Kilo",
   grok: "Grok",
   custom: "OpenAI Compatible",
 };

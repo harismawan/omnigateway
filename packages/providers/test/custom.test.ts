@@ -81,5 +81,12 @@ test("custom responses uses endpoint origin without Codex behavior", async () =>
 });
 
 test("registry includes custom provider", () => {
-  expect(Object.keys(ADAPTERS).sort()).toEqual(["anthropic", "custom", "grok", "kimi", "openai"]);
+  expect(Object.keys(ADAPTERS).sort()).toEqual([
+    "anthropic",
+    "custom",
+    "grok",
+    "kilo",
+    "kimi",
+    "openai",
+  ]);
 });

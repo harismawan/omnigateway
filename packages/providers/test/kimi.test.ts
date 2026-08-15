@@ -260,7 +260,14 @@ test("OAuth inference uses the Kimi Coding API", async () => {
 });
 
 test("the registry exposes every provider", () => {
-  expect(Object.keys(ADAPTERS).sort()).toEqual(["anthropic", "custom", "grok", "kimi", "openai"]);
+  expect(Object.keys(ADAPTERS).sort()).toEqual([
+    "anthropic",
+    "custom",
+    "grok",
+    "kilo",
+    "kimi",
+    "openai",
+  ]);
   expect(ADAPTERS.kimi.capabilities.images).toBe(false);
   expect(ADAPTERS.anthropic.capabilities.reasoning).toBe(true);
 });

@@ -3,7 +3,7 @@
 One endpoint in front of the AI accounts you already pay for.
 
 OmniGateway is a self-hosted gateway that speaks the Anthropic and OpenAI APIs
-and answers them using your own Anthropic, OpenAI, Kimi Coding, and xAI
+and answers them using your own Anthropic, OpenAI, Kimi Coding, Kilo, and xAI
 subscriptions. Point any compatible client at it, ask for a model you defined,
 and the gateway picks an account that can serve it — falling back to another
 when one is rate-limited, expired, or out of quota.
@@ -104,7 +104,7 @@ schema and its encryption boundary, and the background loops.
 - [Bun](https://bun.sh/) 1.4 or later. Bun is the runtime, not just the
   installer, so a Node-only machine cannot run OmniGateway.
 - A directory that persists, for the SQLite database.
-- At least one Anthropic, OpenAI, Kimi Coding, or xAI account to connect.
+- At least one Anthropic, OpenAI, Kimi Coding, Kilo, or xAI account to connect.
 
 ## Install
 
@@ -140,8 +140,17 @@ omni start                 # serves the API and the console on 127.0.0.1:9000
 Connect an account. The CLI prints a URL to open, and waits:
 
 ```bash
-omni connect anthropic     # or: openai, kimi, grok
+omni connect anthropic     # or: openai, kimi, kilo, grok
 ```
+
+Every provider also takes a plain API key, if that is what you hold rather than
+a subscription. `custom` takes nothing else:
+
+```bash
+omni credentials add-key anthropic     # prompts for the key, or reads stdin
+```
+
+The console offers the same choice per provider on the Connect dialog.
 
 Define a virtual model your clients will ask for, seeding its pricing and
 capabilities from the built-in catalog:
@@ -158,6 +167,15 @@ price, so the catalog carries xAI's sub-200K figures and long-context traffic
 is reported cheaper than it was billed. Catalog pricing is only the default a
 new target starts from — if you run grok at long context, edit the saved
 target's price to match the tier you are actually paying.
+
+**A note on `kilo-auto/*` pricing.** Kilo's `frontier`, `balanced`, and
+`efficient` routers choose an upstream model per request, and Kilo states no
+rate for them. The catalog records zero, which the router reads as *unpriced*
+and leaves out of its cost ranking — the same stored figure `kilo-auto/free`
+carries because it genuinely is free. So a `kilo-auto` target seeded from the
+catalog is not free, it is unranked: cost never counts for or against it. If you
+want one ranked against your other accounts, set a real `costPerMTok` on the
+saved target for the tier you expect it to land in.
 
 Mint a key for your client. **It is printed once and stored only as a hash:**
 

@@ -221,7 +221,7 @@ export const credentialsAddKey: Command = {
   async run(args, { ctx, writer, prompt }) {
     const providerId = requirePositional(args, 0, "provider");
     if (!isProviderId(providerId)) {
-      throw new UsageError("provider must be one of anthropic, openai, kimi, grok, custom");
+      throw new UsageError("provider must be one of anthropic, openai, kimi, kilo, grok, custom");
     }
 
     const protocolFlag = stringFlag(args.values, "protocol");

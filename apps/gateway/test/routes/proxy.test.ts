@@ -763,6 +763,7 @@ test("writes exactly one log row when the client disconnects mid-stream after th
     anthropic: hangingAdapter("anthropic"),
     openai: hangingAdapter("openai"),
     kimi: hangingAdapter("kimi"),
+    kilo: hangingAdapter("kilo"),
     grok: hangingAdapter("grok"),
     custom: hangingAdapter("custom"),
   };

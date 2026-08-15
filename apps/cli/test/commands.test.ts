@@ -331,6 +331,24 @@ test("credentials add-key reuses metadata for an existing custom endpoint", asyn
   expect(listed.credentials[1]?.providerData).toEqual(listed.credentials[0]?.providerData);
 });
 
+test("credentials add-key names custom among the providers connect does not", async () => {
+  const root = await installation();
+
+  const result = await cli(["credentials", "add-key", "notaprovider"], {
+    root,
+    prompt: { isTty: false, secret: async () => "test-key", confirm: async () => true },
+  });
+
+  expect(result.code).toBe(2);
+  // Matched whole, not by `toContain`, so the line fails when a provider is
+  // added and when one is dropped. The two lists are meant to differ: `connect`
+  // omits `custom` because there is nothing to authorize, and this one carries
+  // it because a custom endpoint is reached by key alone.
+  expect(result.err.split("\n")[0]).toBe(
+    "provider must be one of anthropic, openai, kimi, kilo, grok, custom",
+  );
+});
+
 test("credentials add-key treats a blank label as the provider default", async () => {
   const root = await installation();
 

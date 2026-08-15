@@ -1,4 +1,4 @@
-import type { ErrorCode, ProviderId } from "@omni/ir";
+import { type ErrorCode, GatewayError, type ProviderId } from "@omni/ir";
 import {
   type ClientProfile,
   type HeaderPair,
@@ -7,6 +7,36 @@ import {
   orderHeaders,
 } from "@omni/providers";
 import type { CredentialSecrets, UsageSecrets, WindowType } from "@omni/store";
+
+/**
+ * Marks the one error a device flow raises that is not a failure.
+ *
+ * A poll that finds the operator has not approved yet has to be told apart
+ * from a poll that failed, and the difference travels back through a rejected
+ * promise. The marker is a property rather than a subclass because it has to
+ * survive `GatewayError`'s own construction and be readable by a caller that
+ * only imports this module.
+ *
+ * Lives here rather than in one provider's file because every device flow needs
+ * it: kimi reads it off an OAuth `error` code, kilo off an HTTP status.
+ */
+const PENDING_MARKER = "__omni_authorization_pending";
+
+type MarkedPendingError = GatewayError & { [PENDING_MARKER]?: boolean };
+
+export function isAuthorizationPending(error: unknown): boolean {
+  return error instanceof GatewayError && (error as MarkedPendingError)[PENDING_MARKER] === true;
+}
+
+/** A "keep polling" rejection. `reason` is an identifier, never a body. */
+export function pendingError(reason: string): GatewayError {
+  const error = new GatewayError(
+    "AUTH",
+    `authorization not yet complete: ${reason}`,
+  ) as MarkedPendingError;
+  error[PENDING_MARKER] = true;
+  return error;
+}
 
 /** Injected so tests never touch the network or the clock. */
 export type OAuthDeps = {
@@ -175,17 +205,24 @@ export async function postJson(
  * authenticates as one client and then reads its account as another is a
  * louder signal than either alone. The timeout is short because nothing on the
  * request path waits for this — a slow probe should be abandoned, not retried.
+ *
+ * A null `accessToken` sends no `Authorization` at all. Kilo's device-code poll
+ * needs that: the token is what the call returns, so there is nothing yet to
+ * authenticate it with, and an empty bearer would be a credential claim rather
+ * than the absence of one.
  */
 export async function getJson(
   deps: OAuthDeps,
   provider: ProviderId,
   url: string,
   profile: ClientProfile,
-  opts: { accessToken: string; extraHeaders?: readonly HeaderPair[] },
+  opts: { accessToken: string | null; extraHeaders?: readonly HeaderPair[] },
 ): Promise<{ status: number; parsed: unknown }> {
   const headers = orderHeaders(
     mergeHeaders(profile.headers, [
-      ["Authorization", `Bearer ${opts.accessToken}`],
+      ...(opts.accessToken === null
+        ? []
+        : ([["Authorization", `Bearer ${opts.accessToken}`]] as const)),
       ["Accept", "application/json"],
       ...(opts.extraHeaders ?? []),
     ]),

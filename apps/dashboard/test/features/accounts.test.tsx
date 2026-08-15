@@ -44,6 +44,21 @@ describe("AccountsBoard", () => {
     expect(screen.getByText("1 of 2 accounts are enabled and eligible for routing.")).toBeTruthy();
   });
 
+  test("gives a Kilo account its own module", async () => {
+    // The board draws only the providers named in its own order list, so a
+    // provider missing from it does not render out of order — it vanishes,
+    // and the account it holds looks like it was never connected.
+    stubAccounts({
+      "GET /api/credentials": () => ({
+        credentials: [credential({ id: "cred-kilo", provider: "kilo", label: "kilo-main" })],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    expect(await screen.findByText("Kilo")).toBeTruthy();
+    expect(screen.getByDisplayValue("kilo-main")).toBeTruthy();
+  });
+
   test("shows the fault and the quota windows on the row", async () => {
     stubAccounts();
     renderWithProviders(<AccountsBoard />);

@@ -111,9 +111,10 @@ and `bun run lint`.
    when a response omits one. Endpoints read from OIDC discovery must be validated as HTTPS on the
    provider's own domain before use, and a discovery failure is `UPSTREAM`, never `AUTH` — `AUTH`
    disables the credential.
-7. Where a provider serves OAuth and API-key traffic from different hosts, select the URL by
-   credential type in the adapter and assert the split in a test. Crossing them surfaces as a
-   billing or entitlement error, which reads as anything but a routing bug.
+7. Where a provider serves OAuth and API-key traffic from different hosts, or from different paths
+   on one host as `kilo` does, select the URL by credential type in the adapter and assert the split
+   in a test. Crossing them surfaces as a billing or entitlement error, which reads as anything but
+   a routing bug.
 8. A provider that prices by request size cannot be expressed in `ProviderModelPricing`. Pick a
    tier, say so in a comment, and warn operators in `README.md`.
 9. Cover streaming and non-streaming, and mutation-test the load-bearing assertions — URL selection,
@@ -217,6 +218,11 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
 - RTK filter ids are persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is a storage
   contract, not an internal enum. `isRtkFilterId` drops unknown ids on read, so renaming one loses
   history silently rather than failing. Add ids freely; rename or remove only with a migration.
+- `ProviderModelChoice.auth` is enforced at write time in `putModel`, never at routing. Which ways
+  in exist is installation state, so the catalog exports the fact (`catalogModelAuths`) and control
+  owns the rule. A provider with no credential is unknown rather than blocked, an unlisted model is
+  unknown rather than forbidden, disabled credentials still count, and a target already stored under
+  that id is exempt so removing a credential cannot make an unrelated edit unsavable.
 - Streaming responses need downstream `: keepalive` comments because provider heartbeats are
   decoded away. Keep server idle timeout above request deadline.
 - Stdout holds operational events; `request_logs` holds completed requests. Do not restore duplicate

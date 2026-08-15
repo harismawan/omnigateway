@@ -18,9 +18,15 @@ curated model catalog, and the wiring each of those forces through `ir`, `router
 Out of scope: the anonymous free tier (Kilo serves some free models to `Bearer anonymous` with no
 account at all — OmniRoute ships this; OmniGateway routes through stored credentials and a
 credential-less path is a separate feature); any quota or credit-balance probe (see *Quota
-Surface*); dynamic catalog population from Kilo's `/models` endpoint; images, embeddings, and audio
-surfaces; and Kilo's OpenRouter-compatible `reasoning` request field beyond what the shared IR
-already expresses.
+Surface*); dynamic catalog population from Kilo's `/models` endpoint; and the image-generation,
+embedding, and audio surfaces.
+
+Image *input* and reasoning are in scope, which is a correction to an earlier draft of this
+document. `PROVIDER_CAPABILITIES.kilo` claims `images: true` and `reasoning: true`, and
+`packages/router/src/filters.ts` both drops a provider lacking `images` from any request carrying an
+image block and routes reasoning requests by that flag. A capability claimed and then dropped by the
+encoder or the decoder is not a smaller scope, it is a false claim the router acts on. Both are
+therefore encoded and decoded; see *Adapter*.
 
 ## Sources
 
@@ -109,6 +115,38 @@ afterwards. Shared infrastructure stays shared: `usageFromPromptTotal`, `parseSs
 
 Cache control has no expression on the OpenAI chat wire. A request carrying cache-control
 breakpoints routed to kilo records a degradation, exactly as kimi does today.
+
+Reasoning crosses the wire in both directions. The encoder forwards IR reasoning as OpenRouter's
+`reasoning` field — `{max_tokens}` for a budget, `{effort}` for adaptive, clamped at `high` with a
+`kilo:reasoning-effort-clamped` note. The decoder reads it back under the three spellings the
+OpenRouter family has used, in precedence order, first non-empty winning: `reasoning`,
+`reasoning_content`, then `reasoning_details[].text`/`.summary`. **The precedence is load-bearing,
+not tidiness**: OpenRouter sends `reasoning` and `reasoning_details` in the same delta describing
+the same tokens, so an implementation that reads every shape it recognises doubles every thinking
+token.
+
+Decoded thinking is **never marked signed**, even when `reasoning_details` carries a `signature` and
+`format: "anthropic-claude-v1"`. That signature was minted over the request *Kilo* made on *Kilo's*
+account, not over ours. `apps/gateway/src/egress/anthropic.ts:85-88` records the consequence: an
+Anthropic-shaped client stores the assistant turn and replays it verbatim, and an unrecognised
+signature fails that request with `Invalid signature in thinking block`, poisoning the conversation
+from that point on. Unsigned is the truthful claim — displayable, not replayable — and it matches
+what the grok decoder reports for the same reason. Both egresses discard unsigned thinking today, so
+decoding does not by itself put reasoning in front of a client; what it buys is an IR that is
+complete and a capability flag the router can trust.
+
+An unrecognised reasoning shape contributes no text and does not throw. This is a deliberate
+exception to the rule that unknown block types fail visibly, and the adapter carries the argument in
+a comment: on the Anthropic surface an unknown block type means the response shape itself was
+misread, so continuing yields wrong content, whereas here it means one display-only field is missing
+while text, tool calls, stop reason, and usage all decoded correctly. Kilo proxies 361 models that
+move weekly; failing the turn would discard a good, fully billed response every time a vendor adds a
+field.
+
+Thinking blocks are emitted strictly non-overlapping — a thinking block closes before text or a tool
+call opens, and text closes if reasoning resumes — because the Anthropic egress renders these as
+`content_block_start`/`content_block_stop` pairs and a start arriving while another block is open is
+malformed on that wire.
 
 Usage accounting follows the existing OpenAI-chat rules: `stream_options.include_usage` is required
 or a streaming response reports no usage at all, and `Usage.inputTokens` stays uncached input with
@@ -250,8 +288,38 @@ creates a target with a hand-typed model id, and the router prices it from the t
 from this table. This is how `kimi` and `grok` already work; the only difference is that Kilo's
 upstream list is larger and moves faster.
 
-`CatalogAuth` on each `ProviderModelChoice` records which backend serves it. `kilo-auto/*` and the
-`:free` models are gateway-only (`apiKey`); the vendor-namespaced models are available on both.
+Two distinct auth facts live in the catalog, and they are easy to confuse because they share a type:
+
+- `ProviderModelChoice.auth` — which backend serves *this model*. `kilo-auto/*` and the `:free`
+  models are gateway-only (`apiKey`); the vendor-namespaced models are on both.
+- `ProviderModelCatalogEntry.authTypes` — which kinds of credential the gateway can hold for *this
+  provider*. Required, so the compiler asks the next provider author. Kilo is `["oauth","apiKey"]`
+  at provider level while individual rows are `["apiKey"]`, which is exactly why one field cannot
+  serve both questions. It could not be derived from the model list either: `custom` has `models:
+  []`, and deriving would say "no way in at all" for the one provider whose only way in is a key.
+
+`auth` is **enforced, not merely recorded**. `catalogModelAuths()` in the catalog leaf is the pure
+lookup both surfaces share; the rule itself lives in `packages/control/src/models.ts` beside the
+sibling `custom`-endpoint credential check, because `PUT /api/models/:id` and `omni models` both
+write through it and a rule enforced only in the dashboard is not enforced (rule 5). The dashboard
+filters its model picker and shows an inline note on top of that.
+
+Reachability is installation state, not catalog state, so the cases are spelled out rather than
+inferred:
+
+| operator holds | outcome |
+| --- | --- |
+| both credential types | allowed |
+| only the type that cannot reach the model | refused, naming both sets |
+| no credential for that provider yet | allowed — composing models before connecting accounts is a normal order, and there is no evidence yet |
+| a model the catalog does not list | allowed — unknown is not forbidden; the curated list is a few dozen of several hundred |
+| a credential that is disabled | still counts — a transient `AUTH` failure must not make an unrelated target unsavable. Deliberately unlike `resolveModelLimits`, which filters on `enabled` because it answers "what can serve a request *now*" |
+| a credential removed after the target was stored | that stored target is exempt, judged by id plus provider plus model; editing either field re-judges it |
+
+New targets are refused; stored ones are grandfathered. The dashboard's warning must therefore state
+the routing consequence ("requests routed here will fail") rather than predicting a refusal — for a
+grandfathered target the refusal never comes, and that is precisely the operator most likely to be
+reading it.
 
 Every figure above was read from the live endpoint rather than recalled, but a proxied catalog moves:
 re-read `GET /api/gateway/models` when the catalog file is written and record what it says then. The
@@ -297,11 +365,22 @@ It flags none of these:
 - `control/src/oauth/index.ts:13` (`OAUTH_PROVIDERS`)
 - `cli/src/commands/connect.ts:17` and `cli/src/commands/credentials.ts:224`, two more free-text
   lists that disagree with each other today
-- dashboard `features/accounts/ConnectDialog.tsx:45` (`CODE_PLACEHOLDER`), `theme/tokens.ts:41-47`
-  (provider token map) and `:71-72` (a second hand-rolled `PROVIDER_IDS`)
+- dashboard `theme/tokens.ts:41-47` (provider token map) and `:71-72` (a second hand-rolled
+  `PROVIDER_IDS`). **Not** `ConnectDialog.tsx:45` (`CODE_PLACEHOLDER`) — it is `Partial` and holds
+  loopback-redirect shapes only, so a device flow has no entry there and kimi has none either.
+  Adding one would be dead data.
 - `theme/GlobalStyle.ts:34-42` (light) **and** `:71-75` (dark) — both halves of the `--p-kilo` oklch
   pair, placed per the hue-spacing rationale recorded in the comment at `:39`
 - `README.md:143` and the provider list in `CLAUDE.md`
+
+One deliberate widening beyond the list above: `ConnectDialog`'s key-entry form was branched on
+`provider === "custom"`, which would have left Kilo connectable by device code alone. It is now
+driven by `authTypes`, so every provider that can hold an API key offers one in the console. This is
+a user-facing change to four providers that have nothing to do with Kilo, approved separately from
+this design. `provider === "custom"` survives in exactly one place — the endpoint-metadata fields,
+which are custom's own data rather than an auth capability. Verified before shipping: no provider
+now offers a credential the gateway rejects, and each adapter genuinely carries a raw key on the
+wire.
 
 Tests that assert exact key sets and will fail loudly, which is the desired behaviour — each is
 updated deliberately, not blanket-widened: `providers/test/catalog.test.ts:5,7-31`,
@@ -328,6 +407,16 @@ red — because a green suite is not evidence of coverage.
 - Mid-conversation system message stays in place and is not folded into request-level `system`
 - Device flow: `202` / `403` / `410` / approved, plus code expiry
 - Null-expiry credential never reaches the refresher; `refresh()` raises `AUTH`
+- Reasoning round-trips: budget encodes to `{max_tokens}`, adaptive to `{effort}`; each decoder
+  spelling produces thinking blocks; a delta carrying two spellings is read once, not twice;
+  thinking is never marked signed; an unreadable shape costs the text, not the response
+- Thinking, text, and tool-call blocks never overlap — assert the open/close *order*, not the count
+  of each, which survives an overlap
+- The Anthropic-tool filter drops an `AnthropicToolDef` rather than forwarding it malformed, and
+  records no tool degradation when every tool is portable
+- Per-model auth enforcement across every row of the reachability table above, including the two
+  that only discriminate when an enabled credential of one type is paired with a disabled
+  credential of the other
 - `X-Kilocode-OrganizationID` present when `providerData.orgId` is set, absent when it is not; a
   failing `/api/profile` read still completes the connect
 - Degradation recorded for cache-control breakpoints the chat wire cannot express

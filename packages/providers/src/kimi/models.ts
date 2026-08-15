@@ -20,6 +20,8 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  */
 export const KIMI_MODELS: ProviderModelCatalogEntry = {
   defaultModel: "k3-256k",
+  // The adapter takes `accessToken ?? apiKey` and sends either as a bearer.
+  authTypes: ["oauth", "apiKey"],
   models: [
     {
       id: "k3-256k",

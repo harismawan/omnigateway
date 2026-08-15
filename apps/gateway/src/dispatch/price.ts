@@ -18,6 +18,11 @@ const WRITE_OVER_INPUT: Readonly<Record<ProviderId, { fiveMinute: number; oneHou
   anthropic: { fiveMinute: 1.25, oneHour: 2 },
   openai: { fiveMinute: 0, oneHour: 0 },
   kimi: { fiveMinute: 0, oneHour: 0 },
+  // Kilo fronts several vendors at once, so no single multiple is right for it.
+  // Zero is the safe fallback rather than the accurate one: the chat wire it
+  // speaks cannot express a cache breakpoint at all, so a Kilo request never
+  // buys a cache entry to be charged for.
+  kilo: { fiveMinute: 0, oneHour: 0 },
   grok: { fiveMinute: 0, oneHour: 0 },
   custom: { fiveMinute: 0, oneHour: 0 },
 };
