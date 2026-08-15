@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { HeaderPair } from "./types.ts";
+import type { HeaderPair } from "../types.ts";
 
 export type KimiDevice = {
   deviceId: string;

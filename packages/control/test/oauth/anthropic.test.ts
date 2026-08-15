@@ -24,8 +24,16 @@ function stubHttp(status: number, body: unknown): HttpClient & { last: () => Htt
   return client;
 }
 
-test("builds an authorize url with pkce and state", () => {
-  const start = anthropicOAuth.start({ redirectUri: "http://localhost:8787/oauth/callback" });
+/** Anthropic's endpoints are compiled in, so `start` must not reach the network. */
+const offline: HttpClient = () => {
+  throw new Error("start reached transport");
+};
+
+test("builds an authorize url with pkce and state", async () => {
+  const start = await anthropicOAuth.start(
+    { redirectUri: "http://localhost:8787/oauth/callback" },
+    { http: offline, now: () => NOW },
+  );
   const url = new URL(start.authorizeUrl);
   expect(url.origin + url.pathname).toBe("https://claude.ai/oauth/authorize");
   expect(url.searchParams.get("code_challenge_method")).toBe("S256");

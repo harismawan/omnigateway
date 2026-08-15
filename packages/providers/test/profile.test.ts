@@ -1,12 +1,16 @@
 import { expect, test } from "bun:test";
-import { kimiDeviceHeaders, mintKimiDevice } from "../src/kimi-device.ts";
-import { mergeHeaders, orderHeaders, PROFILES, stainlessHost } from "../src/profile.ts";
+import { grokHost, mergeHeaders, orderHeaders, PROFILES, stainlessHost } from "../src/profile.ts";
 
 test("stainlessHost maps platform names to the Stainless spelling", () => {
   expect(stainlessHost("darwin", "arm64")).toEqual({ os: "MacOS", arch: "arm64" });
   expect(stainlessHost("linux", "x64")).toEqual({ os: "Linux", arch: "x64" });
   expect(stainlessHost("win32", "x64")).toEqual({ os: "Windows", arch: "x64" });
   expect(stainlessHost("freebsd", "arm64")).toEqual({ os: "Unknown", arch: "arm64" });
+});
+
+test("grokHost lowercases the platform and gives arm64 its GNU name", () => {
+  expect(grokHost("darwin", "arm64")).toEqual({ os: "darwin", arch: "aarch64" });
+  expect(grokHost("Linux", "x64")).toEqual({ os: "linux", arch: "x64" });
 });
 
 test("orderHeaders puts listed names first, in order, case-insensitively", () => {
@@ -104,40 +108,4 @@ test("every profile header appears in that profile's order list", () => {
       expect(ordered.has(name.toLowerCase())).toBe(true);
     }
   }
-});
-
-test("mintKimiDevice produces a stable-shaped synthetic identity", () => {
-  const d = mintKimiDevice();
-  expect(d.deviceId).toMatch(/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
-  expect(d.deviceName.length).toBeGreaterThan(0);
-  // Never the operator's real machine name.
-  expect(d.deviceName).not.toBe(require("node:os").hostname());
-  expect(mintKimiDevice().deviceId).not.toBe(d.deviceId);
-});
-
-test("kimiDeviceHeaders emits all four headers", () => {
-  const names = kimiDeviceHeaders({
-    deviceId: "abc",
-    deviceName: "n",
-    deviceModel: "m",
-    osVersion: "o",
-  }).map(([n]) => n);
-  expect(names).toEqual([
-    "X-Msh-Device-Id",
-    "X-Msh-Device-Name",
-    "X-Msh-Device-Model",
-    "X-Msh-Os-Version",
-  ]);
-});
-
-test("kimiDeviceHeaders fills defaults for credentials that predate the fields", () => {
-  const h = new Map(kimiDeviceHeaders({ deviceId: "abc" }));
-  expect(h.get("X-Msh-Device-Id")).toBe("abc");
-  expect(h.get("X-Msh-Device-Name")).toBe("unknown");
-  expect(h.get("X-Msh-Device-Model")).toBe("unknown");
-  expect(h.get("X-Msh-Os-Version")).toBe("unknown");
-});
-
-test("kimiDeviceHeaders emits nothing when there is no device id", () => {
-  expect(kimiDeviceHeaders({})).toEqual([]);
 });

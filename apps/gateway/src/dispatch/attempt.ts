@@ -67,5 +67,6 @@ export async function attempt(opts: {
     },
     http,
     signal,
+    ...(opts.requestId === undefined ? {} : { requestId: opts.requestId }),
   });
 }

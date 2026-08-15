@@ -1,5 +1,6 @@
 export const IR_VERSION = 1;
 
+export * from "./betas.ts";
 export * from "./capabilities.ts";
 export * from "./errors.ts";
 export * from "./logger.ts";

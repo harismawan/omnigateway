@@ -1,5 +1,4 @@
-import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
-import { CONTEXT_1M_BETA, CONTEXT_1M_TOKENS } from "../betas.ts";
+import { CONTEXT_1M_BETA, CONTEXT_1M_TOKENS, GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
 import { applyAnthropicSystem, BODY_ORDER, orderFields, signAnthropicBody } from "../body.ts";
 import { catalogLimits } from "../catalog.ts";
 import { httpError } from "../http.ts";

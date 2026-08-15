@@ -14,7 +14,7 @@ export const connect: Command = {
   async run(args, { ctx, writer, prompt, connect: connectFlows }) {
     const providerId = requirePositional(args, 0, "provider");
     if (!isProviderId(providerId)) {
-      throw new UsageError("provider must be one of anthropic, openai, kimi");
+      throw new UsageError("provider must be one of anthropic, openai, kimi, grok");
     }
 
     const flows = connectFlows(await ctx.store());

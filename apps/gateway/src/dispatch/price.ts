@@ -18,6 +18,7 @@ const WRITE_OVER_INPUT: Readonly<Record<ProviderId, { fiveMinute: number; oneHou
   anthropic: { fiveMinute: 1.25, oneHour: 2 },
   openai: { fiveMinute: 0, oneHour: 0 },
   kimi: { fiveMinute: 0, oneHour: 0 },
+  grok: { fiveMinute: 0, oneHour: 0 },
   custom: { fiveMinute: 0, oneHour: 0 },
 };
 

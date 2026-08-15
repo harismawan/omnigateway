@@ -22,6 +22,7 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   kimi: "Kimi",
+  grok: "Grok",
   custom: "OpenAI Compatible",
 };
 
@@ -30,7 +31,20 @@ const PASTE_HINT: Record<ProviderId, string> = {
   anthropic: "Authorize in the browser, then paste the code Anthropic shows you.",
   openai: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
   kimi: "Enter the code on Kimi's device page. This dialog finishes on its own.",
+  grok: "Authorize in the browser. When it redirects to 127.0.0.1, paste the whole URL.",
   custom: "Enter endpoint metadata and API key.",
+};
+
+/**
+ * The shape of what gets pasted back, per flow.
+ *
+ * A loopback redirect fails to connect — nothing is listening on that port —
+ * so what the operator has is the address bar, not a page. Providers absent
+ * here show the operator a bare code instead.
+ */
+const CODE_PLACEHOLDER: Partial<Record<ProviderId, string>> = {
+  openai: "http://localhost:1455/auth/callback?code=…",
+  grok: "http://127.0.0.1:56121/callback?code=…",
 };
 
 const Step = styled.ol`
@@ -431,11 +445,7 @@ export function ConnectDialog({
                     {...props}
                     value={code}
                     autoFocus
-                    placeholder={
-                      provider === "openai"
-                        ? "http://localhost:1455/auth/callback?code=…"
-                        : "code#state"
-                    }
+                    placeholder={CODE_PLACEHOLDER[provider] ?? "code#state"}
                     onChange={(event) => setCode(event.target.value)}
                   />
                 )}

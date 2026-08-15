@@ -20,6 +20,74 @@ const noHttp: HttpClient = () => {
   throw new Error("device flow reached transport");
 };
 
+test("a grok flow redirects to loopback and accepts the pasted callback url", async () => {
+  const seen: { redirectUri: string | null; code: string | null } = {
+    redirectUri: null,
+    code: null,
+  };
+  const provider: OAuthProvider = {
+    id: "grok",
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: ({ redirectUri }) => {
+      seen.redirectUri = redirectUri;
+      return {
+        authorizeUrl: "https://auth.x.ai/oauth2/auth",
+        pending: { verifier: "v", challenge: "c", state: "the-state", redirectUri },
+      };
+    },
+    exchange: async ({ code }) => {
+      seen.code = code;
+      return RESULT;
+    },
+    refresh: async () => RESULT,
+  };
+  const flows = createConnectFlows({
+    store: await memoryStore(),
+    providers: { grok: provider },
+    http: noHttp,
+    now: () => 0,
+  });
+
+  const start = await flows.start("grok", "grok");
+  expect(seen.redirectUri).toBe("http://127.0.0.1:56121/callback");
+
+  // The loopback redirect fails to connect, so what the operator has is the
+  // address bar. The whole URL is accepted and unpicked here.
+  await flows.finish(
+    start.flowId,
+    "http://127.0.0.1:56121/callback?code=auth-code&state=the-state",
+  );
+  expect(seen.code).toBe("auth-code#the-state");
+});
+
+test("a forged state in a pasted grok callback is refused", async () => {
+  const provider: OAuthProvider = {
+    id: "grok",
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: ({ redirectUri }) => ({
+      authorizeUrl: "https://auth.x.ai/oauth2/auth",
+      pending: { verifier: "v", challenge: "c", state: "the-state", redirectUri },
+    }),
+    exchange: async () => {
+      throw new Error("exchange must not run on a state mismatch");
+    },
+    refresh: async () => RESULT,
+  };
+  const flows = createConnectFlows({
+    store: await memoryStore(),
+    providers: { grok: provider },
+    http: noHttp,
+    now: () => 0,
+  });
+
+  const start = await flows.start("grok", "grok");
+  expect(
+    flows.finish(start.flowId, "http://127.0.0.1:56121/callback?code=auth-code&state=forged"),
+  ).rejects.toThrow(GatewayError);
+});
+
 test("concurrent pending polls share one device exchange", async () => {
   let exchangeCalls = 0;
   const exchange = Promise.withResolvers<FlowResult>();

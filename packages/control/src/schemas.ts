@@ -19,7 +19,7 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
   throw new GatewayError("BAD_REQUEST", `${path}: ${issue?.message ?? "invalid request"}`);
 }
 
-export const providerIdSchema = z.enum(["anthropic", "openai", "kimi", "custom"]);
+export const providerIdSchema = z.enum(["anthropic", "openai", "kimi", "grok", "custom"]);
 
 /**
  * A hypothetical request, described only by required capabilities. This keeps
@@ -36,7 +36,7 @@ export const dryRunSchema = z
 const targetSchema = z.discriminatedUnion("provider", [
   z
     .object({
-      provider: z.enum(["anthropic", "openai", "kimi"]),
+      provider: z.enum(["anthropic", "openai", "kimi", "grok"]),
       model: z.string().min(1),
       tier: z.number().int().min(1),
       weight: z.number().positive(),
