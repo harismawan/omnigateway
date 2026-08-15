@@ -663,6 +663,34 @@ describe("AccountsBoard quota history", () => {
     );
 
     expect(await screen.findByText("no ceiling reported")).toBeTruthy();
+    // `survives` is true by construction whenever there is no `exhaustsAt`, and
+    // no ceiling is one of the ways to have none. Reading it first prints a
+    // positive claim beside the panel saying nothing is known.
+    expect(screen.queryByText("lasts the window")).toBeNull();
+    expect(screen.getAllByText("unknown").length).toBeGreaterThan(0);
+  });
+
+  test("a window with no reported reset makes no claim about lasting", async () => {
+    // The other arm of the same defect: with no reset there is no window start,
+    // so there is no rate and nothing to outlive.
+    const user = userEvent.setup();
+    const now = Date.now();
+    stubAccounts({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [quota({ used: 500, limit: 1_000, observedAt: now - 30_000, resetsAt: null })],
+        burn: [burn({ windowStartsAt: null, ratePerHour: null, exhaustsAt: null, survives: true })],
+      }),
+      "GET /api/credentials/quota/history": () => ({ samples: [] }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+    );
+
+    expect(await screen.findByText("no reset reported")).toBeTruthy();
+    expect(screen.queryByText("lasts the window")).toBeNull();
   });
 
   test("a stale reading is reported as stale rather than charted", async () => {

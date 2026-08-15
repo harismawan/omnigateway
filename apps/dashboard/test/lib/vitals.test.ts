@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { SAME_WINDOW_TOLERANCE_MS } from "@omni/store/types";
 import { formatRelative } from "../../src/lib/format.ts";
 import {
   bucketLogs,
@@ -349,6 +350,44 @@ describe("quotaSegments", () => {
     expect(segments[0]?.points.map((point) => point.percent)).toEqual([20, 80]);
     expect(segments[1]?.points.map((point) => point.percent)).toEqual([5, 30]);
     expect(segments[0]?.key).not.toBe(segments[1]?.key);
+  });
+
+  test("holds one series through a reset time that only jittered", () => {
+    // A provider stating a whole-second countdown has its absolute reset derived
+    // per probe, so it drifts by milliseconds while the window stands still.
+    // Split on that and every sample becomes its own single-point series, which
+    // `stepAfter` with `dot={false}` draws as nothing at all: a blank chart with
+    // `segments.length !== 0` suppressing the "not yet observed" note.
+    const resets = NOW + 18_000_000;
+    const segments = quotaSegments([
+      quotaSample({ observedAt: NOW - 1_200_000, used: 100, resetsAt: resets }),
+      quotaSample({ observedAt: NOW - 900_000, used: 200, resetsAt: resets + 137 }),
+      quotaSample({ observedAt: NOW - 600_000, used: 300, resetsAt: resets - 402 }),
+      quotaSample({ observedAt: NOW - 300_000, used: 400, resetsAt: resets + 1_985 }),
+      quotaSample({ observedAt: NOW, used: 500, resetsAt: resets + 44 }),
+    ]);
+
+    expect(segments).toHaveLength(1);
+    expect(segments[0]?.points.map((point) => point.percent)).toEqual([10, 20, 30, 40, 50]);
+  });
+
+  test("the chart splits windows exactly where the shared tolerance does", () => {
+    // Pins this site to `SAME_WINDOW_TOLERANCE_MS`, the same constant
+    // `saveQuota` dedups on. If the chart and the store ever answered "is this
+    // the same window" differently, one of them would be describing a series
+    // the other never wrote.
+    const resets = NOW + 18_000_000;
+    const held = quotaSegments([
+      quotaSample({ observedAt: NOW - 1_000, resetsAt: resets }),
+      quotaSample({ observedAt: NOW, resetsAt: resets + SAME_WINDOW_TOLERANCE_MS }),
+    ]);
+    expect(held).toHaveLength(1);
+
+    const split = quotaSegments([
+      quotaSample({ observedAt: NOW - 1_000, resetsAt: resets }),
+      quotaSample({ observedAt: NOW, resetsAt: resets + SAME_WINDOW_TOLERANCE_MS + 1 }),
+    ]);
+    expect(split).toHaveLength(2);
   });
 
   test("drops readings with no ceiling to draw them against", () => {

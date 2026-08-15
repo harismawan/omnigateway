@@ -35,6 +35,96 @@ export function durationFor(windowType: WindowType, windowMs: number | null): nu
 }
 
 /**
+ * How far two reported reset times may sit apart and still be one window.
+ *
+ * Not every provider states an instant. Codex states a whole-second countdown,
+ * which is read as `now + seconds * 1000` — so the absolute reset is rederived
+ * on every probe from a clock that moved a poll interval, and lands a few
+ * hundred milliseconds off its predecessor even when the window never rolled
+ * over. Compared exactly, an idle account looks like a fresh window every time
+ * it is read.
+ *
+ * A minute is picked because the two things it has to separate are three orders
+ * of magnitude apart, not because it was tuned. Jitter is bounded by the
+ * provider's own truncation plus the latency between its clock and ours —
+ * seconds at the very worst. A genuine rollover moves the reset by a whole
+ * window, and the shortest window this store names is five hours. Anything from
+ * a few seconds to a few hours would do; a minute is comfortably inside both
+ * margins and is a span an operator can reason about.
+ *
+ * The tolerance is applied when *comparing*, never when parsing: `resetsAt` is
+ * shown to operators as a countdown and is what a window start is inferred back
+ * from, so quantizing it at the parse site would corrupt a stored fact to fix a
+ * comparison. Rounding into buckets would also still split whenever real jitter
+ * straddles a bucket edge, which turns a constant bug into an intermittent one.
+ */
+export const SAME_WINDOW_TOLERANCE_MS = 60_000;
+
+/**
+ * Whether two reported reset times describe the same window.
+ *
+ * One definition, deliberately: `saveQuota` decides whether a reading is worth
+ * retaining and the console decides where to break a chart line, and those are
+ * the same question. Two answers would mean storage and chart disagreed about
+ * what a window is, which is worse than either being wrong alone.
+ *
+ * Null is not near anything. A provider that started or stopped naming a reset
+ * said something new, and that is a change worth recording.
+ */
+export function sameWindow(a: number | null, b: number | null): boolean {
+  if (a === null || b === null) return a === b;
+  return Math.abs(a - b) <= SAME_WINDOW_TOLERANCE_MS;
+}
+
+/**
+ * The fields a burn estimate has to carry to be judged.
+ *
+ * Spelled structurally so this leaf stays clear of `@omni/control`, which owns
+ * the estimate and whose `BurnEstimate` satisfies this shape. It lives here
+ * because both surfaces that phrase an estimate — the CLI through
+ * `@omni/control`, the console through `/api/*` — can reach this module and
+ * neither can reach the other.
+ */
+export type QuotaBurnReading = {
+  ratePerHour: number | null;
+  exhaustsAt: number | null;
+  survives: boolean | null;
+  stale: boolean;
+};
+
+/**
+ * What can honestly be said about one window, before it is phrased.
+ *
+ * `empty` carries no countdown: the instant it would count down from is
+ * `exhaustsAt`, and each surface renders that against its own `now`.
+ */
+export type QuotaVerdict = "stale" | "unknown" | "ok" | "empty";
+
+/**
+ * Judged on the reading, never on `survives` alone.
+ *
+ * `survives` is true by construction whenever there is no `exhaustsAt`, and
+ * having no ceiling and having no inferable rate are two of the ways to have
+ * none. A reader that branched on it first would answer "this will last the
+ * window" to a window it knows nothing about.
+ *
+ * The unavailable cases stay apart because "too old to use", "never read at
+ * all", and "the provider never said" are three different things to go and fix.
+ */
+export function quotaVerdict(
+  window: Pick<QuotaWindow, "observedAt" | "limit">,
+  estimate: QuotaBurnReading | undefined,
+): QuotaVerdict {
+  if (estimate === undefined) return "unknown";
+  // A row written before snapshots existed carries no reading to age, so it is
+  // unknown rather than stale even though it is suppressed the same way.
+  if (window.observedAt > 0 && estimate.stale) return "stale";
+  if (estimate.ratePerHour === null || window.limit === null) return "unknown";
+  if (estimate.survives === false && estimate.exhaustsAt !== null) return "empty";
+  return estimate.survives === true ? "ok" : "unknown";
+}
+
+/**
  * Why a credential is not routing.
  *
  * `tokenRejected` is the provider's verdict on a refresh: the credential cannot

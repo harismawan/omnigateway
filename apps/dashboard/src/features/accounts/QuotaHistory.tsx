@@ -1,3 +1,4 @@
+import { quotaVerdict } from "@omni/store/types";
 import {
   CartesianGrid,
   Line,
@@ -114,10 +115,20 @@ type WindowPanelProps = {
   now: number;
 };
 
-/** How the exhaustion estimate reads, always phrased against the reset. */
-function estimateText(estimate: BurnEstimate, now: number): string {
-  if (estimate.survives === true) return "lasts the window";
-  if (estimate.survives === null || estimate.exhaustsAt === null) return "unknown";
+/**
+ * How the exhaustion estimate reads, always phrased against the reset.
+ *
+ * The verdict comes from `@omni/store/types` rather than from `survives`
+ * directly, and `omni quota` phrases from the same call. `survives` is true by
+ * construction whenever there is no `exhaustsAt` — which includes a window with
+ * no ceiling and one with no inferable rate — so branching on it first prints
+ * "lasts the window" beside a panel that is simultaneously reporting that
+ * nothing is known.
+ */
+function estimateText(window: QuotaWindow, estimate: BurnEstimate, now: number): string {
+  const verdict = quotaVerdict(window, estimate);
+  if (verdict === "ok") return "lasts the window";
+  if (verdict !== "empty" || estimate.exhaustsAt === null) return "unknown";
   if (estimate.exhaustsAt <= now) return "empty now";
   return `empty ~${formatDuration(estimate.exhaustsAt - now)} before it resets`;
 }
@@ -174,7 +185,7 @@ function WindowPanel({
         </Fact>
         <Fact>
           <Legend>Estimate</Legend>
-          <Mono>{estimateText(estimate, now)}</Mono>
+          <Mono>{estimateText(window, estimate, now)}</Mono>
         </Fact>
         <Fact>
           {/* Provider units and gateway tokens do not convert, so this is a

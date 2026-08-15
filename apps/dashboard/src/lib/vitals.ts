@@ -1,3 +1,8 @@
+// The `/types` subpath is a leaf: domain types plus the pure predicates over
+// them. `sameWindow` is imported rather than reimplemented because the store
+// dedups on it, and a chart that disagreed with storage about what a window is
+// would be a worse bug than either being wrong alone.
+import { sameWindow } from "@omni/store/types";
 import type {
   BurnEstimate,
   CredentialHealth,
@@ -349,6 +354,13 @@ export type QuotaSegment = { key: string; points: QuotaPoint[] };
  * drawn as separate series, nothing connects the end of one window to the start
  * of the next.
  *
+ * It is compared through `sameWindow`, the same predicate `saveQuota` dedups
+ * on, and from the same definition: a provider stating a whole-second countdown
+ * jitters its derived reset by milliseconds on every probe, and splitting on
+ * that gives one single-point series per sample. A single-point `stepAfter`
+ * line with `dot={false}` draws no stroke at all, so the panel would render
+ * blank while a non-empty segment list suppressed the "not yet observed" note.
+ *
  * Readings with no ceiling are dropped: a percentage of an unstated limit is
  * not a number, and drawing them at zero would claim an idle account.
  */
@@ -358,19 +370,23 @@ export function quotaSegments(samples: readonly QuotaSample[]): QuotaSegment[] {
     .sort((a, b) => a.observedAt - b.observedAt);
 
   const segments: QuotaSegment[] = [];
-  let previousResetsAt: number | null | undefined;
+  let previous: QuotaSample | undefined;
   for (const sample of usable) {
     const point = {
       at: sample.observedAt,
       percent: Math.min(100, (sample.used / (sample.limit as number)) * 100),
     };
     const last = segments[segments.length - 1];
-    if (last === undefined || sample.resetsAt !== previousResetsAt) {
+    if (
+      last === undefined ||
+      previous === undefined ||
+      !sameWindow(sample.resetsAt, previous.resetsAt)
+    ) {
       segments.push({ key: `window-${segments.length}`, points: [point] });
     } else {
       last.points.push(point);
     }
-    previousResetsAt = sample.resetsAt;
+    previous = sample;
   }
   return segments;
 }

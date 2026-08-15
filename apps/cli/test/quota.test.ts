@@ -161,6 +161,22 @@ test("quota names a stale reading rather than estimating from it", async () => {
   expect(result.out).not.toContain("ok");
 });
 
+test("quota separates a window never observed from one that aged out", async () => {
+  // Two different things to go and fix. Control folds both into `stale: true`,
+  // but `observedAt` still tells them apart: nothing has ever been read here,
+  // which is not the same as a reading that stopped being refreshed.
+  const root = await installation();
+  await account(root, "cred-1", "work");
+  await saveQuota(root, [draining({ observedAt: 0 })]);
+
+  const result = await cli(["quota"], { root, now: () => NOW });
+
+  expect(result.code).toBe(0);
+  expect(result.out).toMatch(/5h\s+62\/100\s+—\s+unknown/);
+  expect(result.out).not.toContain("stale");
+  expect(result.out).not.toContain("ok");
+});
+
 test("quota reads unknown for an account whose provider reports nothing", async () => {
   const root = await installation();
   await account(root, "cred-1", "silent");

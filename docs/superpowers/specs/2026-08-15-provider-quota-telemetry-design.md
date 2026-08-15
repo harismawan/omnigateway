@@ -86,17 +86,49 @@ Append happens inside `saveQuota` (`packages/store/src/sqlite/credentials.ts:366
 transaction that already writes the snapshot. `saveQuota` is the sole write path for quota data, so
 history cannot drift from the snapshot it describes.
 
-A sample is skipped when `(used, limit_value, resets_at, window_ms)` all equal the newest existing
-row for that `(credential_id, window_type)`. An idle account therefore writes approximately nothing,
-which is what makes the table affordable at the 300s default poll interval.
+A sample is skipped when `used`, `limit_value` and `window_ms` equal the newest existing row for that
+`(credential_id, window_type)` and `resets_at` names the same window. An idle account therefore
+writes approximately nothing, which is what makes the table affordable at the 300s default poll
+interval.
 
 Including `resets_at` in the comparison is load-bearing. A window that rolls over resets `used`, but
 a rollover that happens to land on the same `used` value would otherwise be silently dropped and the
 chart would show one continuous window where there were two. `resets_at` moves on every rollover, so
 comparing it catches the case.
 
+`limit_value` is load-bearing for the mirror reason: a plan change can lift the ceiling while `used`
+sits still, and without it in the comparison every percentage drawn afterwards stays on the old
+denominator until traffic happens to move `used`.
+
+**`resets_at` also moves when nothing happened, and it must not be compared exactly.** Not every
+provider states an instant. Codex states a whole-second countdown, so `resetAtOf`
+(`packages/control/src/oauth/usage.ts:100-105`) derives the absolute reset as `now + seconds * 1000`
+from a clock that advanced a poll interval since the last probe. The result lands a few hundred
+milliseconds off its predecessor on every single poll while the window stands perfectly still.
+Compared exactly, dedup never fires for OpenAI — a row per poll per window per credential, roughly
+288 a day for an account doing nothing — and the chart splits a segment per sample, which
+`stepAfter` with `dot={false}` renders as a blank panel with the "not yet observed" fallback
+suppressed.
+
+The comparison is therefore `sameWindow(a, b)` in `@omni/store/types`, true when both are null or
+within `SAME_WINDOW_TOLERANCE_MS` (60s) of each other. The threshold is unambiguous rather than
+tuned: jitter is bounded by the provider's own truncation plus clock latency, seconds at the very
+worst, while a genuine rollover moves the reset by a whole window and the shortest window named here
+is five hours. Anything from a few seconds to a few hours would serve.
+
+The tolerance is applied when comparing, never when parsing. Quantizing `resets_at` at the parse
+site would corrupt a stored fact — it is displayed to operators as a countdown and is what
+`windowStartsAt` is inferred back from — to fix a comparison, and bucketing would still split
+whenever real jitter straddles a bucket edge, turning a constant bug into an intermittent one.
+
+`sameWindow` has exactly one definition because `saveQuota` and the console's `quotaSegments`
+(`apps/dashboard/src/lib/vitals.ts`) are asking the same question. Two answers would mean storage and
+chart disagreed about what a window *is*, which is worse than either being wrong alone. Both sites
+have a test pinned to the constant's own boundary, so a local copy at either fails.
+
 Where `resets_at` is null — a provider reporting usage with no stated reset — a repeated identical
-reading is genuinely indistinguishable from no change, and is correctly skipped.
+reading is genuinely indistinguishable from no change, and is correctly skipped. Null is not near
+anything: a provider that started or stopped naming a reset said something new.
 
 Dedup makes a gap in the series ambiguous: it means either "the probe did not run" or "nothing
 changed". This is resolved by reading `quota_windows.observed_at`, which every probe updates
@@ -352,8 +384,12 @@ reported window:
   `resetsAt` changing between adjacent samples, and the segments are drawn as separate series so no
   line connects the end of one window to the start of the next.
 - The burn rate, labelled as a window average.
-- The exhaustion estimate, phrased against the reset: an ETA when `survives` is false, and a plain
-  statement that it lasts the window when true.
+- The exhaustion estimate, phrased against the reset: an ETA when the window runs out first, and a
+  plain statement that it lasts the window when it does not. It is phrased from `quotaVerdict`
+  (`@omni/store/types`), never from `survives` directly — `survives` is true by construction whenever
+  `exhaustsAt` is null, which includes `limit === null` and `resetsAt === null`, so a reader that
+  branched on it first would print "lasts the window" beside a panel simultaneously reporting that
+  nothing is known.
 - The gateway rate beneath, labelled as what this gateway accounts for.
 
 Windows with no limit, no reset, or a stale snapshot render the corresponding unavailable state
@@ -388,9 +424,16 @@ Two presentation points the table has to get right:
   of that window's own limit, and falls back to raw provider units per hour (`250.0/h`) where there
   is no ceiling at all.
 - **`unknown` and `stale` are different sentences.** Control folds "too old to believe" and "never
-  observed" into a single `stale: true`, but `observedAt <= 0` is still visible, so the CLI separates
-  them: a never-observed window reads `unknown`, an aged one reads `stale`. Neither prints an
+  observed" into a single `stale: true`, but `observedAt <= 0` is still visible, so the two are
+  separated: a never-observed window reads `unknown`, an aged one reads `stale`. Neither prints an
   estimate. `omni status` keeps them both silent, as specified.
+
+That judgement is `quotaVerdict` in `@omni/store/types`, shared with the console rather than written
+once per surface. It lives in that leaf because the CLI reaches its inputs through `@omni/control`
+and the console through `/api/*`, and neither can reach the other — the same reason
+`WINDOW_DURATION_MS` lives there. Written twice, the two drifted, and the console printed "lasts the
+window" for an account whose provider reported no ceiling at all. Each surface adds only its own
+phrasing and its own `now`.
 
 ## Testing
 

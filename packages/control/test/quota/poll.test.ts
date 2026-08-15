@@ -1,8 +1,9 @@
 import { beforeEach, expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
-import type { CredentialSecrets, Store, UsageSecrets } from "@omni/store";
+import { type CredentialSecrets, type Store, sameWindow, type UsageSecrets } from "@omni/store";
 import { memoryStore, seedCredential } from "@omni/testkit";
+import { parseOpenAIUsage } from "../../src/oauth/openai.ts";
 import type { OAuthProvider, UsageReport } from "../../src/oauth/types.ts";
 import { poll, probe, RATE_LIMIT_COOLDOWN_MS, resetQuotaCooldowns } from "../../src/quota/poll.ts";
 
@@ -243,4 +244,95 @@ test("a rate-limited probe never disables the credential", async () => {
   );
 
   expect((await store.credentials.get("c1"))?.enabled).toBe(true);
+});
+
+/**
+ * Codex as it actually answers: a whole-second countdown, never an instant.
+ *
+ * `resetAtOf` turns that into an absolute reset as `now + seconds * 1000`, and
+ * `now` moves a poll interval between probes, so the derived instant lands a
+ * few hundred milliseconds off the last one every single time even though the
+ * window is standing perfectly still.
+ */
+function codexPayload(trueReset: number, at: number, usedPercent: number): unknown {
+  return {
+    rate_limit: {
+      primary_window: {
+        used_percent: usedPercent,
+        limit_window_seconds: 18_000,
+        reset_after_seconds: Math.floor((trueReset - at) / 1000),
+      },
+      secondary_window: null,
+    },
+  };
+}
+
+/** Probe instants a poll interval apart, never landing on a second boundary. */
+const PROBES = [NOW, NOW + 300_137, NOW + 600_402, NOW + 899_615, NOW + 1_200_988];
+
+test("an idle relative-reset account writes one sample, not one per poll", async () => {
+  // The production scenario in full: five probes of an untouched Codex account
+  // through the real payload parser. Comparing the derived reset exactly makes
+  // every poll look like a new window, which is a row per poll per window per
+  // credential for as long as the account stays connected — roughly 288 a day
+  // for an account doing nothing at all.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1" });
+
+  const trueReset = NOW + 3 * 3_600_000;
+  let at = NOW;
+  const usage = async () => parseOpenAIUsage(codexPayload(trueReset, at, 40), at);
+
+  for (const probeAt of PROBES) {
+    at = probeAt;
+    await poll({ ...deps(store, usage), now: () => at });
+  }
+
+  const samples = await store.credentials.listQuotaSamples({
+    since: 0,
+    until: Number.MAX_SAFE_INTEGER,
+  });
+  expect(samples).toHaveLength(1);
+  expect(samples[0]).toMatchObject({ observedAt: NOW, used: 40 });
+
+  // Liveness still lives in the snapshot: the probe ran five times and the
+  // newest reading says so, even though the series has nothing to add.
+  const rows = await store.credentials.listQuota();
+  expect(rows[0]?.observedAt).toBe(PROBES[PROBES.length - 1]);
+});
+
+test("an active relative-reset account charts as one window, not one point per poll", async () => {
+  // The same jitter with `used` moving. Every reading is genuinely new, so every
+  // reading is retained — but they are all readings of one window, and the reset
+  // they carry must stay close enough for the chart to hold them together. A
+  // segment per sample draws a single-point `stepAfter` line each, which renders
+  // as nothing while still suppressing the "not yet observed" note.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1" });
+
+  const trueReset = NOW + 3 * 3_600_000;
+  let at = NOW;
+  let used = 40;
+  const usage = async () => parseOpenAIUsage(codexPayload(trueReset, at, used), at);
+
+  for (const probeAt of PROBES) {
+    at = probeAt;
+    used += 5;
+    await poll({ ...deps(store, usage), now: () => at });
+  }
+
+  const samples = await store.credentials.listQuotaSamples({
+    since: 0,
+    until: Number.MAX_SAFE_INTEGER,
+  });
+  expect(samples.map((s) => s.used)).toEqual([45, 50, 55, 60, 65]);
+
+  // The resets do differ — that is the whole defect — and no two adjacent
+  // readings may be told apart by it. `sameWindow` is the single definition the
+  // chart splits on, so this is the same question the console asks.
+  const resets = samples.map((s) => s.resetsAt);
+  expect(new Set(resets).size).toBeGreaterThan(1);
+  for (let i = 1; i < resets.length; i += 1) {
+    expect(sameWindow(resets[i - 1] ?? null, resets[i] ?? null)).toBe(true);
+  }
 });

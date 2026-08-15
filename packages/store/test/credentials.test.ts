@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { deriveKey } from "../src/encryption.ts";
 import { createCredentialRepo } from "../src/sqlite/credentials.ts";
 import { openDb } from "../src/sqlite/db.ts";
+import { SAME_WINDOW_TOLERANCE_MS, WINDOW_DURATION_MS } from "../src/types.ts";
 
 async function setup() {
   const db = openDb(":memory:");
@@ -524,16 +525,73 @@ test("a changed reading writes a sample", async () => {
 test("a rollover onto the same used value still writes a sample", async () => {
   // The load-bearing case for including `resets_at` in the comparison. A window
   // that rolled over and happens to read the same `used` is a *different*
-  // window; dropping it merges two windows into one continuous line.
+  // window; dropping it merges two windows into one continuous line. A real
+  // rollover moves the reset by a whole window, which is what tells it apart
+  // from the arithmetic jitter below.
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  const rolled = 900 + WINDOW_DURATION_MS.fiveHour;
+  await repo.saveQuota([reading]);
+  await repo.saveQuota([{ ...reading, observedAt: 400, resetsAt: rolled }]);
+
+  const samples = await repo.listQuotaSamples(allSamples);
+  expect(samples).toHaveLength(2);
+  expect(samples.map((s) => s.resetsAt)).toEqual([900, rolled]);
+  db.close();
+});
+
+test("a reset time that only jittered writes no sample", async () => {
+  // The OpenAI/Codex shape. Its payload states a whole-second countdown, so the
+  // absolute reset is derived as `now + seconds * 1000` and moves a few hundred
+  // milliseconds on every poll even when the window never rolled over. Compared
+  // exactly, dedup never fires and an idle account writes a row per poll for as
+  // long as it is connected.
   const { repo, db } = await setup();
   await repo.create(input);
 
   await repo.saveQuota([reading]);
-  await repo.saveQuota([{ ...reading, observedAt: 400, resetsAt: 18_900 }]);
+  await repo.saveQuota([{ ...reading, observedAt: 400, resetsAt: 900 + 137 }]);
+  await repo.saveQuota([{ ...reading, observedAt: 700, resetsAt: 900 - 402 }]);
+  await repo.saveQuota([{ ...reading, observedAt: 1_000, resetsAt: 900 + 1_985 }]);
 
   const samples = await repo.listQuotaSamples(allSamples);
-  expect(samples).toHaveLength(2);
-  expect(samples.map((s) => s.resetsAt)).toEqual([900, 18_900]);
+  expect(samples).toHaveLength(1);
+  expect(samples[0]).toMatchObject({ observedAt: 100, resetsAt: 900 });
+  db.close();
+});
+
+test("dedup splits windows exactly where the shared tolerance does", async () => {
+  // Pins this site to `SAME_WINDOW_TOLERANCE_MS` rather than to a number that
+  // happens to match it today. Storage and chart must agree about what a window
+  // is; a local copy here would be free to drift from the one the console
+  // splits its line on.
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  await repo.saveQuota([reading]);
+  await repo.saveQuota([{ ...reading, observedAt: 400, resetsAt: 900 + SAME_WINDOW_TOLERANCE_MS }]);
+  expect(await repo.listQuotaSamples(allSamples)).toHaveLength(1);
+
+  await repo.saveQuota([
+    { ...reading, observedAt: 700, resetsAt: 900 + SAME_WINDOW_TOLERANCE_MS + 1 },
+  ]);
+  expect(await repo.listQuotaSamples(allSamples)).toHaveLength(2);
+  db.close();
+});
+
+test("a raised ceiling on an unmoved reading writes a sample", async () => {
+  // A plan change lifts `limit` while `used` sits still. Without `limit_value`
+  // in the comparison nothing is written, and every percentage the chart draws
+  // stays on the old denominator until traffic happens to move `used`.
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  await repo.saveQuota([reading]);
+  await repo.saveQuota([{ ...reading, observedAt: 400, limit: 200 }]);
+
+  const samples = await repo.listQuotaSamples(allSamples);
+  expect(samples.map((s) => s.limit)).toEqual([100, 200]);
   db.close();
 });
 

@@ -18,6 +18,7 @@ import type {
   UsageSecrets,
   WindowType,
 } from "../types.ts";
+import { sameWindow } from "../types.ts";
 
 type Row = {
   id: string;
@@ -439,15 +440,23 @@ export function createCredentialRepo(
           //
           // `resets_at` is in the comparison because a rollover that lands on
           // the same `used` would otherwise be dropped, and the chart would
-          // draw one continuous window where there were two. `starts_at` is
-          // not: it is our own observation time, so it moves every poll and
-          // would defeat the dedup entirely.
+          // draw one continuous window where there were two. It is compared
+          // through `sameWindow` rather than exactly: a provider stating a
+          // whole-second countdown has its absolute reset rederived per probe
+          // and jitters by milliseconds while standing still, and an exact
+          // comparison never matches for it. `starts_at` is not in the
+          // comparison at all: it is our own observation time, so it moves
+          // every poll and would defeat the dedup entirely.
+          //
+          // `limit_value` is here because a plan change can lift the ceiling
+          // while `used` sits still, and every percentage drawn afterwards
+          // would stay on the old denominator until traffic moved `used`.
           const previous = newestSample.get(r.credentialId, r.windowType);
           const unchanged =
             previous !== null &&
             previous.used === r.used &&
             previous.limit_value === r.limit &&
-            previous.resets_at === r.resetsAt &&
+            sameWindow(previous.resets_at, r.resetsAt) &&
             previous.window_ms === r.windowMs;
           if (unchanged) continue;
 

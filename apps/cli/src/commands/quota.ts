@@ -5,7 +5,7 @@ import {
   getSettings,
   quotaHistory,
 } from "@omni/control";
-import type { QuotaWindow, Store, WindowType } from "@omni/store";
+import { type QuotaWindow, quotaVerdict, type Store, type WindowType } from "@omni/store";
 import { type Command, provider } from "../command.ts";
 import { emit, formatSpan, paint, table } from "../output.ts";
 
@@ -55,14 +55,14 @@ export async function burnIndex(
 }
 
 /**
- * What can honestly be said about one window, before it is phrased.
+ * What can honestly be said about one window, plus the countdown to print.
  *
- * Suppression is checked first and on the `stale` flag rather than on the
- * numbers: a suppressed estimate nulls every field it carries, and a reader
- * that inferred its verdict from `survives` would turn a reading nobody
- * believes into "this will last". The unavailable cases stay apart because
- * "too old to use", "never read at all", and "the provider never said" are
- * three different things to go and fix.
+ * The judgement itself is `quotaVerdict` in `@omni/store/types`, which the
+ * console phrases from as well. It lives in that leaf because the CLI reaches
+ * it through `@omni/control` and the console through `/api/*`, and neither can
+ * reach the other — written twice, the two surfaces drifted, and the console
+ * ended up printing "lasts the window" for an account with no ceiling. All this
+ * adds is the span, which is measured against each surface's own `now`.
  */
 export type Verdict =
   | { kind: "stale" }
@@ -75,17 +75,10 @@ export function verdictOf(
   estimate: BurnEstimate | undefined,
   now: number,
 ): Verdict {
-  if (estimate === undefined) return { kind: "unknown" };
-  // A row written before snapshots existed carries no reading to age, so it is
-  // unknown rather than stale even though it is suppressed the same way.
-  if (window.observedAt > 0 && estimate.stale) return { kind: "stale" };
-  // No inferred window start means no rate, and no ceiling means nothing to run
-  // out of. Neither is "fine", so neither may borrow the `ok` phrasing.
-  if (estimate.ratePerHour === null || window.limit === null) return { kind: "unknown" };
-  if (estimate.survives === false && estimate.exhaustsAt !== null) {
-    return { kind: "empty", inMs: estimate.exhaustsAt - now };
-  }
-  return estimate.survives === true ? { kind: "ok" } : { kind: "unknown" };
+  const kind = quotaVerdict(window, estimate);
+  if (kind !== "empty") return { kind };
+  // `quotaVerdict` returns `empty` only with an instant to count down from.
+  return { kind, inMs: (estimate?.exhaustsAt ?? now) - now };
 }
 
 /** The estimate as `omni status` shows it: a suffix, or nothing at all. */
