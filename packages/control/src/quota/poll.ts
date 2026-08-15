@@ -1,9 +1,9 @@
 import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { CredentialView, QuotaWindow, Store } from "@omni/store";
-import { SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
-import type { Refresher } from "./oauth/refresh.ts";
-import type { OAuthProvider } from "./oauth/types.ts";
+import { SCHEDULER_REFRESH_LEAD_MS } from "../oauth/lead.ts";
+import type { Refresher } from "../oauth/refresh.ts";
+import type { OAuthProvider } from "../oauth/types.ts";
 
 /** Accounts probed at once. Enough to keep the sweep short, few enough to be quiet. */
 const CONCURRENCY = 4;

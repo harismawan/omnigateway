@@ -2,6 +2,7 @@ import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import type { Credential, CredentialHealth, QuotaWindow, Store } from "@omni/store";
 import { createAdminAuth } from "./adminAuth.ts";
 import type { Refresher } from "./oauth/refresh.ts";
+import { type BurnEstimate, burnEstimates } from "./quota/burn.ts";
 import { credentialPatchSchema, parseOrThrow, providerIdSchema } from "./schemas.ts";
 
 /**
@@ -170,14 +171,26 @@ export async function refreshCredential(
   return getCredential(deps.store, id);
 }
 
-export async function credentialHealth(
-  store: Store,
-): Promise<{ health: CredentialHealth[]; quota: QuotaWindow[] }> {
-  const [health, quota] = await Promise.all([
-    store.credentials.listHealth(),
-    store.credentials.listQuota(),
+/**
+ * Everything the console draws per credential: breaker state, the newest quota
+ * reading, and what that reading implies.
+ *
+ * `burn` is derived rather than stored, over rows this call already loads. It
+ * costs no sample lookup, which is what lets the Overview rack, the Accounts
+ * table, and `omni status` all read the estimate from a query they were making
+ * anyway.
+ */
+export async function credentialHealth(deps: {
+  store: Store;
+  now: () => number;
+}): Promise<{ health: CredentialHealth[]; quota: QuotaWindow[]; burn: BurnEstimate[] }> {
+  const [health, quota, settings] = await Promise.all([
+    deps.store.credentials.listHealth(),
+    deps.store.credentials.listQuota(),
+    deps.store.config.getSettings(),
   ]);
-  return { health, quota };
+  const burn = await burnEstimates(deps, quota, settings.quotaPollIntervalMs);
+  return { health, quota, burn };
 }
 
 export type CredentialStatus = {

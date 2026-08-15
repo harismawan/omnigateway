@@ -16,6 +16,7 @@ import {
   putModel,
   putSettings,
   queryUsage,
+  quotaHistory,
   readConsole,
   recentLogs,
   removeCredential,
@@ -161,7 +162,25 @@ export function adminRoutes(deps: AdminDeps) {
 
       .get("/api/credentials/health", async ({ request }) => {
         await requireAdmin(request, deps.admin);
-        return credentialHealth(deps.store);
+        return credentialHealth(deps);
+      })
+
+      /**
+       * Retained quota readings, for the one surface that charts them.
+       *
+       * Samples only: the burn estimate rides `/api/credentials/health`, which
+       * every board already loads, and is not repeated here. Clamping the span
+       * to the retention window is `@omni/control`'s rule, not this handler's.
+       */
+      .get("/api/credentials/quota/history", async ({ request, query }) => {
+        await requireAdmin(request, deps.admin);
+        return {
+          samples: await quotaHistory(deps, {
+            since: query.since,
+            until: query.until,
+            credentialId: query.credentialId,
+          }),
+        };
       })
 
       .patch("/api/credentials/:id", async ({ request, params }) => {

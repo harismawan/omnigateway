@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
+import type { Store } from "@omni/store";
 import {
   memoryStore,
   requestLog,
@@ -13,11 +14,20 @@ import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
 const NOW = 1_000_000;
 const SESSION_TTL_MS = 60_000;
 
-type HarnessOptions = { configured?: boolean; console?: AdminDeps["console"] };
+type HarnessOptions = {
+  configured?: boolean;
+  console?: AdminDeps["console"];
+  /** For routes whose spans are measured back from the clock. */
+  now?: number;
+};
 
-async function harness({ configured = true, console: consoleDeps }: HarnessOptions = {}) {
+async function harness({
+  configured = true,
+  console: consoleDeps,
+  now = NOW,
+}: HarnessOptions = {}) {
   const store = await memoryStore();
-  const admin = createAdminAuth(store, { now: () => NOW, sessionTtlMs: SESSION_TTL_MS });
+  const admin = createAdminAuth(store, { now: () => now, sessionTtlMs: SESSION_TTL_MS });
 
   let cookie = "";
   if (configured) {
@@ -31,7 +41,7 @@ async function harness({ configured = true, console: consoleDeps }: HarnessOptio
     store,
     admin,
     baseUrl: "http://localhost:9000",
-    now: () => NOW,
+    now: () => now,
     sessionTtlMs: SESSION_TTL_MS,
     ...(consoleDeps === undefined ? {} : { console: consoleDeps }),
   });
@@ -184,6 +194,7 @@ test("every data route requires a session", async () => {
   for (const path of [
     "/api/credentials",
     "/api/credentials/health",
+    "/api/credentials/quota/history",
     "/api/models",
     "/api/keys",
     "/api/settings",
@@ -533,6 +544,109 @@ test("credential health returns the health and quota rows the dashboard renders"
     used: 250,
     limit: 1_000,
   });
+});
+
+test("credential health carries the burn estimate beside the reading", async () => {
+  const { store, call } = await harness();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await store.credentials.saveQuota([
+    {
+      credentialId: "c1",
+      windowType: "fiveHour",
+      startsAt: NOW,
+      used: 100,
+      limit: 1_000,
+      // Two hours into a five-hour window.
+      resetsAt: NOW + 3 * 3_600_000,
+      observedAt: NOW,
+      windowMs: null,
+    },
+  ]);
+
+  const body = (await (await call("GET", "/api/credentials/health")).json()) as {
+    quota: unknown[];
+    burn: Array<{
+      credentialId: string;
+      windowType: string;
+      windowStartsAt: number | null;
+      ratePerHour: number | null;
+      exhaustsAt: number | null;
+      survives: boolean | null;
+      gatewayRatePerHour: number | null;
+      stale: boolean;
+    }>;
+  };
+
+  expect(body.quota).toHaveLength(1);
+  expect(body.burn).toEqual([
+    {
+      credentialId: "c1",
+      windowType: "fiveHour",
+      windowStartsAt: NOW - 2 * 3_600_000,
+      ratePerHour: 50,
+      exhaustsAt: NOW + 18 * 3_600_000,
+      survives: true,
+      gatewayRatePerHour: 0,
+      stale: false,
+    },
+  ]);
+});
+
+/** A clock far enough from the epoch that a span may reach backwards. */
+const CLOCK = 1_700_000_000_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+async function reading(store: Store, credentialId: string, observedAt: number, used: number) {
+  await store.credentials.saveQuota([
+    {
+      credentialId,
+      windowType: "fiveHour",
+      startsAt: observedAt,
+      used,
+      limit: 100,
+      resetsAt: observedAt + 3_600_000,
+      observedAt,
+      windowMs: null,
+    },
+  ]);
+}
+
+test("quota history returns samples for the requested span and credential", async () => {
+  const { store, call } = await harness({ now: CLOCK });
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await seedCredential(store, { id: "c2", provider: "anthropic" });
+  await reading(store, "c1", CLOCK - 7_200_000, 10);
+  await reading(store, "c1", CLOCK - 3_600_000, 20);
+  await reading(store, "c2", CLOCK - 3_600_000, 30);
+
+  const all = (await (await call("GET", "/api/credentials/quota/history?since=0")).json()) as {
+    samples: Array<{ credentialId: string; used: number; observedAt: number }>;
+  };
+  expect(all.samples.map((s) => s.used).sort()).toEqual([10, 20, 30]);
+
+  const one = (await (
+    await call("GET", "/api/credentials/quota/history?since=0&credentialId=c1")
+  ).json()) as { samples: Array<{ credentialId: string; used: number }> };
+  expect(one.samples.map((s) => s.used)).toEqual([10, 20]);
+
+  const span = (await (
+    await call("GET", `/api/credentials/quota/history?since=${CLOCK - 3_600_000}&credentialId=c1`)
+  ).json()) as { samples: Array<{ used: number }> };
+  expect(span.samples.map((s) => s.used)).toEqual([20]);
+});
+
+test("quota history clamps a span reaching past the retention window", async () => {
+  const { store, call } = await harness({ now: CLOCK });
+  await store.config.putSettings({ logRetentionDays: 1 });
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await reading(store, "c1", CLOCK - 2 * DAY_MS, 10);
+  await reading(store, "c1", CLOCK - 3_600_000, 20);
+
+  const body = (await (
+    await call("GET", `/api/credentials/quota/history?since=${CLOCK - 30 * DAY_MS}`)
+  ).json()) as { samples: Array<{ used: number }> };
+
+  expect(body.samples.map((s) => s.used)).toEqual([20]);
 });
 
 test("credential health hides unexpected repository errors", async () => {

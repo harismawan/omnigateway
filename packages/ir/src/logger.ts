@@ -44,6 +44,8 @@ export type LogFields = {
   count?: number | undefined;
   rawCount?: number | undefined;
   dailyCount?: number | undefined;
+  /** Retained quota readings swept. A row count, and nothing about whose. */
+  quotaSampleCount?: number | undefined;
   host?: string | undefined;
   port?: number | undefined;
   path?: string | undefined;
@@ -82,6 +84,7 @@ const FIELD_ORDER = [
   "count",
   "rawCount",
   "dailyCount",
+  "quotaSampleCount",
   "host",
   "port",
   "path",

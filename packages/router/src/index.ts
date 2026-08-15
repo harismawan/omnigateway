@@ -115,7 +115,7 @@ export function rank(input: RankInput): RankResult {
 
 export { blankHealth, PENALTY, type Penalty, recordFailure, recordSuccess } from "./breaker.ts";
 export { eligible, type Pair, requiredCapabilities } from "./filters.ts";
-export { QUOTA_FLOOR, quotaHeadroom, UNKNOWN_QUOTA } from "./quota.ts";
+export { QUOTA_FLOOR, quotaHeadroom, quotaStaleAfterMs, UNKNOWN_QUOTA } from "./quota.ts";
 export { resolveModel } from "./resolve.ts";
 export { buildSnapshot, healthKey } from "./snapshot.ts";
 export type { Candidate, Excluded, RankInput, RankResult, Snapshot } from "./types.ts";

@@ -16,15 +16,21 @@ export const ROLLUP_RETENTION_DAYS = 400;
  * Deletes request logs past the configured retention window, and rollup rows
  * past the far longer one. The rollup is what survives to answer "last year",
  * so it is deliberately not governed by `logRetentionDays`.
+ *
+ * Retained quota samples go on the raw horizon rather than the rollup's: a
+ * sample describes one moment of one window, and nothing rolls it up into a
+ * cheaper form worth keeping for a year.
  */
 export async function pruneLogs(
   store: Store,
   now: number,
-): Promise<{ raw: number; daily: number }> {
+): Promise<{ raw: number; daily: number; quotaSamples: number }> {
   const settings = await store.config.getSettings();
-  const raw = await store.usage.prune(now - settings.logRetentionDays * DAY_MS);
+  const rawHorizon = now - settings.logRetentionDays * DAY_MS;
+  const raw = await store.usage.prune(rawHorizon);
   const daily = await store.usage.pruneDaily(now - ROLLUP_RETENTION_DAYS * DAY_MS);
-  return { raw, daily };
+  const quotaSamples = await store.credentials.pruneQuotaSamples(rawHorizon);
+  return { raw, daily, quotaSamples };
 }
 
 export type MaintenanceDeps = { store: Store; now: () => number; logger?: Logger };
@@ -34,8 +40,12 @@ export function startMaintenance(deps: MaintenanceDeps): () => void {
   const logger = deps.logger ?? noopLogger;
   const timer = setInterval(() => {
     void pruneLogs(deps.store, deps.now())
-      .then(({ raw, daily }) =>
-        logger.debug("request logs pruned", { rawCount: raw, dailyCount: daily }),
+      .then(({ raw, daily, quotaSamples }) =>
+        logger.debug("request logs pruned", {
+          rawCount: raw,
+          dailyCount: daily,
+          quotaSampleCount: quotaSamples,
+        }),
       )
       .catch((error: unknown) => {
         logger.error("log pruning failed", {

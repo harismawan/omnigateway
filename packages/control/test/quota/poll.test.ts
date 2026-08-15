@@ -3,8 +3,8 @@ import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { CredentialSecrets, Store, UsageSecrets } from "@omni/store";
 import { memoryStore, seedCredential } from "@omni/testkit";
-import type { OAuthProvider, UsageReport } from "../src/oauth/types.ts";
-import { poll, probe, RATE_LIMIT_COOLDOWN_MS, resetQuotaCooldowns } from "../src/quota.ts";
+import type { OAuthProvider, UsageReport } from "../../src/oauth/types.ts";
+import { poll, probe, RATE_LIMIT_COOLDOWN_MS, resetQuotaCooldowns } from "../../src/quota/poll.ts";
 
 const NOW = 1_000_000;
 
