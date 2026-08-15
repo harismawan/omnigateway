@@ -8,7 +8,15 @@ import { Button, IconButton } from "../../ui/Button.tsx";
 import { Input, NumberInput, Select } from "../../ui/Field.tsx";
 import { Legend, Row, Spacer, Stack } from "../../ui/primitives.ts";
 import { Toggle } from "../../ui/Toggle.tsx";
-import { catalogPrices, catalogTokenLimits, retargetDraft, type TargetDraft } from "./draft.ts";
+import {
+  catalogPrices,
+  catalogTokenLimits,
+  type HeldAuths,
+  reachableChoices,
+  retargetDraft,
+  type TargetDraft,
+  unreachableNote,
+} from "./draft.ts";
 
 const PROVIDER_IDS = Object.keys(PROVIDER_MODEL_CATALOG) as ProviderId[];
 
@@ -55,6 +63,13 @@ const Caps = styled(Row)`
   flex-wrap: wrap;
 `;
 
+/** Colour is state here, not decoration: nothing connected can serve this. */
+const Unreachable = styled.p`
+  font-size: 11.5px;
+  color: ${({ theme }) => theme.color.down};
+  margin: 0;
+`;
+
 const Cap = styled.label`
   display: flex;
   align-items: center;
@@ -69,6 +84,13 @@ export type TargetEditorProps = {
   onRemove: () => void;
   removable: boolean;
   endpoints: Array<{ id: string; label: string }>;
+  /**
+   * Which ways in each provider has here. Kilo splits its catalog by backend —
+   * the free tier and the `kilo-auto/*` routers answer an API key and not a
+   * subscription token — so what the operator can pick depends on which
+   * accounts are connected, not on the catalog alone.
+   */
+  held: HeldAuths;
 };
 
 /**
@@ -83,9 +105,12 @@ export function TargetEditor({
   onRemove,
   removable,
   endpoints,
+  held,
 }: TargetEditorProps) {
   const listId = useId();
   const catalog = PROVIDER_MODEL_CATALOG[target.provider];
+  const choices = reachableChoices(target.provider, held);
+  const unreachable = unreachableNote(target.provider, target.model, held);
 
   const set = <K extends keyof TargetDraft>(key: K, value: TargetDraft[K]) => {
     onChange({ ...target, [key]: value });
@@ -177,12 +202,13 @@ export function TargetEditor({
             onChange={(event) => retarget({ provider: target.provider, model: event.target.value })}
           />
           <datalist id={`${listId}-catalog`}>
-            {catalog.models.map((choice) => (
+            {choices.map((choice) => (
               <option key={choice.id} value={choice.id}>
                 {choice.label}
               </option>
             ))}
           </datalist>
+          {unreachable === null ? null : <Unreachable role="note">{unreachable}</Unreachable>}
         </Cell>
 
         <Cell>

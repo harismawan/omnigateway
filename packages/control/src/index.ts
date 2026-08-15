@@ -61,10 +61,12 @@ export { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
 export { createRefresher, type Refresher } from "./oauth/refresh.ts";
 export type {
   AuthorizeStart,
+  DeviceOAuthProvider,
   FlowResult,
   OAuthDeps,
   OAuthProvider,
   PendingFlow,
+  PkceOAuthProvider,
   UsageReport,
 } from "./oauth/types.ts";
 export { type BurnEstimate, type BurnInput, burnEstimates, burnFor } from "./quota/burn.ts";

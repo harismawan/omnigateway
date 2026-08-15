@@ -1,4 +1,4 @@
-import type { ErrorCode, ProviderId } from "@omni/ir";
+import { type ErrorCode, GatewayError, type ProviderId } from "@omni/ir";
 import {
   type ClientProfile,
   type HeaderPair,
@@ -7,6 +7,36 @@ import {
   orderHeaders,
 } from "@omni/providers";
 import type { CredentialSecrets, UsageSecrets, WindowType } from "@omni/store";
+
+/**
+ * Marks the one error a device flow raises that is not a failure.
+ *
+ * A poll that finds the operator has not approved yet has to be told apart
+ * from a poll that failed, and the difference travels back through a rejected
+ * promise. The marker is a property rather than a subclass because it has to
+ * survive `GatewayError`'s own construction and be readable by a caller that
+ * only imports this module.
+ *
+ * Lives here rather than in one provider's file because every device flow needs
+ * it: kimi reads it off an OAuth `error` code, kilo off an HTTP status.
+ */
+const PENDING_MARKER = "__omni_authorization_pending";
+
+type MarkedPendingError = GatewayError & { [PENDING_MARKER]?: boolean };
+
+export function isAuthorizationPending(error: unknown): boolean {
+  return error instanceof GatewayError && (error as MarkedPendingError)[PENDING_MARKER] === true;
+}
+
+/** A "keep polling" rejection. `reason` is an identifier, never a body. */
+export function pendingError(reason: string): GatewayError {
+  const error = new GatewayError(
+    "AUTH",
+    `authorization not yet complete: ${reason}`,
+  ) as MarkedPendingError;
+  error[PENDING_MARKER] = true;
+  return error;
+}
 
 /** Injected so tests never touch the network or the clock. */
 export type OAuthDeps = {
@@ -74,9 +104,8 @@ export type UsageWindowReport = {
 
 export type UsageReport = { windows: UsageWindowReport[] };
 
-export type OAuthProvider = {
+type OAuthProviderBase = {
   readonly id: ProviderId;
-  readonly kind: "pkce" | "device";
   /** Whether the operator can paste a code by hand instead of using a redirect. */
   readonly supportsManualPaste: boolean;
 
@@ -89,12 +118,6 @@ export type OAuthProvider = {
    * Providers whose endpoints are compiled-in ignore `deps` and stay synchronous.
    */
   start(opts: { redirectUri: string }, deps: OAuthDeps): AuthorizeStart | Promise<AuthorizeStart>;
-
-  /**
-   * Device flows only: requests a device code before the operator is shown
-   * anything. PKCE providers leave this undefined and use `start` alone.
-   */
-  begin?(opts: { deviceId: string }, deps: OAuthDeps): Promise<AuthorizeStart>;
 
   /** PKCE: exchange an authorization code. Device: poll once for a token. */
   exchange(input: { code: string; pending: PendingFlow }, deps: OAuthDeps): Promise<FlowResult>;
@@ -126,6 +149,47 @@ export type OAuthProvider = {
     providerData: Record<string, unknown>,
   ): Promise<UsageReport | null>;
 };
+
+/**
+ * A redirect flow. `start` is the whole of the start: there is nothing to mint
+ * before the operator is sent to the browser, and no device identity at all.
+ */
+export type PkceOAuthProvider = OAuthProviderBase & {
+  readonly kind: "pkce";
+};
+
+/**
+ * A device-code flow: `start` prepares whatever the provider needs, `begin`
+ * asks for the code the operator will approve.
+ */
+export type DeviceOAuthProvider = OAuthProviderBase & {
+  readonly kind: "device";
+
+  /**
+   * Whether `begin` cannot work without the device identity `start` minted.
+   *
+   * Declared rather than inferred because the two current device flows differ
+   * and nothing in their shapes says which is which: Kimi ties a session to a
+   * device fingerprint and sends it on every later call, while Kilo identifies
+   * an editor and has no per-machine identity to mint. `deviceIdFrom` in
+   * `connect.ts` reads this and refuses to call `begin` with a blank id when it
+   * is `true` — a provider that needs one and silently receives `""` sends it
+   * upstream, where it comes back as an opaque provider-side auth failure
+   * rather than as the internal error it is.
+   *
+   * Required, and required on this variant alone: a new device provider cannot
+   * compile without answering, and a PKCE provider is never asked.
+   */
+  readonly needsDeviceId: boolean;
+
+  /**
+   * Requests a device code before the operator is shown anything. Handed the
+   * device id `start` minted, or `""` when `needsDeviceId` is false.
+   */
+  begin(opts: { deviceId: string }, deps: OAuthDeps): Promise<AuthorizeStart>;
+};
+
+export type OAuthProvider = PkceOAuthProvider | DeviceOAuthProvider;
 
 /** Sent by every token call. Arguments are ordered by the provider's profile. */
 export async function postJson(
@@ -169,25 +233,22 @@ export async function postJson(
 }
 
 /**
- * Reads an account-level JSON endpoint with a bearer token.
- *
- * Same client identity as inference and the token endpoints: a process that
- * authenticates as one client and then reads its account as another is a
- * louder signal than either alone. The timeout is short because nothing on the
- * request path waits for this — a slow probe should be abandoned, not retried.
+ * The GET both readers share. `authHeaders` is the whole difference between
+ * them, so neither can drift from the other's timeout or parsing.
  */
-export async function getJson(
+async function sendGet(
   deps: OAuthDeps,
   provider: ProviderId,
   url: string,
   profile: ClientProfile,
-  opts: { accessToken: string; extraHeaders?: readonly HeaderPair[] },
+  authHeaders: readonly HeaderPair[],
+  extraHeaders: readonly HeaderPair[],
 ): Promise<{ status: number; parsed: unknown }> {
   const headers = orderHeaders(
     mergeHeaders(profile.headers, [
-      ["Authorization", `Bearer ${opts.accessToken}`],
+      ...authHeaders,
       ["Accept", "application/json"],
-      ...(opts.extraHeaders ?? []),
+      ...extraHeaders,
     ]),
     profile.order,
   );
@@ -209,6 +270,58 @@ export async function getJson(
     // An HTML error page is a real answer; the caller falls back to the status.
   }
   return { status: res.status, parsed };
+}
+
+/**
+ * Reads an account-level JSON endpoint with a bearer token.
+ *
+ * Same client identity as inference and the token endpoints: a process that
+ * authenticates as one client and then reads its account as another is a
+ * louder signal than either alone. The timeout is short because nothing on the
+ * request path waits for this — a slow probe should be abandoned, not retried.
+ *
+ * `accessToken` is `string`, not `string | null`, and that is the point. Every
+ * `usage()` probe reads a `UsageSecrets` whose token is nullable, so the
+ * compiler makes each one say what it does about a credential with no token
+ * before it can call this. Widen it and a probe that lost its guard would go
+ * out unauthenticated, read the 401 as "no usage data", and leave the account's
+ * quota reading unknown forever with nothing logged. Use
+ * `getJsonUnauthenticated` where sending nothing is the intent.
+ */
+export function getJson(
+  deps: OAuthDeps,
+  provider: ProviderId,
+  url: string,
+  profile: ClientProfile,
+  opts: { accessToken: string; extraHeaders?: readonly HeaderPair[] },
+): Promise<{ status: number; parsed: unknown }> {
+  return sendGet(
+    deps,
+    provider,
+    url,
+    profile,
+    [["Authorization", `Bearer ${opts.accessToken}`]],
+    opts.extraHeaders ?? [],
+  );
+}
+
+/**
+ * Reads a JSON endpoint with no credential, deliberately.
+ *
+ * Named rather than expressed as a null token so the absence is a word at the
+ * call site and a greppable one. Kilo's device-code poll is the case: the token
+ * is what the call returns, so there is nothing yet to authenticate it with,
+ * and an empty bearer would be a credential claim rather than the absence of
+ * one. Never use this for a call that has a token available.
+ */
+export function getJsonUnauthenticated(
+  deps: OAuthDeps,
+  provider: ProviderId,
+  url: string,
+  profile: ClientProfile,
+  opts?: { extraHeaders?: readonly HeaderPair[] },
+): Promise<{ status: number; parsed: unknown }> {
+  return sendGet(deps, provider, url, profile, [], opts?.extraHeaders ?? []);
 }
 
 /**

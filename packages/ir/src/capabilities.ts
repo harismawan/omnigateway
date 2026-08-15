@@ -24,6 +24,9 @@ export const ANTHROPIC_NATIVE_TOOLS: Readonly<Record<ProviderId, boolean>> = {
   anthropic: true,
   openai: false,
   kimi: false,
+  // Kilo speaks the OpenAI chat completions wire even for the Anthropic models
+  // it fronts, so an Anthropic-defined tool or native block excludes it.
+  kilo: false,
   grok: false,
   custom: false,
 };
@@ -41,6 +44,12 @@ export const PROVIDER_CAPABILITIES: Readonly<Record<ProviderId, ProviderCapabili
   anthropic: { tools: true, images: true, reasoning: true },
   openai: { tools: true, images: true, reasoning: true },
   kimi: { tools: true, images: false, reasoning: false },
+  // Kilo fronts Claude, GPT and Gemini, all of which accept images and emit
+  // reasoning. The same argument recorded against grok below applies: the
+  // router drops a target whose provider lacks `images` from any request
+  // carrying an image block, so an under-claim makes kilo targets vanish the
+  // moment a client pastes a screenshot.
+  kilo: { tools: true, images: true, reasoning: true },
   // Every current xAI text model is documented `text, image -> text`. Claiming
   // `images: false` would not be the safe direction: the router drops a target
   // whose provider lacks `images` from any request carrying an image block, so

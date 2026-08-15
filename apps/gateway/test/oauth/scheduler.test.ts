@@ -180,3 +180,27 @@ test("stopping the scheduler leaves no timer behind", async () => {
   stop();
   expect(true).toBe(true);
 });
+
+test("a kilo credential is skipped rather than read as expired long ago", async () => {
+  // Kilo issues a bare token: no expiry, no refresh token. A sweep that read
+  // the null expiry as "already past" would hammer a refresh that can only
+  // throw AUTH, and the refresher disables the credential on exactly that.
+  const store = await memoryStore();
+  await seedCredential(store, {
+    id: "kilo1",
+    provider: "kilo",
+    expiresAt: null,
+    refreshToken: null,
+  });
+
+  const refresh = async (): Promise<CredentialSecrets> => {
+    throw new Error("the scheduler reached the refresher for a credential that cannot expire");
+  };
+
+  expect(due(await store.credentials.list(), NOW).map((c) => c.id)).toEqual([]);
+  expect(await sweep({ store, refresh, now: () => NOW })).toBe(0);
+
+  const after = await store.credentials.get("kilo1");
+  expect(after?.enabled).toBe(true);
+  expect(after?.disabledReason).toBeNull();
+});

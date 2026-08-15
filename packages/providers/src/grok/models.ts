@@ -28,6 +28,9 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  */
 export const GROK_MODELS: ProviderModelCatalogEntry = {
   defaultModel: "grok-4.6",
+  // An xAI console key works as a bearer against the same API the OAuth
+  // credential reaches.
+  authTypes: ["oauth", "apiKey"],
   models: [
     {
       id: "grok-4.6",

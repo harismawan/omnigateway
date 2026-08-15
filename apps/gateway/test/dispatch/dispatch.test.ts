@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import { buildSnapshot, healthKey } from "@omni/router";
-import type { Store } from "@omni/store";
+import type { CredentialSecrets, Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
 import { captureLogger } from "@omni/testkit";
 import { dispatch } from "../../src/dispatch/index.ts";
@@ -1269,4 +1269,63 @@ test("failover counts the credential it moves to, and frees it after", async () 
   ]);
   expect(registry.counts().size).toBe(0);
   store.close();
+});
+
+test("a credential that cannot expire is served without reaching the refresher", async () => {
+  // Kilo credentials carry `expiresAt: null` and no refresh token. Handing one
+  // to the refresher would throw AUTH on the null refresh token before any
+  // provider was consulted, disabling a perfectly good credential.
+  const store = await createStore({
+    path: ":memory:",
+    encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
+  });
+  await store.credentials.create({
+    id: "k1",
+    provider: "kilo",
+    label: "k1",
+    authType: "oauth",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: "test-token-kilo",
+    refreshToken: null,
+    apiKey: null,
+    idToken: null,
+  });
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "kilo",
+        model: "anthropic/claude-sonnet-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 2, output: 10 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const adapter = stubAdapter(() => textStream("hello"));
+  const configured = {
+    ...deps(store, adapter),
+    adapters: { kilo: adapter },
+    refresh: async (): Promise<CredentialSecrets> => {
+      throw new Error("dispatch reached the refresher for a credential that cannot expire");
+    },
+  };
+
+  const events = await drain(
+    (await dispatch(req, configured, new AbortController().signal, "req_test")).events,
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "end" });
+  expect(adapter.calls).toEqual(["test-token-kilo"]);
 });

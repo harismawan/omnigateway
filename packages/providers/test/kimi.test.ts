@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { ChatRequest, StreamEvent } from "@omni/ir";
+import { type ChatRequest, collect as fold, type StreamEvent } from "@omni/ir";
 import type { HttpRequest } from "../src/index.ts";
 import { decodeChat } from "../src/kimi/decode.ts";
 import { kimiAdapter } from "../src/kimi/index.ts";
@@ -21,6 +21,33 @@ async function collect(g: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
   const out: StreamEvent[] = [];
   for await (const e of g) out.push(e);
   return out;
+}
+
+/**
+ * Block open/close events in the order they were emitted.
+ *
+ * A count of starts and ends survives an overlap unchanged, so the order is
+ * what has to be asserted: the Anthropic egress reproduces this sequence
+ * verbatim as content_block_start / content_block_stop.
+ */
+function blockSpans(events: readonly StreamEvent[]): string[] {
+  return events.flatMap((e) =>
+    e.type === "blockStart"
+      ? [`open ${e.index}`]
+      : e.type === "blockEnd"
+        ? [`close ${e.index}`]
+        : [],
+  );
+}
+
+/** Chunk payloads as an SSE message stream; the string "[DONE]" passes through. */
+function stream(...payloads: unknown[]): AsyncGenerator<SseMessage> {
+  return msgs(
+    ...payloads.map((p) => ({
+      event: "message",
+      data: p === "[DONE]" ? "[DONE]" : JSON.stringify(p),
+    })),
+  );
 }
 
 test("collapses single text blocks to a plain string content", () => {
@@ -260,7 +287,14 @@ test("OAuth inference uses the Kimi Coding API", async () => {
 });
 
 test("the registry exposes every provider", () => {
-  expect(Object.keys(ADAPTERS).sort()).toEqual(["anthropic", "custom", "grok", "kimi", "openai"]);
+  expect(Object.keys(ADAPTERS).sort()).toEqual([
+    "anthropic",
+    "custom",
+    "grok",
+    "kilo",
+    "kimi",
+    "openai",
+  ]);
   expect(ADAPTERS.kimi.capabilities.images).toBe(false);
   expect(ADAPTERS.anthropic.capabilities.reasoning).toBe(true);
 });
@@ -387,4 +421,139 @@ test("records that a 1m request could not be honoured here", () => {
 test("records nothing when no 1m request was made", () => {
   const { degradations } = toChatWire(base, "k2");
   expect(degradations).not.toContain("kimi:context-1m-dropped");
+});
+
+// --- Block sequencing --------------------------------------------------------
+// Blocks must be strictly sequential: one closes before the next opens. The
+// Anthropic egress renders each blockStart/blockEnd as content_block_start /
+// content_block_stop in the order the decoder emitted them, and the official
+// Anthropic SDK reports every content_block_stop against the most recently
+// started block. An overlapping pair therefore makes a real client announce
+// the tool block twice and never announce the text block it followed.
+//
+// These assert the order, not the counts: a count of starts and ends is
+// identical whether or not the blocks overlap.
+
+test("text closes before a tool call opens", async () => {
+  const events = await collect(
+    decodeChat(
+      stream(
+        { id: "c1", model: "kimi-k2", choices: [{ delta: { content: "Let me check." } }] },
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "t1", function: { name: "f", arguments: "{}" } }],
+              },
+            },
+          ],
+        },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+        "[DONE]",
+      ),
+    ),
+  );
+
+  expect(blockSpans(events)).toEqual(["open 0", "close 0", "open 1", "close 1"]);
+});
+
+test("each tool call closes before the next one opens", async () => {
+  const events = await collect(
+    decodeChat(
+      stream(
+        { id: "c1", model: "kimi-k2", choices: [{ delta: { role: "assistant" } }] },
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "t1", function: { name: "f", arguments: "{}" } }],
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 1, id: "t2", function: { name: "g", arguments: "{}" } }],
+              },
+            },
+          ],
+        },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+        "[DONE]",
+      ),
+    ),
+  );
+
+  expect(blockSpans(events)).toEqual(["open 0", "close 0", "open 1", "close 1"]);
+});
+
+test("text after a tool call opens a second text block rather than reopening the first", async () => {
+  const events = await collect(
+    decodeChat(
+      stream(
+        { id: "c1", model: "kimi-k2", choices: [{ delta: { content: "Checking." } }] },
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "t1", function: { name: "f", arguments: "{}" } }],
+              },
+            },
+          ],
+        },
+        { choices: [{ delta: { content: "All done." } }] },
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+        "[DONE]",
+      ),
+    ),
+  );
+
+  expect(blockSpans(events)).toEqual([
+    "open 0",
+    "close 0",
+    "open 1",
+    "close 1",
+    "open 2",
+    "close 2",
+  ]);
+
+  // The non-streaming fold keeps the trailing text after the tool call it
+  // followed. The earlier shape merged it into the leading text block, which
+  // hoisted it in front of the call.
+  expect(fold(events).content).toEqual([
+    { type: "text", text: "Checking." },
+    { type: "toolUse", id: "t1", name: "f", input: {} },
+    { type: "text", text: "All done." },
+  ]);
+});
+
+test("content and tool_calls in one chunk still produce a flat sequence", async () => {
+  const events = await collect(
+    decodeChat(
+      stream(
+        {
+          id: "c1",
+          model: "kimi-k2",
+          choices: [
+            {
+              delta: {
+                content: "Calling now.",
+                tool_calls: [{ index: 0, id: "t1", function: { name: "f", arguments: '{"a":1}' } }],
+              },
+            },
+          ],
+        },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+        "[DONE]",
+      ),
+    ),
+  );
+
+  expect(blockSpans(events)).toEqual(["open 0", "close 0", "open 1", "close 1"]);
+  expect(fold(events).content).toEqual([
+    { type: "text", text: "Calling now." },
+    { type: "toolUse", id: "t1", name: "f", input: { a: 1 } },
+  ]);
 });

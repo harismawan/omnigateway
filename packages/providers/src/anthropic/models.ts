@@ -16,6 +16,8 @@ import type { ProviderModelCatalogEntry, ProviderReasoningForm } from "../catalo
  */
 export const ANTHROPIC_MODELS: ProviderModelCatalogEntry = {
   defaultModel: "claude-opus-5",
+  // A subscription token, or a console API key sent as `x-api-key`.
+  authTypes: ["oauth", "apiKey"],
   models: [
     {
       id: "claude-fable-5",

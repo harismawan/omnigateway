@@ -1,4 +1,4 @@
-import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
+import { type CatalogAuth, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import styled from "styled-components";
@@ -18,10 +18,34 @@ import { describeError } from "../../ui/States.tsx";
 
 const PROVIDER_IDS = Object.keys(PROVIDER_MODEL_CATALOG) as ProviderId[];
 
+/**
+ * How a provider can be connected, read from the catalog instead of decided
+ * here.
+ *
+ * This used to be `provider === "custom"`, which stood in for "the one that
+ * takes a key" and quietly meant "no other provider may". Every adapter
+ * authenticates with a raw key, so that stranded four providers whose operators
+ * hold a console key and no subscription.
+ */
+function waysIn(provider: ProviderId): readonly CatalogAuth[] {
+  return PROVIDER_MODEL_CATALOG[provider].authTypes;
+}
+
+/** Authorizing is the better path where a provider offers it, so it leads. */
+function defaultWayIn(provider: ProviderId): CatalogAuth {
+  return waysIn(provider).includes("oauth") ? "oauth" : "apiKey";
+}
+
+const AUTH_LABEL: Record<CatalogAuth, string> = {
+  oauth: "Authorize in the browser",
+  apiKey: "Paste an API key",
+};
+
 const PROVIDER_LABEL: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   kimi: "Kimi",
+  kilo: "Kilo",
   grok: "Grok",
   custom: "OpenAI Compatible",
 };
@@ -31,6 +55,7 @@ const PASTE_HINT: Record<ProviderId, string> = {
   anthropic: "Authorize in the browser, then paste the code Anthropic shows you.",
   openai: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
   kimi: "Enter the code on Kimi's device page. This dialog finishes on its own.",
+  kilo: "Approve the code on Kilo's device page. This dialog finishes on its own.",
   grok: "Authorize in the browser. When it redirects to 127.0.0.1, paste the whole URL.",
   custom: "Enter endpoint metadata and API key.",
 };
@@ -95,6 +120,7 @@ export function ConnectDialog({
   onConnected,
 }: ConnectDialogProps) {
   const [provider, setProvider] = useState<ProviderId>("anthropic");
+  const [authType, setAuthType] = useState<CatalogAuth>(defaultWayIn("anthropic"));
   const [label, setLabel] = useState("");
   const [flow, setFlow] = useState<ConnectStart | null>(null);
   const [code, setCode] = useState("");
@@ -175,16 +201,15 @@ export function ConnectDialog({
 
   const begin = () => {
     setProblem(null);
-    if (provider === "custom") {
+    if (authType === "apiKey") {
       createKey.mutate(
         {
           provider,
           apiKey,
-          endpointId,
-          endpointLabel,
-          origin,
-          protocol,
           label: label.trim() || undefined,
+          // Endpoint metadata is custom's alone: it addresses a server the
+          // operator runs. Every other provider's endpoint is the adapter's.
+          ...(provider === "custom" ? { endpointId, endpointLabel, origin, protocol } : {}),
         },
         {
           onSuccess: () => {
@@ -240,7 +265,7 @@ export function ConnectDialog({
               disabled={start.isPending || createKey.isPending}
               onClick={begin}
             >
-              {provider === "custom"
+              {authType === "apiKey"
                 ? createKey.isPending
                   ? "Adding…"
                   : "Add API key"
@@ -278,7 +303,14 @@ export function ConnectDialog({
                 <Select
                   {...props}
                   value={provider}
-                  onChange={(event) => setProvider(event.target.value as ProviderId)}
+                  onChange={(event) => {
+                    const next = event.target.value as ProviderId;
+                    setProvider(next);
+                    // The way in belongs to the provider. Carrying the old one
+                    // across would offer to store a key under a provider that
+                    // has no key path, or authorize one that has no flow.
+                    setAuthType(defaultWayIn(next));
+                  }}
                 >
                   {PROVIDER_IDS.map((id) => (
                     <option key={id} value={id}>
@@ -288,6 +320,23 @@ export function ConnectDialog({
                 </Select>
               )}
             </Field>
+            {waysIn(provider).length > 1 ? (
+              <Field label="How to connect">
+                {(props) => (
+                  <Select
+                    {...props}
+                    value={authType}
+                    onChange={(event) => setAuthType(event.target.value as CatalogAuth)}
+                  >
+                    {waysIn(provider).map((way) => (
+                      <option key={way} value={way}>
+                        {AUTH_LABEL[way]}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+            ) : null}
             {provider === "custom" ? (
               <>
                 {customEndpoints.length === 0 ? null : (
@@ -378,18 +427,20 @@ export function ConnectDialog({
                     </Select>
                   )}
                 </Field>
-                <Field label="API key">
-                  {(props) => (
-                    <Input
-                      {...props}
-                      type="password"
-                      value={apiKey}
-                      autoComplete="off"
-                      onChange={(event) => setApiKey(event.target.value)}
-                    />
-                  )}
-                </Field>
               </>
+            ) : null}
+            {authType === "apiKey" ? (
+              <Field label="API key">
+                {(props) => (
+                  <Input
+                    {...props}
+                    type="password"
+                    value={apiKey}
+                    autoComplete="off"
+                    onChange={(event) => setApiKey(event.target.value)}
+                  />
+                )}
+              </Field>
             ) : null}
             <Field
               label="Label"

@@ -1,11 +1,18 @@
 import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { Store } from "@omni/store";
-import { isAuthorizationPending } from "./oauth/kimi.ts";
 import { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
-import type { AuthorizeStart, OAuthProvider } from "./oauth/types.ts";
+import type { AuthorizeStart, DeviceOAuthProvider, OAuthProvider } from "./oauth/types.ts";
+import { isAuthorizationPending } from "./oauth/types.ts";
 
-const PROVIDER_IDS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "grok", "custom"];
+const PROVIDER_IDS: readonly ProviderId[] = [
+  "anthropic",
+  "openai",
+  "kimi",
+  "kilo",
+  "grok",
+  "custom",
+];
 const FLOW_TTL_MS = 600_000;
 
 /**
@@ -56,12 +63,30 @@ export function isProviderId(value: unknown): value is ProviderId {
   return typeof value === "string" && PROVIDER_IDS.includes(value as ProviderId);
 }
 
-function deviceIdFrom(start: AuthorizeStart): string {
+/**
+ * The device identity `start` minted, checked against what the provider said it
+ * needs.
+ *
+ * Not every device flow has one: Kimi ties a session to a device fingerprint it
+ * has to mint before asking for a code, while Kilo identifies an editor and has
+ * no per-machine identity at all. The difference is `needsDeviceId`, declared on
+ * the provider, so a new device flow has to answer the question at the point of
+ * writing rather than discovering the answer from upstream.
+ *
+ * `INTERNAL` because a provider that needs an identity and did not get one is a
+ * gateway bug, not something the operator did. Sending `""` upstream instead
+ * would come back as a provider-side auth failure, which reads as anything but
+ * a routing bug.
+ */
+function deviceIdFrom(provider: DeviceOAuthProvider, start: AuthorizeStart): string {
   const deviceId = start.pending.extra?.deviceId;
-  if (typeof deviceId !== "string" || deviceId.trim().length === 0) {
+  // Whitespace is not an identity: a blank string reaches the provider looking
+  // like a value and is refused as one.
+  if (typeof deviceId === "string" && deviceId.trim().length > 0) return deviceId;
+  if (provider.needsDeviceId) {
     throw new GatewayError("INTERNAL", "device authorization did not provide a device id");
   }
-  return deviceId;
+  return "";
 }
 
 /**
@@ -169,7 +194,7 @@ export function createConnectFlows(deps: ConnectDeps) {
       if (!isProviderId(providerInput)) {
         throw new GatewayError(
           "BAD_REQUEST",
-          "provider must be one of anthropic, openai, kimi, grok",
+          "provider must be one of anthropic, openai, kimi, kilo, grok",
         );
       }
       const label =
@@ -183,16 +208,11 @@ export function createConnectFlows(deps: ConnectDeps) {
       }
       const redirectUri = callbackUri(providerInput);
       const oauthDeps = { http: deps.http, now: deps.now };
+      const initial = await provider.start({ redirectUri }, oauthDeps);
       const start =
-        provider.begin === undefined
-          ? await provider.start({ redirectUri }, oauthDeps)
-          : await (async () => {
-              const initial = await provider.start({ redirectUri }, oauthDeps);
-              return provider.begin?.({ deviceId: deviceIdFrom(initial) }, oauthDeps);
-            })();
-      if (start === undefined) {
-        throw new GatewayError("INTERNAL", "device authorization could not start");
-      }
+        provider.kind === "device"
+          ? await provider.begin({ deviceId: deviceIdFrom(provider, initial) }, oauthDeps)
+          : initial;
 
       const flowId = flows.put({
         provider: providerInput,

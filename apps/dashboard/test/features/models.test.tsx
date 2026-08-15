@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
@@ -6,13 +7,16 @@ import {
   blankTarget,
   catalogPrices,
   catalogTokenLimits,
+  heldAuths,
   parseDraft,
+  reachableChoices,
   retargetDraft,
   toDraft,
+  unreachableNote,
 } from "../../src/features/models/draft.ts";
 import { ModelsBoard } from "../../src/features/models/ModelsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { model, settings } from "../helpers/fixtures.ts";
+import { credential, model, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 describe("catalog pricing defaults", () => {
@@ -219,6 +223,57 @@ describe("parseDraft", () => {
   });
 });
 
+describe("per-model auth", () => {
+  const oauthOnly = heldAuths([credential({ provider: "kilo", authType: "oauth" })]);
+
+  test("a gateway-only model is not offered to an OAuth-only installation", () => {
+    const ids = reachableChoices("kilo", oauthOnly).map((choice) => choice.id);
+    // Present, so the filter is not simply emptying the list.
+    expect(ids).toContain("anthropic/claude-sonnet-5");
+    expect(ids).not.toContain("kilo-auto/frontier");
+    expect(ids.some((id) => id.endsWith(":free"))).toBe(false);
+  });
+
+  test("connecting a key restores the whole list", () => {
+    const both = heldAuths([
+      credential({ id: "c1", provider: "kilo", authType: "oauth" }),
+      credential({ id: "c2", provider: "kilo", authType: "apiKey" }),
+    ]);
+    expect(reachableChoices("kilo", both).map((choice) => choice.id)).toEqual(
+      PROVIDER_MODEL_CATALOG.kilo.models.map((choice) => choice.id),
+    );
+  });
+
+  test("a provider with no account is unknown, not blocked", () => {
+    const other = heldAuths([credential({ provider: "anthropic", authType: "oauth" })]);
+    expect(reachableChoices("kilo", other).map((choice) => choice.id)).toContain(
+      "kilo-auto/frontier",
+    );
+  });
+
+  test("a disabled credential still counts, so one bad token hides nothing", () => {
+    const disabled = heldAuths([
+      credential({ id: "c1", provider: "kilo", authType: "oauth" }),
+      credential({ id: "c2", provider: "kilo", authType: "apiKey", enabled: false }),
+    ]);
+    expect(reachableChoices("kilo", disabled).map((choice) => choice.id)).toContain(
+      "kilo-auto/frontier",
+    );
+  });
+
+  test("the note names both sides, and says nothing about a reachable model", () => {
+    expect(unreachableNote("kilo", "anthropic/claude-sonnet-5", oauthOnly)).toBeNull();
+    // Unlisted is unknown, not forbidden: Kilo proxies several hundred models
+    // and the catalog curates a few dozen.
+    expect(unreachableNote("kilo", "qwen/qwen4-max", oauthOnly)).toBeNull();
+    expect(unreachableNote("kilo", "", oauthOnly)).toBeNull();
+    expect(unreachableNote("kilo", "kilo-auto/frontier", oauthOnly)).toBe(
+      "kilo serves this model to an API key only, and every kilo account here is OAuth. " +
+        "Requests routed here will fail.",
+    );
+  });
+});
+
 function stubModels(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
     "GET /api/models": () => ({ models: [model(), model({ id: "deep", strategy: "priority" })] }),
@@ -339,6 +394,43 @@ describe("ModelsBoard", () => {
       const put = stub.calls.find((call) => call.init?.method === "PUT");
       expect(JSON.parse(String(put?.init?.body)).targets).toHaveLength(2);
     });
+  });
+
+  test("the picker drops kilo models an OAuth-only account cannot reach", async () => {
+    const user = userEvent.setup();
+    stubModels({
+      "GET /api/credentials": () => ({
+        credentials: [credential({ id: "kilo-1", provider: "kilo", authType: "oauth" })],
+      }),
+    });
+    const { container } = renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    // Wait for the credentials query: the picker is unfiltered until it lands,
+    // so asserting before it would pass against the wrong list.
+    await waitFor(() => {
+      const options = container.querySelectorAll("datalist option");
+      expect([...options].some((option) => option.getAttribute("value") === "claude-opus-5")).toBe(
+        true,
+      );
+    });
+
+    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
+    const offered = [...container.querySelectorAll("datalist option")].map((option) =>
+      option.getAttribute("value"),
+    );
+    expect(offered).toContain("anthropic/claude-sonnet-5");
+    expect(offered).not.toContain("kilo-auto/frontier");
+    // No note yet: kilo's default model is served both ways, so the warning
+    // below is about the model and not about the provider.
+    expect(screen.queryByRole("note")).toBeNull();
+
+    const field = screen.getByLabelText("Provider model");
+    await user.clear(field);
+    await user.type(field, "kilo-auto/frontier");
+    expect((await screen.findByRole("note")).textContent).toContain(
+      "kilo serves this model to an API key only",
+    );
   });
 
   test("the last target cannot be removed", async () => {

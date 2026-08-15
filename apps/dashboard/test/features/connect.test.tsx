@@ -120,6 +120,116 @@ describe("ConnectDialog", () => {
     expect(polls).toBeGreaterThan(1);
   });
 
+  test("Kilo is offered and connects by device code, not by paste", async () => {
+    const user = userEvent.setup();
+    const onConnected = mock(() => {});
+    createFetchStub({
+      "POST /api/connect/start": () => deviceStart,
+      "POST /api/connect/poll": () => ({ status: "complete", id: "cred-kilo" }),
+    });
+    open(onConnected);
+
+    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
+    await user.click(screen.getByRole("button", { name: "Start authorization" }));
+
+    expect(await screen.findByRole("link", { name: "Open Kilo" })).toBeTruthy();
+    expect(
+      screen.getByText(
+        /Approve the code on Kilo's device page\. This dialog finishes on its own\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Authorization code")).toBeNull();
+    await waitFor(() => expect(onConnected).toHaveBeenCalled(), { timeout: 3_000 });
+  });
+
+  test("a provider that takes both ways in offers the choice, and defaults to authorizing", async () => {
+    const user = userEvent.setup();
+    const stub = createFetchStub({ "POST /api/connect/start": () => deviceStart });
+    open();
+
+    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
+
+    // The choice is offered, and nothing about the default changed: a provider
+    // that could always be authorized still authorizes on the first click.
+    expect(screen.getByLabelText("How to connect")).toBeTruthy();
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Start authorization" }));
+
+    await waitFor(() => {
+      const call = stub.calls.find((entry) => entry.url === "/api/connect/start");
+      expect(call?.init?.body).toBe(JSON.stringify({ provider: "kilo", label: "Kilo" }));
+    });
+  });
+
+  test("choosing the key for a provider that also has OAuth stores a key, not a flow", async () => {
+    const user = userEvent.setup();
+    const onConnected = mock(() => {});
+    const stub = createFetchStub({
+      "POST /api/credentials": () => ({ credential: { id: "cred-kilo" } }),
+    });
+    open(onConnected);
+
+    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
+    await user.selectOptions(screen.getByLabelText("How to connect"), "apiKey");
+    await user.type(await screen.findByLabelText("API key"), "sk-kilo-1");
+    await user.click(screen.getByRole("button", { name: "Add API key" }));
+
+    await waitFor(() => {
+      const call = stub.calls.find((entry) => entry.url === "/api/credentials");
+      expect(call?.init?.body).toBe(JSON.stringify({ provider: "kilo", apiKey: "sk-kilo-1" }));
+    });
+    await waitFor(() => expect(onConnected).toHaveBeenCalled());
+    // No flow was ever started: the key path must not also authorize.
+    expect(stub.calls.some((entry) => entry.url === "/api/connect/start")).toBe(false);
+  });
+
+  test("a key-only provider is not asked how to connect", async () => {
+    const user = userEvent.setup();
+    createFetchStub({});
+    open();
+
+    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+
+    // One way in means no question to ask; the form is the only thing there.
+    expect(screen.queryByLabelText("How to connect")).toBeNull();
+    expect(screen.getByLabelText("API key")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add API key" })).toBeTruthy();
+  });
+
+  test("the endpoint fields belong to custom, not to every key form", async () => {
+    const user = userEvent.setup();
+    createFetchStub({});
+    open();
+
+    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+    expect(screen.getByLabelText("Server origin")).toBeTruthy();
+
+    // A custom endpoint is reached by a URL the operator supplies. That is
+    // custom's own metadata, not something every key-bearing provider grew.
+    await user.selectOptions(screen.getByLabelText("Provider"), "kimi");
+    await user.selectOptions(screen.getByLabelText("How to connect"), "apiKey");
+    expect(await screen.findByLabelText("API key")).toBeTruthy();
+    expect(screen.queryByLabelText("Server origin")).toBeNull();
+    expect(screen.queryByLabelText("Endpoint ID")).toBeNull();
+  });
+
+  test("changing provider drops a key choice the new provider may not have", async () => {
+    const user = userEvent.setup();
+    createFetchStub({ "POST /api/connect/start": () => pkceStart });
+    open();
+
+    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
+    await user.selectOptions(screen.getByLabelText("How to connect"), "apiKey");
+    expect(await screen.findByLabelText("API key")).toBeTruthy();
+
+    await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
+
+    // Left as it was, the dialog would offer to store an API key under whatever
+    // the operator picked next, including a provider that has no key path.
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    expect(screen.getByRole("button", { name: "Start authorization" })).toBeTruthy();
+  });
+
   test("a rejected code is reported without losing the flow", async () => {
     const user = userEvent.setup();
     createFetchStub({

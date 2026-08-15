@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import styled from "styled-components";
+import { renderToStaticMarkup } from "react-dom/server";
+import styled, { ServerStyleSheet } from "styled-components";
 import {
   applyTheme,
   isThemeMode,
@@ -11,6 +13,7 @@ import {
   ThemeProvider,
   useTheme,
 } from "../../src/theme/ThemeProvider.tsx";
+import { PROVIDER_IDS, theme } from "../../src/theme/tokens.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 beforeEach(() => {
@@ -113,5 +116,39 @@ describe("styled-components theme", () => {
       </ThemeProvider>,
     );
     expect(screen.getByTestId("tokens").textContent).toMatch(/light|dark/);
+  });
+});
+
+describe("provider palette", () => {
+  test("the console's provider list is the catalog's, not a stale copy", () => {
+    // tokens.ts hand-rolls its own list because the theme cannot import the
+    // store's runtime types. Nothing makes the two agree, so a provider added
+    // to the catalog and forgotten here goes uncoloured; this is that check.
+    const listed: string[] = [...PROVIDER_IDS];
+    expect(listed.sort()).toEqual(Object.keys(PROVIDER_MODEL_CATALOG).sort());
+  });
+
+  test("every provider has both halves of its palette", () => {
+    // Collected off the server sheet rather than off the document: happy-dom
+    // never reflects what `createGlobalStyle` injects, so a DOM assertion here
+    // would read an empty string and pass no matter what the palette says.
+    const sheet = new ServerStyleSheet();
+    renderToStaticMarkup(
+      sheet.collectStyles(
+        <ThemeProvider>
+          <Probe />
+        </ThemeProvider>,
+      ),
+    );
+    const css = sheet.getStyleTags();
+    sheet.seal();
+
+    for (const id of PROVIDER_IDS) {
+      expect(theme.provider[id]).toBe(`var(--p-${id})`);
+      // Two declarations, one per palette. A pair that only got its light half
+      // repaints to nothing the moment the console is switched to dark, which
+      // no light-mode test would ever notice.
+      expect(css.match(new RegExp(`--p-${id}:`, "g"))).toHaveLength(2);
+    }
   });
 });

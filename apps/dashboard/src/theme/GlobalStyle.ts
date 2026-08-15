@@ -34,6 +34,13 @@ export const GlobalStyle = createGlobalStyle`
     --p-anthropic: oklch(0.56 0.13 45);
     --p-openai: oklch(0.5 0.09 190);
     --p-kimi: oklch(0.53 0.17 330);
+    /* Kilo takes the arc between openai and the accent: 224 is ~34deg from
+       openai and ~38 from the accent blue, and — the point — 106 from kimi.
+       Kimi and kilo are one letter apart and sit next to each other in every
+       list the console draws, so they are the one pair that must not also be
+       neighbours in hue. The other free arc, ~296, is 34 from kimi and would
+       have done the opposite. */
+    --p-kilo: oklch(0.52 0.14 224);
     /* xAI's own identity is achromatic, and the neutral slot is already
        custom's, so grok takes the widest free arc of the wheel instead: 125 is
        ~70deg from both anthropic and openai and ~145 from kimi, which is what
@@ -73,6 +80,7 @@ export const GlobalStyle = createGlobalStyle`
     --p-anthropic: oklch(0.74 0.12 48);
     --p-openai: oklch(0.76 0.1 190);
     --p-kimi: oklch(0.72 0.16 330);
+    --p-kilo: oklch(0.74 0.14 224);
     --p-grok: oklch(0.74 0.14 125);
     --p-custom: oklch(0.72 0.03 258);
 

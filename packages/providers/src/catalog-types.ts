@@ -74,6 +74,13 @@ export type ProviderModelChoice = {
    */
   oauthLimits?: ProviderModelLimits;
   /**
+   * Which credential types can reach this model, where a provider does not
+   * serve the same catalog to both. Absent means both, which is the normal
+   * case — Kilo's free tier and its `kilo-auto/*` routers are gateway-only, so
+   * an OAuth credential cannot serve them.
+   */
+  auth?: readonly CatalogAuth[];
+  /**
    * The thinking wire form this model speaks. Absent means `"adaptive"`, which
    * is the current form and the one a newly published model uses; only a model
    * left behind on the fixed-budget API states it.
@@ -83,5 +90,22 @@ export type ProviderModelChoice = {
 
 export type ProviderModelCatalogEntry = {
   defaultModel: string;
+  /**
+   * Which kinds of credential the gateway can hold for this provider — the
+   * values a stored credential's `authType` may take.
+   *
+   * Deliberately here rather than derived from `models[].auth`. The two answer
+   * different questions: `auth` on a choice says which backend serves *that
+   * model* where a provider splits its catalog, and `custom` proves they are
+   * not the same fact — it lists no models at all and is nonetheless the one
+   * provider reachable by key alone. Deriving would have read that empty list
+   * as "no way in".
+   *
+   * Required, not optional, so a new provider has to state it. An `apiKey`
+   * entry here is a promise the console makes to an operator: it puts a key
+   * field in front of them. Claim it only where the adapter authenticates with
+   * a raw key.
+   */
+  authTypes: readonly CatalogAuth[];
   models: readonly ProviderModelChoice[];
 };
