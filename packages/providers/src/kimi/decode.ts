@@ -52,8 +52,6 @@ export async function* decodeChat(
   messages: AsyncGenerator<SseMessage> | AsyncIterable<SseMessage>,
 ): AsyncGenerator<StreamEvent, void, undefined> {
   let started = false;
-  let textOpen = false;
-  let textIndex: number | undefined;
   let done = false;
   let stopReason: StopReason = "endTurn";
   let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -61,6 +59,20 @@ export async function* decodeChat(
   // first — the API can stream a tool call with no accompanying text.
   const toolIndex = new Map<number, number>();
   let nextIndex = 0;
+  // At most one block is open at a time, and it closes before the next opens.
+  // An Anthropic-shaped egress renders these as content_block_start /
+  // content_block_stop pairs and reproduces their order verbatim, so a start
+  // arriving while another block is open is malformed on that wire: the
+  // official SDK reports every content_block_stop against the most recently
+  // started block, so an overlapping pair makes it announce the tool block
+  // twice and the text block never.
+  //
+  // The consequence for content order is that text arriving after a tool call
+  // opens a *second* text block rather than reopening the first. That is the
+  // truthful reading — the earlier shape silently hoisted trailing text in
+  // front of the tool call it followed.
+  let openKind: "text" | "tool" | undefined;
+  let openIndex = 0;
 
   for await (const msg of messages) {
     if (msg.data === "[DONE]") {
@@ -95,14 +107,15 @@ export async function* decodeChat(
     const delta = choice.delta ?? {};
 
     if (typeof delta.content === "string" && delta.content.length > 0) {
-      if (!textOpen) {
-        textOpen = true;
-        textIndex = nextIndex++;
-        yield { type: "blockStart", index: textIndex, block: { type: "text" } };
+      if (openKind !== "text") {
+        if (openKind !== undefined) yield { type: "blockEnd", index: openIndex };
+        openKind = "text";
+        openIndex = nextIndex++;
+        yield { type: "blockStart", index: openIndex, block: { type: "text" } };
       }
       yield {
         type: "blockDelta",
-        index: textIndex ?? 0,
+        index: openIndex,
         delta: { type: "text", text: delta.content },
       };
     }
@@ -111,8 +124,11 @@ export async function* decodeChat(
       const wireIndex: number = call.index ?? 0;
       let index = toolIndex.get(wireIndex);
       if (index === undefined) {
+        if (openKind !== undefined) yield { type: "blockEnd", index: openIndex };
         index = nextIndex++;
         toolIndex.set(wireIndex, index);
+        openKind = "tool";
+        openIndex = index;
         yield {
           type: "blockStart",
           index,
@@ -123,6 +139,12 @@ export async function* decodeChat(
           },
         };
       }
+      // Argument fragments for one call arrive contiguously on this wire, so a
+      // call stays open across the chunks that carry its own arguments and is
+      // closed by whatever opens next. A fragment for a call closed earlier is
+      // still emitted against its own index rather than reopening the block:
+      // both consumers accumulate by index, and splitting one JSON document
+      // across two blocks would hand the client arguments it cannot parse.
       const args = call.function?.arguments;
       if (typeof args === "string" && args.length > 0) {
         yield { type: "blockDelta", index, delta: { type: "toolJson", partial: args } };
@@ -137,8 +159,9 @@ export async function* decodeChat(
   // [DONE] is Kimi's transport-level success marker. A finish_reason carries
   // stop metadata but cannot certify that the stream arrived intact.
   if (done) {
-    if (textOpen) yield { type: "blockEnd", index: textIndex ?? 0 };
-    for (const index of toolIndex.values()) yield { type: "blockEnd", index };
+    // Only the last block is still open; every earlier one was closed by the
+    // block that superseded it.
+    if (openKind !== undefined) yield { type: "blockEnd", index: openIndex };
     yield { type: "end", stopReason, usage };
   } else {
     yield {

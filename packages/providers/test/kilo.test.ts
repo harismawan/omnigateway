@@ -775,12 +775,8 @@ test("reasoning that resumes after text opens a second block rather than reopeni
   // content_block_stop pairs, and a start that arrives while another block is
   // still open is malformed on that wire.
   //
-  // Scope, so the next reader does not over-read this: text and tool-call
-  // blocks still overlap each other, inherited from the kimi decoder this one
-  // was forked from. That is pre-existing and out of scope here; nothing on
-  // the reasoning path introduced it, and no thinking overlap can reach an
-  // Anthropic client anyway, since kilo's thinking is always unsigned and the
-  // egress suppresses it.
+  // The text/tool axis holds to the same rule; see the block-sequencing tests
+  // at the end of this file, which cover it directly.
   expect(blockSpans(events)).toEqual([
     "open 0",
     "close 0",
@@ -862,4 +858,176 @@ test("the registry serves kilo with its canonical capabilities", () => {
   // Kilo fronts Claude, GPT and Gemini: an under-claimed `images` would drop
   // every kilo target from a request carrying a screenshot.
   expect(ADAPTERS.kilo.capabilities).toEqual({ tools: true, images: true, reasoning: true });
+});
+
+// --- Block sequencing, text and tool calls ------------------------------------
+// The reasoning axis was made strictly sequential when this decoder was
+// written; the text/tool axis was inherited overlapping from the kimi decoder
+// this one was forked from and is fixed here. All three axes now share one
+// cursor: at most one block is open at a time.
+//
+// This matters because the Anthropic egress reproduces the decoder's order
+// verbatim as content_block_start / content_block_stop, and the official
+// Anthropic SDK reports every content_block_stop against the most recently
+// started block. Overlapping blocks therefore make a real client announce the
+// later block twice and never announce the earlier one.
+//
+// The assertions are on order, not counts: the number of starts and ends is
+// identical whether or not the blocks overlap.
+
+test("text closes before a tool call opens", async () => {
+  const { events } = await send({
+    credentials: apiKeyCredentials,
+    payloads: [
+      JSON.stringify({
+        id: "gen-t",
+        model: "m",
+        choices: [{ delta: { content: "Let me check." } }],
+      }),
+      JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, id: "c1", function: { name: "f", arguments: "{}" } }],
+            },
+          },
+        ],
+      }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+      "[DONE]",
+    ],
+  });
+
+  expect(blockSpans(events)).toEqual(["open 0", "close 0", "open 1", "close 1"]);
+});
+
+test("each tool call closes before the next one opens", async () => {
+  const { events } = await send({
+    credentials: apiKeyCredentials,
+    payloads: [
+      JSON.stringify({ id: "gen-t", model: "m", choices: [{ delta: { role: "assistant" } }] }),
+      JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, id: "c1", function: { name: "f", arguments: "{}" } }],
+            },
+          },
+        ],
+      }),
+      JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 1, id: "c2", function: { name: "g", arguments: "{}" } }],
+            },
+          },
+        ],
+      }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+      "[DONE]",
+    ],
+  });
+
+  expect(blockSpans(events)).toEqual(["open 0", "close 0", "open 1", "close 1"]);
+});
+
+test("text after a tool call opens a second text block rather than reopening the first", async () => {
+  const { events } = await send({
+    credentials: apiKeyCredentials,
+    payloads: [
+      JSON.stringify({ id: "gen-t", model: "m", choices: [{ delta: { content: "Checking." } }] }),
+      JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, id: "c1", function: { name: "f", arguments: "{}" } }],
+            },
+          },
+        ],
+      }),
+      JSON.stringify({ choices: [{ delta: { content: "All done." } }] }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+      "[DONE]",
+    ],
+  });
+
+  expect(blockSpans(events)).toEqual([
+    "open 0",
+    "close 0",
+    "open 1",
+    "close 1",
+    "open 2",
+    "close 2",
+  ]);
+
+  // The non-streaming fold keeps the trailing text after the call it followed.
+  expect(collectResponse(events).content).toEqual([
+    { type: "text", text: "Checking." },
+    { type: "toolUse", id: "c1", name: "f", input: {} },
+    { type: "text", text: "All done." },
+  ]);
+});
+
+test("reasoning, text and a tool call in one turn stay a flat sequence", async () => {
+  const { events } = await send({
+    credentials: apiKeyCredentials,
+    payloads: [
+      JSON.stringify({ id: "gen-t", model: "m", choices: [{ delta: { reasoning: "thinking" } }] }),
+      JSON.stringify({ choices: [{ delta: { content: "Calling now." } }] }),
+      JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, id: "c1", function: { name: "f", arguments: '{"a":1}' } }],
+            },
+          },
+        ],
+      }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+      "[DONE]",
+    ],
+  });
+
+  expect(blockSpans(events)).toEqual([
+    "open 0",
+    "close 0",
+    "open 1",
+    "close 1",
+    "open 2",
+    "close 2",
+  ]);
+  expect(collectResponse(events).content).toEqual([
+    { type: "thinking", text: "thinking" },
+    { type: "text", text: "Calling now." },
+    { type: "toolUse", id: "c1", name: "f", input: { a: 1 } },
+  ]);
+});
+
+test("content and tool_calls in one chunk still produce a flat sequence", async () => {
+  const { events } = await send({
+    credentials: apiKeyCredentials,
+    payloads: [
+      JSON.stringify({
+        id: "gen-t",
+        model: "m",
+        choices: [
+          {
+            delta: {
+              content: "Calling now.",
+              tool_calls: [{ index: 0, id: "c1", function: { name: "f", arguments: '{"a":1}' } }],
+            },
+          },
+        ],
+      }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+      "[DONE]",
+    ],
+  });
+
+  expect(blockSpans(events)).toEqual(["open 0", "close 0", "open 1", "close 1"]);
+  expect(collectResponse(events).content).toEqual([
+    { type: "text", text: "Calling now." },
+    { type: "toolUse", id: "c1", name: "f", input: { a: 1 } },
+  ]);
 });
