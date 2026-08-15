@@ -4,6 +4,7 @@ import type {
   Credential,
   CredentialHealth,
   DisabledReason,
+  QuotaSample,
   QuotaWindow,
   RequestLog,
   Settings,
@@ -29,6 +30,7 @@ export type {
   DisabledReason,
   ErrorCode,
   ProviderId,
+  QuotaSample,
   QuotaWindow,
   RequestLog,
   Settings,
@@ -46,7 +48,48 @@ export type StatusResponse = { configured: boolean; authenticated: boolean };
 
 export type CredentialsResponse = { credentials: Credential[] };
 
-export type CredentialHealthResponse = { health: CredentialHealth[]; quota: QuotaWindow[] };
+/**
+ * How fast one quota window is being spent, and whether it lasts.
+ *
+ * Mirrored rather than imported: the estimate is derived in `@omni/control`,
+ * which the console may not reach into, so this is a hand-kept copy of
+ * `BurnEstimate` that the route returns unchanged.
+ *
+ * Every estimate is null when `stale` is true — a reading nobody believes must
+ * not be dressed up as a number, so surfaces guard on the flag rather than on
+ * whether a figure happens to be present.
+ */
+export type BurnEstimate = {
+  credentialId: string;
+  windowType: QuotaWindow["windowType"];
+  /** Inferred as `resetsAt` minus the window's length. Null with no stated reset. */
+  windowStartsAt: number | null;
+  /** Provider units per hour, averaged across the window so far. */
+  ratePerHour: number | null;
+  /** When the window runs out at that rate, or null when it will not. */
+  exhaustsAt: number | null;
+  /** Whether the window outlives its own reset. Null only when suppressed. */
+  survives: boolean | null;
+  /** Tokens per hour this gateway can account for over the same span. */
+  gatewayRatePerHour: number | null;
+  stale: boolean;
+};
+
+export type CredentialHealthResponse = {
+  health: CredentialHealth[];
+  quota: QuotaWindow[];
+  burn: BurnEstimate[];
+};
+
+/** Both bounds are epoch milliseconds; the route clamps them to retention. */
+export type QuotaHistoryQuery = {
+  credentialId: string;
+  since: number;
+  until?: number;
+};
+
+/** Samples only. The estimate rides the health endpoint and is not repeated. */
+export type QuotaHistoryResponse = { samples: QuotaSample[] };
 
 export type CredentialPatch = {
   label?: string;

@@ -1,16 +1,22 @@
 import { describe, expect, test } from "bun:test";
+import { formatRelative } from "../../src/lib/format.ts";
 import {
   bucketLogs,
+  burnOf,
   credentialStatus,
   groupBy,
   isError,
   lampLabel,
   lampState,
   percentile,
+  quotaLegend,
+  quotaSegments,
   quotaUsage,
   summarize,
 } from "../../src/lib/vitals.ts";
-import { health, log, NOW, quota } from "../helpers/fixtures.ts";
+import { burn, health, log, NOW, quota, quotaSample } from "../helpers/fixtures.ts";
+
+const POLL_MS = 300_000;
 
 describe("isError", () => {
   test("counts a 4xx or 5xx status and any recorded error code", () => {
@@ -222,6 +228,137 @@ describe("quotaUsage", () => {
 
   test("never reports more than fully spent", () => {
     expect(quotaUsage([quota({ used: 5_000, limit: 1_000 })])[0]?.fraction).toBe(1);
+  });
+});
+
+describe("quotaLegend", () => {
+  test("names the estimate before the reset when the window will not survive", () => {
+    const legend = quotaLegend(quota(), NOW, POLL_MS, formatRelative, burn());
+
+    expect(legend).toBe("5h · empty ~30m · resets in 1h");
+  });
+
+  test("says a window already at its ceiling is empty now, not in some past hour", () => {
+    const legend = quotaLegend(
+      quota({ used: 1_000, limit: 1_000 }),
+      NOW,
+      POLL_MS,
+      formatRelative,
+      burn({ exhaustsAt: NOW - 600_000, survives: false }),
+    );
+
+    expect(legend).toBe("5h · empty now · resets in 1h");
+  });
+
+  test("keeps today's reset phrasing when the window survives", () => {
+    // "You will not run out" is what the reset time already says; a distant
+    // instant beside it would only invite arithmetic.
+    const legend = quotaLegend(
+      quota(),
+      NOW,
+      POLL_MS,
+      formatRelative,
+      burn({ survives: true, exhaustsAt: NOW + 86_400_000 }),
+    );
+
+    expect(legend).toBe("5h · resets in 1h");
+    expect(legend).not.toContain("empty");
+  });
+
+  test("prints no estimate when nothing can be compared to a reset", () => {
+    const legend = quotaLegend(
+      quota(),
+      NOW,
+      POLL_MS,
+      formatRelative,
+      burn({ survives: null, exhaustsAt: null }),
+    );
+
+    expect(legend).toBe("5h · resets in 1h");
+  });
+
+  test("suppression wins over the estimate on a stale reading", () => {
+    // The burn block deliberately still carries numbers: the guard is the
+    // staleness of the reading, not whether an ETA happens to be present.
+    const legend = quotaLegend(
+      quota({ observedAt: NOW - 3_600_000 }),
+      NOW,
+      POLL_MS,
+      formatRelative,
+      burn(),
+    );
+
+    expect(legend).toBe("5h · stale, read 1h ago");
+    expect(legend).not.toContain("empty");
+  });
+
+  test("suppression wins over the estimate when the server marked it stale", () => {
+    const legend = quotaLegend(quota(), NOW, POLL_MS, formatRelative, burn({ stale: true }));
+
+    expect(legend).toBe("5h · resets in 1h");
+    expect(legend).not.toContain("empty");
+  });
+
+  test("a never-observed window says so rather than carrying an estimate", () => {
+    const legend = quotaLegend(quota({ observedAt: 0 }), NOW, POLL_MS, formatRelative, burn());
+
+    expect(legend).toBe("5h · never observed");
+    expect(legend).not.toContain("empty");
+  });
+
+  test("reads as it did before when the gateway sent no estimate at all", () => {
+    expect(quotaLegend(quota(), NOW, POLL_MS, formatRelative, undefined)).toBe("5h · resets in 1h");
+    expect(quotaLegend(quota({ resetsAt: null }), NOW, POLL_MS, formatRelative, undefined)).toBe(
+      "5h",
+    );
+  });
+});
+
+describe("burnOf", () => {
+  test("finds the estimate for one window and reports nothing for the rest", () => {
+    const rows = [burn(), burn({ windowType: "weekly" })];
+
+    expect(burnOf(rows, "weekly")?.windowType).toBe("weekly");
+    expect(burnOf(rows, "daily")).toBeUndefined();
+  });
+});
+
+describe("quotaSegments", () => {
+  test("keeps one window's readings as a single series, oldest first", () => {
+    const segments = quotaSegments([
+      quotaSample({ observedAt: NOW - 1_000, used: 400 }),
+      quotaSample({ observedAt: NOW - 3_000, used: 100 }),
+    ]);
+
+    expect(segments).toHaveLength(1);
+    expect(segments[0]?.points.map((point) => point.at)).toEqual([NOW - 3_000, NOW - 1_000]);
+    expect(segments[0]?.points.map((point) => point.percent)).toEqual([10, 40]);
+  });
+
+  test("breaks the series at a rollover rather than letting it fall to zero", () => {
+    // `resetsAt` moves on every rollover, which is the only signal that the
+    // drop in `used` is a new window and not consumption running backwards.
+    const segments = quotaSegments([
+      quotaSample({ observedAt: NOW - 4_000, used: 200, resetsAt: NOW }),
+      quotaSample({ observedAt: NOW - 3_000, used: 800, resetsAt: NOW }),
+      quotaSample({ observedAt: NOW - 2_000, used: 50, resetsAt: NOW + 18_000_000 }),
+      quotaSample({ observedAt: NOW - 1_000, used: 300, resetsAt: NOW + 18_000_000 }),
+    ]);
+
+    expect(segments).toHaveLength(2);
+    expect(segments[0]?.points.map((point) => point.percent)).toEqual([20, 80]);
+    expect(segments[1]?.points.map((point) => point.percent)).toEqual([5, 30]);
+    expect(segments[0]?.key).not.toBe(segments[1]?.key);
+  });
+
+  test("drops readings with no ceiling to draw them against", () => {
+    expect(quotaSegments([quotaSample({ limit: null }), quotaSample({ limit: 0 })])).toEqual([]);
+  });
+
+  test("never draws past a full window", () => {
+    const segments = quotaSegments([quotaSample({ used: 4_000, limit: 1_000 })]);
+
+    expect(segments[0]?.points[0]?.percent).toBe(100);
   });
 });
 

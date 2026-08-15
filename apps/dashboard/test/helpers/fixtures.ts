@@ -1,8 +1,10 @@
 import type {
   ApiKeySummary,
+  BurnEstimate,
   Credential,
   CredentialHealth,
   DryRunResult,
+  QuotaSample,
   QuotaWindow,
   RequestLog,
   Settings,
@@ -57,6 +59,34 @@ export function quota(patch: Partial<QuotaWindow> = {}): QuotaWindow {
     limit: 1_000,
     resetsAt: NOW + 3_600_000,
     observedAt: NOW - 60_000,
+    windowMs: null,
+    ...patch,
+  };
+}
+
+/** A window that runs out before it resets, which is the case worth naming. */
+export function burn(patch: Partial<BurnEstimate> = {}): BurnEstimate {
+  return {
+    credentialId: "cred-1",
+    windowType: "fiveHour",
+    windowStartsAt: NOW - 3_600_000,
+    ratePerHour: 500,
+    exhaustsAt: NOW + 1_800_000,
+    survives: false,
+    gatewayRatePerHour: 120_000,
+    stale: false,
+    ...patch,
+  };
+}
+
+export function quotaSample(patch: Partial<QuotaSample> = {}): QuotaSample {
+  return {
+    credentialId: "cred-1",
+    windowType: "fiveHour",
+    observedAt: NOW - 3_000_000,
+    used: 100,
+    limit: 1_000,
+    resetsAt: NOW + 3_600_000,
     windowMs: null,
     ...patch,
   };

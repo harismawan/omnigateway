@@ -1,5 +1,5 @@
-import { Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
+import { Fragment, useState } from "react";
 import styled from "styled-components";
 import {
   useCredentialHealth,
@@ -13,6 +13,7 @@ import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatMs, formatRelative } from "../../lib/format.ts";
 import {
+  burnOf,
   credentialStatus,
   groupBy,
   quotaLegend,
@@ -31,6 +32,7 @@ import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { ConnectDialog } from "./ConnectDialog.tsx";
+import { QuotaHistory } from "./QuotaHistory.tsx";
 
 const PROVIDER_ORDER: ProviderId[] = ["anthropic", "openai", "kimi", "grok", "custom"];
 
@@ -116,11 +118,21 @@ export function AccountsBoard() {
 
   const [connecting, setConnecting] = useState(false);
   const [doomed, setDoomed] = useState<Credential | null>(null);
+  // Which rows have their history open. Local to the board: an expansion is a
+  // glance at one account, not a preference worth outliving the visit.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const toggle = (id: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
 
   const now = Date.now();
   const rows = credentials.data ?? [];
   const healthByCredential = groupBy(health.data?.health ?? [], (row) => row.credentialId);
   const quotaByCredential = groupBy(health.data?.quota ?? [], (row) => row.credentialId);
+  const burnByCredential = groupBy(health.data?.burn ?? [], (row) => row.credentialId);
   const pollIntervalMs = settings.data?.quotaPollIntervalMs ?? 300_000;
 
   const enabledCount = rows.filter((row) => row.enabled).length;
@@ -205,7 +217,7 @@ export function AccountsBoard() {
                           <Th $align="right" $width="130px">
                             Token expires
                           </Th>
-                          <Th $width="48px" />
+                          <Th $width="76px" />
                         </tr>
                       </thead>
                       <tbody>
@@ -216,129 +228,173 @@ export function AccountsBoard() {
                             credential.enabled,
                             credential.disabledReason,
                           );
-                          const windows = quotaUsage(quotaByCredential.get(credential.id) ?? []);
+                          const reported = quotaByCredential.get(credential.id) ?? [];
+                          const estimates = burnByCredential.get(credential.id) ?? [];
+                          const windows = quotaUsage(reported);
+                          const open = expanded.has(credential.id);
                           return (
-                            <Tr key={credential.id}>
-                              <Td>
-                                <Row $gap={2}>
-                                  <Lamp
-                                    state={status.state}
-                                    label={status.note === "" ? "healthy" : status.note}
-                                  />
-                                  <LabelInput
-                                    defaultValue={credential.label}
-                                    aria-label={`Label for ${credential.label}`}
+                            <Fragment key={credential.id}>
+                              <Tr>
+                                <Td>
+                                  <Row $gap={2}>
+                                    <Lamp
+                                      state={status.state}
+                                      label={status.note === "" ? "healthy" : status.note}
+                                    />
+                                    <LabelInput
+                                      defaultValue={credential.label}
+                                      aria-label={`Label for ${credential.label}`}
+                                      onBlur={(event) => {
+                                        const next = event.target.value.trim();
+                                        if (next.length === 0 || next === credential.label) {
+                                          event.target.value = credential.label;
+                                          return;
+                                        }
+                                        commit(credential.id, { label: next });
+                                      }}
+                                    />
+                                  </Row>
+                                  {status.note === "" ? null : <Note>{status.note}</Note>}
+                                </Td>
+                                <Td>
+                                  <Row $gap={1}>
+                                    <Chip>
+                                      {credential.authType === "oauth" ? "oauth" : "api key"}
+                                    </Chip>
+                                    {credential.accountEmail === null ? null : (
+                                      <Legend>{credential.accountEmail}</Legend>
+                                    )}
+                                  </Row>
+                                </Td>
+                                <Td $align="right">
+                                  <Small
+                                    min={1}
+                                    step={1}
+                                    defaultValue={credential.tier}
+                                    aria-label={`Tier for ${credential.label}`}
                                     onBlur={(event) => {
-                                      const next = event.target.value.trim();
-                                      if (next.length === 0 || next === credential.label) {
-                                        event.target.value = credential.label;
+                                      const next = Number(event.target.value);
+                                      if (
+                                        !Number.isInteger(next) ||
+                                        next < 1 ||
+                                        next === credential.tier
+                                      ) {
+                                        event.target.value = String(credential.tier);
                                         return;
                                       }
-                                      commit(credential.id, { label: next });
+                                      commit(credential.id, { tier: next });
                                     }}
                                   />
-                                </Row>
-                                {status.note === "" ? null : <Note>{status.note}</Note>}
-                              </Td>
-                              <Td>
-                                <Row $gap={1}>
-                                  <Chip>
-                                    {credential.authType === "oauth" ? "oauth" : "api key"}
-                                  </Chip>
-                                  {credential.accountEmail === null ? null : (
-                                    <Legend>{credential.accountEmail}</Legend>
+                                </Td>
+                                <Td $align="right">
+                                  <Small
+                                    min={0.1}
+                                    step={0.1}
+                                    defaultValue={credential.weight}
+                                    aria-label={`Weight for ${credential.label}`}
+                                    onBlur={(event) => {
+                                      const next = Number(event.target.value);
+                                      if (
+                                        !Number.isFinite(next) ||
+                                        next <= 0 ||
+                                        next === credential.weight
+                                      ) {
+                                        event.target.value = String(credential.weight);
+                                        return;
+                                      }
+                                      commit(credential.id, { weight: next });
+                                    }}
+                                  />
+                                </Td>
+                                <Td $align="center">
+                                  <Toggle
+                                    checked={credential.enabled}
+                                    label={`Route to ${credential.label}`}
+                                    onCheckedChange={(enabled) =>
+                                      commit(credential.id, { enabled })
+                                    }
+                                  />
+                                </Td>
+                                <Td>
+                                  {windows.length === 0 ? (
+                                    // Quota is what the provider reported. Nothing
+                                    // reported is not the same claim as no limit.
+                                    <Legend>unknown</Legend>
+                                  ) : (
+                                    <QuotaStack>
+                                      {windows.map(({ window, fraction }) => (
+                                        <QuotaCell key={window.windowType}>
+                                          <Meter
+                                            fraction={fraction}
+                                            label={`${WINDOW_LABEL[window.windowType]} window, ${Math.round(fraction * 100)}% used`}
+                                          />
+                                          <Legend>
+                                            {quotaLegend(
+                                              window,
+                                              now,
+                                              pollIntervalMs,
+                                              formatRelative,
+                                              burnOf(estimates, window.windowType),
+                                            )}
+                                          </Legend>
+                                        </QuotaCell>
+                                      ))}
+                                    </QuotaStack>
                                   )}
-                                </Row>
-                              </Td>
-                              <Td $align="right">
-                                <Small
-                                  min={1}
-                                  step={1}
-                                  defaultValue={credential.tier}
-                                  aria-label={`Tier for ${credential.label}`}
-                                  onBlur={(event) => {
-                                    const next = Number(event.target.value);
-                                    if (
-                                      !Number.isInteger(next) ||
-                                      next < 1 ||
-                                      next === credential.tier
-                                    ) {
-                                      event.target.value = String(credential.tier);
-                                      return;
-                                    }
-                                    commit(credential.id, { tier: next });
-                                  }}
-                                />
-                              </Td>
-                              <Td $align="right">
-                                <Small
-                                  min={0.1}
-                                  step={0.1}
-                                  defaultValue={credential.weight}
-                                  aria-label={`Weight for ${credential.label}`}
-                                  onBlur={(event) => {
-                                    const next = Number(event.target.value);
-                                    if (
-                                      !Number.isFinite(next) ||
-                                      next <= 0 ||
-                                      next === credential.weight
-                                    ) {
-                                      event.target.value = String(credential.weight);
-                                      return;
-                                    }
-                                    commit(credential.id, { weight: next });
-                                  }}
-                                />
-                              </Td>
-                              <Td $align="center">
-                                <Toggle
-                                  checked={credential.enabled}
-                                  label={`Route to ${credential.label}`}
-                                  onCheckedChange={(enabled) => commit(credential.id, { enabled })}
-                                />
-                              </Td>
-                              <Td>
-                                {windows.length === 0 ? (
-                                  // Quota is what the provider reported. Nothing
-                                  // reported is not the same claim as no limit.
-                                  <Legend>unknown</Legend>
-                                ) : (
-                                  <QuotaStack>
-                                    {windows.map(({ window, fraction }) => (
-                                      <QuotaCell key={window.windowType}>
-                                        <Meter
-                                          fraction={fraction}
-                                          label={`${WINDOW_LABEL[window.windowType]} window, ${Math.round(fraction * 100)}% used`}
-                                        />
-                                        <Legend>
-                                          {quotaLegend(window, now, pollIntervalMs, formatRelative)}
-                                        </Legend>
-                                      </QuotaCell>
-                                    ))}
-                                  </QuotaStack>
-                                )}
-                              </Td>
-                              <Td $align="right" $mono>
-                                {formatMs(status.ttftMs)}
-                              </Td>
-                              <Td $align="right" $mono>
-                                {credential.expiresAt === null
-                                  ? "never"
-                                  : formatRelative(credential.expiresAt, now)}
-                              </Td>
-                              <Td $align="right">
-                                <IconButton
-                                  type="button"
-                                  $variant="ghost"
-                                  $size="sm"
-                                  aria-label={`Remove ${credential.label}`}
-                                  title={`Remove ${credential.label}`}
-                                  onClick={() => setDoomed(credential)}
-                                >
-                                  <Trash2 />
-                                </IconButton>
-                              </Td>
-                            </Tr>
+                                </Td>
+                                <Td $align="right" $mono>
+                                  {formatMs(status.ttftMs)}
+                                </Td>
+                                <Td $align="right" $mono>
+                                  {credential.expiresAt === null
+                                    ? "never"
+                                    : formatRelative(credential.expiresAt, now)}
+                                </Td>
+                                <Td $align="right">
+                                  <Row $gap={1} $justify="flex-end">
+                                    {/* Nothing reported is nothing to chart, so the
+                                        control is absent rather than opening onto
+                                        an empty panel. */}
+                                    {reported.length === 0 ? null : (
+                                      <IconButton
+                                        type="button"
+                                        $variant="ghost"
+                                        $size="sm"
+                                        aria-expanded={open}
+                                        aria-label={`${open ? "Hide" : "Show"} quota history for ${credential.label}`}
+                                        title={`${open ? "Hide" : "Show"} quota history for ${credential.label}`}
+                                        onClick={() => toggle(credential.id)}
+                                      >
+                                        {open ? <ChevronDown /> : <ChevronRight />}
+                                      </IconButton>
+                                    )}
+                                    <IconButton
+                                      type="button"
+                                      $variant="ghost"
+                                      $size="sm"
+                                      aria-label={`Remove ${credential.label}`}
+                                      title={`Remove ${credential.label}`}
+                                      onClick={() => setDoomed(credential)}
+                                    >
+                                      <Trash2 />
+                                    </IconButton>
+                                  </Row>
+                                </Td>
+                              </Tr>
+                              {open ? (
+                                <Tr>
+                                  <Td colSpan={9}>
+                                    <QuotaHistory
+                                      credentialId={credential.id}
+                                      windows={reported}
+                                      burn={estimates}
+                                      pollIntervalMs={pollIntervalMs}
+                                      now={now}
+                                    />
+                                  </Td>
+                                </Tr>
+                              ) : null}
+                            </Fragment>
                           );
                         })}
                       </tbody>

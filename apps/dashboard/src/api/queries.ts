@@ -9,6 +9,7 @@ import { del, get, patch, post, put, request, withQuery } from "./client.ts";
 import type {
   AgentModelMapping,
   ApiKeySummary,
+  BurnEstimate,
   ConnectPollResult,
   ConnectStart,
   ConsoleResponse,
@@ -25,6 +26,9 @@ import type {
   MintedKey,
   ModelsResponse,
   ProviderId,
+  QuotaHistoryQuery,
+  QuotaHistoryResponse,
+  QuotaSample,
   QuotaWindow,
   RequestLog,
   Settings,
@@ -57,6 +61,8 @@ export const queryKeys = {
       query.since,
       query.until ?? null,
     ] as const,
+  quotaHistory: (query: QuotaHistoryQuery) =>
+    ["quota-history", query.credentialId, query.since, query.until ?? null] as const,
   logs: (limit: number) => ["logs", limit] as const,
   console: (lines: number, level: string) => ["console", lines, level] as const,
 };
@@ -84,13 +90,49 @@ export function useCredentials(): UseQueryResult<Credential[]> {
   });
 }
 
-export type HealthSnapshot = { health: CredentialHealth[]; quota: QuotaWindow[] };
+export type HealthSnapshot = {
+  health: CredentialHealth[];
+  quota: QuotaWindow[];
+  /** Derived server-side, so the boards and the CLI cannot disagree about it. */
+  burn: BurnEstimate[];
+};
 
 export function useCredentialHealth(cadence: Cadence = 10_000): UseQueryResult<HealthSnapshot> {
   return useQuery({
     queryKey: queryKeys.credentialHealth,
     queryFn: ({ signal }) => get<CredentialHealthResponse>("/api/credentials/health", signal),
     refetchInterval: cadence,
+  });
+}
+
+/**
+ * The retained readings behind one account's quota chart.
+ *
+ * Deliberately without a refetch interval, unlike credential health: this is
+ * read only while a row is expanded, and the rows it draws are appended at the
+ * provider poll interval rather than at request speed. `enabled` is false when
+ * no window can be placed on a timeline, so a span that means nothing is never
+ * asked for.
+ */
+export function useQuotaHistory(
+  query: QuotaHistoryQuery,
+  enabled = true,
+): UseQueryResult<QuotaSample[]> {
+  return useQuery({
+    queryKey: queryKeys.quotaHistory(query),
+    enabled,
+    queryFn: async ({ signal }) =>
+      (
+        await get<QuotaHistoryResponse>(
+          withQuery("/api/credentials/quota/history", {
+            credentialId: query.credentialId,
+            since: query.since,
+            ...(query.until === undefined ? {} : { until: query.until }),
+          }),
+          signal,
+        )
+      ).samples,
+    refetchInterval: false,
   });
 }
 

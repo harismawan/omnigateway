@@ -1,8 +1,15 @@
 import { Link } from "@tanstack/react-router";
 import styled from "styled-components";
-import type { Credential, CredentialHealth, QuotaWindow, UsageBucket } from "../../api/types.ts";
+import type {
+  BurnEstimate,
+  Credential,
+  CredentialHealth,
+  QuotaWindow,
+  UsageBucket,
+} from "../../api/types.ts";
 import { formatCount, formatMs, formatRelative } from "../../lib/format.ts";
 import {
+  burnOf,
   credentialStatus,
   groupBy,
   type LampState,
@@ -49,6 +56,8 @@ export type AccountRackProps = {
   credentials: readonly Credential[];
   health: readonly CredentialHealth[];
   quota: readonly QuotaWindow[];
+  /** What each window's reading implies, rendered inside the shared legend. */
+  burn: readonly BurnEstimate[];
   /** Usage grouped by credential; the key is the credential id. */
   usage: readonly UsageBucket[];
   /** Poll interval, so a reading can be called stale on the same rule everywhere. */
@@ -65,12 +74,14 @@ export function AccountRack({
   credentials,
   health,
   quota,
+  burn,
   usage,
   quotaPollIntervalMs,
   now,
 }: AccountRackProps) {
   const healthByCredential = groupBy(health, (row) => row.credentialId);
   const quotaByCredential = groupBy(quota, (row) => row.credentialId);
+  const burnByCredential = groupBy(burn, (row) => row.credentialId);
   const usageByCredential = new Map(usage.map((row) => [row.key, row]));
 
   // `live` belongs to a request in flight, never to an account; it is listed
@@ -86,8 +97,12 @@ export function AccountRack({
         credential.disabledReason,
       ),
       quota: quotaUsage(quotaByCredential.get(credential.id) ?? []),
+      burn: burnByCredential.get(credential.id) ?? [],
       usage: usageByCredential.get(credential.id),
     }))
+    // Lamp state, then tier. Burn rate is deliberately not a third key: an
+    // account at 40% draining fast may well be worse than one at 80% sitting
+    // idle, but deciding that changes what this list is for.
     .sort(
       (a, b) =>
         rank[a.status.state] - rank[b.status.state] || a.credential.tier - b.credential.tier,
@@ -129,7 +144,7 @@ export function AccountRack({
               </tr>
             </thead>
             <tbody>
-              {rows.map(({ credential, status, quota: windows, usage: used }) => (
+              {rows.map(({ credential, status, quota: windows, burn: estimates, usage: used }) => (
                 <Tr key={credential.id}>
                   <Td>
                     <Row $gap={2}>
@@ -161,7 +176,13 @@ export function AccountRack({
                               label={`${WINDOW_LABEL[window.windowType]} window, ${Math.round(fraction * 100)}% used`}
                             />
                             <Legend>
-                              {quotaLegend(window, now, quotaPollIntervalMs, formatRelative)}
+                              {quotaLegend(
+                                window,
+                                now,
+                                quotaPollIntervalMs,
+                                formatRelative,
+                                burnOf(estimates, window.windowType),
+                              )}
                             </Legend>
                           </QuotaCell>
                         ))}

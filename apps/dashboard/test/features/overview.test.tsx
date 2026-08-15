@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { screen, within } from "@testing-library/react";
 import { OverviewBoard } from "../../src/features/overview/OverviewBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { credential, health, log, model, quota, usageBucket } from "../helpers/fixtures.ts";
+import { burn, credential, health, log, model, quota, usageBucket } from "../helpers/fixtures.ts";
 import { renderWithRouter } from "../helpers/render.tsx";
 
 /** Logs are placed relative to the real clock, since the board reads Date.now(). */
@@ -254,5 +254,94 @@ describe("OverviewBoard", () => {
 
     expect(await screen.findByText("Activity")).toBeTruthy();
     expect(screen.getByText("UPSTREAM")).toBeTruthy();
+  });
+
+  test("the rack names the window an account will not survive", async () => {
+    const now = Date.now();
+    stubOverview({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [quota({ observedAt: now - 30_000, resetsAt: now + 3_600_000 })],
+        burn: [
+          burn({
+            windowStartsAt: now - 3_600_000,
+            exhaustsAt: now + 1_800_000,
+            survives: false,
+          }),
+        ],
+      }),
+    });
+    renderWithRouter(<OverviewBoard />);
+
+    // Matched by shape: the board reads its own Date.now() after the stub.
+    expect(await screen.findByText(/^5h · empty ~\d+m · resets in \d+[mh]$/)).toBeTruthy();
+  });
+
+  test("the rack stays one line per account: no chart, no disclosure, no extra column", async () => {
+    const now = Date.now();
+    stubOverview({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [quota({ observedAt: now - 30_000, resetsAt: now + 3_600_000 })],
+        burn: [burn({ windowStartsAt: now - 3_600_000, exhaustsAt: now + 1_800_000 })],
+      }),
+    });
+    const { container } = renderWithRouter(<OverviewBoard />);
+
+    const table = (await screen.findByText("claude-main")).closest("table");
+    if (table === null) throw new Error("the account rack was not rendered");
+    expect(
+      within(table)
+        .getAllByRole("columnheader")
+        .map((cell) => cell.textContent),
+    ).toEqual(["Account", "Provider", "Tier", "Quota", "TTFT", "Requests", "Last used"]);
+    expect(within(table).queryByRole("button", { name: /quota history/i })).toBeNull();
+    expect(container.querySelector(".recharts-responsive-container")).toBeNull();
+  });
+
+  test("the rack's order is unchanged by how fast an account is burning", async () => {
+    // Ranking a fast-draining account above a healthy one is a real
+    // improvement and a separate decision; folding it in here would smuggle a
+    // behaviour change into a telemetry feature.
+    const now = Date.now();
+    stubOverview({
+      "GET /api/credentials": () => ({
+        credentials: [
+          credential({ tier: 1 }),
+          credential({ id: "cred-2", provider: "openai", label: "codex", tier: 2 }),
+        ],
+      }),
+      "GET /api/credentials/health": () => ({
+        health: [health(), health({ credentialId: "cred-2", model: "gpt-5.6" })],
+        quota: [
+          quota({ observedAt: now - 30_000, resetsAt: now + 3_600_000 }),
+          quota({
+            credentialId: "cred-2",
+            used: 100,
+            observedAt: now - 30_000,
+            resetsAt: now + 3_600_000,
+          }),
+        ],
+        burn: [
+          burn({ windowStartsAt: now - 3_600_000, ratePerHour: 1, survives: true }),
+          burn({
+            credentialId: "cred-2",
+            windowStartsAt: now - 3_600_000,
+            ratePerHour: 9_000,
+            exhaustsAt: now + 60_000,
+            survives: false,
+          }),
+        ],
+      }),
+    });
+    renderWithRouter(<OverviewBoard />);
+
+    const table = (await screen.findByText("claude-main")).closest("table");
+    if (table === null) throw new Error("the account rack was not rendered");
+    // Document order, so this is the order the rows are drawn in.
+    const labels = within(table)
+      .getAllByText(/^(claude-main|codex)$/)
+      .map((node) => node.textContent);
+    expect(labels).toEqual(["claude-main", "codex"]);
   });
 });
