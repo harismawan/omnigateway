@@ -27,9 +27,11 @@ Out of scope, deliberately:
 
 - Alerts, webhooks, and notification thresholds. The existing `Meter` tones (green below 70%, amber
   70–90%, red at or above 90% — `apps/dashboard/src/ui/Meter.tsx:30-34`) remain the only escalation.
-- Router behaviour. The router keeps scoring from the snapshot via `quotaHeadroom`
-  (`packages/router/src/quota.ts:71`). History is read-only telemetry; nothing here changes a
-  routing decision.
+- Retained history as a routing input. The router still scores from the snapshot alone via
+  `quotaHeadroom` (`packages/router/src/quota.ts:71`) and reads no samples, no trend, and no burn
+  rate. `quota_samples` stays read-only telemetry. The one routing change this design does make is
+  the window *length* the snapshot is measured against — see "The router measures the same window
+  the estimate does" below — which is a correction to an existing calculation, not a new input.
 - Converting gateway token counts into provider quota units. No honest conversion factor exists.
 - Backfill. There is no history to recover.
 - Providers with no usage surface. `grok` has no `usage` method and its accounts continue to read as
@@ -177,6 +179,39 @@ Kimi report no duration and leave it null, falling back to the nominal constant 
 
 The bucketing itself is unchanged: three names are what the store, router, and console are built
 around, and this design does not widen that.
+
+### The router measures the same window the estimate does
+
+`paceAdjusted` (`packages/router/src/quota.ts:44-59`) divides headroom by the fraction of the window
+still to run, and that fraction needs a window length. It used the nominal constant, so once
+`durationFor` existed the burn estimate and the router were measuring the same reading against two
+different windows. One of them had to be wrong, and it was the router.
+
+**This is a deliberate behaviour change**, recorded here rather than left as a silent divergence.
+Its direction is toward caution:
+
+```text
+remaining = (resetsAt - now) / duration
+score     = headroom / remaining
+```
+
+`duration` is a divisor inside a divisor, so a *shorter* real window gives a *larger* `remaining` and
+therefore a *lower* score. A three-hour Codex window filed under `fiveHour`, read at 80% used with
+90 minutes to go, scored `0.2 / (1.5/5) = 0.667` against the bucket and scores `0.2 / (1.5/3) = 0.400`
+against the length the provider actually stated. The old number was not merely a different opinion:
+it described a window with 3.5 hours left that does not exist. The correction runs both ways — a
+window longer than its bucket scores higher — but for Codex, whose reported windows are the ones that
+land shorter, the practical effect is that accounts rotate away sooner.
+
+Blast radius is exactly the providers that state a duration. `durationFor` falls back to the nominal
+constant when `windowMs` is null, so Anthropic and Kimi score bit-for-bit as they did before, and so
+does every row written before `window_ms` existed. No existing router test changes its expected
+value; the change is only reachable through a field that was null everywhere until this branch.
+
+The router imports `durationFor` from the `@omni/store/types` leaf, never the package root. The root
+re-exports `openDb` and `encryption.ts`, and importing a *value* from it would put `bun:sqlite` and
+`node:crypto` in the router's module graph in violation of boundary 3. The existing test at
+`packages/router/test/quota.test.ts` pins that as a source-level rule.
 
 ## Rate and exhaustion
 
@@ -467,6 +502,16 @@ Control:
   window span, and naming a credential scopes the rates to its own windows
 - an empty query param is absent rather than zero: `?until=` must not clamp the span to the epoch
 
+Router:
+
+- a window whose stated `windowMs` is shorter than its bucket scores *lower* than the same reading
+  measured nominally, and a longer one scores higher. The comparison is the assertion, not just the
+  value: a test that only pinned `0.4` would still pass if the two denominators were swapped
+- a window with `windowMs` null scores exactly what it scored before `durationFor` existed, which is
+  what keeps Anthropic and Kimi from drifting
+- mutation-test both halves: reverting `paceAdjusted` to `WINDOW_DURATION_MS`, and making
+  `durationFor` ignore `windowMs`, must each fail a named test
+
 Gateway: the history route requires an admin session, clamps its range, and filters by credential.
 `/api/credentials/health` returns `burn` alongside `health` and `quota`.
 
@@ -504,3 +549,9 @@ should be reviewed as such.
 `WINDOW_DURATION_MS` moving into `@omni/store` means the router imports a constant it used to own.
 This is the intended direction — three consumers now need it — and it removes the risk of a second
 copy drifting.
+
+Routing scores change for providers that state a window duration, which today means OpenAI and Codex
+only. They move down, because a window read as longer than it is looks emptier than it is. An
+operator who had tuned a pool around the old numbers will see Codex accounts rotate out earlier than
+before; that is the correction landing, not a regression. Anthropic and Kimi are unaffected because
+they state no duration.

@@ -1,7 +1,7 @@
 // The types subpath, not the package root: `@omni/store` pulls `openDb`,
 // `createStore`, and `encryption.ts`, which would put `bun:sqlite` and
 // `node:crypto` in the router's module graph. The router stays pure.
-import { type CredentialView, type QuotaWindow, WINDOW_DURATION_MS } from "@omni/store/types";
+import { type CredentialView, durationFor, type QuotaWindow } from "@omni/store/types";
 
 /**
  * How the router reads a quota snapshot.
@@ -48,9 +48,13 @@ function paceAdjusted(window: QuotaWindow, now: number): number {
   const headroom = Math.max(0, Math.min(1, 1 - window.used / limit));
   if (window.resetsAt === null) return headroom;
 
-  // Nominal, not `durationFor`: routing behaviour is deliberately untouched by
-  // the telemetry work that introduced the reported duration.
-  const duration = WINDOW_DURATION_MS[window.windowType];
+  // The provider's own stated length where there is one. The three window names
+  // are buckets, not durations — Codex reports `limit_window_seconds` and it is
+  // filed under whichever name it lands nearest — so measuring a three-hour
+  // window against the five-hour bucket understates how much of it has already
+  // gone, inflates `headroom / remaining`, and reads the account as healthier
+  // than it is. Anthropic and Kimi state nothing and keep the nominal length.
+  const duration = durationFor(window.windowType, window.windowMs);
   // Floored, so the last moments of a window do not divide headroom by nearly
   // zero and read every account as perfect.
   const remaining = Math.max(0.05, Math.min(1, (window.resetsAt - now) / duration));

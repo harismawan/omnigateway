@@ -88,6 +88,55 @@ test("the same headroom is judged differently in a five-hour and a weekly window
   expect(read([weekly])).toBeLessThan(QUOTA_FLOOR);
 });
 
+test("a window shorter than its bucket is judged by the length the provider stated", () => {
+  // The three window names are buckets. Codex states a real duration, and a
+  // three-hour window measured as five understates how much of it is gone: the
+  // remaining fraction comes out `1.5/5` instead of `1.5/3`, headroom is divided
+  // by a smaller number, and the account reads healthier than it is.
+  const shared = { windowType: "fiveHour" as const, used: 80, limit: 100, observedAt: NOW };
+  const resetsAt = NOW + 1.5 * HOUR;
+
+  const nominal = quota({ ...shared, resetsAt, windowMs: null });
+  const stated = quota({ ...shared, resetsAt, windowMs: 3 * HOUR });
+
+  // 0.2 headroom over 1.5h of a real 3h window: half the window left, so half.
+  expect(read([stated])).toBeCloseTo(0.4, 5);
+  // The same reading measured by its five-hour bucket: 1.5/5 left, so 0.667.
+  expect(read([nominal])).toBeCloseTo(2 / 3, 5);
+  // The direction is the point. Believing the provider is the conservative move.
+  expect(read([stated])).toBeLessThan(read([nominal]));
+});
+
+test("a window longer than its bucket is judged by that length too", () => {
+  // The correction runs both ways: a window bucketed as five-hour that actually
+  // runs ten has more of itself left than the bucket implies, and pretending
+  // otherwise would hold back an account that has room.
+  const shared = { windowType: "fiveHour" as const, used: 90, limit: 100, observedAt: NOW };
+  const resetsAt = NOW + 1.5 * HOUR;
+
+  const nominal = quota({ ...shared, resetsAt, windowMs: null });
+  const stated = quota({ ...shared, resetsAt, windowMs: 10 * HOUR });
+
+  expect(read([stated])).toBeCloseTo(2 / 3, 5); // 0.1 / (1.5/10)
+  expect(read([nominal])).toBeCloseTo(1 / 3, 5); // 0.1 / (1.5/5)
+  expect(read([stated])).toBeGreaterThan(read([nominal]));
+});
+
+test("a window whose provider stated no duration scores off the nominal bucket", () => {
+  // Anthropic and Kimi report no duration, so every window they write keeps the
+  // score it had before the reported length existed.
+  const window = quota({
+    windowType: "weekly",
+    used: 50,
+    limit: 100,
+    observedAt: NOW,
+    resetsAt: NOW + 3.5 * 24 * HOUR,
+    windowMs: null,
+  });
+  // Half the week gone, half the quota gone: exactly on pace.
+  expect(read([window])).toBeCloseTo(1, 5);
+});
+
 test("a window with no reported reset falls back to plain headroom", () => {
   const window = quota({ used: 25, limit: 100, observedAt: NOW, resetsAt: null });
   expect(read([window])).toBeCloseTo(0.75, 5);
@@ -108,7 +157,7 @@ test("the router imports no runtime value from the store package root", async ()
   // `createStore`, and `encryption.ts` — importing a *value* from it puts
   // `bun:sqlite` and `node:crypto` in the router's module graph and evaluates
   // both at import time. `@omni/store/types` is the leaf, and is where
-  // `WINDOW_DURATION_MS` and `cacheReadRate` are read from. A type-only import
+  // `durationFor` and `cacheReadRate` are read from. A type-only import
   // of the root is erased and so is left alone.
   const sources = new Bun.Glob("**/*.ts").scan({
     cwd: new URL("../src", import.meta.url).pathname,
