@@ -15,8 +15,13 @@ that render both.
 
 ## Scope
 
-In scope: sample persistence, rate and exhaustion estimates, an authenticated history API, an
-Accounts-page disclosure, and two CLI surfaces.
+In scope: sample persistence, rate and exhaustion estimates, an authenticated history API, the
+estimate on the Overview rack, a history disclosure on the Accounts page, and two CLI surfaces.
+
+The estimate and the history are separable and are deliberately separated. The estimate derives from
+a single snapshot reading and goes everywhere quota is already shown. The history needs the new table
+and appears in one place, behind a disclosure, because a chart per account is not what an
+at-a-glance surface is for.
 
 Out of scope, deliberately:
 
@@ -190,8 +195,10 @@ Each guard below is a real state, reported as unavailable rather than as a numbe
 - Snapshot older than `quotaStaleAfterMs(pollIntervalMs)` — the estimate is suppressed under the
   same rule the router and console already apply. A rate computed from a reading nobody believes is
   worse than no rate.
-- No samples — a fresh install has no history. The bar still renders from the snapshot; the chart
-  and rate read as not yet observed.
+Note what is *not* a guard: having no samples. A whole-window average is computed from one reading,
+so the estimate is available from the first successful probe and does not wait for history to
+accumulate. `quota_samples` exists to draw the chart, not to derive the rate. This is what lets the
+estimate ride the existing health endpoint and appear on a freshly upgraded install immediately.
 
 `gatewayRatePerHour` is computed separately: all four token classes summed —
 `input + output + cacheRead + cacheWrite` — from completed `request_logs` for that `credential_id`
@@ -205,27 +212,45 @@ the window start is unknown.
 
 ## API
 
+Two surfaces, because the estimate and the history have different costs and different consumers.
+
+### The estimate rides the health endpoint
+
+`GET /api/credentials/health` returns `{ health, quota }` today. It gains a third member, `burn`:
+one entry per `(credentialId, windowType)` carrying `windowStartsAt`, `ratePerHour`, `exhaustsAt`,
+`survives`, and `gatewayRatePerHour`.
+
+This costs one derivation per window over rows the route already loads, needs no sample lookup, and
+means the Overview rack, the Accounts table, and `omni status` all read the estimate from a query
+they were already making. The dashboard refetches this every 10s
+(`apps/dashboard/src/api/queries.ts:89`), and since the burn block is invariant under `now`, the
+values it returns are stable between probes.
+
+`HealthSnapshot` in `apps/dashboard/src/api/types.ts` gains the matching member. This is an additive
+JSON change.
+
+### History is its own endpoint
+
 `GET /api/credentials/quota/history?since=&until=&credentialId=`
 
 Admin session required, matching every other `/api/*` route outside the documented setup and login
 flows. `credentialId` is optional; omitting it returns every credential. `since` and `until` are
 epoch milliseconds and are clamped to the retention window.
 
-The response carries samples and the derived block per `(credentialId, windowType)`:
+The response carries samples only — the derived block is on the health endpoint and is not repeated
+here:
 
 ```json
 {
   "samples": [
     { "credentialId": "…", "windowType": "fiveHour", "observedAt": 0,
       "used": 62, "limit": 100, "resetsAt": 0, "windowMs": null }
-  ],
-  "burn": [
-    { "credentialId": "…", "windowType": "fiveHour",
-      "windowStartsAt": 0, "ratePerHour": 12.4, "exhaustsAt": 0,
-      "survives": false, "gatewayRatePerHour": 41000 }
   ]
 }
 ```
+
+Only the Accounts expansion calls this, and only while a row is expanded. It is not on a refetch
+interval.
 
 Derivation is server-side on purpose. The dashboard cannot import `@omni/control` — it is limited to
 `@omni/store/types`, `@omni/ir`, and the catalog subpath — so shipping raw samples would force the
@@ -238,9 +263,46 @@ parsing already used by `queryUsage`.
 
 ## Dashboard
 
+### The shared legend carries the estimate
+
+Both boards render the same thing under each `Meter`: `quotaLegend(window, now, pollIntervalMs,
+formatRelative)` from `apps/dashboard/src/lib/vitals.ts:290-303`, which today produces `resets in
+3h05m`, `stale, read 12m ago`, or `never observed`.
+
+`quotaLegend` takes the window's burn entry as an additional argument and gains one case: when
+`survives` is false, it names the estimate before the reset — `empty ~2h10m · resets 3h05m`. When
+`survives` is true the existing reset phrasing is unchanged, because "you will not run out" is
+already what `resets in 3h05m` communicates and adding a distant ETA beside it would invite
+arithmetic nobody needs to do. The stale and never-observed cases are untouched and take precedence:
+a suppressed estimate must not be printed.
+
+Changing this one function is what puts the estimate on both boards. It is the reason the Overview
+rack costs almost nothing to serve.
+
+### Overview rack
+
+`AccountRack.tsx` is one line per account — lamp, identity, quota meters, TTFT, traffic — sorted
+worst-first, with a "Manage accounts" link to the full board. It stays that way. No chart, no
+disclosure, no new column.
+
+What it gains is the estimate, through the shared legend above, plus the `burn` member threaded from
+`OverviewBoard.tsx` (which already passes `quota` and `quotaPollIntervalMs` down at
+`features/overview/OverviewBoard.tsx:82-84`). An operator scanning the rack sees which accounts will
+not survive their window; clicking through to Accounts is where the history and the gateway-rate
+corroboration live.
+
+The rack's sort is deliberately **not** changed. It ranks by lamp state then tier, and burn rate is a
+tempting third key — an account at 40% draining fast is arguably worse than one at 80% sitting idle.
+That is a real improvement and a separate decision: it changes what the rack is for, it interacts
+with the `warn`/`down` states that currently drive the order, and folding it in here would smuggle a
+behaviour change into a telemetry feature. Left as a follow-up.
+
+### Accounts board
+
 `AccountsBoard.tsx` renders a nine-column table with one `<Tr>` per credential. Each row gains a
-disclosure control in the existing trailing 48px column. The collapsed state is exactly today's row,
-unchanged — the `Meter` stack and `quotaLegend` in the Quota cell stay as they are.
+disclosure control in the existing trailing 48px column. The collapsed state is today's row plus the
+estimate in the legend, exactly as the rack shows it — same `Meter` stack, same `quotaLegend`.
+Everything below is what expanding reveals.
 
 Expanding inserts a second `<Tr>` immediately below, with a single `<Td colSpan={9}>` holding, per
 reported window:
@@ -304,10 +366,20 @@ Control:
 - `gatewayRatePerHour` counts only the credential's own logs within the window span
 
 Gateway: the history route requires an admin session, clamps its range, and filters by credential.
+`/api/credentials/health` returns `burn` alongside `health` and `quota`.
 
-Dashboard, under happy-dom with the existing helpers: the row expands and collapses by accessible
-name; the chart is step-held; a rollover renders as separate segments; "lasts the window" and an ETA
-render in the right conditions; a provider reporting nothing offers no disclosure.
+Dashboard, under happy-dom with the existing helpers:
+
+- `quotaLegend` renders the ETA when `survives` is false, keeps today's reset phrasing when true, and
+  prints neither when the reading is stale or never observed — the suppression cases take precedence
+- the Overview rack shows the estimate and gains no chart, no disclosure, and no extra column
+- the rack's row order is unchanged by burn rate
+- the Accounts row expands and collapses by accessible name
+- the chart is step-held
+- a rollover renders as separate segments rather than one line falling to zero
+- a provider reporting nothing offers no disclosure and keeps its `unknown` legend
+- a fresh install with a snapshot but no samples still shows the estimate on both boards, and shows
+  the chart as not yet observed
 
 CLI: `omni status` renders both estimate forms; `omni quota` renders and `--json` round-trips.
 
