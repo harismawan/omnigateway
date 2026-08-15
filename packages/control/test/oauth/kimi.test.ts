@@ -39,6 +39,11 @@ function stubHttp(status: number, body: unknown): HttpClient & { last: () => Htt
 test("is registered as a device flow that cannot be pasted", () => {
   expect(kimiOAuth.kind).toBe("device");
   expect(kimiOAuth.supportsManualPaste).toBe(false);
+  // The fact `connect.ts` enforces on kimi's behalf. Kimi ties the session to
+  // the fingerprint `start` mints and sends it on every later call, so a flow
+  // that reached `begin` without one would authorize a device that does not
+  // exist. Declaring `false` here would silently disarm that check.
+  expect(kimiOAuth.needsDeviceId).toBe(true);
 });
 
 test("start returns a verification url and a stable device id", async () => {

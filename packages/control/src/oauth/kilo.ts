@@ -1,7 +1,13 @@
 import { GatewayError } from "@omni/ir";
 import { PROFILES } from "@omni/providers";
-import type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider } from "./types.ts";
-import { getJson, pendingError, postJson, tokenErrorCode } from "./types.ts";
+import type { AuthorizeStart, DeviceOAuthProvider, FlowResult, OAuthDeps } from "./types.ts";
+import {
+  getJson,
+  getJsonUnauthenticated,
+  pendingError,
+  postJson,
+  tokenErrorCode,
+} from "./types.ts";
 
 /**
  * Kilo's device-code flow, which is not RFC 8628.
@@ -85,9 +91,12 @@ async function orgIdFor(accessToken: string, deps: OAuthDeps): Promise<string | 
   }
 }
 
-export const kiloOAuth: OAuthProvider = {
+export const kiloOAuth: DeviceOAuthProvider = {
   id: "kilo",
   kind: "device",
+  // Kilo identifies an editor, not a machine: there is no per-installation
+  // identity to mint, and `begin` sends none.
+  needsDeviceId: false,
   supportsManualPaste: false,
 
   /**
@@ -154,13 +163,12 @@ export const kiloOAuth: OAuthProvider = {
       throw new GatewayError("AUTH", "kilo device code expired; start the authorization again");
     }
 
-    const { status, parsed } = await getJson(
+    // The poll is what earns the token; there is nothing to send yet.
+    const { status, parsed } = await getJsonUnauthenticated(
       deps,
       "kilo",
       `${CODES_URL}/${encodeURIComponent(code)}`,
       PROFILES.kilo,
-      // The poll is what earns the token; there is nothing to send yet.
-      { accessToken: null },
     );
 
     if (status === 202) throw pendingError("http_202");

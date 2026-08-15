@@ -14,5 +14,13 @@ export const OAUTH_PROVIDERS = {
   grok: grokOAuth,
 } as const satisfies Readonly<Partial<Record<ProviderId, OAuthProvider>>>;
 
-export type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider, PendingFlow } from "./types.ts";
+export type {
+  AuthorizeStart,
+  DeviceOAuthProvider,
+  FlowResult,
+  OAuthDeps,
+  OAuthProvider,
+  PendingFlow,
+  PkceOAuthProvider,
+} from "./types.ts";
 export { isAuthorizationPending } from "./types.ts";

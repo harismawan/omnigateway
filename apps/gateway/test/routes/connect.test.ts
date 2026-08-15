@@ -244,6 +244,8 @@ test("concurrent polls share one device exchange", async () => {
   const deviceProvider: OAuthProvider = {
     id: "kimi",
     kind: "device",
+    // Modelling kimi, which cannot ask for a code without one.
+    needsDeviceId: true,
     supportsManualPaste: false,
     start: () => ({
       authorizeUrl: "https://kimi.example/device",
@@ -295,6 +297,8 @@ test("poll reports pending for a device flow that is not yet approved", async ()
   const deviceProvider: OAuthProvider = {
     id: "kimi",
     kind: "device",
+    // Modelling kimi, which cannot ask for a code without one.
+    needsDeviceId: true,
     supportsManualPaste: false,
     start: () => ({
       authorizeUrl: "https://kimi.example/device",

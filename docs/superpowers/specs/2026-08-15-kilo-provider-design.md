@@ -165,6 +165,13 @@ Kind is `"device"`. `packages/control/src/oauth/kimi.ts` is the closest existing
 only current device-code provider, and it already exports `isAuthorizationPending` for the poll
 loop.
 
+`needsDeviceId` is `false`, and the field exists because of this provider. Kimi ties a session to a
+device fingerprint it mints before asking for a code; Kilo identifies an editor and has no
+per-machine identity at all. `deviceIdFrom` in `connect.ts` raises `INTERNAL` when a provider that
+declared `true` reaches `begin` with a blank id, and passes `""` through for one that declared
+`false`. It is required on the device variant of `OAuthProvider` alone, so a new device flow cannot
+compile without answering and a redirect flow is never asked.
+
 **`begin()`** — `POST https://api.kilo.ai/api/device-auth/codes` with no body. Response:
 
 ```json

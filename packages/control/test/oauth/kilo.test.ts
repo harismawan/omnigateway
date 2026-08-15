@@ -60,6 +60,9 @@ test("is registered as a device flow that cannot be pasted", () => {
   expect(kiloOAuth.id).toBe("kilo");
   expect(kiloOAuth.kind).toBe("device");
   expect(kiloOAuth.supportsManualPaste).toBe(false);
+  // Kilo identifies an editor, not a machine. Declaring `true` here would fail
+  // every kilo connect with an internal error, since nothing mints an id.
+  expect(kiloOAuth.needsDeviceId).toBe(false);
 });
 
 test("reports no usage surface at all rather than an empty one", () => {

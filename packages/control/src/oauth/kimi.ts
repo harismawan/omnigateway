@@ -1,6 +1,12 @@
 import { GatewayError } from "@omni/ir";
 import { type KimiDevice, kimiDeviceHeaders, mintKimiDevice, PROFILES } from "@omni/providers";
-import type { AuthorizeStart, FlowResult, OAuthDeps, OAuthProvider, UsageReport } from "./types.ts";
+import type {
+  AuthorizeStart,
+  DeviceOAuthProvider,
+  FlowResult,
+  OAuthDeps,
+  UsageReport,
+} from "./types.ts";
 import { getJson, pendingError, postJson, tokenErrorCode, tokenErrorMessage } from "./types.ts";
 import { recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
 
@@ -173,9 +179,12 @@ export function parseKimiUsage(value: unknown, now: number): UsageReport | null 
   return reportFrom([windowFrom(root.usage ?? root.Usage, "weekly", now)]);
 }
 
-export const kimiOAuth: OAuthProvider = {
+export const kimiOAuth: DeviceOAuthProvider = {
   id: "kimi",
   kind: "device",
+  // Kimi ties the session to the fingerprint `start` mints and sends it on
+  // every later call; a blank one is refused upstream as a malformed device.
+  needsDeviceId: true,
   supportsManualPaste: false,
 
   start() {
@@ -187,12 +196,16 @@ export const kimiOAuth: OAuthProvider = {
   },
 
   async begin({ deviceId }, deps): Promise<AuthorizeStart> {
-    // `INTERNAL`, not a bare `Error`: this invariant used to live in
-    // `connect.ts`'s `deviceIdFrom` and was classified there. It moved here
-    // when Kilo, which mints no device identity, made the shared check wrong,
-    // and the classification has to move with it — an unclassified throw is
-    // rewritten to the flat "internal error" by `apiErrorResponse`, so the
-    // operator reads a 500 with no hint of which half of the flow broke.
+    // Kept as a backstop, not as the primary check: `needsDeviceId: true` is
+    // what `connect.ts`'s `deviceIdFrom` reads, and no flow that goes through
+    // it can arrive here blank. `begin` is exported on `OAUTH_PROVIDERS`
+    // though, so it is reachable without that flow, and a fingerprint is
+    // kimi's own requirement rather than something to look up elsewhere.
+    //
+    // `INTERNAL`, not a bare `Error`, and the same code the shared check
+    // raises: an unclassified throw is rewritten to the flat "internal error"
+    // by `apiErrorResponse`, so the operator reads a 500 with no hint of which
+    // half of the flow broke.
     if (deviceId.trim().length === 0) {
       throw new GatewayError("INTERNAL", "kimi begin requires a non-blank deviceId");
     }
