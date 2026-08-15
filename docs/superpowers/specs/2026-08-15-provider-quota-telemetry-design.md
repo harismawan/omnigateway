@@ -154,8 +154,11 @@ New pure module `packages/control/src/quota/burn.ts`. Given a snapshot window an
 elapsedMs   = observedAt - windowStartsAt
 ratePerHour = used / (elapsedMs / 3_600_000)
 exhaustsAt  = observedAt + ((limit - used) / ratePerHour) * 3_600_000
-survives    = exhaustsAt === null || exhaustsAt >= resetsAt
+survives    = exhaustsAt === null || resetsAt === null || exhaustsAt >= resetsAt
 ```
+
+The `resetsAt === null` arm is not decoration: with no reported reset there is nothing to compare
+against, and a window that cannot be said to end cannot be said to be outlived.
 
 The rate is a whole-window average rather than a recent slope. It is stable, needs no lookback
 parameter, and never swings on a single burst. Its cost is that a burst early in a long window keeps
@@ -334,10 +337,25 @@ Expansion state is local to the board and not persisted.
 `5h 62% · 7d 18% (3m ago)`. It gains the estimate: `5h 62% ~2h10m` when the window will not survive,
 `5h 62% ok` when it will, and the existing age note and red-at-90% colouring are untouched.
 
-`omni quota [--json]` — a new command under the Reports section of `apps/cli/src/help.ts`. Per
-credential it lists each window's used and limit, rate, estimate, and reset. `--json` emits the raw
-samples and the derived block for scripting. Like every CLI command it goes through `@omni/control`,
-never `/api/*`.
+`omni quota [--json]` — a new command under the Reports section of `apps/cli/src/help.ts`. It lists
+each window's used and limit, rate, estimate, and reset, one row per `(account, window)` with the
+account as a column. A per-credential block with an indented list would be the prettier shape, but
+the repo's `table()` helper pads per table, so grouping would repeat the header for every account.
+
+`--json` emits the raw samples and the derived block for scripting. `omni status --json` is left
+alone; this is the scripting surface for burn data. Like every CLI command it goes through
+`@omni/control`, never `/api/*`.
+
+Two presentation points the table has to get right:
+
+- **The rate's unit is not always a percentage.** `12.4%/h` reads correctly only because Anthropic
+  and OpenAI are normalized to `limit: 100`. Kimi reports raw counters, so the rate is a percentage
+  of that window's own limit, and falls back to raw provider units per hour (`250.0/h`) where there
+  is no ceiling at all.
+- **`unknown` and `stale` are different sentences.** Control folds "too old to believe" and "never
+  observed" into a single `stale: true`, but `observedAt <= 0` is still visible, so the CLI separates
+  them: a never-observed window reads `unknown`, an aged one reads `stale`. Neither prints an
+  estimate. `omni status` keeps them both silent, as specified.
 
 ## Testing
 
@@ -355,7 +373,9 @@ Control:
 
 - rate math against fixed clocks and known samples
 - each guard returns unavailable rather than a number: null limit, null `resetsAt`, zero elapsed,
-  zero used, stale snapshot, empty history
+  zero used, stale snapshot. Empty history is *not* among them — the estimate never reads samples.
+  Assert that by making `listQuotaSamples` throw and confirming the estimate still computes; only a
+  throw proves the call was never made, where checking a value would not.
 - `survives` is true when the estimate falls past `resetsAt` and false when it falls short
 - the whole burn block is invariant under `now`: holding one sample fixed and advancing `now` across
   several poll intervals leaves `windowStartsAt`, `ratePerHour`, and `exhaustsAt` byte-identical, and

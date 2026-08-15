@@ -165,7 +165,7 @@ catalog affects new targets only.
 
 ## Storage
 
-One SQLite file, WAL mode, six migrations.
+One SQLite file, WAL mode, seven migrations.
 
 ```mermaid
 flowchart TB
@@ -173,6 +173,7 @@ flowchart TB
     cred["<b>credentials</b><br/>access_token 🔒 refresh_token 🔒<br/>api_key 🔒 id_token 🔒"]
     health["<b>credential_health</b><br/>breaker · failures · ewma ttft"]
     quota["<b>quota_windows</b><br/>provider observations,<br/>not gateway counts"]
+    samples["<b>quota_samples</b><br/>one row per changed reading<br/><i>pruned at logRetentionDays</i>"]
   end
 
   subgraph config[Configuration]
@@ -188,11 +189,18 @@ flowchart TB
 
   cred --- health
   cred --- quota
+  quota == "same transaction" ==> samples
   logs == "same transaction" ==> daily
 ```
 
 Writing the rollup in the *same transaction* as the log row is what lets a year of
 usage history survive the 30-day pruning of the detailed logs.
+
+`quota_samples` is written in the same transaction as the snapshot it describes, and only
+when the reading actually changed — an idle account is re-read every poll interval and moves
+nothing. `quota_windows` therefore answers "what is true now" and carries liveness in its
+`observed_at`; `quota_samples` answers "how did it get here". The burn estimate needs only
+the former, so it works on an install with no accumulated history.
 
 Encryption is a boundary, not a pass. Only the four 🔒 fields are sealed, with
 AES-256-GCM under a key derived from `OMNI_ENCRYPTION_KEY`, and decryption is
@@ -213,7 +221,7 @@ flowchart LR
 
   oauth["<b>OAuth refresh</b><br/>every 60s"] --> oauthJob["renew inside lead window<br/>disable if expired, no refresh token"]
   quota["<b>Quota poller</b><br/>every quotaPollIntervalMs"] --> quotaJob["ask providers what is left<br/><i>failed probe ⇒ unknown, never disabled</i>"]
-  maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs at retention<br/>prune usage_daily at 400d"]
+  maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs at retention<br/>prune quota_samples at retention<br/>prune usage_daily at 400d"]
 
   oauthJob -.-> oauth
   quotaJob -.-> quota
