@@ -111,6 +111,25 @@ export function formatAge(from: number | null, now: number): string {
   return `${Math.round(seconds / 86_400)}d`;
 }
 
+const pad = (value: number): string => String(value).padStart(2, "0");
+
+/**
+ * A span still to run, e.g. `1h13m`, `45m`, `5d02h`.
+ *
+ * Two units where `formatAge` uses one: an age only has to be recognisable,
+ * while a deadline is read to decide whether to wait it out, and "empty in 1h"
+ * hides the difference between four minutes' warning and fifty-nine.
+ */
+export function formatSpan(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86_400) {
+    return `${Math.floor(seconds / 3600)}h${pad(Math.floor(seconds / 60) % 60)}m`;
+  }
+  return `${Math.floor(seconds / 86_400)}d${pad(Math.floor(seconds / 3600) % 24)}h`;
+}
+
 export function formatUsd(value: number): string {
   return `$${value.toFixed(value < 1 ? 4 : 2)}`;
 }

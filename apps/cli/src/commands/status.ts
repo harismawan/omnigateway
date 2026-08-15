@@ -1,22 +1,18 @@
-import { createAdminAuth, credentialStatus } from "@omni/control";
+import { type BurnEstimate, createAdminAuth, credentialStatus } from "@omni/control";
 import type { QuotaWindow } from "@omni/store";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatAge, note, paint, table } from "../output.ts";
 import { status as serviceStatus } from "../service.ts";
-
-/** Shortest window first, so the cell reads soonest-to-latest. */
-const WINDOW_ORDER: Record<QuotaWindow["windowType"], number> = {
-  fiveHour: 0,
-  daily: 1,
-  weekly: 2,
-};
-
-const WINDOW_LABEL: Record<QuotaWindow["windowType"], string> = {
-  fiveHour: "5h",
-  daily: "24h",
-  weekly: "7d",
-};
+import {
+  type BurnIndex,
+  burnIndex,
+  burnNote,
+  burnOf,
+  byWindowLength,
+  verdictOf,
+  WINDOW_LABEL,
+} from "./quota.ts";
 
 /**
  * Every window the provider reported, in duration order.
@@ -27,29 +23,33 @@ const WINDOW_LABEL: Record<QuotaWindow["windowType"], string> = {
  * looking at.
  */
 function reportedWindows(windows: readonly QuotaWindow[]): QuotaWindow[] {
-  return windows
-    .filter((window) => window.limit !== null && window.limit > 0)
-    .sort((a, b) => WINDOW_ORDER[a.windowType] - WINDOW_ORDER[b.windowType]);
+  return windows.filter((window) => window.limit !== null && window.limit > 0).sort(byWindowLength);
 }
 
 /**
- * One cell covering every window, e.g. `5h 62% · 7d 18%`.
+ * One cell covering every window, e.g. `5h 62% ~2h10m · 7d 18% ok`.
  *
  * Each window is coloured on its own fraction, while the age note is printed
  * once from the oldest reading in the row: two windows arrive from the same
  * probe, so one timestamp describes both.
+ *
+ * The estimate is dim because the fraction beside it already carries the
+ * colour, and a second tone here would compete with the state it qualifies.
  */
 function quotaCell(
   ctx: Parameters<typeof paint>[0],
   windows: readonly QuotaWindow[],
   now: number,
+  burn: BurnIndex,
 ): string {
   const reported = reportedWindows(windows);
   if (reported.length === 0) return paint(ctx, "dim", "unknown");
 
   const parts = reported.map((window) => {
     const used = Math.round((window.used / (window.limit as number)) * 100);
-    return state(ctx, used < 90, `${WINDOW_LABEL[window.windowType]} ${used}%`);
+    const cell = state(ctx, used < 90, `${WINDOW_LABEL[window.windowType]} ${used}%`);
+    const estimate = burnNote(verdictOf(window, burnOf(burn, window), now));
+    return estimate.length === 0 ? cell : `${cell} ${paint(ctx, "dim", estimate)}`;
   });
 
   const observedAt = Math.min(...reported.map((window) => window.observedAt));
@@ -78,6 +78,16 @@ export const status: Command = {
         ? { adminConfigured: false, credentials: [] }
         : await credentialStatus(store, { now: ctx.now });
     const { adminConfigured: configured, credentials } = persistent;
+    // A stopped gateway still has readings to render; an unreadable store has
+    // no windows to estimate from, so the map stays empty rather than absent.
+    const burn: BurnIndex =
+      store === null
+        ? new Map<string, BurnEstimate>()
+        : await burnIndex(
+            store,
+            ctx.now,
+            credentials.flatMap((credential) => credential.quota),
+          );
 
     const data = {
       process,
@@ -107,7 +117,7 @@ export const status: Command = {
         credential.label,
         provider(ctx, credential.provider),
         state(ctx, credential.enabled, credential.enabled ? "enabled" : "disabled"),
-        quotaCell(ctx, credential.quota, ctx.now()),
+        quotaCell(ctx, credential.quota, ctx.now(), burn),
       ]);
 
       return `${header}\n\n${table(

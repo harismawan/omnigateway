@@ -240,6 +240,7 @@ installation other than the default.
 | `omni logs` | recent requests as the gateway recorded them |
 | `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
 | `omni usage` | spend and tokens, by provider, model, key, or day |
+| `omni quota` | provider quota per window: use, burn rate, and when it runs out |
 | `omni connect <provider>` | authorize an account from the terminal |
 | `omni credentials …` | list, show, enable, disable, retier, refresh, remove |
 | `omni models …` | list, show, put, remove, `dry-run`, `catalog` |
