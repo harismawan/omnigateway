@@ -362,12 +362,20 @@ function WindowPanel({
                 />
                 {/* One series per window. A single series drawn across a
                     rollover would fall to the floor and read as a refund.
-                    `stepAfter` because a reading holds until the next one:
-                    interpolating would draw a climb that never happened. */}
+                    `monotone`, as the usage panels draw theirs: a quota counter
+                    climbs as requests land, not in one jump at the instant it
+                    happened to be read, and monotone cubic will not overshoot a
+                    reading on the way to the next.
+
+                    What the curve does between two readings is drawing, not
+                    evidence. A step claimed no more: dedup drops the unchanged
+                    reading that would have made a flat stretch provable, and
+                    only the snapshot's own `observed_at` survives, so a past
+                    gap cannot be read as "probed, and nothing moved". */}
                 {segments.map((segment) => (
                   <Line
                     key={segment.key}
-                    type="stepAfter"
+                    type="monotone"
                     dataKey={segment.key}
                     stroke="var(--accent)"
                     strokeWidth={2}

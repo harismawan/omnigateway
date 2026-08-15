@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { BurnEstimate, QuotaSample, QuotaWindow } from "../../src/api/types.ts";
 import { AccountsBoard } from "../../src/features/accounts/AccountsBoard.tsx";
 import { PACE_DASH } from "../../src/features/accounts/QuotaHistory.tsx";
-import { axisTicks, dashedPaths, measureCharts, vertices } from "../helpers/chart.ts";
+import { axisTicks, curvePoints, dashedPaths, measureCharts, vertices } from "../helpers/chart.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import {
   burn,
@@ -460,10 +460,12 @@ describe("AccountsBoard quota history", () => {
     expect(screen.getByText("120k tokens/h")).toBeTruthy();
   });
 
-  test("holds each reading until the next one instead of sloping between them", async () => {
-    // Readings are stored only when something moved, so a flat stretch in the
-    // data is a flat stretch in reality; interpolating would draw a climb that
-    // never happened.
+  test("draws every reading as one smooth curve, inventing none of them", async () => {
+    // Smoothing is a rendering choice and must stay one: the curve passes
+    // through the readings that were stored and through nothing else. What it
+    // does between them is not a claim, because a gap cannot be read as "the
+    // probe ran and nothing moved" anyway — dedup discards the reading that
+    // would have said so, and only the snapshot's own `observedAt` survives.
     const restore = measureCharts();
     try {
       const user = userEvent.setup();
@@ -487,15 +489,25 @@ describe("AccountsBoard quota history", () => {
       // Solid lines only: the dashed overlays are drawn pace, not readings.
       await waitFor(() => expect(dashedPaths(container, null)).toHaveLength(1));
       const drawn = dashedPaths(container, null)[0] ?? "";
-      expect(drawn).not.toContain("C");
-      const corners = vertices(drawn);
-      expect(corners.length).toBeGreaterThan(3);
-      for (const [index, corner] of corners.entries()) {
-        const previous = corners[index - 1];
-        if (previous === undefined) continue;
-        // Every segment is flat or a vertical step; nothing runs diagonally.
-        expect(previous[0] === corner[0] || previous[1] === corner[1]).toBe(true);
-      }
+      // Curved, not stepped: a step path is all `M`/`L` and has no `C` at all.
+      expect(drawn).toContain("C");
+
+      // One arrival per stored reading, and no extra. A curve that smoothed the
+      // data rather than the drawing would not land on this count.
+      const points = curvePoints(drawn);
+      expect(points).toHaveLength(3);
+
+      // 100, 100, 400: flat, then up. Screen y grows downward, so a rising
+      // reading is a falling coordinate, and the flat pair must not drift.
+      const [first, second, third] = points as [
+        [number, number],
+        [number, number],
+        [number, number],
+      ];
+      expect(second[1]).toBeCloseTo(first[1], 5);
+      expect(third[1]).toBeLessThan(second[1]);
+      expect(first[0]).toBeLessThan(second[0]);
+      expect(second[0]).toBeLessThan(third[0]);
     } finally {
       restore();
     }

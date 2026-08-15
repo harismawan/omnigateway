@@ -68,6 +68,20 @@ export function axisTicks(container: HTMLElement, axis: "xAxis" | "yAxis"): stri
   ].map((tick) => tick.textContent ?? "");
 }
 
+/**
+ * Where a path actually arrives, one point per command.
+ *
+ * `vertices` reads corners, which a smooth curve does not have. This reads the
+ * endpoint of every `M`/`L`/`C` instead, so a test can still ask which readings
+ * a curve passes through without caring how it got between them.
+ */
+export function curvePoints(d: string): Array<[x: number, y: number]> {
+  return [...d.matchAll(/[MLC][^MLC]*?(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*(?=[MLC]|$)/g)].map((match) => [
+    Number(match[1]),
+    Number(match[2]),
+  ]);
+}
+
 /** The corners of a path. Only `M`/`L` commands have them; a curve has none. */
 export function vertices(d: string): Array<[x: number, y: number]> {
   return [...d.matchAll(/[ML]\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)/g)].map((match) => [

@@ -436,9 +436,21 @@ Everything below is what expanding reveals.
 Expanding inserts a second `<Tr>` immediately below, with a single `<Td colSpan={9}>` holding, per
 reported window:
 
-- A recharts line of `used` as a percentage of `limit` over the selected span. The line uses
-  `type="stepAfter"`. Dedup means a flat stretch in the data is a flat stretch in reality;
-  interpolating between two stored points would draw a slope that never happened.
+- A recharts line of `used` as a percentage of `limit` over the selected span, `type="monotone"`,
+  matching how the usage panels draw their series. A quota counter climbs as requests land rather
+  than in one jump at the instant it happened to be read, and monotone cubic will not overshoot a
+  reading on the way to the next.
+
+  An earlier draft specified `type="stepAfter"`, arguing that dedup makes a flat stretch in the data
+  a flat stretch in reality. That argument does not hold. Dedup skips writing the *unchanged*
+  reading, which is precisely the record that would have proved the stretch flat, and only the
+  snapshot's own `observed_at` survives to say when a probe last ran. A gap in the past therefore
+  cannot be told apart from "no probe ran", so a step asserted no more than a slope does — while
+  additionally claiming that everything consumed between two readings arrived at the instant of the
+  second one, which for a counter fed by many requests is false.
+
+  What the curve does between two readings is drawing, not evidence. The readings themselves are
+  untouched: a test asserts the path arrives once per stored sample and nowhere else.
 - A break at each rollover rather than a line falling to zero. A rollover is detected by
   `resetsAt` changing between adjacent samples, and the segments are drawn as separate series so no
   line connects the end of one window to the start of the next.
@@ -583,7 +595,8 @@ Dashboard, under happy-dom with the existing helpers:
 - the Accounts row expands and collapses by accessible name
 - the charted span is the current window plus the preceding one, and each panel filters the shared
   response down to its own span
-- the chart is step-held
+- the chart is a smooth curve that arrives once per stored reading and nowhere else, so smoothing
+  stays a rendering choice rather than becoming a claim about the data
 - a rollover renders as separate segments rather than one line falling to zero
 - a provider reporting nothing offers no disclosure and keeps its `unknown` legend
 - a fresh install with a snapshot but no samples still shows the estimate on both boards, and shows
