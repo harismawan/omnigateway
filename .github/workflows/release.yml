@@ -9,7 +9,9 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  # Write, not read, for one reason: the last step cuts the GitHub release. It
+  # buys nothing towards npm, which authenticates through OIDC below.
+  contents: write
   # The whole of the publishing credential: npm exchanges this OIDC token for a
   # short-lived one, having been told on npmjs.com to trust this workflow in
   # this repository. There is no secret to leak, rotate, or forget.
@@ -68,3 +70,20 @@ jobs:
       - name: Publish
         run: npm publish --access public
         working-directory: dist/npm
+
+      # After the publish, never before. A release created first would announce
+      # a version that a failing publish then never puts on npm, and the fix
+      # would be deleting a release people may already have seen. This way the
+      # worst case is a published version with no release, which is the state
+      # every tag before v0.2.2 is already in and is repaired by one command.
+      #
+      # `--verify-tag` refuses to invent a release for a tag that does not
+      # exist, so a hand-run of this step cannot conjure one.
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag
