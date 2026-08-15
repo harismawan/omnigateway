@@ -146,9 +146,9 @@ around, and this design does not widen that.
 New pure module `packages/control/src/quota/burn.ts`. Given a snapshot window and its samples:
 
 ```text
-elapsedMs   = now - windowStartsAt
+elapsedMs   = observedAt - windowStartsAt
 ratePerHour = used / (elapsedMs / 3_600_000)
-exhaustsAt  = now + ((limit - used) / ratePerHour) * 3_600_000
+exhaustsAt  = observedAt + ((limit - used) / ratePerHour) * 3_600_000
 survives    = exhaustsAt === null || exhaustsAt >= resetsAt
 ```
 
@@ -156,6 +156,26 @@ The rate is a whole-window average rather than a recent slope. It is stable, nee
 parameter, and never swings on a single burst. Its cost is that a burst early in a long window keeps
 the estimate pessimistic after activity stops; the UI names the measure so this reads as the
 average it is.
+
+### Everything is anchored to `observedAt`, never to `now`
+
+`used` is the provider's count as of `observedAt`. The elapsed span must be measured to the same
+instant, and `exhaustsAt` must be projected from it.
+
+Anchoring the denominator to `now` instead would freeze the numerator between probes while the
+denominator kept growing, decaying the rate for reasons unrelated to traffic. The dashboard refetches
+credential health every 10s (`apps/dashboard/src/api/queries.ts:89`) against a 300s default poll
+interval, so roughly thirty of every thirty-one reads would show a number sagging, then snapping back
+when the probe landed. A sawtooth that is entirely artifact.
+
+With the reading as the anchor, `windowStartsAt`, `ratePerHour`, and `exhaustsAt` are pure functions
+of one sample. They are recomputed on every read because that is simpler than caching them, but the
+values change only when a probe writes a new reading. `now` is used for exactly two things: the
+staleness check, and rendering — `exhaustsAt` is an absolute instant, so the surfaces display it as a
+live countdown that ticks down on its own and is revised only by a new probe.
+
+This also fixes what an operator is owed by an estimate: a prediction that moves should move because
+the prediction changed.
 
 `survives` exists because the honest answer is usually "this will not run out before it resets", and
 that is what the surfaces should say rather than printing a far-future timestamp that invites
@@ -175,7 +195,9 @@ Each guard below is a real state, reported as unavailable rather than as a numbe
 
 `gatewayRatePerHour` is computed separately: all four token classes summed —
 `input + output + cacheRead + cacheWrite` — from completed `request_logs` for that `credential_id`
-between `windowStartsAt` and `now`, divided by elapsed hours. All four are counted because a
+between `windowStartsAt` and `observedAt`, divided by the same elapsed hours the provider rate uses.
+The two rates are only comparable if they cover the same span, so the gateway rate is anchored to the
+reading as well, even though the gateway knows its own logs in real time. All four are counted because a
 provider's quota counter is charged for cached reads and writes too, so excluding them would
 understate what the gateway accounts for and manufacture a divergence that is not there. Pending
 rows are excluded, matching `aggregate` (`packages/store/src/sqlite/usage.ts:309`). It is null when
@@ -273,6 +295,10 @@ Control:
 - each guard returns unavailable rather than a number: null limit, null `resetsAt`, zero elapsed,
   zero used, stale snapshot, empty history
 - `survives` is true when the estimate falls past `resetsAt` and false when it falls short
+- the whole burn block is invariant under `now`: holding one sample fixed and advancing `now` across
+  several poll intervals leaves `windowStartsAt`, `ratePerHour`, and `exhaustsAt` byte-identical, and
+  only the staleness verdict flips. This is the anti-sawtooth anchor and is the first thing to
+  mutation-test — swapping `observedAt` for `now` in the denominator must fail it.
 - `windowMs` overrides the nominal duration, and its absence falls back
 - OpenAI's parser populates `windowMs` from `limit_window_seconds`; Anthropic and Kimi leave it null
 - `gatewayRatePerHour` counts only the credential's own logs within the window span
