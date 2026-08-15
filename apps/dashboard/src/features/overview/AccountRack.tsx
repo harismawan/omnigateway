@@ -52,6 +52,39 @@ const QuotaStack = styled.div`
   gap: 4px;
 `;
 
+/**
+ * When this credential's tightest window runs out, or null when nothing says
+ * it will.
+ *
+ * "Tightest" is the router's sense of the word (`quotaHeadroom`,
+ * `packages/router/src/quota.ts`): every reported window is a candidate, the
+ * ones nobody believes are dropped, and the worst of what is left decides. It
+ * is not `quotaUsage`'s duration order — that is a reading order for the
+ * meters, and a weekly window about to run dry outranks a five-hour one that
+ * is fine.
+ *
+ * A suppressed estimate is dropped rather than counted as urgent, guarded on
+ * `stale` rather than on whether a figure happens to be present, exactly as the
+ * legend guards what it prints. A reading that went stale or never arrived
+ * means we stopped being able to measure the account; promoting it would make
+ * losing visibility look like an emergency, which is the opposite failure.
+ */
+function exhaustionOf(estimates: readonly BurnEstimate[]): number | null {
+  let soonest: number | null = null;
+  for (const estimate of estimates) {
+    if (estimate.stale || estimate.survives !== false || estimate.exhaustsAt === null) continue;
+    if (soonest === null || estimate.exhaustsAt < soonest) soonest = estimate.exhaustsAt;
+  }
+  return soonest;
+}
+
+/** Accounts that run out first, then the rest — which tie, for tier to settle. */
+function byExhaustion(a: number | null, b: number | null): number {
+  if (a === null) return b === null ? 0 : 1;
+  if (b === null) return -1;
+  return a - b;
+}
+
 export type AccountRackProps = {
   credentials: readonly Credential[];
   health: readonly CredentialHealth[];
@@ -88,24 +121,34 @@ export function AccountRack({
   // only so the record covers every LampState.
   const rank: Readonly<Record<LampState, number>> = { down: 0, warn: 1, ok: 2, idle: 3, live: 3 };
   const rows = credentials
-    .map((credential) => ({
-      credential,
-      status: credentialStatus(
-        healthByCredential.get(credential.id) ?? [],
-        now,
-        credential.enabled,
-        credential.disabledReason,
-      ),
-      quota: quotaUsage(quotaByCredential.get(credential.id) ?? []),
-      burn: burnByCredential.get(credential.id) ?? [],
-      usage: usageByCredential.get(credential.id),
-    }))
-    // Lamp state, then tier. Burn rate is deliberately not a third key: an
-    // account at 40% draining fast may well be worse than one at 80% sitting
-    // idle, but deciding that changes what this list is for.
+    .map((credential) => {
+      const burn = burnByCredential.get(credential.id) ?? [];
+      return {
+        credential,
+        status: credentialStatus(
+          healthByCredential.get(credential.id) ?? [],
+          now,
+          credential.enabled,
+          credential.disabledReason,
+        ),
+        quota: quotaUsage(quotaByCredential.get(credential.id) ?? []),
+        burn,
+        exhaustsAt: exhaustionOf(burn),
+        usage: usageByCredential.get(credential.id),
+      };
+    })
+    // Lamp state, then how soon the account runs out, then tier.
+    //
+    // An account at 40% draining fast is worse than one at 80% sitting idle,
+    // so burn sits above tier. It sits below lamp state deliberately: a
+    // breaker that is open is a fault now, while exhaustion is a forecast, and
+    // a forecast must not push a live fault down the list. Sorting is stable,
+    // so accounts the comparator cannot separate stay in the order given.
     .sort(
       (a, b) =>
-        rank[a.status.state] - rank[b.status.state] || a.credential.tier - b.credential.tier,
+        rank[a.status.state] - rank[b.status.state] ||
+        byExhaustion(a.exhaustsAt, b.exhaustsAt) ||
+        a.credential.tier - b.credential.tier,
     );
 
   return (

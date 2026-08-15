@@ -396,11 +396,35 @@ What it gains is the estimate, through the shared legend above, plus the `burn` 
 not survive their window; clicking through to Accounts is where the history and the gateway-rate
 corroboration live.
 
-The rack's sort is deliberately **not** changed. It ranks by lamp state then tier, and burn rate is a
-tempting third key — an account at 40% draining fast is arguably worse than one at 80% sitting idle.
-That is a real improvement and a separate decision: it changes what the rack is for, it interacts
-with the `warn`/`down` states that currently drive the order, and folding it in here would smuggle a
-behaviour change into a telemetry feature. Left as a follow-up.
+#### The rack sorts by exhaustion (follow-up, since taken)
+
+This design originally left the rack's sort alone — lamp state, then tier — and recorded burn rate as
+a tempting third key deferred to a separate decision, on the grounds that an account at 40% draining
+fast is worse than one at 80% sitting idle but that folding it in would smuggle a behaviour change
+into a telemetry feature. That follow-up has since been taken, and this section records what landed
+rather than leaving the note contradicting the code.
+
+The rack now ranks by lamp state, then by exhaustion, then by tier. Within one lamp state, a
+credential whose tightest window will not survive sorts above one that will; among two that will
+not, the sooner `exhaustsAt` sorts first; everything else falls through to today's tier order.
+
+Three properties hold the change to what was asked for:
+
+- **Burn sits below lamp state, not above it.** A `down` account still outranks every healthy one no
+  matter how fast the healthy one is draining. An open breaker is a fault now; exhaustion is a
+  forecast, and a forecast must not push a live fault down the list.
+- **A suppressed estimate never reorders anything.** The key is guarded on `stale`, exactly as
+  `quotaLegend` guards what it prints, rather than on whether a figure happens to be present. A
+  reading that went stale or never arrived means the account stopped being measurable; promoting it
+  would make losing visibility look like an emergency, which is the opposite failure.
+- **"Tightest window" is the router's sense of the word.** Every reported window is a candidate, the
+  ones nobody believes are dropped, and the worst of what is left decides — the same shape as
+  `quotaHeadroom`'s `Math.min` over usable windows. It is not `quotaUsage`'s duration order, which is
+  a reading order for the meters: a weekly window about to run dry outranks a five-hour one that is
+  fine.
+
+`AccountsBoard` keeps its existing order. The rack is a triage surface where worst-first is the whole
+point; the accounts page is a management surface where a stable, predictable order matters more.
 
 ### Accounts board
 
@@ -520,7 +544,12 @@ Dashboard, under happy-dom with the existing helpers:
 - `quotaLegend` renders the ETA when `survives` is false, keeps today's reset phrasing when true, and
   prints neither when the reading is stale or never observed — the suppression cases take precedence
 - the Overview rack shows the estimate and gains no chart, no disclosure, and no extra column
-- the rack's row order is unchanged by burn rate
+- the rack sorts a window that will not survive above a healthier account in the same lamp state, and
+  the sooner exhaustion first between two that will not; a `down` account still outranks a
+  fast-burning healthy one; a suppressed estimate reorders nothing; accounts with no burn data keep
+  tier order; and ties are stable. Mutation-test all four load-bearing halves: removing the key,
+  hoisting it above lamp state, letting a stale estimate participate, and reversing the `exhaustsAt`
+  comparison must each fail a named test
 - the Accounts row expands and collapses by accessible name
 - the charted span is the current window plus the preceding one, and each panel filters the shared
   response down to its own span
