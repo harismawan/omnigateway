@@ -1,0 +1,283 @@
+# Kilo Provider Design
+
+## Goal
+
+Add Kilo (kilo.ai, the inference service behind the Kilo Code editor extension) as a first-class
+provider, reachable two ways: with a Kilo API key, and with an OAuth credential obtained through
+Kilo's device-code flow. Kilo fronts a large third-party catalog — Anthropic, OpenAI, Google,
+DeepSeek, Qwen, MiniMax and others — behind one account, plus a set of models it serves free. The
+OAuth path is the reason this is worth doing: it lets an operator spend a Kilo subscription they
+already pay for through the same gateway that fronts Anthropic and OpenAI directly.
+
+## Scope
+
+In scope: a `kilo` provider id, an OpenAI-chat-completions adapter, a device-code OAuth provider, a
+curated model catalog, and the wiring each of those forces through `ir`, `router`, `control`,
+`store`, the dashboard, and the CLI.
+
+Out of scope: the anonymous free tier (Kilo serves some free models to `Bearer anonymous` with no
+account at all — OmniRoute ships this; OmniGateway routes through stored credentials and a
+credential-less path is a separate feature); any quota or credit-balance probe (see *Quota
+Surface*); dynamic catalog population from Kilo's `/models` endpoint; images, embeddings, and audio
+surfaces; and Kilo's OpenRouter-compatible `reasoning` request field beyond what the shared IR
+already expresses.
+
+## Sources
+
+Kilo publishes no API reference covering the endpoints below. Every wire-level constant here is
+quoted from two independent third-party implementations that talk to the live service, not from
+documentation:
+
+- **9router** (`decolua/9router`) — `open-sse/providers/registry/kilocode.js`,
+  `open-sse/providers/registry/kilo-gateway.js`, `src/lib/oauth/providers/kilocode.js`. The OAuth
+  device flow's status codes and response fields are quoted from the last of these.
+- **OmniRoute** (`omniroute@3.8.48`, a TypeScript fork of 9router) —
+  `open-sse/config/providers/registry/{kilocode,kilo-gateway}/index.ts`. Newer; source of the
+  `X-KILOCODE-EDITORNAME` header and the anonymous-fallback note.
+
+Both agree on hosts, paths, and auth shape, which is the strongest corroboration available short of
+capturing traffic. Where a value below is inferred rather than quoted, this document says so.
+
+Note that both references model Kilo as **two** provider ids (`kilocode` for OAuth,
+`kilo-gateway` for API keys). This design deliberately does not — see *Provider Identity*.
+
+## Provider Identity
+
+`ProviderId` gains `"kilo"` (`packages/ir/src/request.ts:1`). That single edit makes the compiler
+enumerate every exhaustive `Record<ProviderId, …>` in the monorepo, which is the intended way to
+find the work rather than a list maintained by hand.
+
+One id, not two. Kilo serves OAuth and API-key traffic from the same host on different paths, which
+is exactly the case `CLAUDE.md` rule 7 describes: select the URL by credential type inside the
+adapter and assert the split in a test. Two ids would double every exhaustive record, every
+dashboard label map, the theme's oklch pairs, and every hardcoded id list in the test suite, in
+exchange for expressing a difference the `CatalogAuth` field on a model choice already expresses.
+
+- `PROVIDER_CAPABILITIES.kilo = { tools: true, images: true, reasoning: true }`
+  (`packages/ir/src/capabilities.ts:40`). Kilo fronts Claude, GPT, and Gemini, all of which accept
+  images and emit reasoning. Under-claiming is not the safe direction: `router` drops a target whose
+  provider lacks `images` from any request carrying an image block, so a wrong `false` makes kilo
+  targets vanish the moment a client pastes a screenshot. The same reasoning is already recorded
+  against `grok` at `capabilities.ts:44-47`.
+- `ANTHROPIC_NATIVE_TOOLS.kilo = false` (`capabilities.ts:23`). Kilo speaks the OpenAI chat
+  completions wire even for Anthropic-vendored models, so an `AnthropicToolDef` or an
+  `anthropicNative` history block excludes kilo at routing.
+
+## Transport
+
+Host is `api.kilo.ai` for both credential types. The path is chosen by credential type:
+
+| credential | chat completions                        | model list                     |
+| ---------- | --------------------------------------- | ------------------------------ |
+| `oauth`    | `/api/openrouter/chat/completions`       | `/api/openrouter/models`       |
+| `apiKey`   | `/api/gateway/chat/completions`          | `/api/gateway/models`          |
+
+Crossing the two does not fail loudly. An OAuth token sent to the gateway path — or an API key sent
+to the OpenRouter path — surfaces as a billing or entitlement error from Kilo, which reads as
+anything but a routing bug. The split therefore gets a dedicated test asserting both directions,
+mutation-checked by inverting the selection and confirming the test fails.
+
+Auth is `Authorization: Bearer <token>` in both cases; the two credential types differ only in the
+URL. Two additional headers:
+
+- `X-KILOCODE-EDITORNAME` — required by the gateway per OmniRoute's comment, harmless on the
+  authenticated path. Value comes from `env("OMNI_KILO_EDITOR_NAME")` with a compiled-in default, so
+  a value Kilo starts rejecting is an operator fix rather than a release (`CLAUDE.md` rule 5).
+- `X-Kilocode-OrganizationID` — sent only when the credential's `providerData` carries an `orgId`.
+  See *OAuth*.
+
+`PROFILES.kilo` (`packages/providers/src/profile.ts:264`) is **constructed, not captured from real
+traffic**; its comment says so, following the precedent the kimi profile sets. `BODY_ORDER.kilo`
+(`packages/providers/src/body.ts:10`) likewise.
+
+## Adapter
+
+`packages/providers/src/kilo/` holds `index.ts` (transport), `wire.ts` (IR → request), `decode.ts`
+(stream → IR), and `models.ts` (catalog entry). No `device.ts`: Kilo asks for an editor name, not a
+machine fingerprint, so there is no synthetic device identity to mint or freeze.
+
+`wire.ts` and `decode.ts` are **forked from `kimi/`, not imported from it**. Both providers speak
+OpenAI chat completions today and the two files will start out nearly identical, which is precisely
+the situation `CLAUDE.md` rule 4 warns about: vendors look alike on paper and diverge in practice,
+and a shared encoder collects a branch per quirk. `custom/` is the standing counterexample — it
+imports `../kimi/` and `../openai/` and pays for it with a regex that rewrites degradation prefixes
+afterwards. Shared infrastructure stays shared: `usageFromPromptTotal`, `parseSse`, `httpError`,
+`orderHeaders`, `mergeHeaders`, `orderFields`.
+
+Cache control has no expression on the OpenAI chat wire. A request carrying cache-control
+breakpoints routed to kilo records a degradation, exactly as kimi does today.
+
+Usage accounting follows the existing OpenAI-chat rules: `stream_options.include_usage` is required
+or a streaming response reports no usage at all, and `Usage.inputTokens` stays uncached input with
+cache reads counted as their own disjoint class.
+
+## OAuth
+
+Kind is `"device"`. `packages/control/src/oauth/kimi.ts` is the closest existing model — it is the
+only current device-code provider, and it already exports `isAuthorizationPending` for the poll
+loop.
+
+**`begin()`** — `POST https://api.kilo.ai/api/device-auth/codes` with no body. Response:
+
+```json
+{ "code": "...", "verificationUrl": "https://...", "expiresIn": 300 }
+```
+
+`code` serves as both the device code and the user code. `verificationUrl` is what the operator
+opens. `expiresIn` defaults to 300 seconds when absent. Poll interval is 3 seconds. A `429` means
+too many pending authorizations and is surfaced as such rather than as a generic failure.
+
+**`exchange()`** — one poll of `GET https://api.kilo.ai/api/device-auth/codes/<code>`:
+
+| status                          | meaning                                       |
+| ------------------------------- | --------------------------------------------- |
+| `202`                           | authorization pending — keep polling          |
+| `403`                           | denied by the user — terminal                 |
+| `410`                           | code expired — terminal                       |
+| `200` + `{status:"approved"}`   | success; `token` and `userEmail` on the body  |
+| `200`, any other `status`       | treated as still pending                      |
+
+On approval, `GET https://api.kilo.ai/api/profile` with the new bearer token reads
+`organizations[0].id` and freezes it onto `providerData.orgId`. This read is **best-effort**: an
+account with no organization is normal, and a failure here must not fail the connect flow and must
+never be reported as `AUTH`, since `AUTH` disables the credential. A missing `orgId` simply means the
+adapter omits the `X-Kilocode-OrganizationID` header.
+
+**No refresh.** Kilo returns a bare token with no refresh token and no expiry. `FlowResult` carries
+`expiresAt: null` and `CredentialSecrets.refreshToken: null`. `refresh()` is still required by the
+`OAuthProvider` interface; it throws `GatewayError("AUTH", …)` stating that Kilo tokens cannot be
+refreshed and the account must be reconnected.
+
+Two consequences worth testing rather than assuming:
+
+1. A credential with `expiresAt: null` must never be handed to `createRefresher`. If some path does
+   send it, `refresh.ts:38` throws `AUTH` on the null refresh token first, which disables a
+   perfectly good credential. The test asserts the refresher is not reached.
+2. The OAuth scheduler (`apps/gateway`) must skip kilo credentials rather than treating a null
+   expiry as "expired long ago".
+
+## Quota Surface
+
+`usage()` is **omitted**. `OAUTH_PROVIDERS` is `Partial`, so this is a supported shape, and per
+`CLAUDE.md` rule 6 an omitted probe makes accounts read as *unknown* rather than as *unlimited*.
+
+Kilo does expose an account balance through `/api/profile`, but a prepaid dollar balance is not a
+rolling window. `UsageWindowReport` is window-shaped — `used`, `limit`, `resetsAt`, `windowType` —
+and filing a balance under a window name would have the quota poller treat credit exhaustion as a
+cooldown that resets on a schedule it never actually resets on. `quota_windows` stores provider
+observations; recording a non-observation there is worse than recording nothing.
+
+## Catalog
+
+`KILO_MODELS` lives in `packages/providers/src/kilo/models.ts` and is assembled into
+`PROVIDER_MODEL_CATALOG` at `packages/providers/src/catalog.ts:33`. It stays a browser-safe leaf:
+model lists and types only, no runtime imports.
+
+Kilo proxies a catalog of several hundred models that changes without notice. The catalog holds a
+curated subset in Kilo's OpenRouter-style `vendor/model` id form. The intended starting list, to be
+confirmed against a live `/models` read before it is written down:
+
+`anthropic/claude-opus-4.7` · `anthropic/claude-sonnet-4.6` · `anthropic/claude-haiku-4.5` ·
+`openai/gpt-5.5` · `openai/gpt-5.4-mini` · `google/gemini-3.1-pro-preview` ·
+`google/gemini-3-flash-preview` · `deepseek/deepseek-v4-pro` · `moonshotai/kimi-k2.6` ·
+`kilo-auto/frontier` · `kilo-auto/balanced` · `kilo-auto/free`
+
+Anything outside the list is still reachable: an operator
+creates a target with a hand-typed model id, and the router prices it from the target rather than
+from this table. This is how `kimi` and `grok` already work; the only difference is that Kilo's
+upstream list is larger and moves faster.
+
+`CatalogAuth` on each `ProviderModelChoice` records which backend serves it. `kilo-auto/*` and the
+`:free` models are gateway-only (`apiKey`); the vendor-namespaced models are available on both.
+
+Two pricing notes:
+
+- Prices and limits are **not invented in this document**. They are read from
+  `GET /api/openrouter/models` and `GET /api/gateway/models` — both return per-model pricing — at
+  implementation time, and the catalog records the figures observed. The plan carries this as an
+  explicit step; a spec that guessed numbers would have them silently wrong.
+- `kilo-auto/frontier`, `kilo-auto/balanced`, and `kilo-auto/free` route to an upstream Kilo chooses
+  per request, so no single price is correct for them. Per `CLAUDE.md` rule 8 the catalog picks the
+  balanced tier, states in a comment that the figure is a default an operator should override, and
+  `README.md` warns operators of the same.
+
+## Routing
+
+**`PREFIX_PROVIDER` is not changed** (`packages/router/src/resolve.ts:12-21`).
+
+Bare-model-name inference matches prefixes like `claude-` and `gpt-`. Kilo's ids are
+`anthropic/claude-sonnet-4.6` and `openai/gpt-5.5`, which match none of them, so nothing collides
+today and no entry is needed. Adding one would be actively harmful: an `anthropic/ → kilo` mapping
+puts a vendor-namespaced string one edit away from capturing traffic meant for the Anthropic
+adapter. Kilo is reachable through configured virtual models only. This paragraph exists so the next
+reader does not "fix" the omission.
+
+`claude/<id>` alias normalization and `[1m]` handling are unaffected; `claude/` remains reserved.
+
+## Storage
+
+No migration. `credentials.provider` is `TEXT` with no `CHECK` and `providerData` is free-form
+(`CLAUDE.md` lines 96-97), so the `orgId` field needs no schema change. The `ProviderId`-typed
+columns in `packages/store/src/types.ts` follow from the union edit automatically.
+
+## Fan-out
+
+The compiler flags these once `ProviderId` gains `"kilo"`:
+
+`ir/capabilities.ts:23,40` · `providers/profile.ts:264` · `providers/body.ts:10` ·
+`providers/registry.ts:9` (`ADAPTERS`) · `providers/catalog.ts:33` ·
+`gateway/dispatch/price.ts:17` (`WRITE_OVER_INPUT`) · `cli/command.ts:46` (`PROVIDER_TONE`) ·
+`testkit/index.ts:275,288-294` (`stubAdapters`) · dashboard `theme/tokens.ts:74`,
+`features/accounts/ConnectDialog.tsx:21,30`, `features/accounts/AccountsBoard.tsx:39`
+
+It flags none of these:
+
+- `control/src/schemas.ts:41` (`providerIdSchema`) and **`:58`**, the target discriminated union,
+  whose `z.enum` lists providers explicitly and excludes `custom`. Missing `:58` produces a build
+  that connects kilo credentials but cannot create a target against them.
+- `control/src/connect.ts:8` (`PROVIDER_IDS`, backing `isProviderId` at `:54`), `:29` (`CALLBACKS`),
+  `:172` (free-text `"anthropic, openai, kimi, grok"`)
+- `control/src/oauth/index.ts:13` (`OAUTH_PROVIDERS`)
+- `cli/src/commands/connect.ts:17` and `cli/src/commands/credentials.ts:224`, two more free-text
+  lists that disagree with each other today
+- dashboard `features/accounts/ConnectDialog.tsx:45` (`CODE_PLACEHOLDER`), `theme/tokens.ts:41-47`
+  (provider token map) and `:71-72` (a second hand-rolled `PROVIDER_IDS`)
+- `theme/GlobalStyle.ts:34-42` (light) **and** `:71-75` (dark) — both halves of the `--p-kilo` oklch
+  pair, placed per the hue-spacing rationale recorded in the comment at `:39`
+- `README.md:143` and the provider list in `CLAUDE.md`
+
+Tests that assert exact key sets and will fail loudly, which is the desired behaviour — each is
+updated deliberately, not blanket-widened: `providers/test/catalog.test.ts:5,7-31`,
+`providers/test/kimi.test.ts:263` and `providers/test/custom.test.ts:84` (both assert
+`Object.keys(ADAPTERS)` equals the current five), `control/test/oauth/kimi.test.ts:280`
+(`Object.keys(OAUTH_PROVIDERS)`), `gateway/test/routes/proxy.test.ts:154,762`.
+
+One test needs more than an update: `cli/test/connect.test.ts:135` asserts the free-text provider
+list, and the comment at `:133` warns that the assertion still passes by prefix. After adding kilo,
+mutate the string to confirm the assertion actually fails.
+
+## Testing
+
+Behaviour tests at the narrowest stable boundary, stub `HttpClient` throughout, no live calls. Per
+`CLAUDE.md` rule 9 each anchor below is mutation-tested — break the behaviour, confirm the test goes
+red — because a green suite is not evidence of coverage.
+
+- URL selection by credential type: oauth → `/api/openrouter/*`, apiKey → `/api/gateway/*`, both
+  directions
+- Streaming and non-streaming on both paths
+- Usage-token arithmetic, including that a streaming request without `stream_options.include_usage`
+  reports no usage rather than zero
+- Tool call and tool result round-trip
+- Mid-conversation system message stays in place and is not folded into request-level `system`
+- Device flow: `202` / `403` / `410` / approved, plus code expiry
+- Null-expiry credential never reaches the refresher; `refresh()` raises `AUTH`
+- `X-Kilocode-OrganizationID` present when `providerData.orgId` is set, absent when it is not; a
+  failing `/api/profile` read still completes the connect
+- Degradation recorded for cache-control breakpoints the chat wire cannot express
+
+## Open Questions
+
+None blocking. The one deferred decision is the anonymous free tier: Kilo serves a subset of models
+to `Bearer anonymous` with no account, which would let an operator use the gateway before connecting
+anything. It needs a credential-less dispatch path that does not exist today, so it is deliberately
+out of scope here rather than unresolved.
