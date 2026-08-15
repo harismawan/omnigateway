@@ -195,6 +195,49 @@ test("putModel judges a retargeted target fresh rather than carrying the exempti
   });
 });
 
+test("putModel grandfathers a target against its own stored model, not any stored model", async () => {
+  const store = await memoryStore();
+  await kiloCredential(store, "kilo-oauth", "oauth");
+  await kiloCredential(store, "kilo-key", "apiKey");
+  const first = kiloModel("kilo-auto/frontier");
+  first.id = "already-saved";
+  await putModel(store, "already-saved", first);
+
+  const credentials = await store.credentials.list();
+  const key = credentials.find((credential) => credential.authType === "apiKey");
+  await store.credentials.remove(String(key?.id));
+
+  // A second virtual model is a fresh assertion. Reading the exemption off
+  // whichever model happens to be stored first would let this one inherit an
+  // exemption it never earned, and it would fail upstream at request time.
+  const second = kiloModel("kilo-auto/frontier");
+  second.id = "brand-new";
+  await expect(putModel(store, "brand-new", second)).rejects.toMatchObject({
+    code: "BAD_REQUEST",
+  });
+});
+
+test("putModel keys the exemption on the target's provider, not its model alone", async () => {
+  const store = await memoryStore();
+  await kiloCredential(store, "kilo-oauth", "oauth");
+
+  // Saves because the catalog does not list this model under anthropic, and an
+  // unlisted model is unknown rather than forbidden.
+  const elsewhere = kiloModel("kilo-auto/frontier");
+  (elsewhere.targets as Array<Record<string, unknown>>)[0] = {
+    ...(elsewhere.targets as Array<Record<string, unknown>>)[0],
+    provider: "anthropic",
+  };
+  await putModel(store, "m", elsewhere);
+
+  // Repointing that same model string at kilo is a new assertion: kilo serves
+  // it to API keys only and this installation holds none. Keying the exemption
+  // on the model alone would carry the anthropic target's pass straight over.
+  await expect(putModel(store, "m", kiloModel("kilo-auto/frontier"))).rejects.toMatchObject({
+    code: "BAD_REQUEST",
+  });
+});
+
 test("requires an endpoint id only for custom targets", () => {
   const custom = target({ input: 0, output: 0 });
   custom.targets[0] = { ...custom.targets[0], provider: "custom", model: "local-model" };

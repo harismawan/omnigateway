@@ -770,10 +770,17 @@ test("reasoning that resumes after text opens a second block rather than reopeni
     { type: "text", text: "partial" },
     { type: "thinking", text: "second" },
   ]);
-  // Strictly nested, never overlapping: each block closes before the next
-  // opens. An Anthropic-shaped egress renders these as content_block_start /
+  // On the reasoning axis, each block closes before the next opens. An
+  // Anthropic-shaped egress renders these as content_block_start /
   // content_block_stop pairs, and a start that arrives while another block is
   // still open is malformed on that wire.
+  //
+  // Scope, so the next reader does not over-read this: text and tool-call
+  // blocks still overlap each other, inherited from the kimi decoder this one
+  // was forked from. That is pre-existing and out of scope here; nothing on
+  // the reasoning path introduced it, and no thinking overlap can reach an
+  // Anthropic client anyway, since kilo's thinking is always unsigned and the
+  // egress suppresses it.
   expect(blockSpans(events)).toEqual([
     "open 0",
     "close 0",

@@ -143,10 +143,17 @@ while text, tool calls, stop reason, and usage all decoded correctly. Kilo proxi
 move weekly; failing the turn would discard a good, fully billed response every time a vendor adds a
 field.
 
-Thinking blocks are emitted strictly non-overlapping — a thinking block closes before text or a tool
-call opens, and text closes if reasoning resumes — because the Anthropic egress renders these as
-`content_block_start`/`content_block_stop` pairs and a start arriving while another block is open is
-malformed on that wire.
+On the reasoning axis blocks never overlap: a thinking block closes before text or a tool call
+opens, and text closes if reasoning resumes. The Anthropic egress renders these as
+`content_block_start`/`content_block_stop` pairs, and a start arriving while another block is open
+is malformed on that wire. Assert the open/close *order* rather than the count of each — counts
+survive an overlap unchanged.
+
+The claim is deliberately narrow. Text and tool-call blocks still overlap each other, inherited
+unchanged from the kimi decoder this one was forked from; that is pre-existing behaviour on both
+adapters and out of scope here. It is also why the reasoning axis is the one that matters: kilo's
+thinking is always unsigned and `egress/anthropic.ts:88` suppresses unsigned thinking, so a thinking
+overlap could not reach an Anthropic client even if one existed.
 
 Usage accounting follows the existing OpenAI-chat rules: `stream_options.include_usage` is required
 or a streaming response reports no usage at all, and `Usage.inputTokens` stays uncached input with

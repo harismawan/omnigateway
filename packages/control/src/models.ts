@@ -18,7 +18,7 @@ const AUTH_LABEL: Readonly<Record<CatalogAuth, string>> = {
   apiKey: "API key",
 };
 
-/** Reads as prose: "OAuth", "an API key", "OAuth or an API key". */
+/** Reads as prose: "OAuth", "API key", "OAuth or API key". */
 function phrase(auths: readonly CatalogAuth[]): string {
   return auths.map((auth) => AUTH_LABEL[auth]).join(" or ");
 }
