@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { health, seedCredential } from "@omni/testkit";
+import { health, requestLog, seedCredential } from "@omni/testkit";
 import { serviceLogs } from "../src/service.ts";
 import { cli, fakeService, makeRoot, openStore, TEST_KEY } from "./helpers/harness.ts";
 
@@ -212,6 +212,38 @@ test("a setting the schema rejects leaves the stored value unchanged", async () 
     settings: { maxAttempts: number };
   };
   expect(after.settings.maxAttempts).toBeLessThan(99);
+});
+
+/** The stored value of one flattened setting path. */
+async function setting(root: string, path: string): Promise<unknown> {
+  const body = JSON.parse((await cli(["settings", "get", "--json"], { root })).out) as {
+    settings: Record<string, unknown>;
+  };
+  const [head, tail] = path.split(".");
+  const value = body.settings[head ?? ""];
+  if (tail === undefined) return value;
+  return (value as Record<string, unknown>)[tail];
+}
+
+test("a whitespace-only setting value is refused, not written as zero", async () => {
+  const root = await installation();
+
+  // `weights.*`, `requestDeadlineMs` and `quotaPollIntervalMs` all accept 0, so
+  // `Number(" ")` would be stored as a real edit rather than caught downstream.
+  const result = await cli(["settings", "set", "weights.cost", " "], { root });
+
+  expect(result.code).toBe(2);
+  expect(result.err).toContain("must be a number");
+  expect(await setting(root, "weights.cost")).toBe(1);
+});
+
+test("a setting value of 0 is still a value, not a blank", async () => {
+  const root = await installation();
+
+  const result = await cli(["settings", "set", "weights.cost", "0"], { root });
+
+  expect(result.code).toBe(0);
+  expect(await setting(root, "weights.cost")).toBe(0);
 });
 
 test("credentials add-key stores a key read from a prompt, never from argv", async () => {
@@ -618,6 +650,49 @@ test("logs without --service reads the request log", async () => {
 
   expect(result.code).toBe(0);
   expect(JSON.parse(result.out)).toEqual({ logs: [] });
+});
+
+/** Three completed requests, so a page size shows up as a row count. */
+async function seedLogs(root: string): Promise<void> {
+  const store = await openStore(root);
+  for (const id of ["r1", "r2", "r3"]) await store.usage.append(requestLog({ id }));
+  store.close();
+}
+
+async function loggedRows(root: string, argv: string[]): Promise<number> {
+  const result = await cli(["logs", ...argv, "--json"], { root, service: fakeService({ root }) });
+  expect(result.code).toBe(0);
+  return (JSON.parse(result.out) as { logs: unknown[] }).logs.length;
+}
+
+test("a blank -n reads as an absent flag, not as zero", async () => {
+  const root = await installation();
+  await seedLogs(root);
+
+  // `Number("")` is 0, which the page size clamps to a single row: an operator
+  // whose shell expanded an empty variable would be told there was one request.
+  expect(await loggedRows(root, ["-n", ""])).toBe(3);
+  expect(await loggedRows(root, ["-n", "   "])).toBe(3);
+  expect(await loggedRows(root, [])).toBe(3);
+});
+
+test("-n 0 still means zero, which the page size clamps to one row", async () => {
+  const root = await installation();
+  await seedLogs(root);
+
+  expect(await loggedRows(root, ["-n", "0"])).toBe(1);
+  expect(await loggedRows(root, ["-n", "2"])).toBe(2);
+});
+
+test("a non-numeric -n is still refused rather than defaulted", async () => {
+  const root = await installation();
+  const result = await cli(["logs", "-n", "soon", "--json"], {
+    root,
+    service: fakeService({ root }),
+  });
+
+  expect(result.code).toBe(2);
+  expect(result.err).toContain('--number must be a number, got "soon"');
 });
 
 test("status reports every quota window an account has, not just the tightest", async () => {

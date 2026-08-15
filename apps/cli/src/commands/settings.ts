@@ -38,7 +38,11 @@ export const settingsSet: Command = {
     const store = await ctx.store();
     const current = await getSettings(store);
 
-    const value = Number(raw);
+    // A blank positional is not zero: `requirePositional` catches `""`, but a
+    // quoted space reaches `Number(" ")` as 0, and `weights.*`,
+    // `requestDeadlineMs` and `quotaPollIntervalMs` all accept 0, so the schema
+    // would store it as a deliberate edit. A literal "0" still passes.
+    const value = raw.trim().length === 0 ? Number.NaN : Number(raw);
     if (!Number.isFinite(value)) throw new UsageError(`${path} must be a number, got "${raw}"`);
 
     const [head, tail] = path.split(".");
