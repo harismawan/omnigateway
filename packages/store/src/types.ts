@@ -6,6 +6,35 @@ export type AuthType = "oauth" | "apiKey";
 export type WindowType = "fiveHour" | "daily" | "weekly";
 
 /**
+ * Nominal length of each window.
+ *
+ * Lives here rather than with its first consumer because three of them now need
+ * it — the router judges headroom against it, `@omni/control` infers a window
+ * start from it, and the console renders against it — and a second copy would
+ * be free to drift from this one.
+ */
+export const WINDOW_DURATION_MS: Record<WindowType, number> = {
+  fiveHour: 5 * 60 * 60 * 1000,
+  daily: 24 * 60 * 60 * 1000,
+  weekly: 7 * 24 * 60 * 60 * 1000,
+};
+
+/**
+ * How long one window actually runs for.
+ *
+ * The three names are buckets, not durations: Codex reports a real duration and
+ * it is stored under whichever of the three names it lands nearest. A provider
+ * that stated its own duration is believed over the nominal one, because a
+ * three-hour window read as five puts its inferred start two hours too early.
+ *
+ * A non-positive duration is not a window and is discarded rather than passed
+ * on to divide by.
+ */
+export function durationFor(windowType: WindowType, windowMs: number | null): number {
+  return windowMs !== null && windowMs > 0 ? windowMs : WINDOW_DURATION_MS[windowType];
+}
+
+/**
  * Why a credential is not routing.
  *
  * `tokenRejected` is the provider's verdict on a refresh: the credential cannot
@@ -95,6 +124,40 @@ export type QuotaWindow = {
    * existed; readers treat that as never observed rather than as current.
    */
   observedAt: number;
+  /**
+   * How long the provider said this window runs for, or null when it did not
+   * say. `durationFor` prefers it over the nominal length of `windowType`.
+   */
+  windowMs: number | null;
+};
+
+/**
+ * One retained reading of one window.
+ *
+ * `quota_windows` holds only the newest reading, so it can say where an account
+ * stands but never how it got there. A sample is that reading kept, written by
+ * `saveQuota` in the same transaction as the snapshot it describes.
+ *
+ * Readings are stored only when something moved, so a gap in the series means
+ * either "nothing changed" or "the probe did not run". `quota_windows.observedAt`
+ * separates the two: liveness lives in the snapshot, shape lives here.
+ */
+export type QuotaSample = {
+  credentialId: string;
+  windowType: WindowType;
+  observedAt: number;
+  used: number;
+  limit: number | null;
+  resetsAt: number | null;
+  windowMs: number | null;
+};
+
+/** Both bounds are inclusive epoch milliseconds, as `UsageQuery` uses them. */
+export type QuotaSampleQuery = {
+  since: number;
+  until: number;
+  /** Omitted means every credential. */
+  credentialId?: string | undefined;
 };
 
 /**
@@ -258,7 +321,11 @@ export interface CredentialRepo {
   listHealth(): Promise<CredentialHealth[]>;
   saveHealth(rows: CredentialHealth[]): Promise<void>;
   listQuota(): Promise<QuotaWindow[]>;
+  /** Also appends a sample per window whose reading moved. See `QuotaSample`. */
   saveQuota(rows: QuotaWindow[]): Promise<void>;
+  listQuotaSamples(q: QuotaSampleQuery): Promise<QuotaSample[]>;
+  /** Prunes retained samples. Returns how many rows went. */
+  pruneQuotaSamples(olderThan: number): Promise<number>;
 }
 
 export interface ConfigRepo {

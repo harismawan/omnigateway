@@ -643,6 +643,7 @@ test("status reports every quota window an account has, not just the tightest", 
       limit: 1_000,
       resetsAt: null,
       observedAt: 1_000,
+      windowMs: null,
     },
     {
       credentialId: id,
@@ -652,6 +653,7 @@ test("status reports every quota window an account has, not just the tightest", 
       limit: 1_000,
       resetsAt: null,
       observedAt: 1_000,
+      windowMs: null,
     },
   ]);
   store.close();

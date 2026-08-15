@@ -278,6 +278,7 @@ test("credentialStatus attaches quota and reports admin configuration", async ()
             limit: 10,
             resetsAt: null,
             observedAt: NOW,
+            windowMs: null,
           },
         ],
       },

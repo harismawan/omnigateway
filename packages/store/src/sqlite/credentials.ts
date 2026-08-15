@@ -11,6 +11,8 @@ import type {
   CredentialView,
   DisabledReason,
   InferenceSecrets,
+  QuotaSample,
+  QuotaSampleQuery,
   QuotaWindow,
   RefreshSecrets,
   UsageSecrets,
@@ -338,6 +340,7 @@ export function createCredentialRepo(
         limit_value: number | null;
         resets_at: number | null;
         observed_at: number;
+        window_ms: number | null;
       };
       return db
         .query<Q, []>("SELECT * FROM quota_windows")
@@ -350,6 +353,7 @@ export function createCredentialRepo(
           limit: r.limit_value,
           resetsAt: r.resets_at,
           observedAt: r.observed_at,
+          windowMs: r.window_ms,
         }));
     },
 
@@ -362,21 +366,52 @@ export function createCredentialRepo(
      * drawing a bar for a limit that does not exist and letting the router
      * price against it. Credentials not named here are untouched, because this
      * call carries no evidence about them.
+     *
+     * The same transaction appends to `quota_samples` whatever moved. This is
+     * the sole write path for quota data, so history cannot drift from the
+     * snapshot it describes.
      */
     async saveQuota(rows: QuotaWindow[]) {
       const stmt = db.prepare(
         `INSERT INTO quota_windows
-           (credential_id, window_type, starts_at, used, limit_value, resets_at, observed_at)
-         VALUES (?,?,?,?,?,?,?)
+           (credential_id, window_type, starts_at, used, limit_value, resets_at, observed_at,
+            window_ms)
+         VALUES (?,?,?,?,?,?,?,?)
          ON CONFLICT (credential_id, window_type) DO UPDATE SET
            starts_at = excluded.starts_at,
            used = excluded.used,
            limit_value = excluded.limit_value,
            resets_at = excluded.resets_at,
-           observed_at = excluded.observed_at`,
+           observed_at = excluded.observed_at,
+           window_ms = excluded.window_ms`,
       );
       const prune = db.prepare(
         "DELETE FROM quota_windows WHERE credential_id = ? AND window_type NOT IN (SELECT value FROM json_each(?))",
+      );
+      type Newest = {
+        used: number;
+        limit_value: number | null;
+        resets_at: number | null;
+        window_ms: number | null;
+      };
+      const newestSample = db.prepare<Newest, [string, string]>(
+        `SELECT used, limit_value, resets_at, window_ms
+           FROM quota_samples
+          WHERE credential_id = ? AND window_type = ?
+          ORDER BY observed_at DESC
+          LIMIT 1`,
+      );
+      // Two readings of the same window at the same instant are the same
+      // reading; the newer one wins rather than aborting the whole save.
+      const appendSample = db.prepare(
+        `INSERT INTO quota_samples
+           (credential_id, window_type, observed_at, used, limit_value, resets_at, window_ms)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT (credential_id, window_type, observed_at) DO UPDATE SET
+           used = excluded.used,
+           limit_value = excluded.limit_value,
+           resets_at = excluded.resets_at,
+           window_ms = excluded.window_ms`,
       );
 
       const kept = new Map<string, string[]>();
@@ -396,6 +431,34 @@ export function createCredentialRepo(
             r.limit,
             r.resetsAt,
             r.observedAt,
+            r.windowMs,
+          );
+
+          // An idle account is re-read every poll interval and moves nothing,
+          // so only a changed reading is worth a row.
+          //
+          // `resets_at` is in the comparison because a rollover that lands on
+          // the same `used` would otherwise be dropped, and the chart would
+          // draw one continuous window where there were two. `starts_at` is
+          // not: it is our own observation time, so it moves every poll and
+          // would defeat the dedup entirely.
+          const previous = newestSample.get(r.credentialId, r.windowType);
+          const unchanged =
+            previous !== null &&
+            previous.used === r.used &&
+            previous.limit_value === r.limit &&
+            previous.resets_at === r.resetsAt &&
+            previous.window_ms === r.windowMs;
+          if (unchanged) continue;
+
+          appendSample.run(
+            r.credentialId,
+            r.windowType,
+            r.observedAt,
+            r.used,
+            r.limit,
+            r.resetsAt,
+            r.windowMs,
           );
         }
         for (const [credentialId, types] of kept) {
@@ -403,6 +466,45 @@ export function createCredentialRepo(
         }
       })();
       emit({ type: "quotaSaved", rows });
+    },
+
+    async listQuotaSamples(q: QuotaSampleQuery) {
+      type S = {
+        credential_id: string;
+        window_type: string;
+        observed_at: number;
+        used: number;
+        limit_value: number | null;
+        resets_at: number | null;
+        window_ms: number | null;
+      };
+      // Both bounds inclusive, matching how `UsageQuery` reads a span.
+      const sql = (extra: string) =>
+        `SELECT * FROM quota_samples
+          WHERE observed_at >= ? AND observed_at <= ?${extra}
+          ORDER BY credential_id, window_type, observed_at`;
+      const rows =
+        q.credentialId === undefined
+          ? db.query<S, [number, number]>(sql("")).all(q.since, q.until)
+          : db
+              .query<S, [number, number, string]>(sql(" AND credential_id = ?"))
+              .all(q.since, q.until, q.credentialId);
+      return rows.map(
+        (r): QuotaSample => ({
+          credentialId: r.credential_id,
+          windowType: r.window_type as WindowType,
+          observedAt: r.observed_at,
+          used: r.used,
+          limit: r.limit_value,
+          resetsAt: r.resets_at,
+          windowMs: r.window_ms,
+        }),
+      );
+    },
+
+    async pruneQuotaSamples(olderThan: number) {
+      db.run("DELETE FROM quota_samples WHERE observed_at < ?", [olderThan]);
+      return db.query<{ n: number }, []>("SELECT changes() AS n").get()?.n ?? 0;
     },
   };
 }

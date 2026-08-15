@@ -57,6 +57,7 @@ export function quota(patch: Partial<QuotaWindow> = {}): QuotaWindow {
     limit: 1_000,
     resetsAt: NOW + 3_600_000,
     observedAt: NOW - 60_000,
+    windowMs: null,
     ...patch,
   };
 }

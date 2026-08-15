@@ -224,6 +224,7 @@ test("health and quota rows round-trip", async () => {
       limit: 100,
       resetsAt: 20,
       observedAt: 15,
+      windowMs: null,
     },
   ]);
   const quota = await repo.listQuota();
@@ -244,6 +245,7 @@ test("a quota snapshot round-trips its reset and observation times", async () =>
       limit: 100,
       resetsAt: 900,
       observedAt: 500,
+      windowMs: null,
     },
   ]);
   // A second reading of the same window replaces the first rather than adding
@@ -257,6 +259,7 @@ test("a quota snapshot round-trips its reset and observation times", async () =>
       limit: 100,
       resetsAt: 900,
       observedAt: 600,
+      windowMs: null,
     },
   ]);
 
@@ -283,6 +286,7 @@ test("a window the provider stops reporting is dropped, not left behind", async 
       limit: 100,
       resetsAt: 10,
       observedAt: 1,
+      windowMs: null,
     },
     {
       credentialId: "c1",
@@ -292,6 +296,7 @@ test("a window the provider stops reporting is dropped, not left behind", async 
       limit: 100,
       resetsAt: 99,
       observedAt: 1,
+      windowMs: null,
     },
   ]);
   expect(await repo.listQuota()).toHaveLength(2);
@@ -305,6 +310,7 @@ test("a window the provider stops reporting is dropped, not left behind", async 
       limit: 100,
       resetsAt: 99,
       observedAt: 2,
+      windowMs: null,
     },
   ]);
 
@@ -328,6 +334,7 @@ test("saving one credential's windows leaves another credential's alone", async 
       limit: 100,
       resetsAt: 9,
       observedAt: 1,
+      windowMs: null,
     },
     {
       credentialId: "c2",
@@ -337,6 +344,7 @@ test("saving one credential's windows leaves another credential's alone", async 
       limit: 100,
       resetsAt: 9,
       observedAt: 1,
+      windowMs: null,
     },
   ]);
 
@@ -349,6 +357,7 @@ test("saving one credential's windows leaves another credential's alone", async 
       limit: 100,
       resetsAt: 9,
       observedAt: 2,
+      windowMs: null,
     },
   ]);
 
@@ -458,6 +467,7 @@ test("remove cascades to health and quota rows", async () => {
       limit: 100,
       resetsAt: 20,
       observedAt: 15,
+      windowMs: null,
     },
   ]);
 
@@ -465,6 +475,156 @@ test("remove cascades to health and quota rows", async () => {
 
   expect(await repo.listHealth()).toHaveLength(0);
   expect(await repo.listQuota()).toHaveLength(0);
+  db.close();
+});
+
+const reading = {
+  credentialId: "c1",
+  windowType: "fiveHour" as const,
+  startsAt: 0,
+  used: 5,
+  limit: 100,
+  resetsAt: 900,
+  observedAt: 100,
+  windowMs: null,
+};
+
+/** Every sample ever written, whatever the clock said. */
+const allSamples = { since: 0, until: Number.MAX_SAFE_INTEGER };
+
+test("an identical reading writes no sample", async () => {
+  // At a 300s poll an idle account is re-read hundreds of times a day. Storing
+  // each one would fill the table with rows that describe nothing happening.
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  await repo.saveQuota([reading]);
+  await repo.saveQuota([{ ...reading, observedAt: 400 }]);
+  await repo.saveQuota([{ ...reading, observedAt: 700, startsAt: 42 }]);
+
+  const samples = await repo.listQuotaSamples(allSamples);
+  expect(samples).toHaveLength(1);
+  expect(samples[0]).toMatchObject({ observedAt: 100, used: 5 });
+  db.close();
+});
+
+test("a changed reading writes a sample", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  await repo.saveQuota([reading]);
+  await repo.saveQuota([{ ...reading, observedAt: 400, used: 6 }]);
+
+  const samples = await repo.listQuotaSamples(allSamples);
+  expect(samples.map((s) => s.used)).toEqual([5, 6]);
+  expect(samples.map((s) => s.observedAt)).toEqual([100, 400]);
+  db.close();
+});
+
+test("a rollover onto the same used value still writes a sample", async () => {
+  // The load-bearing case for including `resets_at` in the comparison. A window
+  // that rolled over and happens to read the same `used` is a *different*
+  // window; dropping it merges two windows into one continuous line.
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  await repo.saveQuota([reading]);
+  await repo.saveQuota([{ ...reading, observedAt: 400, resetsAt: 18_900 }]);
+
+  const samples = await repo.listQuotaSamples(allSamples);
+  expect(samples).toHaveLength(2);
+  expect(samples.map((s) => s.resetsAt)).toEqual([900, 18_900]);
+  db.close();
+});
+
+test("a reported window duration round-trips on the snapshot and the sample", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  await repo.saveQuota([{ ...reading, windowMs: 10_800_000 }]);
+  expect((await repo.listQuota())[0]?.windowMs).toBe(10_800_000);
+  expect((await repo.listQuotaSamples(allSamples))[0]?.windowMs).toBe(10_800_000);
+
+  // A provider that stops stating the duration is back to unknown, not to the
+  // last duration it happened to mention.
+  await repo.saveQuota([{ ...reading, observedAt: 400, windowMs: null }]);
+  expect((await repo.listQuota())[0]?.windowMs).toBeNull();
+  const samples = await repo.listQuotaSamples(allSamples);
+  expect(samples.map((s) => s.windowMs)).toEqual([10_800_000, null]);
+  db.close();
+});
+
+test("samples are filtered by range and by credential", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  await repo.create({ ...input, id: "c2", label: "second" });
+
+  await repo.saveQuota([reading, { ...reading, credentialId: "c2", used: 11 }]);
+  await repo.saveQuota([
+    { ...reading, observedAt: 500, used: 6 },
+    { ...reading, credentialId: "c2", observedAt: 500, used: 12 },
+  ]);
+
+  expect((await repo.listQuotaSamples({ since: 200, until: 600 })).map((s) => s.used)).toEqual([
+    6, 12,
+  ]);
+  expect(
+    (await repo.listQuotaSamples({ ...allSamples, credentialId: "c2" })).map((s) => s.used),
+  ).toEqual([11, 12]);
+  db.close();
+});
+
+test("remove cascades to quota samples", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  await repo.saveQuota([reading]);
+  expect(await repo.listQuotaSamples(allSamples)).toHaveLength(1);
+
+  await repo.remove("c1");
+  expect(await repo.listQuotaSamples(allSamples)).toHaveLength(0);
+  db.close();
+});
+
+test("a window the provider stops reporting keeps its samples", async () => {
+  // Unlike `quota_windows`, history is not replaced by the newest window set: a
+  // window that is gone still happened, and its shape stays readable until it
+  // ages out.
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  await repo.saveQuota([reading, { ...reading, windowType: "weekly", used: 20 }]);
+  await repo.saveQuota([{ ...reading, observedAt: 400, used: 6 }]);
+
+  expect(await repo.listQuota()).toHaveLength(1);
+  expect(
+    (await repo.listQuotaSamples(allSamples)).filter((s) => s.windowType === "weekly"),
+  ).toHaveLength(1);
+  db.close();
+});
+
+test("pruning drops samples older than the cutoff and leaves the rest", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  await repo.saveQuota([reading]);
+  await repo.saveQuota([{ ...reading, observedAt: 400, used: 6 }]);
+  await repo.saveQuota([{ ...reading, observedAt: 700, used: 7 }]);
+
+  expect(await repo.pruneQuotaSamples(500)).toBe(2);
+  expect((await repo.listQuotaSamples(allSamples)).map((s) => s.observedAt)).toEqual([700]);
+  db.close();
+});
+
+test("saveQuota writes neither snapshot nor sample when it fails", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+
+  // The second row names a credential that does not exist, so the foreign key
+  // fails partway through and the whole call must leave nothing behind.
+  await expect(repo.saveQuota([reading, { ...reading, credentialId: "ghost" }])).rejects.toThrow();
+
+  expect(await repo.listQuota()).toHaveLength(0);
+  expect(await repo.listQuotaSamples(allSamples)).toHaveLength(0);
   db.close();
 });
 

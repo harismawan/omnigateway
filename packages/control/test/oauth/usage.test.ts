@@ -12,6 +12,7 @@ test("a percentage-only window is normalized to a value out of 100", () => {
     used: 62.5,
     limit: 100,
     resetsAt: null,
+    windowMs: null,
   });
 });
 
@@ -156,6 +157,59 @@ test("a codex daily window is not rounded up into a weekly one", () => {
   );
 
   expect(report?.windows[0]?.windowType).toBe("daily");
+});
+
+test("codex reports the duration it declared, not the one its bucket is named after", () => {
+  // The bucket names are three, the durations are not: a three-hour window is
+  // stored as `fiveHour`, and inferring its start from five hours would place
+  // it two hours too early. Keeping the declared seconds is the correction.
+  const report = parseOpenAIUsage(
+    {
+      rate_limit: {
+        primary_window: { used_percent: 1, limit_window_seconds: 10_800 },
+        secondary_window: { used_percent: 2, limit_window_seconds: 604_800 },
+      },
+    },
+    NOW,
+  );
+
+  expect(report?.windows.map((w) => w.windowType)).toEqual(["fiveHour", "weekly"]);
+  expect(report?.windows.map((w) => w.windowMs)).toEqual([10_800_000, 604_800_000]);
+});
+
+test("a codex window with no declared duration reports none, and is bucketed as before", () => {
+  const report = parseOpenAIUsage(
+    {
+      rate_limit: {
+        primary_window: { used_percent: 41, reset_after_seconds: 7_200 },
+        secondary_window: { used_percent: 9, reset_at: 1_900_000_000 },
+      },
+    },
+    NOW,
+  );
+
+  expect(report?.windows.map((w) => w.windowType)).toEqual(["fiveHour", "weekly"]);
+  expect(report?.windows.map((w) => w.windowMs)).toEqual([null, null]);
+
+  // A nonsense duration is no duration; it must not become a zero-length window.
+  const zero = parseOpenAIUsage(
+    { rate_limit: { primary_window: { used_percent: 1, limit_window_seconds: 0 } } },
+    NOW,
+  );
+  expect(zero?.windows[0]).toMatchObject({ windowType: "fiveHour", windowMs: null });
+});
+
+test("anthropic and kimi report no window duration", () => {
+  // Neither states one, and inventing a duration from the bucket name would be
+  // a claim they never made.
+  const anthropic = parseAnthropicUsage(
+    { five_hour: { utilization: 62 }, seven_day: { utilization: 18 } },
+    NOW,
+  );
+  expect(anthropic?.windows.map((w) => w.windowMs)).toEqual([null, null]);
+
+  const kimi = parseKimiUsage({ usage: { limit: "100", used: "92" } }, NOW);
+  expect(kimi?.windows.map((w) => w.windowMs)).toEqual([null]);
 });
 
 test("codex feature caps are not mistaken for the plan window", () => {

@@ -14,6 +14,7 @@ test("openDb applies migrations and records them", () => {
     "credential_health",
     "credentials",
     "migrations",
+    "quota_samples",
     "quota_windows",
     "request_logs",
     "settings",
@@ -23,7 +24,7 @@ test("openDb applies migrations and records them", () => {
     expect(tables).toContain(t);
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
-  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6]);
+  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7]);
   const columns = db
     .query<{ name: string }, []>("PRAGMA table_info(request_logs)")
     .all()
@@ -43,7 +44,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(6);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(7);
   db.close();
 });
 
@@ -97,6 +98,9 @@ test("migration 3 adds the snapshot columns to a database created before it", ()
     .map((r) => r.name);
   expect(quotaColumns).toContain("resets_at");
   expect(quotaColumns).toContain("observed_at");
+  // Migration 7 widens the same table, so a database created before either one
+  // has to arrive with both columns.
+  expect(quotaColumns).toContain("window_ms");
 
   const credentialColumns = db
     .query<{ name: string }, []>("PRAGMA table_info(credentials)")

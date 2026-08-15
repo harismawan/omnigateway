@@ -1,4 +1,4 @@
-import type { CredentialView, QuotaWindow, WindowType } from "@omni/store";
+import { type CredentialView, type QuotaWindow, WINDOW_DURATION_MS } from "@omni/store";
 
 /**
  * How the router reads a quota snapshot.
@@ -6,13 +6,6 @@ import type { CredentialView, QuotaWindow, WindowType } from "@omni/store";
  * Pure, like the rest of the router: it is handed rows the poller wrote and a
  * clock, and never asks a provider anything.
  */
-
-/** Nominal length of each window, used to judge burn rate against the clock. */
-const WINDOW_DURATION_MS: Record<WindowType, number> = {
-  fiveHour: 5 * 60 * 60 * 1000,
-  daily: 24 * 60 * 60 * 1000,
-  weekly: 7 * 24 * 60 * 60 * 1000,
-};
 
 /** Neutral score for a credential whose provider reports no usage at all. */
 export const UNKNOWN_QUOTA = 0.5;
@@ -52,6 +45,8 @@ function paceAdjusted(window: QuotaWindow, now: number): number {
   const headroom = Math.max(0, Math.min(1, 1 - window.used / limit));
   if (window.resetsAt === null) return headroom;
 
+  // Nominal, not `durationFor`: routing behaviour is deliberately untouched by
+  // the telemetry work that introduced the reported duration.
   const duration = WINDOW_DURATION_MS[window.windowType];
   // Floored, so the last moments of a window do not divide headroom by nearly
   // zero and read every account as perfect.

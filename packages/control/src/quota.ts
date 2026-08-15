@@ -88,6 +88,9 @@ export async function probe(
       limit: w.limit,
       resetsAt: w.resetsAt,
       observedAt,
+      // Only the provider knows how long its window runs; null says it did not
+      // say, and readers fall back to the nominal length of `windowType`.
+      windowMs: w.windowMs,
     }),
   );
 

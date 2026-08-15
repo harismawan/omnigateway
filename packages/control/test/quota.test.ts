@@ -53,8 +53,8 @@ function deps(store: Store, usage?: UsageImpl) {
 
 const report: UsageReport = {
   windows: [
-    { windowType: "fiveHour", used: 62, limit: 100, resetsAt: NOW + 3_600_000 },
-    { windowType: "weekly", used: 18, limit: 100, resetsAt: NOW + 86_400_000 },
+    { windowType: "fiveHour", used: 62, limit: 100, resetsAt: NOW + 3_600_000, windowMs: null },
+    { windowType: "weekly", used: 18, limit: 100, resetsAt: NOW + 86_400_000, windowMs: null },
   ],
 };
 
@@ -76,7 +76,32 @@ test("a probe writes one snapshot row per reported window", async () => {
     limit: 100,
     resetsAt: NOW + 3_600_000,
     observedAt: NOW,
+    windowMs: null,
   });
+});
+
+test("a reported window duration reaches the stored snapshot", async () => {
+  // The bucket name is one of three; the duration the provider declared is not.
+  // Losing it here would put the correction back where it started.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1" });
+
+  await poll(
+    deps(store, async () => ({
+      windows: [
+        { windowType: "fiveHour", used: 1, limit: 100, resetsAt: NOW + 1, windowMs: 10_800_000 },
+        { windowType: "weekly", used: 2, limit: 100, resetsAt: NOW + 2, windowMs: null },
+      ],
+    })),
+  );
+
+  const rows = (await store.credentials.listQuota()).sort((a, b) =>
+    a.windowType.localeCompare(b.windowType),
+  );
+  expect(rows.map((r) => r.windowMs)).toEqual([10_800_000, null]);
+  expect(
+    (await store.credentials.listQuotaSamples({ since: 0, until: NOW + 1 })).map((s) => s.windowMs),
+  ).toEqual([10_800_000, null]);
 });
 
 test("providers without a usage probe are skipped rather than guessed at", async () => {
@@ -122,6 +147,7 @@ test("a failing probe leaves the previous snapshot standing and never disables",
       limit: 100,
       resetsAt: NOW + 60_000,
       observedAt: NOW - 60_000,
+      windowMs: null,
     },
   ]);
 

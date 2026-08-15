@@ -511,6 +511,7 @@ test("credential health returns the health and quota rows the dashboard renders"
       limit: 1_000,
       resetsAt: NOW + 3_600_000,
       observedAt: NOW,
+      windowMs: null,
     },
   ]);
 

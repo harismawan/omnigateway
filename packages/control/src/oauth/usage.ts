@@ -142,11 +142,16 @@ const RESET_RELATIVE_KEYS = [
  * An explicit used/limit pair wins over a percentage, because it is the
  * provider's own arithmetic. A percentage alone becomes a value out of 100.
  * A window with neither is not a window we can draw, and returns null.
+ *
+ * `windowMs` is passed in rather than read here because only the caller knows
+ * where its provider states a duration — the key differs per payload, and most
+ * providers state none. It defaults to null so those callers say nothing.
  */
 export function windowFrom(
   value: unknown,
   windowType: WindowType,
   now: number,
+  windowMs: number | null = null,
 ): UsageWindowReport | null {
   const record = recordOf(value);
   if (record === null) return null;
@@ -160,19 +165,25 @@ export function windowFrom(
   const used = numberOf(record, USED_KEYS);
   const limit = numberOf(record, LIMIT_KEYS);
   if (used !== null) {
-    return { windowType, used: Math.max(0, used), limit, resetsAt };
+    return { windowType, used: Math.max(0, used), limit, resetsAt, windowMs };
   }
 
   // Some payloads report only what is left. Remaining plus a ceiling is the
   // same fact stated backwards.
   const remaining = numberOf(record, ["remaining", "remaining_units", "left"]);
   if (remaining !== null && limit !== null) {
-    return { windowType, used: Math.max(0, limit - remaining), limit, resetsAt };
+    return { windowType, used: Math.max(0, limit - remaining), limit, resetsAt, windowMs };
   }
 
   const percent = numberOf(record, PERCENT_KEYS);
   if (percent !== null) {
-    return { windowType, used: Math.max(0, Math.min(100, percent)), limit: 100, resetsAt };
+    return {
+      windowType,
+      used: Math.max(0, Math.min(100, percent)),
+      limit: 100,
+      resetsAt,
+      windowMs,
+    };
   }
 
   return null;

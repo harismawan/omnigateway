@@ -55,6 +55,7 @@ test("routing subscribers receive committed local changes", async () => {
       limit: 100,
       resetsAt: 1000,
       observedAt: 50,
+      windowMs: null,
     },
   ]);
   await s.config.putSettings({ maxAttempts: 4 });
