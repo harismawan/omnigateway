@@ -1,9 +1,9 @@
 import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { CredentialView, QuotaWindow, Store } from "@omni/store";
-import { SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
-import type { Refresher } from "./oauth/refresh.ts";
-import type { OAuthProvider } from "./oauth/types.ts";
+import { SCHEDULER_REFRESH_LEAD_MS } from "../oauth/lead.ts";
+import type { Refresher } from "../oauth/refresh.ts";
+import type { OAuthProvider } from "../oauth/types.ts";
 
 /** Accounts probed at once. Enough to keep the sweep short, few enough to be quiet. */
 const CONCURRENCY = 4;
@@ -88,6 +88,9 @@ export async function probe(
       limit: w.limit,
       resetsAt: w.resetsAt,
       observedAt,
+      // Only the provider knows how long its window runs; null says it did not
+      // say, and readers fall back to the nominal length of `windowType`.
+      windowMs: w.windowMs,
     }),
   );
 

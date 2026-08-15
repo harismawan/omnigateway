@@ -112,6 +112,7 @@ test("local quota writes replace one credential's cached windows", async () => {
       limit: 100,
       resetsAt: 1000,
       observedAt: 10,
+      windowMs: null,
     },
   ]);
   const cache = createRoutingSnapshotCache(store);
@@ -126,6 +127,7 @@ test("local quota writes replace one credential's cached windows", async () => {
       limit: 100,
       resetsAt: 2000,
       observedAt: 20,
+      windowMs: null,
     },
   ]);
   const snapshot = await cache.get(200);
@@ -139,6 +141,7 @@ test("local quota writes replace one credential's cached windows", async () => {
       limit: 100,
       resetsAt: 2000,
       observedAt: 20,
+      windowMs: null,
     },
   ]);
   cache.close();

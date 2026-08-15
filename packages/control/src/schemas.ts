@@ -19,6 +19,25 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
   throw new GatewayError("BAD_REQUEST", `${path}: ${issue?.message ?? "invalid request"}`);
 }
 
+/**
+ * A finite number from a query parameter, or the fallback.
+ *
+ * Every caller hands this function strings: the control API from a URL, the CLI
+ * from flags. An empty or blank param is absent, not zero — `Number("")` is 0,
+ * so an unguarded upper bound clamps a span to the epoch and answers "nothing"
+ * where the operator asked for everything, and an unguarded page size collapses
+ * to a single row.
+ *
+ * A literal `"0"` is not blank and stays a value, because the epoch and a zero
+ * limit are both things a caller can legitimately mean.
+ */
+export function optionalNumber(value: string | number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value === "string" && value.trim().length === 0) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 export const providerIdSchema = z.enum(["anthropic", "openai", "kimi", "grok", "custom"]);
 
 /**

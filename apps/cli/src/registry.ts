@@ -22,6 +22,7 @@ import {
   modelsRemove,
   modelsShow,
 } from "./commands/models.ts";
+import { quota } from "./commands/quota.ts";
 import {
   doctor,
   restart,
@@ -50,6 +51,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   logs,
   console: console_,
   usage,
+  quota,
   connect,
 
   "service install": serviceInstall,

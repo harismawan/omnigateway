@@ -16,6 +16,7 @@ import {
   putModel,
   putSettings,
   queryUsage,
+  quotaHistory,
   readConsole,
   recentLogs,
   removeCredential,
@@ -161,7 +162,28 @@ export function adminRoutes(deps: AdminDeps) {
 
       .get("/api/credentials/health", async ({ request }) => {
         await requireAdmin(request, deps.admin);
-        return credentialHealth(deps.store);
+        return credentialHealth(deps);
+      })
+
+      /**
+       * Retained quota readings, for the one surface that charts them, plus the
+       * gateway rate that corroborates them.
+       *
+       * The burn estimate itself rides `/api/credentials/health`, which every
+       * board already loads, and is not repeated here. The gateway rate is the
+       * other way round: it is a request-log aggregate, and this route is
+       * fetched only while a row is expanded, so it is priced correctly here
+       * and would be head-of-line blocking on a ten-second poll. Clamping the
+       * span to the retention window is `@omni/control`'s rule, not this
+       * handler's.
+       */
+      .get("/api/credentials/quota/history", async ({ request, query }) => {
+        await requireAdmin(request, deps.admin);
+        return quotaHistory(deps, {
+          since: query.since,
+          until: query.until,
+          credentialId: query.credentialId,
+        });
       })
 
       .patch("/api/credentials/:id", async ({ request, params }) => {

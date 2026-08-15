@@ -60,6 +60,16 @@ export type UsageWindowReport = {
   used: number;
   limit: number | null;
   resetsAt: number | null;
+  /**
+   * How long the window runs for, when the provider said so.
+   *
+   * `windowType` is one of three names, so a provider that reports a real
+   * duration has it rounded to the nearest of them. Codex states
+   * `limit_window_seconds`, and a three-hour window filed under `fiveHour`
+   * would have its start inferred two hours too early. Null is the normal
+   * answer: Anthropic and Kimi state no duration at all.
+   */
+  windowMs: number | null;
 };
 
 export type UsageReport = { windows: UsageWindowReport[] };

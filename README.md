@@ -232,6 +232,10 @@ carries the header through but does not add one on your behalf.
 command takes `--json` for scripting, and `--root <path>` to manage an
 installation other than the default.
 
+`--root` names the installation, so an `OMNI_DB_PATH` exported in your shell is
+ignored alongside it and said so on stderr; that root's own `.env` still decides.
+Use `--db <path>` to point one command somewhere else.
+
 | | |
 | --- | --- |
 | `omni status` | the gateway, its accounts, and their quota, on one screen |
@@ -240,6 +244,7 @@ installation other than the default.
 | `omni logs` | recent requests as the gateway recorded them |
 | `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
 | `omni usage` | spend and tokens, by provider, model, key, or day |
+| `omni quota` | provider quota per window: use, burn rate, and when it runs out |
 | `omni connect <provider>` | authorize an account from the terminal |
 | `omni credentials …` | list, show, enable, disable, retier, refresh, remove |
 | `omni models …` | list, show, put, remove, `dry-run`, `catalog` |

@@ -272,7 +272,7 @@ export const credentialsHealth: Command = {
   async run(args, { ctx, writer }) {
     const store = await ctx.store();
     const [{ health: rows }, credentials] = await Promise.all([
-      credentialHealth(store),
+      credentialHealth({ store, now: ctx.now }),
       listCredentials(store),
     ]);
     const labels = new Map(credentials.map((c) => [c.id, c.label]));

@@ -247,10 +247,68 @@ test("credentialHealth returns stored health and quota", async () => {
     quota({ credentialId: "c1", used: 4, limit: 10, observedAt: NOW }),
   ]);
 
-  const result = await credentialHealth(store);
+  const result = await credentialHealth({ store, now: () => NOW });
 
   expect(result.health).toHaveLength(1);
   expect(result.quota).toHaveLength(1);
+});
+
+test("credentialHealth derives a burn estimate per reported window", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1" });
+  await store.credentials.saveQuota([
+    quota({
+      credentialId: "c1",
+      windowType: "fiveHour",
+      // Read two hours into a five-hour window: 100 used is 50 an hour.
+      used: 100,
+      limit: 1_000,
+      resetsAt: NOW + 3 * 3_600_000,
+      observedAt: NOW,
+    }),
+  ]);
+
+  const result = await credentialHealth({ store, now: () => NOW });
+
+  expect(result.burn).toEqual([
+    {
+      credentialId: "c1",
+      windowType: "fiveHour",
+      windowStartsAt: NOW - 2 * 3_600_000,
+      ratePerHour: 50,
+      exhaustsAt: NOW + 18 * 3_600_000,
+      survives: true,
+      stale: false,
+    },
+  ]);
+});
+
+test("credentialHealth reads no request logs at all", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1" });
+  await store.credentials.saveQuota([
+    quota({
+      credentialId: "c1",
+      windowType: "fiveHour",
+      used: 100,
+      limit: 1_000,
+      resetsAt: NOW + 3 * 3_600_000,
+      observedAt: NOW,
+    }),
+  ]);
+  // The console refetches this route every ten seconds against the same
+  // synchronous connection that serves inference. A week-scale aggregate here
+  // is not a slow query, it is head-of-line blocking on the hot path, so the
+  // absence of the call is the property under test. Only a throw proves it was
+  // never made; asserting on a value would pass either way.
+  store.usage.aggregate = () => {
+    throw new Error("credentialHealth must not aggregate request logs");
+  };
+
+  const result = await credentialHealth({ store, now: () => NOW });
+
+  expect(result.burn).toHaveLength(1);
+  expect(result.burn[0]?.ratePerHour).toBe(50);
 });
 
 test("credentialStatus attaches quota and reports admin configuration", async () => {
@@ -278,6 +336,7 @@ test("credentialStatus attaches quota and reports admin configuration", async ()
             limit: 10,
             resetsAt: null,
             observedAt: NOW,
+            windowMs: null,
           },
         ],
       },

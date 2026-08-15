@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { screen, within } from "@testing-library/react";
+import type { Credential } from "../../src/api/types.ts";
 import { OverviewBoard } from "../../src/features/overview/OverviewBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { credential, health, log, model, quota, usageBucket } from "../helpers/fixtures.ts";
+import { burn, credential, health, log, model, quota, usageBucket } from "../helpers/fixtures.ts";
 import { renderWithRouter } from "../helpers/render.tsx";
 
 /** Logs are placed relative to the real clock, since the board reads Date.now(). */
@@ -254,5 +255,227 @@ describe("OverviewBoard", () => {
 
     expect(await screen.findByText("Activity")).toBeTruthy();
     expect(screen.getByText("UPSTREAM")).toBeTruthy();
+  });
+
+  test("the rack names the window an account will not survive", async () => {
+    const now = Date.now();
+    stubOverview({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [quota({ observedAt: now - 30_000, resetsAt: now + 3_600_000 })],
+        burn: [
+          burn({
+            windowStartsAt: now - 3_600_000,
+            exhaustsAt: now + 1_800_000,
+            survives: false,
+          }),
+        ],
+      }),
+    });
+    renderWithRouter(<OverviewBoard />);
+
+    // Matched by shape: the board reads its own Date.now() after the stub.
+    expect(await screen.findByText(/^5h · empty ~\d+m · resets in \d+[mh]$/)).toBeTruthy();
+  });
+
+  test("the rack stays one line per account: no chart, no disclosure, no extra column", async () => {
+    const now = Date.now();
+    stubOverview({
+      "GET /api/credentials/health": () => ({
+        health: [health()],
+        quota: [quota({ observedAt: now - 30_000, resetsAt: now + 3_600_000 })],
+        burn: [burn({ windowStartsAt: now - 3_600_000, exhaustsAt: now + 1_800_000 })],
+      }),
+    });
+    const { container } = renderWithRouter(<OverviewBoard />);
+
+    const table = (await screen.findByText("claude-main")).closest("table");
+    if (table === null) throw new Error("the account rack was not rendered");
+    expect(
+      within(table)
+        .getAllByRole("columnheader")
+        .map((cell) => cell.textContent),
+    ).toEqual(["Account", "Provider", "Tier", "Quota", "TTFT", "Requests", "Last used"]);
+    expect(within(table).queryByRole("button", { name: /quota history/i })).toBeNull();
+    expect(container.querySelector(".recharts-responsive-container")).toBeNull();
+  });
+
+  describe("the rack's order", () => {
+    // Burn rate is now a sort key, between lamp state and tier. These tests
+    // replace an earlier one that pinned the opposite — see the design note in
+    // `docs/superpowers/specs/2026-08-15-provider-quota-telemetry-design.md`.
+
+    /** Row labels in document order, which is the order the rack drew them. */
+    async function rackOrder(): Promise<(string | null)[]> {
+      // The rack draws its rows as soon as the credentials query lands, which
+      // can be before the health query carrying the estimates. A legend only
+      // health can produce is what makes this read the sorted order rather
+      // than the order the credentials arrived in.
+      const legend = await screen.findAllByText(/^5h · /);
+      const table = legend[0]?.closest("table") ?? null;
+      if (table === null) throw new Error("the account rack was not rendered");
+      return within(table)
+        .getAllByText(/^(claude-main|codex)$/)
+        .map((node) => node.textContent);
+    }
+
+    /** Two healthy accounts, tier 1 first, so only the burn key can part them. */
+    function twoAccounts(burns: ReturnType<typeof burn>[], patch: Partial<Credential>[] = []) {
+      const now = Date.now();
+      return stubOverview({
+        "GET /api/credentials": () => ({
+          credentials: [
+            credential({ tier: 1, ...patch[0] }),
+            credential({
+              id: "cred-2",
+              provider: "openai",
+              label: "codex",
+              tier: 2,
+              ...patch[1],
+            }),
+          ],
+        }),
+        "GET /api/credentials/health": () => ({
+          health: [health(), health({ credentialId: "cred-2", model: "gpt-5.6" })],
+          quota: [
+            quota({ observedAt: now - 30_000, resetsAt: now + 3_600_000 }),
+            quota({
+              credentialId: "cred-2",
+              used: 100,
+              observedAt: now - 30_000,
+              resetsAt: now + 3_600_000,
+            }),
+          ],
+          burn: burns,
+        }),
+      });
+    }
+
+    test("puts an account that will not survive its window above a healthier one", async () => {
+      const now = Date.now();
+      twoAccounts([
+        burn({ windowStartsAt: now - 3_600_000, ratePerHour: 1, exhaustsAt: null, survives: true }),
+        burn({
+          credentialId: "cred-2",
+          windowStartsAt: now - 3_600_000,
+          ratePerHour: 9_000,
+          exhaustsAt: now + 60_000,
+          survives: false,
+        }),
+      ]);
+      renderWithRouter(<OverviewBoard />);
+
+      // Tier order says claude-main first; the window codex will not survive
+      // outranks it.
+      expect(await rackOrder()).toEqual(["codex", "claude-main"]);
+    });
+
+    test("puts the sooner exhaustion first when neither account survives", async () => {
+      const now = Date.now();
+      twoAccounts([
+        burn({
+          windowStartsAt: now - 3_600_000,
+          ratePerHour: 900,
+          exhaustsAt: now + 1_800_000,
+          survives: false,
+        }),
+        burn({
+          credentialId: "cred-2",
+          windowStartsAt: now - 3_600_000,
+          ratePerHour: 9_000,
+          exhaustsAt: now + 60_000,
+          survives: false,
+        }),
+      ]);
+      renderWithRouter(<OverviewBoard />);
+
+      expect(await rackOrder()).toEqual(["codex", "claude-main"]);
+    });
+
+    test("keeps a down account above a fast-burning healthy one", async () => {
+      const now = Date.now();
+      stubOverview({
+        "GET /api/credentials": () => ({
+          credentials: [
+            // Worst tier, so nothing but the lamp can hold it at the top.
+            credential({ tier: 9 }),
+            credential({ id: "cred-2", provider: "openai", label: "codex", tier: 1 }),
+          ],
+        }),
+        "GET /api/credentials/health": () => ({
+          health: [
+            health({ breakerState: "open", consecutiveFailures: 5 }),
+            health({ credentialId: "cred-2", model: "gpt-5.6" }),
+          ],
+          quota: [
+            quota({
+              credentialId: "cred-2",
+              used: 100,
+              observedAt: now - 30_000,
+              resetsAt: now + 3_600_000,
+            }),
+          ],
+          burn: [
+            burn({
+              credentialId: "cred-2",
+              windowStartsAt: now - 3_600_000,
+              ratePerHour: 9_000,
+              exhaustsAt: now + 60_000,
+              survives: false,
+            }),
+          ],
+        }),
+      });
+      renderWithRouter(<OverviewBoard />);
+
+      expect(await rackOrder()).toEqual(["claude-main", "codex"]);
+    });
+
+    test("does not let a suppressed estimate promote an account", async () => {
+      const now = Date.now();
+      // Both shapes of suppression: the nulled estimate control actually
+      // returns, and a stale flag over figures that survived on the row.
+      // Losing sight of an account is not the same as an account draining.
+      twoAccounts([
+        burn({
+          windowStartsAt: null,
+          ratePerHour: null,
+          exhaustsAt: null,
+          survives: null,
+          stale: true,
+        }),
+        burn({
+          credentialId: "cred-2",
+          windowStartsAt: now - 3_600_000,
+          ratePerHour: 9_000,
+          exhaustsAt: now + 60_000,
+          survives: false,
+          stale: true,
+        }),
+      ]);
+      renderWithRouter(<OverviewBoard />);
+
+      expect(await rackOrder()).toEqual(["claude-main", "codex"]);
+    });
+
+    test("falls back to tier order when no account reports burn at all", async () => {
+      twoAccounts([]);
+      renderWithRouter(<OverviewBoard />);
+
+      expect(await rackOrder()).toEqual(["claude-main", "codex"]);
+    });
+
+    test("leaves accounts that exhaust at the same instant in the order given", async () => {
+      const now = Date.now();
+      const same = { windowStartsAt: now - 3_600_000, exhaustsAt: now + 60_000, survives: false };
+      twoAccounts(
+        [burn(same), burn({ credentialId: "cred-2", ...same })],
+        // Same tier as well, so the comparator has nothing left to decide on.
+        [{ tier: 3 }, { tier: 3 }],
+      );
+      renderWithRouter(<OverviewBoard />);
+
+      expect(await rackOrder()).toEqual(["claude-main", "codex"]);
+    });
   });
 });

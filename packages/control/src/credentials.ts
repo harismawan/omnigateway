@@ -2,6 +2,7 @@ import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import type { Credential, CredentialHealth, QuotaWindow, Store } from "@omni/store";
 import { createAdminAuth } from "./adminAuth.ts";
 import type { Refresher } from "./oauth/refresh.ts";
+import { type BurnEstimate, burnEstimates } from "./quota/burn.ts";
 import { credentialPatchSchema, parseOrThrow, providerIdSchema } from "./schemas.ts";
 
 /**
@@ -170,14 +171,30 @@ export async function refreshCredential(
   return getCredential(deps.store, id);
 }
 
-export async function credentialHealth(
-  store: Store,
-): Promise<{ health: CredentialHealth[]; quota: QuotaWindow[] }> {
-  const [health, quota] = await Promise.all([
-    store.credentials.listHealth(),
-    store.credentials.listQuota(),
+/**
+ * Everything the console draws per credential: breaker state, the newest quota
+ * reading, and what that reading implies.
+ *
+ * `burn` is derived rather than stored, over rows this call already loads, and
+ * that is the whole budget for this route. The console refetches it every ten
+ * seconds against the same synchronous connection that serves `/v1/messages`,
+ * so nothing here may touch `request_logs`: the gateway-rate corroboration
+ * lives on the history endpoint, where it is asked for once per expanded row.
+ */
+export async function credentialHealth(deps: {
+  store: Store;
+  now: () => number;
+}): Promise<{ health: CredentialHealth[]; quota: QuotaWindow[]; burn: BurnEstimate[] }> {
+  const [health, quota, settings] = await Promise.all([
+    deps.store.credentials.listHealth(),
+    deps.store.credentials.listQuota(),
+    deps.store.config.getSettings(),
   ]);
-  return { health, quota };
+  const burn = burnEstimates(quota, {
+    now: deps.now(),
+    pollIntervalMs: settings.quotaPollIntervalMs,
+  });
+  return { health, quota, burn };
 }
 
 export type CredentialStatus = {

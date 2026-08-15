@@ -97,6 +97,11 @@ export type Context = {
   root: RootResolution;
   /** The env the gateway would see: the ambient environment, overridden by the root's `.env`. */
   env: Record<string, string | undefined>;
+  /**
+   * Things the operator must be told before the command's own output, because
+   * this invocation did not do quite what it was asked. Formatted for stderr.
+   */
+  warnings: readonly string[];
   json: boolean;
   color: boolean;
   assumeYes: boolean;
@@ -140,6 +145,37 @@ export function createContext(parsed: Parsed, options: ContextOptions = {}): Con
   // (PATH, XDG_STATE_HOME, NO_COLOR) still comes from the environment.
   const env: Record<string, string | undefined> = { ...processEnv, ...fileEnv };
 
+  // `--db` is the most specific statement there is, so it is read before the
+  // environment is judged. A blank one is the flag being absent — `omni --db
+  // "$DB"` with an unset variable is a shell handing us "", and an empty
+  // configured path resolves to the root *directory*, which the store then
+  // opens as if it were a file. A literal "0" is a path and stays one.
+  const rawDbFlag = stringFlag(parsed.values, "db");
+  const dbFlag = rawDbFlag === undefined || rawDbFlag.trim().length === 0 ? undefined : rawDbFlag;
+
+  // An ambient OMNI_DB_PATH must not follow `--root` into another installation.
+  //
+  // The same Bun preload that motivates the rule above also puts the current
+  // directory's OMNI_DB_PATH in the environment, and that one is usually
+  // absolute — so a fresh root, which has no `.env` to displace it, would be
+  // selected by the flag while its database was selected by an unrelated
+  // checkout. `--root` is the most explicit signal in the invocation and cannot
+  // lose to the most ambient one. The root's own `.env` still wins, because
+  // that is the installation speaking about itself, and OMNI_ROOT is left alone
+  // because two ambient values outranking each other surprises nobody.
+  const ambientDbPath = processEnv.OMNI_DB_PATH?.trim();
+  const suppressedDbPath =
+    root.source === "flag" &&
+    dbFlag === undefined &&
+    fileEnv.OMNI_DB_PATH === undefined &&
+    ambientDbPath !== undefined &&
+    ambientDbPath.length > 0
+      ? ambientDbPath
+      : null;
+  // Removed from the env rather than skipped at the point of use, so a gateway
+  // this invocation starts is told the same thing the CLI decided.
+  if (suppressedDbPath !== null) delete env.OMNI_DB_PATH;
+
   let config: Config | null = null;
   let configError: string | null = null;
   try {
@@ -148,13 +184,21 @@ export function createContext(parsed: Parsed, options: ContextOptions = {}): Con
     configError = error instanceof Error ? error.message : "invalid configuration";
   }
 
-  const dbFlag = stringFlag(parsed.values, "db");
   const configuredPath = dbFlag ?? config?.databasePath ?? "omnigateway.db";
   // Relative paths in `.env` are relative to the root, because that is the
   // working directory the gateway runs in.
   const databasePath = isAbsolute(configuredPath)
     ? configuredPath
     : resolve(root.root, configuredPath);
+
+  // Silence would make this a second version of the same bug: the operator
+  // would still be looking at a database they did not name.
+  const warnings =
+    suppressedDbPath === null
+      ? []
+      : [
+          `ignoring OMNI_DB_PATH=${suppressedDbPath} from the environment because --root was given; using ${databasePath}`,
+        ];
 
   let opened: Promise<Store> | null = null;
   let store: Store | null = null;
@@ -166,6 +210,7 @@ export function createContext(parsed: Parsed, options: ContextOptions = {}): Con
   return {
     root,
     env,
+    warnings,
     json: boolFlag(parsed.values, "json"),
     color: !noColor && (options.isTty ?? process.stdout.isTTY === true),
     assumeYes: boolFlag(parsed.values, "yes"),

@@ -1,4 +1,7 @@
-import type { CredentialView, QuotaWindow, WindowType } from "@omni/store";
+// The types subpath, not the package root: `@omni/store` pulls `openDb`,
+// `createStore`, and `encryption.ts`, which would put `bun:sqlite` and
+// `node:crypto` in the router's module graph. The router stays pure.
+import { type CredentialView, durationFor, type QuotaWindow } from "@omni/store/types";
 
 /**
  * How the router reads a quota snapshot.
@@ -6,13 +9,6 @@ import type { CredentialView, QuotaWindow, WindowType } from "@omni/store";
  * Pure, like the rest of the router: it is handed rows the poller wrote and a
  * clock, and never asks a provider anything.
  */
-
-/** Nominal length of each window, used to judge burn rate against the clock. */
-const WINDOW_DURATION_MS: Record<WindowType, number> = {
-  fiveHour: 5 * 60 * 60 * 1000,
-  daily: 24 * 60 * 60 * 1000,
-  weekly: 7 * 24 * 60 * 60 * 1000,
-};
 
 /** Neutral score for a credential whose provider reports no usage at all. */
 export const UNKNOWN_QUOTA = 0.5;
@@ -52,7 +48,13 @@ function paceAdjusted(window: QuotaWindow, now: number): number {
   const headroom = Math.max(0, Math.min(1, 1 - window.used / limit));
   if (window.resetsAt === null) return headroom;
 
-  const duration = WINDOW_DURATION_MS[window.windowType];
+  // The provider's own stated length where there is one. The three window names
+  // are buckets, not durations — Codex reports `limit_window_seconds` and it is
+  // filed under whichever name it lands nearest — so measuring a three-hour
+  // window against the five-hour bucket understates how much of it has already
+  // gone, inflates `headroom / remaining`, and reads the account as healthier
+  // than it is. Anthropic and Kimi state nothing and keep the nominal length.
+  const duration = durationFor(window.windowType, window.windowMs);
   // Floored, so the last moments of a window do not divide headroom by nearly
   // zero and read every account as perfect.
   const remaining = Math.max(0.05, Math.min(1, (window.resetsAt - now) / duration));

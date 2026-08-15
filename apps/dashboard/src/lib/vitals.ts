@@ -1,4 +1,17 @@
-import type { CredentialHealth, DisabledReason, QuotaWindow, RequestLog } from "../api/types.ts";
+// The `/types` subpath is a leaf: domain types plus the pure predicates over
+// them. `sameWindow` is imported rather than reimplemented because the store
+// dedups on it, and a chart that disagreed with storage about what a window is
+// would be a worse bug than either being wrong alone.
+import { sameWindow } from "@omni/store/types";
+import type {
+  BurnEstimate,
+  CredentialHealth,
+  DisabledReason,
+  QuotaSample,
+  QuotaWindow,
+  RequestLog,
+} from "../api/types.ts";
+import { formatDuration } from "./format.ts";
 
 /**
  * Derivations the gateway does not compute for us. The control API exposes raw
@@ -280,27 +293,102 @@ export function isQuotaStale(window: QuotaWindow, now: number, pollIntervalMs: n
   return now - window.observedAt > quotaStaleAfterMs(pollIntervalMs);
 }
 
+/** The estimate for one window out of a credential's entries, if it has one. */
+export function burnOf(
+  rows: readonly BurnEstimate[],
+  windowType: QuotaWindow["windowType"],
+): BurnEstimate | undefined {
+  return rows.find((row) => row.windowType === windowType);
+}
+
 /**
- * What to print under a quota bar: which window it is, and how much to trust it.
+ * What to print under a quota bar: which window it is, how much to trust it,
+ * and whether it will last.
  *
  * A fresh reading gets its reset time, which is the number the operator plans
  * around. A stale one says so instead, because a bar drawn from an old reading
  * with a countdown beside it reads as live when it is not.
+ *
+ * The estimate is named only when the window runs out first. "You will not run
+ * out" is already what the reset time says, and a far-off instant printed beside
+ * it invites arithmetic nobody needs to do. The suppression cases above take
+ * precedence and are guarded on the reading, not on whether a figure arrived:
+ * an estimate nobody believes must never reach a bar.
  */
 export function quotaLegend(
   window: QuotaWindow,
   now: number,
   pollIntervalMs: number,
   formatRelative: (at: number, now: number) => string,
+  burn: BurnEstimate | undefined,
 ): string {
   const label = WINDOW_LABEL[window.windowType];
   if (window.observedAt <= 0) return `${label} · never observed`;
   if (isQuotaStale(window, now, pollIntervalMs)) {
     return `${label} · stale, read ${formatRelative(window.observedAt, now)}`;
   }
-  return window.resetsAt === null
-    ? label
-    : `${label} · resets ${formatRelative(window.resetsAt, now)}`;
+  if (window.resetsAt === null) return label;
+
+  const reset = `resets ${formatRelative(window.resetsAt, now)}`;
+  if (burn === undefined || burn.stale || burn.survives !== false || burn.exhaustsAt === null) {
+    return `${label} · ${reset}`;
+  }
+  // A window at or past its ceiling ran out at some instant already behind us,
+  // which is not a countdown an operator can act on.
+  const empty =
+    burn.exhaustsAt <= now ? "empty now" : `empty ~${formatDuration(burn.exhaustsAt - now)}`;
+  return `${label} · ${empty} · ${reset}`;
+}
+
+export type QuotaPoint = { at: number; percent: number };
+
+/** One unbroken run of readings inside a single window. */
+export type QuotaSegment = { key: string; points: QuotaPoint[] };
+
+/**
+ * Retained readings as percentages of their own ceiling, split per window.
+ *
+ * A rollover resets `used`, so a series drawn straight through one would fall
+ * to the floor and read as a sudden refund. `resetsAt` moves on every rollover
+ * and is the only signal that says so, which is what splits the runs here —
+ * drawn as separate series, nothing connects the end of one window to the start
+ * of the next.
+ *
+ * It is compared through `sameWindow`, the same predicate `saveQuota` dedups
+ * on, and from the same definition: a provider stating a whole-second countdown
+ * jitters its derived reset by milliseconds on every probe, and splitting on
+ * that gives one single-point series per sample. A single-point `stepAfter`
+ * line with `dot={false}` draws no stroke at all, so the panel would render
+ * blank while a non-empty segment list suppressed the "not yet observed" note.
+ *
+ * Readings with no ceiling are dropped: a percentage of an unstated limit is
+ * not a number, and drawing them at zero would claim an idle account.
+ */
+export function quotaSegments(samples: readonly QuotaSample[]): QuotaSegment[] {
+  const usable = samples
+    .filter((sample) => sample.limit !== null && sample.limit > 0)
+    .sort((a, b) => a.observedAt - b.observedAt);
+
+  const segments: QuotaSegment[] = [];
+  let previous: QuotaSample | undefined;
+  for (const sample of usable) {
+    const point = {
+      at: sample.observedAt,
+      percent: Math.min(100, (sample.used / (sample.limit as number)) * 100),
+    };
+    const last = segments[segments.length - 1];
+    if (
+      last === undefined ||
+      previous === undefined ||
+      !sameWindow(sample.resetsAt, previous.resetsAt)
+    ) {
+      segments.push({ key: `window-${segments.length}`, points: [point] });
+    } else {
+      last.points.push(point);
+    }
+    previous = sample;
+  }
+  return segments;
 }
 
 /** Shortest window first, so a row reads left-to-right from soonest to latest. */

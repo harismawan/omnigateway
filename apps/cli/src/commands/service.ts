@@ -171,6 +171,10 @@ export const doctor: Command = {
       running: status.running,
       // Which log `omni console` will read, and whether there is one at all.
       consoleSource: consoleSource(deps).source,
+      // Repeated from stderr on purpose: `doctor` is the command an operator
+      // runs to find out why the paths above are what they are, and `--json`
+      // is read by scripts that never see stderr.
+      warnings: ctx.warnings,
     };
 
     emit(ctx, writer, checks, () => {
@@ -188,6 +192,9 @@ export const doctor: Command = {
         ["systemd unit", unit ? deps.scope : paint(ctx, "dim", "none")],
         ["gateway", ok(status.running, status.running ? "running" : "stopped")],
         ["console log", sourceHint(checks.consoleSource)],
+        ...checks.warnings.map(
+          (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],
+        ),
       ]);
     });
   },

@@ -62,10 +62,20 @@ export function listFlag(values: Parsed["values"], name: string): string[] | und
   return typeof value === "string" ? [value] : undefined;
 }
 
-/** Reads a flag that must be a number, naming the flag when it is not. */
+/**
+ * Reads a flag that must be a number, naming the flag when it is not.
+ *
+ * A blank value is the flag being absent — `omni logs -n "$COUNT"` with an
+ * unset variable is a shell handing us `""`, not a request for zero rows, and
+ * `Number("")` is 0. A literal `"0"` is not blank and stays a value.
+ *
+ * Deliberately not `optionalNumber` from `@omni/control`: that helper answers
+ * with a fallback where this one answers "absent" and refuses garbage outright,
+ * so reusing it would turn a misspelled `--tier ten` into a silent default.
+ */
 export function numberFlag(values: Parsed["values"], name: string): number | undefined {
   const raw = stringFlag(values, name);
-  if (raw === undefined) return undefined;
+  if (raw === undefined || raw.trim().length === 0) return undefined;
   const value = Number(raw);
   if (!Number.isFinite(value)) throw new UsageError(`--${name} must be a number, got "${raw}"`);
   return value;

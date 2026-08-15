@@ -203,6 +203,11 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   reverse-proxy origin. Changing `OMNI_ENCRYPTION_KEY` invalidates stored credentials.
 - CLI root resolution: `--root` > `OMNI_ROOT` > installation in cwd >
   `~/.config/omnigateway`. Root `.env` intentionally overrides ambient environment.
+- CLI database path: `--db` > that root's own `.env` > ambient `OMNI_DB_PATH` > `omnigateway.db` in
+  the root. A `--root` flag suppresses ambient `OMNI_DB_PATH` entirely — Bun preloads the cwd's
+  `.env`, so otherwise the flag picks the root and an unrelated checkout picks its database. The
+  suppression is warned on stderr, reported by `doctor`, and removed from the env a spawned gateway
+  inherits. `OMNI_ROOT` does not suppress it: both are ambient.
 - API-key rate limits and quota cooldowns are process-local and reset on restart.
 - `usage.append` must run at most once per request ID; duplicate completion double-counts
   `usage_daily`. Pending rows contain placeholder metrics; inspect `state`, not `status`.

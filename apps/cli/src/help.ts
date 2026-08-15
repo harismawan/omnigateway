@@ -10,7 +10,7 @@ const GROUPS: ReadonlyArray<{ title: string; prefixes: readonly string[] }> = [
   { title: "Models", prefixes: ["models "] },
   { title: "Keys", prefixes: ["keys "] },
   { title: "Configuration", prefixes: ["settings ", "admin ", "db "] },
-  { title: "Reports", prefixes: ["usage"] },
+  { title: "Reports", prefixes: ["usage", "quota"] },
 ];
 
 function matches(name: string, prefixes: readonly string[]): boolean {

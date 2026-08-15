@@ -157,9 +157,9 @@ function toResult(
  * wins whenever it is present. The boundaries are generous because the point is
  * to pick the closest of three names, not to validate the provider.
  */
-function windowTypeOf(value: unknown, fallback: WindowType): WindowType {
+function windowSecondsOf(value: unknown): number | null {
   const record = recordOf(value);
-  if (record === null) return fallback;
+  if (record === null) return null;
 
   const seconds = numberOf(record, [
     "limit_window_seconds",
@@ -167,11 +167,30 @@ function windowTypeOf(value: unknown, fallback: WindowType): WindowType {
     "window_seconds",
     "windowSeconds",
   ]);
-  if (seconds === null || seconds <= 0) return fallback;
+  return seconds === null || seconds <= 0 ? null : seconds;
+}
+
+function windowTypeOf(value: unknown, fallback: WindowType): WindowType {
+  const seconds = windowSecondsOf(value);
+  if (seconds === null) return fallback;
 
   if (seconds <= 6 * 60 * 60) return "fiveHour";
   if (seconds <= 36 * 60 * 60) return "daily";
   return "weekly";
+}
+
+/**
+ * The declared duration, kept rather than discarded once it has been bucketed.
+ *
+ * Three names cannot express the durations Codex actually reports: a three-hour
+ * window becomes `fiveHour`, and anything inferring a window start from the
+ * nominal five hours lands about two hours early. The bucketing is unchanged —
+ * the store, router, and console are built around the three names — but the
+ * number that produced it travels alongside.
+ */
+function windowMsOf(value: unknown): number | null {
+  const seconds = windowSecondsOf(value);
+  return seconds === null ? null : seconds * 1000;
 }
 
 export function parseOpenAIUsage(value: unknown, now: number): UsageReport | null {
@@ -183,8 +202,8 @@ export function parseOpenAIUsage(value: unknown, now: number): UsageReport | nul
   const secondary = rateLimit.secondary_window ?? rateLimit.secondaryWindow;
 
   return reportFrom([
-    windowFrom(primary, windowTypeOf(primary, "fiveHour"), now),
-    windowFrom(secondary, windowTypeOf(secondary, "weekly"), now),
+    windowFrom(primary, windowTypeOf(primary, "fiveHour"), now, windowMsOf(primary)),
+    windowFrom(secondary, windowTypeOf(secondary, "weekly"), now, windowMsOf(secondary)),
   ]);
 }
 

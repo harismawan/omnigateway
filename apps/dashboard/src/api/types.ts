@@ -4,6 +4,7 @@ import type {
   Credential,
   CredentialHealth,
   DisabledReason,
+  QuotaSample,
   QuotaWindow,
   RequestLog,
   Settings,
@@ -29,6 +30,7 @@ export type {
   DisabledReason,
   ErrorCode,
   ProviderId,
+  QuotaSample,
   QuotaWindow,
   RequestLog,
   Settings,
@@ -46,7 +48,60 @@ export type StatusResponse = { configured: boolean; authenticated: boolean };
 
 export type CredentialsResponse = { credentials: Credential[] };
 
-export type CredentialHealthResponse = { health: CredentialHealth[]; quota: QuotaWindow[] };
+/**
+ * How fast one quota window is being spent, and whether it lasts.
+ *
+ * Mirrored rather than imported: the estimate is derived in `@omni/control`,
+ * which the console may not reach into, so this is a hand-kept copy of
+ * `BurnEstimate` that the route returns unchanged.
+ *
+ * Every estimate is null when `stale` is true — a reading nobody believes must
+ * not be dressed up as a number, so surfaces guard on the flag rather than on
+ * whether a figure happens to be present.
+ */
+export type BurnEstimate = {
+  credentialId: string;
+  windowType: QuotaWindow["windowType"];
+  /** Inferred as `resetsAt` minus the window's length. Null with no stated reset. */
+  windowStartsAt: number | null;
+  /** Provider units per hour, averaged across the window so far. */
+  ratePerHour: number | null;
+  /** When the window runs out at that rate, or null when it will not. */
+  exhaustsAt: number | null;
+  /** Whether the window outlives its own reset. Null only when suppressed. */
+  survives: boolean | null;
+  stale: boolean;
+};
+
+/**
+ * What this gateway accounts for over the same span the provider rate covers.
+ *
+ * On the history response rather than beside the estimate, because it costs a
+ * request-log aggregate per window and the health route is refetched every ten
+ * seconds. Only the Accounts disclosure shows it, and only while expanded.
+ */
+export type GatewayRate = {
+  credentialId: string;
+  windowType: QuotaWindow["windowType"];
+  /** Null when the window start is unknown, so there is no span to divide by. */
+  gatewayRatePerHour: number | null;
+};
+
+export type CredentialHealthResponse = {
+  health: CredentialHealth[];
+  quota: QuotaWindow[];
+  burn: BurnEstimate[];
+};
+
+/** Both bounds are epoch milliseconds; the route clamps them to retention. */
+export type QuotaHistoryQuery = {
+  credentialId: string;
+  since: number;
+  until?: number;
+};
+
+/** The estimate itself rides the health endpoint and is not repeated here. */
+export type QuotaHistoryResponse = { samples: QuotaSample[]; gatewayRates: GatewayRate[] };
 
 export type CredentialPatch = {
   label?: string;

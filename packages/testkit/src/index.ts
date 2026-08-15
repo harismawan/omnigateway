@@ -139,6 +139,7 @@ export function quota(overrides: Partial<QuotaWindow> = {}): QuotaWindow {
     limit: null,
     resetsAt: null,
     observedAt: 0,
+    windowMs: null,
     ...overrides,
   };
 }
