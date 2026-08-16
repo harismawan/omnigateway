@@ -410,6 +410,56 @@ export function quotaSegments(samples: readonly QuotaSample[]): QuotaSegment[] {
   return segments;
 }
 
+/**
+ * The live snapshot, drawn onto the run it belongs to.
+ *
+ * `saveQuota` retains a reading only when it moved, so an account nobody is
+ * spending writes no rows at all: its stored run ends at the last change rather
+ * than at the last probe, and the stretch from there to the right edge of the
+ * chart is blank. The snapshot is that probe — `used` as of `observedAt`, the
+ * same pair every retained row carries — so appending it draws the line out to
+ * where the account was actually read, and the flat stretch it makes is
+ * measured rather than assumed.
+ *
+ * It only ever extends a run, never opens one. A window with nothing retained
+ * inside the charted span has no run here, and one point conjured from a
+ * snapshot would replace "not yet observed" with a chart drawn over a history
+ * that was never stored.
+ */
+export function withLiveReading(
+  segments: readonly QuotaSegment[],
+  window: QuotaWindow,
+): QuotaSegment[] {
+  const { limit, used, observedAt } = window;
+  // The rule the readings themselves are dropped under: a percentage of an
+  // unstated ceiling is not a number.
+  if (limit === null || limit <= 0) return [...segments];
+
+  // Compared through `sameWindow` for the reason `quotaSegments` splits on it:
+  // a derived reset jitters by milliseconds per probe, and a run the snapshot
+  // belongs to would otherwise look like the window before it.
+  //
+  // The newest match, because a tolerance is not an equivalence: `sameWindow`
+  // is ±60s, so two runs 100s apart split from each other while both still
+  // match a snapshot sitting between them. The snapshot was read in the newest
+  // window it belongs to by definition, and hanging it off an older run draws
+  // that run forward across the newer one it had already ended before.
+  const index = segments.findLastIndex((segment) => sameWindow(segment.resetsAt, window.resetsAt));
+  const run = segments[index];
+  if (run === undefined) return [...segments];
+
+  // A reading that moved was retained, so the snapshot can report an instant
+  // already drawn. Appending it again puts two points on one x, and appending
+  // an older one walks the line backwards.
+  const last = run.points[run.points.length - 1];
+  if (last === undefined || last.at >= observedAt) return [...segments];
+
+  const point = { at: observedAt, percent: Math.min(100, (used / limit) * 100) };
+  return segments.map((segment, position) =>
+    position === index ? { ...segment, points: [...segment.points, point] } : segment,
+  );
+}
+
 /** A straight run between two instants, as a percentage of the same ceiling. */
 export type QuotaPace = { from: QuotaPoint; to: QuotaPoint };
 

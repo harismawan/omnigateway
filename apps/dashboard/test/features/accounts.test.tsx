@@ -4,7 +4,14 @@ import userEvent from "@testing-library/user-event";
 import type { BurnEstimate, QuotaSample, QuotaWindow } from "../../src/api/types.ts";
 import { AccountsBoard } from "../../src/features/accounts/AccountsBoard.tsx";
 import { PACE_DASH } from "../../src/features/accounts/QuotaHistory.tsx";
-import { axisTicks, curvePoints, dashedPaths, measureCharts, vertices } from "../helpers/chart.ts";
+import {
+  axisTicks,
+  curvePoints,
+  dashedPaths,
+  lineDots,
+  measureCharts,
+  vertices,
+} from "../helpers/chart.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import {
   burn,
@@ -478,9 +485,10 @@ describe("AccountsBoard quota history", () => {
   test("draws every reading as one smooth curve, inventing none of them", async () => {
     // Smoothing is a rendering choice and must stay one: the curve passes
     // through the readings that were stored and through nothing else. What it
-    // does between them is not a claim, because a gap cannot be read as "the
-    // probe ran and nothing moved" anyway — dedup discards the reading that
-    // would have said so, and only the snapshot's own `observedAt` survives.
+    // does between them is not a claim, because an interior gap cannot be read
+    // as "the probe ran and nothing moved" anyway — dedup discards the reading
+    // that would have said so. Only the trailing stretch says that, and only
+    // because the snapshot's own `observedAt` is a probe that survived.
     const restore = measureCharts();
     try {
       const user = userEvent.setup();
@@ -507,22 +515,27 @@ describe("AccountsBoard quota history", () => {
       // Curved, not stepped: a step path is all `M`/`L` and has no `C` at all.
       expect(drawn).toContain("C");
 
-      // One arrival per stored reading, and no extra. A curve that smoothed the
-      // data rather than the drawing would not land on this count.
+      // One arrival per stored reading plus the snapshot's own, and no extra. A
+      // curve that smoothed the data rather than the drawing would not land on
+      // this count.
       const points = curvePoints(drawn);
-      expect(points).toHaveLength(3);
+      expect(points).toHaveLength(4);
 
-      // 100, 100, 400: flat, then up. Screen y grows downward, so a rising
-      // reading is a falling coordinate, and the flat pair must not drift.
-      const [first, second, third] = points as [
+      // 100, 100, 400, then the snapshot's 500: flat, then up. Screen y grows
+      // downward, so a rising reading is a falling coordinate, and the flat
+      // pair must not drift.
+      const [first, second, third, snapshot] = points as [
+        [number, number],
         [number, number],
         [number, number],
         [number, number],
       ];
       expect(second[1]).toBeCloseTo(first[1], 5);
       expect(third[1]).toBeLessThan(second[1]);
+      expect(snapshot[1]).toBeLessThan(third[1]);
       expect(first[0]).toBeLessThan(second[0]);
       expect(second[0]).toBeLessThan(third[0]);
+      expect(third[0]).toBeLessThan(snapshot[0]);
     } finally {
       restore();
     }
@@ -560,6 +573,203 @@ describe("AccountsBoard quota history", () => {
       if (first === undefined || second === undefined) throw new Error("both windows draw a line");
       // Y grows downward, so the spent window stays above the fresh one.
       expect(Math.max(...first)).toBeLessThan(Math.min(...second));
+    } finally {
+      restore();
+    }
+  });
+
+  test("an idle account's line runs on to the reading the snapshot was taken at", async () => {
+    // Dedup retains a reading only when it moved, so an account nobody is
+    // spending writes no rows at all and its stored run ends at the last
+    // change. The snapshot is a later probe of the same window — leaving it off
+    // the chart blanks the stretch between the two, which reads as a gap in
+    // probing rather than as an account holding still.
+    const restore = measureCharts();
+    try {
+      const user = userEvent.setup();
+      const now = Date.now();
+      const resetsAt = now + 4 * 3_600_000;
+      stubHistory(
+        [
+          quotaSample({ observedAt: now - 50 * 60_000, used: 100, resetsAt }),
+          quotaSample({ observedAt: now - 45 * 60_000, used: 300, resetsAt }),
+        ],
+        now,
+      );
+      const { container } = renderWithProviders(<AccountsBoard />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+      );
+      await screen.findByText("Window average");
+
+      await waitFor(() => expect(dashedPaths(container, null)).toHaveLength(1));
+      // Two retained readings and the snapshot's own, which is where the line
+      // has to reach: the projection starts at that same `observedAt`, so its
+      // head is the instant read back off the rendered chart.
+      const drawn = curvePoints(dashedPaths(container, null)[0] ?? "");
+      expect(drawn).toHaveLength(3);
+      const projection = vertices(dashedPaths(container, PACE_DASH.projection)[0] ?? "");
+      const head = projection[0];
+      const last = drawn[2];
+      const retained = drawn[1];
+      if (head === undefined || last === undefined || retained === undefined) {
+        throw new Error("both lines draw");
+      }
+      expect(Math.abs(last[0] - head[0])).toBeLessThan(0.5);
+      // 30% retained, 50% in the snapshot. Y grows downward, so the reading the
+      // line was carried to sits above the last one that was stored, and the
+      // projection leaves the chart from that same point.
+      expect(last[1]).toBeLessThan(retained[1]);
+      expect(Math.abs(last[1] - head[1])).toBeLessThan(0.5);
+    } finally {
+      restore();
+    }
+  });
+
+  test("an account that has not moved since its last change draws a flat trailing stretch", async () => {
+    // What makes the appended point honest, and the case real dedup actually
+    // produces: a reading that moved would have been retained at that instant,
+    // so a snapshot arriving after the run's last change reports the same
+    // `used` it already ended on. The stretch drawn out to it must therefore be
+    // level — a snapshot appended at any other height would be inventing spend
+    // between two probes that both read the same number.
+    const restore = measureCharts();
+    try {
+      const user = userEvent.setup();
+      const now = Date.now();
+      const resetsAt = now + 4 * 3_600_000;
+      stubAccounts({
+        "GET /api/credentials/health": () => ({
+          health: [health()],
+          quota: [quota({ used: 300, limit: 1_000, observedAt: now - 30_000, resetsAt })],
+          burn: [
+            burn({
+              windowStartsAt: now - 3_600_000,
+              ratePerHour: 500,
+              exhaustsAt: now + 1_800_000,
+              survives: false,
+            }),
+          ],
+        }),
+        "GET /api/credentials/quota/history": () => ({
+          samples: [
+            quotaSample({ observedAt: now - 50 * 60_000, used: 100, resetsAt }),
+            quotaSample({ observedAt: now - 45 * 60_000, used: 300, resetsAt }),
+          ],
+          gatewayRates,
+        }),
+      });
+      const { container } = renderWithProviders(<AccountsBoard />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+      );
+      await screen.findByText("Window average");
+
+      await waitFor(() => expect(dashedPaths(container, null)).toHaveLength(1));
+      const drawn = curvePoints(dashedPaths(container, null)[0] ?? "");
+      expect(drawn).toHaveLength(3);
+      const [, retained, snapshot] = drawn as [
+        [number, number],
+        [number, number],
+        [number, number],
+      ];
+      // Later in time, and at exactly the same height.
+      expect(snapshot[0]).toBeGreaterThan(retained[0]);
+      expect(snapshot[1]).toBeCloseTo(retained[1], 5);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a window read past its own reset still draws its run as one unbroken curve", async () => {
+    // A poll landing after the stated reset — rollover lag or clock skew inside
+    // one interval — puts the budget's endpoint, which sits at `resetsAt` by
+    // definition, between the run's last retained reading and its snapshot. The
+    // row that endpoint makes carries no value for the measured series, so a
+    // line that broke on a missing value would sever the run there and leave
+    // the snapshot as an isolated vertex with nothing drawn to it.
+    const restore = measureCharts();
+    try {
+      const user = userEvent.setup();
+      const now = Date.now();
+      const resetsAt = now - 60_000;
+      stubAccounts({
+        "GET /api/credentials/health": () => ({
+          health: [health()],
+          quota: [quota({ used: 500, limit: 1_000, observedAt: now - 30_000, resetsAt })],
+          burn: [
+            burn({
+              windowStartsAt: resetsAt - 5 * 3_600_000,
+              ratePerHour: 500,
+              exhaustsAt: now - 600_000,
+              survives: false,
+            }),
+          ],
+        }),
+        "GET /api/credentials/quota/history": () => ({
+          samples: [
+            quotaSample({ observedAt: now - 3_000_000, used: 400, resetsAt }),
+            quotaSample({ observedAt: now - 2_000_000, used: 500, resetsAt }),
+          ],
+          gatewayRates,
+        }),
+      });
+      const { container } = renderWithProviders(<AccountsBoard />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+      );
+      await screen.findByText("Window average");
+
+      await waitFor(() => expect(dashedPaths(container, null)).toHaveLength(1));
+      const drawn = dashedPaths(container, null)[0] ?? "";
+      // Two retained readings and the snapshot, all on one stroke. `M` is a pen
+      // lift: one at the head is the start of the path, and any further one is
+      // the run coming apart.
+      expect(drawn.startsWith("M")).toBe(true);
+      expect(drawn.slice(1)).not.toContain("M");
+      expect(curvePoints(drawn)).toHaveLength(3);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a window holding a single retained reading draws a mark rather than nothing", async () => {
+    // A one-point line has no stroke: two points is the least a line needs.
+    // The preceding window is where this happens for real — the live one is
+    // carried to its snapshot, and a settled one keeps whatever it retained.
+    const restore = measureCharts();
+    try {
+      const user = userEvent.setup();
+      const now = Date.now();
+      const resetsAt = now + 4 * 3_600_000;
+      const previous = resetsAt - 5 * 3_600_000;
+      stubHistory(
+        [
+          quotaSample({ observedAt: previous - 3_600_000, used: 900, resetsAt: previous }),
+          quotaSample({ observedAt: now - 2_400_000, used: 400, resetsAt }),
+        ],
+        now,
+      );
+      const { container } = renderWithProviders(<AccountsBoard />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+      );
+      await screen.findByText("Window average");
+
+      await waitFor(() => expect(dashedPaths(container, null)).toHaveLength(2));
+      // One mark, for the one run that has a single reading. The live run holds
+      // its own reading and the snapshot, so it draws a stroke and no dots.
+      const dots = lineDots(container);
+      expect(dots).toHaveLength(1);
+      const live = curvePoints(dashedPaths(container, null)[1] ?? "");
+      const [markX] = dots[0] ?? [];
+      const [firstLiveX] = live[0] ?? [];
+      if (markX === undefined || firstLiveX === undefined) throw new Error("both runs draw");
+      expect(markX).toBeLessThan(firstLiveX);
     } finally {
       restore();
     }

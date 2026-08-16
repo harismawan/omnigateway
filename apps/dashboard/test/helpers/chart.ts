@@ -82,6 +82,20 @@ export function curvePoints(d: string): Array<[x: number, y: number]> {
   ]);
 }
 
+/**
+ * Where every line dot was drawn, in document order.
+ *
+ * A run of one reading has no stroke to see — two points is the least a line
+ * needs — so its dot is the whole of it, and counting dots is how a test asks
+ * whether that run rendered at all.
+ */
+export function lineDots(container: HTMLElement): Array<[x: number, y: number]> {
+  return [...container.querySelectorAll("circle.recharts-line-dot")].map((dot) => [
+    Number(dot.getAttribute("cx")),
+    Number(dot.getAttribute("cy")),
+  ]);
+}
+
 /** The corners of a path. Only `M`/`L` commands have them; a curve has none. */
 export function vertices(d: string): Array<[x: number, y: number]> {
   return [...d.matchAll(/[ML]\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)/g)].map((match) => [
