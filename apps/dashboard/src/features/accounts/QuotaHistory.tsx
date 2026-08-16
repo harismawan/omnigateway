@@ -21,6 +21,7 @@ import {
   type QuotaPoint,
   quotaSegments,
   WINDOW_LABEL,
+  withLiveReading,
 } from "../../lib/vitals.ts";
 import { Legend, Mono, Row, Stack } from "../../ui/primitives.ts";
 import { ChartBox, TipCard } from "../usage/shared.ts";
@@ -64,9 +65,13 @@ type PanelRow = { at: number; [series: string]: number };
  * One row per instant, so a pace endpoint landing on a reading shares its row
  * rather than sitting beside it as a second point at the same x.
  *
- * Series are sparse by construction — a row carries the one key it came from —
- * and each pace contributes only its two ends. Those ends bracket their own
- * window, so they never fall inside another series' run and never break it.
+ * Series are sparse by construction: a row carries the one key it came from, so
+ * every other series reads null at that instant. Nothing here keeps a run
+ * contiguous in row space — a budget's endpoint sits at its own `resetsAt`,
+ * which lands inside the measured run whenever the window was read after the
+ * reset it stated — so the lines drawn from these rows connect across nulls
+ * rather than breaking on them, and the window split is carried by the per-run
+ * `dataKey` instead.
  */
 function chartRows(
   series: ReadonlyArray<{ key: string; points: readonly QuotaPoint[] }>,
@@ -229,7 +234,9 @@ function WindowPanel({
     );
   }
 
-  const segments = quotaSegments(samples);
+  // The snapshot's own reading, on the run it belongs to. Everything below is
+  // derived from this list, so it happens before any of it.
+  const segments = withLiveReading(quotaSegments(samples), window);
   // One budget per window drawn, the preceding one included: each is the pace
   // that spends its own allowance exactly as its own window resets.
   const budgets = segments.flatMap((segment) => {
@@ -369,9 +376,22 @@ function WindowPanel({
 
                     What the curve does between two readings is drawing, not
                     evidence. A step claimed no more: dedup drops the unchanged
-                    reading that would have made a flat stretch provable, and
-                    only the snapshot's own `observed_at` survives, so a past
-                    gap cannot be read as "probed, and nothing moved". */}
+                    reading that would have made a flat stretch provable, so an
+                    interior gap cannot be read as "probed, and nothing moved".
+                    The trailing stretch is the exception and is the one the
+                    snapshot buys: `withLiveReading` ends the run at a reading
+                    that was actually taken, so that last stretch is flat
+                    because the account was read and had not moved.
+
+                    `connectNulls` because the window split is carried by the
+                    per-run `dataKey`, not by the nulls: `chartRows` writes a
+                    run's key at that run's own instants and nowhere else, so
+                    the only values this line can reach are its own and a null
+                    means "some other series had something to say at this
+                    instant", never "this run stopped". Breaking on them
+                    silently assumed runs were contiguous in row space, which a
+                    budget endpoint at `resetsAt` makes untrue the moment a
+                    window is read past its own reset. */}
                 {segments.map((segment) => (
                   <Line
                     key={segment.key}
@@ -379,8 +399,15 @@ function WindowPanel({
                     dataKey={segment.key}
                     stroke="var(--accent)"
                     strokeWidth={2}
-                    dot={false}
-                    connectNulls={false}
+                    dot={
+                      // A run of one reading draws no stroke — a line needs two
+                      // points to be a line — so it is marked instead, in the
+                      // stroke's own colour rather than a second one.
+                      segment.points.length === 1
+                        ? { r: 2.5, fill: "var(--accent)", stroke: "var(--accent)" }
+                        : false
+                    }
+                    connectNulls
                     isAnimationActive={false}
                   />
                 ))}

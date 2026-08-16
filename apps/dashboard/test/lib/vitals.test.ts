@@ -16,6 +16,7 @@ import {
   quotaSegments,
   quotaUsage,
   summarize,
+  withLiveReading,
 } from "../../src/lib/vitals.ts";
 import { burn, health, log, NOW, quota, quotaSample } from "../helpers/fixtures.ts";
 
@@ -400,6 +401,147 @@ describe("quotaSegments", () => {
     const segments = quotaSegments([quotaSample({ used: 4_000, limit: 1_000 })]);
 
     expect(segments[0]?.points[0]?.percent).toBe(100);
+  });
+});
+
+describe("withLiveReading", () => {
+  const RESETS_AT = NOW + 3_600_000;
+
+  /** Two readings inside the live window, the newest of them long before now. */
+  function idleRun() {
+    return quotaSegments([
+      quotaSample({ observedAt: NOW - 3_000_000, used: 100, resetsAt: RESETS_AT }),
+      quotaSample({ observedAt: NOW - 2_000_000, used: 300, resetsAt: RESETS_AT }),
+    ]);
+  }
+
+  test("carries the live window's run up to the reading the snapshot was taken at", () => {
+    // An account nobody is spending changes nothing, dedup retains nothing, and
+    // the run ends at the last change rather than at the last probe. The
+    // snapshot is that probe, and the stretch between them was measured.
+    // 500 against the run's own newest reading of 300, so the appended percent
+    // can only come from the snapshot. Reusing the retained one would pass an
+    // assertion written against a fixture where the two agree.
+    const segments = withLiveReading(
+      idleRun(),
+      quota({ used: 500, limit: 1_000, observedAt: NOW - 30_000, resetsAt: RESETS_AT }),
+    );
+
+    expect(segments).toHaveLength(1);
+    expect(segments[0]?.points.map((point) => point.at)).toEqual([
+      NOW - 3_000_000,
+      NOW - 2_000_000,
+      NOW - 30_000,
+    ]);
+    expect(segments[0]?.points[1]?.percent).toBe(30);
+    expect(segments[0]?.points[2]?.percent).toBe(50);
+  });
+
+  test("attaches the snapshot to the newest run it could belong to", () => {
+    // `sameWindow` is a ±60s tolerance, and a tolerance is not transitive: two
+    // runs 100s apart split from each other, yet each sits within 60s of the
+    // snapshot's own reset and matches it. The newest is the window the
+    // snapshot was read in — hanging it off the older one draws that run's line
+    // forward across the newer one it already ended before.
+    const older = RESETS_AT - 50_000;
+    const newer = RESETS_AT + 50_000;
+    const runs = quotaSegments([
+      quotaSample({ observedAt: NOW - 3_000_000, used: 100, resetsAt: older }),
+      quotaSample({ observedAt: NOW - 2_500_000, used: 200, resetsAt: older }),
+      quotaSample({ observedAt: NOW - 2_000_000, used: 300, resetsAt: newer }),
+      quotaSample({ observedAt: NOW - 1_500_000, used: 400, resetsAt: newer }),
+    ]);
+    expect(runs).toHaveLength(2);
+
+    const segments = withLiveReading(
+      runs,
+      quota({ used: 600, limit: 1_000, observedAt: NOW - 30_000, resetsAt: RESETS_AT }),
+    );
+
+    expect(segments[0]?.points.map((point) => point.at)).toEqual([
+      NOW - 3_000_000,
+      NOW - 2_500_000,
+    ]);
+    expect(segments[1]?.points.map((point) => point.at)).toEqual([
+      NOW - 2_000_000,
+      NOW - 1_500_000,
+      NOW - 30_000,
+    ]);
+  });
+
+  test("draws a snapshot past its own ceiling at a full window, not past one", () => {
+    // Load-bearing on the chart, not cosmetic: the y domain is `[0, ceiling]`
+    // with `allowDataOverflow`, and `ceiling` is computed from the projection
+    // alone. A reading above it is clipped off the top of the plot, taking the
+    // trailing stretch of the line with it.
+    const segments = withLiveReading(
+      idleRun(),
+      quota({ used: 1_500, limit: 1_000, observedAt: NOW - 30_000, resetsAt: RESETS_AT }),
+    );
+
+    expect(segments[0]?.points[2]?.percent).toBe(100);
+  });
+
+  test("leaves a settled run alone rather than handing it the next window's reading", () => {
+    // The run belongs to a window that has already rolled over. Its readings
+    // counted down to their own reset, and the live one is a different window
+    // with a different ceiling to have spent.
+    const rolled = RESETS_AT + SAME_WINDOW_TOLERANCE_MS + 1;
+    const segments = withLiveReading(
+      idleRun(),
+      quota({ used: 900, limit: 1_000, observedAt: NOW - 30_000, resetsAt: rolled }),
+    );
+
+    expect(segments[0]?.points.map((point) => point.at)).toEqual([
+      NOW - 3_000_000,
+      NOW - 2_000_000,
+    ]);
+  });
+
+  test("creates no run where nothing was retained", () => {
+    // What keeps "not yet observed" reachable: one snapshot is a reading, not a
+    // history, and a panel drawing it alone would claim a chart it has no data
+    // for.
+    expect(
+      withLiveReading([], quota({ used: 300, limit: 1_000, resetsAt: RESETS_AT })),
+    ).toHaveLength(0);
+  });
+
+  test("adds nothing when the newest retained reading is the snapshot itself", () => {
+    // The reading moved, so it was retained, and the snapshot reports the same
+    // instant. Appending it again would put two points on one x.
+    const segments = withLiveReading(
+      idleRun(),
+      quota({ used: 300, limit: 1_000, observedAt: NOW - 2_000_000, resetsAt: RESETS_AT }),
+    );
+
+    expect(segments[0]?.points).toHaveLength(2);
+  });
+
+  test("draws nothing from a snapshot with no ceiling to draw it against", () => {
+    // The same rule the retained readings are dropped under: a percentage of an
+    // unstated limit is not a number.
+    const runs = idleRun();
+    expect(withLiveReading(runs, quota({ used: 300, limit: null, resetsAt: RESETS_AT }))).toEqual(
+      runs,
+    );
+    expect(withLiveReading(runs, quota({ used: 300, limit: 0, resetsAt: RESETS_AT }))).toEqual(
+      runs,
+    );
+  });
+
+  test("leaves the runs it was given untouched", () => {
+    // The panel derives budgets and rows from the same list, so a run that grew
+    // a point in place would be a different chart depending on read order.
+    const runs = idleRun();
+    const extended = withLiveReading(
+      runs,
+      quota({ used: 300, limit: 1_000, observedAt: NOW, resetsAt: RESETS_AT }),
+    );
+
+    expect(runs[0]?.points).toHaveLength(2);
+    expect(extended[0]?.points).toHaveLength(3);
+    expect(extended[0]).not.toBe(runs[0]);
   });
 });
 
