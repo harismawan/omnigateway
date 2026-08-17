@@ -27,7 +27,7 @@ import type {
   Store,
   VirtualModel,
 } from "@omni/store";
-import { newCompletedRequestLog } from "../logging.ts";
+import { newCompletedRequestLog, reasonField, reportRejection } from "../logging.ts";
 import { attempt } from "./attempt.ts";
 import { classify } from "./classify.ts";
 import type { LoadRegistry } from "./loadRegistry.ts";
@@ -84,10 +84,86 @@ export async function dispatch(
 
   let dispatchRequest = request;
 
-  const fail = (code: GatewayError["code"], message: string): DispatchOutcome => {
-    log.errorCode = code;
-    log.status = HTTP_STATUS[code];
+  /**
+   * Reports a terminal failure.
+   *
+   * Nearly every way dispatch fails ends in a yielded error event rather than a
+   * throw — `fail`, a decoder's own terminal event, a throw after the commit
+   * point, and the exhausted candidate loop. The route reads that event and
+   * renders an error response, so its own `catch` never runs and nothing about
+   * the failure reaches stdout. `request_logs` holds a status and a code and no
+   * message, so without this line the reason a request failed is recoverable
+   * from nowhere. The exceptions still throw past here — a missing adapter, a
+   * `persistHealth` store error, an abort — and the route logs those itself.
+   *
+   * Every caller is a site that decided an outcome, and passes the error that
+   * decided it. Wrapping the returned generator and reporting whatever error
+   * event went past would be tidier, but an event carries no record of who
+   * wrote its message, so that version had to guess — and withheld the
+   * gateway's own `"request deadline exceeded"` as though it were an upstream
+   * body, hiding the single fact this line exists to carry.
+   *
+   * Called once the log carries the failure, so the fields it reads are the
+   * ones the row will hold.
+   *
+   * One line per request is a property of the call sites, not of a guard here:
+   * every one of them returns immediately after reporting, and `fail` hands
+   * back its own generator without `run()` ever starting. A latch used to sit
+   * in this function, but nothing reachable could trip it — it only had an
+   * effect if a consumer called `throw()` into the stream, which no caller
+   * does. **A new terminal site must return once it has reported**, or it will
+   * report again on the way out and there is no longer anything to stop it.
+   */
+  const reject = (error: GatewayError): void => {
+    reportRejection(logger, requestId, log, error);
+  };
+
+  /**
+   * Whether this error *is* the client hanging up, rather than merely having
+   * happened while one was in progress.
+   *
+   * `checkCancellation` and the attempt catch both rethrow `signal.reason`
+   * verbatim, and a fetch aborted by the client rejects with that same reason
+   * because `abortFromClient` passes it on — so identity answers this exactly.
+   * Asking `signal.aborted` instead files a genuine failure that merely
+   * coincided with a disconnect as a clean 499 and prints nothing, which is how
+   * a store outage comes to read as "our clients are all disconnecting". The
+   * deadline aborts with a `GatewayError` of its own, so it never matches here.
+   */
+  const isClientAbort = (error: unknown): boolean => signal.aborted && error === signal.reason;
+
+  /**
+   * Re-wraps a classified error, keeping who wrote the message.
+   *
+   * `provider` is the redaction gate's only input; dropping it here is what
+   * made every re-wrapped upstream error read as gateway-authored.
+   */
+  const rewrap = (classified: ReturnType<typeof classify>, message: string): GatewayError =>
+    new GatewayError(classified.code, message, {
+      ...(classified.retryAfterMs === undefined ? {} : { retryAfterMs: classified.retryAfterMs }),
+      ...(classified.provider === undefined ? {} : { provider: classified.provider }),
+    });
+
+  /**
+   * A failure decided before any attempt ran.
+   *
+   * `cancelled` marks the client having hung up rather than anything having
+   * gone wrong: the row records 499 like every other disconnect and nothing is
+   * printed. A hang-up during model resolution otherwise classifies as
+   * `TIMEOUT` and prints a 504 rejection — the very line the route suppresses
+   * on every other disconnect path, at whatever rate the client retried.
+   */
+  const fail = (
+    code: GatewayError["code"],
+    message: string,
+    cancelled = false,
+  ): DispatchOutcome => {
+    log.errorCode = cancelled ? "interrupted" : code;
+    log.status = cancelled ? 499 : HTTP_STATUS[code];
     log.durationMs = deps.now() - startedAt;
+    // Everything `fail` reports happens before an attempt runs, so the message
+    // is always this gateway's own and prints without waiting for debug.
+    if (!cancelled) reject(new GatewayError(code, message));
     return {
       events: (async function* () {
         yield { type: "error", code, message, retryable: RETRYABLE[code] } as StreamEvent;
@@ -136,8 +212,9 @@ export async function dispatch(
     checkCancellation();
     model = resolveModel(dispatchRequest.model, snapshot);
   } catch (error) {
-    const { code } = classify(error);
     clearDeadline();
+    if (isClientAbort(error)) return fail("TIMEOUT", "client disconnected", true);
+    const { code } = classify(error);
     return fail(code, error instanceof Error ? error.message : "unresolvable model");
   }
 
@@ -363,18 +440,47 @@ export async function dispatch(
                   // would fall through to the success path below once the
                   // generator ends, misreporting a failed request as a 200.
                   committed = true;
-                  yield event;
-                  await persistHealth(
-                    recordFailure(healthFor(candidate), {
-                      settings: snapshot.settings,
-                      now: deps.now(),
-                      code: event.code,
-                      jitter: deps.rand(),
-                    }),
-                  );
+                  // Recorded before the yield, not after. The consumer reads the
+                  // event during that yield — the rejection line prints there,
+                  // and the route completes the row from it — so a log still
+                  // carrying `status: 0` would report this failure as neither a
+                  // success nor a failure. A consumer that abandons the stream
+                  // here never resumes the body at all, and would leave it that
+                  // way permanently.
                   log.status = HTTP_STATUS[event.code];
                   log.errorCode = event.code;
                   log.durationMs = deps.now() - startedAt;
+                  // A decoder raises this from an error frame the upstream
+                  // sent, so the message is the upstream's own words.
+                  reject(
+                    new GatewayError(event.code, event.message, {
+                      provider: candidate.target.provider,
+                    }),
+                  );
+                  yield event;
+                  try {
+                    await persistHealth(
+                      recordFailure(healthFor(candidate), {
+                        settings: snapshot.settings,
+                        now: deps.now(),
+                        code: event.code,
+                        jitter: deps.rand(),
+                      }),
+                    );
+                  } catch (healthError) {
+                    // Bookkeeping, and this request's outcome was decided and
+                    // reported before the yield above. Letting the write reach
+                    // the catch below would reassign the status the row keeps
+                    // and yield a SECOND error event: the client receiving two
+                    // terminal frames, and stdout disagreeing with its own row
+                    // about the same requestId.
+                    logger.error("failed to persist credential health", {
+                      requestId,
+                      provider: candidate.target.provider,
+                      credentialId: candidate.credential.id,
+                      reason: healthError instanceof Error ? healthError.message : "unknown",
+                    });
+                  }
                   return;
                 }
 
@@ -415,12 +521,9 @@ export async function dispatch(
                 deadlineAt !== null && dispatchSignal.aborted
                   ? { code: "TIMEOUT" as const }
                   : classify(error);
-              const { code, retryAfterMs } = classifiedError;
+              const { code } = classifiedError;
               const message = error instanceof Error ? error.message : "attempt failed";
-              lastError =
-                retryAfterMs === undefined
-                  ? new GatewayError(code, message)
-                  : new GatewayError(code, message, { retryAfterMs });
+              lastError = rewrap(classifiedError, message);
 
               if (
                 code === "AUTH" &&
@@ -455,12 +558,25 @@ export async function dispatch(
                     refreshError instanceof Error
                       ? refreshError.message
                       : "credential refresh failed";
-                  lastError =
-                    classified.retryAfterMs === undefined
-                      ? new GatewayError(classified.code, refreshMessage)
-                      : new GatewayError(classified.code, refreshMessage, {
-                          retryAfterMs: classified.retryAfterMs,
-                        });
+                  lastError = rewrap(classified, refreshMessage);
+                  // The refresh *attempt* is logged above. Without this the
+                  // failure is not, so a dead refresh token reads as a refresh
+                  // that worked followed by an unexplained 503.
+                  logger.warn("credential refresh failed", {
+                    requestId,
+                    provider: candidate.target.provider,
+                    model: candidate.target.model,
+                    credentialId: candidate.credential.id,
+                    attempt: i + 1,
+                    code: classified.code,
+                    // Same predicate as every other rejection line. Most of what
+                    // reaches here this gateway wrote — a discovery document
+                    // that failed its HTTPS check, a provider with no refresh
+                    // grant, a token response with no `access_token` — and
+                    // withholding those left the operator with a bare
+                    // `code=UPSTREAM` for the fault the line exists to explain.
+                    ...reasonField(lastError, logger),
+                  });
                 }
               }
 
@@ -496,6 +612,7 @@ export async function dispatch(
                 log.status = HTTP_STATUS[failure.code];
                 log.errorCode = failure.code;
                 log.durationMs = deps.now() - startedAt;
+                reject(failure);
                 yield {
                   type: "error",
                   code: failure.code,
@@ -523,10 +640,20 @@ export async function dispatch(
       log.status = HTTP_STATUS[code];
       log.errorCode = code;
       log.durationMs = deps.now() - startedAt;
+      const message = lastError?.message ?? "all candidates failed";
+      // Whoever wrote the last candidate's message wrote this one. Where no
+      // candidate ever ran there is no `lastError`, and the text below is this
+      // gateway's own — which is exactly the case a blanket "assume upstream"
+      // used to withhold.
+      reject(
+        lastError?.provider === undefined
+          ? new GatewayError(code, message)
+          : new GatewayError(code, message, { provider: lastError.provider }),
+      );
       yield {
         type: "error",
         code,
-        message: lastError?.message ?? "all candidates failed",
+        message,
         retryable: false,
       };
     } finally {

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { ProviderId, StreamEvent } from "@omni/ir";
+import { GatewayError, type ProviderId, type StreamEvent } from "@omni/ir";
 import {
   customAdapter,
   type HttpClient,
@@ -16,6 +16,7 @@ import {
   virtualModel,
 } from "@omni/testkit";
 import { authenticateApiKey } from "../../src/auth/apiKey.ts";
+import { createLoadRegistry } from "../../src/dispatch/loadRegistry.ts";
 import { type ProxyDeps, proxyRoutes } from "../../src/routes/proxy.ts";
 
 const EVENTS: StreamEvent[] = [
@@ -190,6 +191,24 @@ const TERMINAL = ["request done", "request failed", "request cancelled"];
 const terminalLines = (logger: ReturnType<typeof captureLogger>) =>
   logger.records.filter((record) => TERMINAL.includes(record.msg));
 
+/**
+ * Waits for something the route finishes after the response is handed back,
+ * and gives up with a name.
+ *
+ * Bounded on purpose. Polling `usage.recent` in a bare `while` turns any
+ * regression that stops the row being written into a job that hangs until the
+ * whole run is killed — no failing test, no assertion, nothing to read. A
+ * deadline makes the same regression a one-line failure that says what never
+ * arrived.
+ */
+async function until(what: string, ready: () => Promise<boolean>): Promise<void> {
+  for (let waited = 0; waited < 2_000; waited += 5) {
+    if (await ready()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
 test("records a finished request as a row, and prints nothing", async () => {
   const logger = captureLogger();
   const { call, store } = await harness(EVENTS, { logger });
@@ -296,6 +315,195 @@ test("prints nothing for a request that succeeded", async () => {
   // A rejection line on the happy path is an access line by another name, which
   // is what this change removed.
   expect(logger.records.map((record) => record.msg)).not.toContain("request rejected");
+});
+
+/**
+ * An upstream that refuses. A rejecting `send` is how a non-2xx becomes an
+ * attempt failure, and `BAD_REQUEST` is not retryable, so dispatch gives up on
+ * the first candidate and hands the route an error event rather than throwing.
+ *
+ * The error must carry `provider`, because that is what a real one carries:
+ * `httpError` is the only constructor that fills a message from a response
+ * body, and it always sets the field. It is also what the redaction gate reads,
+ * so an upstream error built without it is not a weaker fixture but a different
+ * case — a gateway-authored message, which is allowed to print.
+ */
+function refusingAdapters(
+  error: GatewayError,
+): Readonly<Partial<Record<ProviderId, ProviderAdapter>>> {
+  const make = (id: ProviderId): ProviderAdapter => ({
+    id,
+    capabilities: { tools: true, images: true, reasoning: true },
+    send: () => Promise.reject(error),
+  });
+  return { anthropic: make("anthropic") };
+}
+
+const UPSTREAM_SENTINEL = "UPSTREAM_REFUSAL_BODY_SENTINEL";
+
+test("prints why an upstream refused a non-streaming request", async () => {
+  const logger = captureLogger("info");
+  const { call, store } = await harness(EVENTS, {
+    logger,
+    adapters: refusingAdapters(
+      new GatewayError("BAD_REQUEST", UPSTREAM_SENTINEL, { provider: "anthropic" }),
+    ),
+  });
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(res.status).toBe(400);
+
+  // The failure leaves dispatch as an error event, so the route's own catch
+  // never sees it. Before this line the request was invisible on stdout and
+  // the row kept only `400/BAD_REQUEST`.
+  const rejected = logger.records.filter((record) => record.msg === "request rejected");
+  expect(rejected).toHaveLength(1);
+  expect(rejected[0]?.level).toBe("warn");
+  expect(rejected[0]?.fields).toMatchObject({
+    requestId: "req_1",
+    status: 400,
+    provider: "anthropic",
+    model: "claude-opus-4",
+    credentialId: "c1",
+    code: "BAD_REQUEST",
+    attempts: 1,
+  });
+  expect(logger.lines.join("\n")).not.toContain(UPSTREAM_SENTINEL);
+
+  const [row] = await store.usage.recent(10);
+  expect(row).toEqual(
+    expect.objectContaining({ state: "done", status: 400, errorCode: "BAD_REQUEST" }),
+  );
+});
+
+test("prints why an upstream refused a streaming request, exactly once", async () => {
+  const logger = captureLogger("info");
+  const { call } = await harness(EVENTS, {
+    logger,
+    adapters: refusingAdapters(
+      new GatewayError("BAD_REQUEST", UPSTREAM_SENTINEL, { provider: "anthropic" }),
+    ),
+  });
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  await res.text();
+
+  const rejected = logger.records.filter((record) => record.msg === "request rejected");
+  expect(rejected).toHaveLength(1);
+  expect(rejected[0]?.fields).toMatchObject({ requestId: "req_1", code: "BAD_REQUEST" });
+  expect(logger.lines.join("\n")).not.toContain(UPSTREAM_SENTINEL);
+});
+
+/** An upstream that never answers, so only the client's hang-up ends the attempt. */
+function stallingAdapters(): Readonly<Partial<Record<ProviderId, ProviderAdapter>>> {
+  return {
+    anthropic: {
+      id: "anthropic",
+      capabilities: { tools: true, images: true, reasoning: true },
+      send: (request) =>
+        new Promise<never>((_, reject) => {
+          request.signal.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+        }),
+    },
+  };
+}
+
+test("records a cancelled non-streaming request as 499, keeping what routing resolved", async () => {
+  const logger = captureLogger("info");
+  const { app, raw, store } = await harness(EVENTS, { logger, adapters: stallingAdapters() });
+
+  const controller = new AbortController();
+  const response = app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({
+        model: "fast",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      signal: controller.signal,
+    }),
+  );
+  // Hang up mid-attempt: the pending row proves routing already picked a target.
+  await until(
+    "the pending row routing writes",
+    async () => (await store.usage.recent(1))[0] !== undefined,
+  );
+  controller.abort();
+  await response.catch(() => undefined);
+
+  const [row] = await store.usage.recent(10);
+  // A disconnect is what streaming already records as 499/interrupted. The
+  // non-streaming drain throws instead of returning, so it used to land as
+  // 500/INTERNAL with the pending row's attribution overwritten by nulls.
+  expect(row).toEqual(
+    expect.objectContaining({
+      id: "req_1",
+      state: "done",
+      status: 499,
+      errorCode: "interrupted",
+      requestedModel: "fast",
+      resolvedProvider: "anthropic",
+      resolvedModel: "claude-opus-4",
+      credentialId: "c1",
+      attempts: 1,
+    }),
+  );
+  // A hang-up is not a gateway failure, and they are far too common to print.
+  expect(logger.records.filter((record) => record.msg === "request rejected")).toEqual([]);
+});
+
+test("gives a stream that broke on the gateway's own error a terminal status", async () => {
+  const logger = captureLogger("info");
+  const { call, store } = await harness(EVENTS, { logger });
+  // A health write is the one piece of dispatch that runs outside its own error
+  // handling, so a store failure there escapes the generator as a throw instead
+  // of an error event.
+  store.credentials.saveHealth = async () => {
+    throw new Error("HEALTH_WRITE_SENTINEL");
+  };
+
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  await res.text().catch(() => undefined);
+  await until(
+    "the row to be completed",
+    async () => (await store.usage.recent(1))[0]?.state === "done",
+  );
+
+  // Not a client hang-up, so nothing remapped it: the row used to be written
+  // `state='done', status=0`, reading as neither success nor failure.
+  const [row] = await store.usage.recent(10);
+  expect(row).toEqual(
+    expect.objectContaining({ id: "req_1", state: "done", status: 500, errorCode: "INTERNAL" }),
+  );
+
+  const rejected = logger.records.filter((record) => record.msg === "request rejected");
+  expect(rejected).toHaveLength(1);
+  // The gateway broke, not the upstream, so this is not a warning about someone
+  // else's behaviour.
+  expect(rejected[0]?.level).toBe("error");
+  expect(rejected[0]?.fields).toMatchObject({ requestId: "req_1", status: 500, code: "INTERNAL" });
+  // The store wrote this message, not an upstream, so it cannot quote the
+  // request back and it prints without waiting for debug — a defect nobody can
+  // read is a defect twice. `logger` here is at info.
+  expect(rejected[0]?.fields.reason).toBe("HEALTH_WRITE_SENTINEL");
 });
 
 test("proxies a streaming anthropic request as sse", async () => {
@@ -635,6 +843,219 @@ test("a throw from dispatch completes the pending row without erasing it", async
   expect(logs[0]?.state).toBe("done");
   // The terminal catch carries no model; what beginning the request recorded stands.
   expect(logs[0]?.requestedModel).toBe("fast");
+  store.close();
+});
+
+/**
+ * `usage.append` must run at most once per request id.
+ *
+ * `rollupLog` adds into `usage_daily` rather than replacing, so a second append
+ * bills the same tokens and the same spend twice. The non-streaming path
+ * completes the row and then keeps working — collecting, rendering, serialising
+ * — and anything thrown after that lands in the terminal catch. That catch used
+ * to build a blank log, whose nulls rolled up under a different key and hid the
+ * double count; completing dispatch's real log there is what made it billable.
+ */
+test("completes the row once when a non-streaming request throws after it is written", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  await store.config.putModel(
+    virtualModel({
+      id: "fast",
+      targets: [target({ provider: "anthropic", model: "claude-opus-4" })],
+    }),
+  );
+  const { raw } = await seedApiKey(store);
+
+  let appends = 0;
+  const realAppend = store.usage.append.bind(store.usage);
+  // Armed by the completion itself, so the throw lands strictly after the row
+  // is written rather than at a call count that shifts whenever the path does.
+  let completed = false;
+  store.usage.append = async (log) => {
+    appends++;
+    completed = true;
+    return realAppend(log);
+  };
+  let thrown = false;
+  const logger = captureLogger("info");
+  const app = proxyRoutes({
+    store,
+    adapters: stubAdapters(EVENTS),
+    http: (() => {
+      throw new Error("a stub adapter reached the transport");
+    }) as HttpClient,
+    now: () => {
+      if (completed && !thrown) {
+        thrown = true;
+        throw new Error("AFTER_COMPLETION_SENTINEL");
+      }
+      return 1_000_000;
+    },
+    rand: () => 0.5,
+    refresh: async (c) => await c.secrets(),
+    requestId: () => "req_1",
+    logger,
+  });
+
+  // The OpenAI surface stamps `created` from the clock after the row is
+  // completed, so this is where a post-completion throw actually happens.
+  const res = await app.handle(
+    new Request("http://localhost/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({ model: "fast", messages: [{ role: "user", content: "hi" }] }),
+    }),
+  );
+  await res.text().catch(() => undefined);
+
+  expect(thrown).toBe(true);
+  expect(appends).toBe(1);
+  const rows = await store.usage.recent(10);
+  expect(rows).toHaveLength(1);
+  store.close();
+});
+
+/**
+ * A stream can break after dispatch has already decided the request.
+ *
+ * The slot release runs in the generator's `finally`, after the success path
+ * has recorded 200 and the upstream's tokens, so a throw there escapes with a
+ * status already assigned. Gating the whole branch on `status === 0` meant a
+ * client that received a truncated stream was filed as a clean 200 and printed
+ * nowhere. Reporting and status-assignment are separate for this reason: the
+ * row keeps what the upstream actually did, and the break still gets a line.
+ */
+test("reports a stream that broke after dispatch recorded its outcome", async () => {
+  const logger = captureLogger("info");
+  const inner = createLoadRegistry();
+  const { call, store } = await harness(EVENTS, {
+    logger,
+    loadRegistry: {
+      counts: () => inner.counts(),
+      acquire: (credentialId, model) => {
+        const release = inner.acquire(credentialId, model);
+        return () => {
+          release();
+          throw new Error("RELEASE_SENTINEL");
+        };
+      },
+    },
+  });
+
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  await res.text().catch(() => undefined);
+  await until(
+    "the row to be completed",
+    async () => (await store.usage.recent(1))[0] !== undefined,
+  );
+
+  // The upstream did finish and did bill for it, so the row says so rather than
+  // inventing a 500 the upstream never returned.
+  const [row] = await store.usage.recent(10);
+  expect(row).toEqual(expect.objectContaining({ state: "done", status: 200, outputTokens: 2 }));
+  // But the break is the gateway's own defect, and it is not silent.
+  const rejected = logger.records.filter((record) => record.msg === "request rejected");
+  expect(rejected).toHaveLength(1);
+  expect(rejected[0]?.level).toBe("error");
+  expect(rejected[0]?.fields).toMatchObject({ status: 200, code: "INTERNAL" });
+  store.close();
+});
+
+/**
+ * A failure that merely coincided with a hang-up is not a hang-up.
+ *
+ * The health write inside dispatch's own error handling runs after the point
+ * where an abort is turned back into `signal.reason`, so a store failing there
+ * escapes as itself while the client's own timeout may already have fired.
+ * Keyed off `signal.aborted`, that was filed 499/interrupted and printed
+ * nowhere — a store outage across the fleet reading as clients giving up.
+ */
+test("records a failure that coincided with a hang-up as the failure it was", async () => {
+  const logger = captureLogger("info");
+  const refusing = (id: ProviderId): ProviderAdapter => ({
+    id,
+    capabilities: { tools: true, images: true, reasoning: true },
+    send: () =>
+      Promise.reject(new GatewayError("BAD_REQUEST", "refused", { provider: "anthropic" })),
+  });
+  const { app, raw, store } = await harness(EVENTS, {
+    logger,
+    adapters: { anthropic: refusing("anthropic") },
+  });
+  const controller = new AbortController();
+  // Dispatch records the failure, then writes health — and the client gives up
+  // in that window. The write is what escapes; the abort is a bystander.
+  store.credentials.saveHealth = async () => {
+    controller.abort();
+    throw new Error("HEALTH_WRITE_SENTINEL");
+  };
+
+  const res = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({
+        model: "fast",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      signal: controller.signal,
+    }),
+  );
+  await res.text().catch(() => undefined);
+  await until(
+    "the row to be completed",
+    async () => (await store.usage.recent(1))[0] !== undefined,
+  );
+
+  const [row] = await store.usage.recent(10);
+  expect(row).toEqual(
+    expect.objectContaining({ state: "done", status: 500, errorCode: "INTERNAL" }),
+  );
+  const rejected = logger.records.filter((record) => record.msg === "request rejected");
+  expect(rejected).toHaveLength(1);
+  // The gateway's own defect, so it pages rather than merely warns — and it
+  // reads the same on both surfaces, which is why the level lives in one place.
+  expect(rejected[0]?.level).toBe("error");
+  store.close();
+});
+
+/**
+ * A hang-up before routing is still a hang-up.
+ *
+ * It classifies as `TIMEOUT` on the way out of model resolution, so it used to
+ * print a 504 rejection line and record one — the very event every other
+ * disconnect path suppresses, at whatever rate the client retried.
+ */
+test("records a hang-up before routing as a disconnect, and prints nothing", async () => {
+  const logger = captureLogger("info");
+  const { app, raw, store } = await harness(EVENTS, { logger });
+  const controller = new AbortController();
+  controller.abort();
+
+  const res = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({
+        model: "fast",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      signal: controller.signal,
+    }),
+  );
+  await res.text().catch(() => undefined);
+
+  expect(logger.records.filter((record) => record.msg === "request rejected")).toEqual([]);
+  const [row] = await store.usage.recent(10);
+  expect(row).toEqual(expect.objectContaining({ status: 499, errorCode: "interrupted" }));
   store.close();
 });
 

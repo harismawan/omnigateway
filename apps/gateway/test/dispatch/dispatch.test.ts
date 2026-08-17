@@ -1329,3 +1329,295 @@ test("a credential that cannot expire is served without reaching the refresher",
   expect(events.at(-1)).toMatchObject({ type: "end" });
   expect(adapter.calls).toEqual(["test-token-kilo"]);
 });
+
+/** The line every terminal failure has to leave behind, and nothing else. */
+const rejections = (logger: ReturnType<typeof captureLogger>) =>
+  logger.records.filter((record) => record.msg === "request rejected");
+
+test("prints why a non-retryable attempt failed, naming the target it failed on", async () => {
+  const store = await seeded(1);
+  const logger = captureLogger();
+  const adapter = stubAdapter(() => new GatewayError("BAD_REQUEST", "max_tokens exceeds limit"));
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  const events = await drain(outcome.events);
+
+  expect(events).toEqual([
+    { type: "error", code: "BAD_REQUEST", message: "max_tokens exceeds limit", retryable: false },
+  ]);
+  expect(rejections(logger)).toHaveLength(1);
+  expect(rejections(logger)[0]).toMatchObject({
+    level: "warn",
+    fields: {
+      requestId: "req_test",
+      status: 400,
+      provider: "anthropic",
+      model: "claude-opus-4",
+      credentialId: "c1",
+      code: "BAD_REQUEST",
+      attempts: 1,
+    },
+  });
+  store.close();
+});
+
+test("prints one rejection line when the candidate pool is exhausted", async () => {
+  const store = await seeded(2);
+  const logger = captureLogger();
+  const adapter = stubAdapter(() => new GatewayError("UPSTREAM", "bad gateway"));
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(rejections(logger)).toHaveLength(1);
+  expect(rejections(logger)[0]?.fields).toMatchObject({
+    requestId: "req_test",
+    status: 503,
+    code: "ALL_CANDIDATES_FAILED",
+    attempts: 2,
+  });
+  store.close();
+});
+
+test("prints a rejection line for a request that never reached a candidate", async () => {
+  const store = await seeded(0);
+  // Info, not debug: this line has to earn its keep on a default install.
+  const logger = captureLogger("info");
+  const adapter = stubAdapter(() => textStream("x"));
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(rejections(logger)).toHaveLength(1);
+  const fields = rejections(logger)[0]?.fields;
+  expect(fields).toMatchObject({ requestId: "req_test", status: 503, code: "NO_CANDIDATES" });
+  // Nothing was routed, so there is no target to name — and a line that named
+  // one would be inventing it.
+  expect(fields?.provider).toBeUndefined();
+  expect(fields?.model).toBeUndefined();
+  expect(fields?.credentialId).toBeUndefined();
+  // This gateway wrote the message, so no prompt can be hiding in it and it
+  // prints without debug. Withholding it would leave an empty pool and an
+  // unroutable model looking identical, which is the whole question a 503 asks.
+  expect(fields?.reason).toBe('no eligible credential for model "fast"');
+  store.close();
+});
+
+test("prints the upstream message only where debug output was asked for", async () => {
+  const upstreamBody = "REJECTION_BODY_SENTINEL";
+  for (const [level, expected] of [
+    ["debug", upstreamBody],
+    ["info", undefined],
+  ] as const) {
+    const store = await seeded(1);
+    const logger = captureLogger(level);
+    // `provider` is what marks a message as the upstream's own, and `httpError`
+    // — the only constructor that copies a response body into one — always sets
+    // it. An error built without it is a different case, not a looser fixture.
+    const adapter = stubAdapter(
+      () => new GatewayError("BAD_REQUEST", upstreamBody, { provider: "anthropic" }),
+    );
+
+    const outcome = await dispatch(
+      req,
+      { ...deps(store, adapter), logger },
+      new AbortController().signal,
+      "req_test",
+    );
+    await drain(outcome.events);
+
+    expect(rejections(logger)).toHaveLength(1);
+    expect(rejections(logger)[0]?.fields.reason).toBe(expected);
+    if (level === "info") expect(logger.lines.join("\n")).not.toContain(upstreamBody);
+    store.close();
+  }
+});
+
+/**
+ * The resume after a terminal event is yielded is the one moment a bookkeeping
+ * write can reach code that would decide the request a second time.
+ *
+ * Left to reach the attempt catch, a failed health write reassigned the status
+ * the row keeps and yielded another error event — the client receiving two
+ * terminal frames for one request, and stdout disagreeing with its own row
+ * about the same `requestId`, which is the join those two are supposed to have.
+ */
+test("a failed health write cannot rewrite an outcome the client already has", async () => {
+  const store = await seeded(1);
+  const logger = captureLogger("info");
+  const adapter = stubAdapter(() =>
+    (async function* (): AsyncGenerator<StreamEvent> {
+      yield { type: "start", id: "m", model: "claude-opus-4" };
+      yield { type: "blockStart", index: 0, block: { type: "text" } };
+      yield { type: "blockDelta", index: 0, delta: { type: "text", text: "partial" } };
+      yield { type: "error", code: "UPSTREAM", message: "TERMINAL_FRAME", retryable: true };
+    })(),
+  );
+  const configured = {
+    ...deps(store, adapter),
+    logger,
+    store: {
+      ...store,
+      credentials: {
+        ...store.credentials,
+        saveHealth: () => Promise.reject(new Error("HEALTH_WRITE_SENTINEL")),
+      },
+    },
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_test");
+  const events = await drain(outcome.events);
+
+  // Told once, and told the truth: the upstream's own failure, not the store's.
+  expect(events.filter((e) => e.type === "error")).toHaveLength(1);
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(outcome.log()).toMatchObject({ status: 502, errorCode: "UPSTREAM" });
+  expect(rejections(logger)).toHaveLength(1);
+  expect(rejections(logger)[0]?.fields).toMatchObject({ status: 502, code: "UPSTREAM" });
+
+  // Swallowing it silently would trade one invisible failure for another, so
+  // the write that died is still reported — at `error`, because it is ours.
+  const health = logger.records.filter((r) => r.msg === "failed to persist credential health");
+  expect(health).toHaveLength(1);
+  expect(health[0]?.level).toBe("error");
+  store.close();
+});
+
+test("prints no rejection line for a request that succeeded", async () => {
+  const store = await seeded(1);
+  const logger = captureLogger();
+  const adapter = stubAdapter(() => textStream("hello"));
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(outcome.log().status).toBe(200);
+  expect(rejections(logger)).toEqual([]);
+  store.close();
+});
+
+test("prints a rejection line for a decoder's own terminal error event", async () => {
+  const store = await seeded(1);
+  const logger = captureLogger("info");
+  const adapter = stubAdapter(() =>
+    (async function* (): AsyncGenerator<StreamEvent> {
+      yield { type: "start", id: "m", model: "claude-opus-4" };
+      yield { type: "blockStart", index: 0, block: { type: "text" } };
+      yield { type: "blockDelta", index: 0, delta: { type: "text", text: "partial" } };
+      yield { type: "error", code: "UPSTREAM", message: "DECODER_BODY_SENTINEL", retryable: true };
+    })(),
+  );
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(rejections(logger)).toHaveLength(1);
+  // Committed, so this is the status the client's stream ends on; a line that
+  // read `status=0` would be reporting the log before dispatch filled it in.
+  expect(rejections(logger)[0]?.fields).toMatchObject({
+    requestId: "req_test",
+    status: 502,
+    provider: "anthropic",
+    model: "claude-opus-4",
+    credentialId: "c1",
+    code: "UPSTREAM",
+    attempts: 1,
+  });
+  expect(logger.lines.join("\n")).not.toContain("DECODER_BODY_SENTINEL");
+  store.close();
+});
+
+test("prints why a credential refresh failed, gating the endpoint's message", async () => {
+  const refreshBody = "REFRESH_BODY_SENTINEL";
+  for (const [level, expected] of [
+    ["debug", refreshBody],
+    ["info", undefined],
+  ] as const) {
+    const store = await seeded(2);
+    const logger = captureLogger(level);
+    const adapter = stubAdapter((call) =>
+      call === 1 ? new GatewayError("AUTH", "expired") : textStream("fallback"),
+    );
+    const configured = { ...deps(store, adapter), logger };
+    configured.refresh = async () => {
+      throw new GatewayError("UPSTREAM", refreshBody, { provider: "anthropic" });
+    };
+
+    const outcome = await dispatch(req, configured, new AbortController().signal, "req_test");
+    await drain(outcome.events);
+
+    // The refresh *attempt* is already announced, so without this the output
+    // reads as a refresh that worked followed by an unexplained failover.
+    const failed = logger.records.filter((record) => record.msg === "credential refresh failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.level).toBe("warn");
+    expect(failed[0]?.fields).toMatchObject({
+      requestId: "req_test",
+      provider: "anthropic",
+      model: "claude-opus-4",
+      credentialId: "c1",
+      attempt: 1,
+      code: "UPSTREAM",
+    });
+    expect(failed[0]?.fields.reason).toBe(expected);
+    if (level === "info") expect(logger.lines.join("\n")).not.toContain(refreshBody);
+    store.close();
+  }
+});
+
+/**
+ * The other half of the rule, and the reason it is a rule rather than a debug
+ * gate: most of what fails a refresh, this gateway wrote.
+ *
+ * A rejected OIDC discovery document, a provider with no refresh grant, a token
+ * response carrying no `access_token` — none can hold a prompt, and each is the
+ * single fact that explains the failover underneath it. Gating the whole line
+ * on debug left an operator a bare `code=UPSTREAM` for exactly the faults it
+ * was added to name.
+ */
+test("prints a refresh failure this gateway wrote, without waiting for debug", async () => {
+  const ownMessage = "discovery document token_endpoint is not an accounts.example.com https url";
+  const store = await seeded(2);
+  const logger = captureLogger("info");
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("AUTH", "expired") : textStream("fallback"),
+  );
+  const configured = { ...deps(store, adapter), logger };
+  configured.refresh = async () => {
+    // No `provider`: nothing upstream said this.
+    throw new GatewayError("UPSTREAM", ownMessage);
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_test");
+  await drain(outcome.events);
+
+  const failed = logger.records.filter((record) => record.msg === "credential refresh failed");
+  expect(failed).toHaveLength(1);
+  expect(failed[0]?.fields.reason).toBe(ownMessage);
+  store.close();
+});
