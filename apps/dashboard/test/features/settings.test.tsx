@@ -8,7 +8,17 @@ import { renderWithProviders } from "../helpers/render.tsx";
 
 function stubSettings(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
-    "GET /api/settings": () => ({ settings }),
+    // `bodyLoggingAllowed` is a sibling of the settings, not a field inside
+    // them: it is read from the environment at boot and is not editable here.
+    "GET /api/settings": () => ({ settings, bodyLoggingAllowed: false }),
+    ...overrides,
+  });
+}
+
+/** The same route with the environment half of the capture contract in place. */
+function stubPermitted(overrides: Parameters<typeof createFetchStub>[0] = {}) {
+  return stubSettings({
+    "GET /api/settings": () => ({ settings, bodyLoggingAllowed: true }),
     ...overrides,
   });
 }
@@ -154,6 +164,73 @@ describe("SettingsBoard", () => {
     renderWithProviders(<SettingsBoard />);
 
     expect(await screen.findByText(/reset when it restarts/i)).toBeTruthy();
+  });
+
+  /**
+   * The two-key contract, made legible.
+   *
+   * `OMNI_BODY_LOGGING_ALLOWED` is read at boot and cannot be set from here, so
+   * on an installation without it the toggle would save happily and record
+   * nothing. An operator flipping a switch that silently does nothing files a
+   * bug; the screen has to say why instead.
+   */
+  test("a gateway that may not capture says so and will not let the toggle move", async () => {
+    stubSettings();
+    renderWithProviders(<SettingsBoard />);
+
+    const toggle = await screen.findByRole("switch", {
+      name: "Capture request and response bodies",
+    });
+    expect(toggle.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText(/started without/)).toBeTruthy();
+    expect(screen.getByText("OMNI_BODY_LOGGING_ALLOWED")).toBeTruthy();
+  });
+
+  test("a gateway that may capture offers the toggle and drops the warning", async () => {
+    stubPermitted();
+    renderWithProviders(<SettingsBoard />);
+
+    const toggle = await screen.findByRole("switch", {
+      name: "Capture request and response bodies",
+    });
+    expect(toggle.hasAttribute("disabled")).toBe(false);
+    expect(screen.queryByText(/started without/)).toBeNull();
+  });
+
+  test("turning capture on sends both body logging settings as booleans", async () => {
+    const user = userEvent.setup();
+    const stub = stubPermitted({ "PUT /api/settings": () => ({ ok: true }) });
+    renderWithProviders(<SettingsBoard />);
+
+    await user.click(
+      await screen.findByRole("switch", { name: "Capture request and response bodies" }),
+    );
+    await user.click(screen.getByRole("switch", { name: "Also keep raw stream frames" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const body = JSON.parse(String(put?.init?.body)) as {
+        bodyLoggingEnabled: unknown;
+        bodyLoggingCaptureStreamChunks: unknown;
+      };
+      // Booleans, not the strings the draft holds and not numbers: the schema
+      // rejects both, and `Number("false")` is `NaN`.
+      expect(body.bodyLoggingEnabled).toBe(true);
+      expect(body.bodyLoggingCaptureStreamChunks).toBe(true);
+    });
+  });
+
+  /**
+   * Stream frames are the most expensive thing capture can store, so they are
+   * gated behind capture rather than implied by it.
+   */
+  test("raw stream frames cannot be armed while capture itself is off", async () => {
+    stubPermitted();
+    renderWithProviders(<SettingsBoard />);
+
+    const chunks = await screen.findByRole("switch", { name: "Also keep raw stream frames" });
+    expect(chunks.hasAttribute("disabled")).toBe(true);
   });
 
   test("a failed read offers a retry", async () => {

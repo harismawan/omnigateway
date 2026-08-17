@@ -331,6 +331,14 @@ export type ApiKey = {
   hash: string;
   modelAllowlist: string[] | null;
   rateLimitPerMin: number | null;
+  /**
+   * Suppresses body capture for this key whatever the settings say.
+   *
+   * A shared installation can serve a client whose payloads must not be
+   * retained, and that client cannot be asked to trust an installation-wide
+   * switch it does not control. Checked before any capture work begins.
+   */
+  bodyLoggingOptOut: boolean;
   createdAt: number;
   revokedAt: number | null;
 };
@@ -391,6 +399,24 @@ export type Settings = {
   /** How often provider quota is polled. Zero disables polling entirely. */
   quotaPollIntervalMs: number;
   rtkEnabled: boolean;
+  /**
+   * Whether request and response bodies are captured at all.
+   *
+   * One of two independent keys: the gateway also requires
+   * `OMNI_BODY_LOGGING_ALLOWED` in the environment, read at boot. Two keys mean
+   * a compromised admin session cannot by itself start recording prompts, while
+   * an operator whose environment already permits it can still flip capture on
+   * and off mid-incident without a restart.
+   */
+  bodyLoggingEnabled: boolean;
+  /**
+   * Additionally retains raw SSE frames per attempt.
+   *
+   * Gated separately rather than implied by capture: it is the only way to debug
+   * stream framing itself, and it is the most expensive thing this feature can
+   * store.
+   */
+  bodyLoggingCaptureStreamChunks: boolean;
 };
 
 export interface CredentialRepo {
@@ -429,6 +455,121 @@ export interface ConfigRepo {
   setAdminPasswordHashIfAbsent(hash: string): Promise<boolean>;
   /** Replaces an existing password hash for the authenticated password-change path. */
   setAdminPasswordHash(hash: string): Promise<void>;
+}
+
+/**
+ * Where an artifact's bodies actually are, from the row's point of view.
+ *
+ * `none` is a row with no artifact behind it. `ready` is one that was written
+ * and has not since been contradicted. `missing` and `corrupt` are what the
+ * reader observed and wrote back: a file tree and a table that are not written
+ * transactionally together will drift, and the reader is where that has to be
+ * survivable rather than fatal.
+ */
+export type BodyDetailState = "none" | "ready" | "missing" | "corrupt";
+
+/**
+ * One request/response pair as it crossed a boundary.
+ *
+ * Both halves are `unknown` because a body is whatever the client or the
+ * provider sent: usually a parsed JSON object, sometimes a bare string, and
+ * absent entirely on the half that never happened.
+ */
+export type BodyPair = {
+  request: unknown;
+  response: unknown;
+  /** True when structural bounding altered either half. */
+  truncated: boolean;
+};
+
+/** One provider attempt's wire pair, in dispatch order. */
+export type BodyAttempt = BodyPair & {
+  /** 1-based, matching how `request_logs.attempts` counts. */
+  attempt: number;
+  provider: ProviderId;
+  /**
+   * Raw SSE frames, only when `bodyLoggingCaptureStreamChunks` is on. Null
+   * otherwise, in which case a streaming response appears as the reassembled
+   * final response instead.
+   */
+  streamChunks: string[] | null;
+};
+
+/**
+ * One request's whole story: what arrived at `/v1/*`, and what went to and came
+ * back from every provider tried.
+ *
+ * `client.request` is the pre-RTK conversation and every `attempts[].request` is
+ * the post-filter one, because `transformRequest` runs in dispatch before
+ * routing. That difference is the point — `request_logs` records which filters
+ * ran but not what they removed — so a reader must label which side is which
+ * and must never present the two as interchangeable.
+ *
+ * `schemaVersion` is present from the first release rather than added once the
+ * shape changes; OmniRoute is on its fifth revision of this structure.
+ */
+export type BodyArtifact = {
+  schemaVersion: number;
+  requestId: string;
+  at: number;
+  client: BodyPair;
+  attempts: BodyAttempt[];
+  /** Whatever the request failed with, or null. Masked and bounded like a body. */
+  error: unknown;
+};
+
+/** The database row: a pointer and its integrity metadata, never a body. */
+export type BodyArtifactRow = {
+  requestId: string;
+  at: number;
+  /** Relative to the bodies directory, so moving an installation keeps rows valid. */
+  relPath: string | null;
+  /** Size of the stored bytes, which are ciphertext. */
+  sizeBytes: number;
+  /** Over the stored bytes, so corruption is detectable without the key. */
+  sha256: string | null;
+  detailState: BodyDetailState;
+  truncated: boolean;
+};
+
+/**
+ * What a read of one request's bodies can say.
+ *
+ * `artifact` is null whenever `row.detailState` is not `ready`, and the row is
+ * still returned so a caller can report *why* rather than an error.
+ */
+export type BodyRead = {
+  row: BodyArtifactRow;
+  artifact: BodyArtifact | null;
+};
+
+export interface BodyRepo {
+  /**
+   * The only write path, and the reason there is no raw one.
+   *
+   * Masking and structural bounding happen inside, before encryption, so no
+   * caller can write an unmasked or unbounded body even by mistake. Throws on a
+   * request id that could escape its shard directory, and propagates a failed
+   * disk write: capture is the caller's to degrade, and it degrades to no
+   * artifact rather than to a failed request.
+   */
+  put(artifact: BodyArtifact): Promise<BodyArtifactRow>;
+  /**
+   * Null when no row exists. Never throws on a bad artifact: a file that has
+   * gone reads as `missing` and one that fails decryption or its digest reads as
+   * `corrupt`, and either way the observed state is written back to the row.
+   */
+  get(requestId: string): Promise<BodyRead | null>;
+  /** Deletes rows older than the cutoff and their files. Returns how many went. */
+  prune(olderThan: number): Promise<number>;
+  /**
+   * Trims oldest-first to a row cap. The time window is what an operator
+   * reasons about; this is what actually bounds disk, because a window over
+   * sustained traffic bounds nothing.
+   */
+  pruneToCap(cap?: number): Promise<number>;
+  /** Removes artifact files with no row, which a crash between the two writes leaves. */
+  sweepOrphans(): Promise<number>;
 }
 
 export interface KeyRepo {
@@ -538,6 +679,7 @@ export type Store = {
   config: ConfigRepo;
   keys: KeyRepo;
   usage: UsageRepo;
+  bodies: BodyRepo;
   routing: RoutingChangeSource;
   close(): void;
 };
@@ -551,4 +693,6 @@ export const DEFAULT_SETTINGS: Settings = {
   logRetentionDays: 30,
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,
+  bodyLoggingEnabled: false,
+  bodyLoggingCaptureStreamChunks: false,
 };

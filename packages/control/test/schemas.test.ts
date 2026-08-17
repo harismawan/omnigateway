@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import type { ProviderId } from "@omni/ir";
+import { DEFAULT_SETTINGS } from "@omni/store";
 import { isProviderId } from "../src/connect.ts";
-import { modelSchema, providerIdSchema } from "../src/schemas.ts";
+import { keyCreateSchema, modelSchema, providerIdSchema, settingsSchema } from "../src/schemas.ts";
 
 const target = (provider: string) => ({
   provider,
@@ -50,4 +51,50 @@ test("a provider that does not exist is refused everywhere", () => {
   expect(() => providerIdSchema.parse("kilocode")).toThrow();
   expect(isProviderId("kilocode")).toBe(false);
   expect(() => modelSchema.parse(model("kilocode"))).toThrow();
+});
+
+/**
+ * The settings schema and the `Settings` type are two descriptions of one shape,
+ * and only the type is checked by the compiler. A field on the type but absent
+ * from the schema is dropped on the way through `PUT /api/settings`, which reads
+ * as an operator's toggle refusing to stick.
+ */
+test("every settings field survives a round trip through the schema", () => {
+  expect(settingsSchema.parse(DEFAULT_SETTINGS)).toEqual(DEFAULT_SETTINGS);
+
+  const on = {
+    ...DEFAULT_SETTINGS,
+    bodyLoggingEnabled: true,
+    bodyLoggingCaptureStreamChunks: true,
+  };
+  expect(settingsSchema.parse(on)).toEqual(on);
+});
+
+test("the body logging settings are booleans, not anything truthy", () => {
+  expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, bodyLoggingEnabled: "true" })).toThrow();
+  expect(() =>
+    settingsSchema.parse({ ...DEFAULT_SETTINGS, bodyLoggingCaptureStreamChunks: 1 }),
+  ).toThrow();
+});
+
+/**
+ * Both halves are required: a settings object missing either boolean cannot be
+ * saved, because a partial write would silently reset the field it omitted.
+ */
+test("settings cannot be saved with a body logging field missing", () => {
+  const { bodyLoggingEnabled: _enabled, ...withoutEnabled } = DEFAULT_SETTINGS;
+  const { bodyLoggingCaptureStreamChunks: _chunks, ...withoutChunks } = DEFAULT_SETTINGS;
+  expect(() => settingsSchema.parse(withoutEnabled)).toThrow();
+  expect(() => settingsSchema.parse(withoutChunks)).toThrow();
+});
+
+/**
+ * The opt-out defaults off rather than being required, because the setting it
+ * defers to is itself off by default: a key that says nothing inherits the
+ * installation's policy rather than opting out of one it has not met.
+ */
+test("a key opts out of body capture only when it asks to", () => {
+  expect(keyCreateSchema.parse({}).bodyLoggingOptOut).toBe(false);
+  expect(keyCreateSchema.parse({ bodyLoggingOptOut: true }).bodyLoggingOptOut).toBe(true);
+  expect(() => keyCreateSchema.parse({ bodyLoggingOptOut: "yes" })).toThrow();
 });

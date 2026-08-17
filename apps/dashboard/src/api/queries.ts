@@ -29,6 +29,7 @@ import type {
   QuotaHistoryQuery,
   QuotaHistoryResponse,
   QuotaWindow,
+  RequestBodyResponse,
   RequestLog,
   Settings,
   SettingsResponse,
@@ -63,6 +64,7 @@ export const queryKeys = {
   quotaHistory: (query: QuotaHistoryQuery) =>
     ["quota-history", query.credentialId, query.since, query.until ?? null] as const,
   logs: (limit: number) => ["logs", limit] as const,
+  requestBody: (requestId: string) => ["logs", "body", requestId] as const,
   console: (lines: number, level: string) => ["console", lines, level] as const,
 };
 
@@ -149,11 +151,43 @@ export function useKeys(): UseQueryResult<ApiKeySummary[]> {
   });
 }
 
+/**
+ * One fetch of `/api/settings`, read two ways.
+ *
+ * The route answers with the settings and with whether the environment permits
+ * body capture, and both hooks below select from the same cache entry rather
+ * than issuing a request each. Splitting them keeps the common case — a board
+ * that wants the settings — reading exactly as it did before the second field
+ * existed.
+ */
+const settingsQuery = {
+  queryKey: queryKeys.settings,
+  queryFn: ({ signal }: { signal: AbortSignal }) => get<SettingsResponse>("/api/settings", signal),
+};
+
 export function useSettings(): UseQueryResult<Settings> {
+  return useQuery({ ...settingsQuery, select: (response) => response.settings });
+}
+
+/**
+ * Whether body capture is actually happening, which needs both keys.
+ *
+ * `OMNI_BODY_LOGGING_ALLOWED` is read at boot and the setting is flipped at
+ * runtime; either one off means nothing is recorded. Surfaces that state what
+ * this gateway does with prompts must answer on the pair, because answering on
+ * the setting alone tells an operator their prompts are being kept when the
+ * environment never permitted it.
+ */
+export function useBodyLoggingActive(): UseQueryResult<boolean> {
   return useQuery({
-    queryKey: queryKeys.settings,
-    queryFn: async ({ signal }) => (await get<SettingsResponse>("/api/settings", signal)).settings,
+    ...settingsQuery,
+    select: (response) => response.bodyLoggingAllowed && response.settings.bodyLoggingEnabled,
   });
+}
+
+/** Whether the environment permits capture at all, regardless of the setting. */
+export function useBodyLoggingAllowed(): UseQueryResult<boolean> {
+  return useQuery({ ...settingsQuery, select: (response) => response.bodyLoggingAllowed });
 }
 
 /**
@@ -227,6 +261,27 @@ export function useLogs(
     queryFn: async ({ signal }) =>
       (await get<LogsResponse>(withQuery("/api/logs", { limit }), signal)).logs,
     refetchInterval: cadence,
+  });
+}
+
+/**
+ * One request's captured bodies.
+ *
+ * Fetched only while a row is expanded, and never polled: an artifact is written
+ * once, at the end of the request, and nothing rewrites it afterwards. It is
+ * also the largest and most sensitive thing this console can ask for, which is
+ * reason enough not to put it on a two-second timer beside the log itself.
+ *
+ * `enabled` is false with no row open, so closing the modal stops the fetch
+ * rather than leaving a request in flight for a body nobody is looking at.
+ */
+export function useRequestBody(requestId: string | null): UseQueryResult<RequestBodyResponse> {
+  return useQuery({
+    queryKey: queryKeys.requestBody(requestId ?? ""),
+    enabled: requestId !== null,
+    queryFn: ({ signal }) =>
+      get<RequestBodyResponse>(`/api/requests/${encodeURIComponent(requestId ?? "")}/body`, signal),
+    refetchInterval: false,
   });
 }
 

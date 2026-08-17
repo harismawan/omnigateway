@@ -163,21 +163,45 @@ export async function routeLog(
 }
 
 /**
+ * Writes one request's captured bodies, given the log that describes it.
+ *
+ * Takes the log rather than closing over one because the two sites that finish
+ * a request finish different objects — dispatch's own live log on the success
+ * path, a reconstructed one in the terminal catch — and the artifact records
+ * whichever outcome was actually reached.
+ */
+export type BodyWriter = (log: RequestLog) => Promise<void>;
+
+/**
  * Persists a finished request log, completing the pending row if one was
- * written.
+ * written, and with it whatever bodies were captured for the request.
  *
  * Never throws: a failure to write a log line must not turn a successful
  * proxied request into an error the client sees.
+ *
+ * `bodies` runs here rather than at its own call site because this function is
+ * already the one place that runs exactly once per request id, on both the
+ * success and the error path — `usage.append` double-counts `usage_daily` if it
+ * runs twice, and an artifact write has the same shape of problem. It runs
+ * second and in a `try` of its own: the row is the record every operator relies
+ * on, and an opt-in body corpus must not be able to cost them one.
  */
 export async function finishLog(
   store: Store,
   log: RequestLog,
   keyId: string | null,
   logger: Logger = noopLogger,
+  bodies?: BodyWriter,
 ): Promise<void> {
   try {
     await store.usage.append({ ...log, apiKeyId: keyId });
   } catch (error) {
     report(logger, "failed to persist request log", log.id, error);
+  }
+  if (bodies === undefined) return;
+  try {
+    await bodies(log);
+  } catch (error) {
+    report(logger, "failed to persist request bodies", log.id, error);
   }
 }

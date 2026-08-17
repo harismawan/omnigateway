@@ -52,6 +52,12 @@ const Once = styled.p`
   color: ${({ theme }) => theme.color.inkDim};
 `;
 
+/** Matches `Field`'s own hint, for a control that draws its own label. */
+const Hint = styled.p`
+  font-size: 11px;
+  color: ${({ theme }) => theme.color.inkDim};
+`;
+
 export type MintKeyDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -72,6 +78,7 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
   const [unrestricted, setUnrestricted] = useState(true);
   const [allowed, setAllowed] = useState<string[]>([]);
   const [rateLimit, setRateLimit] = useState("");
+  const [optOut, setOptOut] = useState(false);
   const [minted, setMinted] = useState<MintedKey | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -80,6 +87,7 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
     setUnrestricted(true);
     setAllowed([]);
     setRateLimit("");
+    setOptOut(false);
     setMinted(null);
     setProblem(null);
     create.reset();
@@ -105,6 +113,7 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
         label: label.trim().length === 0 ? "api key" : label.trim(),
         modelAllowlist: unrestricted ? null : allowed,
         rateLimitPerMin: limit,
+        bodyLoggingOptOut: optOut,
       },
       {
         onSuccess: (key) => setMinted(key),
@@ -209,6 +218,25 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
               />
             )}
           </Field>
+
+          {/* Settable only here. A client handed a key on the promise that its
+              payloads are never retained must not have that reversed later by
+              an edit it cannot see, so there is no route that clears this. */}
+          <Stack $gap={2}>
+            <Row $gap={2}>
+              <Toggle
+                checked={optOut}
+                label="Never record this key's bodies"
+                onCheckedChange={setOptOut}
+              />
+              <Legend as="span">Never record this key's bodies</Legend>
+            </Row>
+            <Hint>
+              Suppresses body capture for this key whatever the gateway setting says. Choose it for
+              a client whose payloads must not be retained. It cannot be changed after the key is
+              created — issue a new key instead.
+            </Hint>
+          </Stack>
 
           {problem === null ? null : <Problem role="alert">{problem}</Problem>}
         </Stack>

@@ -18,6 +18,7 @@ import {
   queryUsage,
   quotaHistory,
   readConsole,
+  readRequestBody,
   recentLogs,
   removeCredential,
   removeModel,
@@ -44,6 +45,16 @@ export type AdminDeps = {
   /** Public origin, which is what a generated client configuration points at. */
   baseUrl: string;
   discoveryMirrors?: boolean;
+  /**
+   * Whether `OMNI_BODY_LOGGING_ALLOWED` was set at boot.
+   *
+   * Reported on `/api/settings` beside the settings themselves, because the
+   * runtime toggle is meaningless without it: a console that only knew the
+   * setting would render a switch that silently does nothing, which is a bug
+   * report rather than a feature. It is startup configuration and is not
+   * settable here — that is the whole point of the second key.
+   */
+  bodyLoggingAllowed?: boolean;
   logger?: Logger;
   /**
    * Where this process's stdout was captured, and how to read it.
@@ -278,9 +289,23 @@ export function adminRoutes(deps: AdminDeps) {
         return { ok: true };
       })
 
+      /**
+       * The runtime settings, and the one piece of boot configuration that
+       * decides whether one of them can do anything.
+       *
+       * `bodyLoggingAllowed` rides here rather than on `/api/status` because
+       * that route answers before there is a session, and rather than on a new
+       * endpoint because this is the screen that renders the toggle it governs.
+       * It is a sibling of `settings`, not a field inside it: `Settings` is the
+       * shape `PUT` accepts and the store persists, and an environment fact
+       * folded into it would look editable.
+       */
       .get("/api/settings", async ({ request }) => {
         await requireAdmin(request, deps.admin);
-        return { settings: await getSettings(deps.store) };
+        return {
+          settings: await getSettings(deps.store),
+          bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
+        };
       })
 
       .put("/api/settings", async ({ request }) => {
@@ -310,6 +335,24 @@ export function adminRoutes(deps: AdminDeps) {
       .get("/api/logs", async ({ request, query }) => {
         await requireAdmin(request, deps.admin);
         return { logs: await recentLogs(deps.store, query.limit) };
+      })
+
+      /**
+       * One request's captured bodies, decrypted.
+       *
+       * The most sensitive thing this gateway serves, so it sits behind the same
+       * session check as everything else here and behind nothing weaker. There
+       * is no unauthenticated form of this route and no token-scoped one.
+       *
+       * `@omni/control` decides what an absent or unreadable artifact means, and
+       * every one of those is a state rather than a failure: an artifact swept
+       * out from under its row, one that no longer decrypts, or a request that
+       * was never captured at all. This handler adds no error mapping of its
+       * own, so there is nothing here to leak a path, a digest, or a stack.
+       */
+      .get("/api/requests/:id/body", async ({ request, params }) => {
+        await requireAdmin(request, deps.admin);
+        return readRequestBody(deps.store, params.id);
       })
 
       /**

@@ -73,9 +73,57 @@ describe("KeysBoard", () => {
     await waitFor(() => {
       const post = stub.calls.find((call) => call.init?.method === "POST");
       expect(post?.init?.body).toBe(
-        JSON.stringify({ label: "ci-runner", modelAllowlist: null, rateLimitPerMin: 60 }),
+        JSON.stringify({
+          label: "ci-runner",
+          modelAllowlist: null,
+          rateLimitPerMin: 60,
+          bodyLoggingOptOut: false,
+        }),
       );
     });
+  });
+
+  /**
+   * A key issued on the promise that its payloads are never retained. The
+   * promise is made at creation and there is no route that takes it back, so the
+   * dialog is where it has to be settable and the list is where it has to show.
+   */
+  test("a key can be issued that is never captured, and the choice is sent", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({ "POST /api/keys": () => minted });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: /Create a key/ }));
+    const dialog = await screen.findByRole("dialog");
+
+    await user.type(within(dialog).getByLabelText("Label"), "private-client");
+    await user.click(
+      within(dialog).getByRole("switch", { name: "Never record this key's bodies" }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Create key" }));
+
+    await waitFor(() => {
+      const post = stub.calls.find((call) => call.init?.method === "POST");
+      const body = JSON.parse(String(post?.init?.body)) as { bodyLoggingOptOut: unknown };
+      expect(body.bodyLoggingOptOut).toBe(true);
+    });
+  });
+
+  test("an opted-out key is listed as such rather than looking like any other", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [apiKey(), apiKey({ id: "key-2", label: "private", bodyLoggingOptOut: true })],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const row = (await screen.findByText("private")).closest("tr");
+    if (row === null) throw new Error("the opted-out key has no row");
+    expect(within(row).getByText("no bodies")).toBeTruthy();
+
+    const ordinary = screen.getByText("laptop").closest("tr");
+    if (ordinary === null) throw new Error("the ordinary key has no row");
+    expect(within(ordinary).queryByText("no bodies")).toBeNull();
   });
 
   test("the raw key is shown once, with a warning that it is the only copy", async () => {

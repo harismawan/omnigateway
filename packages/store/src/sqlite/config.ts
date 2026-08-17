@@ -91,12 +91,16 @@ export function createConfigRepo(
           parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
             ? (parsed as Partial<Settings>)
             : {};
-        // Only literal true enables this lossy transform. This runtime boundary
-        // must remain safe even if an old or manually-edited row is malformed.
+        // Only literal true enables this lossy transform, or either half of body
+        // capture. This runtime boundary must remain safe even if an old or
+        // manually-edited row is malformed: a truthy-but-not-true value must not
+        // start retaining prompts any more than it may start rewriting them.
         return {
           ...DEFAULT_SETTINGS,
           ...stored,
           rtkEnabled: stored.rtkEnabled === true,
+          bodyLoggingEnabled: stored.bodyLoggingEnabled === true,
+          bodyLoggingCaptureStreamChunks: stored.bodyLoggingCaptureStreamChunks === true,
           weights: knownWeights(stored.weights),
         };
       } catch {

@@ -47,6 +47,12 @@ export type AppDeps = {
    * model picker. Startup configuration, read once from the environment.
    */
   discoveryMirrors?: boolean;
+  /**
+   * Whether `OMNI_BODY_LOGGING_ALLOWED` was set. Startup configuration, read
+   * once from the environment: the runtime setting is the half an operator
+   * flips mid-incident, and this is the half that says they may.
+   */
+  bodyLoggingAllowed?: boolean;
   logger?: Logger;
   /** Where this process's stdout was captured, when anything captured it. */
   console?: { source: ConsoleSource; deps: ConsoleDeps };
@@ -101,6 +107,7 @@ export function createApp(deps: AppDeps) {
         logger,
         ...(deps.loadRegistry === undefined ? {} : { loadRegistry: deps.loadRegistry }),
         discoveryMirrors: deps.discoveryMirrors === true,
+        bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
       }),
     )
     .use(
@@ -109,6 +116,7 @@ export function createApp(deps: AppDeps) {
         admin,
         baseUrl: deps.baseUrl,
         discoveryMirrors: deps.discoveryMirrors === true,
+        bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
         now,
         sessionTtlMs: ADMIN_SESSION_TTL_MS,
         logger,

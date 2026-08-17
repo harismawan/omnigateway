@@ -25,6 +25,18 @@ export type Config = {
    * clients are not Claude Code should not have its catalog doubled.
    */
   exposeClaudeCodeAliases: boolean;
+  /**
+   * Whether this installation is permitted to capture request and response
+   * bodies at all.
+   *
+   * The first of two independent keys: `settings.bodyLoggingEnabled` is the
+   * second, and capture happens only when both say yes. Read at boot and never
+   * again, so a compromised admin session cannot by itself start recording
+   * prompts — flipping the setting on an installation whose environment does not
+   * permit it does nothing at all. The operator who does set this can still turn
+   * capture on and off mid-incident without a restart.
+   */
+  bodyLoggingAllowed: boolean;
   /** Threshold for stdout logging. Read once, at boot. */
   logLevel: LogLevel;
   /**
@@ -89,6 +101,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     (env.OMNI_EXPOSE_CLAUDE_CODE_ALIASES ?? "").trim().toLowerCase(),
   );
 
+  const bodyLoggingAllowed = TRUTHY.has((env.OMNI_BODY_LOGGING_ALLOWED ?? "").trim().toLowerCase());
+
   // Deliberately not fatal, unlike OMNI_PORT: a typo in a log level is not a
   // reason to refuse to serve traffic. The boot line says which value was
   // ignored, so the mistake is still visible.
@@ -105,6 +119,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     baseUrl,
     staticDir: staticDir === undefined || staticDir.length === 0 ? null : staticDir,
     exposeClaudeCodeAliases,
+    bodyLoggingAllowed,
     logFile: logFile === undefined || logFile.length === 0 ? null : logFile,
   };
 }

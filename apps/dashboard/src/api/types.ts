@@ -1,6 +1,10 @@
 import type { ErrorCode, ProviderId } from "@omni/ir";
 import type {
   ApiKey,
+  BodyArtifact,
+  BodyAttempt,
+  BodyDetailState,
+  BodyPair,
   Credential,
   CredentialHealth,
   DisabledReason,
@@ -25,6 +29,10 @@ import type {
  */
 export type {
   ApiKey,
+  BodyArtifact,
+  BodyAttempt,
+  BodyDetailState,
+  BodyPair,
   Credential,
   CredentialHealth,
   DisabledReason,
@@ -125,9 +133,48 @@ export type KeyCreateInput = {
   /** Null means every configured model; an empty array means none. */
   modelAllowlist: string[] | null;
   rateLimitPerMin: number | null;
+  /** Settable only here: there is no route that turns capture back on for a key. */
+  bodyLoggingOptOut: boolean;
 };
 
-export type SettingsResponse = { settings: Settings };
+/**
+ * The runtime settings, plus whether the environment permits body capture.
+ *
+ * `bodyLoggingAllowed` is not part of `Settings` and never will be: it is
+ * `OMNI_BODY_LOGGING_ALLOWED`, read at boot, and the console needs it only so it
+ * can say that flipping `bodyLoggingEnabled` on this installation would do
+ * nothing. A switch that silently does nothing is worse than one that is absent.
+ */
+export type SettingsResponse = { settings: Settings; bodyLoggingAllowed: boolean };
+
+/**
+ * One request's captured bodies.
+ *
+ * Mirrored rather than imported: the shape is assembled in `@omni/control`,
+ * which the console may not reach into, so this is a hand-kept copy of
+ * `RequestBodyRead` that the route returns unchanged. It deliberately carries no
+ * artifact path and no digest — where the gateway keeps a file is not the
+ * console's business.
+ */
+export type RequestBodyResponse = {
+  requestId: string;
+  /** `none` is "never captured"; `missing` and `corrupt` are "captured, then lost". */
+  detailState: BodyDetailState;
+  truncated: boolean;
+  /** Bytes as stored, which are ciphertext, so roughly twice the plaintext. */
+  sizeBytes: number;
+  at: number | null;
+  artifact: BodyArtifact | null;
+};
+
+/**
+ * The marker that replaced a body too large to keep.
+ *
+ * Written by the store in place of the payload, so an artifact that reads as
+ * `ready` can still have nothing in it. Recognised structurally because the
+ * bodies either side of it are `unknown` by design.
+ */
+export type BodyOmission = { omitted: true; reason: string; serializedBytes: number };
 
 /** Which agent a generated configuration is for. */
 export type SetupClient = "claude" | "opencode";

@@ -1,5 +1,7 @@
 import { type Logger, noopLogger } from "@omni/ir";
+import { bodiesDirFor } from "../bodies/artifact.ts";
 import type { RoutingChange, Store } from "../types.ts";
+import { createBodyRepo } from "./bodies.ts";
 import { createConfigRepo } from "./config.ts";
 import { createCredentialRepo } from "./credentials.ts";
 import { openDb } from "./db.ts";
@@ -31,6 +33,11 @@ export async function createStore(opts: {
     config: createConfigRepo(db, emit),
     keys: createKeyRepo(db),
     usage: createUsageRepo(db),
+    // Derived from the database path rather than configured. One installation
+    // is one directory: an artifact tree that could be pointed elsewhere is one
+    // an operator can lose track of, and a prompt corpus is the last thing that
+    // should end up somewhere nobody backs up or nobody prunes.
+    bodies: createBodyRepo(db, opts.encryptionKey, bodiesDirFor(opts.path)),
     routing: {
       version: () =>
         db.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version ?? 0,

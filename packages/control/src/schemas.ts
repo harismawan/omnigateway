@@ -124,6 +124,15 @@ export const keyCreateSchema = z
     /** Null means every configured model. An empty array would mean none. */
     modelAllowlist: z.array(z.string().min(1)).nullable().default(null),
     rateLimitPerMin: z.number().int().positive().nullable().default(null),
+    /**
+     * Suppresses body capture for this key whatever the settings say.
+     *
+     * Defaulted rather than required so every existing caller keeps working,
+     * and defaulted to `false` because the installation-wide setting it defers
+     * to is itself off by default: a key that says nothing inherits the
+     * installation's policy rather than opting itself out of one it has not met.
+     */
+    bodyLoggingOptOut: z.boolean().default(false),
   })
   .strict();
 
@@ -146,6 +155,14 @@ export const settingsSchema = z.object({
   /** Zero disables quota polling. Takes effect at the next restart. */
   quotaPollIntervalMs: z.number().int().min(0),
   rtkEnabled: z.boolean(),
+  /**
+   * One half of the capture contract. `OMNI_BODY_LOGGING_ALLOWED` is the other,
+   * and it is read at boot, so nothing this schema accepts can start recording
+   * prompts on an installation whose environment does not permit it.
+   */
+  bodyLoggingEnabled: z.boolean(),
+  /** Raw SSE frames per attempt. Gated apart because it is far the largest. */
+  bodyLoggingCaptureStreamChunks: z.boolean(),
 });
 
 /** Only these credential fields are operator-editable. Secrets are not. */

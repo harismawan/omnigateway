@@ -147,6 +147,7 @@ async function main(): Promise<void> {
     logger,
     console,
     discoveryMirrors: config.exposeClaudeCodeAliases,
+    bodyLoggingAllowed: config.bodyLoggingAllowed,
   });
 
   const stopMaintenance = startMaintenance({ store, now, logger });

@@ -80,6 +80,7 @@ export function KeysBoard() {
                   <Th>Allowed models</Th>
                   <Th $align="right">Rate limit</Th>
                   <Th $align="right">Created</Th>
+                  <Th>Body capture</Th>
                   <Th>Status</Th>
                   <Th />
                 </tr>
@@ -111,6 +112,13 @@ export function KeysBoard() {
                     </Td>
                     <Td $align="right" $mono>
                       {formatDateTime(key.createdAt)}
+                    </Td>
+                    <Td>
+                      {/* An opted-out key is never captured whatever the
+                          settings say, and that is a promise made to whoever
+                          holds it — so it is listed rather than left in the
+                          database for an auditor to find. */}
+                      {key.bodyLoggingOptOut ? <Chip>no bodies</Chip> : <Legend>—</Legend>}
                     </Td>
                     <Td>
                       {key.revokedAt === null ? (

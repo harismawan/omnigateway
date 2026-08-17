@@ -11,6 +11,7 @@ export {
   type AdminAuthOptions,
   createAdminAuth,
 } from "./adminAuth.ts";
+export { type RequestBodyRead, readRequestBody } from "./bodies.ts";
 export { type Config, loadConfig } from "./config.ts";
 export {
   type ConnectDeps,

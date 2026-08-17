@@ -6,6 +6,7 @@ import requestState004 from "./migrations/004_request_state.sql" with { type: "t
 import rtkMetrics005 from "./migrations/005_rtk_metrics.sql" with { type: "text" };
 import rtkUsage006 from "./migrations/006_rtk_usage.sql" with { type: "text" };
 import quotaSamples007 from "./migrations/007_quota_samples.sql" with { type: "text" };
+import bodyLogging008 from "./migrations/008_body_logging.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage } from "./rollup.ts";
 
 /**
@@ -21,6 +22,7 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
   { id: 5, sql: rtkMetrics005 },
   { id: 6, sql: rtkUsage006, after: backfillRtkUsage },
   { id: 7, sql: quotaSamples007 },
+  { id: 8, sql: bodyLogging008 },
 ];
 
 /**

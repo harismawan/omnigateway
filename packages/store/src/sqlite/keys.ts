@@ -33,6 +33,7 @@ type Row = {
   hash: string;
   model_allowlist: string | null;
   rate_limit_per_min: number | null;
+  body_logging_opt_out: number;
   created_at: number;
   revoked_at: number | null;
 };
@@ -44,6 +45,9 @@ const toKey = (r: Row): ApiKey => ({
   hash: r.hash,
   modelAllowlist: r.model_allowlist === null ? null : (JSON.parse(r.model_allowlist) as string[]),
   rateLimitPerMin: r.rate_limit_per_min,
+  // Only a stored 1 opts out; anything else leaves the key on the
+  // installation-wide setting, which is itself off by default.
+  bodyLoggingOptOut: r.body_logging_opt_out === 1,
   createdAt: r.created_at,
   revokedAt: r.revoked_at,
 });
@@ -62,8 +66,9 @@ export function createKeyRepo(db: Database): KeyRepo {
     async create(input) {
       const now = Date.now();
       db.run(
-        `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, rate_limit_per_min, created_at, revoked_at)
-         VALUES (?,?,?,?,?,?,?,NULL)`,
+        `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, rate_limit_per_min,
+                               body_logging_opt_out, created_at, revoked_at)
+         VALUES (?,?,?,?,?,?,?,?,NULL)`,
         [
           input.id,
           input.label,
@@ -71,6 +76,7 @@ export function createKeyRepo(db: Database): KeyRepo {
           input.hash,
           input.modelAllowlist === null ? null : JSON.stringify(input.modelAllowlist),
           input.rateLimitPerMin,
+          input.bodyLoggingOptOut ? 1 : 0,
           now,
         ],
       );

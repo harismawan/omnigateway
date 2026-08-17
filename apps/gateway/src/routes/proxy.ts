@@ -8,9 +8,16 @@ import {
   noopLogger,
   type StreamEvent,
 } from "@omni/ir";
+import { type ApiKey, ARTIFACT_SCHEMA_VERSION } from "@omni/store";
 import { Elysia } from "elysia";
 import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
 import { ApiKeyRateLimiter } from "../auth/rateLimit.ts";
+import {
+  type BodyCollector,
+  createBodyCollector,
+  createFrameSink,
+  type FrameSink,
+} from "../bodyCapture.ts";
 import { type DispatchDeps, dispatch } from "../dispatch/index.ts";
 import { createLoadRegistry } from "../dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "../dispatch/snapshotCache.ts";
@@ -19,6 +26,7 @@ import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
 import {
+  type BodyWriter,
   beginLog,
   finishLog,
   newCompletedRequestLog,
@@ -41,10 +49,22 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
    * Claude Code should not have its catalog doubled.
    */
   discoveryMirrors?: boolean;
+  /**
+   * Whether `OMNI_BODY_LOGGING_ALLOWED` was set at boot.
+   *
+   * The outer of the two keys body capture needs, and the cheapest to ask: a
+   * boolean read once from the environment. Off, nothing below it is consulted
+   * and the transport is never wrapped, so an installation that never opted in
+   * runs exactly the path it ran before capture existed.
+   */
+  bodyLoggingAllowed?: boolean;
 };
 
 type ResolvedProxyDeps = DispatchDeps &
-  Pick<ProxyDeps, "requestId" | "rateLimiter"> & { keepaliveMs: number; logger: Logger };
+  Pick<ProxyDeps, "requestId" | "rateLimiter" | "bodyLoggingAllowed"> & {
+    keepaliveMs: number;
+    logger: Logger;
+  };
 
 type Surface = "anthropic" | "openai";
 
@@ -82,13 +102,26 @@ const SSE_HEADERS = {
   "x-accel-buffering": "no",
 } as const;
 
-function errorResponse(surface: Surface, code: ErrorCode, message: string): Response {
-  const body =
-    surface === "anthropic" ? anthropicErrorBody(code, message) : openaiErrorBody(code, message);
+/**
+ * The error body a surface renders, separately from the response around it, so
+ * body capture records the same object the client is handed rather than a
+ * second construction of it that could drift.
+ */
+function errorBody(surface: Surface, code: ErrorCode, message: string): unknown {
+  return surface === "anthropic"
+    ? anthropicErrorBody(code, message)
+    : openaiErrorBody(code, message);
+}
+
+function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
-    status: HTTP_STATUS[code],
+    status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function errorResponse(surface: Surface, code: ErrorCode, message: string): Response {
+  return jsonResponse(errorBody(surface, code, message), HTTP_STATUS[code]);
 }
 
 function asGatewayError(error: unknown): GatewayError {
@@ -116,6 +149,15 @@ function sseResponse(
    * dispatch claimed for the request held.
    */
   source: AsyncGenerator<StreamEvent, void, undefined>,
+  /**
+   * Given every frame written to the client, in order, when body capture is on.
+   *
+   * A streaming response has no single rendered body to record, so what the
+   * gateway returned *is* this sequence. Keepalive comments are left out: they
+   * are transport padding this route emits because provider heartbeats are
+   * decoded away, and nothing upstream or downstream of the gateway sent them.
+   */
+  onFrame?: (frame: string) => void,
 ): Response {
   const encoder = new TextEncoder();
 
@@ -151,6 +193,7 @@ function sseResponse(
           return;
         }
         const { event, data } = next.value;
+        onFrame?.(`event: ${event}\ndata: ${data}`);
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${data}\n\n`));
       } catch (error) {
         controller.error(error);
@@ -169,6 +212,37 @@ function sseResponse(
   return new Response(stream, { headers: SSE_HEADERS });
 }
 
+/**
+ * Decides whether this request is captured, and builds the collector if it is.
+ *
+ * Three keys, asked cheapest first and every one of them able to say no on its
+ * own:
+ *
+ * 1. `OMNI_BODY_LOGGING_ALLOWED`, a boolean read at boot. Off, nothing else is
+ *    consulted, so a compromised admin session cannot start recording prompts
+ *    by flipping a setting.
+ * 2. The authenticated key's own opt-out, which a shared installation uses to
+ *    serve a client whose payloads must not be retained. It wins over the
+ *    setting, and it is asked before anything is read.
+ * 3. `settings.bodyLoggingEnabled`, so an operator whose environment already
+ *    permits capture can turn it on and off mid-incident without a restart.
+ *
+ * Null means the transport is never wrapped and nothing is collected, which is
+ * exactly the path this route ran before capture existed.
+ */
+async function bodyCollectorFor(
+  deps: ResolvedProxyDeps,
+  key: ApiKey,
+): Promise<BodyCollector | null> {
+  if (deps.bodyLoggingAllowed !== true) return null;
+  if (key.bodyLoggingOptOut) return null;
+  const { settings } = await deps.snapshots.get(deps.now());
+  if (!settings.bodyLoggingEnabled) return null;
+  return createBodyCollector({
+    captureStreamChunks: settings.bodyLoggingCaptureStreamChunks,
+  });
+}
+
 async function handle(
   deps: ResolvedProxyDeps,
   rateLimiter: ApiKeyRateLimiter,
@@ -184,6 +258,15 @@ async function handle(
   // `credential_id`, `attempts` and the rtk columns from whatever log it is
   // handed, so a blank one erases the attribution the pending row already held.
   let outcome: Awaited<ReturnType<typeof dispatch>> | null = null;
+  // Null whenever capture is off, which is every request on an installation
+  // that never opted in. Both live out here so the terminal catch can record
+  // the error body it renders and still write through the same one-shot path.
+  let collector: BodyCollector | null = null;
+  let writeBodies: BodyWriter | undefined;
+  // Out here for the same reason, and read at the one place the artifact is
+  // assembled: a sink that evicted frames to stay inside its cap is the only
+  // thing that knows the recorded response is not the whole one.
+  let frameSink: FrameSink | null = null;
   /**
    * Whether the row has already been completed.
    *
@@ -227,7 +310,49 @@ async function handle(
       throw error;
     }
 
+    const captured = await bodyCollectorFor(deps, key);
+    collector = captured;
+    if (captured !== null) {
+      /**
+       * Assembles and stores one request's whole story.
+       *
+       * Handed to `finishLog`, which is the single site that runs once per
+       * request id on both the success and the error path. `settle` waits for
+       * the capture drains here rather than anywhere on the commit path: by the
+       * time this runs the client's response is finished, so waiting costs the
+       * request nothing.
+       *
+       * `client.request` is the payload as it arrived, before RTK; every
+       * `attempts[].request` is what actually went to a provider, after it.
+       * `transformRequest` runs inside dispatch, so the two halves are captured
+       * on either side of it. That asymmetry is the point of the feature —
+       * `request_logs` records which filters ran and not what they removed —
+       * and nothing here should try to reconcile them.
+       */
+      writeBodies = async (completed) => {
+        await captured.settle();
+        // Folded in here rather than at either call site, because both of them
+        // reach this function and a streamed response that outran its sink is
+        // truncated whichever way the request ended.
+        if (frameSink?.truncated === true) captured.client.truncated = true;
+        await deps.store.bodies.put({
+          schemaVersion: ARTIFACT_SCHEMA_VERSION,
+          requestId,
+          at: startedAt,
+          client: captured.client,
+          attempts: captured.attempts(),
+          // The code and status only. Everything a message could add here, the
+          // artifact's own bodies already hold in their original form.
+          error:
+            completed.errorCode === null
+              ? null
+              : { code: completed.errorCode, status: completed.status },
+        });
+      };
+    }
+
     const body: unknown = await request.json();
+    if (captured !== null) captured.client.request = body;
     const chatRequest =
       surface === "anthropic"
         ? parseAnthropicRequest(body, request.headers)
@@ -245,6 +370,14 @@ async function handle(
       chatRequest,
       {
         ...deps,
+        // Per request, and only when this request is captured. `HttpClient` is
+        // a single function type, so capture is a decorator over it: dispatch
+        // and every adapter go on calling the transport they were handed, the
+        // rule that all outbound provider HTTP goes through `HttpClient` holds,
+        // and `nodeHttpClient` never learns this exists. The collector's
+        // lifetime is this handler's — there is no registry keyed by request id
+        // to leak or to look a request up in.
+        ...(captured === null ? {} : { http: captured.wrap(deps.http) }),
         async onRoute(target) {
           if (began) {
             await routeLog(deps.store, requestId, target, deps.logger);
@@ -269,6 +402,12 @@ async function handle(
     const log = async (cancelled = false, failure?: unknown): Promise<void> => {
       const completed = dispatched.log();
       const wasCancelled = cancelled || request.signal.aborted;
+      // The client hung up, so the response in the artifact is whatever had
+      // already gone out rather than a whole one. Known here rather than
+      // inferred from the capture, because a disconnect is the one truncation
+      // the route can state as a fact instead of guessing at from a stream that
+      // stopped arriving.
+      if (captured !== null && wasCancelled) captured.client.truncated = true;
       if (wasCancelled && completed.status === 0) {
         completed.status = 499;
         completed.errorCode = "interrupted";
@@ -302,7 +441,7 @@ async function handle(
       // lines about the process itself. The console reads those rows; stdout
       // carries what never becomes one. `requestId` is on both, and joins them.
       logged = true;
-      await finishLog(deps.store, completed, keyId, deps.logger);
+      await finishLog(deps.store, completed, keyId, deps.logger, writeBodies);
     };
 
     if (chatRequest.stream) {
@@ -310,28 +449,41 @@ async function handle(
         surface === "anthropic"
           ? anthropicStream(dispatched.events, requestId)
           : openaiStream(dispatched.events, requestId, Math.floor(deps.now() / 1000));
-      return sseResponse(frames, log, deps.keepaliveMs, dispatched.events);
+      // A stream has no rendered body, so what the gateway returned is the
+      // frames it wrote. The sink is handed over live: a client that hangs up
+      // mid-stream leaves whatever had already gone out, which is precisely
+      // what the artifact should hold for a request that was cut off.
+      let onFrame: ((frame: string) => void) | undefined;
+      if (captured !== null) {
+        const sink = createFrameSink();
+        frameSink = sink;
+        captured.client.response = sink.frames;
+        onFrame = sink.write;
+      }
+      return sseResponse(frames, log, deps.keepaliveMs, dispatched.events, onFrame);
     }
 
     const events: StreamEvent[] = [];
     for await (const event of dispatched.events) events.push(event);
-    await log();
 
     const failure = events.find(
       (e): e is Extract<StreamEvent, { type: "error" }> => e.type === "error",
     );
-    if (failure !== undefined) return errorResponse(surface, failure.code, failure.message);
-
-    const collected = collect(events);
+    // Rendered before the row is completed, not after, so the body capture and
+    // the client are handed the same object. A throw from rendering then lands
+    // in the terminal catch with `logged` still false, which completes the row
+    // once — the same guarantee the flag gave when rendering came second.
     const responseBody =
-      surface === "anthropic"
-        ? anthropicResponse(collected, requestId)
-        : openaiResponse(collected, requestId, Math.floor(deps.now() / 1000));
+      failure !== undefined
+        ? errorBody(surface, failure.code, failure.message)
+        : surface === "anthropic"
+          ? anthropicResponse(collect(events), requestId)
+          : openaiResponse(collect(events), requestId, Math.floor(deps.now() / 1000));
+    if (captured !== null) captured.client.response = responseBody;
 
-    return new Response(JSON.stringify(responseBody), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    await log();
+
+    return jsonResponse(responseBody, failure === undefined ? 200 : HTTP_STATUS[failure.code]);
   } catch (error) {
     const gatewayError = asGatewayError(error);
     // A client that hangs up makes the non-streaming drain throw rather than
@@ -357,7 +509,13 @@ async function handle(
     // keeps what beginning it recorded where this log carries nothing. Skipped
     // where the row is already complete: `completed` is dispatch's own live log
     // once a request got that far, so appending it twice bills its tokens twice.
-    if (!logged) await finishLog(deps.store, completed, keyId, deps.logger);
+    const rejection = errorBody(surface, gatewayError.code, gatewayError.message);
+    if (collector !== null && cancelled) collector.client.truncated = true;
+    // Only where the row is still open. Where it is not, the artifact went with
+    // it at the earlier `finishLog`, and writing a second one here would be the
+    // duplicate write the `logged` flag exists to prevent.
+    if (collector !== null && !logged) collector.client.response = rejection;
+    if (!logged) await finishLog(deps.store, completed, keyId, deps.logger, writeBodies);
     // Not an access line: this fires only when a request failed outright, which
     // a busy gateway does rarely. It exists because the row cannot hold the
     // reason — `request_logs` has a status and an error code and no room for
@@ -365,7 +523,7 @@ async function handle(
     // fact an operator needs is the one nothing recorded. A disconnect is not a
     // failure and is far too common to print; its row is the whole record.
     if (!cancelled) reportRejection(deps.logger, requestId, completed, gatewayError, surface);
-    return errorResponse(surface, gatewayError.code, gatewayError.message);
+    return jsonResponse(rejection, HTTP_STATUS[gatewayError.code]);
   }
 }
 
