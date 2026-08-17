@@ -198,8 +198,13 @@ Preserve these translation invariants:
 - The OpenAI surface reads images from `messages[].images` (bare base64) and from `attachments` /
   `experimental_attachments` as well as from `content`. Neither sidecar is an OpenAI field; they are
   read because the clients that send them send no other copy. The payload's own container header
-  beats any declared type, a remote URL is refused rather than fetched, and a non-image or
-  unrecognized payload is a `BAD_REQUEST` rather than a silent drop.
+  beats any declared type, and a remote URL is never fetched.
+- The two sidecars differ on what an unusable payload means, and the split is the contract.
+  `images` is Ollama's images-only field, so anything in it that is not image data is a
+  `BAD_REQUEST`. `attachments` is the SDK's general file envelope, where a PDF or a hosted URL is
+  ordinary: those are dropped, never refused, because they were dropped before the gateway read the
+  field and refusing now would break a caller that worked yesterday. Same reasoning as
+  `looseCacheControl`.
 
 Detailed compatibility rules and measured client behavior belong in relevant specs under
 `docs/superpowers/specs/`.

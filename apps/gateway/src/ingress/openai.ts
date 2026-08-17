@@ -6,9 +6,10 @@ import {
   applyMessageCacheControl,
   extraFields,
   looseCacheControl,
+  optionalSidecarImage,
   parseDataUrl,
   parseOrThrow,
-  sidecarImage,
+  requireSidecarImage,
 } from "./schemas.ts";
 
 /**
@@ -75,26 +76,29 @@ const message = z.object({
  * the text a client writes refers to the image it attached, not the other way
  * round.
  */
-function hasSidecarImages(m: z.infer<typeof message>): boolean {
-  return [m.images, m.attachments, m.experimental_attachments].some(
-    (list) => list !== undefined && list.length > 0,
-  );
+/**
+ * Whether the message carries the images-only field.
+ *
+ * Deliberately not `attachments`: those are refused nowhere and dropped
+ * wherever they cannot be expressed, so a file hanging off a system message
+ * stays as ignorable as it was before this field was read.
+ */
+function hasOllamaImages(m: z.infer<typeof message>): boolean {
+  return (m.images ?? []).length > 0;
 }
 
 function sidecarImages(m: z.infer<typeof message>): ContentBlock[] {
   const blocks: ContentBlock[] = [];
   for (const [index, raw] of (m.images ?? []).entries()) {
-    blocks.push({ type: "image", ...sidecarImage(raw, undefined, `messages: images[${index}]`) });
+    blocks.push({ type: "image", ...requireSidecarImage(raw, `messages: images[${index}]`) });
   }
-  for (const [field, list] of [
-    ["attachments", m.attachments],
-    ["experimental_attachments", m.experimental_attachments],
-  ] as const) {
-    for (const [index, a] of (list ?? []).entries()) {
-      blocks.push({
-        type: "image",
-        ...sidecarImage(a.url, a.mediaType ?? a.contentType, `messages: ${field}[${index}]`),
-      });
+  for (const list of [m.attachments, m.experimental_attachments]) {
+    for (const a of list ?? []) {
+      // A PDF or a hosted URL in here is an ordinary attachment, not a bad
+      // request: it was dropped before this field was read, and it is dropped
+      // now. Only what maps to an image block is carried.
+      const image = optionalSidecarImage(a.url, a.mediaType ?? a.contentType);
+      if (image !== null) blocks.push({ type: "image", ...image });
     }
   }
   return blocks;
@@ -198,7 +202,7 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
     // no image, and no provider here accepts one inside a tool result, so
     // silently dropping it would put the request in front of the model missing
     // the thing it is about.
-    if (m.role !== "user" && m.role !== "assistant" && hasSidecarImages(m)) {
+    if (m.role !== "user" && m.role !== "assistant" && hasOllamaImages(m)) {
       throw new GatewayError(
         "BAD_REQUEST",
         `messages: a ${m.role} message cannot carry images; attach them to a user message`,
