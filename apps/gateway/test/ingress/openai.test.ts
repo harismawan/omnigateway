@@ -61,6 +61,186 @@ test("rejects a non-data image url rather than fetching it", () => {
   ).toThrow(GatewayError);
 });
 
+// Real one-pixel encodings. A made-up payload would sniff as nothing and prove
+// only that the error path works.
+const PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+const JPEG = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB";
+
+test("reads bare base64 images from the Ollama-shaped images field", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [{ role: "user", content: "analyze this", images: [PNG, JPEG] }],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "analyze this" },
+    { type: "image", mediaType: "image/png", data: PNG },
+    { type: "image", mediaType: "image/jpeg", data: JPEG },
+  ]);
+});
+
+test("reads data-url attachments and the experimental spelling, images first", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: "compare",
+        images: [PNG],
+        attachments: [
+          { url: "data:image/gif;base64,R0lGODlhAQABAAAAACw=", mediaType: "image/gif" },
+        ],
+        experimental_attachments: [
+          { url: "data:image/webp;base64,UklGRhoAAABXRUJQ", contentType: "image/webp" },
+        ],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "compare" },
+    { type: "image", mediaType: "image/png", data: PNG },
+    { type: "image", mediaType: "image/gif", data: "R0lGODlhAQABAAAAACw=" },
+    { type: "image", mediaType: "image/webp", data: "UklGRhoAAABXRUJQ" },
+  ]);
+});
+
+test("the payload's own type beats the one the attachment declared", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "x", attachments: [{ url: PNG, mediaType: "image/jpeg" }] },
+    ],
+  });
+  expect(req.messages[0]?.content[1]).toEqual({
+    type: "image",
+    mediaType: "image/png",
+    data: PNG,
+  });
+});
+
+test("sniffs a bare GIF and WebP payload without a data url to declare them", () => {
+  // Wrapping these in `data:image/gif;base64,` would read the type off the URL
+  // and never reach the magic-prefix table, so a typo in it would go unnoticed.
+  const GIF = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+  const WEBP = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [{ role: "user", content: "x", images: [GIF, WEBP] }],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "x" },
+    { type: "image", mediaType: "image/gif", data: GIF },
+    { type: "image", mediaType: "image/webp", data: WEBP },
+  ]);
+});
+
+test("drops a remote attachment url rather than fetching it or refusing the request", () => {
+  // The declared type is deliberately valid: without the scheme check this URL
+  // would become an image block whose base64 payload is the URL text.
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: "x",
+        attachments: [{ url: "https://example.com/a.png", mediaType: "image/png" }],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content).toEqual([{ type: "text", text: "x" }]);
+});
+
+test("drops an attachment that is not an image and keeps the rest of the turn", () => {
+  // `attachments` is the SDK's general file envelope, so a PDF in it is
+  // ordinary. It was dropped before the gateway read the field; refusing the
+  // whole request now would break a caller that worked yesterday.
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: "summarize",
+        attachments: [
+          { url: "data:application/pdf;base64,JVBERi0=", mediaType: "application/pdf" },
+          { url: `data:image/png;base64,${PNG}`, mediaType: "image/png" },
+        ],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "summarize" },
+    { type: "image", mediaType: "image/png", data: PNG },
+  ]);
+});
+
+test("drops an attachment whose data url carries no base64 content", () => {
+  // The declared type is valid on purpose. Without the data-URL check the URL
+  // text itself would be forwarded as the base64 payload of an `image/png`
+  // block, and a fixture with no declared type would be dropped by the sniff
+  // instead — passing while proving nothing.
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: "x",
+        attachments: [{ url: "data:image/png,notbase64", mediaType: "image/png" }],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content).toEqual([{ type: "text", text: "x" }]);
+});
+
+test("refuses an unrecognized payload in the images-only field", () => {
+  // No second copy of it exists in the message, so dropping would send the
+  // model a question about a picture it cannot see.
+  expect(() =>
+    parseOpenAIRequest({
+      ...minimal,
+      messages: [{ role: "user", content: "x", images: ["AAAA"] }],
+    }),
+  ).toThrow(GatewayError);
+});
+
+test("refuses a remote url in the images-only field", () => {
+  expect(() =>
+    parseOpenAIRequest({
+      ...minimal,
+      messages: [{ role: "user", content: "x", images: ["https://example.com/a.png"] }],
+    }),
+  ).toThrow(/does not fetch remote images/);
+});
+
+test("refuses the images-only field on a message role that cannot carry it", () => {
+  for (const role of ["system", "tool"]) {
+    expect(() =>
+      parseOpenAIRequest({
+        ...minimal,
+        messages: [
+          { role, content: "x", tool_call_id: "t1", images: [PNG] },
+          { role: "user", content: "hi" },
+        ],
+      }),
+    ).toThrow(GatewayError);
+  }
+});
+
+test("ignores attachments on a role that cannot carry them, as before the field was read", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "system",
+        content: "be terse",
+        attachments: [{ url: `data:image/png;base64,${PNG}` }],
+      },
+      { role: "user", content: "hi" },
+    ],
+  });
+  expect(req.system).toEqual([{ type: "text", text: "be terse" }]);
+  expect(req.messages).toHaveLength(1);
+});
+
 test("parses assistant tool calls and tool result messages", () => {
   const req = parseOpenAIRequest({
     ...minimal,

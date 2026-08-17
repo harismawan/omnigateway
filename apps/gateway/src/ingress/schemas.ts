@@ -105,3 +105,119 @@ export function parseDataUrl(url: string): { mediaType: string; data: string } {
   }
   return { mediaType: match[1] as string, data: match[2] as string };
 }
+
+/**
+ * Leading base64 of each container header, for payloads that arrive with no
+ * declared media type.
+ *
+ * Each base64 character depends only on the bytes before it, so a prefix of the
+ * encoding identifies a prefix of the bytes at any character boundary — these
+ * are cut for legibility, not alignment. The set is the four formats Anthropic
+ * accepts, which is also every format the vision-capable targets here share; a
+ * fifth would have to be carried by a provider that can receive it.
+ */
+const BASE64_MAGIC: readonly (readonly [string, string])[] = [
+  ["iVBORw0KGgo", "image/png"],
+  ["/9j/", "image/jpeg"],
+  ["R0lGOD", "image/gif"],
+  ["UklGR", "image/webp"],
+];
+
+/** Why a sidecar payload could not become an image block. */
+type SidecarRejection = "remote" | "unrecognized" | "not-an-image";
+
+type SidecarResult =
+  | { ok: true; mediaType: string; data: string }
+  | { ok: false; reason: SidecarRejection; detail: string };
+
+/**
+ * Reads an image a client sent outside the `content` array.
+ *
+ * Ollama-shaped clients (Hermes Agent among them) put a bare base64 string in
+ * `messages[].images`, and SDK-shaped ones put `{url, contentType}` in
+ * `attachments` / `experimental_attachments`. Neither is an OpenAI field, so
+ * both were dropped by the schema before this existed — a request whose only
+ * image rode in one of them reached the model as text alone, with nothing said.
+ *
+ * A declared media type is never trusted over the payload: a data URL carries
+ * its own, and that one wins, because the client that wrote the envelope and
+ * the client that wrote the bytes disagree often enough to matter.
+ *
+ * Returns a rejection rather than throwing, because the two carriers disagree
+ * about what a rejection means — see `requireSidecarImage` and
+ * `optionalSidecarImage`.
+ */
+function readSidecarImage(raw: string, declaredMediaType: string | undefined): SidecarResult {
+  if (!raw.startsWith("data:") && /^[a-z][a-z0-9+.-]*:/i.test(raw)) {
+    return { ok: false, reason: "remote", detail: "the gateway does not fetch remote images" };
+  }
+
+  // Parsed here rather than through `parseDataUrl`, which throws: on this path
+  // a data URL the gateway cannot read is a rejection the caller gets to
+  // classify, not an error decided on its behalf.
+  const dataUrl = raw.startsWith("data:") ? /^data:([^;,]+);base64,(.*)$/s.exec(raw) : null;
+  if (raw.startsWith("data:") && dataUrl === null) {
+    return {
+      ok: false,
+      reason: "unrecognized",
+      detail: "data URL must carry base64 content",
+    };
+  }
+  const resolved =
+    dataUrl === null
+      ? { mediaType: BASE64_MAGIC.find(([prefix]) => raw.startsWith(prefix))?.[1], data: raw }
+      : { mediaType: dataUrl[1] as string, data: dataUrl[2] as string };
+
+  const mediaType = resolved.mediaType ?? declaredMediaType;
+  if (mediaType === undefined) {
+    return {
+      ok: false,
+      reason: "unrecognized",
+      detail: "unrecognized image data; expected PNG, JPEG, GIF or WebP",
+    };
+  }
+  // Checked on both paths, not just the sniffed one: a data URL states its own
+  // type, and `data:application/pdf;base64,` states it just as clearly as an
+  // envelope does.
+  if (!mediaType.startsWith("image/")) {
+    return { ok: false, reason: "not-an-image", detail: `${mediaType} is not an image` };
+  }
+  return { ok: true, mediaType, data: resolved.data };
+}
+
+/**
+ * Reads a payload from a carrier that holds nothing but images.
+ *
+ * `messages[].images` is Ollama's field and takes image data by definition, so
+ * something in it that is not image data is a malformed request rather than an
+ * attachment this gateway happens not to handle. There is also no second copy
+ * of it anywhere in the message, so dropping it would send the model a question
+ * about a picture it cannot see.
+ */
+export function requireSidecarImage(
+  raw: string,
+  field: string,
+): { mediaType: string; data: string } {
+  const result = readSidecarImage(raw, undefined);
+  if (!result.ok) throw new GatewayError("BAD_REQUEST", `${field}: ${result.detail}`);
+  return { mediaType: result.mediaType, data: result.data };
+}
+
+/**
+ * Reads a payload from a carrier that holds files of any kind.
+ *
+ * `attachments` and `experimental_attachments` are the SDK's general file
+ * envelope: a PDF, a text file, or a hosted URL is an ordinary thing to find
+ * there, not an error. Every one of them was dropped before this gateway read
+ * the field at all, so refusing the request now would break a caller that
+ * worked yesterday over a part of it the gateway never used. Same reasoning as
+ * `looseCacheControl` above, and the same conclusion: translate what maps, drop
+ * what does not.
+ */
+export function optionalSidecarImage(
+  raw: string,
+  declaredMediaType: string | undefined,
+): { mediaType: string; data: string } | null {
+  const result = readSidecarImage(raw, declaredMediaType);
+  return result.ok ? { mediaType: result.mediaType, data: result.data } : null;
+}

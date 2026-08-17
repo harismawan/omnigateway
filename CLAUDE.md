@@ -195,6 +195,16 @@ Preserve these translation invariants:
 - Normalize `claude/<id>` aliases and `[1m]` before key allowlist checks. `claude/` remains reserved.
 - Gateway does not validate request-shape support per model; unsupported combinations surface as
   upstream errors.
+- The OpenAI surface reads images from `messages[].images` (bare base64) and from `attachments` /
+  `experimental_attachments` as well as from `content`. Neither sidecar is an OpenAI field; they are
+  read because the clients that send them send no other copy. The payload's own container header
+  beats any declared type, and a remote URL is never fetched.
+- The two sidecars differ on what an unusable payload means, and the split is the contract.
+  `images` is Ollama's images-only field, so anything in it that is not image data is a
+  `BAD_REQUEST`. `attachments` is the SDK's general file envelope, where a PDF or a hosted URL is
+  ordinary: those are dropped, never refused, because they were dropped before the gateway read the
+  field and refusing now would break a caller that worked yesterday. Same reasoning as
+  `looseCacheControl`.
 
 Detailed compatibility rules and measured client behavior belong in relevant specs under
 `docs/superpowers/specs/`.
