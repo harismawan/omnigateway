@@ -131,15 +131,30 @@ function billingBlock(): string {
 
 /** Paragraphs mentioning any of these are dropped whole. */
 const BANNED_SUBSTRINGS = [
-  "github.com/anomalyco/o‍pencode",
-  "o‍pencode.ai/docs",
-  "github.com/c‍line/c‍line",
-  "github.com/getc‍ursor/c‍ursor",
-  "c‍ontinue.dev",
+  "github.com/anomalyco/opencode",
+  "opencode.ai/docs",
+  "github.com/cline/cline",
+  "github.com/getcursor/cursor",
+  "continue.dev",
+  // Hermes Agent's help paragraph (`HERMES_AGENT_HELP_GUIDANCE` in its
+  // `agent/prompt_builder.py`). Its repository URL is deliberately absent:
+  // that string does not appear in the prompt, only in third-party copies of
+  // this list, and a banned substring that matches nothing is worse than no
+  // entry — it reads as coverage.
+  "hermes-agent.nousresearch.com",
 ];
 
+/**
+ * Paragraphs opening with one of these are dropped whole.
+ *
+ * Each is the first phrase of an identity paragraph the client assembles as a
+ * standalone section, so dropping the paragraph takes the identity and nothing
+ * around it.
+ */
+const IDENTITY_PREFIXES = ["You are OpenCode", "You are Hermes Agent"];
+
 const REWRITES: readonly (readonly [string, string])[] = [
-  ["if O‍penCode honestly", "if the assistant honestly"],
+  ["if OpenCode honestly", "if the assistant honestly"],
   [
     "Here is some useful information about the environment you are running in:",
     "Environment context you are running in:",
@@ -164,7 +179,7 @@ export function applyAnthropicSystem(system: readonly SystemBlock[]): SystemBloc
     const text = block.text
       .split(/\n{2,}/)
       .filter((p) => !BANNED_SUBSTRINGS.some((b) => p.includes(b)))
-      .filter((p) => !p.trimStart().startsWith("You are O‍penCode"))
+      .filter((p) => !IDENTITY_PREFIXES.some((i) => p.trimStart().startsWith(i)))
       .filter((p) => !p.includes(BILLING_PREFIX))
       .filter((p) => p.trim() !== AGENT_PREAMBLE)
       .join("\n\n");

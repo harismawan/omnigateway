@@ -88,26 +88,102 @@ test("applyAnthropicSystem drops paragraphs naming other agents", () => {
   const blocks = applyAnthropicSystem([
     {
       type: "text",
-      text: ["Keep this.", "See https://o‍pencode.ai/docs for help.", "Keep this too."].join("\n\n"),
+      text: ["Keep this.", "See https://opencode.ai/docs for help.", "Keep this too."].join("\n\n"),
     },
   ]);
   const joined = blocks.map((b) => b.text).join("\n");
   expect(joined).toContain("Keep this.");
   expect(joined).toContain("Keep this too.");
-  expect(joined).not.toContain("o‍pencode.ai/docs");
+  expect(joined).not.toContain("opencode.ai/docs");
+});
+
+test("applyAnthropicSystem drops the OpenCode identity paragraph", () => {
+  const blocks = applyAnthropicSystem([
+    {
+      type: "text",
+      text: ["You are OpenCode, a coding agent.", "Follow the repository style."].join("\n\n"),
+    },
+  ]);
+  const joined = blocks.map((b) => b.text).join("\n");
+  expect(joined).not.toContain("You are OpenCode");
+  expect(joined).toContain("Follow the repository style.");
 });
 
 test("applyAnthropicSystem rewrites the known phrases", () => {
   const blocks = applyAnthropicSystem([
     {
       type: "text",
-      text: "Answer if O‍penCode honestly cannot.\n\nHere is some useful information about the environment you are running in:",
+      text: "Answer if OpenCode honestly cannot.\n\nHere is some useful information about the environment you are running in:",
     },
   ]);
   const joined = blocks.map((b) => b.text).join("\n");
   expect(joined).toContain("if the assistant honestly");
   expect(joined).toContain("Environment context you are running in:");
-  expect(joined).not.toContain("O‍penCode honestly");
+  expect(joined).not.toContain("OpenCode honestly");
+});
+
+// Copied verbatim from NousResearch/hermes-agent `agent/prompt_builder.py`
+// (`DEFAULT_AGENT_IDENTITY` and `HERMES_AGENT_HELP_GUIDANCE`). Transcribing the
+// client's own text rather than echoing this package's tables is the point: a
+// fixture built from the table passes whatever the table says, including
+// nothing. `agent/system_prompt.py` appends these as separate `stable_parts`
+// and joins with a blank line, which is why each is its own paragraph here.
+const HERMES_IDENTITY =
+  "You are Hermes Agent, an intelligent AI assistant created by Nous Research. " +
+  "You are helpful, knowledgeable, and direct.";
+const HERMES_HELP =
+  "You run on Hermes Agent (by Nous Research). When the user needs help with " +
+  "Hermes itself, the documentation at https://hermes-agent.nousresearch.com/docs " +
+  "is your authoritative reference.";
+
+test("applyAnthropicSystem drops the Hermes identity paragraph", () => {
+  const blocks = applyAnthropicSystem([
+    { type: "text", text: [HERMES_IDENTITY, "Follow the user's coding style."].join("\n\n") },
+  ]);
+  const joined = blocks.map((b) => b.text).join("\n");
+  expect(joined).not.toContain("You are Hermes Agent");
+  expect(joined).toContain("Follow the user's coding style.");
+});
+
+test("applyAnthropicSystem drops the Hermes help paragraph", () => {
+  // Opens with "You run on", not "You are", so only the banned substring can
+  // catch it — the prefix filter must not be what makes this pass.
+  const blocks = applyAnthropicSystem([
+    { type: "text", text: ["Keep this.", HERMES_HELP, "Keep this too."].join("\n\n") },
+  ]);
+  const joined = blocks.map((b) => b.text).join("\n");
+  expect(joined).not.toContain("hermes-agent.nousresearch.com");
+  expect(joined).toContain("Keep this.");
+  expect(joined).toContain("Keep this too.");
+});
+
+test("applyAnthropicSystem keeps a paragraph that merely mentions Hermes", () => {
+  const blocks = applyAnthropicSystem([
+    { type: "text", text: "The user asked about Hermes and Nous Research earlier." },
+  ]);
+  const joined = blocks.map((b) => b.text).join("\n");
+  expect(joined).toContain("The user asked about Hermes and Nous Research earlier.");
+});
+
+/**
+ * The tables shipped for months with a zero-width joiner spliced into every
+ * literal, so `includes`/`startsWith` matched nothing and the fixtures — carrying
+ * the same splice — still passed. Assert on the source text: any invisible
+ * character inside these literals reintroduces exactly that failure, and no
+ * behavioural test can see the difference between a table that matches nothing
+ * and one that is never reached.
+ */
+test("the drop and rewrite tables contain no invisible characters", async () => {
+  const source = await Bun.file(new URL("../src/body.ts", import.meta.url)).text();
+  // Numeric code points, not escape sequences in a pattern: the check has to
+  // stay readable to survive, and an escape is one careless paste away from
+  // becoming the very character it looks for.
+  const INVISIBLE = new Set([0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x2060, 0xfeff]);
+  const offenders = [...source]
+    .map((ch, i) => ({ code: ch.codePointAt(0) ?? 0, i }))
+    .filter(({ code }) => INVISIBLE.has(code))
+    .map(({ code, i }) => `U+${code.toString(16).toUpperCase()} at index ${i}`);
+  expect(offenders).toEqual([]);
 });
 
 test("applyAnthropicSystem is idempotent", () => {
