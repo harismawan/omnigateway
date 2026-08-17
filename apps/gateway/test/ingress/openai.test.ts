@@ -61,6 +61,122 @@ test("rejects a non-data image url rather than fetching it", () => {
   ).toThrow(GatewayError);
 });
 
+// Real one-pixel encodings. A made-up payload would sniff as nothing and prove
+// only that the error path works.
+const PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+const JPEG = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB";
+
+test("reads bare base64 images from the Ollama-shaped images field", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [{ role: "user", content: "analyze this", images: [PNG, JPEG] }],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "analyze this" },
+    { type: "image", mediaType: "image/png", data: PNG },
+    { type: "image", mediaType: "image/jpeg", data: JPEG },
+  ]);
+});
+
+test("reads data-url attachments and the experimental spelling, images first", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      {
+        role: "user",
+        content: "compare",
+        images: [PNG],
+        attachments: [
+          { url: "data:image/gif;base64,R0lGODlhAQABAAAAACw=", mediaType: "image/gif" },
+        ],
+        experimental_attachments: [
+          { url: "data:image/webp;base64,UklGRhoAAABXRUJQ", contentType: "image/webp" },
+        ],
+      },
+    ],
+  });
+  expect(req.messages[0]?.content).toEqual([
+    { type: "text", text: "compare" },
+    { type: "image", mediaType: "image/png", data: PNG },
+    { type: "image", mediaType: "image/gif", data: "R0lGODlhAQABAAAAACw=" },
+    { type: "image", mediaType: "image/webp", data: "UklGRhoAAABXRUJQ" },
+  ]);
+});
+
+test("the payload's own type beats the one the attachment declared", () => {
+  const req = parseOpenAIRequest({
+    ...minimal,
+    messages: [
+      { role: "user", content: "x", attachments: [{ url: PNG, mediaType: "image/jpeg" }] },
+    ],
+  });
+  expect(req.messages[0]?.content[1]).toEqual({
+    type: "image",
+    mediaType: "image/png",
+    data: PNG,
+  });
+});
+
+test("rejects a remote attachment url rather than fetching it", () => {
+  // The declared type is deliberately valid. Without the scheme check the URL
+  // would sail through as an image whose base64 payload is the URL text, and a
+  // fixture with no declared type would throw on the sniff instead — passing
+  // this test while proving nothing about remote fetching.
+  expect(() =>
+    parseOpenAIRequest({
+      ...minimal,
+      messages: [
+        {
+          role: "user",
+          content: "x",
+          attachments: [{ url: "https://example.com/a.png", mediaType: "image/png" }],
+        },
+      ],
+    }),
+  ).toThrow(/does not fetch remote images/);
+});
+
+test("rejects an attachment this gateway cannot forward as an image", () => {
+  expect(() =>
+    parseOpenAIRequest({
+      ...minimal,
+      messages: [
+        {
+          role: "user",
+          content: "x",
+          attachments: [
+            { url: "data:application/pdf;base64,JVBERi0=", mediaType: "application/pdf" },
+          ],
+        },
+      ],
+    }),
+  ).toThrow(GatewayError);
+});
+
+test("rejects an unrecognized bare payload rather than guessing a media type", () => {
+  expect(() =>
+    parseOpenAIRequest({
+      ...minimal,
+      messages: [{ role: "user", content: "x", images: ["AAAA"] }],
+    }),
+  ).toThrow(GatewayError);
+});
+
+test("rejects images on a message role that cannot carry them", () => {
+  for (const role of ["system", "tool"]) {
+    expect(() =>
+      parseOpenAIRequest({
+        ...minimal,
+        messages: [
+          { role, content: "x", tool_call_id: "t1", images: [PNG] },
+          { role: "user", content: "hi" },
+        ],
+      }),
+    ).toThrow(GatewayError);
+  }
+});
+
 test("parses assistant tool calls and tool result messages", () => {
   const req = parseOpenAIRequest({
     ...minimal,

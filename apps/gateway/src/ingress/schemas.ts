@@ -105,3 +105,72 @@ export function parseDataUrl(url: string): { mediaType: string; data: string } {
   }
   return { mediaType: match[1] as string, data: match[2] as string };
 }
+
+/**
+ * Leading base64 of each container header, for payloads that arrive with no
+ * declared media type.
+ *
+ * Base64 encodes three bytes per four characters, so a prefix of the encoding
+ * is a prefix of the bytes only on that boundary — each entry below is cut to
+ * one. The set is exactly the four formats Anthropic accepts, which is also
+ * every format the vision-capable targets here share; a fifth would have to be
+ * carried by a provider that can receive it.
+ */
+const BASE64_MAGIC: readonly (readonly [string, string])[] = [
+  ["iVBORw0KGgo", "image/png"],
+  ["/9j/", "image/jpeg"],
+  ["R0lGOD", "image/gif"],
+  ["UklGR", "image/webp"],
+];
+
+/**
+ * Reads an image a client sent outside the `content` array.
+ *
+ * Ollama-shaped clients (Hermes Agent among them) put a bare base64 string in
+ * `messages[].images`, and SDK-shaped ones put `{url, contentType}` in
+ * `attachments` / `experimental_attachments`. Neither is an OpenAI field, so
+ * both were dropped by the schema before this existed — a request whose only
+ * image rode in one of them reached the model as text alone, with nothing said.
+ *
+ * A declared media type is never trusted over the payload: a data URL carries
+ * its own, and that one wins, because the client that wrote the envelope and
+ * the client that wrote the bytes disagree often enough to matter.
+ */
+export function sidecarImage(
+  raw: string,
+  declaredMediaType: string | undefined,
+  field: string,
+): { mediaType: string; data: string } {
+  const resolved = raw.startsWith("data:") ? parseDataUrl(raw) : bareBase64Image(raw, field);
+  const mediaType = resolved.mediaType ?? declaredMediaType;
+  if (mediaType === undefined) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `${field}: unrecognized image data; expected PNG, JPEG, GIF or WebP`,
+    );
+  }
+  // Checked on both paths, not just the sniffed one: a data URL states its own
+  // type, and `data:application/pdf;base64,` states it just as clearly as an
+  // envelope does.
+  if (!mediaType.startsWith("image/")) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `${field}: ${mediaType} is not an image; this gateway forwards image attachments only`,
+    );
+  }
+  return { mediaType, data: resolved.data };
+}
+
+/** A payload with no envelope: the container header is the only type there is. */
+function bareBase64Image(
+  raw: string,
+  field: string,
+): { mediaType: string | undefined; data: string } {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `${field}: must be a base64 data URL or bare base64; the gateway does not fetch remote images`,
+    );
+  }
+  return { mediaType: BASE64_MAGIC.find(([prefix]) => raw.startsWith(prefix))?.[1], data: raw };
+}

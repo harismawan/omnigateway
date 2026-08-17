@@ -8,6 +8,7 @@ import {
   looseCacheControl,
   parseDataUrl,
   parseOrThrow,
+  sidecarImage,
 } from "./schemas.ts";
 
 /**
@@ -38,13 +39,66 @@ const toolCall = z.object({
   function: z.object({ name: z.string(), arguments: z.string() }),
 });
 
+/**
+ * The envelope SDK-shaped clients use for a file alongside the text.
+ *
+ * Deliberately loose: `contentType` is the Vercel AI SDK's spelling and
+ * `mediaType` is the newer one, both are optional because a data URL carries
+ * the type itself, and everything else the client attached (name, size) is
+ * ignored rather than refused.
+ */
+const attachment = z.object({
+  url: z.string(),
+  contentType: z.string().optional(),
+  mediaType: z.string().optional(),
+});
+
 const message = z.object({
   role: z.enum(["system", "developer", "user", "assistant", "tool"]),
   content: z.union([z.string(), z.array(part), z.null()]).optional(),
   tool_calls: z.array(toolCall).optional(),
   tool_call_id: z.string().optional(),
   cache_control: z.unknown().optional(),
+  // Sidecar image carriers. Not OpenAI fields; read because the clients that
+  // send them send no other copy of the image. See `sidecarImages`.
+  images: z.array(z.string()).optional(),
+  attachments: z.array(attachment).optional(),
+  experimental_attachments: z.array(attachment).optional(),
 });
+
+/**
+ * Image blocks from the carriers that sit beside `content` rather than in it.
+ *
+ * Ordered images first, then attachments, then the experimental spelling, so a
+ * client that sends more than one carrier gets a stable transcript rather than
+ * one that depends on key order. They append after the message's own content:
+ * the text a client writes refers to the image it attached, not the other way
+ * round.
+ */
+function hasSidecarImages(m: z.infer<typeof message>): boolean {
+  return [m.images, m.attachments, m.experimental_attachments].some(
+    (list) => list !== undefined && list.length > 0,
+  );
+}
+
+function sidecarImages(m: z.infer<typeof message>): ContentBlock[] {
+  const blocks: ContentBlock[] = [];
+  for (const [index, raw] of (m.images ?? []).entries()) {
+    blocks.push({ type: "image", ...sidecarImage(raw, undefined, `messages: images[${index}]`) });
+  }
+  for (const [field, list] of [
+    ["attachments", m.attachments],
+    ["experimental_attachments", m.experimental_attachments],
+  ] as const) {
+    for (const [index, a] of (list ?? []).entries()) {
+      blocks.push({
+        type: "image",
+        ...sidecarImage(a.url, a.mediaType ?? a.contentType, `messages: ${field}[${index}]`),
+      });
+    }
+  }
+  return blocks;
+}
 
 const schema = z.object({
   model: z.string().min(1),
@@ -140,6 +194,17 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
   const messages: Message[] = [];
 
   for (const m of parsed.messages) {
+    // Only a conversational turn can carry one. Anthropic's system prompt takes
+    // no image, and no provider here accepts one inside a tool result, so
+    // silently dropping it would put the request in front of the model missing
+    // the thing it is about.
+    if (m.role !== "user" && m.role !== "assistant" && hasSidecarImages(m)) {
+      throw new GatewayError(
+        "BAD_REQUEST",
+        `messages: a ${m.role} message cannot carry images; attach them to a user message`,
+      );
+    }
+
     if (m.role === "system" || m.role === "developer") {
       // Both map to the IR system prompt; developer is the newer spelling.
       const blocks = contentBlocks(m.content);
@@ -171,6 +236,7 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
     }
 
     const content = contentBlocks(m.content);
+    content.push(...sidecarImages(m));
     for (const call of m.tool_calls ?? []) {
       content.push({
         type: "toolUse",

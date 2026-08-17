@@ -195,6 +195,11 @@ Preserve these translation invariants:
 - Normalize `claude/<id>` aliases and `[1m]` before key allowlist checks. `claude/` remains reserved.
 - Gateway does not validate request-shape support per model; unsupported combinations surface as
   upstream errors.
+- The OpenAI surface reads images from `messages[].images` (bare base64) and from `attachments` /
+  `experimental_attachments` as well as from `content`. Neither sidecar is an OpenAI field; they are
+  read because the clients that send them send no other copy. The payload's own container header
+  beats any declared type, a remote URL is refused rather than fetched, and a non-image or
+  unrecognized payload is a `BAD_REQUEST` rather than a silent drop.
 
 Detailed compatibility rules and measured client behavior belong in relevant specs under
 `docs/superpowers/specs/`.
