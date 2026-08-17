@@ -23,6 +23,7 @@ import {
   finishLog,
   newCompletedRequestLog,
   newPendingRequestLog,
+  reportRejection,
   routeLog,
 } from "../logging.ts";
 import { modelListBody } from "./models.ts";
@@ -98,7 +99,12 @@ function asGatewayError(error: unknown): GatewayError {
 /** Serializes SSE frames and drains the stream, logging once it is done. */
 function sseResponse(
   frames: AsyncGenerator<{ event: string; data: string }, void, undefined>,
-  onDone: (cancelled: boolean) => Promise<void>,
+  /**
+   * `failure` is whatever broke the stream where that was not a hang-up — the
+   * generator can throw past every terminal site inside dispatch, and the log
+   * would otherwise be written with the status nobody ever assigned.
+   */
+  onDone: (cancelled: boolean, failure?: unknown) => Promise<void>,
   keepaliveMs: number,
   /**
    * The generator `frames` wraps.
@@ -118,8 +124,8 @@ function sseResponse(
   // cancelled), so the log write is latched to run exactly once regardless
   // of which path gets there first.
   let done: Promise<void> | null = null;
-  const runOnce = (cancelled = false): Promise<void> => {
-    if (done === null) done = onDone(cancelled);
+  const runOnce = (cancelled = false, failure?: unknown): Promise<void> => {
+    if (done === null) done = onDone(cancelled, failure);
     return done;
   };
 
@@ -148,7 +154,7 @@ function sseResponse(
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${data}\n\n`));
       } catch (error) {
         controller.error(error);
-        await runOnce();
+        await runOnce(false, error);
       }
     },
     async cancel() {
@@ -173,6 +179,23 @@ async function handle(
   const startedAt = deps.now();
   let keyId: string | null = null;
   let requestedModel = "";
+  // Held out here so the terminal catch can complete dispatch's own log rather
+  // than a blank one. The completion upsert writes `resolved_*`,
+  // `credential_id`, `attempts` and the rtk columns from whatever log it is
+  // handed, so a blank one erases the attribution the pending row already held.
+  let outcome: Awaited<ReturnType<typeof dispatch>> | null = null;
+  /**
+   * Whether the row has already been completed.
+   *
+   * `usage.append` must run at most once per request id: `rollupLog` adds into
+   * `usage_daily` rather than replacing, so a second call bills the same tokens
+   * and the same spend twice. The non-streaming path completes the row and then
+   * keeps working — rendering a body, serialising it — and anything thrown after
+   * that point lands in the terminal catch, which would otherwise complete it
+   * again. This used to be survivable only because the catch built a *blank*
+   * log, whose nulls and zeros happened to roll up under a different key.
+   */
+  let logged = false;
 
   try {
     let key: Awaited<ReturnType<typeof authenticateApiKey>>;
@@ -218,7 +241,7 @@ async function handle(
 
     requestedModel = chatRequest.model;
     let began = false;
-    const outcome = await dispatch(
+    const dispatched = await dispatch(
       chatRequest,
       {
         ...deps,
@@ -242,32 +265,56 @@ async function handle(
       request.signal,
       requestId,
     );
-    const log = async (cancelled = false): Promise<void> => {
-      const completed = outcome.log();
+    outcome = dispatched;
+    const log = async (cancelled = false, failure?: unknown): Promise<void> => {
+      const completed = dispatched.log();
       const wasCancelled = cancelled || request.signal.aborted;
       if (wasCancelled && completed.status === 0) {
         completed.status = 499;
         completed.errorCode = "interrupted";
         completed.durationMs = deps.now() - startedAt;
+      } else if (!wasCancelled && failure !== undefined) {
+        // The stream broke somewhere dispatch does not answer for — a health
+        // write, the egress encoder, `onRoute`. That is the gateway's own
+        // defect rather than a request being refused, so `reportRejection`
+        // prints it at `error`.
+        //
+        // Reported whatever status the log already carries, but only *assigned*
+        // one where nothing did. The two are separate because the two failures
+        // here differ: a break before any terminal site leaves `status: 0`,
+        // which is neither a success nor a failure and has to be filled in; a
+        // break *after* one — the encoder throwing on a stream the client has
+        // stopped reading, when dispatch has already recorded the upstream's
+        // 200 and its tokens — must keep what actually happened upstream. An
+        // earlier version gated the whole branch on `status === 0`, so that
+        // second case was recorded as a clean 200 and printed nowhere.
+        const gatewayError = asGatewayError(failure);
+        if (completed.status === 0) {
+          completed.status = HTTP_STATUS[gatewayError.code];
+          completed.errorCode = gatewayError.code;
+          completed.durationMs = deps.now() - startedAt;
+        }
+        reportRejection(deps.logger, requestId, completed, gatewayError, surface);
       }
       // The row is the request log. Nothing is printed for a finished request:
       // a terminal line would restate what `request_logs` already holds, more
       // briefly, somewhere nothing can query — and at a volume that buries the
       // lines about the process itself. The console reads those rows; stdout
       // carries what never becomes one. `requestId` is on both, and joins them.
+      logged = true;
       await finishLog(deps.store, completed, keyId, deps.logger);
     };
 
     if (chatRequest.stream) {
       const frames =
         surface === "anthropic"
-          ? anthropicStream(outcome.events, requestId)
-          : openaiStream(outcome.events, requestId, Math.floor(deps.now() / 1000));
-      return sseResponse(frames, log, deps.keepaliveMs, outcome.events);
+          ? anthropicStream(dispatched.events, requestId)
+          : openaiStream(dispatched.events, requestId, Math.floor(deps.now() / 1000));
+      return sseResponse(frames, log, deps.keepaliveMs, dispatched.events);
     }
 
     const events: StreamEvent[] = [];
-    for await (const event of outcome.events) events.push(event);
+    for await (const event of dispatched.events) events.push(event);
     await log();
 
     const failure = events.find(
@@ -287,27 +334,37 @@ async function handle(
     });
   } catch (error) {
     const gatewayError = asGatewayError(error);
-    const completed = newCompletedRequestLog(requestId, startedAt, {
-      requestedModel,
-      status: HTTP_STATUS[gatewayError.code],
-      errorCode: gatewayError.code,
-      durationMs: deps.now() - startedAt,
-    });
+    // A client that hangs up makes the non-streaming drain throw rather than
+    // return, so it lands here instead of at `log()` above — where streaming
+    // remaps the same event. Without this it reads as a gateway 500.
+    //
+    // The test is whether this error *is* the hang-up, not whether one is in
+    // progress. `request.signal.aborted` is also true for a failure that merely
+    // coincided with a disconnect — a store write dying under load while the
+    // client's own timeout expires — and filing that as 499 with nothing
+    // printed is how an outage comes to read as clients giving up. It also
+    // swallowed the model-allowlist rejection this very line exists to record,
+    // handing the client a 401 body over a row that claimed 499.
+    const cancelled = request.signal.aborted && error === request.signal.reason;
+    // Dispatch's log where the request got that far, so completing it keeps the
+    // target the pending row recorded instead of overwriting it with nulls.
+    const completed =
+      outcome?.log() ?? newCompletedRequestLog(requestId, startedAt, { requestedModel, status: 0 });
+    completed.status = cancelled ? 499 : HTTP_STATUS[gatewayError.code];
+    completed.errorCode = cancelled ? "interrupted" : gatewayError.code;
+    completed.durationMs = deps.now() - startedAt;
     // Completes a pending row if the request got as far as dispatch. The store
-    // keeps what beginning it recorded where this log carries nothing.
-    await finishLog(deps.store, completed, keyId, deps.logger);
+    // keeps what beginning it recorded where this log carries nothing. Skipped
+    // where the row is already complete: `completed` is dispatch's own live log
+    // once a request got that far, so appending it twice bills its tokens twice.
+    if (!logged) await finishLog(deps.store, completed, keyId, deps.logger);
     // Not an access line: this fires only when a request failed outright, which
     // a busy gateway does rarely. It exists because the row cannot hold the
     // reason — `request_logs` has a status and an error code and no room for
     // "model \"x\" is not allowed for this API key" — so without this, the one
-    // fact an operator needs is the one nothing recorded.
-    deps.logger.warn("request rejected", {
-      requestId,
-      surface,
-      status: completed.status,
-      code: gatewayError.code,
-      reason: gatewayError.message,
-    });
+    // fact an operator needs is the one nothing recorded. A disconnect is not a
+    // failure and is far too common to print; its row is the whole record.
+    if (!cancelled) reportRejection(deps.logger, requestId, completed, gatewayError, surface);
     return errorResponse(surface, gatewayError.code, gatewayError.message);
   }
 }

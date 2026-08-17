@@ -194,9 +194,11 @@ function values(log: RequestLog, state: RequestState): SQLQueryBindings[] {
  * Three columns are deliberately not overwritten. `at` is omitted entirely, so
  * a row keeps the start time it was filed under and does not jump position in
  * the log the instant it finishes. `requested_model` and `api_key_id` fall back
- * to what the row already holds, because the route's terminal catch synthesises
- * a blank log and can reach a row that already began — when dispatch throws
- * rather than yielding an error event.
+ * to what the row already holds, because the route's terminal catch can reach a
+ * row that already began — when dispatch throws rather than yielding an error
+ * event — and the log it completes may carry neither. It hands over dispatch's
+ * own log where the request got that far, and a blank one only where it did
+ * not, so the fallback covers the second case rather than every case.
  */
 const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
   ON CONFLICT(id) DO UPDATE SET
