@@ -260,6 +260,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni start` / `stop` / `restart` | run the gateway; `--foreground` attaches it to your terminal |
 | `omni doctor` | which installation it resolved, and whether it can act on it |
 | `omni logs` | recent requests as the gateway recorded them |
+| `omni bodies <request-id>` | captured bodies for one request; withheld unless you pass `--full` |
 | `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
 | `omni usage` | spend and tokens, by provider, model, key, or day |
 | `omni quota` | provider quota per window: use, burn rate, and when it runs out |
@@ -267,7 +268,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni credentials …` | list, show, enable, disable, retier, refresh, remove |
 | `omni models …` | list, show, put, remove, `dry-run`, `catalog` |
 | `omni keys …` | list, create, revoke |
-| `omni settings get` / `set` | routing weights, retention, deadlines |
+| `omni settings get` / `set` | routing weights, retention, deadlines, and the runtime switches |
 | `omni admin set-password` | change the console password |
 | `omni db migrate` | create or upgrade the database |
 
@@ -339,7 +340,9 @@ returned — capture is opt-in and takes **two independent keys, both required**
 
 1. `OMNI_BODY_LOGGING_ALLOWED=1` in the installation's `.env`, read at boot.
 2. The **Capture request and response bodies** setting, in the console's
-   Settings screen or `omni settings set`. Off by default.
+   Settings screen or `omni settings set bodyLoggingEnabled true`. Off by
+   default. Raw SSE frames are the separate, far larger
+   `bodyLoggingCaptureStreamChunks`.
 
 Two keys, because an admin session on its own must not be able to start
 recording your users' prompts. With the environment variable unset the setting
@@ -351,15 +354,45 @@ Turning capture off stops new capture. It does not delete what was already
 written.
 
 **Per-key opt-out.** A gateway key can be created with *Never record this key's
-bodies*, and it is then never captured whatever the setting says. Use it for a
-client whose payloads must not be retained. The choice is made when the key is
-issued and cannot be reversed afterwards — reissue the key instead.
+bodies* — `omni keys create --no-bodies` — and it is then never captured whatever
+the setting says. Use it for a client whose payloads must not be retained. The
+choice is made when the key is issued and cannot be reversed afterwards; reissue
+the key instead. `omni keys list` and the console's Keys screen both show which
+keys are exempt, so an audit does not have to go through the database.
 
 **What is captured.** What arrived at `/v1/*` and what was returned, plus the
 request and response of every provider attempt, in dispatch order. The client
 request is the conversation *before* RTK compression and each attempt request is
 the one *after* it, so an artifact is the only place you can read what a filter
-actually removed. The console labels which side is which.
+actually removed. The console labels which side is which, and so does the CLI.
+
+**Reading them.** Expand a row on the console's Logs screen, or from a terminal:
+
+```bash
+omni bodies req_550e8400-…          # the frame: state, size, one line per attempt
+omni bodies req_550e8400-… --full   # the payloads themselves
+omni bodies req_550e8400-… --json   # the artifact, for a script
+```
+
+**The bare command withholds the bodies and prints only the frame.** Every other
+read in the CLI prints everything it has; this one prints conversations. A
+terminal keeps scrollback, a multiplexer keeps a logged pane, and whoever runs
+this during an incident is usually sharing that screen. Asking for the bodies
+costs one flag; printing them by default costs a prompt corpus in someone's
+session log, silently. The frame still tells you the detail state, when the
+capture landed, its size on disk, whether anything was truncated, and each
+attempt's provider and byte counts — labelled `pre-RTK` for the client request
+and `post-RTK` for every attempt request, because those are not the same payload.
+
+A request with no artifact is an answer rather than an error, and the three
+answers are different: `not captured` means capture was not running, `captured,
+then lost` means retention or the row cap has been through, and `captured, but
+unreadable` means the file is there but will not decrypt — usually a changed
+`OMNI_ENCRYPTION_KEY`.
+
+There is no CLI command to delete a captured body. Retention, the row cap, and
+the orphan sweep are the gateway's; a second path that erases forensic evidence
+on request is a way to lose an incident record.
 
 **What is never captured.** Headers, at any layer — every provider authenticates
 through headers, so that is where the tokens are. That one is a guarantee: the

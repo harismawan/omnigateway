@@ -622,6 +622,29 @@ describe("LogsBoard", () => {
     await waitFor(() => expect(within(dialog).getAllByText("truncated").length).toBeGreaterThan(0));
   });
 
+  test("the artifact size says what it measured rather than reading as a request size", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({
+          requestId: "req-ok",
+          sizeBytes: 82_400,
+          artifact: bodyArtifact({
+            client: { request: { model: "fast" }, response: { ok: true }, truncated: false },
+            attempts: [],
+          }),
+        }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+    // The figure is the encrypted file: bounded and masked, then hex encoded. It
+    // is neither the wire size nor the size of the JSON shown below it, and a
+    // bare number here would be read as the former.
+    expect(await within(dialog).findByText(/82,400 bytes on disk/)).toBeTruthy();
+  });
+
   test("a quiet gateway invites traffic rather than showing an empty table", async () => {
     createFetchStub({
       "GET /api/logs": () => ({ logs: [] }),

@@ -271,7 +271,41 @@ disconnect, marked truncated.
 
 `GET /api/requests/:id/body` decrypts and returns the artifact, or returns the row's `detail_state`
 when the artifact is missing or corrupt. It requires an admin session like every other `/api/*` route.
-The dashboard shows the artifact on request log row expansion. No CLI command in this change.
+The dashboard shows the artifact on request log row expansion.
+
+The CLI reaches the same operations through `@omni/control`, never `/api/*`, and covers what the
+dashboard covers: reading an artifact, both settings, and the per-key opt-out at creation with the
+resulting state visible in `keys list`.
+
+`omni bodies <request-id>` withholds the bodies by default and prints the frame instead — the detail
+state, the size on disk, whether anything was truncated, and one line per attempt with its provider
+and byte counts. `--full` prints the bodies, `--json` prints the artifact. The default is the
+conservative one because this command differs from every other read in the CLI: `omni logs` and
+`omni usage` print metrics an operator may leave on screen, while this prints conversations. A
+terminal keeps scrollback, a terminal multiplexer keeps a logged pane, and an operator running this
+during an incident is usually sharing that screen. Withholding by default costs one flag; the
+other default costs a prompt corpus in someone's session log, and it costs it silently.
+
+Both the summary and `--full` name which side of RTK each payload sits on, for the same reason the
+dashboard does: the client request and the attempt request are not the same payload, and a reader
+comparing them must know which is which.
+
+No byte count either surface reports is the size of what crossed the wire, and neither surface may
+imply otherwise, because the wire size is recorded nowhere. The CLI's per-payload counts are measured
+over the stored payload, after masking and structural bounding; the gap is not marginal, since a
+payload made mostly of one long opaque token is replaced by an elision and reads as a fraction of
+what was sent. The dashboard's single figure is the encrypted file, which is that same bounded
+payload and then hex encoding, so it errs the other way. Each therefore names what it measured —
+"stored" and "on disk" — rather than printing a bare size an operator will read as a request size.
+
+Settings edits go through the same schema the dashboard's do. `settings set` had accepted only
+numbers, so `rtkEnabled` was unreachable from the CLI before this change and the two new booleans
+would have been unreachable in the same way; it now parses booleans as well, which fixes `rtkEnabled`
+as a side effect rather than as a special case.
+
+There is no CLI command to prune or delete a captured body. Retention, the row cap, and the orphan
+sweep are the gateway's, and a second path that deletes forensic evidence on demand is a way to lose
+an incident record, not a convenience.
 
 ## Tests
 

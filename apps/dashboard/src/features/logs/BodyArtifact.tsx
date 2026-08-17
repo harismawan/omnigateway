@@ -243,7 +243,12 @@ export function BodyArtifact({ requestId }: { requestId: string }) {
   const meta =
     body.data === undefined || body.data.detailState !== "ready"
       ? undefined
-      : `${BYTES.format(body.data.sizeBytes)} bytes stored`;
+      : // "on disk" rather than a bare size, because this is the encrypted file:
+        // it is measured after masking and structural bounding and then after hex
+        // encoding, so it is neither what crossed the wire nor the size of the
+        // JSON below it. Naming the thing measured is cheaper than an operator
+        // reading it as a request size.
+        `${BYTES.format(body.data.sizeBytes)} bytes on disk`;
 
   return (
     <Module
