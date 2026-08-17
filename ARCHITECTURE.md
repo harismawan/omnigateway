@@ -165,7 +165,8 @@ catalog affects new targets only.
 
 ## Storage
 
-One SQLite file, WAL mode, seven migrations.
+One SQLite file, WAL mode, eight migrations — plus, when body capture is on, a
+tree of encrypted artifacts beside it.
 
 ```mermaid
 flowchart TB
@@ -185,12 +186,16 @@ flowchart TB
   subgraph history[History]
     logs["<b>request_logs</b><br/>metadata + tokens, state pending→done<br/><i>pruned at logRetentionDays</i>"]
     daily["<b>usage_daily</b><br/>rollup<br/><i>kept 400 days</i>"]
+    bodies["<b>request_bodies</b><br/>pointer + sha256, never a body<br/><i>pruned at logRetentionDays, capped at 100k rows</i>"]
+    artifact["<i>request_bodies/YYYY/MM/DD/&lt;id&gt;.json.enc</i> 🔒<br/>client pair + one pair per attempt"]
   end
 
   cred --- health
   cred --- quota
   quota == "same transaction" ==> samples
   logs == "same transaction" ==> daily
+  logs -. "requestId" .- bodies
+  bodies -. "rel_path" .-> artifact
 ```
 
 Writing the rollup in the *same transaction* as the log row is what lets a year of
@@ -208,6 +213,34 @@ lazy and purpose-scoped — a credential opens *for inference*, *for refresh*, o
 *for usage*, so ranking ten candidates costs zero decryptions. Gateway API keys
 are not stored at all, only their hashes.
 
+`request_bodies` is the one table whose payload is not in the database. Bodies
+are the largest thing this gateway could store — one conversation with a pasted
+file in it dwarfs the whole of `request_logs` — and inlining them would carry
+every prompt through the same page cache, the same WAL, and the same `VACUUM` as
+the routing tables, one `sqlite3` invocation from plaintext. The row therefore
+holds a pointer and a `sha256` **over the ciphertext**, so on-disk truncation is
+detectable by a reader that does not hold the key at all. That is what lets the
+reader answer `missing` or `corrupt` instead of raising: a file tree and a table
+that are not written transactionally together *will* drift, and expiry deletes
+file and row explicitly rather than by `ON DELETE CASCADE`, because a silently
+disabled `foreign_keys` pragma would turn expiry of a prompt corpus into
+indefinite retention of one.
+
+Capture needs two keys — `OMNI_BODY_LOGGING_ALLOWED` at boot and
+`settings.bodyLoggingEnabled` at runtime — and a third can veto it: an API key
+carrying `body_logging_opt_out` is never captured. Both are checked in
+`apps/gateway/src/routes/proxy.ts` before any capture work begins. Reading back
+is `readRequestBody` in `@omni/control`, served by `GET /api/requests/:id/body`
+behind the same admin session as every other `/api/*` route.
+
+One artifact holds the client pair and every wire pair together, so a failover
+incident reads as one ordered story. The two are not the same payload: RTK's
+`transformRequest` runs in dispatch before routing, so `client.request` is the
+pre-filter conversation and every `attempts[].request` is the post-filter one.
+`request_logs` already records which filters ran and how much they removed but
+not *what*, and the artifact is the only place that can be read — which is why
+the console labels each side rather than presenting them as interchangeable.
+
 ## Background loops
 
 Three, started at boot and stopped on signal:
@@ -221,7 +254,7 @@ flowchart LR
 
   oauth["<b>OAuth refresh</b><br/>every 60s"] --> oauthJob["renew inside lead window<br/>disable if expired, no refresh token"]
   quota["<b>Quota poller</b><br/>every quotaPollIntervalMs"] --> quotaJob["ask providers what is left<br/><i>failed probe ⇒ unknown, never disabled</i>"]
-  maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs at retention<br/>prune quota_samples at retention<br/>prune usage_daily at 400d"]
+  maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs at retention<br/>prune quota_samples at retention<br/>prune usage_daily at 400d<br/>prune body rows at retention, cap at 100k<br/>sweep artifact files with no row"]
 
   oauthJob -.-> oauth
   quotaJob -.-> quota
@@ -231,6 +264,13 @@ flowchart LR
 Setting `quotaPollIntervalMs` to zero disables the poller entirely; it is read
 once at boot. Retiring the `pending` rows at startup is what stops a crash from
 double-counting usage.
+
+Body rows expire on the same sweep as the request logs they belong to, rather
+than on a schedule of their own, so an artifact can never outlive its log line.
+The row cap runs beside the window because the window bounds nothing: at
+sustained load a seven-day retention over full traffic is unbounded in practice.
+The orphan sweep exists because a crash between the file write and the row write
+leaves a file nothing will ever come back for.
 
 ## The console and the CLI
 
@@ -253,3 +293,12 @@ The console is a React SPA the gateway serves as static files from its own
 origin; it may import types and the model catalog, never a provider adapter or
 the HTTP client. The CLI skips the server completely and opens the database
 itself — same operations, no running gateway required.
+
+Reading a captured body is one of those operations, not a route's own logic:
+`readRequestBody` decides that a swept or undecryptable artifact is a state to
+report rather than an error to raise, and the handler adds no error mapping that
+could quote a path or a stack back. It carries no CLI command yet, which is the
+only asymmetry between the two front ends. `GET /api/settings` additionally
+reports `bodyLoggingAllowed` beside the settings, because the runtime toggle is
+meaningless without the boot-time key and a console that knew only the setting
+would render a switch that silently does nothing.

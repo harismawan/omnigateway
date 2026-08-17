@@ -308,6 +308,7 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_STATIC_DIR` | No | the console shipped with the server | Serve a different console build |
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
+| `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](#recording-bodies) |
 
 Gateway events are written to stdout as one greppable line each: process lifecycle, OAuth
 refreshes, quota probes, failover, and errors.
@@ -329,6 +330,95 @@ environment. Edit it with `omni settings set` or in the console.
 
 `.env.example` in the repository documents the optional provider
 client-identity overrides.
+
+## Recording bodies
+
+By default the gateway records no prompts and no responses. If you need them for
+an incident — to see what a client actually sent, or what a provider actually
+returned — capture is opt-in and takes **two independent keys, both required**:
+
+1. `OMNI_BODY_LOGGING_ALLOWED=1` in the installation's `.env`, read at boot.
+2. The **Capture request and response bodies** setting, in the console's
+   Settings screen or `omni settings set`. Off by default.
+
+Two keys, because an admin session on its own must not be able to start
+recording your users' prompts. With the environment variable unset the setting
+does nothing at all, and the console says so rather than letting you flip a
+switch that silently no-ops. With the environment variable set you can turn
+capture on and off mid-incident without restarting.
+
+Turning capture off stops new capture. It does not delete what was already
+written.
+
+**Per-key opt-out.** A gateway key can be created with *Never record this key's
+bodies*, and it is then never captured whatever the setting says. Use it for a
+client whose payloads must not be retained. The choice is made when the key is
+issued and cannot be reversed afterwards — reissue the key instead.
+
+**What is captured.** What arrived at `/v1/*` and what was returned, plus the
+request and response of every provider attempt, in dispatch order. The client
+request is the conversation *before* RTK compression and each attempt request is
+the one *after* it, so an artifact is the only place you can read what a filter
+actually removed. The console labels which side is which.
+
+**What is never captured.** Headers, at any layer — every provider authenticates
+through headers, so that is where the tokens are. That one is a guarantee: the
+capture layer is never handed a header list, so no provider, present or future,
+can opt its own in.
+
+**Masking is best-effort, and a body corpus is sensitive even after it.** Bodies
+are masked before they are written, replacing bearer tokens, `sk-`/`ak-`/`pk-`
+prefixed keys, the well-known vendor prefixes (`ghp_` and the rest of GitHub's,
+`github_pat_`, `AIza`, `GOCSPX-`, `xai-`), and any long opaque token with elided
+forms. Two things follow, and both matter before you turn capture on:
+
+- It costs fidelity. The length rule has no idea what it is looking at, so it
+  also elides base64 image data, content hashes, and minified source. That is
+  deliberate: a corpus that leaks a live credential is the worse failure.
+- It does not catch everything. The length rule is tuned to base64url, so a
+  standard-base64 secret or an AWS secret access key can slip through it on a
+  `+` or a `/`, and a credential shorter than forty-one characters or exactly
+  forty characters long — an Azure OpenAI key, for instance — is out of its reach
+  entirely. The prefix rules exist precisely because the length rule cannot be
+  the whole answer, and between them they are a reduction in exposure, not a
+  guarantee of none.
+
+Treat the artifact tree as you would treat the prompts themselves: it is
+encrypted at rest, it belongs on a volume you control, and it is not something to
+copy into a ticket.
+
+Nothing changes about stdout. Prompts and responses never reach the log, the
+journal, or the Console screen; capture is a separate encrypted store.
+
+**Where it goes.** `request_bodies/YYYY/MM/DD/<requestId>.json.enc` beside the
+database file, encrypted with AES-256-GCM under `OMNI_ENCRYPTION_KEY`, the same
+key as your provider credentials. Copies taken without the key yield nothing.
+Changing the key invalidates every artifact already written.
+
+**Bounds.** Two limits, because either alone fails:
+
+- Bodies expire on the same **log retention** window as request rows, swept
+  hourly, file and row deleted together.
+- A hard cap of **100,000 body rows**, oldest pruned first. The window is what
+  you reason about; the row cap is what actually bounds disk, because a week's
+  window over sustained traffic bounds nothing.
+
+Individual payloads are bounded structurally rather than by byte offset — strings
+past 64 KB, arrays to their last 24 items, nesting past 6 levels, objects to 80
+keys — so a stored artifact is always valid JSON. An artifact still over 512 KB
+after that has its bodies replaced by a marker recording why.
+
+**Sizing a volume.** 512 KB is a *plaintext* cap and encryption emits hex, so one
+artifact can reach roughly 1 MB on disk. With the 100,000-row cap, the worst case
+for the whole body corpus is therefore about **100 GB**, not 50. Real traffic is
+nowhere near that — most artifacts are a few kilobytes — but that is the number
+to size against if you enable capture on a busy gateway.
+
+**Sizing memory.** The same 512 KB is also the cap on each captured body held in
+memory while a request is in flight, and there is one of those per side per
+attempt. Worst case per captured request is therefore about 512 KB × (attempts +
+1), so a request that fails over twice can hold a few megabytes until it
+finishes. Multiply by your concurrency before enabling capture on a small box.
 
 ## Docker
 
@@ -355,21 +445,26 @@ Worth knowing before you deploy it:
 - **Two grains of usage history.** Detailed request logs are pruned after 30
   days by default; a daily rollup is kept for 400 days. A day is your host's
   local midnight, fixed when the row is written.
+- **Body capture is forensics, not an archive.** It is off unless you turn it on
+  with both keys, it expires on the request-log window, and it is capped at
+  100,000 rows. It is not a searchable prompt history and there is no CLI for it.
 - **Quota readings come from the providers**, and their usage endpoints are
   undocumented. An account with nothing reported is treated as unknown, never
   as unlimited.
 - **The gateway does not know which model accepts which request shape.** An
   unsupported combination surfaces as the provider's own 400 rather than being
   caught earlier.
-- Not in scope for version 1: semantic caching, billing, prompt storage,
-  horizontal scaling.
+- Not in scope for version 1: semantic caching, billing, horizontal scaling.
 
 ## Security
 
 - Treat `OMNI_ENCRYPTION_KEY`, gateway keys, and the SQLite file as secrets.
   Anyone with the file *and* the key has your provider credentials.
 - Prompts and responses are never logged. Request logs hold metadata and token
-  counts only.
+  counts only, and no body ever reaches stdout, the journal, or the Console
+  screen. Bodies are stored only if you opt in to
+  [body capture](#recording-bodies), which needs both an environment variable
+  and a setting, encrypts what it writes, and can be refused per key.
 - Gateway keys are stored as hashes. A lost key is reissued, not recovered.
 - Secrets are never accepted on the command line — `omni` prompts for them or
   reads stdin — so they stay out of your shell history and the process table.
