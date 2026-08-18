@@ -392,6 +392,51 @@ test("creating an api key returns the raw value exactly once", async () => {
   expect(JSON.stringify(listed)).not.toContain(created.key);
 });
 
+/**
+ * Limits are the one part of a key that is editable after minting.
+ *
+ * `bodyLoggingOptOut` has no route like this on purpose: it is a promise to
+ * whoever holds the key. A limit is the operator's own ceiling on their own
+ * installation, and a weekly spend cap that cannot be adjusted without minting a
+ * new key and redeploying every client is a cap that gets set to unlimited.
+ */
+test("a key's limits are editable behind admin auth, and the matrix is replaced whole", async () => {
+  const { call, store } = await harness();
+  const created = (await (
+    await call("POST", "/api/keys", { label: "cli", limits: { requests: { "1m": 60 } } })
+  ).json()) as { id: string };
+
+  const body = { limits: { tokens: { "1w": 50_000_000 }, concurrency: 8 } };
+  expect((await call("PUT", `/api/keys/${created.id}/limits`, body, false)).status).toBe(401);
+
+  const saved = await call("PUT", `/api/keys/${created.id}/limits`, body);
+  expect(saved.status).toBe(200);
+  const listed = await store.keys.list();
+  expect(listed[0]?.limits).toEqual({ tokens: { "1w": 50_000_000 }, concurrency: 8 });
+});
+
+test("a malformed limit matrix is refused rather than stored", async () => {
+  const { call, store } = await harness();
+  const created = (await (
+    await call("POST", "/api/keys", { label: "cli", limits: { requests: { "1m": 60 } } })
+  ).json()) as { id: string };
+
+  for (const body of [
+    // An unknown dimension or window read back later as "no limit" would fail
+    // open on a control the operator explicitly set.
+    { limits: { bandwidth: { "1m": 5 } } },
+    { limits: { requests: { "2m": 60 } } },
+    { limits: { spend: { "1m": 5 } } },
+    // Zero is a revoked key, not a ceiling.
+    { limits: { requests: { "1m": 0 } } },
+    { limits: null },
+    {},
+  ]) {
+    expect((await call("PUT", `/api/keys/${created.id}/limits`, body)).status).toBe(400);
+  }
+  expect((await store.keys.list())[0]?.limits).toEqual({ requests: { "1m": 60 } });
+});
+
 test("an api key is revoked rather than deleted, so usage keeps its attribution", async () => {
   const { call, store } = await harness();
   const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as {

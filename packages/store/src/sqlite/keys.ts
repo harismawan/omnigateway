@@ -118,6 +118,16 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       return { ...input, createdAt: now, revokedAt: null };
     },
 
+    async setLimits(id: string, limits: LimitConfig) {
+      db.run("UPDATE api_keys SET limits = ? WHERE id = ?", [
+        // Same guard as `create`, and for the same reason: an edit that reached
+        // past the control schema must not be able to write a matrix the next
+        // reader refuses, which is a key locked out of `/v1` by its own repair.
+        JSON.stringify(parseLimitConfig(limits)),
+        id,
+      ]);
+    },
+
     async revoke(id: string) {
       db.run("UPDATE api_keys SET revoked_at = ? WHERE id = ?", [Date.now(), id]);
     },

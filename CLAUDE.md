@@ -249,6 +249,14 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   throw over one such row: `toKey` serves the listing as well as the auth lookup, and the listing is
   how an operator finds the row to fix. Nothing may collapse the null into `{}` on the way to the
   CLI or console.
+- `limits` is the one field on a key that is editable after minting, through `setKeyLimits` and
+  `PUT /api/keys/:id/limits`; `bodyLoggingOptOut` deliberately has no such path. An opt-out is a
+  promise to whoever holds the key, while a limit is the operator's own ceiling on their own
+  installation. The matrix is written whole — `{}` is how the last limit goes away, and it must land
+  as `{}` rather than a husk like `{"requests":{}}` or the outer `null` that means unreadable.
+- The usage on `ApiKeySummary.limitUsage` is committed rows only, so it is a floor on what the
+  limiter sees and never the limiter's own number: the gateway adds a process-local delta and the
+  `concurrency` gauge is not stored at all, which is why its `used` is `null` rather than `0`.
 - API-key limits are enforced over *sliding* windows. A fixed window resets on a clock edge and lets
   a key spend a whole window's allowance either side of one, at every window size. `1m` is exact from
   a ring of timestamps in `apps/gateway`; longer windows read `usage.sumSince`, which must filter

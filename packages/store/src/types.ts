@@ -626,6 +626,21 @@ export interface KeyRepo {
   findByHash(hash: string): Promise<ApiKey | null>;
   /** Throws on a `limits` shape no reader could parse, rather than storing it. */
   create(input: ApiKeyInput): Promise<ApiKey>;
+  /**
+   * Replaces one key's limit matrix, whole.
+   *
+   * The one field on a key that is editable after minting, and deliberately so:
+   * `bodyLoggingOptOut` is a promise to whoever holds the key, while a limit is
+   * the operator's own ceiling on their own installation. A weekly spend cap
+   * that cannot be adjusted without minting a new key and redeploying every
+   * client is a cap that gets set to unlimited instead.
+   *
+   * Replaces rather than merges, for the same reason `create` validates: the
+   * stored value is one JSON document and a partial write would have to be
+   * read, merged, and re-validated somewhere, which is a caller's decision
+   * rather than a repo's. Throws on a shape no reader could parse.
+   */
+  setLimits(id: string, limits: LimitConfig): Promise<void>;
   revoke(id: string): Promise<void>;
 }
 

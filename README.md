@@ -214,6 +214,23 @@ in-flight requests die with the process.
 > `--limit requests:1m=N`. A script still passing the old flag stops with an
 > unknown-flag error rather than quietly taking a deprecated path.
 
+Limits are editable after the key exists, unlike `--no-bodies` below. `omni keys
+list` prints a compact summary; the full matrix and what has gone against it
+need one key's id:
+
+```bash
+omni keys limits <id>
+omni keys limits <id> --set tokens:1w=50000000
+omni keys limits <id> --unset spend:5h
+```
+
+`--unset` names a pair that is actually set, so a typo fails rather than
+reporting a change it did not make. The usage shown counts completed requests
+still inside each window, so it reads at or below what the running gateway is
+enforcing, and `concurrency` shows no figure at all — the gauge lives in the
+gateway process, not in the database. The console's Keys screen shows the same
+matrix behind each row's disclosure and edits it there.
+
 Now use it:
 
 ```bash

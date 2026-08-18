@@ -144,6 +144,21 @@ export const keyCreateSchema = z
   .strict();
 
 /**
+ * The one part of a key that may be edited after it is minted.
+ *
+ * Sent whole rather than as a patch: `limits` is one JSON document, `{}` is a
+ * meaningful value, and a partial body would have to distinguish "leave this
+ * pair alone" from "clear it" in a shape where absent and null already both
+ * mean unlimited. A caller that wants to change one pair reads the matrix,
+ * edits it, and sends it back.
+ *
+ * `bodyLoggingOptOut` is deliberately not here. An opt-out is a promise to
+ * whoever holds the key and must not be revocable behind their back; a limit is
+ * the operator's own ceiling on their own installation.
+ */
+export const keyLimitsSchema = z.object({ limits: limitConfigSchema }).strict();
+
+/**
  * How many database snapshots to keep, and for how long.
  *
  * Both bounds are floored at one. Keeping zero snapshots deletes the undo for

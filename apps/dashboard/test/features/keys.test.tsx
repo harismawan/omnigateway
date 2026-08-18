@@ -58,7 +58,7 @@ describe("KeysBoard", () => {
     expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(2);
   });
 
-  test("creating a key sends the label, allowlist, and limit", async () => {
+  test("creating a key sends the label, allowlist, and limits", async () => {
     const user = userEvent.setup();
     const stub = stubKeys({ "POST /api/keys": () => minted });
     renderWithProviders(<KeysBoard />);
@@ -67,7 +67,9 @@ describe("KeysBoard", () => {
     const dialog = await screen.findByRole("dialog");
 
     await user.type(within(dialog).getByLabelText("Label"), "ci-runner");
-    await user.type(within(dialog).getByLabelText("Rate limit"), "60");
+    await user.click(within(dialog).getByRole("button", { name: "Limits" }));
+    await user.type(within(dialog).getByLabelText("Requests per minute"), "60");
+    await user.type(within(dialog).getByLabelText("Spend per week"), "25.5");
     await user.click(within(dialog).getByRole("button", { name: "Create key" }));
 
     await waitFor(() => {
@@ -76,11 +78,30 @@ describe("KeysBoard", () => {
         JSON.stringify({
           label: "ci-runner",
           modelAllowlist: null,
-          limits: { requests: { "1m": 60 } },
+          limits: { requests: { "1m": 60 }, spend: { "1w": 25.5 } },
           bodyLoggingOptOut: false,
         }),
       );
     });
+  });
+
+  /**
+   * Nine ceilings unfolded over an operator who only ever wanted a label would
+   * be a worse default than the one field this replaced.
+   */
+  test("the limit matrix is folded away until it is asked for", async () => {
+    const user = userEvent.setup();
+    stubKeys();
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: /Create a key/ }));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(within(dialog).queryByLabelText("Requests per minute")).toBeNull();
+    expect(within(dialog).getByText("no limits; this key is unbounded")).toBeTruthy();
+
+    await user.click(within(dialog).getByRole("button", { name: "Limits" }));
+    expect(within(dialog).getByLabelText("Requests per minute")).toBeTruthy();
   });
 
   /**
@@ -166,7 +187,7 @@ describe("KeysBoard", () => {
     // The healthy key keeps its own ceiling: one broken row is one broken row.
     const ordinary = screen.getByText("laptop").closest("tr");
     if (ordinary === null) throw new Error("the ordinary key has no row");
-    expect(within(ordinary).getByText("120/min")).toBeTruthy();
+    expect(within(ordinary).getByText("1 limit")).toBeTruthy();
     expect(within(ordinary).queryByText("unreadable")).toBeNull();
   });
 
@@ -199,18 +220,19 @@ describe("KeysBoard", () => {
     ).toBeTruthy();
   });
 
-  test("a fractional rate limit is refused before it is sent", async () => {
+  test("a fractional request ceiling is refused before it is sent", async () => {
     const user = userEvent.setup();
     const stub = stubKeys();
     renderWithProviders(<KeysBoard />);
 
     await user.click(await screen.findByRole("button", { name: /Create a key/ }));
     const dialog = await screen.findByRole("dialog");
-    await user.type(within(dialog).getByLabelText("Rate limit"), "1.5");
+    await user.click(within(dialog).getByRole("button", { name: "Limits" }));
+    await user.type(within(dialog).getByLabelText("Requests per minute"), "1.5");
     await user.click(within(dialog).getByRole("button", { name: "Create key" }));
 
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "The rate limit must be a whole number of requests per minute, or blank for none.",
+      "Requests per minute must be a whole number above zero, or blank for no limit.",
     );
     expect(stub.calls.some((call) => call.init?.method === "POST")).toBe(false);
   });
@@ -229,6 +251,120 @@ describe("KeysBoard", () => {
 
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url === "/api/keys/key-1")).toBe(true);
+    });
+  });
+
+  /**
+   * A key has one cell and may have three ceilings, so the summary has to pick
+   * one. The shortest window is the wrong answer and so is the first
+   * configured: a key idle this minute and one request from its weekly ceiling
+   * would read as comfortable in either.
+   */
+  test("the cell summarises the count and the limit nearest exhaustion", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            limits: { requests: { "1m": 60 }, tokens: { "1w": 1_000_000 } },
+            limitUsage: [
+              { dimension: "requests", window: "1m", limit: 60, used: 6 },
+              { dimension: "tokens", window: "1w", limit: 1_000_000, used: 900_000 },
+            ],
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const row = (await screen.findByText("laptop")).closest("tr");
+    if (row === null) throw new Error("the key has no row");
+    expect(within(row).getByText("2 limits")).toBeTruthy();
+    expect(within(row).getByText("Tokens per week 1,000,000, 90% used")).toBeTruthy();
+    expect(within(row).queryByText(/Requests per minute/)).toBeNull();
+  });
+
+  test("the full matrix is behind a disclosure rather than in the cell", async () => {
+    const user = userEvent.setup();
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            limits: { requests: { "1m": 60 }, concurrency: 8 },
+            limitUsage: [
+              { dimension: "requests", window: "1m", limit: 60, used: 45 },
+              { dimension: "concurrency", window: null, limit: 8, used: null },
+            ],
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const toggle = await screen.findByRole("button", { name: "Show limits for laptop" });
+    expect(screen.queryByRole("meter")).toBeNull();
+
+    await user.click(toggle);
+    expect(
+      await screen.findByRole("meter", { name: "laptop, Requests per minute, 75% used" }),
+    ).toBeTruthy();
+    // A gauge held in the serving process has no bar to draw, and drawing an
+    // empty one would claim the key is idle.
+    expect(screen.getAllByRole("meter")).toHaveLength(1);
+    expect(screen.getByText(/in flight now, counted in the gateway process/)).toBeTruthy();
+  });
+
+  /**
+   * Editable after creation, unlike `bodyLoggingOptOut`. A weekly spend cap that
+   * cannot be adjusted without minting a new key and redeploying every client is
+   * a cap that gets set to unlimited instead.
+   */
+  test("limits are editable after creation, and the matrix is sent whole", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({
+        keys: [apiKey({ limits: { requests: { "1m": 60 }, tokens: { "1w": 1_000_000 } } })],
+      }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+
+    // The stored matrix is what the form starts from, not a blank one.
+    const perMinute = within(dialog).getByLabelText("Requests per minute");
+    expect((perMinute as HTMLInputElement).value).toBe("60");
+
+    await user.clear(perMinute);
+    await user.type(perMinute, "90");
+    await user.clear(within(dialog).getByLabelText("Tokens per week"));
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.url).toBe("/api/keys/key-1/limits");
+      // Cleared, not merged: the whole matrix is sent, so a blank field is how
+      // a ceiling is removed.
+      expect(put?.init?.body).toBe(JSON.stringify({ limits: { requests: { "1m": 90 } } }));
+    });
+  });
+
+  test("clearing every field leaves the key unlimited rather than broken", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey({ limits: { requests: { "1m": 60 } } })] }),
+      "PUT /api/keys/key-1/limits": () => apiKey({ limits: {} }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.clear(within(dialog).getByLabelText("Requests per minute"));
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.init?.body).toBe(JSON.stringify({ limits: {} }));
     });
   });
 
