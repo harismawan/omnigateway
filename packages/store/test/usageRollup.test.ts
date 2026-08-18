@@ -340,6 +340,42 @@ test("the audit compares every counter, within a float's tolerance on cost", asy
   db.close();
 });
 
+/**
+ * Nothing validates `RequestLog.at`, and SQLite's `/` is integer division only
+ * when both operands are integers.
+ *
+ * With a fractional `at` the write path buckets at `hourOf` — an integer — while
+ * a bare `at / 3600000` computes a REAL an eyelash above it. Two consequences,
+ * both silent: `doctor` reports a mismatch against a rollup that is correct, and
+ * a rebuild writes a REAL primary key that no later integer-hour write ever
+ * merges with, so that key double-counts from then on. The bucket is asserted
+ * for its type rather than only its value, because `480000` and
+ * `480000.0000001389` compare unequal but print alike in a failure message.
+ */
+test("a fractional timestamp buckets the same way on both sides of the rollup", async () => {
+  const { db, usage } = repo();
+  const fractional = H0 + 0.5;
+  await usage.append(log({ id: "r1", at: fractional }));
+  const written = await usage.sumSince("k1", H0);
+
+  expect(await usage.auditRollup()).toEqual({ buckets: 1, mismatched: 0, ok: true });
+
+  await usage.rebuildRollup();
+  expect(await usage.sumSince("k1", H0)).toEqual(written);
+  expect(await usage.auditRollup()).toEqual({ buckets: 1, mismatched: 0, ok: true });
+
+  const hours = db.query<{ hour: number }, []>("SELECT hour FROM usage_rollup").all();
+  expect(hours).toEqual([{ hour: Math.floor(H0 / HOUR_MS) }]);
+  expect(Number.isInteger(hours[0]?.hour)).toBe(true);
+
+  // And a later integer-hour write lands in the bucket the rebuild wrote rather
+  // than beside it, which is the shape the double-count took.
+  await usage.append(log({ id: "r2", at: H0 + 1_000 }));
+  expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM usage_rollup").get()?.n).toBe(1);
+  expect((await usage.sumSince("k1", H0)).requests).toBe(2);
+  db.close();
+});
+
 test("a rebuild leaves out pending rows, as the write path does", async () => {
   const { db, usage } = repo();
   const inside = H0 + 2 * HOUR_MS;

@@ -254,7 +254,7 @@ async function stageUpload(
  */
 export function databaseRoutes(deps: DatabaseRouteDeps) {
   const logger = deps.logger ?? noopLogger;
-  const database: DatabaseDeps = { store: deps.store, fs: deps.fs, now: deps.now };
+  const database: DatabaseDeps = { store: deps.store, fs: deps.fs, now: deps.now, logger };
 
   return (
     new Elysia()

@@ -19,9 +19,13 @@
 -- being a rebuild, a restore that runs it, and a `doctor` check that compares
 -- the two. It would not be answered by care.
 --
--- `hour` is `at / 3600000`, floored. SQLite truncates integer division toward
--- zero and JavaScript's `Math.floor` rounds toward negative infinity; they agree
--- on every epoch this side of 1970, which is every epoch a request log holds.
+-- `hour` is `at / 3600000`, floored, and every SQL side spells that
+-- `CAST(at / 3600000 AS INTEGER)`. The cast is not decoration: nothing validates
+-- `at`, and SQLite's `/` is integer division only when both operands are
+-- integers, so a fractional `at` would give this INTEGER column a REAL key that
+-- no later integer-hour write ever merges with. Truncation toward zero and
+-- JavaScript's `Math.floor` then agree on every epoch this side of 1970, which
+-- is every epoch a request log holds.
 --
 -- `api_key_id` is NOT NULL and anonymous rows are left out: a WITHOUT ROWID
 -- primary key cannot hold a NULL, and nothing reads this table except a per-key

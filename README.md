@@ -576,6 +576,16 @@ to another machine — bring `OMNI_ENCRYPTION_KEY` with it, or the credentials i
 are unreadable. Either way the file is integrity-checked before anything is
 touched, and a copy of what was there is taken first.
 
+**A restore ends by rebuilding the hourly usage rollup, and that step blocks.**
+The rollup is what rate limits count their 5h and 1w windows from, and no file an
+operator hands over says whether its counters agree with its rows — so it is
+recomputed rather than trusted. `bun:sqlite` is synchronous, so the grouped scan
+holds the event loop: roughly 0.4 s per 500k request-log rows, 1.6 s per 2M, and
+about 6.5 s at 8M. `/api/*` and `/health` do not answer during it. It is the last
+thing a restore does, after the swap has already succeeded, and a failure is
+logged rather than raised — the database is live either way, and `omni doctor`
+reports a rollup that disagrees with its rows.
+
 **`omni db restore <id>` refuses while a gateway is running** against that
 installation, and there is no override flag. A second process can open its own
 handle but cannot quiesce the gateway's, and moving the file out from under a live

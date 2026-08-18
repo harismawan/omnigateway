@@ -23,6 +23,30 @@ const WINDOWED = new Set(["requests", "tokens", "spend"]);
 type LooseLimits = Record<string, Record<string, number> | number>;
 
 /**
+ * The one name this parser refuses itself rather than deferring to the schema.
+ *
+ * Everything else here is structural on purpose, but `__proto__` cannot be
+ * carried structurally: assigning it to an object reaches the prototype setter
+ * instead of becoming an own key, so the schema is never shown it. Reading it
+ * back is no better — `limits.__proto__` is `Object.prototype`, which is not
+ * `undefined`, so `--unset` reads it as a limit that is there and deletes
+ * nothing. Both ends are the "succeeded having changed nothing" outcome
+ * `applyUnsetFlags` refuses below, and `--limit requests:__proto__=60` stores
+ * `{"requests":{}}` — the empty husk `toLoose` and `applyUnsetFlags` are both
+ * written to avoid.
+ *
+ * Refused rather than passed through even with a null-prototype object, because
+ * zod drops an own `__proto__` key silently instead of reporting it as an
+ * unknown name: the vocabulary check the rest of this parser leans on is the one
+ * check that does not cover it.
+ */
+const PROTO = "__proto__";
+
+function rejectProto(flag: string, name: string): void {
+  if (name === PROTO) throw new UsageError(`${flag} cannot name "${PROTO}"`);
+}
+
+/**
  * `--limit` at creation and `--set` afterwards are the same syntax, so they are
  * the same parser and the flag it names is a parameter. A second copy would be
  * free to drift into a second spelling of the one thing this design has.
@@ -52,6 +76,7 @@ function parseLimitFlags(
       if (WINDOWED.has(pair)) {
         throw new UsageError(`${flag} ${pair} needs a window, e.g. ${flag} ${pair}:1m=60`);
       }
+      rejectProto(flag, pair);
       limits[pair] = value;
       continue;
     }
@@ -61,6 +86,8 @@ function parseLimitFlags(
     if (dimension.length === 0 || window.length === 0) {
       throw new UsageError(`${flag} must be dimension:window=value, got "${entry}"`);
     }
+    rejectProto(flag, dimension);
+    rejectProto(flag, window);
     const existing = limits[dimension];
     const windows = typeof existing === "object" ? existing : {};
     windows[window] = value;
@@ -113,6 +140,7 @@ function applyUnsetFlags(limits: LooseLimits, entries: readonly string[]): void 
       if (WINDOWED.has(entry)) {
         throw new UsageError(`--unset ${entry} needs a window, e.g. --unset ${entry}:1m`);
       }
+      rejectProto("--unset", entry);
       if (limits[entry] === undefined) throw new UsageError(`this key has no ${entry} limit`);
       delete limits[entry];
       continue;
@@ -123,6 +151,8 @@ function applyUnsetFlags(limits: LooseLimits, entries: readonly string[]): void 
     if (dimension.length === 0 || window.length === 0) {
       throw new UsageError(`--unset must be dimension:window, got "${entry}"`);
     }
+    rejectProto("--unset", dimension);
+    rejectProto("--unset", window);
     const windows = limits[dimension];
     if (typeof windows !== "object" || windows[window] === undefined) {
       throw new UsageError(`this key has no ${entry} limit`);

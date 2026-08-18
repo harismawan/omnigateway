@@ -6,9 +6,15 @@ export const HOUR_MS = 3_600_000;
 /**
  * The bucket an instant belongs to, as `usage_rollup.hour` holds it.
  *
- * `Math.floor` and SQLite's integer division disagree below the epoch and
- * nowhere above it, so this and the `at / 3600000` in `rebuildRollup` describe
- * the same bucket for every timestamp a request log can carry.
+ * The SQL sides say `CAST(at / 3600000 AS INTEGER)` rather than `at / 3600000`,
+ * and the cast is load-bearing: nothing validates `RequestLog.at`, and SQLite's
+ * `/` is integer division only when both operands are integers. A fractional
+ * `at` makes the bare expression a REAL, so the write path buckets at `480000`
+ * while a rebuild computes `480000.0000001389` — `doctor` then reports a
+ * mismatch on a correct rollup, and the rebuild writes a REAL key that later
+ * integer-hour writes never merge with, double-counting that key from then on.
+ * With the cast the two agree for every non-negative `at`, fractional or not,
+ * and disagree only below the epoch, where no request log lands.
  */
 export function hourOf(at: number): number {
   return Math.floor(at / HOUR_MS);
@@ -249,7 +255,7 @@ const REBUILD = `
     (api_key_id, hour, requests, input_tokens, output_tokens,
      cache_read_tokens, cache_write_tokens, cost_usd)
   SELECT api_key_id,
-         at / 3600000,
+         CAST(at / 3600000 AS INTEGER),
          COUNT(*),
          COALESCE(SUM(input_tokens), 0),
          COALESCE(SUM(output_tokens), 0),
@@ -258,7 +264,7 @@ const REBUILD = `
          COALESCE(SUM(cost_usd), 0)
     FROM request_logs
    WHERE state = 'done' AND api_key_id IS NOT NULL
-   GROUP BY api_key_id, at / 3600000`;
+   GROUP BY api_key_id, CAST(at / 3600000 AS INTEGER)`;
 
 /**
  * Recomputes `usage_rollup` from `request_logs`, whole.
@@ -294,7 +300,7 @@ export function auditRollup(db: Database): RollupAudit {
     .query<{ buckets: number; mismatched: number; orphans: number }, []>(
       `WITH truth AS (
          SELECT api_key_id AS k,
-                at / 3600000 AS h,
+                CAST(at / 3600000 AS INTEGER) AS h,
                 COUNT(*) AS requests,
                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,

@@ -313,7 +313,12 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   file keeps every page and every caller reports reclaiming nothing.
 - Restoring writes another installation's admin password hash without passing through `setPassword`,
   which is what clears sessions. Restore compares the hash across the swap and invalidates only when
-  it differs.
+  it differs. Nothing may sit between the swap and that comparison: the swap has already succeeded by
+  then, so a step that throws in front of it skips the invalidation while the new password is live.
+- `swapIn` ends by rebuilding `usage_rollup`, after the hash comparison and guarded. `bun:sqlite` is
+  synchronous, so the rebuild blocks the event loop — and therefore `/api/*` and `/health` — for
+  ≈0.4 s per 500k `request_logs` rows, ≈1.6 s at 2M, ≈6.5 s at 8M. Document the cost rather than hide
+  it; a stale rollup is a `doctor` complaint, a failed restore is an outage.
 - `omni db restore` refuses while a gateway is running and has no override. The dashboard swaps
   inside the process owning the handle; a second process cannot quiesce that connection, and renaming
   the file under it corrupts the database being rescued.

@@ -38,8 +38,19 @@ const CACHE_TTL_MS = 30_000;
  */
 const EAGER_FRACTION = 0.9;
 
+/**
+ * How many delta entries one key may hold before the oldest are folded together.
+ *
+ * A successful store read is what normally empties this list, so a store that
+ * cannot answer leaves nothing emptying it: it grows with every completed
+ * request for as long as the fault lasts, `cleanup` can never drop the key
+ * because a key holding debits is not idle, and `markEager` walks the whole
+ * list once per debit. See `trimDebits` for why folding rather than dropping.
+ */
+export const MAX_DEBITS = 10_000;
+
 /** One completed request's contribution, held until a store read absorbs it. */
-type Debit = { at: number; requests: number; tokens: number; costUsd: number };
+export type Debit = { at: number; requests: number; tokens: number; costUsd: number };
 
 /** The last store read for one key, and the instant it was issued at. */
 type StoreCounts = { readAt: number; sums: Record<LongWindow, UsageSums> };
@@ -173,6 +184,43 @@ function sinceRead(debits: readonly Debit[], readAt: number): UsageSums {
     costUsd += debit.costUsd;
   }
   return { requests, tokens, costUsd };
+}
+
+/** The far edge of the longest window, past which nothing can still be counted. */
+const LONGEST_WINDOW_MS = Math.max(...LONG_WINDOWS.map((window) => WINDOW_MS[window]));
+
+/**
+ * Bounds one key's delta list without ever lowering what it reports.
+ *
+ * Two bounds, applied in that order, because they fail in different directions
+ * and only one of them is free:
+ *
+ * - A debit older than the longest window is outside every window there is, so
+ *   dropping it changes no count at all. This is also what lets `cleanup` drop
+ *   a key that went quiet during a fault, rather than holding its entry for the
+ *   life of the process.
+ * - Past `MAX_DEBITS` the oldest entries are folded into one, stamped at the
+ *   newest instant among them — not discarded. A dropped debit is a request
+ *   counted nowhere, which is the one direction this design must never take; a
+ *   folded one is counted for longer than it belonged, which is the direction
+ *   `sinceRead` already chooses and for the same reason.
+ *
+ * Pure and exported so the second bound can be tested for what it promises,
+ * which is a property of the arithmetic rather than of any store fault.
+ */
+export function trimDebits(debits: readonly Debit[], now: number): Debit[] {
+  const live = debits.filter((debit) => debit.at >= now - LONGEST_WINDOW_MS);
+  if (live.length <= MAX_DEBITS) return live;
+
+  const folded: Debit = { at: 0, requests: 0, tokens: 0, costUsd: 0 };
+  const cut = live.length - MAX_DEBITS + 1;
+  for (const debit of live.slice(0, cut)) {
+    folded.at = Math.max(folded.at, debit.at);
+    folded.requests += debit.requests;
+    folded.tokens += debit.tokens;
+    folded.costUsd += debit.costUsd;
+  }
+  return [folded, ...live.slice(cut)];
 }
 
 /**
@@ -342,6 +390,18 @@ export class ApiKeyRateLimiter {
   /** In-flight requests for one key. Zero for a key holding nothing. */
   inFlight(keyId: string): number {
     return this.keys.get(keyId)?.inFlight ?? 0;
+  }
+
+  /**
+   * Delta entries waiting for a store read to absorb them. Zero for a key
+   * holding nothing.
+   *
+   * A store read is what empties this, so its length is a fact about how long
+   * the store has been unable to answer rather than about traffic — which is
+   * why `trimDebits` bounds it and why the bound is observable.
+   */
+  pendingDebits(keyId: string): number {
+    return this.keys.get(keyId)?.debits.length ?? 0;
   }
 
   private async refuse(
@@ -517,6 +577,17 @@ export class ApiKeyRateLimiter {
         this.store.usage.sumSince(keyId, readAt - WINDOW_MS["5h"]),
         this.store.usage.sumSince(keyId, readAt - WINDOW_MS["1w"]),
       ]);
+      // A read that comes back behind a newer one is discarded rather than
+      // installed. Two read-throughs can be in flight at once — nothing here
+      // holds a lock across the yield — and against a store whose reads settle
+      // out of order the older one would overwrite the newer sums *after* the
+      // newer had already pruned the debits covering the difference, so the
+      // usage between the two reads would be counted in neither place. An equal
+      // `readAt` still installs: both asked about the same instant, and the one
+      // that resolved later saw at least as many committed rows.
+      const newer = state.counts;
+      if (newer !== null && newer.readAt > readAt) return newer;
+
       state.counts = { readAt, sums: { "5h": fiveHour, "1w": oneWeek } };
       state.stale = false;
       // Anything debited before the read was issued is in the sums now, and
@@ -532,6 +603,11 @@ export class ApiKeyRateLimiter {
         // let alone a key, into stdout.
         reason: error instanceof Error ? error.message : "unknown",
       });
+      // Nothing absorbed the list this time, and nothing will until the store
+      // answers again, so it is bounded here instead. Without this the fault
+      // costs memory that only a restart gives back and turns `markEager` into
+      // a walk of every request served since it began.
+      state.debits = trimDebits(state.debits, now);
       return null;
     }
   }

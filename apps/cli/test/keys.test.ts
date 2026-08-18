@@ -92,6 +92,49 @@ test("concurrency takes no window, and a windowed dimension requires one", async
   ).not.toBe(0);
 });
 
+/**
+ * The one name that reaches a prototype setter instead of the schema.
+ *
+ * `--limit requests:__proto__=60` stored `{"requests":{}}` and `--limit
+ * __proto__=60` stored `{}`, both exiting 0: the assignment never became an own
+ * key, so the strict schema that refuses every other unknown name never saw one.
+ * Reporting success having changed nothing is exactly what `--unset` refuses a
+ * few lines down, and `{"requests":{}}` is the husk `toLoose` exists to avoid.
+ */
+test("__proto__ is refused as a dimension and as a window rather than vanishing", async () => {
+  const root = makeRoot();
+  for (const bad of ["__proto__=60", "requests:__proto__=60", "__proto__:1m=60"]) {
+    const result = await cli(["keys", "create", "--label", "poison", "--limit", bad], { root });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("__proto__");
+  }
+  // Nothing was minted, so nothing is holding an empty matrix it reported saving.
+  const listed = await cli(["keys", "list", "--json"], { root });
+  expect((JSON.parse(listed.out) as { keys: ListedKey[] }).keys).toHaveLength(0);
+});
+
+test("__proto__ is refused by --set and --unset on the same grounds", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "ci", "--limit", "requests:1m=60", "--json"], { root });
+  const id = await idOf(root, "ci");
+
+  for (const bad of ["__proto__=60", "requests:__proto__=60"]) {
+    const result = await cli(["keys", "limits", id, "--set", bad], { root });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("__proto__");
+  }
+  // `--unset` reads the name back rather than writing it, and reading is where
+  // it went wrong the other way round: `limits.__proto__` is `Object.prototype`
+  // rather than `undefined`, so the "this key has no such limit" refusal below
+  // was never reached and a delete that removed nothing reported success.
+  for (const bad of ["__proto__", "requests:__proto__"]) {
+    const result = await cli(["keys", "limits", id, "--unset", bad], { root });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("__proto__");
+  }
+  expect(await limitsOf(root, "ci")).toEqual({ requests: { "1m": 60 } });
+});
+
 test("keys list prints limits in the syntax the flag accepts", async () => {
   const root = makeRoot();
   await cli(["keys", "create", "--label", "ci", "--limit", "requests:1m=60", "--json"], { root });

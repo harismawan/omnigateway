@@ -3,10 +3,11 @@ import { GatewayError } from "@omni/ir";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
 import type { Store } from "@omni/store";
 import { captureLogger, memoryStore, requestLog, seedApiKey } from "@omni/testkit";
-import { ApiKeyRateLimiter } from "../../src/auth/rateLimit.ts";
+import { ApiKeyRateLimiter, type Debit, MAX_DEBITS, trimDebits } from "../../src/auth/rateLimit.ts";
 
 const T0 = 10_000_000;
 const FIVE_HOURS = 5 * 60 * 60 * 1000;
+const ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * A limiter over a real store, with the one read it makes on the hot path
@@ -413,6 +414,143 @@ test("count_tokens consumes requests and never tokens, spend, or a concurrency s
 
   // Only `requests` at 1m, which two counts have now filled.
   expect((await denied(consume)).code).toBe("RATE_LIMIT");
+  store.close();
+});
+
+/**
+ * Two read-throughs in flight at once, resolving in the wrong order.
+ *
+ * Nothing holds a lock across the yield, so an older read can come back after a
+ * newer one — and the older one used to overwrite the newer sums *after* the
+ * newer had already pruned the delta covering the difference. The usage between
+ * the two reads is then counted in neither place, and the cache it left behind
+ * is believed for the rest of its TTL. Under-counting is the one direction this
+ * design must never take.
+ *
+ * Not reachable through `bun:sqlite`, whose reads settle in the same tick — but
+ * reachable for any decorated or genuinely async store, and this file decorates
+ * `sumSince` a few lines up.
+ */
+test("a store read that resolves behind a newer one is discarded rather than installed", async () => {
+  const { store, keyId, limiter, limits, at } = await harness({ tokens: { "5h": 100 } });
+  const real = store.usage.sumSince.bind(store.usage);
+  /** One release per issued read, so the test chooses the order they land in. */
+  const gates: Array<() => void> = [];
+  store.usage.sumSince = async (id, since) => {
+    // Read now and deliver later: the point is a read that answered for an
+    // earlier instant, not one that ran against a later store.
+    const sums = await real(id, since);
+    await new Promise<void>((resolve) => gates.push(resolve));
+    return sums;
+  };
+
+  // The older read, issued while the window is empty.
+  at(T0);
+  const older = limiter.admit(keyId, limits, "req_older");
+  await Bun.sleep(0);
+
+  // Usage the older read cannot have seen, recorded as `finishLog` records it.
+  at(T0 + 2_000);
+  await seedRow(store, keyId, T0 + 2_000, { tokens: 120 });
+  limiter.debit(keyId, { tokens: 120, costUsd: 0 });
+
+  // The newer read, which does see it.
+  at(T0 + 5_000);
+  const newer = limiter.admit(keyId, limits, "req_newer");
+  await Bun.sleep(0);
+  expect(gates).toHaveLength(4);
+
+  // The newer pair lands first and prunes the delta it has absorbed; the older
+  // pair lands second, with sums from before any of it happened.
+  for (const gate of gates.slice(2)) gate();
+  await Promise.allSettled([newer]);
+  for (const gate of gates.slice(0, 2)) gate();
+  await Promise.allSettled([older]);
+
+  // 120 tokens against a ceiling of 100, and no read is due for another TTL.
+  at(T0 + 6_000);
+  expect((await denied(() => limiter.admit(keyId, limits, "req_after"))).code).toBe("RATE_LIMIT");
+  expect(gates).toHaveLength(4);
+  store.close();
+});
+
+/**
+ * The delta list is emptied by a store read, so a store that cannot answer
+ * leaves nothing emptying it.
+ *
+ * Unbounded growth is the visible half; the invisible half is that `cleanup`
+ * never drops a key holding debits and `markEager` walks the whole list once per
+ * debit, which is quadratic in the requests served during the fault.
+ */
+test("folding a delta list bounds it without lowering what it reports", () => {
+  const now = T0 + ONE_WEEK;
+  const debits: Debit[] = [
+    // Older than the longest window, so no window can still count it. Absurd
+    // figures, so dropping it shows up as a number rather than as a rounding.
+    { at: now - ONE_WEEK - 1, requests: 1, tokens: 1_000_000, costUsd: 1_000 },
+    ...Array.from({ length: MAX_DEBITS + 5_000 }, (_, i) => ({
+      at: T0 + i,
+      requests: 1,
+      tokens: 10,
+      costUsd: 0.01,
+    })),
+  ];
+
+  const trimmed = trimDebits(debits, now);
+  expect(trimmed.length).toBeLessThanOrEqual(MAX_DEBITS);
+  expect(trimmed.some((debit) => debit.at < now - ONE_WEEK)).toBe(false);
+
+  /** `sinceRead`'s arithmetic, restated so the property is checked against it. */
+  const delta = (entries: readonly Debit[], readAt: number): number =>
+    entries.reduce((sum, entry) => (entry.at < readAt ? sum : sum + entry.tokens), 0);
+
+  // Instants a cached read could carry, sampled either side of the fold rather
+  // than swept: the fold is where the two lists can differ, and a readAt inside
+  // it is the only one that can differ downward. Folding may keep a
+  // contribution in the delta longer than it belonged there — the direction
+  // `sinceRead` already chooses — and may never drop one that still belongs.
+  const cut = debits.length - MAX_DEBITS;
+  for (const readAt of [
+    now - ONE_WEEK,
+    T0,
+    T0 + 1,
+    T0 + Math.floor(cut / 2),
+    T0 + cut - 1,
+    T0 + cut,
+    T0 + cut + 1,
+    T0 + debits.length - 1,
+    T0 + debits.length,
+    now,
+  ]) {
+    expect(delta(trimmed, readAt)).toBeGreaterThanOrEqual(delta(debits, readAt));
+  }
+  // And it is a fold rather than a discard: nothing inside the window is lost.
+  expect(delta(trimmed, now - ONE_WEEK)).toBe(delta(debits, now - ONE_WEEK));
+});
+
+test("a store that cannot answer stops the delta list growing without bound", async () => {
+  const { store, keyId, limiter, admit, at } = await harness({ tokens: { "5h": 1_000_000 } });
+  store.usage.sumSince = async () => {
+    throw new Error("database is locked");
+  };
+
+  at(T0);
+  (await admit())();
+  for (let i = 0; i < MAX_DEBITS + 500; i++) {
+    at(T0 + i);
+    limiter.debit(keyId, { tokens: 1, costUsd: 0 });
+  }
+  expect(limiter.pendingDebits(keyId)).toBeGreaterThan(MAX_DEBITS);
+
+  at(T0 + MAX_DEBITS + 500);
+  (await admit())();
+  expect(limiter.pendingDebits(keyId)).toBeLessThanOrEqual(MAX_DEBITS);
+
+  // A week on, every entry is outside every window and the key can be dropped
+  // again rather than held for the life of the process.
+  at(T0 + ONE_WEEK + FIVE_HOURS);
+  (await admit())();
+  expect(limiter.pendingDebits(keyId)).toBe(0);
   store.close();
 });
 

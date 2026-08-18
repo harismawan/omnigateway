@@ -72,3 +72,23 @@ test("a non-object is refused rather than read as unlimited", () => {
   expect(() => parseLimitConfig(60)).toThrow();
   expect(() => parseLimitConfig([])).toThrow();
 });
+
+/**
+ * `.strict()` refuses `bogus` and `9m` but not this one: `JSON.parse` makes
+ * `__proto__` an own property and zod 4.4.3 drops it silently rather than
+ * refusing it. Left alone, a caller is told a ceiling was stored when the key
+ * holds `{"requests":{}}` — an empty husk, and a success that changed nothing.
+ *
+ * Written against `JSON.parse` output rather than an object literal, because a
+ * literal's `__proto__` never becomes an own property and the test would then
+ * pass without exercising the check at all.
+ */
+test("a limits shape naming __proto__ is refused rather than silently emptied", () => {
+  expect(() => parseLimitConfig(JSON.parse('{"__proto__":60}'))).toThrow(/__proto__/);
+  expect(() => parseLimitConfig(JSON.parse('{"requests":{"__proto__":60}}'))).toThrow(/__proto__/);
+  // The neighbouring rejections still work, so the guard has not replaced them.
+  expect(() => parseLimitConfig(JSON.parse('{"bogus":60}'))).toThrow();
+  expect(parseLimitConfig(JSON.parse('{"requests":{"1m":60}}'))).toEqual({
+    requests: { "1m": 60 },
+  });
+});

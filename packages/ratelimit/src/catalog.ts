@@ -95,6 +95,29 @@ export const limitConfigSchema = z
 export type LimitConfig = z.infer<typeof limitConfigSchema>;
 
 /**
+ * `.strict()` rejects an unknown key — except this one.
+ *
+ * `JSON.parse` makes `__proto__` an own property, and zod 4.4.3 nevertheless
+ * drops it silently instead of refusing it, while rejecting `bogus` and `9m`
+ * beside it. So `{"requests":{"__proto__":60}}` parses to `{"requests":{}}` and
+ * a caller is told their ceiling was stored when nothing was: the "reports
+ * success having changed nothing" outcome this codebase refuses elsewhere, and
+ * an empty husk of exactly the shape `CLAUDE.md` forbids.
+ *
+ * Checked before parsing rather than as a refinement, because by the time zod
+ * has a value to refine the key is already gone.
+ */
+function assertNoProto(value: unknown, path: string): void {
+  if (typeof value !== "object" || value === null) return;
+  for (const key of Object.getOwnPropertyNames(value)) {
+    if (key === "__proto__") {
+      throw new Error(`limits cannot name "__proto__"${path === "" ? "" : ` under ${path}`}`);
+    }
+    assertNoProto((value as Record<string, unknown>)[key], path === "" ? key : `${path}.${key}`);
+  }
+}
+
+/**
  * Validates a stored or submitted `limits` value, throwing on anything this
  * build cannot understand.
  *
@@ -102,5 +125,6 @@ export type LimitConfig = z.infer<typeof limitConfigSchema>;
  * on `.strict()` above.
  */
 export function parseLimitConfig(value: unknown): LimitConfig {
+  assertNoProto(value, "");
   return limitConfigSchema.parse(value);
 }
