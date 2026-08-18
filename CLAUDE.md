@@ -232,7 +232,14 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   inherits. `OMNI_ROOT` does not suppress it: both are ambient.
 - API-key rate limits and quota cooldowns are process-local and reset on restart.
 - `usage.append` must run at most once per request ID; duplicate completion double-counts
-  `usage_daily`. Pending rows contain placeholder metrics; inspect `state`, not `status`.
+  `usage_daily` and `usage_rollup` alike. Pending rows contain placeholder metrics; inspect `state`,
+  not `status`.
+- `usage_rollup` is derived, never authoritative: `request_logs` is the source of truth and
+  `rebuildRollup` reproduces every bucket from it. It is written in `append`'s transaction, pruned
+  with the rows it summarizes, rebuilt after a restore or import, and compared by `omni doctor`. A
+  read of it is flat where a `SELECT SUM` over the window grows without bound — and `bun:sqlite` is
+  synchronous, so that scan blocked the whole event loop, not one request. For the same reason a
+  timeout around a store read is a bound that cannot fire; do not add one back.
 - `quota_windows` stores provider observations, not gateway counts. Missing data means unknown, not
   unlimited. Probe failure must never disable a credential.
 - RTK filter ids are persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is a storage

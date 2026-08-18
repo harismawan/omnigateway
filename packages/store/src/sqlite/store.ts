@@ -149,6 +149,8 @@ export async function createStore(opts: {
       aggregate: (q) => handle.usage.aggregate(q),
       sumSince: (apiKeyId, sinceMs) => handle.usage.sumSince(apiKeyId, sinceMs),
       oldestSince: (apiKeyId, sinceMs) => handle.usage.oldestSince(apiKeyId, sinceMs),
+      rebuildRollup: () => handle.usage.rebuildRollup(),
+      auditRollup: () => handle.usage.auditRollup(),
       prune: (olderThan) => handle.usage.prune(olderThan),
       pruneDaily: (olderThan) => handle.usage.pruneDaily(olderThan),
     },

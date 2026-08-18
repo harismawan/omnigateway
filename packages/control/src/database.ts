@@ -72,6 +72,8 @@ export type DatabaseStore = {
     putSettings(patch: Partial<Settings>): Promise<Settings>;
     getAdminPasswordHash(): Promise<string | null>;
   };
+  /** The one derived table a swap has to put back in step with its rows. */
+  usage: { rebuildRollup(): Promise<void> };
   maintenance: MaintenanceRepo;
   reopen(): Promise<void>;
   close(): void;
@@ -553,6 +555,17 @@ async function swapIn(
     }
     throw new SwapFailedError(preRestoreSnapshot.id, error, reopened);
   }
+
+  // The hourly usage rollup is rebuilt rather than trusted.
+  //
+  // A snapshot carries the table, and one this installation took carries it
+  // consistently — but an import is any database file an operator handed over,
+  // and the rollup is what a rate limiter enforces long windows from. Nothing
+  // in the file says whether its counters agree with its rows, and the table is
+  // derived, so recomputing it costs one grouped scan on a path that has just
+  // copied the whole database anyway. Trusting it would mean believing a
+  // provenance the gateway cannot check.
+  await deps.store.usage.rebuildRollup();
 
   // After the reopen rather than inside the try: the swap is over and succeeded,
   // and a read that fails here is not a half-swapped database.

@@ -158,6 +158,8 @@ against `idx_request_logs_at` scans every row in the week for every key on the i
 `idx_request_logs_key_at` is therefore a correctness-adjacent requirement, not an optimisation, and
 it must not be dropped later as redundant with `idx_request_logs_at`. Composite order matters:
 `(api_key_id, at DESC)` allows the range scan to start at the key; `(at DESC, api_key_id)` does not.
+It stays load-bearing after the correction below: the range it now serves is one partial hour rather
+than a week, and `oldestSince` still reads through it on every refusal.
 
 ### One new repo method
 
@@ -177,6 +179,54 @@ which is exactly when the limiter matters. This filter gets its own test.
 `tokens` sums `input_tokens + output_tokens + cache_read_tokens + cache_write_tokens`. All four are
 tokens the key caused to move; `Usage.inputTokens` being uncached input (per `CLAUDE.md`) means the
 four columns are disjoint and summing them double-counts nothing.
+
+### Correction: the range scan became a counter table
+
+**This reverses a decision this document made, and the original reasoning still stands as far as it
+went.** It said a long window should be a real range sum over `request_logs` served by
+`idx_request_logs_key_at`, and it declined a counter table because a counter that disagrees with the
+log is a second record of the same events with no way to tell which is right. That objection was
+correct. What the document did not price was the scan itself.
+
+`bun:sqlite` is synchronous. A `SELECT SUM` on the admission path does not block one request; it
+blocks the event loop, and with it `/health`, every `/api/*` route, the quiesce latch, and every
+other key's traffic. Measured on one machine, one key, WAL:
+
+| rows in window | `SELECT SUM` | hourly-rollup read | rollup write |
+| -------------- | ------------ | ------------------ | ------------ |
+| 0.2M           | 149 ms       | 0.018 ms           | 0.005 ms/req |
+| 2M             | 2,146 ms     | 0.017 ms           | 0.003 ms/req |
+| 8M             | 10,759 ms    | 0.017 ms           | 0.005 ms/req |
+
+The cost is O(accumulated history) with no ceiling, and the eager-refresh rule above turns it worst
+side up: a key inside the last tenth of a long ceiling reads through on *every* admission, so it pays
+a full scan per request exactly when it is busiest. That is not a slow limiter, it is a gateway that
+stops answering.
+
+`SUM_TIMEOUT_MS` was written to bound this and **could not ever fire**: the timer it arms cannot run
+until the synchronous query it is bounding has already returned. It is deleted rather than left in
+place, because a bound that cannot trigger reads as a bound that does. Its test stubbed `sumSince`
+with a promise that never settled — a fake exhibiting a failure the real store cannot have — and is
+deleted with it. Fail-open on a store *error* is unchanged and still tested.
+
+So `sumSince` keeps its signature and its meaning, and its implementation becomes: whole hours from
+`usage_rollup` (migration `010`, keyed `(api_key_id, hour)`), plus a scan of the one partial hour the
+window's instant falls inside. Windows stay exactly sliding to the millisecond — hour-granular
+windows were considered and refused, because a limiter that rounds is a limiter an operator cannot
+reason about — and the scan is bounded by one hour of one key's traffic rather than by the install's
+whole history.
+
+**What answers the original objection is not care, it is derivation.** `request_logs` remains the
+source of truth and every bucket is reproducible from it by one grouped select. That rebuild exists
+(`usage.rebuildRollup`), runs as the migration's backfill and again on the way out of any database
+restore or import, and `omni doctor` compares the two so a disagreement is something an operator is
+told rather than something a limiter acts on. A derived counter with a rebuild is a cache; that is a
+different object from the second source of truth this document declined, and it is the only reason
+the reversal is available.
+
+Retention follows the rows: `usage.prune` drops the buckets whose rows it deleted and recomputes the
+one hour that straddles the cut. Without that the rollup would keep counting requests the log no
+longer holds, which is both a wrong limit and a permanent `doctor` complaint.
 
 ## `packages/ratelimit`
 
@@ -234,7 +284,8 @@ where a decision is close and an idle key costs nothing.
 
 ### Store read failure fails open, loudly
 
-If `sumSince` fails or times out, the request is served and a structured event is logged.
+If `sumSince` throws, the request is served and a structured event is logged. Not "or times out":
+see the correction above for why a timeout on a synchronous query is a bound that cannot fire.
 
 The reasoning is proportionality. This is a self-hosted gateway; a transient store fault that 429s
 all traffic is a worse outage than briefly under-enforcing a weekly budget. Crucially, the limits
@@ -424,6 +475,12 @@ Store:
 - `sumSince` excludes `state = 'pending'` rows. Seeded with pending rows carrying deliberately
   absurd placeholder metrics, so an unfiltered implementation fails loudly rather than by a margin.
 - `sumSince` sums all four token columns without double-counting.
+- The rollup read equals a direct `SELECT SUM` over `request_logs` for the same window, property-style
+  over several seeded distributions. This is the anchor: if those two ever disagree, every long window
+  is silently wrong and no other test in the feature means anything.
+- The partial hour is exact to the millisecond, and rows added behind the rollup inside a whole hour
+  do not move the answer — which is how "the read does not grow with row count" is asserted as a fact
+  about where the number came from rather than as a duration.
 - Migration `009` backfills `rate_limit_per_min` into `requests["1m"]`, including the `NULL` case.
 
 Gateway:
@@ -457,5 +514,8 @@ sliding-window arithmetic, the pending-row filter, and the concurrency `finally`
   install pruning logs at 3 days silently enforces a 3-day window. `omni doctor` reports the
   conflict; the spec does not attempt to prevent the configuration.
 - `idx_request_logs_key_at` adds write cost to every request log insert and disk to every snapshot.
+- `usage_rollup` is derived state in a snapshot: it is carried by the file and rebuilt on the way out
+  of a restore or import, because nothing in a file an operator handed over says whether its counters
+  agree with its rows.
 - Nothing here bounds admin surface abuse. That gap is now explicit rather than incidental, and is
   the subject of its own design.

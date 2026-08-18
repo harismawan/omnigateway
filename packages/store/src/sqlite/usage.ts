@@ -10,7 +10,15 @@ import type {
   UsageQuery,
   UsageRepo,
 } from "../types.ts";
-import { rollupLog, startOfLocalDay } from "./rollup.ts";
+import {
+  auditRollup,
+  HOUR_MS,
+  hourOf,
+  rebuildRollup,
+  rollupHour,
+  rollupLog,
+  startOfLocalDay,
+} from "./rollup.ts";
 
 type Row = {
   id: string;
@@ -232,17 +240,56 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
 
 export function createUsageRepo(db: Database): UsageRepo {
   /**
-   * The raw row and its rollup are written together: a crash between the two
-   * would leave the year view quietly disagreeing with the log it summarizes.
+   * The raw row and both rollups are written together: a crash between them
+   * would leave the year view, or a key's hourly counters, quietly disagreeing
+   * with the log they summarize. One transaction is also one fsync, so the
+   * hourly bucket costs the write path nothing beyond the row it accompanies.
    *
-   * The rollup is fed from the stored row rather than from the argument, so it
-   * summarizes what the log actually says even where the upsert kept a column
-   * the completing log did not carry.
+   * The rollups are fed from the stored row rather than from the argument, so
+   * they summarize what the log actually says even where the upsert kept a
+   * column the completing log did not carry.
    */
   const complete = db.transaction((log: RequestLog) => {
     db.run(COMPLETE, values(log, "done"));
     const stored = db.query<Row, [string]>("SELECT * FROM request_logs WHERE id = ?").get(log.id);
-    if (stored !== null) rollupLog(db, toLog(stored));
+    if (stored !== null) {
+      const restored = toLog(stored);
+      rollupLog(db, restored);
+      rollupHour(db, restored);
+    }
+  });
+
+  /**
+   * Retention applied to the derived counters as well as to the rows.
+   *
+   * Without this the rollup keeps counting requests whose rows are gone, and
+   * every long window — and `doctor`'s comparison of the two — reports history
+   * the log no longer holds. Buckets below the boundary go whole; the one
+   * boundary hour straddles the cut, so it is recomputed from what survived
+   * rather than adjusted. That is one hour of one install's traffic, not a
+   * second pass over the table.
+   */
+  const pruneLogs = db.transaction((olderThan: number): number => {
+    db.run("DELETE FROM request_logs WHERE at < ?", [olderThan]);
+    const removed = db.query<{ n: number }, []>("SELECT changes() AS n").get()?.n ?? 0;
+    const boundary = hourOf(olderThan);
+    db.run("DELETE FROM usage_rollup WHERE hour <= ?", [boundary]);
+    db.run(
+      `INSERT INTO usage_rollup
+         (api_key_id, hour, requests, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, cost_usd)
+       SELECT api_key_id, ?, COUNT(*),
+              COALESCE(SUM(input_tokens), 0),
+              COALESCE(SUM(output_tokens), 0),
+              COALESCE(SUM(cache_read_tokens), 0),
+              COALESCE(SUM(cache_write_tokens), 0),
+              COALESCE(SUM(cost_usd), 0)
+         FROM request_logs
+        WHERE state = 'done' AND api_key_id IS NOT NULL AND at >= ? AND at < ?
+        GROUP BY api_key_id`,
+      [boundary, boundary * HOUR_MS, (boundary + 1) * HOUR_MS],
+    );
+    return removed;
   });
 
   return {
@@ -288,26 +335,57 @@ export function createUsageRepo(db: Database): UsageRepo {
     },
 
     async sumSince(apiKeyId: string, sinceMs: number) {
-      // `state = 'done'` is load-bearing, not hygiene. A pending row carries
-      // placeholder zeros where its metrics will go, so an unfiltered sum counts
-      // every in-flight request as a request and inflates the count silently.
-      const row = db
+      // Two reads, and neither grows with how long the install has been running.
+      //
+      // `sinceMs` lands inside an hour rather than on one, so the bucket holding
+      // it is the only one the rollup cannot answer for: it summarizes the whole
+      // hour, and the window wants part of it. Every later bucket is wholly
+      // inside the window — including the current, still-filling one, because
+      // the window has no upper bound and the bucket holds every committed row
+      // in it. So the sum is (buckets strictly after the boundary hour) plus
+      // (the rows of the boundary hour at or after the instant), which keeps the
+      // exact sliding semantics the limiter is specified against while bounding
+      // the scan to one hour of one key's traffic.
+      const boundary = hourOf(sinceMs);
+      const whole = db
         .query<SumRow, [string, number]>(
+          `SELECT COALESCE(SUM(requests), 0) AS requests,
+                  COALESCE(SUM(input_tokens + output_tokens
+                               + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                  COALESCE(SUM(cost_usd), 0) AS cost_usd
+             FROM usage_rollup
+            WHERE api_key_id = ? AND hour > ?`,
+        )
+        .get(apiKeyId, boundary);
+      // `state = 'done'` is load-bearing, not hygiene, and it is why the rollup
+      // is written only on completion. A pending row carries placeholder zeros
+      // where its metrics will go, so an unfiltered edge scan counts every
+      // in-flight request as a request and inflates the count silently.
+      const edge = db
+        .query<SumRow, [string, number, number]>(
           `SELECT COUNT(*) AS requests,
                   COALESCE(SUM(input_tokens + output_tokens
                                + cache_read_tokens + cache_write_tokens), 0) AS tokens,
                   COALESCE(SUM(cost_usd), 0) AS cost_usd
              FROM request_logs
-            WHERE api_key_id = ? AND state = 'done' AND at >= ?`,
+            WHERE api_key_id = ? AND state = 'done' AND at >= ? AND at < ?`,
         )
-        .get(apiKeyId, sinceMs);
-      // A key with no rows in the window is zero, never unknown: the row always
-      // comes back because the query is an aggregate over no groups.
+        .get(apiKeyId, sinceMs, (boundary + 1) * HOUR_MS);
+      // A key with no rows in the window is zero, never unknown: both rows
+      // always come back because each query is an aggregate over no groups.
       return {
-        requests: row?.requests ?? 0,
-        tokens: row?.tokens ?? 0,
-        costUsd: row?.cost_usd ?? 0,
+        requests: (whole?.requests ?? 0) + (edge?.requests ?? 0),
+        tokens: (whole?.tokens ?? 0) + (edge?.tokens ?? 0),
+        costUsd: (whole?.cost_usd ?? 0) + (edge?.cost_usd ?? 0),
       };
+    },
+
+    async rebuildRollup() {
+      rebuildRollup(db);
+    },
+
+    async auditRollup() {
+      return auditRollup(db);
     },
 
     async oldestSince(apiKeyId: string, sinceMs: number) {
@@ -378,8 +456,7 @@ export function createUsageRepo(db: Database): UsageRepo {
     },
 
     async prune(olderThan: number) {
-      db.run("DELETE FROM request_logs WHERE at < ?", [olderThan]);
-      return db.query<{ n: number }, []>("SELECT changes() AS n").get()?.n ?? 0;
+      return pruneLogs(olderThan);
     },
 
     async pruneDaily(olderThan: number) {

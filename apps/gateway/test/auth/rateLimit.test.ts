@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
-import type { Store, UsageSums } from "@omni/store";
+import type { Store } from "@omni/store";
 import { captureLogger, memoryStore, requestLog, seedApiKey } from "@omni/testkit";
 import { ApiKeyRateLimiter } from "../../src/auth/rateLimit.ts";
 
@@ -16,7 +16,7 @@ const FIVE_HOURS = 5 * 60 * 60 * 1000;
  * pending-row filter and the four-column token sum live, and a fake would agree
  * with whatever this file assumed about them.
  */
-async function harness(limits: LimitConfig, sumTimeoutMs = 20) {
+async function harness(limits: LimitConfig) {
   const store = await memoryStore();
   const { key } = await seedApiKey(store, { limits });
   const logger = captureLogger();
@@ -27,7 +27,7 @@ async function harness(limits: LimitConfig, sumTimeoutMs = 20) {
     reads.push(since);
     return await real(id, since);
   };
-  const limiter = new ApiKeyRateLimiter({ store, now: () => clock, logger, sumTimeoutMs });
+  const limiter = new ApiKeyRateLimiter({ store, now: () => clock, logger });
 
   return {
     store,
@@ -392,18 +392,6 @@ test("a failing store read serves the request, logs it, and still enforces 1m an
 
   at(T0 + 60_000);
   expect(await admit()).toBeInstanceOf(Function);
-  store.close();
-});
-
-test("a store read that never answers is abandoned rather than held open", async () => {
-  const { store, admit, at, logger } = await harness({ requests: { "1m": 1, "5h": 1 } }, 20);
-  store.usage.sumSince = () => new Promise<UsageSums>(() => {});
-
-  at(T0);
-  expect(await admit()).toBeInstanceOf(Function);
-  expect(logger.records.map((record) => record.msg)).toContain("rate limit counters unavailable");
-  // The 1m ring is untouched by the fault, so the next request is still refused.
-  expect((await denied(admit)).code).toBe("RATE_LIMIT");
   store.close();
 });
 

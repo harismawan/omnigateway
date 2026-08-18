@@ -95,6 +95,11 @@ function deps(
           );
         },
       },
+      usage: {
+        rebuildRollup: async () => {
+          log.push("rebuildRollup");
+        },
+      },
       close: () => log.push("close"),
       reopen: async () => {
         log.push("reopen");
@@ -503,6 +508,10 @@ describe("restoreSnapshot", () => {
       `unlink:${DB}-shm`,
       `rename:${DB}.incoming->${DB}`,
       "reopen",
+      // After the reopen, never before: the rollup is derived from the rows in
+      // whichever file is now live, and a rebuild against the outgoing handle
+      // would summarize the database being replaced.
+      "rebuildRollup",
     ]);
   });
 
@@ -712,6 +721,7 @@ describe("importSnapshot", () => {
       `unlink:${DB}-shm`,
       `rename:${DB}.incoming->${DB}`,
       "reopen",
+      "rebuildRollup",
     ]);
     expect(result.ok).toBe(true);
   });

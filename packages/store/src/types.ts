@@ -704,6 +704,15 @@ export type UsageBucket = {
  */
 export type UsageSums = { requests: number; tokens: number; costUsd: number };
 
+/** What comparing the hourly rollup against the rows it summarizes found. */
+export type RollupAudit = {
+  /** Buckets `request_logs` says should exist. Zero on an install with no traffic. */
+  buckets: number;
+  /** Buckets missing, extra, or disagreeing on a counter. */
+  mismatched: number;
+  ok: boolean;
+};
+
 export interface UsageRepo {
   /**
    * Records a request that has started. Writes no rollup: a request that has
@@ -735,8 +744,13 @@ export interface UsageRepo {
    * rate limiter cannot hold in memory.
    *
    * Separate from `aggregate`, which groups by reporting dimension and is the
-   * wrong shape and the wrong cost for a check on the request hot path. Served
-   * by `idx_request_logs_key_at`.
+   * wrong shape and the wrong cost for a check on the request hot path.
+   *
+   * Exactly sliding, and bounded: read from `usage_rollup` for the hours wholly
+   * inside the window and from `request_logs` for the partial hour the instant
+   * lands in. `bun:sqlite` is synchronous, so a query here blocks the whole
+   * event loop for its duration — the scan this replaced grew with everything
+   * the install had ever served, and took ten seconds at eight million rows.
    *
    * Pending rows are excluded. Their tokens and cost are placeholder zeros, not
    * measurements, and including them adds one placeholder per in-flight request
@@ -744,6 +758,23 @@ export interface UsageRepo {
    * is exactly when the limit matters.
    */
   sumSince(apiKeyId: string, sinceMs: number): Promise<UsageSums>;
+  /**
+   * Recomputes the hourly rollup from `request_logs`, whole.
+   *
+   * The rollup is derived, never authoritative: the log is the source of truth
+   * and every bucket is reproducible from it. That is what makes a disagreement
+   * a repairable cache rather than two records neither of which can be
+   * believed. Run after a database restore and by the `010` migration, and
+   * never on the request path — it is a full grouped scan.
+   */
+  rebuildRollup(): Promise<void>;
+  /**
+   * Compares every rollup bucket against the rows it summarizes.
+   *
+   * A diagnostic, with the same full-scan cost `sumSince` exists to avoid, so
+   * it is run by `omni doctor` and by nothing that serves a request.
+   */
+  auditRollup(): Promise<RollupAudit>;
   /**
    * The `at` of the oldest completed row this key still has inside a window, or
    * null where it has none.
@@ -763,6 +794,11 @@ export interface UsageRepo {
    * frees nothing for a whole window.
    */
   oldestSince(apiKeyId: string, sinceMs: number): Promise<number | null>;
+  /**
+   * Drops rows older than an instant, and the hourly buckets that summarized
+   * them: a counter that outlives its rows reports history the log no longer
+   * holds, to a limiter and to `auditRollup` alike.
+   */
   prune(olderThan: number): Promise<number>;
   /** Prunes the daily rollup, which is kept far longer than the raw logs. */
   pruneDaily(olderThan: number): Promise<number>;

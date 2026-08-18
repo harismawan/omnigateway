@@ -38,13 +38,6 @@ const CACHE_TTL_MS = 30_000;
  */
 const EAGER_FRACTION = 0.9;
 
-/**
- * How long a single `sumSince` may take before the request is served without
- * it. On the hot path of every request, so a store that has stopped answering
- * must not become a gateway that has stopped answering.
- */
-const SUM_TIMEOUT_MS = 1_000;
-
 /** One completed request's contribution, held until a store read absorbs it. */
 type Debit = { at: number; requests: number; tokens: number; costUsd: number };
 
@@ -125,8 +118,6 @@ export type RateLimiterDeps = {
   store: Store;
   now: () => number;
   logger?: Logger;
-  /** Overridden by tests that assert the fail-open path without waiting. */
-  sumTimeoutMs?: number;
 };
 
 /** A configured ceiling, as opposed to an absent one or an explicit `null`. */
@@ -204,13 +195,11 @@ export class ApiKeyRateLimiter {
   private readonly store: Store;
   private readonly now: () => number;
   private readonly logger: Logger;
-  private readonly sumTimeoutMs: number;
 
   constructor(deps: RateLimiterDeps) {
     this.store = deps.store;
     this.now = deps.now;
     this.logger = deps.logger ?? noopLogger;
-    this.sumTimeoutMs = deps.sumTimeoutMs ?? SUM_TIMEOUT_MS;
   }
 
   /**
@@ -503,6 +492,12 @@ export class ApiKeyRateLimiter {
    * weekly budget. The limits that stop abuse fastest — `requests` at `1m` and
    * `concurrency` — are pure memory and keep enforcing exactly through the
    * fault, because they never reach this function.
+   *
+   * There is deliberately no timeout on the reads. `bun:sqlite` is synchronous:
+   * the timer that would fire cannot run until the query it is bounding has
+   * returned, so a deadline here is a promise the runtime cannot keep. The
+   * bound that does exist is `sumSince` reading a rollup instead of scanning a
+   * window, which is flat in the size of the window.
    */
   private async longCounts(
     state: KeyState,
@@ -519,8 +514,8 @@ export class ApiKeyRateLimiter {
     const readAt = now;
     try {
       const [fiveHour, oneWeek] = await Promise.all([
-        this.read(keyId, readAt - WINDOW_MS["5h"]),
-        this.read(keyId, readAt - WINDOW_MS["1w"]),
+        this.store.usage.sumSince(keyId, readAt - WINDOW_MS["5h"]),
+        this.store.usage.sumSince(keyId, readAt - WINDOW_MS["1w"]),
       ]);
       state.counts = { readAt, sums: { "5h": fiveHour, "1w": oneWeek } };
       state.stale = false;
@@ -538,21 +533,6 @@ export class ApiKeyRateLimiter {
         reason: error instanceof Error ? error.message : "unknown",
       });
       return null;
-    }
-  }
-
-  /** One `sumSince`, bounded so a store that never answers cannot hang a request. */
-  private async read(keyId: string, since: number): Promise<UsageSums> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const expiry = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("usage sum timed out")), this.sumTimeoutMs);
-    });
-    try {
-      return await Promise.race([this.store.usage.sumSince(keyId, since), expiry]);
-    } finally {
-      // Cleared on both outcomes, so a served request leaves no timer and a
-      // timed-out one leaves no second rejection to go unhandled.
-      clearTimeout(timer);
     }
   }
 
