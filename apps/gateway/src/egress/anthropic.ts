@@ -1,4 +1,5 @@
 import type { CollectedResponse, ErrorCode, StopReason, StreamEvent } from "@omni/ir";
+import type { HeadroomByDimension } from "@omni/ratelimit";
 
 export type SseFrame = { event: string; data: string };
 
@@ -211,4 +212,48 @@ export function anthropicResponse(collected: CollectedResponse, requestId: strin
 
 export function anthropicErrorBody(code: ErrorCode, message: string): unknown {
   return { type: "error", error: { type: ERROR_TYPE[code], message } };
+}
+
+/**
+ * The dimensions that get headers, on either surface.
+ *
+ * `spend` and `concurrency` are left out on purpose. Neither vendor defines a
+ * header for them, so inventing `anthropic-ratelimit-dollars-remaining` would
+ * put a number no client parses into every response.
+ */
+export const REPORTED_LIMIT_DIMENSIONS = ["requests", "tokens"] as const;
+
+/**
+ * An instant in the spelling Anthropic's own headers use: whole seconds, UTC.
+ *
+ * Rounded up rather than truncated, so the instant named is never one the
+ * window is still refusing at.
+ */
+function rfc3339(at: number): string {
+  return `${new Date(Math.ceil(at / 1000) * 1000).toISOString().slice(0, 19)}Z`;
+}
+
+/**
+ * The rate-limit headers an Anthropic-shaped client already knows how to read.
+ *
+ * Rendered here beside the error shapes rather than in the route, because this
+ * is the file that speaks Anthropic: the same figures go out over
+ * `/v1/chat/completions` under different names, in a different order, with the
+ * reset expressed as a duration instead of an instant. An SDK that gets the
+ * wrong dialect sees no rate-limit headers at all and backs off from nothing.
+ *
+ * A dimension with no configured limit contributes no headers. There is no
+ * "unlimited" to render, and a limit header with no number in it is worse than
+ * its absence.
+ */
+export function anthropicRateLimitHeaders(headroom: HeadroomByDimension): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const dimension of REPORTED_LIMIT_DIMENSIONS) {
+    const entry = headroom[dimension];
+    if (entry === undefined) continue;
+    headers[`anthropic-ratelimit-${dimension}-limit`] = String(entry.limit);
+    headers[`anthropic-ratelimit-${dimension}-remaining`] = String(entry.remaining);
+    headers[`anthropic-ratelimit-${dimension}-reset`] = rfc3339(entry.resetAt);
+  }
+  return headers;
 }

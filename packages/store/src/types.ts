@@ -729,6 +729,25 @@ export interface UsageRepo {
    * is exactly when the limit matters.
    */
   sumSince(apiKeyId: string, sinceMs: number): Promise<UsageSums>;
+  /**
+   * The `at` of the oldest completed row this key still has inside a window, or
+   * null where it has none.
+   *
+   * The instant a sliding window actually frees a slot: that row plus the
+   * window's length. Every other count in this repo answers how much has been
+   * used; this one answers when some of it stops counting, which is the only
+   * honest figure to put in a `Retry-After`.
+   *
+   * Read only when a request is being refused. A window's far end is
+   * `now + windowMs`, which is the safe over-statement to report on the path
+   * where nothing acts on it, and this is a second query on a hot path.
+   *
+   * Served by `idx_request_logs_key_at`, and pending rows are excluded for the
+   * same reason `sumSince` excludes them: a request admitted a moment ago is
+   * not a measurement, and letting one answer here would report that the window
+   * frees nothing for a whole window.
+   */
+  oldestSince(apiKeyId: string, sinceMs: number): Promise<number | null>;
   prune(olderThan: number): Promise<number>;
   /** Prunes the daily rollup, which is kept far longer than the raw logs. */
   pruneDaily(olderThan: number): Promise<number>;

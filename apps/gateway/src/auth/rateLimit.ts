@@ -1,13 +1,14 @@
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import {
   type CounterSnapshot,
+  type Decision,
   type DimensionCounters,
   evaluate,
+  type HeadroomByDimension,
   retryAfterMs,
   SlidingWindow,
-  type Violation,
 } from "@omni/ratelimit";
-import { type LimitConfig, WINDOW_MS } from "@omni/ratelimit/catalog";
+import { type LimitConfig, WINDOW_MS, type Window } from "@omni/ratelimit/catalog";
 import type { Store, UsageSums } from "@omni/store";
 
 /**
@@ -61,6 +62,33 @@ type KeyState = {
   /** The limits last seen at admission, so a debit can judge its own nearness. */
   limits: LimitConfig;
 };
+
+/**
+ * What an admitted request carries away from the check.
+ *
+ * The release is the concurrency slot; the headroom is what the response's
+ * rate-limit headers are rendered from. Both come from the one evaluation, so a
+ * route never asks the limiter a second question about a decision it already
+ * made.
+ */
+export type Admission = { release: () => void; headroom: HeadroomByDimension };
+
+/**
+ * A refusal that carries what the client is owed about it.
+ *
+ * A bare `GatewayError` reaches the route with a retry hint and nothing to
+ * render headers from, and the headroom is known at exactly one place — the
+ * evaluation that refused. `code` is still `RATE_LIMIT`, so every site that
+ * matches on the code is unaffected by this being a subclass.
+ */
+export class RateLimitExceeded extends GatewayError {
+  readonly headroom: HeadroomByDimension;
+
+  constructor(retryAfterMs: number, headroom: HeadroomByDimension) {
+    super("RATE_LIMIT", "API key rate limit exceeded", { retryAfterMs });
+    this.headroom = headroom;
+  }
+}
 
 export type RateLimiterDeps = {
   store: Store;
@@ -162,16 +190,18 @@ export class ApiKeyRateLimiter {
    * a gauge is expired by nothing, so a leak locks the key out permanently and
    * says nothing while it does.
    */
-  async admit(keyId: string, limits: LimitConfig, requestId?: string): Promise<() => void> {
+  async admit(keyId: string, limits: LimitConfig, requestId?: string): Promise<Admission> {
     // An unlimited key allocates nothing, so an install that sets no limits
-    // pays no memory for the mechanism.
-    if (!anyLimit(limits)) return () => {};
+    // pays no memory for the mechanism — and renders no headers, because there
+    // is no ceiling to report a distance from.
+    if (!anyLimit(limits)) return { release: () => {}, headroom: {} };
 
     const now = this.now();
     this.cleanup(now);
     const state = this.state(keyId, limits);
     const counters = await this.counters(state, keyId, limits, now, requestId);
-    this.refuse(evaluateAgainst(limits, counters, now), now);
+    const decision = evaluate(limits, counters, now);
+    await this.refuse(keyId, decision, now, requestId);
 
     state.ring.record(now);
     state.inFlight++;
@@ -181,11 +211,12 @@ export class ApiKeyRateLimiter {
     // arrives after the entry was dropped lowers the count it raised instead of
     // one belonging to a fresh entry. `cleanup` never drops a state that is
     // holding a request, so the two cannot disagree about a live key.
-    return () => {
+    const release = () => {
       if (released) return;
       released = true;
       state.inFlight = Math.max(0, state.inFlight - 1);
     };
+    return { release, headroom: decision.headroom };
   }
 
   /**
@@ -204,7 +235,7 @@ export class ApiKeyRateLimiter {
     this.cleanup(now);
     const state = this.state(keyId, limits);
     const counters = await this.counters(state, keyId, { requests }, now, requestId);
-    this.refuse(evaluateAgainst({ requests }, counters, now), now);
+    await this.refuse(keyId, evaluate({ requests }, counters, now), now, requestId);
 
     state.ring.record(now);
   }
@@ -242,14 +273,77 @@ export class ApiKeyRateLimiter {
     return this.keys.get(keyId)?.inFlight ?? 0;
   }
 
-  private refuse(violation: Violation | null, now: number): void {
+  private async refuse(
+    keyId: string,
+    decision: Decision,
+    now: number,
+    requestId: string | undefined,
+  ): Promise<void> {
+    const violation = decision.violation;
     if (violation === null) return;
+
+    // The one read this design makes on the refusal path and nowhere else. Null
+    // for a violation with no window, which is why the correction below is
+    // guarded on the window rather than on the instant.
+    const window = violation.window;
+    const exact = await this.exactReset(keyId, window, now, requestId);
+    const resolved = exact === null ? violation : { ...violation, resetAt: exact };
+    const headroom =
+      exact === null || window === null
+        ? decision.headroom
+        : withReset(decision.headroom, window, exact);
+
     // A denied request records nothing: the ring is not advanced and the gauge
     // is not raised, so a key hammering its own ceiling does not push itself
     // further past it.
-    throw new GatewayError("RATE_LIMIT", "API key rate limit exceeded", {
-      retryAfterMs: retryAfterMs(violation, now),
-    });
+    throw new RateLimitExceeded(retryAfterMs(resolved, now), headroom);
+  }
+
+  /**
+   * When a long window truly frees a slot, asked only of a request being
+   * refused.
+   *
+   * `counters` reports a long window's reset as `now + windowMs`, because the
+   * instant it actually releases anything is the oldest retained row's
+   * timestamp plus the window's length and that is a second query on every
+   * request. Overstating is the safe direction while a request is being served,
+   * since nothing acts on it. A `Retry-After` is acted on: a client one request
+   * over a weekly ceiling would be told to stop for seven days when a slot may
+   * free in an hour, and a well-behaved SDK would obey.
+   *
+   * Null wherever there is nothing better to say, which the caller reads as
+   * "keep the overstated figure":
+   *
+   * - `concurrency` has no window, and nobody knows when a request will finish.
+   * - `1m` is already exact — the ring holds every timestamp in it.
+   * - A window holding no completed row has no instant to report.
+   * - A failed read. The request is already being refused, and a reset that
+   *   could not be computed must not turn a 429 into a 500.
+   */
+  private async exactReset(
+    keyId: string,
+    window: Window | null,
+    now: number,
+    requestId: string | undefined,
+  ): Promise<number | null> {
+    if (window === null || window === "1m") return null;
+    const length = WINDOW_MS[window];
+    try {
+      const oldest = await this.store.usage.oldestSince(keyId, now - length);
+      if (oldest === null) return null;
+      // Never behind now: a row on the very edge of the window ages out as this
+      // is read, and a reset in the past is a `Retry-After` of zero dressed up.
+      return Math.max(now, oldest + length);
+    } catch (error) {
+      this.logger.warn("rate limit reset unavailable", {
+        ...(requestId === undefined ? {} : { requestId }),
+        apiKeyId: keyId,
+        // The message only, for the same reason the counter read logs only the
+        // message: a store failure must not drag a row's contents into stdout.
+        reason: error instanceof Error ? error.message : "unknown",
+      });
+      return null;
+    }
   }
 
   private state(keyId: string, limits: LimitConfig): KeyState {
@@ -424,11 +518,24 @@ function near(limit: number | null | undefined, used: number): boolean {
   return configured(limit) && used >= limit * EAGER_FRACTION;
 }
 
-/** `evaluate`, reduced to the one thing an enforcement site needs from it. */
-function evaluateAgainst(
-  limits: LimitConfig,
-  counters: CounterSnapshot,
-  now: number,
-): Violation | null {
-  return evaluate(limits, counters, now).violation;
+/**
+ * Rewrites the reset of every reported dimension sitting on one window.
+ *
+ * So the headers on a 429 name the same instant as the `Retry-After` beside
+ * them. A response that says "wait an hour" in one field and "wait a week" in
+ * the next is worse than either figure alone: the client obeys whichever its
+ * SDK happens to read.
+ */
+function withReset(
+  headroom: HeadroomByDimension,
+  window: Window,
+  resetAt: number,
+): HeadroomByDimension {
+  const corrected: HeadroomByDimension = { ...headroom };
+  for (const dimension of ["requests", "tokens", "spend"] as const) {
+    const entry = corrected[dimension];
+    if (entry !== undefined && entry.window === window)
+      corrected[dimension] = { ...entry, resetAt };
+  }
+  return corrected;
 }

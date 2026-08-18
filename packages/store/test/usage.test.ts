@@ -537,6 +537,80 @@ test("sumSince is bounded below by its instant and above by nothing", async () =
   s.close();
 });
 
+/**
+ * The instant a sliding window actually frees a slot, which is the whole reason
+ * this query exists: `now + windowMs` is what every other path reports, and on a
+ * weekly window that is a `Retry-After` of seven days for a key that regains a
+ * slot in an hour.
+ */
+test("oldestSince reports the oldest retained row, which is when the window next frees a slot", async () => {
+  const s = await store();
+  const now = Date.now();
+  // Written out of order, so an implementation reading the first row rather than
+  // the minimum answers with the wrong one.
+  await s.usage.append(log({ id: "middle", at: now - 20_000 }));
+  await s.usage.append(log({ id: "oldest", at: now - 50_000 }));
+  await s.usage.append(log({ id: "newest", at: now - 1_000 }));
+
+  expect(await s.usage.oldestSince("k1", now - 60_000)).toBe(now - 50_000);
+  // The window moved past the oldest two, so the answer moves with it.
+  expect(await s.usage.oldestSince("k1", now - 30_000)).toBe(now - 20_000);
+  s.close();
+});
+
+/**
+ * Same filter as `sumSince`, and load-bearing for a different reason. A request
+ * admitted a moment ago is the newest row there is, but it is also the one whose
+ * `at` a broken query would most often return — reporting that the window frees
+ * nothing for a whole window, which is the overstatement this query replaces.
+ */
+test("oldestSince excludes pending rows, which are admissions rather than measurements", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "done", at: now - 10_000 }));
+  await s.usage.begin(log({ id: "flying", at: now - 90_000, state: "pending" }));
+
+  expect(await s.usage.oldestSince("k1", now - 120_000)).toBe(now - 10_000);
+  s.close();
+});
+
+test("oldestSince is null where the key has nothing in the window, and counts one key only", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "stale", at: now - 120_000 }));
+  await s.usage.append(log({ id: "theirs", at: now - 1_000, apiKeyId: "k2" }));
+
+  // Nothing retained is null, not zero: zero is an instant in 1970 and would be
+  // read as a window that freed a slot fifty-six years ago.
+  expect(await s.usage.oldestSince("k1", now - 60_000)).toBeNull();
+  expect(await s.usage.oldestSince("nobody", 0)).toBeNull();
+  // Inclusive at the lower bound, matching `sumSince`, so the row the sum counts
+  // is the row this reports.
+  expect(await s.usage.oldestSince("k1", now - 120_000)).toBe(now - 120_000);
+  expect(await s.usage.oldestSince("k2", 0)).toBe(now - 1_000);
+  s.close();
+});
+
+/**
+ * Correctness-adjacent rather than an optimisation: without a composite index
+ * leading with the key, a weekly lookup for one key scans every row in the week
+ * for every key on the install.
+ */
+test("oldestSince is served by idx_request_logs_key_at", async () => {
+  const db = openDb(":memory:");
+  const plan = db
+    .query<{ detail: string }, [string, number]>(
+      `EXPLAIN QUERY PLAN
+       SELECT MIN(at) FROM request_logs
+        WHERE api_key_id = ? AND state = 'done' AND at >= ?`,
+    )
+    .all("k1", 0)
+    .map((row) => row.detail)
+    .join(" ");
+  expect(plan).toContain("idx_request_logs_key_at");
+  db.close();
+});
+
 test("sumSince counts one key only, and an unknown key is zero rather than everything", async () => {
   const s = await store();
   const now = Date.now();

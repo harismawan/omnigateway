@@ -8,10 +8,11 @@ import {
   noopLogger,
   type StreamEvent,
 } from "@omni/ir";
+import type { HeadroomByDimension } from "@omni/ratelimit";
 import { type ApiKey, ARTIFACT_SCHEMA_VERSION } from "@omni/store";
 import { Elysia } from "elysia";
 import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
-import { ApiKeyRateLimiter } from "../auth/rateLimit.ts";
+import { ApiKeyRateLimiter, RateLimitExceeded } from "../auth/rateLimit.ts";
 import {
   type BodyCollector,
   createBodyCollector,
@@ -21,8 +22,18 @@ import {
 import { type DispatchDeps, dispatch } from "../dispatch/index.ts";
 import { createLoadRegistry } from "../dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "../dispatch/snapshotCache.ts";
-import { anthropicErrorBody, anthropicResponse, anthropicStream } from "../egress/anthropic.ts";
-import { openaiErrorBody, openaiResponse, openaiStream } from "../egress/openai.ts";
+import {
+  anthropicErrorBody,
+  anthropicRateLimitHeaders,
+  anthropicResponse,
+  anthropicStream,
+} from "../egress/anthropic.ts";
+import {
+  openaiErrorBody,
+  openaiRateLimitHeaders,
+  openaiResponse,
+  openaiStream,
+} from "../egress/openai.ts";
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
 import {
@@ -114,15 +125,79 @@ function errorBody(surface: Surface, code: ErrorCode, message: string): unknown 
     : openaiErrorBody(code, message);
 }
 
-function jsonResponse(body: unknown, status: number): Response {
+/**
+ * The rate-limit headers this surface speaks.
+ *
+ * Split on the surface for the same reason the error body is: each vendor's SDK
+ * parses its own dialect and nothing else, so a client handed the other one
+ * sees no rate-limit headers at all and backs off from nothing. `spend` and
+ * `concurrency` are absent from both by design.
+ */
+function rateLimitHeaders(
+  surface: Surface,
+  headroom: HeadroomByDimension,
+  now: number,
+): Record<string, string> {
+  return surface === "anthropic"
+    ? anthropicRateLimitHeaders(headroom)
+    : openaiRateLimitHeaders(headroom, now);
+}
+
+/**
+ * `Retry-After`, in whole seconds, on the refusals that carry a wait.
+ *
+ * The gap this closes: a 429 already knew how long a client should wait and
+ * said so only in the error body, where no SDK looks. Rounded up, because a
+ * client sent back early is a client refused twice.
+ */
+/**
+ * `remaining` counted after the request being served, which is what the header
+ * means to the client reading it.
+ *
+ * `Decision.headroom` reports what a window held *before* this request, because
+ * that is the state the evaluator judged. Both vendors define `remaining` as
+ * what is left once this response is accounted for, so a fresh key limited to
+ * 60/min would otherwise advertise 60 on its first response and hand a client
+ * that believed it a 429 on the sixtieth.
+ *
+ * Only `requests` is adjusted, and only once the request was admitted. `tokens`
+ * and `spend` debit when the response completes, so this request's cost is
+ * genuinely unknown while the head is being written — subtracting anything
+ * there would invent a number rather than report one.
+ */
+function afterThisRequest(headroom: HeadroomByDimension): HeadroomByDimension {
+  const requests = headroom.requests;
+  if (requests === undefined) return headroom;
+  return {
+    ...headroom,
+    requests: { ...requests, remaining: Math.max(0, requests.remaining - 1) },
+  };
+}
+
+function retryAfterHeaders(error: GatewayError): Record<string, string> {
+  const ms = error.retryAfterMs;
+  if (ms === undefined || HTTP_STATUS[error.code] !== 429) return {};
+  return { "retry-after": String(Math.max(0, Math.ceil(ms / 1000))) };
+}
+
+function jsonResponse(
+  body: unknown,
+  status: number,
+  headers: Record<string, string> = {},
+): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
   });
 }
 
-function errorResponse(surface: Surface, code: ErrorCode, message: string): Response {
-  return jsonResponse(errorBody(surface, code, message), HTTP_STATUS[code]);
+function errorResponse(
+  surface: Surface,
+  code: ErrorCode,
+  message: string,
+  headers: Record<string, string> = {},
+): Response {
+  return jsonResponse(errorBody(surface, code, message), HTTP_STATUS[code], headers);
 }
 
 function asGatewayError(error: unknown): GatewayError {
@@ -150,6 +225,14 @@ function sseResponse(
    * dispatch claimed for the request held.
    */
   source: AsyncGenerator<StreamEvent, void, undefined>,
+  /**
+   * The rate-limit headers, as computed at pre-flight.
+   *
+   * A stream's head goes out before a token has been counted, so these are the
+   * figures the request was admitted against and they are never revised
+   * mid-stream — there is nowhere to revise them to once the headers are sent.
+   */
+  limitHeaders: Record<string, string>,
   /**
    * Given every frame written to the client, in order, when body capture is on.
    *
@@ -210,7 +293,7 @@ function sseResponse(
     },
   });
 
-  return new Response(stream, { headers: SSE_HEADERS });
+  return new Response(stream, { headers: { ...SSE_HEADERS, ...limitHeaders } });
 }
 
 /**
@@ -300,6 +383,32 @@ async function handle(
    * a broken one, and a client that hung up alike.
    */
   let streaming = false;
+  /**
+   * What the client is told about its own ceilings.
+   *
+   * Empty until the key is admitted, and empty for a key with no limits — a
+   * dimension with no ceiling has no distance from one to report, and
+   * `limit: unlimited` is a number no client can parse. Set on the refusal path
+   * too, so a 429 carries the same figures a served request would have.
+   */
+  let headroom: HeadroomByDimension = {};
+  /**
+   * Rendered against the instant the request arrived, not the instant it is
+   * answered.
+   *
+   * A stream's head goes out at pre-flight and cannot be revised afterwards, so
+   * that is the only instant both response kinds share. It also reads the clock
+   * exactly zero extra times, which matters because the non-streaming path
+   * completes its row before it returns and a read after that point is a read
+   * the row cannot account for. The cost is that a slow request over-states the
+   * remaining wait by its own duration — the same safe direction every other
+   * reset here leans.
+   */
+  // `release` is non-null exactly when the request claimed a slot, which is the
+  // same condition as "this request will be counted". A refusal never was, so
+  // it reports the window untouched.
+  const limitHeaders = (): Record<string, string> =>
+    rateLimitHeaders(surface, release === null ? headroom : afterThisRequest(headroom), startedAt);
   const debit: UsageDebit = (id, usage) => {
     rateLimiter.debit(id, usage);
   };
@@ -320,8 +429,13 @@ async function handle(
     }
     keyId = key.id;
     try {
-      release = await rateLimiter.admit(key.id, key.limits, requestId);
+      const admitted = await rateLimiter.admit(key.id, key.limits, requestId);
+      release = admitted.release;
+      headroom = admitted.headroom;
     } catch (error) {
+      // The refusal knows what the client is up against, and it is the only
+      // thing that does — nothing downstream re-evaluates the limits.
+      if (error instanceof RateLimitExceeded) headroom = error.headroom;
       if (error instanceof GatewayError && error.code === "RATE_LIMIT") {
         deps.logger.warn("rate limit rejected", {
           requestId,
@@ -501,7 +615,14 @@ async function handle(
         release?.();
         await log(cancelled, failure);
       };
-      const response = sseResponse(frames, finish, deps.keepaliveMs, dispatched.events, onFrame);
+      const response = sseResponse(
+        frames,
+        finish,
+        deps.keepaliveMs,
+        dispatched.events,
+        limitHeaders(),
+        onFrame,
+      );
       // Only once the response exists. A throw while building it leaves this
       // false, so the `finally` frees the slot that nothing else now will.
       streaming = true;
@@ -528,7 +649,11 @@ async function handle(
 
     await log();
 
-    return jsonResponse(responseBody, failure === undefined ? 200 : HTTP_STATUS[failure.code]);
+    return jsonResponse(
+      responseBody,
+      failure === undefined ? 200 : HTTP_STATUS[failure.code],
+      limitHeaders(),
+    );
   } catch (error) {
     const gatewayError = asGatewayError(error);
     // A client that hangs up makes the non-streaming drain throw rather than
@@ -568,7 +693,10 @@ async function handle(
     // fact an operator needs is the one nothing recorded. A disconnect is not a
     // failure and is far too common to print; its row is the whole record.
     if (!cancelled) reportRejection(deps.logger, requestId, completed, gatewayError, surface);
-    return jsonResponse(rejection, HTTP_STATUS[gatewayError.code]);
+    return jsonResponse(rejection, HTTP_STATUS[gatewayError.code], {
+      ...limitHeaders(),
+      ...retryAfterHeaders(gatewayError),
+    });
   } finally {
     // Every path that ends inside this function: a rendered response, a
     // deadline, a rejection before dispatch, a hang-up on the non-streaming
@@ -662,7 +790,15 @@ export function proxyRoutes(deps: ProxyDeps) {
             code: gatewayError.code,
             reason: gatewayError.message,
           });
-          return errorResponse("anthropic", gatewayError.code, gatewayError.message);
+          // No rate-limit dialect here: this route renders no usage headers,
+          // but a refusal still says how long to wait rather than saying it
+          // only in a body no SDK reads.
+          return errorResponse(
+            "anthropic",
+            gatewayError.code,
+            gatewayError.message,
+            retryAfterHeaders(gatewayError),
+          );
         }
       })
       .onError(({ error }) => {

@@ -41,7 +41,8 @@ async function harness(limits: LimitConfig, sumTimeoutMs = 20) {
     at(ms: number) {
       clock = ms;
     },
-    admit: () => limiter.admit(key.id, limits, "req_test"),
+    /** The concurrency release only; the headroom has its own tests. */
+    admit: async () => (await limiter.admit(key.id, limits, "req_test")).release,
     consume: () => limiter.consume(key.id, limits, "req_test"),
     /** One finished request, as `finishLog` completes it: row first, then debit. */
     async complete(usage: { tokens?: number; costUsd?: number } = {}) {

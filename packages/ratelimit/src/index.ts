@@ -54,17 +54,20 @@ export type Headroom = {
   resetAt: number;
 };
 
+/**
+ * Per dimension, the configured window nearest exhaustion by proportion — the
+ * one that will deny first. There is one header per dimension and a key may
+ * have three windows in it, and reporting the shortest unconditionally would
+ * show a comfortable per-minute figure to a key one request from its weekly
+ * ceiling. Empty for a dimension with no configured limit, which is what makes
+ * a renderer emit nothing for it rather than an invented "unlimited".
+ */
+export type HeadroomByDimension = Partial<Record<Dimension, Headroom>>;
+
 export type Decision = {
   allowed: boolean;
   violation: Violation | null;
-  /**
-   * Per dimension, the configured window nearest exhaustion by proportion —
-   * the one that will deny first. There is one header per dimension and a key
-   * may have three windows in it, and reporting the shortest unconditionally
-   * would show a comfortable per-minute figure to a key one request from its
-   * weekly ceiling.
-   */
-  headroom: Partial<Record<Dimension, Headroom>>;
+  headroom: HeadroomByDimension;
 };
 
 /** The dimensions counted over a window. `concurrency` is handled apart. */
@@ -113,7 +116,7 @@ function lastToClear(violations: readonly Violation[]): Violation | null {
  */
 export function evaluate(config: LimitConfig, counters: CounterSnapshot, now: number): Decision {
   const violations: Violation[] = [];
-  const headroom: Partial<Record<Dimension, Headroom>> = {};
+  const headroom: HeadroomByDimension = {};
 
   for (const dimension of WINDOWED) {
     const limits: WindowLimits | undefined = config[dimension];

@@ -144,6 +144,8 @@ type Agg = {
 
 type SumRow = { requests: number; tokens: number; cost_usd: number };
 
+type OldestRow = { at: number | null };
+
 /** An absent credential, key, or upstream model is a bucket, not a hole. */
 function label(value: string | number | null): string {
   if (value === null) return "unknown";
@@ -306,6 +308,24 @@ export function createUsageRepo(db: Database): UsageRepo {
         tokens: row?.tokens ?? 0,
         costUsd: row?.cost_usd ?? 0,
       };
+    },
+
+    async oldestSince(apiKeyId: string, sinceMs: number) {
+      // `state = 'done'` for the same reason `sumSince` carries it: a pending
+      // row is a placeholder rather than a measurement, and one written a
+      // moment ago would answer that this window frees nothing for a whole
+      // window — the exact overstatement this query exists to replace.
+      const row = db
+        .query<OldestRow, [string, number]>(
+          `SELECT MIN(at) AS at
+             FROM request_logs
+            WHERE api_key_id = ? AND state = 'done' AND at >= ?`,
+        )
+        .get(apiKeyId, sinceMs);
+      // `MIN` over no rows is a row holding null, not an absent row. Both mean
+      // the same thing here: the key has nothing retained inside the window, so
+      // there is no instant to report and the caller keeps its own.
+      return row?.at ?? null;
     },
 
     async aggregate(q: UsageQuery) {

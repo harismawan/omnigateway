@@ -1,6 +1,7 @@
 import type { CollectedResponse, ErrorCode, StopReason, StreamEvent, Usage } from "@omni/ir";
 import { promptTokens } from "@omni/ir";
-import type { SseFrame } from "./anthropic.ts";
+import type { HeadroomByDimension } from "@omni/ratelimit";
+import { REPORTED_LIMIT_DIMENSIONS, type SseFrame } from "./anthropic.ts";
 
 /**
  * Renders usage the way this surface counts it.
@@ -209,4 +210,50 @@ export function openaiResponse(
 export function openaiErrorBody(code: ErrorCode, message: string): unknown {
   const e = ERROR_TYPE[code];
   return { error: { message, type: e.type, code: e.code } };
+}
+
+/**
+ * A wait in OpenAI's own spelling — `4h51m22s`, `6m0s`, `22s`.
+ *
+ * A duration rather than the instant the Anthropic dialect names, which is the
+ * whole reason the two renderers are separate functions and not one with a
+ * prefix argument. Whole seconds, rounded up: a client sent back early is a
+ * client that gets refused again.
+ */
+function duration(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours}h${minutes}m${seconds}s`;
+  if (minutes > 0) return `${minutes}m${seconds}s`;
+  return `${seconds}s`;
+}
+
+/**
+ * The rate-limit headers an OpenAI-shaped client already knows how to read.
+ *
+ * The same figures the Anthropic surface sends, under different names, in a
+ * different word order, with the reset relative to now instead of absolute. An
+ * SDK handed the other dialect sees no rate-limit headers at all and backs off
+ * from nothing, so which renderer runs is decided by the surface and nothing
+ * else.
+ *
+ * A dimension with no configured limit contributes no headers, and `spend` and
+ * `concurrency` contribute none on either surface — see
+ * `REPORTED_LIMIT_DIMENSIONS`.
+ */
+export function openaiRateLimitHeaders(
+  headroom: HeadroomByDimension,
+  now: number,
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const dimension of REPORTED_LIMIT_DIMENSIONS) {
+    const entry = headroom[dimension];
+    if (entry === undefined) continue;
+    headers[`x-ratelimit-limit-${dimension}`] = String(entry.limit);
+    headers[`x-ratelimit-remaining-${dimension}`] = String(entry.remaining);
+    headers[`x-ratelimit-reset-${dimension}`] = duration(entry.resetAt - now);
+  }
+  return headers;
 }

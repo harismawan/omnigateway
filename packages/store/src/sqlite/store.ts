@@ -147,6 +147,7 @@ export async function createStore(opts: {
       recent: (limit) => handle.usage.recent(limit),
       aggregate: (q) => handle.usage.aggregate(q),
       sumSince: (apiKeyId, sinceMs) => handle.usage.sumSince(apiKeyId, sinceMs),
+      oldestSince: (apiKeyId, sinceMs) => handle.usage.oldestSince(apiKeyId, sinceMs),
       prune: (olderThan) => handle.usage.prune(olderThan),
       pruneDaily: (olderThan) => handle.usage.pruneDaily(olderThan),
     },
