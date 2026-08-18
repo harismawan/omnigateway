@@ -15,7 +15,9 @@ designs live in `docs/superpowers/specs/`.
 - [Dispatch](#dispatch)
 - [Providers](#providers)
 - [Storage](#storage)
+  - [Replacing the database while it is open](#replacing-the-database-while-it-is-open)
 - [Background loops](#background-loops)
+  - [Stopping and restarting](#stopping-and-restarting)
 - [The console and the CLI](#the-console-and-the-cli)
 
 ## What a request actually does
@@ -241,6 +243,111 @@ pre-filter conversation and every `attempts[].request` is the post-filter one.
 not *what*, and the artifact is the only place that can be read — which is why
 the console labels each side rather than presenting them as interchangeable.
 
+### Replacing the database while it is open
+
+A snapshot is `VACUUM INTO` a file in `snapshots/` beside the database. That
+folds the write-ahead log in by definition, so there is no `-wal` or `-shm` to
+handle on the way out, and it reads through SQLite rather than copying the file,
+so taking one against a live gateway yields a consistent database rather than a
+torn one. The `request_bodies/` tree is excluded by construction: including it
+would make every downloaded copy a prompt corpus and would make snapshot size
+track prompt volume rather than database size. A restore therefore leaves the two
+sides out of step, which is a state that already exists and is already handled:
+the orphan sweep above collects files the restored `bodies` table no longer
+references, and a row whose file is gone reads back as *captured, then lost*
+rather than raising.
+Retention — `keepLatest` and `maxAgeDays`, both enforced, newest always kept —
+prunes when a snapshot is written rather than on the hourly sweep, and the forced
+copy taken on the way into a restore skips the prune entirely: the undo for an
+operation must not be deletable by the policy that operation runs under.
+
+Restoring one replaces the file every repo reads from, inside the process that is
+reading it. Three pieces make that survivable.
+
+**The store is swappable.** `createStore` returns a stable outer object whose repo
+methods forward, *per call*, to a replaceable inner handle; `reopen()` closes the
+inner handle and opens a new one at the same path, and `close()` is idempotent so
+a restore can close, move a file, and reopen without a separate primitive. The
+indirection is not decoration. The store is captured by value into five long-lived
+holders at boot — the app, the refresher, and the three loops — and two dozen
+modules are typed against `Store`, so closing and re-opening a connection
+underneath them would leave every one of them holding repos bound to a dead
+`Database`. Reading the handle per call is what makes the swap invisible to them.
+It also means binding a repo method to a local defeats the whole mechanism and
+strands that local on the closed handle. Routing subscribers live on the outer
+object for the same reason: a listener registered at boot has to survive a
+restore.
+
+**A quiesce latch gates client traffic, and only client traffic.** `/v1/*` is
+refused with a 503 and a `retry-after`, rendered by the same encoders the proxy
+uses so an SDK gets an error in the dialect it already parses. `/api/*` and
+`/health` stay live for the whole operation: the console is how an operator
+watches a restore and how they hear that it failed, so a latch that covered the
+whole server would black out the dashboard at the exact moment it is needed and
+take the load balancer's health check with it.
+
+What the latch waits for is requests being *answered*, not streams draining.
+Elysia's `onAfterResponse` fires when the response is handed back, which for SSE
+is long before the body ends. So the wait is bounded — ten seconds — and the latch
+stays shut for the whole swap rather than only until the in-flight count reaches
+zero, because a stream admitted before the close is still reading through the
+handle the swap is about to replace.
+
+**The sequence is ordered so that neither of the two things making it recoverable
+can be skipped:** nothing is closed until the candidate has been judged, and
+nothing is swapped until the undo exists.
+
+```mermaid
+flowchart TD
+  req(["restore or import"]) --> latch["close latch<br/><i>/v1 refused · drain, bounded at 10s</i>"]
+  latch --> insp["inspect candidate<br/><b>read-only, separate handle</b><br/>quick_check + migration-001 tables"]
+  insp -- "corrupt, or not ours" --> abort(["BAD_REQUEST<br/><i>live database untouched</i><br/>latch reopens"])
+  insp -- ok --> undo["pre-restore snapshot<br/><i>forced, exempt from retention</i>"]
+  undo --> swap["stage beside the live file · close handle<br/>unlink stale -wal/-shm · rename into place · reopen()"]
+  swap -- fails --> wedged(["<b>SwapFailedError</b><br/>latch stays shut, /v1 stays refused<br/><i>pre-restore id logged</i>"])
+  swap -- ok --> inval["invalidate the routing snapshot<br/>end admin sessions <i>iff</i> the password hash changed"]
+  inval --> open(["latch reopens"])
+```
+
+The error seam is the distinction worth internalizing. Everything before the swap
+— a file that fails `quick_check`, a file that is a database but not one of ours,
+no room on disk for the undo — fails with the live database untouched, and the
+latch reopens immediately. A failure *during* the swap raises `SwapFailedError`,
+and the gateway deliberately does not reopen: the file it would serve from is in
+an unknown state, and refusing client traffic beats answering out of a
+half-swapped database. `/api/*` is still up, which is how an operator reaches the
+pre-restore snapshot named in the log line.
+
+The required-tables check is the set migration 001 creates, not today's schema.
+`openDb` migrates a snapshot forward on the way in, so asserting the current
+tables would reject exactly the old backup an operator reaches for.
+
+Two smaller placements carry weight. The candidate is copied to a staging name
+*before* the handle closes, so the window with no database open is a rename and
+not a file copy. And an uploaded database is streamed to a temp file beside the
+live one rather than into `/tmp`, because the swap renames that file into place
+and a rename across filesystems fails — which would turn an ordinary import into
+a `SwapFailedError` and wedge the latch shut for no reason at all. The stale
+`-wal` and `-shm` go while the handle is shut: they belong to the file being
+replaced, and SQLite reopening a new database beside another database's
+write-ahead log is how a restore becomes corruption.
+
+Two pieces of derived state do not survive the swap on their own. The routing
+snapshot cache checks staleness with SQLite's `data_version`, which is
+connection-local — a freshly opened handle over a different file can report the
+same number and serve a stale snapshot — so it is invalidated explicitly. Admin
+sessions live in a `Map` rather than in the database, but `setPassword` clears
+them, so a restore that writes a different password hash is that same "log
+everyone out" event arriving by another door. The hashes are compared across the
+swap and only a boolean leaves the operation, so restoring this installation's own
+snapshot leaves the operator signed in.
+
+The CLI cannot do any of this, and refuses rather than trying: `omni db restore`
+stops if a gateway is running against that installation, with no override. A
+second process can reopen its own handle but cannot quiesce the gateway's, and
+renaming the file under a live SQLite connection corrupts the database being
+rescued.
+
 ## Background loops
 
 Three, started at boot and stopped on signal:
@@ -271,6 +378,57 @@ The row cap runs beside the window because the window bounds nothing: at
 sustained load a seven-day retention over full traffic is unbounded in practice.
 The orphan sweep exists because a crash between the file write and the row write
 leaves a file nothing will ever come back for.
+
+### Stopping and restarting
+
+A signal and `POST /api/lifecycle/shutdown` reach the same teardown. They used to
+be unable to: the server, the store, and the three loop stoppers are locals of the
+bootstrap, so a handler defined anywhere else had nothing to stop. `createShutdown`
+closes over them once, and both callers get the same shutdown — loops first,
+because a timer that fires while the socket drains reaches a store that is about
+to close, then the server, then the store, then exit. A second request while the
+first is draining escalates, on the theory that the first one is evidently stuck.
+
+The drain is bounded at five seconds. Bun stops a server by letting its
+connections finish, and a shutdown asked for over HTTP arrives on one of them, so
+the request that asked for the shutdown is itself a reason the shutdown cannot
+complete — the gateway answered `ok` and then stayed alive until a second signal
+escalated. A signal never hits this, because a shell holds no socket. On timeout
+the process exits **0**: a nonzero code would read to `Restart=on-failure` as a
+crash and resurrect a gateway an operator just asked to stop.
+
+Restart is not shutdown, and what it takes depends on what is watching. The
+capability is detected rather than assumed. `JOURNAL_STREAM` is systemd's own
+statement that it is capturing this process, which beats looking for an installed
+unit file — that says a unit exists, not that this process is the one it started —
+and `MANAGERPID` distinguishes the user manager from the system one, because the
+uid is wrong in both directions. Failing that, `/.dockerenv` means a container.
+Failing both, nothing would respawn the process and restart is refused.
+
+Under systemd the gateway asks the manager instead of signalling itself:
+
+```
+systemctl [--user] --no-block restart omnigateway.service
+```
+
+The unit the CLI installs sets `Restart=on-failure`, and a handled `SIGTERM` exits
+zero, which systemd reads as success — a self-signalling gateway would stop and
+stay stopped. `--no-block` is load-bearing: restarting the unit tears down its
+whole cgroup, which contains the `systemctl` client just spawned, so a blocking
+call is killed mid-wait while the queued job survives. Asking also fails better.
+A refused `systemctl` is an ordinary error response from a gateway that is still
+running and still serving, rather than a process that killed itself and hoped.
+
+A container's restart policy is the one capability here that is a hope rather than
+a fact — it is not readable from inside the container — so a restart is an exit
+with code 0 and the console reports the uncertainty instead of promising. With no
+supervisor at all `canRestart` is false, because `omni start` without a unit is a
+detached spawn with a pidfile and nothing watching it. Shutdown stays available in
+every shape; stopping is the point of it.
+
+`describeLifecycle` is a pure function of the environment and one path probe,
+which is what lets the console disable a control and print the reason rather than
+letting an operator press it and find out.
 
 ## The console and the CLI
 

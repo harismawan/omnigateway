@@ -75,15 +75,21 @@ introducing one.
 **A `maintenance` repo** alongside the existing five:
 
 - `stats()` → `{ pageSize, pageCount, freelistCount, schemaVersion }`. PRAGMA reads plus
-  `SELECT MAX(...) FROM` the migrations table. The precedent for a raw PRAGMA through the query API
-  is the `data_version` read at `store.ts:43`.
-- `vacuum()` — reclaims free pages. Blocking, holds a write lock.
+  `SELECT MAX(id) FROM migrations` — the table is `(id, applied_at)` and has no `version` column.
+  The precedent for a raw PRAGMA through the query API is the `data_version` read at `store.ts:43`.
+- `vacuum()` — reclaims free pages, then checkpoints. Blocking, holds a write lock. The checkpoint is
+  not optional: in WAL mode the rewrite lands in the log, so without it the page count falls while
+  the file on disk keeps every page and every caller reports reclaiming nothing.
 - `snapshotTo(path)` — `VACUUM INTO`. The path is escaped by doubling single quotes.
 - `inspect(path)` → opens the file read-only and returns `{ ok, quickCheck, tables, counts }` without
   touching the live database.
 
 **`createStore` returns a swappable store.** The repos become a stable outer object delegating to a
 replaceable inner handle, with `reopen()` closing the inner handle and re-opening at the same path.
+`close()` is idempotent and `reopen()` tolerates an already-closed handle, because restore needs a
+window between the two to move the file: the sequence is `close()` → swap → `reopen()`, and no
+separate swap primitive exists. Repo methods forward per call, so binding one to a local defeats the
+indirection and leaves it on a dead handle.
 
 This indirection is what makes a live swap survivable. `store` is captured by value into five
 long-lived holders during boot — `createApp`, `createRefresher`, `startMaintenance`,
@@ -211,6 +217,18 @@ says so.
 pidfile and nothing watching it (`apps/cli/src/service.ts:226-250`). Shutdown remains available —
 stopping is the point of shutdown.
 
+**The drain has to be bounded.** `app.stop()` does not resolve while the shutdown request's own
+connection is open — Bun drains connections and that request is one of them — so an unbounded wait
+answers `{"ok":true}` and then leaves the gateway alive until a second signal escalates. A signal
+never hits this, because a shell holds no socket. On timeout the process exits **0**: a nonzero code
+would read to `Restart=on-failure` as a crash and resurrect the gateway an operator just stopped.
+
+**The CLI is a different situation and refuses.** `omni db restore` will not run while a gateway is
+running against that installation, and has no override flag. The dashboard may swap live because the
+swap happens inside the process that owns the handle, behind the latch; a second process can reopen
+its own handle but cannot quiesce the gateway's, and renaming the file under a live SQLite connection
+corrupts the database being rescued.
+
 ## How restore works
 
 Restore and import are one operation with two sources. The swap happens in the live process.
@@ -228,8 +246,17 @@ supervisor could take snapshots it could never restore.
    loops.
 4. **Swap.** Close the inner handle, replace the database file, unlink stale `-wal` and `-shm`,
    `reopen()`.
-5. **Invalidate derived state, then release.** `dispatch/snapshotCache.ts` and the sessions held by
-   `adminAuth` are both computed from store contents and are stale the moment the file changes.
+5. **Invalidate derived state, then release.** `dispatch/snapshotCache.ts` checks staleness with
+   SQLite `data_version`, which is connection-local — a reopened handle over a different file can
+   report the same number and serve a stale routing snapshot — so it is invalidated explicitly.
+
+   Admin sessions are *not* computed from store contents; `createAdminAuth` keeps them in an
+   in-memory `Map` and only the password hash is in the database. But `setPassword` clears that map,
+   so this codebase does enforce "a password change ends every session", and a restore writes another
+   installation's hash without passing through it. Restore therefore compares the hash across the
+   swap and invalidates sessions only when it differs, leaving the ordinary case — restoring this
+   installation's own snapshot — signed in. The hash is read to compare and never logged, returned,
+   or placed in an error; only the boolean `adminPasswordChanged` reaches the wire.
 
 Failure before step 4 aborts with the live database untouched. Failure during step 4 is the one
 genuinely bad window: the gateway holds the latch closed, logs, and refuses `/v1/*` rather than
@@ -252,8 +279,8 @@ Errors use the existing `GatewayError` codes and `apiErrorHandler`.
 | `POST /api/database/snapshots` | `{ id, filename, sizeBytes, createdAt }` |
 | `GET /api/database/snapshots/:id/download` | binary, `Content-Disposition`, `Cache-Control: no-store` |
 | `DELETE /api/database/snapshots/:id` | `{ ok: true }` |
-| `POST /api/database/snapshots/:id/restore` | `{ ok: true, counts }` |
-| `POST /api/database/import` | `{ ok: true, counts }` |
+| `POST /api/database/snapshots/:id/restore` | `{ ok, counts, preRestoreSnapshot, adminPasswordChanged }` |
+| `POST /api/database/import` | same shape; body is the raw database, streamed |
 | `PUT /api/database/retention` | `{ keepLatest, maxAgeDays }` |
 | `GET /api/lifecycle` | `{ supervisor, canRestart, canShutdown, note? }` |
 | `POST /api/lifecycle/restart` | `{ ok: true }`; `CONFLICT` when `canRestart` is false |
