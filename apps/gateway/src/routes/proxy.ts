@@ -618,6 +618,15 @@ async function handle(
         // either way, and freeing here keeps the instant the gauge falls the
         // instant the request ended, rather than a store write later — which
         // also means a caller that has read the last byte can rely on it.
+        //
+        // This is the only thing that frees a streaming request's slot, so the
+        // gauge is owned entirely by whether the body is consumed. A `Response`
+        // that is never read and never cancelled therefore holds its slot for
+        // good, and no window expires a gauge. Bun's server always pulls or
+        // cancels, so the case is unreachable in production and reachable from
+        // a test calling `app.handle` directly. Deliberately not defended: a
+        // reaper would have to guess when a legitimately slow stream is dead,
+        // and guessing wrong frees a slot that is still in use.
         release?.();
         await log(cancelled, failure);
       };

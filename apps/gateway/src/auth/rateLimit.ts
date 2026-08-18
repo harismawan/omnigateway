@@ -462,9 +462,13 @@ export class ApiKeyRateLimiter {
     try {
       const oldest = await this.store.usage.oldestSince(keyId, now - length);
       if (oldest === null) return null;
-      // Never behind now: a row on the very edge of the window ages out as this
-      // is read, and a reset in the past is a `Retry-After` of zero dressed up.
-      return Math.max(now, oldest + length);
+      // No clamp to `now`. `oldestSince` was asked for rows at or after
+      // `now - length`, so `oldest + length >= now` by construction, and `now`
+      // is a fixed local rather than a second clock read — there is no instant
+      // at which this can come back in the past. A guard here would describe a
+      // race the code cannot have, which is what `SUM_TIMEOUT_MS` did before it
+      // was deleted for the same reason.
+      return oldest + length;
     } catch (error) {
       this.logger.warn("rate limit reset unavailable", {
         ...(requestId === undefined ? {} : { requestId }),
@@ -644,6 +648,16 @@ export class ApiKeyRateLimiter {
    * read, and its cached sums have expired anyway — dropping it earlier would
    * lose a debit, strand a release, or orphan the entry a suspended check is
    * still holding a claim on.
+   *
+   * `deciding` is redundant today and no test fails without it: `admit` raises
+   * the gauge inside `claim` before it can yield, and `consume` raises none but
+   * leaves a ring stamp, and an entry only becomes droppable once that stamp has
+   * aged out — by which point it counts toward nothing. It is kept, and named
+   * here as belt-and-braces rather than left looking load-bearing, because it
+   * makes this condition state the invariant outright: nothing is dropped while
+   * a check is inside it. Without it the same guarantee holds only by way of an
+   * argument about which half of a claim is visible when, which is exactly the
+   * reasoning that was wrong before the claim was made synchronous.
    */
   private cleanup(now: number): void {
     for (const [keyId, state] of this.keys) {

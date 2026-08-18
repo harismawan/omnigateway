@@ -179,7 +179,8 @@ omni models dry-run <id> [--tools] [--images] [--reasoning]
 omni models catalog [--provider P]
 
 omni keys list
-omni keys create [--label L] [--allow <model> ...] [--rate-limit N]
+omni keys create [--label L] [--allow <model> ...] [--limit <dim>:<window>=N ...]
+omni keys limits <id> [--set <dim>:<window>=N ...] [--unset <dim>[:<window>] ...]
 omni keys revoke <id>
 
 omni settings get

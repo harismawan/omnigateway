@@ -97,13 +97,19 @@ test("openDb applies migrations and records them", () => {
  * `rate_limit_per_min` was `INTEGER` with no `CHECK`, and the new schema is
  * `z.number().int().positive()` — so `0`, `-5` and `1.5` are all values a
  * hand-edited install can be sitting on and none of them is a limit the reader
- * accepts. Ordered by id, which is the order the assertions below read in.
+ * accepts. `'sixty'` is the fourth, and the one a range test alone lets through:
+ * INTEGER affinity is a preference rather than a constraint, so the string is
+ * stored as TEXT, and TEXT sorts above every number so `> 0` is true of it. A
+ * backfill guarded only on the range writes `{"requests":{"1m":"sixty"}}`, which
+ * `parseLimitConfig` refuses. Ordered by id, which is the order the assertions
+ * below read in.
  */
 const LEGACY_KEYS = `
   INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, rate_limit_per_min, created_at)
   VALUES ('fractional', 'f', 'sk-omni-eeee', 'h5', NULL, 1.5, 0),
          ('limited',    'l', 'sk-omni-aaaa', 'h1', NULL, 60,  0),
          ('negative',   'n', 'sk-omni-dddd', 'h4', NULL, -5,  0),
+         ('textual',    't', 'sk-omni-ffff', 'h6', NULL, 'sixty', 0),
          ('unlimited',  'u', 'sk-omni-bbbb', 'h2', NULL, NULL, 0),
          ('zero',       'z', 'sk-omni-cccc', 'h3', NULL, 0,   0)`;
 
@@ -126,6 +132,10 @@ test("migration 9 backfills a per-minute limit into the requests matrix", () => 
     { id: "fractional", limits: "{}" },
     { id: "limited", limits: '{"requests":{"1m":60}}' },
     { id: "negative", limits: "{}" },
+    // The one a bare `> 0` admits, because SQLite sorts TEXT above every
+    // number. Carried over it would be `{"requests":{"1m":"sixty"}}`, which is
+    // not a limit at all — it is an unreadable key.
+    { id: "textual", limits: "{}" },
     // Not `{"requests":{"1m":null}}`. An absent key and an explicit null both
     // mean unlimited, and the empty object is the shape every new key starts at.
     { id: "unlimited", limits: "{}" },
@@ -157,6 +167,7 @@ test("migration 9 leaves every upgraded key readable, whatever the old column he
     "fractional",
     "limited",
     "negative",
+    "textual",
     "unlimited",
     "zero",
   ]);

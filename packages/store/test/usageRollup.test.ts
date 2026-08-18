@@ -255,8 +255,12 @@ test("append writes one bucket per request id, exactly where the daily rollup is
   expect(requests()).toBe(1);
   expect(daily()).toBe(1);
 
+  // Two, absolutely, in both tables. Asserting only that the two agree passes
+  // at `1 === 1` as readily as at `2 === 2`, which is exactly the case where the
+  // hourly bucket had stopped being written beside the daily row.
   await usage.append(log({ id: "r1", at }));
-  expect(requests()).toBe(daily());
+  expect(requests()).toBe(2);
+  expect(daily()).toBe(2);
   db.close();
 });
 
@@ -283,11 +287,18 @@ test("a rebuild reproduces the same totals as the rows it derives from", async (
   );
   const before = await usage.sumSince("k1", H0);
 
-  // A restored file's rollup, in every way one can be wrong at once: a bucket
-  // that is gone, one that over-counts, and one for an hour with no rows.
+  // The orphan first and on its own: a bucket the rollup holds for an hour the
+  // log has no rows in is the shape a missing prune leaves behind, and it is the
+  // one damage the truth-side comparison cannot see — every row it joins from is
+  // a row that exists. Beside the two damages below it is invisible, because
+  // either of those already fails the same assertion.
+  db.run("INSERT INTO usage_rollup (api_key_id, hour, requests) VALUES ('k1', 1, 5)");
+  expect(await usage.auditRollup()).toEqual({ buckets: 120, mismatched: 1, ok: false });
+
+  // And the rest of what a restored file's rollup can be wrong by, at once: a
+  // bucket that is gone and one that over-counts.
   db.run("DELETE FROM usage_rollup WHERE hour = ?", [Math.floor(H0 / HOUR_MS)]);
   db.run("UPDATE usage_rollup SET requests = requests + 17, cost_usd = cost_usd + 3");
-  db.run("INSERT INTO usage_rollup (api_key_id, hour, requests) VALUES ('k1', 1, 5)");
   const damaged = await usage.auditRollup();
   expect(damaged.ok).toBe(false);
   expect(damaged.mismatched).toBeGreaterThan(0);

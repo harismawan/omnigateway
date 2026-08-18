@@ -42,9 +42,10 @@ export class SlidingWindow {
    *
    * A caller that records before it judges — which is how concurrent callers see
    * each other rather than one shared pre-burst snapshot — has to undo the
-   * record when it refuses. The newest stamp of that value rather than the last
-   * one held, because another caller may have recorded after this one and must
-   * keep its own slot.
+   * record when it refuses. Exactly one stamp goes, so a concurrent caller that
+   * recorded the same instant keeps its own slot; which of two equal numbers is
+   * removed is not a distinction the data can carry, and the scan runs from the
+   * newest end only because the stamps are ascending and it can stop early.
    *
    * Silent when there is no such stamp: it aged out while the caller was
    * deciding, so the slot it is giving back has already been given back.

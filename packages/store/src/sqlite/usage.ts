@@ -98,7 +98,13 @@ const GROUP_COLUMN: Readonly<Record<UsageGrain, Readonly<Record<UsageDimension, 
       requestedModel: "requested_model",
       apiKey: "api_key_id",
       provider: "resolved_provider",
-      hour: "at / 3600000",
+      // CAST for the same reason `rollup.ts` casts: `at` is contractually an
+      // integer epoch, but nothing enforces it, and a fractional one would
+      // group into REAL buckets no integer-keyed reader ever matches. Harmless
+      // here where the value is a report label rather than a stored key, and
+      // free, so the two hour expressions in this package agree by construction
+      // rather than by both being fed well-formed input.
+      hour: "CAST(at / 3600000 AS INTEGER)",
       day: null,
     },
     daily: {

@@ -101,7 +101,8 @@ ALTER TABLE api_keys ADD COLUMN limits TEXT NOT NULL DEFAULT '{}';
 
 UPDATE api_keys
    SET limits = json_object('requests', json_object('1m', rate_limit_per_min))
- WHERE rate_limit_per_min IS NOT NULL;
+ WHERE typeof(rate_limit_per_min) = 'integer'
+   AND rate_limit_per_min > 0;
 
 ALTER TABLE api_keys DROP COLUMN rate_limit_per_min;
 
@@ -121,6 +122,20 @@ The stored shape:
 
 An absent key and an explicit `null` both mean unlimited. Because limits are per-key with no
 inheritance, nothing distinguishes the two and nothing needs to.
+
+### Correction: the backfill has to be guarded
+
+The `WHERE rate_limit_per_min IS NOT NULL` this section originally specified was wrong, and shipped
+before it was caught. The column is `INTEGER` with no `CHECK`, so `0`, `-5`, `1.5` and even `'sixty'`
+are all values an installation can be sitting on — and none of them is a limit the new schema
+accepts. Backfilling them produced rows the reader refuses, which is `limits: null`, which is
+`INTERNAL` on every request for that key. The migration manufactured, on upgrade, exactly the
+unreadable row this design describes as arising only from hand-editing.
+
+`typeof()` rather than a range test alone, because SQLite's INTEGER affinity is a preference and not
+a constraint: `1.5` stays REAL, `'sixty'` stays TEXT, and TEXT sorts above every number, so a bare
+`> 0` admits the string. Anything the reader will not accept stays at the `{}` default, which is
+what a nonsense ceiling already meant in practice.
 
 ### These JSON keys are a storage contract
 

@@ -258,6 +258,40 @@ test("a long window counts the store sum plus what has been debited since it was
   store.close();
 });
 
+/**
+ * A long `requests` ceiling is enforced by the debit, not by the ring.
+ *
+ * `requests` at `1m` is claimed at admission, but at `5h` and `1w` the count is
+ * `sumSince` plus the delta — and `sumSince` counts committed rows only, so a
+ * long window sees a request when `finishLog` debits it. Ten requests inside one
+ * cache TTL is the arrangement that separates the two: the store sum is read
+ * once and then reused, so the delta is the only thing that moves, and a debit
+ * carrying no request at all leaves the ceiling reading zero forever. Asserted
+ * at exactly the ceiling rather than at "fewer than ten", because the debit is
+ * also what trips the eager read-through that turns the third admission into the
+ * refusal of the fourth.
+ */
+test("a long requests ceiling is reached inside one cache TTL, because every debit carries its request", async () => {
+  const { store, admit, complete, at } = await harness({ requests: { "5h": 3 } });
+  let admitted = 0;
+  for (let i = 0; i < 10; i++) {
+    at(T0 + i * 1_000);
+    let release: (() => void) | null = null;
+    try {
+      release = await admit();
+    } catch (error) {
+      if (!(error instanceof GatewayError)) throw error;
+      continue;
+    }
+    admitted++;
+    // Row first, then the debit, which is the order `finishLog` runs them in.
+    await complete();
+    release();
+  }
+  expect(admitted).toBe(3);
+  store.close();
+});
+
 test("the store sum is reused inside the cache TTL and read again after it", async () => {
   // A ceiling nothing reaches, so every admission is allowed and the only thing
   // under test is how often the store is asked.

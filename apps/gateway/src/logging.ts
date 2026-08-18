@@ -214,10 +214,20 @@ export async function finishLog(
   } catch (error) {
     report(logger, "failed to persist request log", log.id, error);
   }
-  // Whether or not the row landed. A key that spent the tokens spent them, and
-  // a limiter that forgot them because a write failed under load would stop
-  // enforcing exactly when it matters. All four token classes are disjoint —
-  // `Usage.inputTokens` is uncached input — so summing them double-counts none.
+  // Whether or not the row landed: a key that spent the tokens spent them, and
+  // the limiter should not forget them because a write failed under load.
+  //
+  // The reach of that is one cache TTL, not forever, and the limit of it is
+  // worth stating rather than discovering. A debit lives in the in-memory delta
+  // until the next store read-through, which trims anything older than the
+  // instant it read — and the row this debit stood in for is not in that read,
+  // because it was never written. So a failed write is covered for as long as
+  // the delta holds it and not beyond. Retaining such debits across the trim
+  // would fix that and would double-count every debit whose row did land, which
+  // is the worse of the two errors and the one this design refuses.
+  //
+  // All four token classes are disjoint — `Usage.inputTokens` is uncached
+  // input — so summing them double-counts none.
   if (keyId !== null && debit !== undefined) {
     debit(keyId, {
       tokens: log.inputTokens + log.outputTokens + log.cacheReadTokens + log.cacheWriteTokens,
