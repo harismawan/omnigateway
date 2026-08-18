@@ -7,6 +7,7 @@ import {
   type HeadroomByDimension,
   retryAfterMs,
   SlidingWindow,
+  type WindowCounter,
 } from "@omni/ratelimit";
 import { type LimitConfig, WINDOW_MS, type Window } from "@omni/ratelimit/catalog";
 import type { Store, UsageSums } from "@omni/store";
@@ -55,6 +56,15 @@ type KeyState = {
   ring: SlidingWindow;
   /** In-flight requests for this key right now. A gauge, not a window. */
   inFlight: number;
+  /**
+   * Checks sitting between claiming their place and being judged.
+   *
+   * A check yields on a store read, and by then its claim is not always visible
+   * in the ring or the gauge: `consume` raises no gauge at all, and a ring stamp
+   * can age out under a slow read. This is what keeps `cleanup` off an entry a
+   * suspended check is still holding.
+   */
+  deciding: number;
   debits: Debit[];
   counts: StoreCounts | null;
   /** Set by a debit that lands near a ceiling; forces the next read through. */
@@ -72,6 +82,27 @@ type KeyState = {
  * made.
  */
 export type Admission = { release: () => void; headroom: HeadroomByDimension };
+
+/**
+ * One request's place in a key's counters, taken before the check could yield.
+ *
+ * The claim is the mechanism: two checks running at once see each other's claim
+ * instead of judging the same pre-burst snapshot, which is what a check that
+ * recorded only after its store read could never do.
+ *
+ * `before` is what the counters held the instant before the claim was taken.
+ * `evaluate` judges `used` as what a limit held *before* the request being
+ * judged — the boundary that admits the request landing exactly on a ceiling and
+ * refuses the next — so the check is handed these figures rather than re-reading
+ * state that now counts itself.
+ */
+type Claim = {
+  /** Where the ring stamp was recorded, and therefore the one to give back. */
+  at: number;
+  /** Whether the gauge was raised. `consume` claims a ring slot and nothing else. */
+  gauge: boolean;
+  before: { requests: WindowCounter; concurrency: number };
+};
 
 /**
  * A refusal that carries what the client is owed about it.
@@ -199,24 +230,36 @@ export class ApiKeyRateLimiter {
     const now = this.now();
     this.cleanup(now);
     const state = this.state(keyId, limits);
-    const counters = await this.counters(state, keyId, limits, now, requestId);
-    const decision = evaluate(limits, counters, now);
-    await this.refuse(keyId, decision, now, requestId);
+    const claim = this.claim(state, now, true);
 
-    state.ring.record(now);
-    state.inFlight++;
+    let admitted = false;
+    try {
+      const counters = await this.counters(state, keyId, limits, claim, now, requestId);
+      const decision = evaluate(limits, counters, now);
+      await this.refuse(keyId, decision, now, requestId);
+      admitted = true;
 
-    let released = false;
-    // Closed over the state rather than looked up again, so a release that
-    // arrives after the entry was dropped lowers the count it raised instead of
-    // one belonging to a fresh entry. `cleanup` never drops a state that is
-    // holding a request, so the two cannot disagree about a live key.
-    const release = () => {
-      if (released) return;
-      released = true;
-      state.inFlight = Math.max(0, state.inFlight - 1);
-    };
-    return { release, headroom: decision.headroom };
+      let released = false;
+      // Closed over the state rather than looked up again, so a release that
+      // arrives after the entry was dropped lowers the count it raised instead
+      // of one belonging to a fresh entry. `cleanup` cannot drop a state a claim
+      // is holding — the gauge is raised before this method can yield, and
+      // `deciding` covers the check itself — so the two cannot disagree about a
+      // live key.
+      const release = () => {
+        if (released) return;
+        released = true;
+        state.inFlight = Math.max(0, state.inFlight - 1);
+      };
+      return { release, headroom: decision.headroom };
+    } finally {
+      // Where the claim stops being provisional. An admitted request keeps it
+      // until its release; anything else — a refusal, or a failure while judging
+      // — gives every part of it back, because no window expires a gauge and a
+      // slot leaked here locks the key out permanently and silently.
+      state.deciding--;
+      if (!admitted) this.rollback(state, claim);
+    }
   }
 
   /**
@@ -234,10 +277,49 @@ export class ApiKeyRateLimiter {
     const now = this.now();
     this.cleanup(now);
     const state = this.state(keyId, limits);
-    const counters = await this.counters(state, keyId, { requests }, now, requestId);
-    await this.refuse(keyId, evaluate({ requests }, counters, now), now, requestId);
+    const claim = this.claim(state, now, false);
 
+    let consumed = false;
+    try {
+      const counters = await this.counters(state, keyId, { requests }, claim, now, requestId);
+      await this.refuse(keyId, evaluate({ requests }, counters, now), now, requestId);
+      consumed = true;
+    } finally {
+      state.deciding--;
+      if (!consumed) this.rollback(state, claim);
+    }
+  }
+
+  /**
+   * Takes this request's place in the counters, and reports what they held
+   * before it did.
+   *
+   * Synchronous, and finished before the caller can yield: that is the whole
+   * mechanism. A check that recorded only after its store read let every
+   * concurrent check judge the same pre-burst snapshot, so ten requests arriving
+   * together against a ceiling of three were ten admissions — and the same for
+   * the gauge, which is the dimension that is supposed to bound exactly that
+   * burst.
+   */
+  private claim(state: KeyState, now: number, gauge: boolean): Claim {
+    const before: Claim["before"] = {
+      requests: { used: state.ring.count(now), resetAt: state.ring.resetAt(now) },
+      concurrency: state.inFlight,
+    };
     state.ring.record(now);
+    if (gauge) state.inFlight++;
+    // Held for the length of the check. Without it `cleanup` can drop an entry
+    // that looks idle and leave a suspended check recording onto an orphan, and
+    // a request counted nowhere is the one error direction this design must
+    // never take.
+    state.deciding++;
+    return { at: now, gauge, before };
+  }
+
+  /** Gives back every part of a claim, for a request that will not be served. */
+  private rollback(state: KeyState, claim: Claim): void {
+    state.ring.forget(claim.at);
+    if (claim.gauge) state.inFlight = Math.max(0, state.inFlight - 1);
   }
 
   /**
@@ -293,9 +375,9 @@ export class ApiKeyRateLimiter {
         ? decision.headroom
         : withReset(decision.headroom, window, exact);
 
-    // A denied request records nothing: the ring is not advanced and the gauge
-    // is not raised, so a key hammering its own ceiling does not push itself
-    // further past it.
+    // A denied request keeps nothing: its caller rolls back the ring stamp and
+    // the gauge slot the check claimed before it ran, so a key hammering its own
+    // ceiling does not push itself further past it.
     throw new RateLimitExceeded(retryAfterMs(resolved, now), headroom);
   }
 
@@ -357,6 +439,7 @@ export class ApiKeyRateLimiter {
     const created: KeyState = {
       ring: new SlidingWindow(WINDOW_MS["1m"]),
       inFlight: 0,
+      deciding: 0,
       debits: [],
       counts: null,
       stale: false,
@@ -369,22 +452,24 @@ export class ApiKeyRateLimiter {
   /**
    * Assembles what this key has used, from the two sources that know.
    *
-   * `requests` at `1m` and `concurrency` are pure memory and are always here.
-   * The long windows are omitted entirely when the store cannot answer, which
+   * `requests` at `1m` and `concurrency` are pure memory and come off the claim,
+   * which read them the instant before this request joined them — so they
+   * include every claim taken ahead of this one and never this one itself. The
+   * long windows are omitted entirely when the store cannot answer, which
    * `evaluate` reads as nothing used — see `longCounts` for why that is the
-   * chosen failure.
+   * chosen failure. They need no such correction: a long window's `requests`
+   * debits on completion, so this request is not in it either.
    */
   private async counters(
     state: KeyState,
     keyId: string,
     limits: LimitConfig,
+    claim: Claim,
     now: number,
     requestId: string | undefined,
   ): Promise<CounterSnapshot> {
-    const requests: DimensionCounters = {
-      "1m": { used: state.ring.count(now), resetAt: state.ring.resetAt(now) },
-    };
-    const snapshot: CounterSnapshot = { requests, concurrency: state.inFlight };
+    const requests: DimensionCounters = { "1m": claim.before.requests };
+    const snapshot: CounterSnapshot = { requests, concurrency: claim.before.concurrency };
     if (!anyLongLimit(limits)) return snapshot;
 
     const counts = await this.longCounts(state, keyId, now, requestId);
@@ -498,15 +583,17 @@ export class ApiKeyRateLimiter {
 
   /**
    * Drops keys holding nothing, so a key that stopped calling stops costing
-   * anything. A key is only droppable once its ring has drained, its gauge is
-   * empty, nothing is waiting to be absorbed by a store read, and its cached
-   * sums have expired anyway — dropping it earlier would either lose a debit or
-   * strand a release.
+   * anything. A key is only droppable once no check is inside it, its ring has
+   * drained, its gauge is empty, nothing is waiting to be absorbed by a store
+   * read, and its cached sums have expired anyway — dropping it earlier would
+   * lose a debit, strand a release, or orphan the entry a suspended check is
+   * still holding a claim on.
    */
   private cleanup(now: number): void {
     for (const [keyId, state] of this.keys) {
       state.ring.count(now);
-      if (!state.ring.empty || state.inFlight > 0 || state.debits.length > 0) continue;
+      if (state.deciding > 0 || !state.ring.empty || state.inFlight > 0) continue;
+      if (state.debits.length > 0) continue;
       if (state.counts !== null && now - state.counts.readAt < CACHE_TTL_MS) continue;
       this.keys.delete(keyId);
     }

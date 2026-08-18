@@ -87,6 +87,24 @@ async function seedRow(
   );
 }
 
+/**
+ * How many of `count` checks started together were admitted.
+ *
+ * Every call is started before any of them is awaited, which is the arrangement
+ * a burst of concurrent requests actually produces and the one a check that
+ * recorded only after its store read could not survive: each call yielded on the
+ * read, so all of them judged the same pre-burst snapshot and all of them were
+ * admitted.
+ */
+async function burst(count: number, call: () => Promise<unknown>): Promise<number> {
+  const settled = await Promise.allSettled(Array.from({ length: count }, () => call()));
+  for (const result of settled) {
+    if (result.status === "rejected" && !(result.reason instanceof GatewayError))
+      throw result.reason;
+  }
+  return settled.filter((result) => result.status === "fulfilled").length;
+}
+
 async function denied(admit: () => Promise<unknown>): Promise<GatewayError> {
   try {
     await admit();
@@ -140,6 +158,87 @@ test("a concurrency ceiling denies while slots are held and allows once one is f
   second();
   third();
   expect(limiter.inFlight(keyId)).toBe(0);
+  store.close();
+});
+
+/**
+ * A check has to claim its place before it can yield, or a burst never sees
+ * itself.
+ *
+ * Ten requests arriving together against a ceiling of three were ten
+ * admissions: each read the ring, yielded, and recorded only afterwards, so
+ * every one of them judged the same pre-burst snapshot. Asserted at exactly the
+ * ceiling rather than at "fewer than ten", because a claim that half works is
+ * still a hole.
+ */
+test("a burst against a 1m ceiling admits exactly the ceiling", async () => {
+  const { limiter, keyId, limits, store } = await harness({ requests: { "1m": 3 } });
+  expect(await burst(10, () => limiter.admit(keyId, limits, "req_test"))).toBe(3);
+  store.close();
+});
+
+/** The same hole, in the dimension that exists to bound exactly this burst. */
+test("a burst against a concurrency ceiling admits exactly the ceiling", async () => {
+  const { limiter, keyId, limits, store } = await harness({ concurrency: 3 });
+  expect(await burst(8, () => limiter.admit(keyId, limits, "req_test"))).toBe(3);
+  expect(limiter.inFlight(keyId)).toBe(3);
+  store.close();
+});
+
+/**
+ * The other half of the same bug, and the half that errs the wrong way.
+ *
+ * A check suspended before its claim had raised nothing, so `cleanup` read its
+ * state as idle and dropped it, and the check then recorded onto an entry no
+ * longer in the map. Four requests admitted under a ceiling nothing reaches left
+ * the gauge reading one, and a gauge that under-counts is a ceiling nobody is
+ * held to.
+ */
+test("a burst under a generous ceiling leaves the gauge at the true count", async () => {
+  const { limiter, keyId, limits, store } = await harness({ concurrency: 10 });
+  expect(await burst(4, () => limiter.admit(keyId, limits, "req_test"))).toBe(4);
+  expect(limiter.inFlight(keyId)).toBe(4);
+  store.close();
+});
+
+/**
+ * A refusal gives back every part of what its check claimed.
+ *
+ * Refused on `concurrency` while `requests` still has room, which is the only
+ * arrangement where both halves of the rollback are visible: the gauge must read
+ * two rather than eight, and the ring must hold the two admissions rather than
+ * all eight attempts. A leaked claim is worse than the race it closed — no
+ * window expires a gauge, so six stranded slots lock the key out for good.
+ */
+test("a refused request rolls back both the gauge and the ring", async () => {
+  const { limiter, keyId, limits, store } = await harness({
+    requests: { "1m": 100 },
+    concurrency: 2,
+  });
+
+  const settled = await Promise.allSettled(
+    Array.from({ length: 8 }, () => limiter.admit(keyId, limits, "req_test")),
+  );
+  const admitted = settled.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : [],
+  );
+  expect(admitted).toHaveLength(2);
+  expect(limiter.inFlight(keyId)).toBe(2);
+
+  for (const admission of admitted) admission.release();
+  expect(limiter.inFlight(keyId)).toBe(0);
+
+  // The ring, read off the next request's headroom: the two stamps the
+  // admissions recorded, and nothing at all from the six refusals.
+  const next = await limiter.admit(keyId, limits, "req_test");
+  expect(next.headroom.requests?.used).toBe(2);
+  store.close();
+});
+
+/** `count_tokens` claims a ring slot the same way, and had the same hole. */
+test("a burst of count_tokens checks consumes exactly the ceiling", async () => {
+  const { limiter, keyId, limits, store } = await harness({ requests: { "1m": 3 } });
+  expect(await burst(10, () => limiter.consume(keyId, limits, "req_test"))).toBe(3);
   store.close();
 });
 

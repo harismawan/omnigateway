@@ -54,6 +54,43 @@ test("an empty window resets now, so an idle key is told to retry immediately", 
   expect(window.resetAt(70_000)).toBe(70_000);
 });
 
+/**
+ * The stamp of that value, not the last one held.
+ *
+ * A caller records before it judges so that concurrent callers see each other,
+ * which means a later caller may already have recorded by the time an earlier
+ * one gives its slot back. Popping the tail would take the wrong caller's slot,
+ * and the count alone cannot tell the two apart — the reset can, which is why it
+ * is what this asserts.
+ */
+test("forget drops the event recorded at that instant, not the newest one", () => {
+  const window = new SlidingWindow(MINUTE);
+  window.record(1_000);
+  window.record(5_000);
+  window.forget(1_000);
+  expect(window.count(5_000)).toBe(1);
+  expect(window.resetAt(5_000)).toBe(65_000);
+});
+
+test("forget takes one slot per call, leaving events recorded at the same instant", () => {
+  const window = new SlidingWindow(MINUTE);
+  window.record(1_000);
+  window.record(1_000);
+  window.record(1_000);
+  window.forget(1_000);
+  expect(window.count(1_000)).toBe(2);
+});
+
+/** Its slot has already been given back by ageing out, so there is nothing to undo. */
+test("forgetting an event that aged out is silent rather than dropping another", () => {
+  const window = new SlidingWindow(MINUTE);
+  window.record(1_000);
+  window.record(70_000);
+  expect(window.count(70_000)).toBe(1);
+  window.forget(1_000);
+  expect(window.count(70_000)).toBe(1);
+});
+
 test("a drained window reports empty so its caller can drop the whole entry", () => {
   const window = new SlidingWindow(MINUTE);
   expect(window.empty).toBe(true);
