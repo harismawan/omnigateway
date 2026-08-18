@@ -150,7 +150,7 @@ test("a snapshot is a self-contained copy of what was committed", async () => {
       prefix: "sk-omni-abcd",
       hash: "hash-1",
       modelAllowlist: null,
-      rateLimitPerMin: null,
+      limits: {},
       bodyLoggingOptOut: false,
     });
 
@@ -178,7 +178,7 @@ test("a snapshot is a self-contained copy of what was committed", async () => {
       prefix: "sk-omni-efgh",
       hash: "hash-2",
       modelAllowlist: null,
-      rateLimitPerMin: null,
+      limits: {},
       bodyLoggingOptOut: false,
     });
     const reread = await createStore({
@@ -218,7 +218,7 @@ test("inspect accepts a snapshot of this database", async () => {
       prefix: "sk-omni-abcd",
       hash: "hash-1",
       modelAllowlist: null,
-      rateLimitPerMin: null,
+      limits: {},
       bodyLoggingOptOut: false,
     });
     await store.maintenance.snapshotTo(snapshot);

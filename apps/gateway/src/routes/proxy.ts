@@ -283,7 +283,7 @@ async function handle(
   try {
     let key: Awaited<ReturnType<typeof authenticateApiKey>>;
     try {
-      key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
+      key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers), deps.logger);
     } catch (error) {
       if (error instanceof GatewayError && error.code === "AUTH") {
         deps.logger.warn("authentication rejected", {
@@ -296,7 +296,7 @@ async function handle(
     }
     keyId = key.id;
     try {
-      rateLimiter.consume(key.id, key.rateLimitPerMin);
+      rateLimiter.consume(key.id, key.limits);
     } catch (error) {
       if (error instanceof GatewayError && error.code === "RATE_LIMIT") {
         deps.logger.warn("rate limit rejected", {
@@ -552,7 +552,7 @@ export function proxyRoutes(deps: ProxyDeps) {
       })
       .get("/v1/models", async ({ request }) => {
         try {
-          const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
+          const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers), logger);
           // The routing snapshot, not the store: it already holds both halves of
           // the answer, it is invalidated on every routing change, and taking it
           // here means the listing and dispatch cannot disagree about which
@@ -590,8 +590,8 @@ export function proxyRoutes(deps: ProxyDeps) {
       // which is exactly when a client most needs the number.
       .post("/v1/messages/count_tokens", async ({ request }) => {
         try {
-          const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers));
-          rateLimiter.consume(key.id, key.rateLimitPerMin);
+          const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers), logger);
+          rateLimiter.consume(key.id, key.limits);
           const body: unknown = await request.json();
           const chatRequest = parseAnthropicRequest(body, request.headers);
           if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {

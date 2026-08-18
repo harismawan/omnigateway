@@ -186,6 +186,22 @@ Mint a key for your client. **It is printed once and stored only as a hash:**
 omni keys create --label laptop
 ```
 
+Bound what the key can do with `--limit <dimension>:<window>=<value>`, repeated
+once per pair. An unset pair is unlimited:
+
+```bash
+omni keys create --label ci --limit requests:1m=60
+```
+
+The per-minute request ceiling is enforced over a *sliding* minute, so a key
+cannot spend two minutes' allowance either side of a clock edge. It is counted
+per process and reset when the gateway restarts. The remaining pairs are
+accepted and stored but not yet enforced.
+
+> **Breaking:** `--rate-limit N` is removed, not aliased. Use
+> `--limit requests:1m=N`. A script still passing the old flag stops with an
+> unknown-flag error rather than quietly taking a deprecated path.
+
 Now use it:
 
 ```bash

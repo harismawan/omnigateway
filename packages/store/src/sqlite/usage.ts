@@ -142,6 +142,8 @@ type Agg = {
   duration_ms_sum: number;
 };
 
+type SumRow = { requests: number; tokens: number; cost_usd: number };
+
 /** An absent credential, key, or upstream model is a bucket, not a hole. */
 function label(value: string | number | null): string {
   if (value === null) return "unknown";
@@ -281,6 +283,29 @@ export function createUsageRepo(db: Database): UsageRepo {
         .query<Row, [number]>("SELECT * FROM request_logs ORDER BY at DESC LIMIT ?")
         .all(limit)
         .map(toLog);
+    },
+
+    async sumSince(apiKeyId: string, sinceMs: number) {
+      // `state = 'done'` is load-bearing, not hygiene. A pending row carries
+      // placeholder zeros where its metrics will go, so an unfiltered sum counts
+      // every in-flight request as a request and inflates the count silently.
+      const row = db
+        .query<SumRow, [string, number]>(
+          `SELECT COUNT(*) AS requests,
+                  COALESCE(SUM(input_tokens + output_tokens
+                               + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                  COALESCE(SUM(cost_usd), 0) AS cost_usd
+             FROM request_logs
+            WHERE api_key_id = ? AND state = 'done' AND at >= ?`,
+        )
+        .get(apiKeyId, sinceMs);
+      // A key with no rows in the window is zero, never unknown: the row always
+      // comes back because the query is an aggregate over no groups.
+      return {
+        requests: row?.requests ?? 0,
+        tokens: row?.tokens ?? 0,
+        costUsd: row?.cost_usd ?? 0,
+      };
     },
 
     async aggregate(q: UsageQuery) {

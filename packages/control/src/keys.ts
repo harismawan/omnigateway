@@ -16,7 +16,11 @@ export async function listKeys(store: Store): Promise<ApiKeySummary[]> {
     // it is not a secret, but publishing it invites offline guessing.
     prefix: k.prefix,
     modelAllowlist: k.modelAllowlist,
-    rateLimitPerMin: k.rateLimitPerMin,
+    // Carried through as-is, `null` included. A key whose stored limits cannot
+    // be parsed is refused at `/v1`, so the listing is the only place an
+    // operator can see which key that is — flattening it to `{}` here would
+    // show them an unlimited key and hide the one thing worth acting on.
+    limits: k.limits,
     // Not a secret and not a policy the gateway hides: an operator auditing a
     // shared installation has to be able to see which client's payloads are
     // exempt from capture without reading the database.
@@ -44,7 +48,7 @@ export async function createKey(store: Store, input: unknown): Promise<CreatedKe
     prefix: raw.slice(0, 12),
     hash: await hashApiKey(raw),
     modelAllowlist: body.modelAllowlist,
-    rateLimitPerMin: body.rateLimitPerMin,
+    limits: body.limits,
     // Settable only at creation. A key handed to a client on the promise that
     // its payloads are never retained must not become capturable later by an
     // edit the client cannot see, and there is no patch route to make one.

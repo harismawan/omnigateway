@@ -9,6 +9,7 @@ import type {
   CredentialHealth,
   DatabaseStats,
   DisabledReason,
+  LimitConfig,
   QuotaSample,
   QuotaWindow,
   RequestLog,
@@ -39,6 +40,7 @@ export type {
   DatabaseStats,
   DisabledReason,
   ErrorCode,
+  LimitConfig,
   ProviderId,
   QuotaSample,
   QuotaWindow,
@@ -125,7 +127,14 @@ export type ModelsResponse = { models: VirtualModel[] };
 /** The key is never persisted in plaintext, so this response is the only copy. */
 export type MintedKey = { id: string; label: string; prefix: string; key: string };
 
-/** `hash` is withheld by the route: not a secret, but not worth publishing. */
+/**
+ * `hash` is withheld by the route: not a secret, but not worth publishing.
+ *
+ * `limits` arrives nullable, and the null is load-bearing rather than an
+ * absence: it says the gateway could not parse what is stored and is refusing
+ * the key until an operator fixes it. Rendering it like `{}` would present the
+ * one row that needs attention as the least interesting on the board.
+ */
 export type ApiKeySummary = Omit<ApiKey, "hash">;
 
 export type KeysResponse = { keys: ApiKeySummary[] };
@@ -134,7 +143,16 @@ export type KeyCreateInput = {
   label: string;
   /** Null means every configured model; an empty array means none. */
   modelAllowlist: string[] | null;
-  rateLimitPerMin: number | null;
+  /**
+   * The sparse `(dimension, window)` matrix. `{}` is unlimited.
+   *
+   * Not nullable, unlike the same field on `ApiKeySummary`: unreadable is a
+   * state a reader discovers, never one a minting form may ask for.
+   *
+   * Only `requests.1m` is collected here for now; the rest of the matrix is a
+   * later stage, and the shape is already what it will submit.
+   */
+  limits: LimitConfig;
   /** Settable only here: there is no route that turns capture back on for a key. */
   bodyLoggingOptOut: boolean;
 };

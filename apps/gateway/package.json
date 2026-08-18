@@ -12,6 +12,7 @@
     "@omni/control": "workspace:*",
     "@omni/ir": "workspace:*",
     "@omni/providers": "workspace:*",
+    "@omni/ratelimit": "workspace:*",
     "@omni/router": "workspace:*",
     "@omni/rtk": "workspace:*",
     "@omni/store": "workspace:*",

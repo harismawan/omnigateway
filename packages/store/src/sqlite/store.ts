@@ -75,7 +75,9 @@ export async function createStore(opts: {
       db,
       credentials: createCredentialRepo(db, opts.encryptionKey, emit),
       config: createConfigRepo(db, emit),
-      keys: createKeyRepo(db),
+      // The one repo handed the logger: an unreadable `limits` column is
+      // reported rather than thrown, so this is where that trail is written.
+      keys: createKeyRepo(db, logger),
       usage: createUsageRepo(db),
       // Derived from the database path rather than configured. One installation
       // is one directory: an artifact tree that could be pointed elsewhere is one
@@ -144,6 +146,7 @@ export async function createStore(opts: {
       sweepPending: () => handle.usage.sweepPending(),
       recent: (limit) => handle.usage.recent(limit),
       aggregate: (q) => handle.usage.aggregate(q),
+      sumSince: (apiKeyId, sinceMs) => handle.usage.sumSince(apiKeyId, sinceMs),
       prune: (olderThan) => handle.usage.prune(olderThan),
       pruneDaily: (olderThan) => handle.usage.pruneDaily(olderThan),
     },

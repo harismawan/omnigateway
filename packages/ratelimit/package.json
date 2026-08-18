@@ -1,0 +1,13 @@
+{
+  "name": "@omni/ratelimit",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts",
+    "./catalog": "./src/catalog.ts"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  }
+}

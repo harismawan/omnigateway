@@ -15,6 +15,7 @@ OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway:
 - `packages/ir`: provider-neutral domain model
 - `packages/providers`: provider adapters and catalog
 - `packages/router`: pure routing
+- `packages/ratelimit`: pure API-key limit evaluation and sliding-window counting
 - `packages/rtk`: tool-result filters, applied in dispatch before routing
 - `packages/store`: persistence and encryption
 - `packages/testkit`: shared test fixtures
@@ -86,6 +87,12 @@ and `bun run lint`.
 13. `packages/rtk` stays pure like `ir` and `router`: no I/O, clocks, or randomness. It rewrites
     tool-result content only and preserves errors and non-tool-result blocks. `@omni/rtk/catalog` is
     a leaf holding the filter-id union; `@omni/store` imports that subpath alone.
+14. `packages/ratelimit` stays pure the same way; `now` is always a parameter and the counters are
+    supplied by the caller, so the package never learns where they came from. `@omni/ratelimit/catalog`
+    is a leaf holding the dimension and window unions, `LimitConfig`, and its zod schema;
+    `@omni/store` imports that subpath alone and re-exports `LimitConfig` from `@omni/store/types`,
+    which is the import the dashboard is already permitted. Limiter state — rings and gauges — lives
+    in `apps/gateway`, because state is not the package's job.
 
 ## Adding a provider
 
@@ -231,6 +238,21 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
 - RTK filter ids are persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is a storage
   contract, not an internal enum. `isRtkFilterId` drops unknown ids on read, so renaming one loses
   history silently rather than failing. Add ids freely; rename or remove only with a migration.
+- The limit vocabulary — `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` — is persisted as
+  the JSON keys of `api_keys.limits` in every row, so it is a storage contract of the same class.
+  Unlike RTK ids it fails **closed**: an unknown dimension or window is a parse failure, never a
+  silent drop, because a limit read as "no limit" fails open on a ceiling the operator set. Add
+  names freely; rename or remove only with a migration.
+- Refuse at auth, degrade at list. A row whose `limits` will not parse reads back as
+  `ApiKey.limits === null`, distinct from `{}`, and `authenticateApiKey` turns that into
+  `INTERNAL` — not `AUTH`, which would blame a credential that is fine. `keys.list()` must never
+  throw over one such row: `toKey` serves the listing as well as the auth lookup, and the listing is
+  how an operator finds the row to fix. Nothing may collapse the null into `{}` on the way to the
+  CLI or console.
+- API-key limits are enforced over *sliding* windows. A fixed window resets on a clock edge and lets
+  a key spend a whole window's allowance either side of one, at every window size. `1m` is exact from
+  a ring of timestamps in `apps/gateway`; longer windows read `usage.sumSince`, which must filter
+  `state = 'done'` or every in-flight request's placeholder metrics inflate the count.
 - `ProviderModelChoice.auth` is enforced at write time in `putModel`, never at routing. Which ways
   in exist is installation state, so the catalog exports the fact (`catalogModelAuths`) and control
   owns the rule. A provider with no credential is unknown rather than blocked, an unlisted model is

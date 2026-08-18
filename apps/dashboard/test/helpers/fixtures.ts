@@ -121,7 +121,7 @@ export function apiKey(patch: Partial<ApiKeySummary> = {}): ApiKeySummary {
     label: "laptop",
     prefix: "omni_sk_a1b2",
     modelAllowlist: null,
-    rateLimitPerMin: 120,
+    limits: { requests: { "1m": 120 } },
     bodyLoggingOptOut: false,
     createdAt: NOW - 86_400_000,
     revokedAt: null,

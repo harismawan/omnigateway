@@ -112,7 +112,10 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
       {
         label: label.trim().length === 0 ? "api key" : label.trim(),
         modelAllowlist: unrestricted ? null : allowed,
-        rateLimitPerMin: limit,
+        // `{}` is unlimited, and an omitted pair says the same thing as a null
+        // one — so a blank field submits an empty matrix rather than a null
+        // inside a `requests` object nobody asked for.
+        limits: limit === null ? {} : { requests: { "1m": limit } },
         bodyLoggingOptOut: optOut,
       },
       {

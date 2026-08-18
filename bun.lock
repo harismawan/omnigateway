@@ -69,6 +69,7 @@
         "@omni/control": "workspace:*",
         "@omni/ir": "workspace:*",
         "@omni/providers": "workspace:*",
+        "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
         "@omni/rtk": "workspace:*",
         "@omni/store": "workspace:*",
@@ -84,6 +85,7 @@
         "@node-rs/argon2": "2.0.2",
         "@omni/ir": "workspace:*",
         "@omni/providers": "workspace:*",
+        "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
         "@omni/store": "workspace:*",
         "zod": "4.4.3",
@@ -101,6 +103,13 @@
       "version": "0.0.0",
       "dependencies": {
         "@omni/ir": "workspace:*",
+      },
+    },
+    "packages/ratelimit": {
+      "name": "@omni/ratelimit",
+      "version": "0.0.0",
+      "dependencies": {
+        "zod": "4.4.3",
       },
     },
     "packages/router": {
@@ -127,6 +136,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@omni/ir": "workspace:*",
+        "@omni/ratelimit": "workspace:*",
         "@omni/rtk": "workspace:*",
       },
     },
@@ -287,6 +297,8 @@
     "@omni/ir": ["@omni/ir@workspace:packages/ir"],
 
     "@omni/providers": ["@omni/providers@workspace:packages/providers"],
+
+    "@omni/ratelimit": ["@omni/ratelimit@workspace:packages/ratelimit"],
 
     "@omni/router": ["@omni/router@workspace:packages/router"],
 

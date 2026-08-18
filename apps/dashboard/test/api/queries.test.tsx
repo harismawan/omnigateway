@@ -77,7 +77,7 @@ describe("mutations", () => {
     create.result.current.mutate({
       label: "ci",
       modelAllowlist: null,
-      rateLimitPerMin: null,
+      limits: {},
       bodyLoggingOptOut: false,
     });
 

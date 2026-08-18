@@ -119,7 +119,24 @@ The dimension and window names are persisted in every row. This is the same clas
 one loses data. Unlike `isRtkFilterId`, which drops unknown ids silently on read, an unknown limit
 key is a **parse failure**, not a silent drop — a limit the gateway cannot understand must never be
 read as "no limit", because that fails open on a control the operator explicitly set. Unknown keys
-are rejected by the zod schema and the key is treated as misconfigured and refused, loudly.
+are rejected by the zod schema.
+
+**Where that failure lands matters as much as that it happens.** `ApiKey.limits` is
+`LimitConfig | null`: `{}` means no limits configured, `null` means the stored value could not be
+parsed. They are distinct types, so strict TypeScript forces every consumer to tell them apart
+rather than letting a broken key quietly read as unlimited.
+
+The failure is then **refused at authentication and tolerated everywhere else**. A malformed key is
+rejected at `apps/gateway/src/auth/apiKey.ts`, the single chokepoint every `/v1` request passes, with
+`INTERNAL` rather than `AUTH` — the client's credentials are fine and no retry will help; it is the
+operator's configuration that is unreadable. But `keys.list()` still returns every key, with the
+broken one marked.
+
+Throwing inside the row parser was implemented first and rejected. Because that parser serves both
+`list()` and `findByHash()`, one malformed row locked the operator out of seeing *any* of their keys
+in the console, leaving no way to identify or repair the offending one short of hand-editing SQL.
+Failing closed at the point of enforcement is a safety property; failing closed at the point of
+*diagnosis* is just a locked door.
 
 ### The index is load-bearing
 

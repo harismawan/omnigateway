@@ -454,3 +454,98 @@ test("the migration seeds the rollup from logs already on disk", () => {
   expect(row?.input_tokens).toBe(30);
   db.close();
 });
+
+/**
+ * The pending-row filter, seeded so an unfiltered implementation fails loudly
+ * rather than by a margin.
+ *
+ * A pending row's tokens and cost are placeholder zeros in production, which is
+ * exactly why an unfiltered sum is invisible under normal data. These carry
+ * absurd metrics instead, so a `sumSince` that forgets `state = 'done'` reports
+ * a number nobody could mistake for a real one.
+ */
+test("sumSince excludes pending rows, whose metrics are placeholders and not measurements", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(
+    log({ id: "done", at: now - 1_000, inputTokens: 1, outputTokens: 2, costUsd: 0.5 }),
+  );
+  await s.usage.begin(
+    log({
+      id: "flying",
+      at: now - 500,
+      state: "pending",
+      inputTokens: 999_999,
+      outputTokens: 888_888,
+      cacheReadTokens: 777_777,
+      cacheWriteTokens: 666_666,
+      costUsd: 4_242.42,
+    }),
+  );
+
+  const sums = await s.usage.sumSince("k1", now - 60_000);
+  expect(sums).toEqual({ requests: 1, tokens: 33, costUsd: 0.5 });
+  s.close();
+});
+
+test("sumSince adds all four token columns, which are disjoint classes", async () => {
+  // `Usage.inputTokens` is uncached input, and cache reads and writes are priced
+  // once each, so summing the four double-counts nothing.
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(
+    log({
+      id: "r1",
+      at: now - 1_000,
+      inputTokens: 1,
+      outputTokens: 20,
+      cacheReadTokens: 300,
+      cacheWriteTokens: 4_000,
+      costUsd: 0.25,
+    }),
+  );
+  await s.usage.append(
+    log({
+      id: "r2",
+      at: now - 900,
+      inputTokens: 50_000,
+      outputTokens: 600_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0.75,
+    }),
+  );
+
+  const sums = await s.usage.sumSince("k1", now - 60_000);
+  expect(sums.tokens).toBe(4_321 + 650_000);
+  expect(sums.requests).toBe(2);
+  expect(sums.costUsd).toBeCloseTo(1.0, 10);
+  s.close();
+});
+
+test("sumSince is bounded below by its instant and above by nothing", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "stale", at: now - 120_000 }));
+  await s.usage.append(log({ id: "edge", at: now - 60_000 }));
+  await s.usage.append(log({ id: "fresh", at: now - 1 }));
+
+  // Inclusive at the lower bound, so a window is `[since, ∞)` and a row landing
+  // exactly on the boundary is counted once rather than lost between two reads.
+  expect((await s.usage.sumSince("k1", now - 60_000)).requests).toBe(2);
+  expect((await s.usage.sumSince("k1", now - 59_999)).requests).toBe(1);
+  s.close();
+});
+
+test("sumSince counts one key only, and an unknown key is zero rather than everything", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "mine", at: now - 1_000, apiKeyId: "k1" }));
+  await s.usage.append(log({ id: "theirs", at: now - 1_000, apiKeyId: "k2", costUsd: 9.99 }));
+  await s.usage.append(log({ id: "anonymous", at: now - 1_000, apiKeyId: null }));
+
+  expect((await s.usage.sumSince("k1", 0)).requests).toBe(1);
+  expect((await s.usage.sumSince("k2", 0)).costUsd).toBeCloseTo(9.99, 10);
+  expect(await s.usage.sumSince("nobody", 0)).toEqual({ requests: 0, tokens: 0, costUsd: 0 });
+  s.close();
+});

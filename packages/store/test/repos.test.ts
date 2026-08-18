@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
+import { createLogger } from "@omni/ir";
 import { deriveKey } from "../src/encryption.ts";
-import { generateApiKey, hashApiKey } from "../src/sqlite/keys.ts";
+import { openDb } from "../src/sqlite/db.ts";
+import { createKeyRepo, generateApiKey, hashApiKey } from "../src/sqlite/keys.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import type { Settings, Store } from "../src/types.ts";
+import type { LimitConfig, Settings, Store } from "../src/types.ts";
 
 async function store(): Promise<Store> {
   return createStore({
@@ -143,7 +145,7 @@ test("api key body logging opt-out defaults off and round-trips", async () => {
     prefix: "sk-omni-aaaa",
     hash: plain,
     modelAllowlist: null,
-    rateLimitPerMin: null,
+    limits: {},
     bodyLoggingOptOut: false,
   });
   await s.keys.create({
@@ -152,7 +154,7 @@ test("api key body logging opt-out defaults off and round-trips", async () => {
     prefix: "sk-omni-bbbb",
     hash: quiet,
     modelAllowlist: null,
-    rateLimitPerMin: null,
+    limits: {},
     bodyLoggingOptOut: true,
   });
 
@@ -243,7 +245,7 @@ test("api keys are found by hash and never store the raw value", async () => {
     prefix: raw.slice(0, 12),
     hash,
     modelAllowlist: ["fast"],
-    rateLimitPerMin: 60,
+    limits: { requests: { "1m": 60 } },
     bodyLoggingOptOut: false,
   });
 
@@ -263,7 +265,7 @@ test("revoked keys are still listed but marked revoked", async () => {
     prefix: "sk-omni-abcd",
     hash,
     modelAllowlist: null,
-    rateLimitPerMin: null,
+    limits: {},
     bodyLoggingOptOut: false,
   });
   await s.keys.revoke("k1");
@@ -356,5 +358,94 @@ test("prune removes logs older than the cutoff", async () => {
   await s.usage.append({ ...base, id: "new", at: 9000 });
   expect(await s.usage.prune(5000)).toBe(1);
   expect(await s.usage.recent(10)).toHaveLength(1);
+  s.close();
+});
+
+test("api key limits round-trip the sparse matrix", async () => {
+  const s = await store();
+  const hash = await hashApiKey(generateApiKey());
+  await s.keys.create({
+    id: "k1",
+    label: "bounded",
+    prefix: "sk-omni-cccc",
+    hash,
+    modelAllowlist: null,
+    limits: {
+      requests: { "1m": 60, "5h": 2000 },
+      tokens: { "1w": 50_000_000 },
+      spend: { "1w": 25.5 },
+      concurrency: 8,
+    },
+    bodyLoggingOptOut: false,
+  });
+
+  expect((await s.keys.findByHash(hash))?.limits).toEqual({
+    requests: { "1m": 60, "5h": 2000 },
+    tokens: { "1w": 50_000_000 },
+    spend: { "1w": 25.5 },
+    concurrency: 8,
+  });
+  s.close();
+});
+
+/**
+ * A limit this build cannot understand marks that key and no other.
+ *
+ * Two rules meet here. A bad shape must never be read as "no limit", which is
+ * failing open on a ceiling the operator explicitly set — `parseRtkFilters` may
+ * discard an id it does not know because the worst outcome there is a gap in
+ * reported history, and this is not that. But throwing on the way out took the
+ * whole listing with it, because `toKey` serves `list` as well as `findByHash`,
+ * and the listing is exactly how an operator would find the row to fix. So:
+ * refuse at auth, degrade at list.
+ */
+test("one unreadable limits column costs that key and not the listing", async () => {
+  const db = openDb(":memory:");
+  const lines: string[] = [];
+  const keys = createKeyRepo(
+    db,
+    createLogger({ level: "debug", write: (line) => lines.push(line) }),
+  );
+  db.run(
+    `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits, created_at)
+     VALUES ('bounded', 'bounded', 'sk-omni-cccc', 'h-bounded', NULL, '{"requests":{"1m":60}}', 3),
+            ('meddled', 'meddled', 'sk-omni-dddd', 'h-meddled', NULL, '{"bandwidth":{"1m":5}}', 2),
+            ('open', 'open', 'sk-omni-eeee', 'h-open', NULL, '{}', 1)`,
+  );
+
+  const listed = await keys.list();
+  expect(listed.map((k) => k.id)).toEqual(["bounded", "meddled", "open"]);
+
+  // Not merely present: the healthy rows still carry the limits they were
+  // stored with, so they are usable rather than collateral damage.
+  const byId = new Map(listed.map((k) => [k.id, k]));
+  expect(byId.get("bounded")?.limits).toEqual({ requests: { "1m": 60 } });
+  expect(byId.get("open")?.limits).toEqual({});
+  expect(byId.get("meddled")?.limits).toBeNull();
+
+  // The same on the auth path, which is what turns null into a refusal.
+  expect((await keys.findByHash("h-meddled"))?.limits).toBeNull();
+  expect((await keys.findByHash("h-bounded"))?.limits).toEqual({ requests: { "1m": 60 } });
+
+  // Degrading quietly would be its own failure: the row is named on stdout.
+  expect(lines.some((line) => line.includes("apiKeyId=meddled"))).toBe(true);
+  db.close();
+});
+
+test("a limits shape the schema refuses is never written", async () => {
+  const s = await store();
+  await expect(
+    s.keys.create({
+      id: "k1",
+      label: "bad",
+      prefix: "sk-omni-eeee",
+      hash: await hashApiKey(generateApiKey()),
+      modelAllowlist: null,
+      // Reached past the control schema, e.g. by a direct store caller.
+      limits: { requests: { "2m": 60 } } as unknown as LimitConfig,
+      bodyLoggingOptOut: false,
+    }),
+  ).rejects.toThrow();
+  expect(await s.keys.list()).toHaveLength(0);
   s.close();
 });

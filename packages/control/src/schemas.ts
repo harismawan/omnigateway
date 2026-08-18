@@ -1,4 +1,5 @@
 import { GatewayError } from "@omni/ir";
+import { limitConfigSchema } from "@omni/ratelimit/catalog";
 import type { UsageDimension, UsageGrain } from "@omni/store";
 import { z } from "zod";
 
@@ -123,7 +124,13 @@ export const keyCreateSchema = z
     label: z.string().min(1).default("api key"),
     /** Null means every configured model. An empty array would mean none. */
     modelAllowlist: z.array(z.string().min(1)).nullable().default(null),
-    rateLimitPerMin: z.number().int().positive().nullable().default(null),
+    /**
+     * The sparse `(dimension, window)` matrix. `{}` is unlimited.
+     *
+     * Strict all the way down, so an unknown dimension or window name is
+     * refused here rather than stored and later read as no limit at all.
+     */
+    limits: limitConfigSchema.default({}),
     /**
      * Suppresses body capture for this key whatever the settings say.
      *

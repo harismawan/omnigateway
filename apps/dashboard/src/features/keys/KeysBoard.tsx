@@ -108,7 +108,21 @@ export function KeysBoard() {
                       )}
                     </Td>
                     <Td $align="right" $mono>
-                      {key.rateLimitPerMin === null ? "—" : `${key.rateLimitPerMin}/min`}
+                      {/* Only the per-minute request ceiling for now. The rest
+                          of the matrix needs a disclosure rather than another
+                          column, and that is a later stage.
+
+                          Null limits are not a dash: the gateway refuses this
+                          key until the stored column is fixed, so showing it as
+                          unlimited would name the healthiest-looking row on the
+                          board as the broken one. */}
+                      {key.limits === null ? (
+                        <Chip $tone="down">unreadable</Chip>
+                      ) : key.limits.requests?.["1m"] == null ? (
+                        "—"
+                      ) : (
+                        `${key.limits.requests["1m"]}/min`
+                      )}
                     </Td>
                     <Td $align="right" $mono>
                       {formatDateTime(key.createdAt)}

@@ -23,7 +23,7 @@ function stubKeys(overrides: Parameters<typeof createFetchStub>[0] = {}) {
           label: "ci",
           prefix: "omni_sk_c3d4",
           modelAllowlist: ["fast"],
-          rateLimitPerMin: null,
+          limits: {},
         }),
         apiKey({
           id: "key-3",
@@ -76,7 +76,7 @@ describe("KeysBoard", () => {
         JSON.stringify({
           label: "ci-runner",
           modelAllowlist: null,
-          rateLimitPerMin: 60,
+          limits: { requests: { "1m": 60 } },
           bodyLoggingOptOut: false,
         }),
       );
@@ -109,6 +109,26 @@ describe("KeysBoard", () => {
     });
   });
 
+  test("a blank rate limit submits an empty matrix rather than a null inside one", async () => {
+    // `{}` is unlimited, and so is an omitted pair. Sending
+    // `{ requests: { "1m": null } }` would say the same thing in a second
+    // spelling that every reader then has to handle.
+    const user = userEvent.setup();
+    const stub = stubKeys({ "POST /api/keys": () => minted });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: /Create a key/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Label"), "unbounded");
+    await user.click(within(dialog).getByRole("button", { name: "Create key" }));
+
+    await waitFor(() => {
+      const post = stub.calls.find((call) => call.init?.method === "POST");
+      const body = JSON.parse(String(post?.init?.body)) as { limits: unknown };
+      expect(body.limits).toEqual({});
+    });
+  });
+
   test("an opted-out key is listed as such rather than looking like any other", async () => {
     stubKeys({
       "GET /api/keys": () => ({
@@ -124,6 +144,30 @@ describe("KeysBoard", () => {
     const ordinary = screen.getByText("laptop").closest("tr");
     if (ordinary === null) throw new Error("the ordinary key has no row");
     expect(within(ordinary).queryByText("no bodies")).toBeNull();
+  });
+
+  /**
+   * `null` limits mean the gateway cannot read what is stored and refuses the
+   * key. Rendering that as the dash used for "no limits" would put the one row
+   * needing attention next to the ones that need none.
+   */
+  test("a key whose limits cannot be read is shown as broken rather than unlimited", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [apiKey(), apiKey({ id: "key-2", label: "meddled", limits: null })],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const row = (await screen.findByText("meddled")).closest("tr");
+    if (row === null) throw new Error("the unreadable key has no row");
+    expect(within(row).getByText("unreadable")).toBeTruthy();
+
+    // The healthy key keeps its own ceiling: one broken row is one broken row.
+    const ordinary = screen.getByText("laptop").closest("tr");
+    if (ordinary === null) throw new Error("the ordinary key has no row");
+    expect(within(ordinary).getByText("120/min")).toBeTruthy();
+    expect(within(ordinary).queryByText("unreadable")).toBeNull();
   });
 
   test("the raw key is shown once, with a warning that it is the only copy", async () => {

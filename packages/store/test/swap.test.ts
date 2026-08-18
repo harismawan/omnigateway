@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveKey } from "../src/encryption.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import type { ApiKey, Store } from "../src/types.ts";
+import type { ApiKeyInput, Store } from "../src/types.ts";
 
 const SECRET = "test-secret-value-for-unit-tests";
 
@@ -25,14 +25,14 @@ async function cleanup(store: Store, root: string): Promise<void> {
   await rm(root, { recursive: true, force: true });
 }
 
-function key(id: string): Omit<ApiKey, "createdAt" | "revokedAt"> {
+function key(id: string): ApiKeyInput {
   return {
     id,
     label: id,
     prefix: `sk-omni-${id}`,
     hash: `hash-${id}`,
     modelAllowlist: null,
-    rateLimitPerMin: null,
+    limits: {},
     bodyLoggingOptOut: false,
   };
 }
