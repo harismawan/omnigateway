@@ -87,6 +87,7 @@ export {
   type ServingCredential,
 } from "./modelLimits.ts";
 export { getModel, listModels, putModel, removeModel } from "./models.ts";
+export { nodeDatabaseFs } from "./nodeFs.ts";
 export { OAUTH_PROVIDERS } from "./oauth/index.ts";
 export { DISPATCH_REFRESH_LEAD_MS, SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
 export { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";

@@ -13,7 +13,7 @@ import {
   credentialsSet,
   credentialsShow,
 } from "./commands/credentials.ts";
-import { dbMigrate } from "./commands/db.ts";
+import { dbBackup, dbMigrate, dbRestore, dbSnapshots, dbStats, dbVacuum } from "./commands/db.ts";
 import { keysCreate, keysList, keysRevoke } from "./commands/keys.ts";
 import {
   modelsCatalog,
@@ -89,6 +89,11 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "admin set-password": adminSetPassword,
 
   "db migrate": dbMigrate,
+  "db stats": dbStats,
+  "db snapshots": dbSnapshots,
+  "db backup": dbBackup,
+  "db restore": dbRestore,
+  "db vacuum": dbVacuum,
 };
 
 export type Resolved = { name: string; command: Command; rest: string[] };

@@ -271,6 +271,10 @@ Use `--db <path>` to point one command somewhere else.
 | `omni settings get` / `set` | routing weights, retention, deadlines, and the runtime switches |
 | `omni admin set-password` | change the console password |
 | `omni db migrate` | create or upgrade the database |
+| `omni db stats` | size on disk, free pages, schema version, and what snapshots are held |
+| `omni db backup` / `snapshots` | take a snapshot, and list the ones retention has kept |
+| `omni db restore <id>` | put a snapshot back; asks first, and refuses while the gateway is running |
+| `omni db vacuum` | rewrite the database, reclaiming the pages deletion left free |
 
 Two worth knowing:
 

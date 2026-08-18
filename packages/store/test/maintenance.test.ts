@@ -121,6 +121,25 @@ test("vacuum returns the freelist to the filesystem", async () => {
   }
 });
 
+test("vacuum shrinks the database file itself, not only its page count", async () => {
+  const { store, root, dbPath } = await tempStore();
+  try {
+    await churn(store);
+    const before = (await stat(dbPath)).size;
+
+    await store.maintenance.vacuum();
+
+    // In WAL mode a rewrite lands in the log, so the page count falls while the
+    // main file keeps every page it had. Callers report reclaimed bytes by
+    // measuring this file, and an operator who compacts a database is told
+    // about the disk they got back — so the checkpoint is part of the job, not
+    // an optimisation to leave for whenever the log next rolls over.
+    expect((await stat(dbPath)).size).toBeLessThan(before);
+  } finally {
+    await cleanup(store, root);
+  }
+});
+
 test("a snapshot is a self-contained copy of what was committed", async () => {
   const { store, root } = await tempStore();
   const snapshot = join(root, "snap.sqlite");

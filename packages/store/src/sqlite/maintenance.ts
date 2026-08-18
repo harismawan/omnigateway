@@ -57,6 +57,12 @@ export function createMaintenanceRepo(db: Database): MaintenanceRepo {
 
     async vacuum(): Promise<void> {
       db.run("VACUUM");
+      // The rewrite lands in the write-ahead log, so without this the page
+      // count falls while the file on disk keeps every page it had. Every
+      // caller measures the file to report what compaction returned, and an
+      // operator reading "0 bytes reclaimed" after a successful vacuum learns
+      // the wrong thing about their disk.
+      db.run("PRAGMA wal_checkpoint(TRUNCATE)");
     },
 
     async snapshotTo(path: string): Promise<void> {

@@ -68,6 +68,19 @@ test("changing the password invalidates existing sessions", async () => {
   expect(await auth.verify(token)).toBe(false);
 });
 
+test("invalidating sessions ends them without touching the stored password", async () => {
+  const auth = createAdminAuth(await memoryStore(), opts);
+  await auth.setPassword("hunter2hunter2");
+  const token = (await auth.login("hunter2hunter2")) as string;
+
+  auth.invalidateSessions();
+
+  expect(await auth.verify(token)).toBe(false);
+  // The password itself is untouched: this is for the caller that replaced the
+  // database underneath, not for one that changed the credential.
+  expect(await auth.login("hunter2hunter2")).not.toBeNull();
+});
+
 test("verify rejects an unknown token", async () => {
   const auth = createAdminAuth(await memoryStore(), opts);
   expect(await auth.verify("not-a-token")).toBe(false);

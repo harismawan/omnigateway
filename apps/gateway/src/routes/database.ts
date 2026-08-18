@@ -1,12 +1,3 @@
-import {
-  copyFileSync,
-  mkdirSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  statfsSync,
-  statSync,
-} from "node:fs";
 import { dirname, join } from "node:path";
 import {
   type AdminAuth,
@@ -33,78 +24,6 @@ import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import { Elysia } from "elysia";
 import type { QuiesceLatch } from "../quiesce.ts";
 import { apiErrorHandler, readJson, requireAdmin } from "./http.ts";
-
-/**
- * The real filesystem, shaped the way `@omni/control` asks for it.
- *
- * Every call here is the gateway's side of a seam the control package defines
- * so its own tests never touch a directory. The two conventions the package
- * documents are honoured rather than reimplemented: an absent directory reads
- * as empty, and unlinking a path that is not there is a no-op.
- */
-export function nodeDatabaseFs(): DatabaseDeps["fs"] {
-  const dirBytes = (dir: string): number => {
-    let entries: readonly { name: string; isDirectory: () => boolean }[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true, encoding: "utf8" });
-    } catch {
-      // Never created, or swept while it was being read. Zero either way.
-      return 0;
-    }
-
-    let total = 0;
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        total += dirBytes(path);
-        continue;
-      }
-      try {
-        total += statSync(path).size;
-      } catch {
-        // Swept between the listing and the stat. Not part of the total.
-      }
-    }
-    return total;
-  };
-
-  return {
-    readdir: (dir) => {
-      try {
-        return readdirSync(dir);
-      } catch {
-        return [];
-      }
-    },
-    stat: (path) => {
-      try {
-        const stat = statSync(path);
-        return { size: stat.size, mtimeMs: stat.mtimeMs };
-      } catch {
-        return null;
-      }
-    },
-    unlink: (path) => {
-      rmSync(path, { force: true });
-    },
-    rename: (from, to) => renameSync(from, to),
-    copyFile: (from, to) => copyFileSync(from, to),
-    mkdir: (dir) => {
-      mkdirSync(dir, { recursive: true });
-    },
-    freeBytes: (dir) => {
-      try {
-        const stat = statfsSync(dir);
-        // What an unprivileged process may actually use, not the raw free
-        // count: the reserve blocks root keeps are not room for a backup.
-        return Number(stat.bavail) * Number(stat.bsize);
-      } catch {
-        return null;
-      }
-    },
-    dirBytes,
-  };
-}
 
 export type DatabaseRouteDeps = {
   store: DatabaseStore;
@@ -176,6 +95,28 @@ async function swap(
       durationMs: deps.now() - startedAt,
       reason: label,
     });
+
+    /**
+     * The admin sessions, when the file brought a different password with it.
+     *
+     * `setPassword` clears sessions because a changed password is a "log
+     * everyone out" event, and a restore changes it without going through
+     * `setPassword` — so this is that same event arriving by the other door.
+     * Conditional because the ordinary restore is of this installation's own
+     * snapshot, where the password is the one the operator is holding a session
+     * for and ending it would be a self-inflicted logout.
+     *
+     * After the result exists rather than before the operation: the caller is
+     * about to be handed `adminPasswordChanged` and has to receive it. Their
+     * own request was authorised at the top of the handler, so nothing here can
+     * retract it.
+     */
+    if (result.adminPasswordChanged) {
+      deps.admin.invalidateSessions();
+      logger.warn("admin sessions ended: the restored database carries a different password", {
+        reason: label,
+      });
+    }
     return result;
   } catch (error) {
     if (error instanceof SwapFailedError) {

@@ -7,6 +7,7 @@ import {
   createRefresher,
   type DatabaseDeps,
   type LifecycleDeps,
+  nodeDatabaseFs,
   OAUTH_PROVIDERS,
   type Refresher,
 } from "@omni/control";
@@ -22,7 +23,7 @@ import { openaiErrorBody } from "./egress/openai.ts";
 import { createQuiesceLatch, type QuiesceLatch } from "./quiesce.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectRoutes } from "./routes/connect.ts";
-import { databaseRoutes, nodeDatabaseFs } from "./routes/database.ts";
+import { databaseRoutes } from "./routes/database.ts";
 import { proxyRoutes } from "./routes/proxy.ts";
 
 export type AppDeps = {

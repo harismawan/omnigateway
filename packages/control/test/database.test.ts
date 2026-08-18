@@ -41,11 +41,24 @@ function deps(
     now?: number;
     freeBytes?: number | null;
     inspect?: DatabaseInspection;
+    /**
+     * The admin password hash before the swap and after the reopen.
+     *
+     * Two values rather than one because the whole question a restore has to
+     * answer is whether the file it swapped in carries a different one. Equal
+     * unless a test says otherwise.
+     */
+    adminHash?: { before: string | null; after: string | null };
   } = {},
 ): Fake {
   const files = new Map<string, number>(Object.entries(input.files ?? { [DB]: 4_096 }));
   const log: string[] = [];
   const settings: Settings = { ...DEFAULT_SETTINGS, ...input.settings };
+  const adminHash = input.adminHash ?? {
+    before: "argon2-of-the-same",
+    after: "argon2-of-the-same",
+  };
+  let liveAdminHash = adminHash.before;
 
   return {
     files,
@@ -57,6 +70,7 @@ function deps(
       config: {
         getSettings: async () => settings,
         putSettings: async (patch) => Object.assign(settings, patch),
+        getAdminPasswordHash: async () => liveAdminHash,
       },
       maintenance: {
         stats: async () => ({
@@ -82,6 +96,8 @@ function deps(
       close: () => log.push("close"),
       reopen: async () => {
         log.push("reopen");
+        // The file underneath changed; so, possibly, did the credential in it.
+        liveAdminHash = adminHash.after;
       },
     },
     fs: {
@@ -355,6 +371,29 @@ describe("restoreSnapshot", () => {
     expect(restoreSnapshot(d, "../omnigateway.db")).rejects.toThrow(GatewayError);
     await Bun.sleep(0);
     expect(d.log).toEqual([]);
+  });
+
+  test("reports an admin password hash that the restored file changed", async () => {
+    const d = deps({ files, adminHash: { before: "argon2-of-old", after: "argon2-of-new" } });
+    const result = await restoreSnapshot(d, id);
+    expect(result.adminPasswordChanged).toBe(true);
+  });
+
+  test("reports no change when the restored file carries the same admin password", async () => {
+    // The point of comparing rather than assuming. A snapshot of this same
+    // installation is the ordinary case, and it must not log the operator out
+    // in the middle of the operation they are watching.
+    const d = deps({ files, adminHash: { before: "argon2-of-one", after: "argon2-of-one" } });
+    const result = await restoreSnapshot(d, id);
+    expect(result.adminPasswordChanged).toBe(false);
+  });
+
+  test("counts either null transition as a change, in both directions", async () => {
+    const gained = deps({ files, adminHash: { before: null, after: "argon2-of-new" } });
+    expect((await restoreSnapshot(gained, id)).adminPasswordChanged).toBe(true);
+
+    const lost = deps({ files, adminHash: { before: "argon2-of-old", after: null } });
+    expect((await restoreSnapshot(lost, id)).adminPasswordChanged).toBe(true);
   });
 
   test("marks a failure inside the swap, so a caller can keep its latch closed", async () => {

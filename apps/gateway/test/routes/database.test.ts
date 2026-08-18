@@ -2,15 +2,11 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ADMIN_COOKIE, createAdminAuth, type DatabaseDeps } from "@omni/control";
+import { ADMIN_COOKIE, createAdminAuth, type DatabaseDeps, nodeDatabaseFs } from "@omni/control";
 import { createStore, deriveKey } from "@omni/store";
 import { virtualModel } from "@omni/testkit";
 import { createQuiesceLatch } from "../../src/quiesce.ts";
-import {
-  type DatabaseRouteDeps,
-  databaseRoutes,
-  nodeDatabaseFs,
-} from "../../src/routes/database.ts";
+import { type DatabaseRouteDeps, databaseRoutes } from "../../src/routes/database.ts";
 
 const NOW = Date.parse("2026-08-18T04:12:03.114Z");
 const SESSION_TTL_MS = 60_000;
@@ -18,6 +14,8 @@ const SNAPSHOT_ID = "db_2026-08-18T04-12-03-114Z_manual.sqlite";
 
 type HarnessOptions = {
   configured?: boolean;
+  /** The admin password this installation is set up with. Two harnesses differ by it. */
+  password?: string;
   /** Folded over the real filesystem, for the one seam a test needs to fail. */
   fs?: Partial<DatabaseDeps["fs"]>;
   lifecycle?: Partial<DatabaseRouteDeps["lifecycle"]>;
@@ -41,11 +39,15 @@ async function harness(options: HarnessOptions = {}) {
   const admin = createAdminAuth(store, { now: () => NOW, sessionTtlMs: SESSION_TTL_MS });
 
   let cookie = "";
-  if (options.configured !== false) {
-    await admin.setPassword("hunter2hunter2");
-    const token = await admin.login("hunter2hunter2");
+  /** Logs in and makes that the session `call` sends. Every later call is it. */
+  const login = async (password: string) => {
+    const token = await admin.login(password);
     if (token === null) throw new Error("test admin login failed");
     cookie = `${ADMIN_COOKIE}=${token}`;
+  };
+  if (options.configured !== false) {
+    await admin.setPassword(options.password ?? "hunter2hunter2");
+    await login(options.password ?? "hunter2hunter2");
   }
 
   const runs: string[][] = [];
@@ -103,7 +105,7 @@ async function harness(options: HarnessOptions = {}) {
     rmSync(dir, { recursive: true, force: true });
   };
 
-  return { dir, store, admin, app, latch, call, upload, snapshot, runs, stops, cleanup };
+  return { dir, store, admin, app, latch, call, login, upload, snapshot, runs, stops, cleanup };
 }
 
 test("the overview reports the file, the pages, retention, and the snapshots", async () => {
@@ -213,6 +215,51 @@ test("a restore puts the snapshot's contents back and reopens the latch", async 
   cleanup();
 });
 
+/**
+ * The invariant `setPassword` protects, reached the other way round.
+ *
+ * Sessions live in memory and are trusted against whatever hash is on disk, so
+ * a restore that brings a different admin password in leaves this process
+ * honouring a cookie for a password the installation no longer has. Nobody
+ * called `setPassword`, so nothing cleared them.
+ */
+test("a restore that changes the admin password ends the session that asked for it", async () => {
+  const { call, login, admin, snapshot, cleanup } = await harness();
+
+  const created = await snapshot();
+  await admin.setPassword("correct-horse-battery");
+  await login("correct-horse-battery");
+  expect((await call("GET", "/api/database")).status).toBe(200);
+
+  const restored = await call("POST", `/api/database/snapshots/${created.id}/restore`);
+  // The operator asked for this, so the operator is told how it went. Their own
+  // response is not the one the invalidation is allowed to eat.
+  expect(restored.status).toBe(200);
+  expect(((await restored.json()) as { adminPasswordChanged: boolean }).adminPasswordChanged).toBe(
+    true,
+  );
+
+  expect((await call("GET", "/api/database")).status).toBe(401);
+
+  cleanup();
+});
+
+test("a restore of this installation's own snapshot leaves the session alone", async () => {
+  const { call, snapshot, cleanup } = await harness();
+
+  const created = await snapshot();
+  const restored = await call("POST", `/api/database/snapshots/${created.id}/restore`);
+
+  expect(restored.status).toBe(200);
+  expect(((await restored.json()) as { adminPasswordChanged: boolean }).adminPasswordChanged).toBe(
+    false,
+  );
+  // The whole reason the hashes are compared instead of assumed to differ.
+  expect((await call("GET", "/api/database")).status).toBe(200);
+
+  cleanup();
+});
+
 test("a swap that failed keeps the latch closed", async () => {
   const { call, latch, snapshot, cleanup } = await harness({
     fs: {
@@ -256,6 +303,32 @@ test("an imported database replaces the live one", async () => {
   expect(imported.status).toBe(200);
   expect((await target.store.config.listModels()).map((m) => m.id)).toEqual(["from-the-import"]);
   expect(target.latch.isClosed()).toBe(false);
+
+  source.cleanup();
+  target.cleanup();
+});
+
+/**
+ * The same invariant on the other route, where it is the likely case.
+ *
+ * An imported database came from somewhere else, so its admin password is
+ * somebody else's by default — the operator who uploads one is the operator
+ * whose session must not survive it.
+ */
+test("an import from an installation with another password ends the session", async () => {
+  const source = await harness({ password: "correct-horse-battery" });
+  const created = await source.snapshot();
+  const bytes = new Uint8Array(
+    await Bun.file(join(source.dir, "snapshots", created.id)).arrayBuffer(),
+  );
+
+  const target = await harness();
+  const imported = await target.upload(bytes);
+  expect(imported.status).toBe(200);
+  expect(((await imported.json()) as { adminPasswordChanged: boolean }).adminPasswordChanged).toBe(
+    true,
+  );
+  expect((await target.call("GET", "/api/database")).status).toBe(401);
 
   source.cleanup();
   target.cleanup();

@@ -48,6 +48,7 @@ export type DatabaseStore = {
   config: {
     getSettings(): Promise<Settings>;
     putSettings(patch: Partial<Settings>): Promise<Settings>;
+    getAdminPasswordHash(): Promise<string | null>;
   };
   maintenance: MaintenanceRepo;
   reopen(): Promise<void>;
@@ -306,6 +307,17 @@ export type RestoreResult = {
   /** Row counts `inspect` read from the file that was restored. */
   counts: Record<string, number>;
   preRestoreSnapshot: SnapshotInfo;
+  /**
+   * Whether the file that arrived carries a different admin password.
+   *
+   * Admin sessions are held in memory and validated against the hash on disk,
+   * so a restore that brings a different one leaves live sessions authorising a
+   * password that no longer exists — the same state `setPassword` clears its
+   * sessions to avoid. A caller that holds sessions acts on this; one that does
+   * not can ignore it. Deliberately a boolean: the hashes are compared here so
+   * that neither of them has to travel.
+   */
+  adminPasswordChanged: boolean;
 };
 
 /**
@@ -338,6 +350,11 @@ async function swapIn(
   // snapshot is a step inside their operation rather than one of its own.
   const preRestoreSnapshot = await writeSnapshot(deps, { reason: "preRestore", force: true });
 
+  // Read to be compared and nothing else. A password hash is a credential, so
+  // it is never logged, never returned, and never named in an error; the two
+  // values meet here and only the boolean leaves.
+  const adminHashBefore = await deps.store.config.getAdminPasswordHash();
+
   const live = deps.store.databasePath;
   const staged = `${live}.incoming`;
   try {
@@ -353,7 +370,18 @@ async function swapIn(
     throw new SwapFailedError(preRestoreSnapshot.id, error);
   }
 
-  return { ok: true, counts: inspection.counts, preRestoreSnapshot };
+  // After the reopen rather than inside the try: the swap is over and succeeded,
+  // and a read that fails here is not a half-swapped database.
+  const adminHashAfter = await deps.store.config.getAdminPasswordHash();
+
+  return {
+    ok: true,
+    counts: inspection.counts,
+    preRestoreSnapshot,
+    // `!==` on `string | null` is the whole rule, and it is why the null
+    // transitions fall out: gaining or losing a password is a change.
+    adminPasswordChanged: adminHashAfter !== adminHashBefore,
+  };
 }
 
 /**
