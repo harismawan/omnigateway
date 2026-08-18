@@ -140,3 +140,20 @@ export function formatSpan(ms: number): string {
 export function formatUsd(value: number): string {
   return `$${value.toFixed(value < 1 ? 4 : 2)}`;
 }
+
+/**
+ * A size on disk or on the wire, e.g. `0 B`, `3.1 KB`, `1.2 MB`.
+ *
+ * One decimal rather than a rounded figure, because the numbers this prints are
+ * read against stated caps — 512 KB for one artifact, 64 KB for one string — and
+ * "512 KB" against "511.8 KB" is the difference between bounded and bounding.
+ * Bytes below a kilobyte stay bytes: `0 B` for a half that never happened has to
+ * be visibly nothing, not `0.0 KB`.
+ */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+}

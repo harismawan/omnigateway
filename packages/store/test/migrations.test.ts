@@ -16,6 +16,7 @@ test("openDb applies migrations and records them", () => {
     "migrations",
     "quota_samples",
     "quota_windows",
+    "request_bodies",
     "request_logs",
     "settings",
     "usage_daily",
@@ -24,7 +25,7 @@ test("openDb applies migrations and records them", () => {
     expect(tables).toContain(t);
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
-  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   const columns = db
     .query<{ name: string }, []>("PRAGMA table_info(request_logs)")
     .all()
@@ -37,6 +38,29 @@ test("openDb applies migrations and records them", () => {
     .map((row) => row.name);
   expect(dailyColumns).toContain("rtk_saved_tokens");
   expect(dailyColumns).toContain("rtk_applied_requests");
+  const keyColumns = db
+    .query<{ name: string }, []>("PRAGMA table_info(api_keys)")
+    .all()
+    .map((row) => row.name);
+  expect(keyColumns).toContain("body_logging_opt_out");
+  db.close();
+});
+
+test("migration 8 gives request_bodies its time index and no cascade", () => {
+  const db = openDb(":memory:");
+  const indexes = db
+    .query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='request_bodies'",
+    )
+    .all()
+    .map((row) => row.name);
+  expect(indexes).toContain("idx_request_bodies_at");
+
+  // No foreign key to `request_logs`, deliberately. A cascade only fires while
+  // the `foreign_keys` pragma is on, and a pragma silently off would turn expiry
+  // of a prompt corpus into indefinite retention of one.
+  const keys = db.query<{ table: string }, []>("PRAGMA foreign_key_list(request_bodies)").all();
+  expect(keys).toEqual([]);
   db.close();
 });
 
@@ -44,7 +68,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(7);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(8);
   db.close();
 });
 

@@ -44,7 +44,14 @@ test("the rollup survives log pruning and is swept on its own horizon", async ()
   await log(store, "old", now - 31 * day);
   await log(store, "new", now - 1000);
 
-  expect(await pruneLogs(store, now)).toEqual({ raw: 2, daily: 1, quotaSamples: 0 });
+  expect(await pruneLogs(store, now)).toEqual({
+    raw: 2,
+    daily: 1,
+    quotaSamples: 0,
+    bodies: 0,
+    bodiesOverCap: 0,
+    bodyOrphans: 0,
+  });
 
   // Raw logs keep the retention window; the rollup keeps a year and a margin.
   expect((await store.usage.recent(10)).map((l) => l.id)).toEqual(["new"]);
@@ -79,7 +86,14 @@ test("retained quota samples are swept on the raw log horizon", async () => {
 
   // The raw horizon, not the rollup's far longer one: a sample describes a
   // moment, and there is no rolled-up form of it to keep.
-  expect(await pruneLogs(store, CLOCK)).toEqual({ raw: 0, daily: 0, quotaSamples: 1 });
+  expect(await pruneLogs(store, CLOCK)).toEqual({
+    raw: 0,
+    daily: 0,
+    quotaSamples: 1,
+    bodies: 0,
+    bodiesOverCap: 0,
+    bodyOrphans: 0,
+  });
 
   const kept = await store.credentials.listQuotaSamples({ since: 0, until: CLOCK });
   expect(kept.map((s) => s.used)).toEqual([20]);

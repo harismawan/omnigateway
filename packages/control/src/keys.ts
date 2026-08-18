@@ -17,6 +17,10 @@ export async function listKeys(store: Store): Promise<ApiKeySummary[]> {
     prefix: k.prefix,
     modelAllowlist: k.modelAllowlist,
     rateLimitPerMin: k.rateLimitPerMin,
+    // Not a secret and not a policy the gateway hides: an operator auditing a
+    // shared installation has to be able to see which client's payloads are
+    // exempt from capture without reading the database.
+    bodyLoggingOptOut: k.bodyLoggingOptOut,
     createdAt: k.createdAt,
     revokedAt: k.revokedAt,
   }));
@@ -41,6 +45,10 @@ export async function createKey(store: Store, input: unknown): Promise<CreatedKe
     hash: await hashApiKey(raw),
     modelAllowlist: body.modelAllowlist,
     rateLimitPerMin: body.rateLimitPerMin,
+    // Settable only at creation. A key handed to a client on the promise that
+    // its payloads are never retained must not become capturable later by an
+    // edit the client cannot see, and there is no patch route to make one.
+    bodyLoggingOptOut: body.bodyLoggingOptOut,
   });
 
   return { id: created.id, label: created.label, prefix: created.prefix, key: raw };

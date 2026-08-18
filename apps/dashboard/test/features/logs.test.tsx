@@ -3,7 +3,15 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LogsBoard } from "../../src/features/logs/LogsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { apiKey, credential, log, NOW } from "../helpers/fixtures.ts";
+import {
+  apiKey,
+  bodyArtifact,
+  credential,
+  log,
+  NOW,
+  requestBody,
+  settings,
+} from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 const logs = [
@@ -29,6 +37,11 @@ function stubLogs(overrides: Parameters<typeof createFetchStub>[0] = {}) {
     "GET /api/logs": () => ({ logs }),
     "GET /api/credentials": () => ({ credentials: [credential()] }),
     "GET /api/keys": () => ({ keys: [apiKey()] }),
+    // The board states what this gateway does with prompts, and that answer is
+    // a function of both capture keys, so the settings envelope is part of the
+    // default fixture rather than something each test remembers to add.
+    "GET /api/settings": () => ({ settings, bodyLoggingAllowed: false }),
+    "GET /api/requests/req-1/body": () => requestBody({ detailState: "none", artifact: null }),
     ...overrides,
   });
 }
@@ -40,7 +53,46 @@ describe("LogsBoard", () => {
 
     expect(
       await screen.findByText(
-        "2 recent requests, 1 of them failed. Prompt and response bodies are never recorded.",
+        "2 recent requests, 1 of them failed. Prompt and response bodies are not being recorded.",
+      ),
+    ).toBeTruthy();
+  });
+
+  /**
+   * The claim has to move with the configuration.
+   *
+   * Both keys are needed to record anything, so a board that answered on the
+   * setting alone would tell an operator on an installation that never permitted
+   * capture that their prompts are being kept.
+   */
+  test("the summary answers on both capture keys, not on the setting alone", async () => {
+    stubLogs({
+      "GET /api/settings": () => ({
+        settings: { ...settings, bodyLoggingEnabled: true },
+        bodyLoggingAllowed: false,
+      }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    expect(
+      await screen.findByText(
+        "2 recent requests, 1 of them failed. Prompt and response bodies are not being recorded.",
+      ),
+    ).toBeTruthy();
+  });
+
+  test("the summary says capture is on when both keys are set", async () => {
+    stubLogs({
+      "GET /api/settings": () => ({
+        settings: { ...settings, bodyLoggingEnabled: true },
+        bodyLoggingAllowed: true,
+      }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    expect(
+      await screen.findByText(
+        "2 recent requests, 1 of them failed. Body capture is on: open a request to read what it sent and received.",
       ),
     ).toBeTruthy();
   });
@@ -382,7 +434,7 @@ describe("LogsBoard", () => {
 
     expect(
       await screen.findByText(
-        "3 recent requests, 1 of them failed, 1 still running. Prompt and response bodies are never recorded.",
+        "3 recent requests, 1 of them failed, 1 still running. Prompt and response bodies are not being recorded.",
       ),
     ).toBeTruthy();
   });
@@ -402,6 +454,195 @@ describe("LogsBoard", () => {
 
     await waitFor(() => expect(screen.queryByText("live-one")).toBeNull());
     expect(screen.getByText("1 shown")).toBeTruthy();
+  });
+
+  /**
+   * The pre/post-RTK split, which is the whole reason both halves are stored.
+   *
+   * `client.request` is what arrived and every `attempts[].request` is what went
+   * upstream after RTK filters ran. A reader who cannot tell them apart will
+   * read a compressed tool result as what their client actually sent, so the two
+   * payloads must be labelled and the caveat must be on screen beside them.
+   */
+  test("the captured client and provider requests are labelled either side of RTK", async () => {
+    const user = userEvent.setup();
+    stubLogs({ "GET /api/requests/req-ok/body": () => requestBody({ requestId: "req-ok" }) });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+
+    const client = await within(dialog).findByRole("heading", {
+      name: "Request from the client",
+    });
+    const upstream = within(dialog).getByRole("heading", {
+      name: "Request sent to the provider",
+    });
+
+    // Each payload is labelled with the side of RTK it sits on, in its own
+    // caption rather than somewhere else in the panel.
+    const clientCaption = client.closest("figcaption");
+    const upstreamCaption = upstream.closest("figcaption");
+    if (clientCaption === null || upstreamCaption === null) {
+      throw new Error("a captured payload has no caption");
+    }
+    expect(clientCaption.textContent).toContain("pre-RTK");
+    expect(upstreamCaption.textContent).toContain("post-RTK");
+    expect(clientCaption.textContent).not.toContain("post-RTK");
+    expect(upstreamCaption.textContent).not.toContain("pre-RTK");
+
+    // And the two really are different payloads in the fixture, so a UI that
+    // rendered one of them twice would fail here rather than pass.
+    expect(within(dialog).getByText(/FULL-TOOL-RESULT/)).toBeTruthy();
+    expect(within(dialog).getByText(/SQUEEZED/)).toBeTruthy();
+    expect(
+      within(dialog).getByText(/after RTK filters ran, so the two are not the same payload/),
+    ).toBeTruthy();
+  });
+
+  test("an artifact with no attempts states no RTK caveat it cannot support", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({ requestId: "req-ok", artifact: bodyArtifact({ attempts: [] }) }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByRole("heading", { name: "Request from the client" });
+    expect(within(dialog).queryByText(/RTK filters ran/)).toBeNull();
+  });
+
+  /**
+   * Three absences that mean three different things, and an operator acts on
+   * each differently. Rendering any of them as a blank panel or as a crash sends
+   * someone hunting for a setting they already have on.
+   */
+  test("a request that was never captured says so rather than rendering blank", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({ requestId: "req-ok", detailState: "none", artifact: null, sizeBytes: 0 }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(await within(dialog).findByText("Not captured")).toBeTruthy();
+    expect(within(dialog).getByText(/OMNI_BODY_LOGGING_ALLOWED/)).toBeTruthy();
+  });
+
+  test("an artifact that has been pruned reads as lost, not as never captured", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({ requestId: "req-ok", detailState: "missing", artifact: null }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(await within(dialog).findByText("Captured, then lost")).toBeTruthy();
+    expect(within(dialog).queryByText("Not captured")).toBeNull();
+  });
+
+  test("an artifact that will not decrypt reads as unreadable, not as absent", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({ requestId: "req-ok", detailState: "corrupt", artifact: null }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(await within(dialog).findByText("Captured, but unreadable")).toBeTruthy();
+    expect(within(dialog).getByText(/OMNI_ENCRYPTION_KEY/)).toBeTruthy();
+  });
+
+  /**
+   * "Capture was off" and "capture ran and this was too big to keep" are the two
+   * absences an operator most needs to tell apart, and they look identical
+   * unless the omission marker is rendered as itself.
+   */
+  test("a body dropped for being too large says so rather than showing the marker", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({
+          requestId: "req-ok",
+          truncated: true,
+          artifact: bodyArtifact({
+            client: {
+              request: {
+                omitted: true,
+                reason: "artifact exceeded 524288 bytes after structural bounding",
+                serializedBytes: 900_000,
+              },
+              response: null,
+              truncated: true,
+            },
+            attempts: [],
+          }),
+        }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(
+      await within(dialog).findByText(/Too large to keep: artifact exceeded 524288 bytes/),
+    ).toBeTruthy();
+    expect(within(dialog).getByText(/900,000 bytes after structural bounding/)).toBeTruthy();
+    expect(within(dialog).queryByText("Not captured")).toBeNull();
+  });
+
+  test("a truncated artifact is flagged rather than passed off as whole", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({
+          requestId: "req-ok",
+          truncated: true,
+          artifact: bodyArtifact({
+            client: { request: { model: "fast" }, response: null, truncated: true },
+            attempts: [],
+          }),
+        }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(within(dialog).getAllByText("truncated").length).toBeGreaterThan(0));
+  });
+
+  test("the artifact size says what it measured rather than reading as a request size", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({
+          requestId: "req-ok",
+          sizeBytes: 82_400,
+          artifact: bodyArtifact({
+            client: { request: { model: "fast" }, response: { ok: true }, truncated: false },
+            attempts: [],
+          }),
+        }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+    // The figure is the encrypted file: bounded and masked, then hex encoded. It
+    // is neither the wire size nor the size of the JSON shown below it, and a
+    // bare number here would be read as the former.
+    expect(await within(dialog).findByText(/82,400 bytes on disk/)).toBeTruthy();
   });
 
   test("a quiet gateway invites traffic rather than showing an empty table", async () => {

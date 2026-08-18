@@ -74,7 +74,12 @@ describe("mutations", () => {
     expect(listCalls).toBe(1);
 
     const create = renderHook(() => useCreateKey(), { wrapper });
-    create.result.current.mutate({ label: "ci", modelAllowlist: null, rateLimitPerMin: null });
+    create.result.current.mutate({
+      label: "ci",
+      modelAllowlist: null,
+      rateLimitPerMin: null,
+      bodyLoggingOptOut: false,
+    });
 
     await waitFor(() => expect(create.result.current.isSuccess).toBe(true));
     expect(create.result.current.data?.key).toBe("omni_sk_zzzz_secret");

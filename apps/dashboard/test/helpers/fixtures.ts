@@ -1,11 +1,13 @@
 import type {
   ApiKeySummary,
+  BodyArtifact,
   BurnEstimate,
   Credential,
   CredentialHealth,
   DryRunResult,
   QuotaSample,
   QuotaWindow,
+  RequestBodyResponse,
   RequestLog,
   Settings,
   UsageBucket,
@@ -117,6 +119,7 @@ export function apiKey(patch: Partial<ApiKeySummary> = {}): ApiKeySummary {
     prefix: "omni_sk_a1b2",
     modelAllowlist: null,
     rateLimitPerMin: 120,
+    bodyLoggingOptOut: false,
     createdAt: NOW - 86_400_000,
     revokedAt: null,
     ...patch,
@@ -180,7 +183,54 @@ export const settings: Settings = {
   logRetentionDays: 30,
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,
+  bodyLoggingEnabled: false,
+  bodyLoggingCaptureStreamChunks: false,
 };
+
+/**
+ * One captured artifact, with the pre/post-RTK difference actually present.
+ *
+ * The client request holds an uncompressed tool result and the attempt request
+ * holds the compressed one, because that is the pair the console has to keep
+ * distinguishable — a fixture where both sides matched would let a UI that
+ * mislabels them pass.
+ */
+export function bodyArtifact(patch: Partial<BodyArtifact> = {}): BodyArtifact {
+  return {
+    schemaVersion: 1,
+    requestId: "req-1",
+    at: NOW - 60_000,
+    client: {
+      request: { model: "fast", messages: [{ role: "user", content: "FULL-TOOL-RESULT" }] },
+      response: { id: "msg_1", content: "hello" },
+      truncated: false,
+    },
+    attempts: [
+      {
+        attempt: 1,
+        provider: "anthropic",
+        request: { model: "claude-haiku-4-5", messages: [{ role: "user", content: "SQUEEZED" }] },
+        response: { id: "msg_1", content: "hello" },
+        streamChunks: null,
+        truncated: false,
+      },
+    ],
+    error: null,
+    ...patch,
+  };
+}
+
+export function requestBody(patch: Partial<RequestBodyResponse> = {}): RequestBodyResponse {
+  return {
+    requestId: "req-1",
+    detailState: "ready",
+    truncated: false,
+    sizeBytes: 2_048,
+    at: NOW - 60_000,
+    artifact: bodyArtifact(),
+    ...patch,
+  };
+}
 
 export const dryRunResult: DryRunResult = {
   modelId: "fast",

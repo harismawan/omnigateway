@@ -1,5 +1,5 @@
 import { createKey, listKeys, revokeKey } from "@omni/control";
-import { listFlag, numberFlag, requirePositional, stringFlag } from "../args.ts";
+import { boolFlag, listFlag, numberFlag, requirePositional, stringFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, formatTime, note, paint, table } from "../output.ts";
@@ -19,6 +19,7 @@ export const keysList: Command = {
           { header: "PREFIX" },
           { header: "MODELS" },
           { header: "RATE/MIN", align: "right" },
+          { header: "BODY CAPTURE" },
           { header: "STATE" },
           { header: "CREATED" },
         ],
@@ -32,6 +33,12 @@ export const keysList: Command = {
               ? "none"
               : key.modelAllowlist.join(","),
           key.rateLimitPerMin === null ? "—" : String(key.rateLimitPerMin),
+          // An opted-out key is never captured whatever the settings say, and
+          // that is a promise made to whoever holds it — so it is listed rather
+          // than left in the database for an auditor to find. A dash is not
+          // "captured": it means this key defers to the installation's setting,
+          // which is off unless someone turned it on.
+          key.bodyLoggingOptOut ? "no bodies" : "—",
           state(ctx, key.revokedAt === null, key.revokedAt === null ? "active" : "revoked"),
           formatTime(key.createdAt),
         ]),
@@ -41,12 +48,13 @@ export const keysList: Command = {
 };
 
 export const keysCreate: Command = {
-  usage: "keys create [--label L] [--allow <model> ...] [--rate-limit N]",
+  usage: "keys create [--label L] [--allow <model> ...] [--rate-limit N] [--no-bodies]",
   summary: "Mint a gateway API key, printed once",
   options: {
     label: { type: "string" },
     allow: { type: "string", multiple: true },
     "rate-limit": { type: "string" },
+    "no-bodies": { type: "boolean" },
   },
   async run(args, { ctx, writer }) {
     const allow = listFlag(args.values, "allow");
@@ -58,6 +66,11 @@ export const keysCreate: Command = {
       // an absent flag must stay null rather than becoming [].
       modelAllowlist: allow ?? null,
       rateLimitPerMin: numberFlag(args.values, "rate-limit") ?? null,
+      // Creation only, matching the console and the store: a key handed to a
+      // client on the promise that its payloads are never retained must not
+      // become capturable later by an edit the client cannot see. Reissue
+      // instead — there is no flag that turns this off.
+      bodyLoggingOptOut: boolFlag(args.values, "no-bodies"),
     });
 
     emit(ctx, writer, created, () => {

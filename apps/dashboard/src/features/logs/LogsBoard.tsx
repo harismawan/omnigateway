@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import styled from "styled-components";
-import { LOG_CADENCE_MS, useCredentials, useKeys, useLogs } from "../../api/queries.ts";
+import {
+  LOG_CADENCE_MS,
+  useBodyLoggingActive,
+  useCredentials,
+  useKeys,
+  useLogs,
+} from "../../api/queries.ts";
 import type { RequestLog } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import {
@@ -24,6 +30,7 @@ import { Legend, Mono, Row, ScrollX, Stack, Truncate } from "../../ui/primitives
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { ProcessingTokens, TokenBreakdown, tokenBreakdownLabel } from "../../ui/TokenBreakdown.tsx";
+import { BodyArtifact } from "./BodyArtifact.tsx";
 
 const LIMITS = [50, 100, 250, 500] as const;
 
@@ -110,6 +117,11 @@ export function LogsBoard() {
   const logs = useLogs(limit, cadence(LOG_CADENCE_MS));
   const credentials = useCredentials();
   const keys = useKeys();
+  // Both keys, not just the setting: an installation whose environment never
+  // permitted capture records nothing however the setting reads, and telling an
+  // operator their prompts are being kept when they are not is the worse lie of
+  // the two. Unknown — the settings read failed — is reported as not recording.
+  const capturing = useBodyLoggingActive();
   const hasPending = (logs.data ?? []).some(isPending);
   const now = useCurrentTime(liveUpdates && hasPending);
 
@@ -159,7 +171,7 @@ export function LogsBoard() {
         summary={
           logs.isLoading
             ? "Reading the request log…"
-            : `${formatCount(logs.data?.length ?? 0)} recent requests, ${formatCount(failed)} of them failed${live === 0 ? "" : `, ${formatCount(live)} still running`}. Prompt and response bodies are never recorded.`
+            : `${formatCount(logs.data?.length ?? 0)} recent requests, ${formatCount(failed)} of them failed${live === 0 ? "" : `, ${formatCount(live)} still running`}. ${capturing.data === true ? "Body capture is on: open a request to read what it sent and received." : "Prompt and response bodies are not being recorded."}`
         }
         actions={
           <Controls>
@@ -316,7 +328,9 @@ export function LogsBoard() {
           if (!next) setOpen(null);
         }}
         title="Request detail"
-        width="600px"
+        // Wider than the metadata alone needs: the captured bodies below are
+        // JSON, and a payload wrapped every forty columns is unreadable.
+        width="760px"
         footer={
           <Button type="button" onClick={() => setOpen(null)}>
             Close
@@ -406,6 +420,11 @@ export function LogsBoard() {
                 </Row>
               </Stack>
             )}
+
+            {/* Mounted with the row, so the artifact is fetched only while
+                someone is looking at it. It reports its own absence, so there
+                is nothing to guard on here. */}
+            <BodyArtifact requestId={open.id} />
           </Stack>
         )}
       </Modal>

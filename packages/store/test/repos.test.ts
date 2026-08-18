@@ -110,6 +110,58 @@ test("settings safely normalize malformed persisted RTK values to disabled", asy
   s.close();
 });
 
+test("body logging settings default off and only literal true enables them", async () => {
+  const s = await store();
+  const defaults = await s.config.getSettings();
+  expect(defaults.bodyLoggingEnabled).toBe(false);
+  expect(defaults.bodyLoggingCaptureStreamChunks).toBe(false);
+
+  // A hand-edited or older row: truthy, but not `true`. Capture must not start
+  // on a value nobody typed with that meaning.
+  await s.config.putSettings({
+    bodyLoggingEnabled: "yes",
+    bodyLoggingCaptureStreamChunks: 1,
+  } as unknown as Partial<Settings>);
+  const coerced = await s.config.getSettings();
+  expect(coerced.bodyLoggingEnabled).toBe(false);
+  expect(coerced.bodyLoggingCaptureStreamChunks).toBe(false);
+
+  await s.config.putSettings({ bodyLoggingEnabled: true, bodyLoggingCaptureStreamChunks: true });
+  const enabled = await s.config.getSettings();
+  expect(enabled.bodyLoggingEnabled).toBe(true);
+  expect(enabled.bodyLoggingCaptureStreamChunks).toBe(true);
+  s.close();
+});
+
+test("api key body logging opt-out defaults off and round-trips", async () => {
+  const s = await store();
+  const plain = await hashApiKey(generateApiKey());
+  const quiet = await hashApiKey(generateApiKey());
+  await s.keys.create({
+    id: "k1",
+    label: "shared",
+    prefix: "sk-omni-aaaa",
+    hash: plain,
+    modelAllowlist: null,
+    rateLimitPerMin: null,
+    bodyLoggingOptOut: false,
+  });
+  await s.keys.create({
+    id: "k2",
+    label: "confidential",
+    prefix: "sk-omni-bbbb",
+    hash: quiet,
+    modelAllowlist: null,
+    rateLimitPerMin: null,
+    bodyLoggingOptOut: true,
+  });
+
+  expect((await s.keys.findByHash(plain))?.bodyLoggingOptOut).toBe(false);
+  expect((await s.keys.findByHash(quiet))?.bodyLoggingOptOut).toBe(true);
+  expect((await s.keys.list()).map((k) => k.bodyLoggingOptOut).sort()).toEqual([false, true]);
+  s.close();
+});
+
 test("settings return defaults then persist patches", async () => {
   const s = await store();
   const defaults = await s.config.getSettings();
@@ -192,6 +244,7 @@ test("api keys are found by hash and never store the raw value", async () => {
     hash,
     modelAllowlist: ["fast"],
     rateLimitPerMin: 60,
+    bodyLoggingOptOut: false,
   });
 
   const found = await s.keys.findByHash(hash);
@@ -211,6 +264,7 @@ test("revoked keys are still listed but marked revoked", async () => {
     hash,
     modelAllowlist: null,
     rateLimitPerMin: null,
+    bodyLoggingOptOut: false,
   });
   await s.keys.revoke("k1");
   const found = await s.keys.findByHash(hash);

@@ -850,13 +850,25 @@ test("a throw from dispatch completes the pending row without erasing it", async
  * `usage.append` must run at most once per request id.
  *
  * `rollupLog` adds into `usage_daily` rather than replacing, so a second append
- * bills the same tokens and the same spend twice. The non-streaming path
- * completes the row and then keeps working — collecting, rendering, serialising
- * — and anything thrown after that lands in the terminal catch. That catch used
- * to build a blank log, whose nulls rolled up under a different key and hid the
- * double count; completing dispatch's real log there is what made it billable.
+ * bills the same tokens and the same spend twice. The non-streaming path used to
+ * complete the row and then keep working — collecting, rendering, serialising —
+ * and anything thrown after that landed in the terminal catch, which completed
+ * it again. The `logged` flag is what stopped that being billable.
+ *
+ * Body capture closed the window instead of guarding it: the artifact records
+ * the response the client is handed, the artifact is written at `finishLog`, so
+ * the body has to be rendered before the row is completed. The clock stamp the
+ * OpenAI surface takes for `created` moved with it, and nothing that can throw
+ * now runs after the append.
+ *
+ * The sentinel is left armed rather than deleted. It fires on the first clock
+ * read after the row is written, so it stays false only while that ordering
+ * holds — put rendering back after the completion and this test fails on
+ * `thrown` rather than silently going back to relying on the flag. The flag
+ * itself stays: it still guards the streaming path's `log`, and it is what makes
+ * a future post-completion step safe to add.
  */
-test("completes the row once when a non-streaming request throws after it is written", async () => {
+test("renders a non-streaming response before completing its row, and completes it once", async () => {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
   await store.config.putModel(
@@ -898,8 +910,8 @@ test("completes the row once when a non-streaming request throws after it is wri
     logger,
   });
 
-  // The OpenAI surface stamps `created` from the clock after the row is
-  // completed, so this is where a post-completion throw actually happens.
+  // The OpenAI surface stamps `created` from the clock while it renders, which
+  // is the last clock read of the request and now happens before the append.
   const res = await app.handle(
     new Request("http://localhost/v1/chat/completions", {
       method: "POST",
@@ -909,10 +921,74 @@ test("completes the row once when a non-streaming request throws after it is wri
   );
   await res.text().catch(() => undefined);
 
-  expect(thrown).toBe(true);
+  expect(thrown).toBe(false);
+  expect(res.status).toBe(200);
   expect(appends).toBe(1);
   const rows = await store.usage.recent(10);
   expect(rows).toHaveLength(1);
+  expect(rows[0]?.state).toBe("done");
+  expect(rows[0]?.status).toBe(200);
+  store.close();
+});
+
+/**
+ * The window the ordering above narrowed but did not close, and the billing
+ * invariant that depends on the flag rather than on the order.
+ *
+ * Rendering now happens before the append, so the ordinary path has nothing left
+ * that can throw afterwards — but `jsonResponse` still serialises the rendered
+ * body after the row is written, and a body it cannot serialise lands in the
+ * terminal catch with `logged` already true. An Anthropic-native block is the
+ * cheapest way to arrange that honestly: its payload is carried verbatim by
+ * contract, so a value `JSON.stringify` refuses reaches the response untouched.
+ *
+ * Without the guard the catch completes the row a second time, `rollupLog` adds
+ * the same tokens and the same spend into `usage_daily` again, and every usage
+ * figure the operator bills against is wrong. The client's 500 is correct and is
+ * not what this is about.
+ */
+test("completes the row once when serialising the response throws after it is written", async () => {
+  const unserializable: StreamEvent[] = [
+    { type: "start", id: "upstream_1", model: "claude-opus-4" },
+    {
+      type: "blockStart",
+      index: 0,
+      block: {
+        type: "anthropicNative",
+        blockType: "web_search_tool_result",
+        // A BigInt is the one JSON type there is no encoding for, so this throws
+        // in `JSON.stringify` and nowhere earlier.
+        data: { queriedAt: 1n },
+      },
+    },
+    { type: "blockEnd", index: 0 },
+    {
+      type: "end",
+      stopReason: "endTurn",
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    },
+  ];
+  const logger = captureLogger("info");
+  const { store, call } = await harness(unserializable, { logger });
+  let appends = 0;
+  const realAppend = store.usage.append.bind(store.usage);
+  store.usage.append = async (log) => {
+    appends++;
+    return realAppend(log);
+  };
+
+  const res = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  await res.text().catch(() => undefined);
+
+  expect(res.status).toBe(500);
+  expect(appends).toBe(1);
+  const rows = await store.usage.recent(10);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]?.state).toBe("done");
   store.close();
 });
 

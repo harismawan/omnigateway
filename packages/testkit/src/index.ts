@@ -200,6 +200,7 @@ export async function seedApiKey(
     hash: await hashApiKey(raw),
     modelAllowlist: null,
     rateLimitPerMin: null,
+    bodyLoggingOptOut: false,
     ...overrides,
   });
   return { raw, key };

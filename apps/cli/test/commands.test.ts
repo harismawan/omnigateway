@@ -69,6 +69,42 @@ test("an absent --allow means every model, not none", async () => {
   expect(body.keys[0]?.modelAllowlist).toBeNull();
 });
 
+/**
+ * The opt-out is a promise to whoever holds the key, and it is made once: there
+ * is no update path here, in the console, or in the store. So both halves matter
+ * — that the flag takes, and that its absence does not silently opt a key out of
+ * something the operator meant to capture.
+ */
+test("keys create --no-bodies opts the key out of capture, and only when asked", async () => {
+  const root = await installation();
+
+  await cli(["keys", "create", "--label", "private", "--no-bodies"], { root });
+  await cli(["keys", "create", "--label", "ordinary"], { root });
+
+  const listed = await cli(["keys", "list", "--json"], { root });
+  const body = JSON.parse(listed.out) as {
+    keys: Array<{ label: string; bodyLoggingOptOut: boolean }>;
+  };
+  expect(body.keys.find((k) => k.label === "private")?.bodyLoggingOptOut).toBe(true);
+  expect(body.keys.find((k) => k.label === "ordinary")?.bodyLoggingOptOut).toBe(false);
+});
+
+/**
+ * An auditor asking which client's payloads are exempt must be able to read the
+ * answer off the table rather than out of the database.
+ */
+test("keys list shows both sides of the capture opt-out", async () => {
+  const root = await installation();
+  await cli(["keys", "create", "--label", "private", "--no-bodies"], { root });
+  await cli(["keys", "create", "--label", "ordinary"], { root });
+
+  const listed = await cli(["keys", "list"], { root });
+  expect(listed.out).toContain("BODY CAPTURE");
+  const rows = listed.out.split("\n");
+  expect(rows.find((row) => row.includes("private"))).toContain("no bodies");
+  expect(rows.find((row) => row.includes("ordinary"))).not.toContain("no bodies");
+});
+
 test("keys revoke keeps the key listed, so usage keeps its attribution", async () => {
   const root = await installation();
   const created = await cli(["keys", "create", "--json"], { root });
@@ -244,6 +280,96 @@ test("a setting value of 0 is still a value, not a blank", async () => {
 
   expect(result.code).toBe(0);
   expect(await setting(root, "weights.cost")).toBe(0);
+});
+
+/**
+ * The regression this parse exists for.
+ *
+ * `rtkEnabled` shipped unreachable from the CLI: the value was read with
+ * `Number(raw)` and every boolean therefore failed as "must be a number" before
+ * it ever reached the schema. Nothing said so, because no test ever set one.
+ */
+test("settings set writes a boolean setting the old number-only parse could not reach", async () => {
+  const root = await installation();
+
+  const result = await cli(["settings", "set", "rtkEnabled", "true"], { root });
+
+  expect(result.code).toBe(0);
+  expect(await setting(root, "rtkEnabled")).toBe(true);
+});
+
+test("settings set turns body capture on and off again", async () => {
+  const root = await installation();
+
+  expect((await cli(["settings", "set", "bodyLoggingEnabled", "true"], { root })).code).toBe(0);
+  expect(await setting(root, "bodyLoggingEnabled")).toBe(true);
+
+  expect((await cli(["settings", "set", "bodyLoggingEnabled", "false"], { root })).code).toBe(0);
+  expect(await setting(root, "bodyLoggingEnabled")).toBe(false);
+
+  expect(
+    (await cli(["settings", "set", "bodyLoggingCaptureStreamChunks", "true"], { root })).code,
+  ).toBe(0);
+  expect(await setting(root, "bodyLoggingCaptureStreamChunks")).toBe(true);
+});
+
+/**
+ * `1` is the tempting alias and it is refused on purpose: a capture switch read
+ * as the opposite of what was typed fails silently, and two words are cheap.
+ */
+test("a non-boolean value for a boolean setting is refused, not coerced", async () => {
+  const root = await installation();
+
+  const result = await cli(["settings", "set", "bodyLoggingEnabled", "1"], { root });
+
+  expect(result.code).toBe(2);
+  expect(result.err).toContain("must be true or false");
+  expect(await setting(root, "bodyLoggingEnabled")).toBe(false);
+});
+
+/** The type of the stored value picks the parse, so a number setting is untouched. */
+test("a boolean value for a numeric setting is still refused as not a number", async () => {
+  const root = await installation();
+
+  const result = await cli(["settings", "set", "maxAttempts", "true"], { root });
+
+  expect(result.code).toBe(2);
+  expect(result.err).toContain("must be a number");
+  expect(await setting(root, "maxAttempts")).toBe(3);
+});
+
+/**
+ * A name off `Object.prototype` is not a setting.
+ *
+ * `head in current` walks the prototype chain, so `toString` and `constructor`
+ * both passed the existence check. The schema then stripped the unknown key on
+ * the way to the store, and the command exited 0 printing `toString = 5` over a
+ * write that never happened — the one failure mode worse than an error, because
+ * an operator has no reason to check.
+ */
+test("a prototype property is not a setting path", async () => {
+  const root = await installation();
+  const before = (await cli(["settings", "get", "--json"], { root })).out;
+
+  for (const name of ["toString", "constructor", "hasOwnProperty", "__proto__"]) {
+    const result = await cli(["settings", "set", name, "5"], { root });
+    expect(`${name}: ${result.code}`).toBe(`${name}: 2`);
+    expect(result.err).toContain(`no setting "${name}"`);
+  }
+
+  expect((await cli(["settings", "get", "--json"], { root })).out).toBe(before);
+});
+
+test("settings get prints booleans as words, not as 0 and 1", async () => {
+  const root = await installation();
+  await cli(["settings", "set", "rtkEnabled", "true"], { root });
+
+  const shown = await cli(["settings", "get"], { root });
+  expect(shown.code).toBe(0);
+  expect(shown.out).toContain("rtkEnabled");
+  expect(shown.out).toContain("true");
+  expect(shown.out).toContain("bodyLoggingEnabled");
+  expect(shown.out).toContain("false");
 });
 
 test("credentials add-key stores a key read from a prompt, never from argv", async () => {

@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
-import type { Store } from "@omni/store";
+import { type BodyArtifact, createStore, deriveKey, type Store } from "@omni/store";
 import {
   memoryStore,
   requestLog,
@@ -19,14 +22,23 @@ type HarnessOptions = {
   console?: AdminDeps["console"];
   /** For routes whose spans are measured back from the clock. */
   now?: number;
+  /**
+   * A store built by the test, for the one route whose data lives on disk.
+   * Everything else is happy with an in-memory database.
+   */
+  store?: Store;
+  /** Whether `OMNI_BODY_LOGGING_ALLOWED` was set at boot. */
+  bodyLoggingAllowed?: boolean;
 };
 
 async function harness({
   configured = true,
   console: consoleDeps,
   now = NOW,
+  store: provided,
+  bodyLoggingAllowed,
 }: HarnessOptions = {}) {
-  const store = await memoryStore();
+  const store = provided ?? (await memoryStore());
   const admin = createAdminAuth(store, { now: () => now, sessionTtlMs: SESSION_TTL_MS });
 
   let cookie = "";
@@ -44,6 +56,7 @@ async function harness({
     now: () => now,
     sessionTtlMs: SESSION_TTL_MS,
     ...(consoleDeps === undefined ? {} : { console: consoleDeps }),
+    ...(bodyLoggingAllowed === undefined ? {} : { bodyLoggingAllowed }),
   });
 
   const call = (
@@ -202,6 +215,7 @@ test("every data route requires a session", async () => {
     "/api/logs",
     "/api/console",
     "/api/agent-setup",
+    "/api/requests/req-1/body",
   ]) {
     expect((await call("GET", path, undefined, false)).status).toBe(401);
   }
@@ -522,6 +536,230 @@ test("logs are returned newest first, capped, and normalize fractional limits", 
     logs: Array<{ id: string }>;
   };
   expect(blank.logs).toHaveLength(3);
+});
+
+/* ------------------------------------------------------- captured bodies -- */
+
+const BODY_AT = Date.UTC(2026, 7, 17, 12, 0, 0);
+const BODY_REQUEST_ID = "req_11111111-2222-4333-8444-555555555555";
+/** UTC shard layout, spelled out so the test does not agree with any layout. */
+const BODY_REL_PATH = `2026/08/17/${BODY_REQUEST_ID}.json.enc`;
+
+/**
+ * A store on disk, because artifacts live beside the database file and an
+ * in-memory database has nowhere to put a tree.
+ */
+async function bodyHarness(): Promise<{
+  store: Store;
+  root: string;
+  dir: string;
+  call: Awaited<ReturnType<typeof harness>>["call"];
+}> {
+  const root = join(tmpdir(), `omni-admin-bodies-${crypto.randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const store = await createStore({
+    path: join(root, "omnigateway.db"),
+    encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
+  });
+  const { call } = await harness({ store });
+  return { store, root, dir: join(root, "request_bodies"), call };
+}
+
+function bodyArtifact(overrides: Partial<BodyArtifact> = {}): BodyArtifact {
+  return {
+    schemaVersion: 1,
+    requestId: BODY_REQUEST_ID,
+    at: BODY_AT,
+    client: { request: { model: "fast" }, response: { ok: true }, truncated: false },
+    attempts: [
+      {
+        attempt: 1,
+        provider: "anthropic",
+        request: { model: "claude-haiku-4-5" },
+        response: { ok: true },
+        streamChunks: null,
+        truncated: false,
+      },
+    ],
+    error: null,
+    ...overrides,
+  };
+}
+
+type BodyResponse = {
+  requestId: string;
+  detailState: string;
+  truncated: boolean;
+  sizeBytes: number;
+  at: number | null;
+  artifact: BodyArtifact | null;
+};
+
+test("a captured request's bodies are served decrypted to an admin", async () => {
+  const { store, root, call } = await bodyHarness();
+  try {
+    await store.bodies.put(bodyArtifact());
+
+    const response = await call("GET", `/api/requests/${BODY_REQUEST_ID}/body`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as BodyResponse;
+    expect(body.detailState).toBe("ready");
+    expect(body.artifact?.client.request).toEqual({ model: "fast" });
+    expect(body.artifact?.attempts[0]?.provider).toBe("anthropic");
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The most sensitive thing this gateway serves. There is no unauthenticated
+ * form of this route, and a caller without a session learns nothing about
+ * whether the request even exists.
+ */
+test("captured bodies are refused to a caller with no admin session", async () => {
+  const { store, root, call } = await bodyHarness();
+  try {
+    await store.bodies.put(bodyArtifact());
+
+    const response = await call("GET", `/api/requests/${BODY_REQUEST_ID}/body`, undefined, false);
+    expect(response.status).toBe(401);
+    const text = await response.text();
+    expect(text).not.toContain("claude-haiku-4-5");
+    expect(text).not.toContain("ready");
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** Capture is off by default, so "never captured" is the ordinary answer. */
+test("a request that was never captured answers none rather than 404", async () => {
+  const { store, root, call } = await bodyHarness();
+  try {
+    const response = await call("GET", "/api/requests/req_nothing-here/body");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as BodyResponse;
+    expect(body.detailState).toBe("none");
+    expect(body.artifact).toBeNull();
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an artifact deleted underneath its row answers missing rather than 500", async () => {
+  const { store, root, dir, call } = await bodyHarness();
+  try {
+    await store.bodies.put(bodyArtifact());
+    await rm(join(dir, BODY_REL_PATH));
+
+    const response = await call("GET", `/api/requests/${BODY_REQUEST_ID}/body`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as BodyResponse;
+    expect(body.detailState).toBe("missing");
+    expect(body.artifact).toBeNull();
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an artifact that no longer decrypts answers corrupt rather than 500", async () => {
+  const { store, root, dir, call } = await bodyHarness();
+  try {
+    await store.bodies.put(bodyArtifact());
+    await writeFile(join(dir, BODY_REL_PATH), "not the ciphertext that was written");
+
+    const response = await call("GET", `/api/requests/${BODY_REQUEST_ID}/body`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as BodyResponse;
+    expect(body.detailState).toBe("corrupt");
+    expect(body.artifact).toBeNull();
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Neither the answer nor its failure modes may describe the installation. A path
+ * names where the prompt corpus lives, a credential id names an account, and a
+ * stack names the code — none of which a console needs and all of which an
+ * attacker with a session would take.
+ */
+test("the body response names no path, credential, or stack", async () => {
+  const { store, root, dir, call } = await bodyHarness();
+  try {
+    await seedCredential(store, { id: "cred-secret-1", accessToken: "test-token-1" });
+    await store.bodies.put(bodyArtifact());
+    const ready = await (await call("GET", `/api/requests/${BODY_REQUEST_ID}/body`)).text();
+
+    await writeFile(join(dir, BODY_REL_PATH), "corrupted");
+    const broken = await (await call("GET", `/api/requests/${BODY_REQUEST_ID}/body`)).text();
+
+    for (const text of [ready, broken]) {
+      expect(text).not.toContain("cred-secret-1");
+      expect(text).not.toContain("request_bodies");
+      expect(text).not.toContain(root);
+      expect(text).not.toContain("relPath");
+      expect(text).not.toContain("sha256");
+      expect(text).not.toContain("at Object.");
+    }
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------------------------ two keys -- */
+
+/**
+ * The environment half of the capture contract, reported beside the setting it
+ * governs. Without it the console renders a switch that saves fine and records
+ * nothing, which is a bug report rather than a feature.
+ */
+test("settings report whether the environment permits body capture", async () => {
+  const permitted = await harness({ bodyLoggingAllowed: true });
+  const body = (await (await permitted.call("GET", "/api/settings")).json()) as {
+    settings: { bodyLoggingEnabled: boolean };
+    bodyLoggingAllowed: boolean;
+  };
+  expect(body.bodyLoggingAllowed).toBe(true);
+  // The setting itself is untouched by the environment: off until an operator
+  // turns it on, and turning it on is what the other key permits.
+  expect(body.settings.bodyLoggingEnabled).toBe(false);
+
+  const forbidden = await harness();
+  const off = (await (await forbidden.call("GET", "/api/settings")).json()) as {
+    bodyLoggingAllowed: boolean;
+  };
+  expect(off.bodyLoggingAllowed).toBe(false);
+});
+
+test("a key can be issued that is never captured, and says so when listed", async () => {
+  const { call, store } = await harness();
+  const created = (await (
+    await call("POST", "/api/keys", { label: "private-client", bodyLoggingOptOut: true })
+  ).json()) as { id: string };
+
+  const listed = (await (await call("GET", "/api/keys")).json()) as {
+    keys: Array<{ id: string; bodyLoggingOptOut: boolean }>;
+  };
+  expect(listed.keys.find((key) => key.id === created.id)?.bodyLoggingOptOut).toBe(true);
+  // Persisted, not merely echoed: the proxy reads it off the key on every
+  // request before any capture work begins.
+  expect((await store.keys.list())[0]?.bodyLoggingOptOut).toBe(true);
+});
+
+test("a key that says nothing inherits the installation's capture policy", async () => {
+  const { call } = await harness();
+  await call("POST", "/api/keys", { label: "ordinary" });
+
+  const listed = (await (await call("GET", "/api/keys")).json()) as {
+    keys: Array<{ bodyLoggingOptOut: boolean }>;
+  };
+  expect(listed.keys[0]?.bodyLoggingOptOut).toBe(false);
 });
 
 test("credential health returns the health and quota rows the dashboard renders", async () => {

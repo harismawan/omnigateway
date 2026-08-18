@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import styled from "styled-components";
-import { useSaveSettings, useSettings } from "../../api/queries.ts";
+import { useBodyLoggingAllowed, useSaveSettings, useSettings } from "../../api/queries.ts";
 import type { Settings } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { Button } from "../../ui/Button.tsx";
@@ -31,8 +31,21 @@ const WEIGHTS: ReadonlyArray<{ id: WeightKey; label: string; blurb: string }> = 
   },
 ];
 
+/**
+ * Every setting that is a plain number typed into a box.
+ *
+ * Named rather than spelled out at each use because the exclusion list is now
+ * long enough to drift: a boolean left out of it is parsed by `Number` and saved
+ * as `NaN`, which the schema then rejects with a message about the wrong field.
+ * Each entry excluded here has a control of its own further down.
+ */
+type LimitKey = Exclude<
+  keyof Settings,
+  "weights" | "rtkEnabled" | "bodyLoggingEnabled" | "bodyLoggingCaptureStreamChunks"
+>;
+
 const LIMITS: ReadonlyArray<{
-  id: Exclude<keyof Settings, "weights" | "rtkEnabled">;
+  id: LimitKey;
   label: string;
   hint: string;
   unit: string;
@@ -114,13 +127,36 @@ const Saved = styled.p`
   color: ${({ theme }) => theme.color.ok};
 `;
 
-type Draft = Record<string, string> & { rtkEnabled?: string };
+/**
+ * A control that is present but cannot act, and why.
+ *
+ * Warn rather than down: nothing is broken and nothing failed. The operator is
+ * simply one restart away from the switch below doing what it says.
+ */
+const Blocked = styled.p`
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.warn};
+  max-width: 72ch;
+
+  code {
+    font-family: ${({ theme }) => theme.font.mono};
+  }
+`;
+
+/** Every field is held as the string the input carries, booleans included. */
+type Draft = Record<string, string> & {
+  rtkEnabled?: string;
+  bodyLoggingEnabled?: string;
+  bodyLoggingCaptureStreamChunks?: string;
+};
 
 function toDraft(settings: Settings): Draft {
   const draft: Draft = {};
   for (const weight of WEIGHTS) draft[`w.${weight.id}`] = String(settings.weights[weight.id]);
   for (const limit of LIMITS) draft[limit.id] = String(settings[limit.id]);
   draft.rtkEnabled = String(settings.rtkEnabled);
+  draft.bodyLoggingEnabled = String(settings.bodyLoggingEnabled);
+  draft.bodyLoggingCaptureStreamChunks = String(settings.bodyLoggingCaptureStreamChunks);
   return draft;
 }
 
@@ -139,7 +175,7 @@ function parseDraft(
     weights[weight.id] = value;
   }
 
-  const limits = {} as Record<Exclude<keyof Settings, "weights" | "rtkEnabled">, number>;
+  const limits = {} as Record<LimitKey, number>;
   for (const limit of LIMITS) {
     const raw = (draft[limit.id] ?? "").trim();
     const value = Number(raw);
@@ -155,7 +191,16 @@ function parseDraft(
     return { ok: false, problem: "Attempts per request cannot exceed 10." };
   }
 
-  return { ok: true, settings: { weights, ...limits, rtkEnabled: draft.rtkEnabled === "true" } };
+  return {
+    ok: true,
+    settings: {
+      weights,
+      ...limits,
+      rtkEnabled: draft.rtkEnabled === "true",
+      bodyLoggingEnabled: draft.bodyLoggingEnabled === "true",
+      bodyLoggingCaptureStreamChunks: draft.bodyLoggingCaptureStreamChunks === "true",
+    },
+  };
 }
 
 /**
@@ -166,6 +211,10 @@ function parseDraft(
  */
 export function SettingsBoard() {
   const settings = useSettings();
+  // The environment half of the capture contract, read at boot and not settable
+  // from here. Without it the toggle below saves fine and records nothing, which
+  // is the one outcome this screen must never let an operator walk into quietly.
+  const bodyLoggingAllowed = useBodyLoggingAllowed();
   const save = useSaveSettings();
   const [draft, setDraft] = useState<Draft>({});
   const [problem, setProblem] = useState<string | null>(null);
@@ -309,6 +358,61 @@ export function SettingsBoard() {
             </Row>
           </Module>
 
+          <Module
+            legend="Request and response bodies"
+            meta={
+              bodyLoggingAllowed.data === true ? "permitted by the environment" : "not permitted"
+            }
+          >
+            <Stack $gap={3}>
+              {/* Deliberately not a live region: this is the standing state of
+                  the installation, present from first paint, not an outcome
+                  announced after an action. */}
+              {bodyLoggingAllowed.data === true ? null : (
+                <Blocked>
+                  This gateway was started without <code>OMNI_BODY_LOGGING_ALLOWED</code>, so
+                  nothing below can record anything. Set it in the installation's <code>.env</code>{" "}
+                  and restart before turning capture on. Two keys mean an admin session on its own
+                  cannot start recording prompts.
+                </Blocked>
+              )}
+
+              <Row $gap={3} $align="start">
+                <Toggle
+                  checked={draft.bodyLoggingEnabled === "true"}
+                  disabled={bodyLoggingAllowed.data !== true}
+                  onCheckedChange={(checked) =>
+                    setDraft({ ...draft, bodyLoggingEnabled: String(checked) })
+                  }
+                  label="Capture request and response bodies"
+                />
+                <Blurb>
+                  Stores what each client sent and what each provider returned, encrypted under
+                  OMNI_ENCRYPTION_KEY beside the database. Bearer tokens and API keys are masked
+                  first and headers are never captured. Bodies expire on the log retention window
+                  above, and the newest 100,000 requests are kept whatever that window says. Off by
+                  default.
+                </Blurb>
+              </Row>
+
+              <Row $gap={3} $align="start">
+                <Toggle
+                  checked={draft.bodyLoggingCaptureStreamChunks === "true"}
+                  disabled={bodyLoggingAllowed.data !== true || draft.bodyLoggingEnabled !== "true"}
+                  onCheckedChange={(checked) =>
+                    setDraft({ ...draft, bodyLoggingCaptureStreamChunks: String(checked) })
+                  }
+                  label="Also keep raw stream frames"
+                />
+                <Blurb>
+                  Retains the raw SSE frames of each attempt as well as the reassembled response.
+                  The only way to debug stream framing itself, and by far the most expensive thing
+                  capture can store, so it is gated separately rather than implied.
+                </Blurb>
+              </Row>
+            </Stack>
+          </Module>
+
           {problem === null ? null : <Problem role="alert">{problem}</Problem>}
           {saved && problem === null ? <Saved role="status">Settings saved.</Saved> : null}
 
@@ -326,8 +430,9 @@ export function SettingsBoard() {
               <Row $gap={2}>
                 <Mono $dim>logs</Mono>
                 <Blurb>
-                  Request rows record routing and token counts only. Prompts, responses, and
-                  credentials are never written.
+                  Request rows record routing and token counts only. Prompts and responses are
+                  written only when body capture above is on, and to a separate encrypted store;
+                  credentials are never written to either.
                 </Blurb>
               </Row>
             </Stack>

@@ -1,4 +1,5 @@
 import type { Command } from "./command.ts";
+import { bodies } from "./commands/bodies.ts";
 import { connect } from "./commands/connect.ts";
 import { console_ } from "./commands/console.ts";
 import {
@@ -49,6 +50,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   restart,
   doctor,
   logs,
+  bodies,
   console: console_,
   usage,
   quota,
