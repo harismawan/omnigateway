@@ -1,22 +1,28 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import {
   type ConsoleDeps,
   type ConsoleSource,
   createAdminAuth,
   createRefresher,
+  type DatabaseDeps,
+  type LifecycleDeps,
   OAUTH_PROVIDERS,
   type Refresher,
 } from "@omni/control";
-import { type Logger, noopLogger, type ProviderId } from "@omni/ir";
+import { GatewayError, HTTP_STATUS, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
 import type { LoadRegistry } from "./dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
+import { anthropicErrorBody } from "./egress/anthropic.ts";
+import { openaiErrorBody } from "./egress/openai.ts";
+import { createQuiesceLatch, type QuiesceLatch } from "./quiesce.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectRoutes } from "./routes/connect.ts";
+import { databaseRoutes, nodeDatabaseFs } from "./routes/database.ts";
 import { proxyRoutes } from "./routes/proxy.ts";
 
 export type AppDeps = {
@@ -56,9 +62,83 @@ export type AppDeps = {
   logger?: Logger;
   /** Where this process's stdout was captured, when anything captured it. */
   console?: { source: ConsoleSource; deps: ConsoleDeps };
+  /**
+   * The admission gate over `/v1/*`, shared with whatever closes it.
+   *
+   * One per process, built here unless a caller wants to hold the handle: a
+   * restore closes this and the database routes are what reopen it.
+   */
+  latch?: QuiesceLatch;
+  /** Filesystem effects the database panel runs on. Real ones by default. */
+  databaseFs?: DatabaseDeps["fs"];
+  /**
+   * How this process stops, and what it would ask to be restarted by.
+   *
+   * Supplied by the bootstrap, which is the only place holding the running
+   * server, the store, and the background loops. Without it the capability is
+   * still reported honestly, and the two mutating routes fail rather than
+   * answering `ok` for something that did not happen.
+   */
+  lifecycle?: LifecycleDeps;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * What a client is told while the database is being replaced.
+ *
+ * 503 with a `retry-after`, in the surface's own error shape, because the
+ * caller is an SDK: an agent that retries in five seconds gets its answer, and
+ * one that does not at least fails with the vocabulary it parses. Rendered from
+ * the same encoders the proxy uses, so this is not a second construction of an
+ * error body that could drift from the one every other refusal returns.
+ */
+const QUIESCE_MESSAGE = "the gateway is briefly quiesced for database maintenance";
+
+function quiesceResponse(path: string): Response {
+  const body =
+    path === "/v1/chat/completions"
+      ? openaiErrorBody("OVERLOADED", QUIESCE_MESSAGE)
+      : anthropicErrorBody("OVERLOADED", QUIESCE_MESSAGE);
+  return new Response(JSON.stringify(body), {
+    status: HTTP_STATUS.OVERLOADED,
+    headers: { "content-type": "application/json", "retry-after": "5" },
+  });
+}
+
+/**
+ * Whether this request is client traffic, which is the only thing the latch
+ * gates.
+ *
+ * `/api/*` and `/health` are deliberately outside it. A restore is watched from
+ * the console and reported through it, so a latch that covered the whole server
+ * would black out the dashboard at the exact moment an operator needs to see
+ * whether their database came back — and would take `/health` with it, which is
+ * what a load balancer reads.
+ */
+function isClientTraffic(path: string): boolean {
+  return path === "/v1" || path.startsWith("/v1/");
+}
+
+/**
+ * The lifecycle seam for an app nobody handed a stop effect to.
+ *
+ * The capability is still read from the real environment, because reporting
+ * "no supervisor" on a machine that has one would be a lie in the other
+ * direction. What is missing is the ability to act, so acting fails loudly
+ * rather than returning `ok` for a restart that never happened.
+ */
+function absentLifecycle(): LifecycleDeps {
+  const refuse = (): never => {
+    throw new GatewayError("INTERNAL", "this process has no lifecycle control installed");
+  };
+  return {
+    env: process.env,
+    fileExists: (path) => existsSync(path),
+    run: async () => refuse(),
+    stop: refuse,
+  };
+}
 
 export function createApp(deps: AppDeps) {
   const now = deps.now ?? (() => Date.now());
@@ -91,7 +171,33 @@ export function createApp(deps: AppDeps) {
     }
   }
 
+  const latch = deps.latch ?? createQuiesceLatch();
+  /**
+   * The release for each admitted request, keyed by the request itself.
+   *
+   * Weak so a request whose after-response hook never runs is collected rather
+   * than retained; the count it leaves behind costs the next quiesce its
+   * deadline and nothing more.
+   */
+  const admitted = new WeakMap<Request, () => void>();
+
   return new Elysia()
+    .onRequest(({ request }) => {
+      const path = new URL(request.url).pathname;
+      if (!isClientTraffic(path)) return;
+      const release = latch.enter();
+      if (release === null) return quiesceResponse(path);
+      admitted.set(request, release);
+    })
+    .onAfterResponse(({ request }) => {
+      // Fires once the response has been handed back, which for a stream is
+      // before its body has finished. A quiesce therefore waits for requests to
+      // be answered rather than for streams to end — which is why its wait is
+      // bounded, and why `/v1` is refused for the whole operation rather than
+      // only until the count reaches zero.
+      admitted.get(request)?.();
+      admitted.delete(request);
+    })
     .get("/health", () => ({ ok: true }))
     .use(
       proxyRoutes({
@@ -121,6 +227,18 @@ export function createApp(deps: AppDeps) {
         sessionTtlMs: ADMIN_SESSION_TTL_MS,
         logger,
         ...(deps.console === undefined ? {} : { console: deps.console }),
+      }),
+    )
+    .use(
+      databaseRoutes({
+        store: deps.store,
+        admin,
+        latch,
+        snapshots,
+        fs: deps.databaseFs ?? nodeDatabaseFs(),
+        now,
+        logger,
+        lifecycle: deps.lifecycle ?? absentLifecycle(),
       }),
     )
     .use(

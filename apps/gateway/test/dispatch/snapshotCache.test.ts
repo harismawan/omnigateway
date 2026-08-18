@@ -237,3 +237,26 @@ test("another SQLite connection invalidates cache before next read", async () =>
   second.close();
   await Bun.file(path).delete();
 });
+
+/**
+ * The one change the version check cannot see.
+ *
+ * Staleness is decided by SQLite's `data_version`, which is a property of the
+ * open connection — so a restore, which closes the handle and opens a new one
+ * over a different file, is exactly the change that can leave the counter
+ * reading the same as before. Whoever swapped the file says so explicitly.
+ */
+test("an explicit invalidation rebuilds the snapshot even when the version agrees", async () => {
+  const store = await seedRoutingStore();
+  const cache = createRoutingSnapshotCache(store);
+  const first = await cache.get(100);
+  expect(await cache.get(200)).toBe(first);
+
+  cache.invalidate();
+
+  const rebuilt = await cache.get(300);
+  expect(rebuilt).not.toBe(first);
+  expect(rebuilt.models.has("fast")).toBe(true);
+  cache.close();
+  store.close();
+});

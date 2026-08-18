@@ -28,6 +28,14 @@ export type LogFields = {
   requestedModel?: string | undefined;
   credentialId?: string | undefined;
   apiKeyId?: string | undefined;
+  /**
+   * Which snapshot a maintenance line is about.
+   *
+   * The filename, which is generated from an instant and a closed set of
+   * reasons and is therefore neither operator text nor a path — the directory
+   * it lives in is not logged, here or anywhere.
+   */
+  snapshotId?: string | undefined;
   attempt?: number | undefined;
   attempts?: number | undefined;
   code?: ErrorCode | "INTERNAL" | "interrupted" | undefined;
@@ -46,9 +54,13 @@ export type LogFields = {
   dailyCount?: number | undefined;
   /** Retained quota readings swept. A row count, and nothing about whose. */
   quotaSampleCount?: number | undefined;
+  /** Bytes of a file this gateway wrote, read, or reclaimed. Never of a body. */
+  sizeBytes?: number | undefined;
   host?: string | undefined;
   port?: number | undefined;
   path?: string | undefined;
+  /** What would restart this process: one of three words from `describeLifecycle`. */
+  supervisor?: "systemd" | "container" | "none" | undefined;
   reason?: string | undefined;
 };
 
@@ -68,6 +80,7 @@ const FIELD_ORDER = [
   "requestedModel",
   "credentialId",
   "apiKeyId",
+  "snapshotId",
   "attempt",
   "attempts",
   "code",
@@ -85,9 +98,11 @@ const FIELD_ORDER = [
   "rawCount",
   "dailyCount",
   "quotaSampleCount",
+  "sizeBytes",
   "host",
   "port",
   "path",
+  "supervisor",
   // Last on purpose: the only free-text field, and the only truncated one, so
   // a long message can never push a structured field out of view.
   "reason",
