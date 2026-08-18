@@ -64,7 +64,7 @@ A limit is a `(dimension, window)` pair. Not every pair is meaningful, so the ma
 
 | Dimension     | 1m  | 5h  | 1w  | Enforcement                                |
 | ------------- | --- | --- | --- | ------------------------------------------ |
-| `requests`    | yes | yes | yes | Pre-flight, exact                          |
+| `requests`    | yes | yes | yes | 1m pre-flight and exact; 5h/1w on completion |
 | `tokens`      | yes | yes | yes | Post-hoc debit; overshoots by ≤1 request   |
 | `spend` (USD) | —   | yes | yes | Post-hoc debit, priced from `cost_usd`     |
 | `concurrency` | instantaneous gauge  ||| Pre-flight increment, `finally` decrement  |
@@ -75,6 +75,16 @@ already recorded, and debits the request's own usage afterwards. A key at its ce
 its *next* request, not its current one. The overshoot is bounded by one request per limit and is
 inherent to the dimension — pre-estimating from `count_tokens` would trade a bounded, understood
 overshoot for an unbounded, silent inaccuracy on output tokens, which cannot be estimated at all.
+
+`requests` splits across its windows, which the table above compresses. At `1m` the count is an
+exact in-memory ring and the check is genuinely pre-flight. At `5h` and `1w` it derives from
+`sumSince`, which counts committed rows only — so an admission recorded into the in-memory delta and
+then pruned before its row landed would be counted in neither place, and under-counting is the one
+direction this design must never take. Long-window request counts therefore debit on completion like
+tokens and spend.
+
+The consequence is that a burst of N concurrent requests can overshoot a long request ceiling by up
+to N. That is exactly what `concurrency` bounds, and it is why the gauge is not optional garnish.
 
 `concurrency` is not a window. It is a gauge: in-flight requests for this key, right now. It exists
 because the other dimensions cannot see a runaway agent loop that opens forty streams and holds
@@ -297,6 +307,16 @@ x-ratelimit-reset-tokens: 4h51m22s
 
 Both surfaces send `Retry-After` in seconds on a 429. This is the gap that exists today: the 429
 already carries `retryAfterMs`, but in the error body, where no SDK looks.
+
+**A long window's reset is computed exactly, and only when refusing.** In the allow path a long
+window reports `now + windowMs`, because the true instant it frees a slot needs the oldest retained
+row's timestamp and that is a second query. Overstating is the safe direction there — nobody acts on
+it. But a `Retry-After` is acted on: a client refused one request over a weekly ceiling would be
+told to stop for seven days when a slot may free in an hour, and a well-behaved SDK would obey.
+
+So the deny path queries the oldest row inside the window and reports the truth. A 429 is by
+definition the path where nothing is being served, so the extra read costs nothing that matters and
+never touches the hot path.
 
 **Which window is reported.** A key may have three windows per dimension and there is one header per
 dimension. The reported window is the one **nearest exhaustion by proportion** — the one that will
