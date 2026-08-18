@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import styled from "styled-components";
 import { useLogin, useSetup, useStatus } from "../api/queries.ts";
+import { describeLoginReason } from "../session/reasons.ts";
 import { Button } from "../ui/Button.tsx";
 import { Field, Input } from "../ui/Field.tsx";
 import { Lamp } from "../ui/Lamp.tsx";
@@ -53,11 +54,22 @@ const Problem = styled.p`
   color: ${({ theme }) => theme.color.down};
 `;
 
-type Search = { next?: string };
+/**
+ * Why the session ended, when the console knows.
+ *
+ * Warn rather than down: nothing failed, and being asked to sign in again after
+ * restoring a database that carries a different password is the system working.
+ */
+const Ended = styled.p`
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.warn};
+`;
+
+type Search = { next?: string; reason?: string };
 
 function LoginScreen() {
   const navigate = useNavigate();
-  const { next } = Route.useSearch();
+  const { next, reason } = Route.useSearch();
   const status = useStatus();
   const login = useLogin();
   const setup = useSetup();
@@ -67,6 +79,9 @@ function LoginScreen() {
   const [problem, setProblem] = useState<string | null>(null);
 
   const configuring = status.data?.configured === false;
+  // Why the operator is here, when the console sent them rather than the cookie
+  // simply expiring. Unknown codes describe nothing, so nothing is shown.
+  const ended = describeLoginReason(reason);
   const busy = login.isPending || setup.isPending || status.isLoading;
 
   const goOn = () => {
@@ -110,6 +125,8 @@ function LoginScreen() {
           {status.isError ? (
             <Problem>The gateway is not answering. Check that it is running, then reload.</Problem>
           ) : null}
+
+          {ended === null ? null : <Ended role="status">{ended}</Ended>}
 
           <Stack $gap={1}>
             <Legend>{configuring ? "First run" : "Sign in"}</Legend>
@@ -161,7 +178,9 @@ function LoginScreen() {
 }
 
 export const Route = createFileRoute("/login")({
-  validateSearch: (search: Record<string, unknown>): Search =>
-    typeof search.next === "string" ? { next: search.next } : {},
+  validateSearch: (search: Record<string, unknown>): Search => ({
+    ...(typeof search.next === "string" ? { next: search.next } : {}),
+    ...(typeof search.reason === "string" ? { reason: search.reason } : {}),
+  }),
   component: LoginScreen,
 });

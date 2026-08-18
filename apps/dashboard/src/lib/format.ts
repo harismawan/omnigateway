@@ -76,6 +76,28 @@ export function formatDateTime(at: number | null | undefined): string {
   });
 }
 
+const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"] as const;
+
+/**
+ * A size on disk, in the units the filesystem actually counts in.
+ *
+ * Binary rather than decimal because every figure this formats comes from a
+ * page count or a `stat`, and rendering 4096 pages of 4 KiB as "12.6 MB" would
+ * disagree with every tool an operator would check it against.
+ */
+export function formatBytes(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  const abs = Math.abs(value);
+  if (abs < 1024) return `${Math.round(value)} B`;
+  let scaled = value;
+  let unit = 0;
+  while (Math.abs(scaled) >= 1024 && unit < BYTE_UNITS.length - 1) {
+    scaled /= 1024;
+    unit += 1;
+  }
+  return `${scaled.toFixed(1)} ${BYTE_UNITS[unit]}`;
+}
+
 /** Truncates an id for display while keeping it recognisable. */
 export function shortId(id: string, head = 8): string {
   return id.length <= head ? id : `${id.slice(0, head)}…`;

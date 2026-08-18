@@ -64,6 +64,29 @@ describe("login screen", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
   });
 
+  /**
+   * A restore can end the session it was started from, and an operator who is
+   * suddenly at a login screen needs to know that is what happened rather than
+   * that something broke.
+   */
+  test("says why the session ended when it was sent here with a reason", async () => {
+    createFetchStub({ "GET /api/status": () => ({ configured: true, authenticated: false }) });
+    renderLogin("/login?reason=admin-password-changed");
+
+    expect(await screen.findByText(/carries a different admin password/i)).toBeTruthy();
+  });
+
+  /** A reason is a code from a closed set, never text a URL can dictate. */
+  test("ignores a reason it does not recognise", async () => {
+    createFetchStub({ "GET /api/status": () => ({ configured: true, authenticated: false }) });
+    renderLogin("/login?reason=your%20account%20is%20suspended%2C%20call%20555");
+
+    expect(
+      await screen.findByText("This console is for the operator of this gateway."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/suspended/i)).toBeNull();
+  });
+
   test("a first run asks for a new password twice", async () => {
     createFetchStub({ "GET /api/status": () => ({ configured: false, authenticated: false }) });
     renderLogin();
