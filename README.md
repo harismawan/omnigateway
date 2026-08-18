@@ -42,6 +42,9 @@ omni start
   and rate limits instead of sharing provider credentials.
 - **Reports usage.** Requests, tokens, and cost by provider, model, key, and
   day — metadata only.
+- **Backs itself up.** Snapshot the database from the console or the CLI, see
+  what it occupies, reclaim what deletion left behind, and restore a snapshot
+  without stopping the gateway.
 - **Ships an admin console and a CLI.** Both cover the same ground; use
   whichever suits the machine you are on.
 
@@ -271,6 +274,10 @@ Use `--db <path>` to point one command somewhere else.
 | `omni settings get` / `set` | routing weights, retention, deadlines, and the runtime switches |
 | `omni admin set-password` | change the console password |
 | `omni db migrate` | create or upgrade the database |
+| `omni db stats` | size on disk, free pages, schema version, and what snapshots are held |
+| `omni db backup` / `snapshots` | take a snapshot, and list the ones retention has kept |
+| `omni db restore <id>` | put a snapshot back; asks first, and refuses while the gateway is running |
+| `omni db vacuum` | rewrite the database, reclaiming the pages deletion left free |
 
 Two worth knowing:
 
@@ -294,6 +301,29 @@ Use `--system` for a system-wide unit (needs root). Without systemd, `omni
 start` supervises the process itself with a pidfile under
 `~/.local/state/omnigateway`. Either way, `omni start` returns only once
 `/health` actually answers.
+
+### Restarting and stopping from the console
+
+The console's Database screen can restart and shut down the gateway. A restart
+only restarts if something would start the process again, so what the control
+does — and whether it is offered at all — depends on how this installation runs:
+
+- **Under systemd**, it works. The gateway asks the manager rather than
+  signalling itself — `systemctl [--user] --no-block restart
+  omnigateway.service` — because the unit `omni service install` writes sets
+  `Restart=on-failure`, and a handled `SIGTERM` exits cleanly, which systemd
+  reads as success. A gateway that killed itself would stop and stay stopped.
+- **In a container**, it depends on the container's restart policy, and that
+  policy cannot be read from inside the container. The console says so instead
+  of promising a restart it has no way to verify. Run with
+  `--restart unless-stopped` if you want the control to mean what it says.
+- **With no supervisor** — `omni start` with no unit installed — the control is
+  disabled and shows the reason. Nothing is watching the process, so an exit is
+  simply the end of it. Use `omni restart` from a terminal on the machine.
+
+Shutdown is offered in every shape, because stopping is the point of it. In a
+container it is a one-way door: stopping the only process takes the console that
+would have restarted it, so bringing the gateway back needs access to the host.
 
 ## Configuration
 
@@ -453,6 +483,67 @@ attempt. Worst case per captured request is therefore about 512 KB × (attempts 
 1), so a request that fails over twice can hold a few megabytes until it
 finishes. Multiply by your concurrency before enabling capture on a small box.
 
+## Snapshots and restore
+
+The console's Database screen reports what this installation occupies — the
+database file, its write-ahead log, the captured-body tree, and the free pages a
+compaction would give back — and takes snapshots. `omni db stats` prints the same
+figures.
+
+**What a snapshot is.** One self-contained SQLite file, written into a
+`snapshots/` directory beside the database. The write-ahead log is folded in, so
+there is nothing else to copy alongside it, and taking one is safe while the
+gateway is running: it reads through SQLite rather than copying bytes off disk.
+
+**What it is not.** The sibling `request_bodies/` tree is excluded, always. A
+snapshot is never a prompt corpus, and its size tracks your configuration and
+usage history rather than your traffic. The cost is that a restore leaves the
+captured-body tree out of step with the table: files the restored database has no
+row for are collected by the hourly sweep, and a row whose file is gone reads back
+as `captured, then lost`.
+
+**A snapshot does carry secrets.** Your provider credentials are in it, encrypted,
+along with your gateway key hashes. They are inert only because
+`OMNI_ENCRYPTION_KEY` is not in the file — it lives in the installation's `.env`.
+So treat a downloaded snapshot exactly as you treat the database itself: anyone
+holding both the file and the key holds your provider accounts. Downloads are
+never cached, and each one is recorded in the gateway's log.
+
+**Retention** bounds the directory: at most `keepLatest` snapshots are kept, and
+nothing older than `maxAgeDays` — 5 and 30 by default. Both bounds have to pass,
+so an old snapshot goes even while the count is under the limit, and the newest is
+always kept whatever the numbers say. Pruning runs when a snapshot is taken rather
+than on a timer, so a quiet installation keeps what it already has. **Edit the
+policy on the Database screen**, not on Settings: it is deliberately not part of
+the settings form, so a settings save from a client that has never heard of
+retention leaves your policy alone instead of resetting it.
+
+The copy taken automatically on the way into a restore is exempt from retention.
+It is the undo.
+
+**Restoring from the console** happens inside the running gateway. Client traffic
+on `/v1/*` is refused with a retryable 503 while the file is replaced; `/api/*`
+and `/health` keep answering, so you can watch the restore and hear how it ended.
+Restoring a database that carries a different console password signs every session
+out; restoring this installation's own snapshot does not. The screen also uploads
+a database file from elsewhere, up to 2 GiB, which is how you move an installation
+to another machine — bring `OMNI_ENCRYPTION_KEY` with it, or the credentials in it
+are unreadable. Either way the file is integrity-checked before anything is
+touched, and a copy of what was there is taken first.
+
+**`omni db restore <id>` refuses while a gateway is running** against that
+installation, and there is no override flag. A second process can open its own
+handle but cannot quiesce the gateway's, and moving the file out from under a live
+SQLite connection corrupts the database you were trying to rescue. Run `omni stop`
+first, or restore from the console, which swaps the file behind its own quiesce
+latch.
+
+**Compaction.** `omni db vacuum`, or the console's equivalent, rewrites the
+database and reclaims the pages deletion left free. It holds SQLite's write lock
+for the rewrite, so a busy gateway stalls on its writes until it finishes — but
+nothing is lost by running it live, and it reports what it actually gave back to
+the filesystem.
+
 ## Docker
 
 ```bash
@@ -469,6 +560,11 @@ The container listens on `0.0.0.0:9000` and keeps its database at
 serves the APIs and returns 404 for the console. Use the CLI or the control API
 against it, or install the npm package if you want the console.
 
+Give the container a restart policy — `--restart unless-stopped` — if you want a
+restart request to bring it back. A container cannot read its own policy, so
+without one an exit is simply the end of the installation until you start it
+again from the host.
+
 ## Scope and limits
 
 Worth knowing before you deploy it:
@@ -481,6 +577,10 @@ Worth knowing before you deploy it:
 - **Body capture is forensics, not an archive.** It is off unless you turn it on
   with both keys, it expires on the request-log window, and it is capped at
   100,000 rows. It is not a searchable prompt history and there is no CLI for it.
+- **Snapshots are manual, and local.** Nothing takes one on a schedule and there
+  is no off-host target; retention bounds what you have taken, and a restore
+  always takes one first. Copy them somewhere else yourself if the disk failing
+  is what you are guarding against.
 - **Quota readings come from the providers**, and their usage endpoints are
   undocumented. An account with nothing reported is treated as unknown, never
   as unlimited.
@@ -499,6 +599,10 @@ Worth knowing before you deploy it:
   [body capture](#recording-bodies), which needs both an environment variable
   and a setting, encrypts what it writes, and can be refused per key.
 - Gateway keys are stored as hashes. A lost key is reissued, not recovered.
+- A [snapshot](#snapshots-and-restore) carries whatever the database does —
+  encrypted provider credentials, gateway key hashes — and is inert only because
+  `OMNI_ENCRYPTION_KEY` is not in it. Captured bodies are excluded, so a snapshot
+  is never a prompt corpus.
 - Secrets are never accepted on the command line — `omni` prompts for them or
   reads stdin — so they stay out of your shell history and the process table.
 - Behind a reverse proxy, set `OMNI_BASE_URL` to the public HTTPS origin so

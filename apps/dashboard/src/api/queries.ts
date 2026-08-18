@@ -18,10 +18,12 @@ import type {
   CredentialHealthResponse,
   CredentialPatch,
   CredentialsResponse,
+  DatabaseOverview,
   DryRunNeed,
   DryRunResult,
   KeyCreateInput,
   KeysResponse,
+  LifecycleCapability,
   LogsResponse,
   MintedKey,
   ModelsResponse,
@@ -31,15 +33,20 @@ import type {
   QuotaWindow,
   RequestBodyResponse,
   RequestLog,
+  RestoreResult,
+  RetentionPolicy,
   Settings,
   SettingsResponse,
   SetupClient,
   SetupFile,
   SetupResponse,
+  SnapshotInfo,
+  SnapshotsResponse,
   StatusResponse,
   UsageBucket,
   UsageQuery,
   UsageResponse,
+  VacuumResult,
   VirtualModel,
 } from "./types.ts";
 
@@ -66,6 +73,9 @@ export const queryKeys = {
   logs: (limit: number) => ["logs", limit] as const,
   requestBody: (requestId: string) => ["logs", "body", requestId] as const,
   console: (lines: number, level: string) => ["console", lines, level] as const,
+  database: ["database"] as const,
+  snapshots: ["database", "snapshots"] as const,
+  lifecycle: ["lifecycle"] as const,
 };
 
 /**
@@ -308,6 +318,154 @@ export function useConsole(
       ),
     refetchInterval: cadence,
   });
+}
+
+/* --------------------------------------------------------------- database -- */
+
+/**
+ * How big the database is and what a vacuum would give back.
+ *
+ * Not polled. Every figure here moves on an hourly maintenance sweep or on an
+ * operation the operator just performed, and both of those invalidate this key
+ * themselves.
+ */
+export function useDatabaseOverview(): UseQueryResult<DatabaseOverview> {
+  return useQuery({
+    queryKey: queryKeys.database,
+    queryFn: ({ signal }) => get<DatabaseOverview>("/api/database", signal),
+    refetchInterval: false,
+  });
+}
+
+/**
+ * Where a snapshot is, for a link rather than for a fetch.
+ *
+ * Not a hook and not a mutation on purpose: the response is a whole database
+ * and a secret-bearing one, so it is never read into this process. The browser
+ * follows the URL, sends the same-origin session cookie the route requires, and
+ * streams the file to disk.
+ */
+export function snapshotDownloadUrl(id: string): string {
+  return `/api/database/snapshots/${encodeURIComponent(id)}/download`;
+}
+
+export function useSnapshots(): UseQueryResult<SnapshotInfo[]> {
+  return useQuery({
+    queryKey: queryKeys.snapshots,
+    queryFn: async ({ signal }) =>
+      (await get<SnapshotsResponse>("/api/database/snapshots", signal)).snapshots,
+    refetchInterval: false,
+  });
+}
+
+/**
+ * Everything a whole-database operation makes stale.
+ *
+ * The size figures and the snapshot list move together — a snapshot changes the
+ * count on the overview, a vacuum changes the bytes the next snapshot will be —
+ * so they are invalidated as a pair rather than one at a time.
+ */
+function invalidateDatabase(client: ReturnType<typeof useQueryClient>): void {
+  void client.invalidateQueries({ queryKey: queryKeys.database });
+}
+
+export function useCreateSnapshot(): UseMutationResult<SnapshotInfo, Error, void> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => post<SnapshotInfo>("/api/database/snapshots"),
+    onSuccess: () => invalidateDatabase(client),
+  });
+}
+
+export function useSaveRetention(): UseMutationResult<RetentionPolicy, Error, RetentionPolicy> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (policy: RetentionPolicy) =>
+      put<RetentionPolicy>("/api/database/retention", policy),
+    onSuccess: () => {
+      invalidateDatabase(client);
+      // The policy lives in `Settings`, which the settings screen also reads.
+      void client.invalidateQueries({ queryKey: queryKeys.settings });
+    },
+  });
+}
+
+export function useVacuum(): UseMutationResult<VacuumResult, Error, void> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => post<VacuumResult>("/api/database/vacuum"),
+    onSuccess: () => invalidateDatabase(client),
+  });
+}
+
+export function useDeleteSnapshot(): UseMutationResult<{ ok: true }, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      del<{ ok: true }>(`/api/database/snapshots/${encodeURIComponent(id)}`),
+    onSuccess: () => invalidateDatabase(client),
+  });
+}
+
+/**
+ * Puts a snapshot back in place of the live database.
+ *
+ * Nothing is invalidated here. The caller has to read `adminPasswordChanged`
+ * first: when it is true the gateway has already ended every admin session, and
+ * a refetch fired from `onSuccess` would race the caller to the same dead cookie
+ * and turn a clean sign-out into a screen of failures.
+ */
+export function useRestoreSnapshot(): UseMutationResult<RestoreResult, Error, string> {
+  return useMutation({
+    mutationFn: (id: string) =>
+      post<RestoreResult>(`/api/database/snapshots/${encodeURIComponent(id)}/restore`),
+  });
+}
+
+/**
+ * Puts a database the operator supplied in place of the live one.
+ *
+ * The same operation as a restore with a different source, so it answers with
+ * the same shape and the same `adminPasswordChanged` rule applies — which is why
+ * this, too, invalidates nothing on its own.
+ */
+export function useImportDatabase(): UseMutationResult<RestoreResult, Error, File> {
+  return useMutation({
+    mutationFn: (file: File) => post<RestoreResult>("/api/database/import", file),
+  });
+}
+
+/* -------------------------------------------------------------- lifecycle -- */
+
+/**
+ * Whether a restart would restart anything.
+ *
+ * Read from the gateway rather than assumed, because the answer is a property of
+ * how this installation was started: a unit under systemd, a container, or a
+ * process nothing is watching.
+ */
+export function useLifecycle(): UseQueryResult<LifecycleCapability> {
+  return useQuery({
+    queryKey: queryKeys.lifecycle,
+    queryFn: ({ signal }) => get<LifecycleCapability>("/api/lifecycle", signal),
+    refetchInterval: false,
+  });
+}
+
+/**
+ * Asks the gateway to restart, and nothing more.
+ *
+ * The response arrives before the process goes anywhere, so a success here means
+ * the request was accepted rather than that anything has happened yet. Waiting
+ * for the gateway to come back is the caller's job, and it cannot be done
+ * through this client: the whole point is the window where nothing answers.
+ */
+export function useRestart(): UseMutationResult<{ ok: true }, Error, void> {
+  return useMutation({ mutationFn: () => post<{ ok: true }>("/api/lifecycle/restart") });
+}
+
+export function useShutdown(): UseMutationResult<{ ok: true }, Error, void> {
+  return useMutation({ mutationFn: () => post<{ ok: true }>("/api/lifecycle/shutdown") });
 }
 
 /* ---------------------------------------------------------------- session -- */

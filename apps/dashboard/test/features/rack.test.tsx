@@ -20,3 +20,14 @@ test("the rack owns viewport height and scrolls only its main content", async ()
   expect(getComputedStyle(main).minHeight).toBe("0");
   expect(getComputedStyle(navigation).overflowY).toBe("auto");
 });
+
+test("the rail reaches the database screen", async () => {
+  renderWithRouter(
+    <Rack>
+      <div>page content</div>
+    </Rack>,
+  );
+
+  const link = await screen.findByRole("link", { name: "Database" });
+  expect(link.getAttribute("href")).toBe("/database");
+});

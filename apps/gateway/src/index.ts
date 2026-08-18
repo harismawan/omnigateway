@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  type CommandRunner,
   type ConsoleDeps,
   type ConsoleSource,
   createRefresher,
@@ -13,6 +14,7 @@ import { createLogger, type Logger } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import { createStore, deriveKey } from "@omni/store";
 import { createApp } from "./app.ts";
+import { createDeferredStop, createShutdown, type Shutdown } from "./lifecycle.ts";
 import { startMaintenance } from "./maintenance.ts";
 import { startRefreshScheduler } from "./oauth/scheduler.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
@@ -45,6 +47,24 @@ let logger = stdoutLogger("info");
  * The real filesystem and a real spawn enter here and nowhere else. Both are
  * arguments to the reader, so every test of it stays hermetic.
  */
+/**
+ * The one place this process spawns anything.
+ *
+ * Shared by the console reader and by the restart, which both hand a fixed
+ * argv to something outside the gateway. Injected everywhere it is used, so no
+ * test spawns a process.
+ */
+const commandRunner: CommandRunner = async (argv) => {
+  const [cmd, ...args] = argv;
+  if (cmd === undefined) return { code: 1, stdout: "", stderr: "empty argv" };
+  const proc = Bun.spawn([cmd, ...args], { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  return { code: await proc.exited, stdout, stderr };
+};
+
 function consoleSource(logFile: string | null): { source: ConsoleSource; deps: ConsoleDeps } {
   const source = resolveConsoleSource({
     logFile,
@@ -62,16 +82,7 @@ function consoleSource(logFile: string | null): { source: ConsoleSource; deps: C
     source,
     deps: {
       readFile: (path, lines) => tailFile(path, lines),
-      run: async (argv) => {
-        const [cmd, ...args] = argv;
-        if (cmd === undefined) return { code: 1, stdout: "", stderr: "empty argv" };
-        const proc = Bun.spawn([cmd, ...args], { stdout: "pipe", stderr: "pipe" });
-        const [stdout, stderr] = await Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-        ]);
-        return { code: await proc.exited, stdout, stderr };
-      },
+      run: commandRunner,
     },
   };
 }
@@ -137,6 +148,20 @@ async function main(): Promise<void> {
     },
   );
 
+  /**
+   * Replaced below, once there is something to stop.
+   *
+   * The lifecycle routes are built with the app and the app is built before the
+   * server is listening, so the stop effect they are handed reaches this
+   * binding rather than a value. Calling it before then means a shutdown was
+   * requested by a gateway that had not finished starting, which is not a
+   * graceful anything.
+   */
+  let shutdown: Shutdown = (reason) => {
+    logger.error("shutdown requested before the gateway was serving", { reason });
+    process.exit(1);
+  };
+
   const app = createApp({
     store,
     baseUrl: config.baseUrl,
@@ -148,6 +173,12 @@ async function main(): Promise<void> {
     console,
     discoveryMirrors: config.exposeClaudeCodeAliases,
     bodyLoggingAllowed: config.bodyLoggingAllowed,
+    lifecycle: {
+      env: process.env,
+      fileExists: (path) => existsSync(path),
+      run: commandRunner,
+      stop: createDeferredStop((reason, mode) => shutdown(reason, mode)),
+    },
   });
 
   const stopMaintenance = startMaintenance({ store, now, logger });
@@ -170,35 +201,20 @@ async function main(): Promise<void> {
   app.listen({ port: config.port, hostname: config.host, idleTimeout: 255 });
   logger.info("omnigateway listening", { host: config.host, port: config.port });
 
-  let shuttingDown = false;
+  shutdown = createShutdown({
+    logger,
+    stopLoops: [stopMaintenance, stopRefreshScheduler, stopQuotaPoller],
+    stopServer: async () => {
+      await app.stop();
+    },
+    closeStore: () => store.close(),
+    exit: (code) => process.exit(code),
+  });
 
-  function exitAfterClosingStore(code: number): never {
-    try {
-      store.close();
-    } finally {
-      process.exit(code);
-    }
-  }
-
+  // Both signals and the lifecycle route reach the same teardown. A second
+  // signal escalates, which `createShutdown` owns.
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.on(signal, () => {
-      if (shuttingDown) exitAfterClosingStore(1);
-
-      logger.info("shutdown requested", { reason: signal });
-      shuttingDown = true;
-      stopMaintenance();
-      stopRefreshScheduler();
-      stopQuotaPoller();
-      void app.stop().then(
-        () => exitAfterClosingStore(0),
-        (error: unknown) => {
-          logger.error("shutdown failed", {
-            reason: error instanceof Error ? error.message : "unknown",
-          });
-          return exitAfterClosingStore(1);
-        },
-      );
-    });
+    process.on(signal, () => shutdown(signal));
   }
 }
 

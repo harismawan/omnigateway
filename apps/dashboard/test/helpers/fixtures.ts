@@ -4,12 +4,15 @@ import type {
   BurnEstimate,
   Credential,
   CredentialHealth,
+  DatabaseOverview,
   DryRunResult,
+  LifecycleCapability,
   QuotaSample,
   QuotaWindow,
   RequestBodyResponse,
   RequestLog,
   Settings,
+  SnapshotInfo,
   UsageBucket,
   VirtualModel,
 } from "../../src/api/types.ts";
@@ -185,6 +188,8 @@ export const settings: Settings = {
   rtkEnabled: false,
   bodyLoggingEnabled: false,
   bodyLoggingCaptureStreamChunks: false,
+  snapshotKeepLatest: 5,
+  snapshotMaxAgeDays: 30,
 };
 
 /**
@@ -250,3 +255,50 @@ export const dryRunResult: DryRunResult = {
   ],
   excluded: [{ credentialId: "cred-2", model: "gpt-5.6", reason: "breaker:open" }],
 };
+
+/**
+ * One snapshot file, as `GET /api/database/snapshots` lists it.
+ *
+ * The id is the filename, which is what the routes take as `:id` — a fixture
+ * that gave them different values would let a board that sends the wrong one
+ * pass.
+ */
+export function snapshot(patch: Partial<SnapshotInfo> = {}): SnapshotInfo {
+  const id = patch.id ?? "db_2027-01-15T09-00-00-000Z_manual.sqlite";
+  return {
+    id,
+    filename: id,
+    createdAt: NOW - 3_600_000,
+    sizeBytes: 10_485_760,
+    reason: "manual",
+    ...patch,
+  };
+}
+
+/**
+ * A database a quarter of which is free pages.
+ *
+ * The page geometry and the byte figures agree with each other: 3072 pages of
+ * 4 KiB is the 12 MiB on disk, and the 768 free ones are the 3 MiB a vacuum
+ * would reclaim. A fixture whose numbers did not multiply out would hide a
+ * panel that divided the wrong pair.
+ */
+export function databaseOverview(patch: Partial<DatabaseOverview> = {}): DatabaseOverview {
+  return {
+    stats: { pageSize: 4096, pageCount: 3072, freelistCount: 768, schemaVersion: 14 },
+    fileBytes: 12_582_912,
+    walBytes: 1_048_576,
+    bodiesBytes: 52_428_800,
+    logicalBytes: 12_582_912,
+    freePageBytes: 3_145_728,
+    freeDiskBytes: 10_737_418_240,
+    retention: { keepLatest: 5, maxAgeDays: 30 },
+    snapshots: { count: 1, totalBytes: 10_485_760, latestAt: NOW - 3_600_000 },
+    ...patch,
+  };
+}
+
+/** systemd by default: the shape where both controls are real. */
+export function lifecycle(patch: Partial<LifecycleCapability> = {}): LifecycleCapability {
+  return { supervisor: "systemd", canRestart: true, canShutdown: true, ...patch };
+}

@@ -3,6 +3,7 @@ import {
   Activity,
   Boxes,
   Cable,
+  Database,
   Gauge,
   KeyRound,
   ScrollText,
@@ -44,6 +45,12 @@ const DESTINATIONS: Destination[] = [
     label: "Settings",
     blurb: "Routing weights, retries, retention",
     Icon: SlidersHorizontal,
+  },
+  {
+    to: "/database",
+    label: "Database",
+    blurb: "Size, snapshots, restart and shutdown",
+    Icon: Database,
   },
 ];
 

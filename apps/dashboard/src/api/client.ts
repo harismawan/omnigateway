@@ -50,11 +50,21 @@ export async function request<T>(
   options: RequestOptions = {},
 ): Promise<ApiResult<T>> {
   const method = options.method ?? "GET";
+  // A `Blob` body is sent as itself. The one caller that does this is the
+  // database import, whose body is a whole SQLite file: serializing it would
+  // mean holding a base64 copy of a database in memory to send a third more
+  // bytes than it started with.
+  const raw = options.body instanceof Blob ? options.body : null;
   const init: RequestInit = {
     method,
     credentials: "same-origin",
-    headers: options.body === undefined ? {} : { "content-type": "application/json" },
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+    headers:
+      options.body === undefined
+        ? {}
+        : { "content-type": raw === null ? "application/json" : "application/octet-stream" },
+    ...(options.body === undefined
+      ? {}
+      : { body: raw === null ? JSON.stringify(options.body) : raw }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   };
 

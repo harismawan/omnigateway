@@ -78,8 +78,11 @@ and `bun run lint`.
     targets only.
 11. CLI administers local installations through `@omni/control`, never `/api/*`. Inject every side
     effect so tests never start processes or write outside temp directories.
-12. Dashboard calls `/api/*` only. It may import `@omni/store/types`, `@omni/ir`, and catalog subpath,
-    but not provider adapters, HTTP client, or runtime store code.
+12. Dashboard calls `/api/*` only, with one exception: `/health`, polled to watch the gateway leave
+    and return across a restart. During a restart there is no session and no authenticated surface
+    to probe, so liveness is the one question `/api/*` cannot answer. It may import
+    `@omni/store/types`, `@omni/ir`, and catalog subpath, but not provider adapters, HTTP client, or
+    runtime store code.
 13. `packages/rtk` stays pure like `ir` and `router`: no I/O, clocks, or randomness. It rewrites
     tool-result content only and preserves errors and non-tool-result blocks. `@omni/rtk/catalog` is
     a leaf holding the filter-id union; `@omni/store` imports that subpath alone.
@@ -242,6 +245,27 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
 - Docker image contains gateway only; npm package contains CLI, gateway, and dashboard.
 - OpenAI OAuth routes to narrower Codex surface. OAuth-specific encoding stays behind existing
   `oauth` flag.
+- A snapshot is the database alone. `request_bodies/` is excluded, so a downloaded snapshot is never
+  a prompt corpus and its size never tracks prompt volume. After a restore, body rows and artifact
+  files disagree until `sweepOrphans` reconciles them; that is expected, not a bug.
+- A snapshot still carries encrypted credentials and API-key hashes. Downloads are `no-store`, and
+  the file is inert only because `OMNI_ENCRYPTION_KEY` is not in it.
+- Restart asks systemd rather than signalling itself. The unit sets `Restart=on-failure`, so a
+  handled SIGTERM exits 0 and reads as success — self-SIGTERM stops the gateway for good. `--no-block`
+  is required: systemd tears down the unit cgroup including the `systemctl` client it just spawned.
+- The quiesce latch gates `/v1/*` only. `/api/*` and `/health` stay live through a swap, because an
+  operator watching a restore recovers through exactly those routes.
+- `store.close()` is idempotent and `reopen()` tolerates a closed handle, so restore is close → swap
+  → reopen. Repo methods forward per call to the inner handle: bind one to a local and it dies at the
+  next swap.
+- `vacuum()` must checkpoint. In WAL mode the rewrite lands in the log, so page count falls while the
+  file keeps every page and every caller reports reclaiming nothing.
+- Restoring writes another installation's admin password hash without passing through `setPassword`,
+  which is what clears sessions. Restore compares the hash across the swap and invalidates only when
+  it differs.
+- `omni db restore` refuses while a gateway is running and has no override. The dashboard swaps
+  inside the process owning the handle; a second process cannot quiesce that connection, and renaming
+  the file under it corrupts the database being rescued.
 
 ## Subagent workflow
 

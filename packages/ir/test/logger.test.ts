@@ -55,6 +55,26 @@ describe("formatLine", () => {
     );
   });
 
+  test("renders the database and lifecycle fields a maintenance line carries", () => {
+    const line = formatLine(
+      "info",
+      AT,
+      "database snapshot created",
+      {
+        supervisor: "systemd",
+        sizeBytes: 40_960,
+        durationMs: 12,
+        snapshotId: "db_2026-08-18T04-12-03-114Z_manual.sqlite",
+      },
+      false,
+    );
+    expect(line).toBe(
+      "2026-08-09T04:12:03.114Z INFO  database snapshot created  " +
+        "snapshotId=db_2026-08-18T04-12-03-114Z_manual.sqlite durationMs=12 " +
+        "sizeBytes=40960 supervisor=systemd",
+    );
+  });
+
   test("quotes values containing a space, an equals sign, or a quote", () => {
     const line = formatLine("warn", AT, "x", { reason: "no such host = down" }, false);
     expect(line).toContain('reason="no such host = down"');

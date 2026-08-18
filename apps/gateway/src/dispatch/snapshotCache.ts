@@ -7,6 +7,15 @@ export type RoutingSnapshotSource = {
 };
 
 export type RoutingSnapshotCache = RoutingSnapshotSource & {
+  /**
+   * Drops what is held, for a change the version check cannot see.
+   *
+   * Staleness is otherwise decided by SQLite's `data_version`, which belongs to
+   * the open connection — so a restore, which closes the handle and opens a new
+   * one over a different file, is the one change that can leave the counter
+   * agreeing with itself across a completely different database.
+   */
+  invalidate(): void;
   close(): void;
 };
 
@@ -76,5 +85,16 @@ export function createRoutingSnapshotCache(
     return inFlight;
   };
 
-  return { get, close: unsubscribe };
+  return {
+    get,
+    invalidate() {
+      // The generation bump is what discards a build already in flight: it
+      // began against the file that has just been replaced.
+      generation++;
+      snapshot = null;
+      stale = true;
+      version = store.routing.version();
+    },
+    close: unsubscribe,
+  };
 }

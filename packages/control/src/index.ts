@@ -47,8 +47,43 @@ export {
   refreshCredential,
   removeCredential,
 } from "./credentials.ts";
+export {
+  createSnapshot,
+  type DatabaseDeps,
+  type DatabaseOverview,
+  type DatabaseStore,
+  deleteSnapshot,
+  getDatabaseOverview,
+  importSnapshot,
+  listSnapshots,
+  MAX_IMPORT_BYTES,
+  pruneSnapshots,
+  putRetention,
+  type RestoreResult,
+  type RetentionPolicy,
+  resolveSnapshotForDownload,
+  restoreSnapshot,
+  SNAPSHOT_HEADROOM,
+  SNAPSHOTS_DIRNAME,
+  type SnapshotInfo,
+  type SnapshotReason,
+  SwapFailedError,
+  snapshotsDir,
+  stagedImportPath,
+  sweepStaging,
+  vacuum,
+} from "./database.ts";
 export { type DryRunCandidate, type DryRunResult, dryRun } from "./dryRun.ts";
 export { type ApiKeySummary, type CreatedKey, createKey, listKeys, revokeKey } from "./keys.ts";
+export {
+  DOCKERENV_PATH,
+  describeLifecycle,
+  type LifecycleCapability,
+  type LifecycleDeps,
+  requestRestart,
+  requestShutdown,
+  type Supervisor,
+} from "./lifecycle.ts";
 export {
   type ModelLimits,
   modelDisplayName,
@@ -56,6 +91,7 @@ export {
   type ServingCredential,
 } from "./modelLimits.ts";
 export { getModel, listModels, putModel, removeModel } from "./models.ts";
+export { nodeDatabaseFs } from "./nodeFs.ts";
 export { OAUTH_PROVIDERS } from "./oauth/index.ts";
 export { DISPATCH_REFRESH_LEAD_MS, SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
 export { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
@@ -94,6 +130,7 @@ export {
   parseOrThrow,
   providerIdSchema,
   requireDimension,
+  retentionSchema,
   settingsSchema,
 } from "./schemas.ts";
 export { getSettings, putSettings } from "./settings.ts";

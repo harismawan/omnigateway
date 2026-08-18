@@ -11,6 +11,15 @@ export type AdminAuth = {
   login(password: string): Promise<string | null>;
   verify(token: string): Promise<boolean>;
   logout(token: string): void;
+  /**
+   * Ends every session without changing the password.
+   *
+   * For the caller that replaced the database rather than the credential: a
+   * restore can bring a different admin hash in without going through
+   * `setPassword`, and the sessions in memory were issued against the hash that
+   * just left.
+   */
+  invalidateSessions(): void;
 };
 
 export type AdminAuthOptions = {
@@ -86,6 +95,10 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
 
     logout(token) {
       sessions.delete(token);
+    },
+
+    invalidateSessions() {
+      sessions.clear();
     },
   };
 }

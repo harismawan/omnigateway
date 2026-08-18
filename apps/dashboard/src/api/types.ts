@@ -7,6 +7,7 @@ import type {
   BodyPair,
   Credential,
   CredentialHealth,
+  DatabaseStats,
   DisabledReason,
   QuotaSample,
   QuotaWindow,
@@ -35,6 +36,7 @@ export type {
   BodyPair,
   Credential,
   CredentialHealth,
+  DatabaseStats,
   DisabledReason,
   ErrorCode,
   ProviderId,
@@ -276,3 +278,72 @@ export type ConnectStart = {
 export type ConnectPending = { status: "pending" };
 export type ConnectComplete = { status: "complete"; id: string };
 export type ConnectPollResult = ConnectPending | ConnectComplete;
+
+/* --------------------------------------------------------------- database -- */
+
+/**
+ * The database panel's wire shapes.
+ *
+ * Mirrored by hand rather than imported, for the reason `BurnEstimate` above
+ * gives: these are `@omni/control`'s types, and the console may not reach into
+ * that package. `DatabaseStats` is the exception — it is a store type, which the
+ * `/types` subpath already publishes, so it is imported and stays honest by
+ * itself.
+ */
+export type RetentionPolicy = {
+  /** How many snapshots survive regardless of age. Never zero. */
+  keepLatest: number;
+  maxAgeDays: number;
+};
+
+export type SnapshotInfo = {
+  /** The filename. A snapshot has no identity apart from the file it is. */
+  id: string;
+  filename: string;
+  createdAt: number;
+  sizeBytes: number;
+  /** `manual` or `preRestore`; free-form on the wire, so never switched on. */
+  reason: string;
+};
+
+export type DatabaseOverview = {
+  stats: DatabaseStats;
+  fileBytes: number;
+  walBytes: number;
+  /** The captured-body tree, which snapshots deliberately exclude. */
+  bodiesBytes: number;
+  logicalBytes: number;
+  /** The part of the logical size a vacuum would give back. */
+  freePageBytes: number;
+  freeDiskBytes: number | null;
+  retention: RetentionPolicy;
+  snapshots: { count: number; totalBytes: number; latestAt: number | null };
+};
+
+export type SnapshotsResponse = { snapshots: SnapshotInfo[] };
+
+export type VacuumResult = { ok: true; reclaimedBytes: number; durationMs: number };
+
+/**
+ * What a restore or an import answers with.
+ *
+ * `adminPasswordChanged` is the field that matters to a console: the gateway has
+ * already ended every admin session by the time this arrives, so the cookie the
+ * operator is holding is dead and any refetch would only earn a 401.
+ */
+export type RestoreResult = {
+  ok: true;
+  counts: Record<string, number>;
+  preRestoreSnapshot: SnapshotInfo;
+  adminPasswordChanged: boolean;
+};
+
+export type Supervisor = "systemd" | "container" | "none";
+
+export type LifecycleCapability = {
+  supervisor: Supervisor;
+  canRestart: boolean;
+  canShutdown: boolean;
+  /** Why the capability is what it is, when that is not obvious. */
+  note?: string;
+};

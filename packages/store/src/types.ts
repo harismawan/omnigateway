@@ -417,6 +417,17 @@ export type Settings = {
    * store.
    */
   bodyLoggingCaptureStreamChunks: boolean;
+  /**
+   * How many database snapshots survive regardless of age.
+   *
+   * Bounded rather than optional. A snapshot is a whole copy of the database, so
+   * an unbounded directory of them is a disk-full incident waiting for a busy
+   * week; the reference implementation this feature follows added retention only
+   * after 48,999 files against a 5 MB database.
+   */
+  snapshotKeepLatest: number;
+  /** How long a snapshot outside the keep-latest window is kept. */
+  snapshotMaxAgeDays: number;
 };
 
 export interface CredentialRepo {
@@ -661,6 +672,64 @@ export interface UsageRepo {
   pruneDaily(olderThan: number): Promise<number>;
 }
 
+/**
+ * The database's own account of its size and schema.
+ *
+ * Page geometry rather than bytes: `pageSize * pageCount` is the logical size
+ * SQLite believes in, which is what `freelistCount` is a fraction of. The bytes
+ * actually on disk are a filesystem question and belong to whoever can `stat`.
+ */
+export type DatabaseStats = {
+  pageSize: number;
+  pageCount: number;
+  /** Pages already reclaimed by deletion and reusable without growing the file. */
+  freelistCount: number;
+  /** Highest applied migration id. Zero for a file with no migrations table. */
+  schemaVersion: number;
+};
+
+/** What `inspect` observed about a database file. */
+export type DatabaseInspection = {
+  /** True only when the file passed integrity *and* looks like one of ours. */
+  ok: boolean;
+  /**
+   * What `PRAGMA quick_check` said, or `unreadable` when the file could not be
+   * opened as a database at all.
+   *
+   * The SQLite error is deliberately not forwarded: this string is shown to
+   * operators and reaches logs, and the messages carry the path.
+   */
+  quickCheck: string;
+  /** Every user table found, sorted, so a foreign database reports what it is. */
+  tables: string[];
+  /** Row counts for the required tables, empty when the file is not one of ours. */
+  counts: Record<string, number>;
+};
+
+/**
+ * Whole-database operations, as opposed to reads and writes of rows.
+ *
+ * `vacuum` and `snapshotTo` both hold a write lock for their duration and are
+ * therefore the caller's to serialise; this repo does not guard against a
+ * second concurrent call.
+ */
+export interface MaintenanceRepo {
+  stats(): Promise<DatabaseStats>;
+  /** Rewrites the file, reclaiming freelist pages. Blocking. */
+  vacuum(): Promise<void>;
+  /**
+   * Writes a self-contained copy to `path` with `VACUUM INTO`, folding in the
+   * write-ahead log. Throws if the file already exists, as SQLite does.
+   */
+  snapshotTo(path: string): Promise<void>;
+  /**
+   * Judges a database file without touching the live one. Opened read-only, so
+   * looking at a file cannot migrate it, recover its write-ahead log, or create
+   * anything beside it.
+   */
+  inspect(path: string): Promise<DatabaseInspection>;
+}
+
 export type RoutingChange =
   | { type: "healthSaved"; rows: CredentialHealth[] }
   | { type: "quotaSaved"; rows: QuotaWindow[] }
@@ -675,12 +744,33 @@ export interface RoutingChangeSource {
 }
 
 export type Store = {
+  /**
+   * Where this store's database file is, as it was opened.
+   *
+   * Exposed because callers that need to locate a sibling directory or stat the
+   * file already depend on it implicitly — `bodiesDirFor` derives the artifact
+   * tree from exactly this value — and rediscovering it from configuration is
+   * how the two end up pointing at different installations.
+   */
+  databasePath: string;
   credentials: CredentialRepo;
   config: ConfigRepo;
   keys: KeyRepo;
   usage: UsageRepo;
   bodies: BodyRepo;
+  maintenance: MaintenanceRepo;
   routing: RoutingChangeSource;
+  /**
+   * Closes the current database handle and opens a new one at `databasePath`.
+   *
+   * Every repo above is a stable object forwarding to whichever handle is
+   * current, so a caller holding one from before the call keeps working and
+   * reads whatever is at the path now. Routing subscriptions survive too.
+   *
+   * Idempotent with `close`: a restore closes the handle, moves the file into
+   * place, then reopens.
+   */
+  reopen(): Promise<void>;
   close(): void;
 };
 
@@ -695,4 +785,6 @@ export const DEFAULT_SETTINGS: Settings = {
   rtkEnabled: false,
   bodyLoggingEnabled: false,
   bodyLoggingCaptureStreamChunks: false,
+  snapshotKeepLatest: 5,
+  snapshotMaxAgeDays: 30,
 };

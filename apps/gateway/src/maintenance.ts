@@ -1,3 +1,4 @@
+import { type DatabaseDeps, nodeDatabaseFs, pruneSnapshots, sweepStaging } from "@omni/control";
 import { type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
 
@@ -56,12 +57,57 @@ export async function pruneLogs(
   return { raw, daily, quotaSamples, bodies, bodiesOverCap, bodyOrphans };
 }
 
-export type MaintenanceDeps = { store: Store; now: () => number; logger?: Logger };
+/**
+ * The half of the sweep that removes files rather than rows.
+ *
+ * Snapshot retention is the approved design's "applied after every create and
+ * on the existing maintenance sweep", and only the first half of that was ever
+ * wired: with the create path as its sole caller, `maxAgeDays` expires nothing
+ * on an installation that stopped taking snapshots and a lowered `keepLatest`
+ * prunes nothing until somebody takes another one — while the panel tells the
+ * operator both apply hourly.
+ *
+ * The staging sweep rides along for the same reason the three body sweeps ride
+ * along with the log prune: one schedule to reason about. It is bounded
+ * cleanup, and the files it removes are database-sized.
+ */
+export async function pruneFiles(
+  deps: DatabaseDeps,
+): Promise<{ snapshots: number; staging: number }> {
+  return { snapshots: await pruneSnapshots(deps), staging: sweepStaging(deps) };
+}
+
+export type MaintenanceDeps = {
+  store: Store;
+  now: () => number;
+  logger?: Logger;
+  /** The filesystem the file sweeps run against. The real one, unless a test says otherwise. */
+  fs?: DatabaseDeps["fs"];
+};
 
 /** Starts the hourly sweep. Returns a function that stops it. */
 export function startMaintenance(deps: MaintenanceDeps): () => void {
   const logger = deps.logger ?? noopLogger;
+  const files: DatabaseDeps = {
+    store: deps.store,
+    fs: deps.fs ?? nodeDatabaseFs(),
+    now: deps.now,
+  };
+
   const timer = setInterval(() => {
+    void pruneFiles(files)
+      .then(({ snapshots, staging }) =>
+        // One number, under a field `LogFields` already has, for the same
+        // reason the three body sweeps share one: this type is the compile-time
+        // redaction boundary and not somewhere to widen for a debug line.
+        logger.debug("snapshots and staging files swept", { count: snapshots + staging }),
+      )
+      .catch((error: unknown) => {
+        logger.error("snapshot sweeping failed", {
+          reason: error instanceof Error ? error.message : "unknown",
+        });
+      });
+
     void pruneLogs(deps.store, deps.now())
       .then(({ raw, daily, quotaSamples, bodies, bodiesOverCap, bodyOrphans }) =>
         logger.debug("request logs pruned", {
