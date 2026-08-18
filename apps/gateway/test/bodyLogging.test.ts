@@ -963,6 +963,32 @@ test("the frame sink keeps everything inside its cap and marks what it drops", (
   );
 });
 
+/**
+ * The eviction loop stops at one frame rather than at none.
+ *
+ * A frame can be larger than the whole cap on its own — a tool result or an
+ * image comes back as a single `message_delta` — and evicting it leaves the
+ * sink empty, which is not a bounded record of the stream but the absence of
+ * one. Keeping it is the same choice the artifact writer makes when a bounded
+ * payload is still oversized: record something and say it was cut, never
+ * silently record nothing.
+ */
+test("the frame sink keeps a lone frame that is larger than the cap on its own", () => {
+  const sink = createFrameSink();
+  const huge = `data: ${"z".repeat(MAX_CAPTURED_BODY_BYTES)}`;
+  sink.write(huge);
+
+  expect(sink.frames).toEqual([huge]);
+  // Nothing was dropped, so nothing is claimed to have been.
+  expect(sink.truncated).toBe(false);
+
+  // And the next frame evicts it rather than the loop having simply given up:
+  // the cap still governs once there is more than one frame to choose between.
+  sink.write("data: after");
+  expect(sink.frames).toEqual(["data: after"]);
+  expect(sink.truncated).toBe(true);
+});
+
 // ---------------------------------------------------------------------------
 // Retention
 // ---------------------------------------------------------------------------

@@ -123,6 +123,31 @@ test("a truncated artifact says so rather than reading as complete", async () =>
 });
 
 /**
+ * Every byte count this command prints names what it measured.
+ *
+ * Three different numbers are in play — what crossed the wire, what was stored
+ * after masking and structural bounding, and the encrypted file — and only the
+ * last two are recorded anywhere. The gap is not marginal: a payload made mostly
+ * of one long opaque token is stored as an elision. A bare `69 B` beside a
+ * request is therefore read as a request size and is wrong, so the frame says
+ * `on disk` and the table says what its columns are.
+ */
+test("the byte counts say what they measured rather than reading as request sizes", async () => {
+  const root = await installation();
+  await capture(root);
+
+  const result = await cli(["bodies", REQUEST_ID], { root });
+  expect(result.code).toBe(0);
+  // The frame's figure is the encrypted file.
+  expect(line(result.out, "SIZE")).toContain("on disk");
+  // The table's figures are the stored payload, and the caption says so in the
+  // columns' own words so it cannot be read as being about the frame.
+  expect(result.out).toContain("REQUEST and RESPONSE are the stored payload");
+  expect(result.out).toContain("after masking and bounding");
+  expect(result.out).toContain("neither is the size sent over the wire");
+});
+
+/**
  * The two requests in an artifact are different payloads whenever a filter
  * fired, and a reader comparing them who does not know which is which will read
  * a compressed tool result as what their client sent.

@@ -15,7 +15,7 @@ import {
   MAX_OBJECT_KEYS,
   MAX_STRING_BYTES,
 } from "../src/bodies/bound.ts";
-import { maskString } from "../src/bodies/mask.ts";
+import { MASK_RULES, type MaskRule, type MaskRuleId, maskString } from "../src/bodies/mask.ts";
 import { deriveKey } from "../src/encryption.ts";
 import { createBodyRepo } from "../src/sqlite/bodies.ts";
 import { openDb } from "../src/sqlite/db.ts";
@@ -175,10 +175,214 @@ test("masking leaves the pinned non-secret strings intact", () => {
     "GOCSPX-",
     "xai-",
     "highlight_matches(text)",
+    // A prefix with fewer than the eight trailing characters every rule
+    // requires. The bare prefixes above only pin zero, which a rule whose
+    // minimum had slipped to one would still satisfy.
+    "AIzaSyD",
+    "ghp_1234567",
+    "github_pat_1234",
+    "GOCSPX-1234567",
+    "xai-1234567",
+    "sk-abcdefg",
+    // A prefix part-way into a run of token characters, which is not where a
+    // credential starts and is where the anchors keep every rule from firing.
+    // `-` is the case that matters: it is both a token character and a word
+    // boundary, so a `\b` fires after it and hands back everything to its left.
+    "prefixAIzaSyD9fZq2Lm",
+    "aaaaaaaaaa-AIzaSyD9fZq",
+    "task-sk-abcdefghij",
+    "omni-xai-abcdefghij",
+    "proxai-abcdefghij",
+    // xAI model aliases. `xai-` is the one prefix here that also names
+    // something ordinary, and under a class that admitted `-` every one of
+    // these was destroyed.
+    "xai-grok-4-latest",
+    "xai-grok-3-mini-beta",
+    "xai-grok-code-fast-1",
   ];
   for (const value of survivors) {
     expect(maskString(value)).toBe(value);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Monotonicity: the property that makes it safe to add a rule to the chain.
+//
+// Every shape rule keeps its prefix in clear, so a rule that fires *inside* a
+// run the length rule would have eaten whole gives back everything to the left
+// of that prefix. That is not hypothetical — it is what a `\b` anchor did, and
+// nothing in a suite of examples noticed, because each rule was only ever
+// checked against inputs written for it.
+// ---------------------------------------------------------------------------
+
+/** The chain as it stood before the vendor rules were added to it. */
+const BASELINE: readonly MaskRuleId[] = ["bearer", "prefixedKey", "opaque"];
+
+/**
+ * The literals a rule is allowed to hand back that an earlier chain had hidden.
+ *
+ * A shape rule keeps its prefix on purpose — which vendor's credential leaked is
+ * what an operator acts on — and a prefix is a fixed string carrying no secret.
+ * Anything else surrendered is secret material the older chain covered.
+ */
+const SURVIVING_PREFIXES = new Set([
+  "sk-",
+  "ak-",
+  "pk-",
+  "ghp_",
+  "gho_",
+  "ghs_",
+  "ghu_",
+  "github_pat_",
+  "AIza",
+  "GOCSPX-",
+  "xai-",
+]);
+
+/**
+ * Which characters of `input` a chain elides, and under which match.
+ *
+ * Positions rather than output text, because "redacts less" is a claim about the
+ * input: two chains produce differently shaped output for the same coverage, and
+ * comparing the outputs cannot tell a moved marker from a recovered secret.
+ *
+ * Each rule runs over the input with the previous rules' elisions replaced by
+ * NUL. That is what makes the model faithful: NUL is one character wide, so
+ * every match index is still an input index, and it sits outside every rule's
+ * token class, so it breaks a run exactly the way `[redacted]` does.
+ *
+ * Positions carry a match number rather than a flag because two matches can end
+ * up adjacent — a shape rule keeps a prefix, and the length rule then eats the
+ * run ending at it — and the masker writes one marker per match. A flag map
+ * cannot tell one elision from two touching ones.
+ */
+function elidedPositions(rules: readonly MaskRule[], input: string): number[] {
+  const elided = new Array<number>(input.length).fill(0);
+  let matches = 0;
+  let working = input;
+  for (const rule of rules) {
+    // A fresh regex per pass: the shared ones carry `lastIndex`.
+    const pattern = new RegExp(rule.pattern.source, rule.pattern.flags);
+    let next = working;
+    for (const match of working.matchAll(pattern)) {
+      const text = match[0];
+      const start = match.index + rule.keep(text);
+      const end = match.index + text.length;
+      matches += 1;
+      for (let i = start; i < end; i++) elided[i] = matches;
+      next = `${next.slice(0, start)}${"\0".repeat(end - start)}${next.slice(end)}`;
+    }
+    working = next;
+  }
+  return elided;
+}
+
+/** Renders a position map the way the masker renders its matches. */
+function render(input: string, elided: readonly number[]): string {
+  let out = "";
+  for (let i = 0; i < input.length; i++) {
+    const match = elided[i] ?? 0;
+    if (match === 0) {
+      out += input[i];
+      continue;
+    }
+    if (elided[i - 1] !== match) out += "[redacted]";
+  }
+  return out;
+}
+
+/** The runs `older` hid and `newer` does not, in the input's own text. */
+function surrendered(input: string, older: readonly number[], newer: readonly number[]): string[] {
+  const runs: string[] = [];
+  let start = -1;
+  for (let i = 0; i <= input.length; i++) {
+    const lost = i < input.length && older[i] !== 0 && newer[i] === 0;
+    if (lost && start < 0) start = i;
+    if (!lost && start >= 0) {
+      runs.push(input.slice(start, i));
+      start = -1;
+    }
+  }
+  return runs;
+}
+
+/**
+ * Prefix, lead-in, and trailing shapes crossed with each other.
+ *
+ * The lead-ins are the point. A credential in a captured body arrives at the
+ * start of a value, mid-sentence, and welded to whatever preceded it — and
+ * base64url spells `-`, so a run of token characters that happens to contain
+ * `-AIza` or `-xai-` is not a contrived input.
+ */
+function corpus(): string[] {
+  const prefixes = [...SURVIVING_PREFIXES];
+  const leads = ["", "-", "_", "x", "token=", "aaaaaaaaaa", "aaaaaaaaaa-", `${"A".repeat(40)}-`];
+  const tails = [
+    "",
+    "1",
+    "1234567",
+    "12345678",
+    "aBcDeFgH1234567890",
+    "z".repeat(41),
+    "z".repeat(80),
+    "aB-cD-eF-gH-iJ-kL",
+    "grok-4-latest",
+  ];
+  const inputs: string[] = [];
+  for (const prefix of prefixes) {
+    for (const lead of leads) {
+      for (const tail of tails) inputs.push(`${lead}${prefix}${tail}`);
+    }
+  }
+  return [
+    ...inputs,
+    // The three reproductions. Each is a run of token characters the length
+    // rule alone elided whole, and each had its leading segment handed back.
+    "aaaaaaaaaa-AIzaSyD9fZq2LmT4vB8nR1xKpW7uY0jH3gE6",
+    "7vQ2mXk9LpR4-xai-tZ0aB6cD8eF1gH3jK5nM7pQ9rS2tU4w",
+    "prefix1234-ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+    // And the same shape through the rule that predates the vendor rules.
+    "aaaaaaaaaa-sk-ant-api03-9fZq2LmT4vB8nR1xKpW7uY0jH3gE6cAb",
+    "Bearer 7vQ2mXk9LpR4tZ0aB6cD8eF1gH3jK5nM7pQ9rS2tU4w",
+    "the quick brown fox jumps over the lazy dog",
+    "req_550e8400-e29b-41d4-a716-446655440000",
+  ];
+}
+
+test("the position model of the masker agrees with the masker", () => {
+  // Without this the property below could hold over a model that has drifted
+  // from the code it claims to describe.
+  for (const input of corpus()) {
+    expect(`${input}: ${render(input, elidedPositions(MASK_RULES, input))}`).toBe(
+      `${input}: ${maskString(input)}`,
+    );
+  }
+});
+
+test("masking never redacts less than the chain without its shape rules", () => {
+  const baseline = MASK_RULES.filter((rule) => BASELINE.includes(rule.id));
+  expect(baseline).toHaveLength(BASELINE.length);
+
+  for (const input of corpus()) {
+    const older = elidedPositions(baseline, input);
+    const newer = elidedPositions(MASK_RULES, input);
+    // Reported as the whole list so a failure names every run that came back,
+    // not just the first.
+    expect(`${input}: ${JSON.stringify(surrendered(input, older, newer))}`).toBe(
+      `${input}: ${JSON.stringify(
+        surrendered(input, older, newer).filter((run) => SURVIVING_PREFIXES.has(run)),
+      )}`,
+    );
+  }
+});
+
+test("the reproductions that the vendor rules used to weaken are elided whole", () => {
+  // Spelled out rather than left to the property, because the property is a
+  // claim about a chain and these are the three strings that made it.
+  expect(maskString("aaaaaaaaaa-AIzaSyD9fZq2LmT4vB8nR1xKpW7uY0jH3gE6")).toBe("[redacted]");
+  expect(maskString("7vQ2mXk9LpR4-xai-tZ0aB6cD8eF1gH3jK5nM7pQ9rS2tU4w")).toBe("[redacted]");
+  expect(maskString("prefix1234-ghp_16C7e42F292c6912E7710c838347Ae178B4a")).toBe("[redacted]");
+  expect(maskString("aaaaaaaaaa-sk-ant-api03-9fZq2LmT4vB8nR1xKpW7uY0jH3gE6cAb")).toBe("[redacted]");
 });
 
 test("masking traverses structure and leaves object keys alone", async () => {

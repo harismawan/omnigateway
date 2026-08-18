@@ -338,6 +338,28 @@ test("a boolean value for a numeric setting is still refused as not a number", a
   expect(await setting(root, "maxAttempts")).toBe(3);
 });
 
+/**
+ * A name off `Object.prototype` is not a setting.
+ *
+ * `head in current` walks the prototype chain, so `toString` and `constructor`
+ * both passed the existence check. The schema then stripped the unknown key on
+ * the way to the store, and the command exited 0 printing `toString = 5` over a
+ * write that never happened — the one failure mode worse than an error, because
+ * an operator has no reason to check.
+ */
+test("a prototype property is not a setting path", async () => {
+  const root = await installation();
+  const before = (await cli(["settings", "get", "--json"], { root })).out;
+
+  for (const name of ["toString", "constructor", "hasOwnProperty", "__proto__"]) {
+    const result = await cli(["settings", "set", name, "5"], { root });
+    expect(`${name}: ${result.code}`).toBe(`${name}: 2`);
+    expect(result.err).toContain(`no setting "${name}"`);
+  }
+
+  expect((await cli(["settings", "get", "--json"], { root })).out).toBe(before);
+});
+
 test("settings get prints booleans as words, not as 0 and 1", async () => {
   const root = await installation();
   await cli(["settings", "set", "rtkEnabled", "true"], { root });

@@ -39,10 +39,13 @@ const encoder = new TextEncoder();
 /**
  * How large one stored payload is as JSON.
  *
- * Not what crossed the wire. The artifact holds the masked, structurally bounded
- * copy, so every count here describes what is on disk — which is the number worth
- * printing, because it is the one an operator compares against the bounds and
- * against the other pairs in the same request.
+ * Not what crossed the wire, and not the file either. The artifact holds the
+ * masked, structurally bounded copy, so every count here describes the *stored*
+ * payload — which is the number worth printing, because it is the one an
+ * operator compares against the bounds and against the other pairs in the same
+ * request. The frame's `on disk` is the third number, the encrypted file, and
+ * the table says which of the three it is rather than leaving a bare size to be
+ * read as a request size.
  *
  * A half that never happened is `0 B` rather than a dash: an attempt that got no
  * response and an attempt whose response was empty are both nothing to read, and
@@ -176,7 +179,23 @@ export const bodies: Command = {
         return [frame(read), "", legend, message].join("\n");
       }
 
-      const lines = [frame(read), "", pairs(ctx, artifact)];
+      const lines = [
+        frame(read),
+        "",
+        pairs(ctx, artifact),
+        // What the columns measured, in the same breath as the columns. The
+        // frame above says "on disk" for the encrypted file; these are the
+        // other number, and neither is the size of what crossed the wire —
+        // which is recorded nowhere. A payload made mostly of one long opaque
+        // token is stored as an elision and reads here as a fraction of what
+        // was sent, so a bare byte count invites exactly the wrong reading.
+        "",
+        paint(
+          ctx,
+          "dim",
+          "REQUEST and RESPONSE are the stored payload, after masking and bounding; neither is the size sent over the wire",
+        ),
+      ];
 
       // The one sentence that stops a reader misreading the two halves. The
       // client request is what arrived; each attempt request is what went

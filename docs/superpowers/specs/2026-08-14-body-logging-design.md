@@ -74,9 +74,26 @@ replacement, because which vendor's credential leaked is what an operator acts o
 of reach is the unprefixed fixed-length secret — an AWS secret access key, an Azure key — and that
 gap is the reason masking is described to operators as best-effort rather than as a guarantee.
 
+A prefix rule is cheap in false positives but not free, and `xai-` is where that shows: it is also
+how clients and aggregators spell xAI *model* aliases, so a rule broad enough to take
+`xai-<key>` under the shared trailing class also destroys `xai-grok-4-latest` in an ordinary
+request body. It therefore gets its own rule with a narrower class — an xAI key is one long
+alphanumeric run, and requiring the trailing characters to hold no `-` separates it from every
+dash-separated alias. That test is specific to this prefix and must not be generalised: `GOCSPX-`
+and `github_pat_` both carry `-` or `_` inside the secret.
+
+The rules are a chain and the order is load-bearing, so adding one must never reduce what the chain
+catches. That is not automatic. A shape rule keeps its prefix in clear by design, so a rule that
+fires part-way into a run the length rule would have elided whole hands back everything to the left
+of the prefix — which is what a `\b` anchor does, because `-` is both a token character and a word
+boundary, and base64url spells `-`. Every shape rule is therefore anchored on a lookbehind that
+excludes `-` as well as the word characters. A real credential always starts a run, so the anchor
+costs nothing.
+
 The masker must be anchored by tests that pin both what it redacts and what it leaves intact, in both
 directions and for every rule, so the false-positive surface is a known quantity rather than a
-discovery made later.
+discovery made later — and by a property over the chain itself, because the surface tests are each
+written for one rule and none of them can see a rule weakening another.
 
 Artifacts are encrypted at rest under the required `OMNI_ENCRYPTION_KEY`, using the same encryption
 path as provider credentials. Artifact files copied without the key yield nothing. An operator who
@@ -334,7 +351,13 @@ Redaction, the load-bearing properties:
 - A synthetic bearer token in upstream request headers appears nowhere in any artifact.
 - A synthetic API key embedded in a prompt body is masked in the stored artifact.
 - The masker leaves a specified set of non-secret long strings intact, pinning the false-positive
-  surface.
+  surface. The set includes each vendor prefix with fewer trailing characters than its minimum, each
+  one part-way into a run of token characters, and the `xai-` model aliases, so the minimum, the
+  anchor, and the narrowed class are each pinned rather than assumed.
+- Over a corpus of credential shapes crossed with lead-ins, the masker elides every character the
+  chain without its shape rules elided, except for the vendor prefixes those rules deliberately keep.
+  This is the property that makes adding a rule safe, and it is the only test that can see one rule
+  weakening another.
 - Stored artifact bytes do not contain the plaintext marker, so a refactor that skips encryption fails
   rather than passing a green suite.
 

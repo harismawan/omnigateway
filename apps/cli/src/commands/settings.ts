@@ -29,15 +29,29 @@ export const settingsGet: Command = {
 };
 
 /**
+ * Whether a settings object carries this key itself.
+ *
+ * `in` walks the prototype chain, so it answers yes for `toString`,
+ * `constructor`, and everything else on `Object.prototype`. The schema then
+ * strips the unknown key on the way to the store, and the edit exits 0 having
+ * reported a change that was never written — a silent no-op dressed as success.
+ */
+function has(value: object, key: string): boolean {
+  return Object.hasOwn(value, key);
+}
+
+/**
  * What is stored at a flattened path today, or `undefined` when nothing is.
  *
  * The current value is what decides how the new one is read, so this runs before
  * the parse rather than after it.
  */
 function currentValue(settings: Settings, head: string, tail: string | undefined): unknown {
+  if (!has(settings, head)) return undefined;
   const top = (settings as unknown as Record<string, unknown>)[head];
   if (tail === undefined) return top;
   if (top === null || typeof top !== "object") return undefined;
+  if (!has(top, tail)) return undefined;
   return (top as Record<string, unknown>)[tail];
 }
 
@@ -82,7 +96,7 @@ export const settingsSet: Command = {
     const current = await getSettings(store);
 
     const [head, tail] = path.split(".");
-    if (head === undefined || !(head in current)) throw new UsageError(`no setting "${path}"`);
+    if (head === undefined || !has(current, head)) throw new UsageError(`no setting "${path}"`);
     if (tail !== undefined && head !== "weights") {
       throw new UsageError(`"${head}" has no sub-settings`);
     }

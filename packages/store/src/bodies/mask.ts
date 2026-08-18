@@ -8,14 +8,23 @@
  * credential is a worse failure than one that elides a base64 blob, so this runs
  * over everything before it is written, and it is deliberately blunt.
  *
- * Four rules, applied in order. The first three are structural — they recognise
+ * Five rules, applied in order. The first four are structural — they recognise
  * the shape of a credential and keep the shape while dropping the secret, so a
- * reader can still see *that* a bearer token was present. The fourth is a length
+ * reader can still see *that* a bearer token was present. The last is a length
  * rule with no notion of what it is looking at, and it is the one that costs
  * fidelity: it also hits base64 image data, content hashes, and minified source.
  * That is accepted. The tests pin both what is redacted and what survives, so
  * the false-positive surface is a known quantity rather than a discovery made
  * during an incident.
+ *
+ * The order is a chain, not a set, and the tests pin a property over it: a rule
+ * added here may only ever redact *more* than the chain without it. That is not
+ * automatic. A shape rule keeps its prefix in clear, so one that fires inside a
+ * run the length rule would have eaten whole hands back everything to the left
+ * of the prefix — which is exactly what a `\b` anchor did here, because `-` is
+ * both a token character and a word boundary. Hence the lookbehinds below, and
+ * hence `masking never redacts less than the chain without its shape rules` in
+ * the tests.
  *
  * The shape rules are not decoration on top of the length rule; they exist
  * because the length rule provably cannot be the whole answer. Its threshold is
@@ -46,10 +55,16 @@ const BEARER = /\b(bearer)\s+[A-Za-z0-9._~+/=-]+/gi;
  * which vendor's key leaked is what an operator acts on.
  *
  * Eight characters minimum so `sk-` in prose is not a match; every real key is
- * far longer. The leading `\b` keeps it from firing inside a word — `task-` does
- * not contain a key.
+ * far longer.
+ *
+ * The lookbehind, rather than a `\b`, keeps it from firing part-way into a run
+ * of token characters. `\b` would do that for `task-` — but `-` is itself a
+ * boundary *and* a token character, so `\b` also fires on the `sk-` inside
+ * `<forty chars>-sk-<key>`, which leaves everything to its left in clear where
+ * `OPAQUE` would have elided the run whole. A real key always starts a run, so
+ * excluding `-` as well costs nothing.
  */
-const PREFIXED_KEY = /\b(sk|ak|pk)-[A-Za-z0-9_-]{8,}/g;
+const PREFIXED_KEY = /(?<![A-Za-z0-9_-])(?:sk|ak|pk)-[A-Za-z0-9_-]{8,}/g;
 
 /**
  * The credential families that announce themselves and that neither of the rules
@@ -64,18 +79,47 @@ const PREFIXED_KEY = /\b(sk|ak|pk)-[A-Za-z0-9_-]{8,}/g;
  *   only masking it here keeps the prefix that tells an operator *what* leaked.
  * - `AIza…`, Google's API key, is thirty-nine.
  * - `GOCSPX-…`, a Google OAuth client secret, is thirty-five.
- * - `xai-…` keys are long enough, and are listed for the same reason as
- *   `github_pat_`: the vendor is the part worth keeping.
  *
  * Anthropic's `sk-ant-…` is deliberately absent: `PREFIXED_KEY` already catches
  * it and leaves `sk-`, and a second rule for it would be a duplicate that only
- * changes which of the two fires first.
+ * changes which of the two fires first. `xai-` is absent for the opposite
+ * reason, and has a rule of its own below.
  *
  * Eight trailing characters minimum, matching `PREFIXED_KEY`, so a bare prefix
  * written in prose is not a match. The prefix survives the replacement because
  * knowing which vendor's credential leaked is what an operator acts on.
+ *
+ * The lookbehind is `PREFIXED_KEY`'s, and is here for the same reason: a `\b`
+ * fires after a `-`, so `<forty chars>-AIza<key>` matched from the prefix onward
+ * and left the leading forty characters in clear, where the length rule alone
+ * had elided the run whole. Every credential listed above starts a run.
  */
-const VENDOR_KEY = /\b(gh[posu]_|github_pat_|AIza|GOCSPX-|xai-)[A-Za-z0-9_-]{8,}/g;
+const VENDOR_KEY = /(?<![A-Za-z0-9_-])(?:gh[posu]_|github_pat_|AIza|GOCSPX-)[A-Za-z0-9_-]{8,}/g;
+
+/** The part of a `VENDOR_KEY` match that survives it. */
+const VENDOR_PREFIX = /^(?:gh[posu]_|github_pat_|AIza|GOCSPX-)/;
+
+/**
+ * xAI's key, which needs a narrower trailing class than the families above and
+ * therefore cannot share their rule.
+ *
+ * Every other prefix here belongs to a shape only that vendor's secrets are
+ * spelled in. `xai-` is not: it is also how clients and aggregators name xAI
+ * *models*, so `xai-grok-4-latest` in a captured body is an ordinary payload and
+ * not a leak. Under the shared class every such alias was destroyed, which is a
+ * false positive on exactly the text this feature exists to let someone read.
+ *
+ * The separator is what tells the two apart. An xAI key is the prefix followed
+ * by one long alphanumeric run, so requiring the eight trailing characters to
+ * hold no `-` keeps every key and releases every alias, whose segments are
+ * dash-separated words far shorter than eight characters each.
+ *
+ * That test is not applied to the others, because it does not hold for them: a
+ * `GOCSPX-` secret and a `github_pat_` token both carry `-` or `_` inside the
+ * secret, and narrowing their class would cut a real credential in half and
+ * leave the tail in clear — the very failure this file is about.
+ */
+const XAI_KEY = /(?<![A-Za-z0-9_-])xai-[A-Za-z0-9_]{8,}/g;
 
 /**
  * The blunt rule: an unbroken run of token characters long enough that nothing
@@ -98,8 +142,8 @@ const VENDOR_KEY = /\b(gh[posu]_|github_pat_|AIza|GOCSPX-|xai-)[A-Za-z0-9_-]{8,}
  * and this rule still misses it, because `+` and `/` are outside the class and
  * split the run into sub-threshold pieces — the same reason it misses an AWS
  * secret access key. Anything at exactly forty characters is out of reach
- * permanently, since that is where `req_<uuid>` sits. `VENDOR_KEY` above exists
- * for the families this leaves behind, and the two rules together are still
+ * permanently, since that is where `req_<uuid>` sits. The shape rules above
+ * exist for the families this leaves behind, and all of them together are still
  * best-effort rather than a guarantee.
  *
  * A JWT is caught by this rule rather than by a shape of its own, because its
@@ -107,13 +151,57 @@ const VENDOR_KEY = /\b(gh[posu]_|github_pat_|AIza|GOCSPX-|xai-)[A-Za-z0-9_-]{8,}
  */
 const OPAQUE = /[A-Za-z0-9_-]{41,}/g;
 
+/** Which rule a chain entry is, so a test can rebuild the chain it joined. */
+export type MaskRuleId = "bearer" | "prefixedKey" | "vendorKey" | "xaiKey" | "opaque";
+
+/**
+ * One rule: what it recognises, and how much of what it recognised survives.
+ *
+ * `keep` counts leading characters of the match rather than returning the text
+ * to put back, because the monotonicity test reasons in *input positions* — it
+ * compares which characters each chain elided — and a rule that described its
+ * survivors as a string could not be lined up against the input.
+ */
+export type MaskRule = {
+  id: MaskRuleId;
+  pattern: RegExp;
+  /** How many leading characters of a match are left in clear. */
+  keep: (match: string) => number;
+};
+
+/**
+ * The chain, in order. Exported so the tests can reconstruct an earlier chain
+ * from it and assert this one never redacts less than that one did.
+ */
+export const MASK_RULES: readonly MaskRule[] = [
+  {
+    id: "bearer",
+    pattern: BEARER,
+    // Scheme and the whitespace after it, verbatim: the separator is part of
+    // what the reader is being shown was there.
+    keep: (match) => match.length - match.replace(/^bearer\s+/i, "").length,
+  },
+  // Two characters of prefix and the hyphen.
+  { id: "prefixedKey", pattern: PREFIXED_KEY, keep: () => 3 },
+  {
+    id: "vendorKey",
+    pattern: VENDOR_KEY,
+    keep: (match) => VENDOR_PREFIX.exec(match)?.[0].length ?? 0,
+  },
+  { id: "xaiKey", pattern: XAI_KEY, keep: () => "xai-".length },
+  { id: "opaque", pattern: OPAQUE, keep: () => 0 },
+];
+
 /** Masks one string. Exported for the tests that pin the surface both ways. */
 export function maskString(value: string): string {
-  return value
-    .replace(BEARER, (_match, scheme: string) => `${scheme} ${ELIDED}`)
-    .replace(PREFIXED_KEY, (_match, prefix: string) => `${prefix}-${ELIDED}`)
-    .replace(VENDOR_KEY, (_match, prefix: string) => `${prefix}${ELIDED}`)
-    .replace(OPAQUE, ELIDED);
+  return MASK_RULES.reduce(
+    (masked, rule) =>
+      masked.replace(
+        rule.pattern,
+        (match: string) => `${match.slice(0, rule.keep(match))}${ELIDED}`,
+      ),
+    value,
+  );
 }
 
 /**
