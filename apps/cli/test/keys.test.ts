@@ -264,6 +264,12 @@ test("--unset names a pair the key does not have rather than reporting a change 
   const missing = await cli(["keys", "limits", id, "--unset", "spend:5h"], { root });
   expect(missing.code).not.toBe(0);
   expect(missing.err).toContain("spend:5h");
+  // The gauge answers to the same contract, spelled without a window. It is the
+  // one branch that could quietly report success for a limit that was never
+  // there, because it is reached before the dimension:window parsing below.
+  const gauge = await cli(["keys", "limits", id, "--unset", "concurrency"], { root });
+  expect(gauge.code).not.toBe(0);
+  expect(gauge.err).toContain("concurrency");
   // A typo must not be a silent success either.
   const typo = await cli(["keys", "limits", id, "--unset", "requsts:1m"], { root });
   expect(typo.code).not.toBe(0);

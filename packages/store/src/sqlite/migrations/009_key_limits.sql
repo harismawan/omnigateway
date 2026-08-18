@@ -22,9 +22,26 @@ ALTER TABLE api_keys ADD COLUMN limits TEXT NOT NULL DEFAULT '{}';
 -- `requests["1m"]`. A NULL meant unlimited and stays unlimited as the default
 -- `{}`: an absent key and an explicit null both mean the same thing, and the
 -- empty object is the shape a newly minted key starts at.
+--
+-- Only a value the reader accepts is carried over. `rate_limit_per_min` was
+-- `INTEGER` with no `CHECK`, so a hand-edited install can hold `0`, `-5` or
+-- `1.5` in it, while the new schema is `z.number().int().positive()`. Backfilled
+-- unconditionally, each of those writes a matrix `parseLimitConfig` refuses —
+-- which is `limits: null`, which is every request for that key answered
+-- `INTERNAL` at the auth chokepoint. An upgrade must not manufacture the
+-- unreadable row the design describes as arising only from meddling.
+--
+-- Anything else stays at the `{}` default, which is unlimited: a ceiling that
+-- was already nonsense bounded nothing before this migration either, so
+-- dropping it changes no behaviour and leaves the key serving.
+--
+-- `typeof()` rather than a range test alone. SQLite's INTEGER affinity is a
+-- preference, not a constraint: `1.5` stays REAL and `'sixty'` stays TEXT, and
+-- TEXT sorts above every number so a bare `> 0` would admit the string.
 UPDATE api_keys
    SET limits = json_object('requests', json_object('1m', rate_limit_per_min))
- WHERE rate_limit_per_min IS NOT NULL;
+ WHERE typeof(rate_limit_per_min) = 'integer'
+   AND rate_limit_per_min > 0;
 
 ALTER TABLE api_keys DROP COLUMN rate_limit_per_min;
 

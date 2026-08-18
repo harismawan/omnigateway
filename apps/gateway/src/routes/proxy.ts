@@ -144,13 +144,6 @@ function rateLimitHeaders(
 }
 
 /**
- * `Retry-After`, in whole seconds, on the refusals that carry a wait.
- *
- * The gap this closes: a 429 already knew how long a client should wait and
- * said so only in the error body, where no SDK looks. Rounded up, because a
- * client sent back early is a client refused twice.
- */
-/**
  * `remaining` counted after the request being served, which is what the header
  * means to the client reading it.
  *
@@ -174,6 +167,19 @@ function afterThisRequest(headroom: HeadroomByDimension): HeadroomByDimension {
   };
 }
 
+/**
+ * `Retry-After`, in whole seconds, on the refusals that carry a wait.
+ *
+ * The gap this closes: a 429 already knew how long a client should wait and
+ * said so only in the error body, where no SDK looks. Rounded up, because a
+ * client sent back early is a client refused twice.
+ *
+ * The status guard separates two of the three things this codebase calls a rate
+ * limit. `retryAfterMs` is also where `providers/http.ts` puts a *provider's*
+ * own `Retry-After` — that is the router's business, and forwarding it on a 502
+ * or a 503 would hand the client an upstream credential's backoff as though it
+ * were their key's ceiling.
+ */
 function retryAfterHeaders(error: GatewayError): Record<string, string> {
   const ms = error.retryAfterMs;
   if (ms === undefined || HTTP_STATUS[error.code] !== 429) return {};
@@ -771,7 +777,11 @@ export function proxyRoutes(deps: ProxyDeps) {
       .post("/v1/messages/count_tokens", async ({ request }) => {
         try {
           const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers), logger);
-          await rateLimiter.consume(key.id, key.limits);
+          // Minted even though this route writes no row. `consume` logs the
+          // fail-open path when a long-window store read times out, and that
+          // line is the only record this request leaves anywhere — without an
+          // id it names no request and joins to nothing.
+          await rateLimiter.consume(key.id, key.limits, deps.requestId());
           const body: unknown = await request.json();
           const chatRequest = parseAnthropicRequest(body, request.headers);
           if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {

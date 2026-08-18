@@ -237,6 +237,29 @@ describe("KeysBoard", () => {
     expect(stub.calls.some((call) => call.init?.method === "POST")).toBe(false);
   });
 
+  /**
+   * Zero is not a ceiling of zero, it is a key that can do nothing — and it is
+   * a whole number and a finite one, so the integer check beside it never sees
+   * it. Refused here rather than at the route, because here it can name the
+   * field the operator typed into.
+   */
+  test("a ceiling of zero is refused before it is sent", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys();
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: /Create a key/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Limits" }));
+    await user.type(within(dialog).getByLabelText("Requests per minute"), "0");
+    await user.click(within(dialog).getByRole("button", { name: "Create key" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Requests per minute must be a whole number above zero, or blank for no limit.",
+    );
+    expect(stub.calls.some((call) => call.init?.method === "POST")).toBe(false);
+  });
+
   test("revoking says the key cannot be brought back", async () => {
     const user = userEvent.setup();
     const stub = stubKeys({ "DELETE /api/keys/key-1": () => ({ ok: true }) });
@@ -280,6 +303,37 @@ describe("KeysBoard", () => {
     if (row === null) throw new Error("the key has no row");
     expect(within(row).getByText("2 limits")).toBeTruthy();
     expect(within(row).getByText("Tokens per week 1,000,000, 90% used")).toBeTruthy();
+    expect(within(row).queryByText(/Requests per minute/)).toBeNull();
+  });
+
+  /**
+   * Both ceilings are already passed, so a share clamped to 100% cannot tell
+   * them apart and the summary falls back to whichever was walked first.
+   *
+   * Being over a ceiling is ordinary rather than exceptional: `tokens` and
+   * `spend` debit once a response completes, so a key finishes one request past
+   * either of them. The row that most needs attention is the one furthest past,
+   * and 500% over is a different situation from 10% over.
+   */
+  test("the cell separates two ceilings that are both already passed", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            limits: { requests: { "1m": 60 }, tokens: { "1w": 1_000 } },
+            limitUsage: [
+              { dimension: "requests", window: "1m", limit: 60, used: 66 },
+              { dimension: "tokens", window: "1w", limit: 1_000, used: 5_000 },
+            ],
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const row = (await screen.findByText("laptop")).closest("tr");
+    if (row === null) throw new Error("the key has no row");
+    expect(within(row).getByText("Tokens per week 1,000, 500% used")).toBeTruthy();
     expect(within(row).queryByText(/Requests per minute/)).toBeNull();
   });
 

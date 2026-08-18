@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { StreamEvent } from "@omni/ir";
+import { GatewayError, type StreamEvent } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
 import {
@@ -73,6 +73,7 @@ async function harness(limits: LimitConfig, seeded: Seeded[] = []) {
 
   const logger = captureLogger();
   const now = () => NOW;
+  const rateLimiter = new ApiKeyRateLimiter({ store, now, logger });
   let n = 0;
   const app = proxyRoutes({
     store,
@@ -84,7 +85,7 @@ async function harness(limits: LimitConfig, seeded: Seeded[] = []) {
     rand: () => 0.5,
     refresh: async (credential) => await credential.secrets(),
     requestId: () => `req_${++n}`,
-    rateLimiter: new ApiKeyRateLimiter({ store, now, logger }),
+    rateLimiter,
     logger,
   });
 
@@ -109,7 +110,7 @@ async function harness(limits: LimitConfig, seeded: Seeded[] = []) {
       }),
     );
 
-  return { store, call, keyId: key.id };
+  return { store, call, keyId: key.id, rateLimiter };
 }
 
 /** Only the rate-limit headers, so an assertion states the whole dialect. */
@@ -256,6 +257,55 @@ test("a 429 carries the headers and a Retry-After, on both surfaces", async () =
     "x-ratelimit-reset-requests": "1h0m0s",
   });
   openai.store.close();
+});
+
+/**
+ * Which way the seconds are rounded, which every whole-second fixture above is
+ * blind to.
+ *
+ * A window's reset is the oldest retained row plus the window's length, so in
+ * production it lands on an arbitrary millisecond; `Retry-After` is whole
+ * seconds. Rounded down, a sub-second wait renders `Retry-After: 0` and invites
+ * the client straight back into a second 429 — which is the retry storm the
+ * header exists to prevent. The row here sits 1.5s inside the window, so the
+ * honest answer is 2 and the truncated one is 1.
+ */
+test("a wait that is not a whole number of seconds is rounded up, never down", async () => {
+  const { store, call } = await harness({ requests: { "5h": 2 } }, [
+    { at: NOW - 5 * HOUR + 1500 },
+    { at: NOW - MINUTE },
+  ]);
+  const response = await call("anthropic");
+
+  expect(response.status).toBe(429);
+  expect(response.headers.get("retry-after")).toBe("2");
+  // The instant on the header is rounded the same way, for the same reason.
+  expect(response.headers.get("anthropic-ratelimit-requests-reset")).toBe("2026-08-18T09:32:09Z");
+  store.close();
+});
+
+/**
+ * `Retry-After` says when *this key's* ceiling frees, and nothing else.
+ *
+ * Three unrelated mechanisms in this codebase are called a rate limit, and two
+ * of them meet here: `GatewayError.retryAfterMs` is also what
+ * `providers/http.ts` puts a provider's own `Retry-After` on. Forwarding that
+ * to the client on a 502 or a 503 hands a caller an upstream credential's
+ * backoff as though it were their key's, and a well-behaved SDK obeys it. The
+ * status guard is the only thing separating the two, so it is asserted rather
+ * than left to the fact that today's dispatch happens to drop the field before
+ * the route sees it.
+ */
+test("a refusal that is not a 429 does not forward its wait to the client", async () => {
+  const { store, call, rateLimiter } = await harness({ requests: { "5h": 2000 } });
+  rateLimiter.admit = () => {
+    throw new GatewayError("OVERLOADED", "upstream is backing us off", { retryAfterMs: 30_000 });
+  };
+
+  const response = await call("anthropic");
+  expect(response.status).toBe(503);
+  expect(response.headers.get("retry-after")).toBeNull();
+  store.close();
 });
 
 /**

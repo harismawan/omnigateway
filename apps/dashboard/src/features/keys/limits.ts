@@ -51,10 +51,20 @@ export function formatLimitValue(dimension: Dimension, value: number): string {
   return value.toLocaleString("en-US");
 }
 
-/** Share of a ceiling already spent, clamped, and null where nothing measures it. */
+/**
+ * Share of a ceiling already spent, and null where nothing measures it.
+ *
+ * Not clamped to 1. `nearestExhaustion` ranks on this figure, and a ceiling can
+ * genuinely be passed — `tokens` and `spend` debit after a response completes,
+ * so a key finishes one request beyond them — so clamping here makes a key 10%
+ * over indistinguishable from one 400% over and hands the summary whichever
+ * came first. The gateway's own `evaluate` ranks unclamped for the same reason.
+ * `Meter` is the only consumer that needs a bounded number, and it is bounded
+ * at that call site.
+ */
 export function fractionOf(reading: LimitReading): number | null {
   if (reading.used === null || reading.limit <= 0) return null;
-  return Math.max(0, Math.min(1, reading.used / reading.limit));
+  return Math.max(0, reading.used / reading.limit);
 }
 
 /**

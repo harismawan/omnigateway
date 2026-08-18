@@ -151,6 +151,42 @@ test("of several violations the one clearing last is reported", () => {
   expect(retryAfterMs(decision.violation, NOW)).toBe(600_000_000);
 });
 
+/**
+ * Two limits clearing at the same instant, decided by overshoot rather than by
+ * where the walk happened to reach them.
+ *
+ * `resetAt` alone cannot separate these — they free together — so without the
+ * tie-break the answer is whichever the loop saw first, and which one that is
+ * follows from the order the dimensions and windows are enumerated in. Both
+ * arrangements are asserted: the deeper overshoot is walked first in one and
+ * second in the other, so neither "first wins" nor "last wins" passes.
+ */
+test("violations that clear together are separated by overshoot, not by walk order", () => {
+  const together = NOW + 60_000;
+
+  const walkedFirst = evaluate(
+    { requests: { "5h": 10, "1w": 100 } },
+    {
+      requests: {
+        "5h": { used: 50, resetAt: together },
+        "1w": { used: 110, resetAt: together },
+      },
+    },
+    NOW,
+  );
+  expect(walkedFirst.violation?.window).toBe("5h");
+
+  const walkedSecond = evaluate(
+    { requests: { "1m": 10 }, tokens: { "1m": 100 } },
+    {
+      requests: { "1m": { used: 11, resetAt: together } },
+      tokens: { "1m": { used: 500, resetAt: together } },
+    },
+    NOW,
+  );
+  expect(walkedSecond.violation?.dimension).toBe("tokens");
+});
+
 test("retryAfterMs never goes negative on a reset already in the past", () => {
   expect(
     retryAfterMs({ dimension: "requests", window: "1m", limit: 1, used: 1, resetAt: 5 }, 10),

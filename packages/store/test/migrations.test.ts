@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { openDb } from "../src/sqlite/db.ts";
+import { createKeyRepo } from "../src/sqlite/keys.ts";
 import init001 from "../src/sqlite/migrations/001_init.sql" with { type: "text" };
 import usageDaily002 from "../src/sqlite/migrations/002_usage_daily.sql" with { type: "text" };
 import quotaSnapshot003 from "../src/sqlite/migrations/003_quota_snapshot.sql" with {
@@ -89,17 +90,28 @@ test("openDb applies migrations and records them", () => {
   db.close();
 });
 
+/**
+ * Every value the old column could hold, because it could hold anything.
+ *
+ * `rate_limit_per_min` was `INTEGER` with no `CHECK`, and the new schema is
+ * `z.number().int().positive()` — so `0`, `-5` and `1.5` are all values a
+ * hand-edited install can be sitting on and none of them is a limit the reader
+ * accepts. Ordered by id, which is the order the assertions below read in.
+ */
+const LEGACY_KEYS = `
+  INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, rate_limit_per_min, created_at)
+  VALUES ('fractional', 'f', 'sk-omni-eeee', 'h5', NULL, 1.5, 0),
+         ('limited',    'l', 'sk-omni-aaaa', 'h1', NULL, 60,  0),
+         ('negative',   'n', 'sk-omni-dddd', 'h4', NULL, -5,  0),
+         ('unlimited',  'u', 'sk-omni-bbbb', 'h2', NULL, NULL, 0),
+         ('zero',       'z', 'sk-omni-cccc', 'h3', NULL, 0,   0)`;
+
 test("migration 9 backfills a per-minute limit into the requests matrix", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   legacyDb(path);
 
   const legacy = new Database(path);
-  legacy.run(
-    `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, rate_limit_per_min,
-                           created_at)
-     VALUES ('limited', 'l', 'sk-omni-aaaa', 'h1', NULL, 60, 0),
-            ('unlimited', 'u', 'sk-omni-bbbb', 'h2', NULL, NULL, 0)`,
-  );
+  legacy.run(LEGACY_KEYS);
   legacy.close();
 
   const db = openDb(path);
@@ -107,11 +119,52 @@ test("migration 9 backfills a per-minute limit into the requests matrix", () => 
     .query<{ id: string; limits: string }, []>("SELECT id, limits FROM api_keys ORDER BY id")
     .all();
   expect(rows).toEqual([
+    // Not a ceiling the reader would take, so it is not carried over. It bounded
+    // nothing before the upgrade either — a value no code path could enforce —
+    // so `{}` loses nothing and keeps the key serving.
+    { id: "fractional", limits: "{}" },
     { id: "limited", limits: '{"requests":{"1m":60}}' },
+    { id: "negative", limits: "{}" },
     // Not `{"requests":{"1m":null}}`. An absent key and an explicit null both
     // mean unlimited, and the empty object is the shape every new key starts at.
     { id: "unlimited", limits: "{}" },
+    { id: "zero", limits: "{}" },
   ]);
+  db.close();
+});
+
+/**
+ * The property the backfill exists to preserve, stated as the reader sees it.
+ *
+ * A migrated row that `parseLimitConfig` refuses is `limits: null`, and a null
+ * there is not a cosmetic defect: `authenticateApiKey` answers `INTERNAL` for
+ * it, so every `/v1` request that key makes fails until an operator hand-edits
+ * SQL. An upgrade that bricks a key is worse than an upgrade that drops a
+ * ceiling which was never enforceable, so every row must come out readable.
+ */
+test("migration 9 leaves every upgraded key readable, whatever the old column held", async () => {
+  const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
+  legacyDb(path);
+
+  const legacy = new Database(path);
+  legacy.run(LEGACY_KEYS);
+  legacy.close();
+
+  const db = openDb(path);
+  const keys = await createKeyRepo(db).list();
+  expect(keys.map((key) => key.id).sort()).toEqual([
+    "fractional",
+    "limited",
+    "negative",
+    "unlimited",
+    "zero",
+  ]);
+  for (const key of keys) {
+    expect({ id: key.id, limits: key.limits }).toEqual({
+      id: key.id,
+      limits: key.id === "limited" ? { requests: { "1m": 60 } } : {},
+    });
+  }
   db.close();
 });
 

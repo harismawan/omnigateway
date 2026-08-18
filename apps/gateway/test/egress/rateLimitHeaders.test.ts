@@ -29,6 +29,25 @@ test("the Anthropic dialect names an instant, in RFC3339 to the second", () => {
   });
 });
 
+/**
+ * The direction the rounding goes, which every fixture above is blind to.
+ *
+ * A reset is a millisecond instant in production — a sliding window's oldest
+ * retained row plus the window's length — and the header holds whole seconds.
+ * Rounded down, the header names an instant up to 999ms *before* the window
+ * frees a slot, and a well-behaved SDK that obeys it is refused a second time.
+ * Every other case here sits on a whole second, where ceil and floor agree and
+ * the assertion says nothing about either.
+ */
+test("a reset mid-second is rounded up, to an instant the window is no longer refusing", () => {
+  const headroom: HeadroomByDimension = {
+    requests: { window: "1m", limit: 60, used: 60, remaining: 0, resetAt: NOW + 1500 },
+  };
+  expect(anthropicRateLimitHeaders(headroom)["anthropic-ratelimit-requests-reset"]).toBe(
+    "2026-08-18T09:32:09Z",
+  );
+});
+
 test("the OpenAI dialect names a duration, in the spelling its own headers use", () => {
   expect(openaiRateLimitHeaders(HEADROOM, NOW)).toEqual({
     "x-ratelimit-limit-requests": "2000",

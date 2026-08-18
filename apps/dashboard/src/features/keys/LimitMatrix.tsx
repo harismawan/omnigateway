@@ -56,7 +56,9 @@ export function LimitMatrix({ label, readings }: LimitMatrixProps) {
                 <Absent>in flight now, counted in the gateway process</Absent>
               ) : (
                 <Meter
-                  fraction={fraction}
+                  // A bar is a bar: it saturates where the ceiling was passed,
+                  // while the figure beside it stays honest about by how much.
+                  fraction={Math.min(1, fraction)}
                   label={`${label}, ${name}, ${Math.round(fraction * 100)}% used`}
                 />
               )}

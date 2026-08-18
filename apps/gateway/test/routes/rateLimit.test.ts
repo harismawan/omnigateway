@@ -228,6 +228,42 @@ test("a row write that never returns does not strand the concurrency slot", asyn
   store.close();
 });
 
+/**
+ * That the route asks the limiter at all, which `consume`'s own tests cannot
+ * say.
+ *
+ * Every assertion about this dimension sits on `ApiKeyRateLimiter.consume`,
+ * called directly — so deleting the call site in the route leaves the whole
+ * suite green and makes `count_tokens` the one `/v1` surface a key may hammer
+ * without a ceiling. It is also the surface a client polls hardest: Claude Code
+ * paces its own compaction with it.
+ */
+test("count_tokens is refused once the key's requests ceiling is reached", async () => {
+  const { store, app, raw } = await harness({ limits: { requests: { "1m": 2 } } });
+  const count = () =>
+    app.handle(
+      new Request("http://localhost/v1/messages/count_tokens", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+        body: JSON.stringify(BODY),
+      }),
+    );
+
+  const first = await count();
+  expect(first.status).toBe(200);
+  // The route still answers what it is for, so a 429 below is the ceiling and
+  // not the estimate having broken.
+  expect(await first.json()).toEqual({ input_tokens: expect.any(Number) as number });
+  expect((await count()).status).toBe(200);
+
+  const refused = await count();
+  expect(refused.status).toBe(429);
+  // The whole minute, from the oldest of the two stamps in the ring. Said on a
+  // header rather than only in a body no SDK reads.
+  expect(refused.headers.get("retry-after")).toBe("60");
+  store.close();
+});
+
 test("debits a finished request's tokens and cost exactly once", async () => {
   const { store, call, debits, keyId } = await harness();
   const response = await call(BODY);

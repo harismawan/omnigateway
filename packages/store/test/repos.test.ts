@@ -449,3 +449,34 @@ test("a limits shape the schema refuses is never written", async () => {
   expect(await s.keys.list()).toHaveLength(0);
   s.close();
 });
+
+/**
+ * The same guard on the edit path, which is the one that matters more.
+ *
+ * Limits are editable after creation, so `setLimits` is how an operator repairs
+ * a key — and a repair that writes a matrix no reader can parse turns a working
+ * key into one `authenticateApiKey` answers `INTERNAL` for, by the very command
+ * meant to fix it. Only a caller reaching past `@omni/control` gets here, which
+ * is exactly the caller the schema is not otherwise standing behind.
+ */
+test("a limits shape the schema refuses is never written by an edit either", async () => {
+  const s = await store();
+  const hash = await hashApiKey(generateApiKey());
+  await s.keys.create({
+    id: "k1",
+    label: "bounded",
+    prefix: "sk-omni-ffff",
+    hash,
+    modelAllowlist: null,
+    limits: { requests: { "1m": 60 } },
+    bodyLoggingOptOut: false,
+  });
+
+  await expect(
+    s.keys.setLimits("k1", { requests: { "2m": 60 } } as unknown as LimitConfig),
+  ).rejects.toThrow();
+  // The key is still the key it was: the refused edit left no partial write and
+  // nothing the next reader has to interpret.
+  expect((await s.keys.findByHash(hash))?.limits).toEqual({ requests: { "1m": 60 } });
+  s.close();
+});
