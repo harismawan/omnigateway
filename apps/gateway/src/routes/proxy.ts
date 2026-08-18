@@ -33,6 +33,7 @@ import {
   newPendingRequestLog,
   reportRejection,
   routeLog,
+  type UsageDebit,
 } from "../logging.ts";
 import { modelListBody } from "./models.ts";
 
@@ -279,6 +280,29 @@ async function handle(
    * log, whose nulls and zeros happened to roll up under a different key.
    */
   let logged = false;
+  /**
+   * The concurrency slot this request holds, once it has one.
+   *
+   * Out here because the `finally` below is the only site that can free it on
+   * every path that ends inside this function, and null until admission so a
+   * request refused before it claimed anything cannot free a slot it never had.
+   */
+  let release: (() => void) | null = null;
+  /**
+   * Whether the response is a stream this function has already handed back.
+   *
+   * The trap this exists for: a streaming handler returns as soon as the head
+   * is ready and the request goes on running for however long the body takes,
+   * so a `finally` here fires when the headers are sent rather than at the end
+   * of the request. Freeing the gauge there would count a forty-stream agent
+   * loop as nothing in flight. Streams therefore free it from `sseResponse`'s
+   * own run-once completion, which is the site that fires on a drained stream,
+   * a broken one, and a client that hung up alike.
+   */
+  let streaming = false;
+  const debit: UsageDebit = (id, usage) => {
+    rateLimiter.debit(id, usage);
+  };
 
   try {
     let key: Awaited<ReturnType<typeof authenticateApiKey>>;
@@ -296,7 +320,7 @@ async function handle(
     }
     keyId = key.id;
     try {
-      rateLimiter.consume(key.id, key.limits);
+      release = await rateLimiter.admit(key.id, key.limits, requestId);
     } catch (error) {
       if (error instanceof GatewayError && error.code === "RATE_LIMIT") {
         deps.logger.warn("rate limit rejected", {
@@ -441,7 +465,7 @@ async function handle(
       // lines about the process itself. The console reads those rows; stdout
       // carries what never becomes one. `requestId` is on both, and joins them.
       logged = true;
-      await finishLog(deps.store, completed, keyId, deps.logger, writeBodies);
+      await finishLog(deps.store, completed, keyId, deps.logger, writeBodies, debit);
     };
 
     if (chatRequest.stream) {
@@ -460,7 +484,28 @@ async function handle(
         captured.client.response = sink.frames;
         onFrame = sink.write;
       }
-      return sseResponse(frames, log, deps.keepaliveMs, dispatched.events, onFrame);
+      /**
+       * The end of a streaming request, wherever it comes from.
+       *
+       * `sseResponse` latches this to run exactly once whether the stream
+       * drained, threw, or was cancelled by a client that hung up, which is
+       * precisely the guarantee the gauge needs: a decrement placed beside the
+       * debit would never run for the disconnect, and one placed in the
+       * `finally` below would run while the stream was still going.
+       */
+      const finish = async (cancelled = false, failure?: unknown): Promise<void> => {
+        // Before the row is written rather than after it. The stream is over
+        // either way, and freeing here keeps the instant the gauge falls the
+        // instant the request ended, rather than a store write later — which
+        // also means a caller that has read the last byte can rely on it.
+        release?.();
+        await log(cancelled, failure);
+      };
+      const response = sseResponse(frames, finish, deps.keepaliveMs, dispatched.events, onFrame);
+      // Only once the response exists. A throw while building it leaves this
+      // false, so the `finally` frees the slot that nothing else now will.
+      streaming = true;
+      return response;
     }
 
     const events: StreamEvent[] = [];
@@ -515,7 +560,7 @@ async function handle(
     // it at the earlier `finishLog`, and writing a second one here would be the
     // duplicate write the `logged` flag exists to prevent.
     if (collector !== null && !logged) collector.client.response = rejection;
-    if (!logged) await finishLog(deps.store, completed, keyId, deps.logger, writeBodies);
+    if (!logged) await finishLog(deps.store, completed, keyId, deps.logger, writeBodies, debit);
     // Not an access line: this fires only when a request failed outright, which
     // a busy gateway does rarely. It exists because the row cannot hold the
     // reason — `request_logs` has a status and an error code and no room for
@@ -524,12 +569,19 @@ async function handle(
     // failure and is far too common to print; its row is the whole record.
     if (!cancelled) reportRejection(deps.logger, requestId, completed, gatewayError, surface);
     return jsonResponse(rejection, HTTP_STATUS[gatewayError.code]);
+  } finally {
+    // Every path that ends inside this function: a rendered response, a
+    // deadline, a rejection before dispatch, a hang-up on the non-streaming
+    // drain. A stream is the one request that outlives the return, and it frees
+    // itself. The release is idempotent, so the two can never disagree.
+    if (!streaming) release?.();
   }
 }
 
 export function proxyRoutes(deps: ProxyDeps) {
-  const rateLimiter = deps.rateLimiter ?? new ApiKeyRateLimiter(deps.now);
   const logger = deps.logger ?? noopLogger;
+  const rateLimiter =
+    deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now: deps.now, logger });
   const dispatchDeps: ResolvedProxyDeps = {
     ...deps,
     logger,
@@ -591,7 +643,7 @@ export function proxyRoutes(deps: ProxyDeps) {
       .post("/v1/messages/count_tokens", async ({ request }) => {
         try {
           const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers), logger);
-          rateLimiter.consume(key.id, key.limits);
+          await rateLimiter.consume(key.id, key.limits);
           const body: unknown = await request.json();
           const chatRequest = parseAnthropicRequest(body, request.headers);
           if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {

@@ -253,6 +253,20 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   a key spend a whole window's allowance either side of one, at every window size. `1m` is exact from
   a ring of timestamps in `apps/gateway`; longer windows read `usage.sumSince`, which must filter
   `state = 'done'` or every in-flight request's placeholder metrics inflate the count.
+- A long-window count is `usage.sumSince` plus the in-memory delta since that read, cached 30s. The
+  composition may over-count — events aging out between the read and now are not subtracted — and
+  must never under-count, so the delta keeps everything recorded at or after the read instant. A
+  limiter whose error ran the other way could be walked through by timing the refresh. A failed or
+  slow `sumSince` serves the request and logs it through existing `LogFields` keys; only the long
+  windows degrade, because `requests` at `1m` and `concurrency` never touch the store.
+- The token and spend debit lives in `finishLog`, beside `usage.append` and never inside
+  `@omni/store`. That site already runs at most once per request id, which is exactly the guarantee
+  the debit needs and would otherwise have to re-establish.
+- The concurrency gauge is decremented at request scope and nowhere else. A streaming handler returns
+  its `Response` while the request is still running, so a `finally` around the handler body fires
+  when the head is sent, and a decrement beside the debit sits behind a store write. Streams free the
+  slot from `sseResponse`'s run-once completion, which covers a drained stream, a broken one, and a
+  hang-up alike. No window expires a gauge: a leak locks the key out until restart, silently.
 - `ProviderModelChoice.auth` is enforced at write time in `putModel`, never at routing. Which ways
   in exist is installation state, so the catalog exports the fact (`catalogModelAuths`) and control
   owns the rule. A provider with no credential is unknown rather than blocked, an unlisted model is

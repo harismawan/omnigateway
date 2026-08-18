@@ -193,10 +193,22 @@ once per pair. An unset pair is unlimited:
 omni keys create --label ci --limit requests:1m=60
 ```
 
-The per-minute request ceiling is enforced over a *sliding* minute, so a key
-cannot spend two minutes' allowance either side of a clock edge. It is counted
-per process and reset when the gateway restarts. The remaining pairs are
-accepted and stored but not yet enforced.
+Every window is *sliding*, so a key cannot spend two windows' allowance either
+side of a clock edge. `requests` and `tokens` take `1m`, `5h`, and `1w`; `spend`
+takes `5h` and `1w`; `concurrency` is not a window at all but a ceiling on
+requests in flight at once.
+
+`tokens` and `spend` are debited once a response completes, because an exact
+token count exists only then — a key at its ceiling is refused on its *next*
+request rather than its current one. The `5h` and `1w` counts come from
+`request_logs`, so a `1w` limit on an installation that prunes logs after three
+days really enforces three days. They are cached for thirty seconds and can
+therefore read slightly high, never low: the key is refused early rather than
+let past a ceiling you set. If the database cannot answer, those windows stop
+enforcing and the gateway logs it; `requests` at `1m` and `concurrency` are held
+in memory and go on enforcing exactly. Everything here is counted per process
+and reset when the gateway restarts — which for `concurrency` is correct, since
+in-flight requests die with the process.
 
 > **Breaking:** `--rate-limit N` is removed, not aliased. Use
 > `--limit requests:1m=N`. A script still passing the old flag stops with an

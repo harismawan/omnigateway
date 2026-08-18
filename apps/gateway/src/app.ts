@@ -37,6 +37,8 @@ export type AppDeps = {
   requestId?: () => string;
   /** Overridden by tests that assert in-flight accounting; one per process otherwise. */
   loadRegistry?: LoadRegistry;
+  /** Overridden by tests that read the concurrency gauge; one per process otherwise. */
+  rateLimiter?: ApiKeyRateLimiter;
   /**
    * Shared with the background loops by the bootstrap.
    *
@@ -148,7 +150,7 @@ export function createApp(deps: AppDeps) {
   const http = deps.http ?? nodeHttpClient({ logger, now });
   const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
-  const rateLimiter = new ApiKeyRateLimiter(now);
+  const rateLimiter = deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger });
   const snapshots = createRoutingSnapshotCache(deps.store, logger);
 
   const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS });
