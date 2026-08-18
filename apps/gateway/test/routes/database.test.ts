@@ -1,8 +1,14 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ADMIN_COOKIE, createAdminAuth, type DatabaseDeps, nodeDatabaseFs } from "@omni/control";
+import {
+  ADMIN_COOKIE,
+  createAdminAuth,
+  type DatabaseDeps,
+  type DatabaseStore,
+  nodeDatabaseFs,
+} from "@omni/control";
 import { createStore, deriveKey } from "@omni/store";
 import { virtualModel } from "@omni/testkit";
 import { createQuiesceLatch } from "../../src/quiesce.ts";
@@ -53,11 +59,41 @@ async function harness(options: HarnessOptions = {}) {
   const runs: string[][] = [];
   const stops: number[] = [];
   const latch = createQuiesceLatch();
+  /**
+   * The database clock, which a test may move; the session clock, which it may not.
+   *
+   * Snapshots are named after the instant they were taken, so two operations at
+   * one frozen instant collide on the filename. A test that runs two of them
+   * moves this rather than the session TTL it is not making a point about.
+   */
+  const clock = { now: NOW };
+
+  /**
+   * A seam to park a whole-database operation at, for the tests about two of them.
+   *
+   * `snapshotTo` is where every mutating operation spends real time — a restore
+   * takes its undo snapshot through it — so holding it holds a restore exactly
+   * where a concurrent one would find it: latch shut, swap not begun. Spread
+   * rather than mutated, because the store's repos forward per call and the
+   * outer object is what survives a reopen.
+   */
+  let held: Promise<void> | null = null;
+  const routeStore: DatabaseStore = {
+    ...store,
+    maintenance: {
+      ...store.maintenance,
+      snapshotTo: async (path) => {
+        if (held !== null) await held;
+        await store.maintenance.snapshotTo(path);
+      },
+    },
+  };
+
   const app = databaseRoutes({
-    store,
+    store: routeStore,
     admin,
     latch,
-    now: () => NOW,
+    now: () => clock.now,
     fs: { ...nodeDatabaseFs(), ...options.fs },
     quiesceDeadlineMs: 50,
     ...(options.maxImportBytes === undefined ? {} : { maxImportBytes: options.maxImportBytes }),
@@ -93,6 +129,17 @@ async function harness(options: HarnessOptions = {}) {
       }),
     );
 
+  /** The same route, with a body that declares no length. */
+  const uploadStream = (body: ReadableStream<Uint8Array>) =>
+    app.handle(
+      new Request("http://localhost/api/database/import", {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream", ...auth(true) },
+        body,
+        duplex: "half",
+      } as RequestInit),
+    );
+
   const snapshot = async (): Promise<{ id: string; sizeBytes: number; reason: string }> =>
     (await (await call("POST", "/api/database/snapshots")).json()) as {
       id: string;
@@ -100,12 +147,33 @@ async function harness(options: HarnessOptions = {}) {
       reason: string;
     };
 
+  /** Parks the next whole-database operation until `promise` settles. */
+  const holdSnapshots = (promise: Promise<void>) => {
+    held = promise;
+  };
+
   const cleanup = () => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   };
 
-  return { dir, store, admin, app, latch, call, login, upload, snapshot, runs, stops, cleanup };
+  return {
+    dir,
+    store,
+    admin,
+    app,
+    latch,
+    clock,
+    holdSnapshots,
+    call,
+    login,
+    upload,
+    uploadStream,
+    snapshot,
+    runs,
+    stops,
+    cleanup,
+  };
 }
 
 test("the overview reports the file, the pages, retention, and the snapshots", async () => {
@@ -278,6 +346,155 @@ test("a swap that failed keeps the latch closed", async () => {
   cleanup();
 });
 
+/**
+ * The documented recovery path, exercised rather than described.
+ *
+ * A failed swap points the operator at the pre-restore snapshot and keeps
+ * `/api/*` up so they can reach it. Both halves of that need an open handle:
+ * the panel reads PRAGMAs through it, and the second attempt takes its own undo
+ * snapshot through it. A swap that leaves the database closed leaves the panel
+ * blank and turns the retry into a different, unrecognised failure.
+ */
+test("after a failed swap the panel still answers and a second attempt still runs", async () => {
+  const failing = { fail: true };
+  const { call, clock, latch, snapshot, cleanup } = await harness({
+    fs: {
+      rename: (from: string, to: string) => {
+        if (failing.fail) throw new Error("EXDEV");
+        renameSync(from, to);
+      },
+    },
+  });
+
+  const created = await snapshot();
+  expect((await call("POST", `/api/database/snapshots/${created.id}/restore`)).status).toBe(500);
+
+  // The panel the operator reads the failure on.
+  const overview = await call("GET", "/api/database");
+  expect(overview.status).toBe(200);
+  const listed = (await (await call("GET", "/api/database/snapshots")).json()) as {
+    snapshots: { reason: string }[];
+  };
+  expect(listed.snapshots.map((s) => s.reason)).toContain("preRestore");
+
+  // And the retry, which succeeds and puts client traffic back. The clock moves
+  // because the second attempt takes its own undo snapshot, and a snapshot is
+  // named after the instant it was taken.
+  failing.fail = false;
+  clock.now = NOW + 1_000;
+  expect((await call("POST", `/api/database/snapshots/${created.id}/restore`)).status).toBe(200);
+  expect(latch.isClosed()).toBe(false);
+
+  cleanup();
+});
+
+/**
+ * Two mutating requests at once: a double-clicked button, or two open tabs.
+ *
+ * The second one is refused by the single-flight guard in `@omni/control`, but
+ * the refusal arrives at the gateway *after* the gateway closed the latch for
+ * it — and the latch it closed was already closed, by the restore that is
+ * mid-swap. A caller that reopens on any failure therefore admits `/v1` traffic
+ * against a database that is between `close()` and `reopen()`, which is exactly
+ * the window the latch exists to cover.
+ */
+test("a second mutating request is refused without speaking for the first one's latch", async () => {
+  const { call, latch, snapshot, holdSnapshots, cleanup } = await harness();
+  const created = await snapshot();
+
+  // The first restore, parked inside its pre-restore snapshot with the latch
+  // shut: past the close, nowhere near the reopen.
+  const gate = Promise.withResolvers<void>();
+  holdSnapshots(gate.promise);
+  const first = call("POST", `/api/database/snapshots/${created.id}/restore`);
+  try {
+    await Bun.sleep(20);
+    expect(latch.isClosed()).toBe(true);
+
+    const second = await call("POST", `/api/database/snapshots/${created.id}/restore`);
+    expect(second.status).toBe(409);
+    expect(latch.isClosed()).toBe(true);
+  } finally {
+    // The exclusive lock in `@omni/control` is process-wide, so a failed
+    // assertion here would leave the parked restore holding it and every later
+    // test in this file would fail as a conflict instead of on its own merits.
+    gate.resolve();
+    await first;
+  }
+
+  expect((await first).status).toBe(200);
+  expect(latch.isClosed()).toBe(false);
+
+  cleanup();
+});
+
+/**
+ * The other half of two overlapping operations: what the refused one wrote.
+ *
+ * An import stages its body beside the live database before the operation runs,
+ * and the operation can reject before it ever takes ownership of that file.
+ * `@omni/control` removes the staged file on every path it does own, so nothing
+ * else does — and nothing sweeps the installation directory for `.part` files,
+ * so a refused import leaves up to the byte cap on the operator's disk.
+ */
+test("an import refused by a concurrent operation does not leave its upload behind", async () => {
+  const { call, upload, dir, snapshot, holdSnapshots, cleanup } = await harness();
+  const created = await snapshot();
+
+  const gate = Promise.withResolvers<void>();
+  holdSnapshots(gate.promise);
+  const first = call("POST", `/api/database/snapshots/${created.id}/restore`);
+  try {
+    await Bun.sleep(20);
+
+    const refused = await upload(new TextEncoder().encode("a database, notionally"));
+    expect(refused.status).toBe(409);
+    expect(readdirSync(dir).filter((name) => name.endsWith(".part"))).toEqual([]);
+  } finally {
+    // As above: the lock is process-wide and must not outlive this test.
+    gate.resolve();
+    await first;
+  }
+
+  expect((await first).status).toBe(200);
+
+  cleanup();
+});
+
+/**
+ * The staging copy, which happens before anything is closed.
+ *
+ * An import stages with `rename` — the restore above stages with `copyFile` and
+ * only reaches `rename` after the close — so breaking `rename` here trips the
+ * pre-close branch specifically. A full disk at this point has touched nothing,
+ * and answering it by refusing every `/v1` request until the process restarts
+ * is a self-inflicted outage.
+ */
+test("an import whose staging fails leaves the latch open, because nothing was swapped", async () => {
+  const source = await harness();
+  const created = await source.snapshot();
+  const bytes = new Uint8Array(
+    await Bun.file(join(source.dir, "snapshots", created.id)).arrayBuffer(),
+  );
+
+  const target = await harness({
+    fs: {
+      rename: () => {
+        throw new Error("ENOSPC: no space left on device");
+      },
+    },
+  });
+
+  const imported = await target.upload(bytes);
+  expect(imported.status).toBe(500);
+  expect(target.latch.isClosed()).toBe(false);
+  // And the live database is still the one that was there.
+  expect((await target.call("GET", "/api/database")).status).toBe(200);
+
+  source.cleanup();
+  target.cleanup();
+});
+
 test("a failure before the swap releases the latch, because the database is untouched", async () => {
   const { upload, latch, dir, cleanup } = await harness();
 
@@ -347,6 +564,64 @@ test("an import stops at the byte cap instead of writing the whole body", async 
   expect(existsSync(join(dir, "omnigateway.db"))).toBe(true);
 
   cleanup();
+});
+
+/**
+ * The other end of the byte cap: what the disk can actually take.
+ *
+ * `createSnapshot` demands room before `VACUUM INTO` because filling the
+ * filesystem the installation runs on is worse than a refused backup. The
+ * import path is the one that accepts operator-supplied bytes and had no such
+ * check at all, so it would stream up to two gibibytes into the installation
+ * directory and find out afterwards — with the pre-restore snapshot, which
+ * needs its own room, still to come.
+ */
+test("an import is refused before it writes when the disk could not hold it", async () => {
+  const { upload, dir, cleanup } = await harness({ fs: { freeBytes: () => 1_000 } });
+
+  const response = await upload(new Uint8Array(64_000));
+  expect(response.status).toBe(409);
+  expect(((await response.json()) as { error: { message: string } }).error.message).toContain(
+    "disk space",
+  );
+  expect(readdirSync(dir).filter((name) => name.endsWith(".part"))).toEqual([]);
+
+  cleanup();
+});
+
+test("an import of unknown length stops at what is free rather than at the cap", async () => {
+  // A chunked body declares no length, so the up-front check has nothing to
+  // read and the budget has to be enforced on the bytes as they land.
+  const { uploadStream, dir, cleanup } = await harness({ fs: { freeBytes: () => 0 } });
+
+  const response = await uploadStream(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(8_192));
+        controller.close();
+      },
+    }),
+  );
+
+  expect(response.status).toBe(409);
+  expect(readdirSync(dir).filter((name) => name.endsWith(".part"))).toEqual([]);
+
+  cleanup();
+});
+
+test("an import proceeds when the filesystem will not say how much is free", async () => {
+  const source = await harness();
+  const created = await source.snapshot();
+  const bytes = new Uint8Array(
+    await Bun.file(join(source.dir, "snapshots", created.id)).arrayBuffer(),
+  );
+
+  // Null is "this filesystem will not say", which is not the same as "no room".
+  const target = await harness({ fs: { freeBytes: () => null } });
+  expect((await target.upload(bytes)).status).toBe(200);
+
+  source.cleanup();
+  target.cleanup();
 });
 
 test("retention is validated and persisted", async () => {

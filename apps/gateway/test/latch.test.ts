@@ -87,9 +87,28 @@ async function harness() {
       }),
     );
 
-  const get = (path: string) => app.handle(new Request(`http://localhost${path}`));
+  const get = (path: string, cookie?: string) =>
+    app.handle(
+      new Request(`http://localhost${path}`, {
+        ...(cookie === undefined ? {} : { headers: { cookie } }),
+      }),
+    );
 
-  return { store, latch, app, proxy, get, release: open.resolve };
+  /** Sets the admin password through the setup route and returns its session cookie. */
+  const login = async (): Promise<string> => {
+    const response = await app.handle(
+      new Request("http://localhost/api/setup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: "hunter2hunter2" }),
+      }),
+    );
+    const setCookie = response.headers.get("set-cookie");
+    if (setCookie === null) throw new Error("test admin setup returned no session");
+    return setCookie.split(";")[0] ?? "";
+  };
+
+  return { store, latch, app, proxy, get, login, release: open.resolve };
 }
 
 test("a closed latch refuses new client work, waits for what is in flight, and leaves the console up", async () => {
@@ -155,14 +174,29 @@ test("a refusal is retryable and rendered in the surface the caller asked for", 
   store.close();
 });
 
+/**
+ * The asymmetry the latch exists for, asserted rather than gestured at.
+ *
+ * `.not.toBe(503)` passes on a 401, a 404, and a route that was never mounted,
+ * so it says nothing about whether the panel an operator watches a restore on
+ * actually answers. These are the statuses each route really returns while the
+ * gate is shut: the console is signed in and serving, and `/health` is the
+ * liveness probe a supervisor keeps calling throughout.
+ */
 test("the latch is not consulted for the routes an operator recovers through", async () => {
-  const { store, latch, get, release } = await harness();
+  const { store, latch, get, login, release } = await harness();
   release();
+  const cookie = await login();
   await latch.close(2_000);
 
-  for (const path of ["/health", "/api/status", "/api/database"]) {
-    expect((await get(path)).status).not.toBe(503);
-  }
+  expect((await get("/health")).status).toBe(200);
+  expect((await get("/api/status")).status).toBe(200);
+  expect((await get("/api/database", cookie)).status).toBe(200);
+  expect((await get("/api/lifecycle", cookie)).status).toBe(200);
+
+  // And unauthenticated is still unauthenticated: the gate did not become the
+  // reason a request was refused.
+  expect((await get("/api/database")).status).toBe(401);
 
   store.close();
 });

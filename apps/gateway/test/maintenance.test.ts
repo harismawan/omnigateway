@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import type { DatabaseDeps } from "@omni/control";
 import type { Store } from "@omni/store";
 import { memoryStore, requestLog, seedCredential } from "@omni/testkit";
-import { pruneLogs } from "../src/maintenance.ts";
+import { pruneFiles, pruneLogs } from "../src/maintenance.ts";
 
 const NOW = 30 * 24 * 60 * 60 * 1000;
 
@@ -57,6 +58,87 @@ test("the rollup survives log pruning and is swept on its own horizon", async ()
   expect((await store.usage.recent(10)).map((l) => l.id)).toEqual(["new"]);
   const days = await store.usage.aggregate({ since: 0, grain: "daily", groupBy: "day" });
   expect(days.map((row) => row.requests)).toEqual([1, 1]);
+});
+
+/**
+ * The other half of the sweep: files, rather than rows.
+ *
+ * Snapshot retention ran only on the way out of a create, so an installation
+ * that stopped taking snapshots never expired one and a lowered `keepLatest`
+ * did nothing until the next create — while the panel says both apply on the
+ * hourly sweep. Staging files had nothing sweeping them at all.
+ */
+describe("pruneFiles", () => {
+  const DB = "/srv/omni/omnigateway.db";
+  const SNAPSHOTS = "/srv/omni/snapshots";
+  const AT = Date.parse("2026-08-18T04:12:03.114Z");
+  const DAY = 24 * 60 * 60 * 1000;
+
+  const snapshotName = (at: number, reason = "manual") =>
+    `db_${new Date(at).toISOString().replaceAll(":", "-").replaceAll(".", "-")}_${reason}.sqlite`;
+
+  /** A filesystem that is a map, so the sweep is exercised and nothing is. */
+  async function deps(files: Record<string, number>, now: number): Promise<DatabaseDeps> {
+    const map = new Map(Object.entries(files));
+    const store = await memoryStore();
+    return {
+      store: { ...store, databasePath: DB },
+      now: () => now,
+      fs: {
+        readdir: (dir) =>
+          [...map.keys()]
+            .filter((path) => path.startsWith(`${dir}/`))
+            .map((path) => path.slice(dir.length + 1)),
+        stat: (path) => {
+          const size = map.get(path);
+          return size === undefined ? null : { size, mtimeMs: AT };
+        },
+        unlink: (path) => {
+          map.delete(path);
+        },
+        rename: () => {
+          throw new Error("the sweep does not move files");
+        },
+        copyFile: () => {
+          throw new Error("the sweep does not copy files");
+        },
+        mkdir: () => {
+          throw new Error("the sweep does not create directories");
+        },
+        realpath: (path) => (map.has(path) ? path : null),
+        freeBytes: () => null,
+        dirBytes: () => 0,
+      },
+    };
+  }
+
+  test("expires snapshots the saved policy no longer covers, with no create to trigger it", async () => {
+    const d = await deps(
+      {
+        [DB]: 4_096,
+        [`${SNAPSHOTS}/${snapshotName(AT - 40 * DAY)}`]: 100,
+        [`${SNAPSHOTS}/${snapshotName(AT - 39 * DAY)}`]: 100,
+        [`${SNAPSHOTS}/${snapshotName(AT - 1 * DAY)}`]: 100,
+      },
+      AT,
+    );
+    await d.store.config.putSettings({ snapshotKeepLatest: 5, snapshotMaxAgeDays: 30 });
+
+    expect(await pruneFiles(d)).toEqual({ snapshots: 2, staging: 0 });
+  });
+
+  test("removes the staging files a refused import and a failed swap leave behind", async () => {
+    const d = await deps(
+      {
+        [DB]: 4_096,
+        "/srv/omni/omni-import-6f1b.sqlite.part": 2_000,
+        [`${DB}.incoming`]: 2_000,
+      },
+      AT + 5 * 60 * 60 * 1000,
+    );
+
+    expect(await pruneFiles(d)).toEqual({ snapshots: 0, staging: 2 });
+  });
 });
 
 /** A clock far enough from the epoch that retention may reach backwards. */

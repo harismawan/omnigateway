@@ -257,9 +257,16 @@ the orphan sweep above collects files the restored `bodies` table no longer
 references, and a row whose file is gone reads back as *captured, then lost*
 rather than raising.
 Retention — `keepLatest` and `maxAgeDays`, both enforced, newest always kept —
-prunes when a snapshot is written rather than on the hourly sweep, and the forced
-copy taken on the way into a restore skips the prune entirely: the undo for an
-operation must not be deletable by the policy that operation runs under.
+prunes when a snapshot is written *and* on the hourly sweep. Both, because the
+create path alone is not a policy: an installation that stops taking snapshots
+never expires one, and lowering `keepLatest` does nothing until somebody happens
+to take another. The forced copy taken on the way into a restore skips the prune
+during its own creation and stays exempt from every later one, because the undo
+for an operation must not be deletable by the policy that operation runs under —
+nor by ordinary housekeeping five manual snapshots later. The same sweep removes
+staging files no operation is holding any more: an upload a refused import wrote,
+and the `${db}.incoming` a swap that failed after its rename left behind. Both
+are database-sized and nothing else looks at that directory.
 
 Restoring one replaces the file every repo reads from, inside the process that is
 reading it. Three pieces make that survivable.
@@ -303,20 +310,42 @@ flowchart TD
   latch --> insp["inspect candidate<br/><b>read-only, separate handle</b><br/>quick_check + migration-001 tables"]
   insp -- "corrupt, or not ours" --> abort(["BAD_REQUEST<br/><i>live database untouched</i><br/>latch reopens"])
   insp -- ok --> undo["pre-restore snapshot<br/><i>forced, exempt from retention</i>"]
-  undo --> swap["stage beside the live file · close handle<br/>unlink stale -wal/-shm · rename into place · reopen()"]
-  swap -- fails --> wedged(["<b>SwapFailedError</b><br/>latch stays shut, /v1 stays refused<br/><i>pre-restore id logged</i>"])
+  undo --> stage["stage beside the live file<br/><i>nothing closed yet</i>"]
+  stage -- "no room" --> abort
+  stage --> swap["close handle · unlink stale -wal/-shm<br/>rename into place · reopen()"]
+  swap -- fails --> wedged(["<b>SwapFailedError</b><br/>best-effort reopen, then latch stays shut<br/><i>pre-restore id logged</i>"])
   swap -- ok --> inval["invalidate the routing snapshot<br/>end admin sessions <i>iff</i> the password hash changed"]
   inval --> open(["latch reopens"])
 ```
 
 The error seam is the distinction worth internalizing. Everything before the swap
 — a file that fails `quick_check`, a file that is a database but not one of ours,
-no room on disk for the undo — fails with the live database untouched, and the
-latch reopens immediately. A failure *during* the swap raises `SwapFailedError`,
-and the gateway deliberately does not reopen: the file it would serve from is in
-an unknown state, and refusing client traffic beats answering out of a
-half-swapped database. `/api/*` is still up, which is how an operator reaches the
-pre-restore snapshot named in the log line.
+no room on disk for the undo, **no room for the staging copy** — fails with the
+live database untouched, and the latch reopens immediately. The staging copy in
+particular sits outside the swap's `try`, because a full disk is where it
+actually fails and it fails having moved nothing: classing that as a failed swap
+would refuse `/v1` until an operator restarted the process, over a database that
+was never opened.
+
+A failure *during* the swap raises `SwapFailedError`, and the gateway
+deliberately leaves the latch shut: the file it would serve from is in an unknown
+state, and refusing client traffic beats answering out of a half-swapped
+database. The handle itself is reopened on the way out, best effort, and the
+error carries whether that worked — because both halves of the documented
+recovery run through it. `GET /api/database` reads PRAGMAs through that handle
+and a second attempt takes its own undo snapshot through it, so a swap that left
+the database closed would leave the panel blank and turn the retry into a
+different, unrecognised failure. `/api/*` is still up, which is how an operator
+reaches the pre-restore snapshot named in the log line.
+
+The latch is reopened only by the call that shut it, and only on a failure. Two
+mutating requests can overlap — a double-clicked button, two tabs — and the
+single-flight guard that refuses the second lives *inside* the operation, which
+the gateway reaches only after closing the latch. Without that rule the refused
+request reopens the gate while the first is mid-swap, which is precisely the
+window the latch exists to cover. Success reopens unconditionally, because
+restoring the undo snapshot is the documented way out of a failed swap and it has
+to end that outage rather than inherit it.
 
 The required-tables check is the set migration 001 creates, not today's schema.
 `openDb` migrates a snapshot forward on the way in, so asserting the current
@@ -326,8 +355,11 @@ Two smaller placements carry weight. The candidate is copied to a staging name
 *before* the handle closes, so the window with no database open is a rename and
 not a file copy. And an uploaded database is streamed to a temp file beside the
 live one rather than into `/tmp`, because the swap renames that file into place
-and a rename across filesystems fails — which would turn an ordinary import into
-a `SwapFailedError` and wedge the latch shut for no reason at all. The stale
+and a rename across filesystems fails. That upload is bounded twice: by the byte
+cap this gateway will accept at all, and by what the disk can take with room left
+for the undo snapshot the import is about to write — the same precheck
+`createSnapshot` runs, on the one path that accepts operator-supplied bytes. The
+stale
 `-wal` and `-shm` go while the handle is shut: they belong to the file being
 replaced, and SQLite reopening a new database beside another database's
 write-ahead log is how a restore becomes corruption.
@@ -361,7 +393,7 @@ flowchart LR
 
   oauth["<b>OAuth refresh</b><br/>every 60s"] --> oauthJob["renew inside lead window<br/>disable if expired, no refresh token"]
   quota["<b>Quota poller</b><br/>every quotaPollIntervalMs"] --> quotaJob["ask providers what is left<br/><i>failed probe ⇒ unknown, never disabled</i>"]
-  maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs at retention<br/>prune quota_samples at retention<br/>prune usage_daily at 400d<br/>prune body rows at retention, cap at 100k<br/>sweep artifact files with no row"]
+  maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs at retention<br/>prune quota_samples at retention<br/>prune usage_daily at 400d<br/>prune body rows at retention, cap at 100k<br/>sweep artifact files with no row<br/>prune snapshots at retention<br/>sweep staging files older than 1h"]
 
   oauthJob -.-> oauth
   quotaJob -.-> quota

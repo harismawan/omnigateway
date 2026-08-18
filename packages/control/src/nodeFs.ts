@@ -2,6 +2,7 @@ import {
   copyFileSync,
   mkdirSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statfsSync,
@@ -75,6 +76,15 @@ export function nodeDatabaseFs(): DatabaseDeps["fs"] {
     copyFile: (from, to) => copyFileSync(from, to),
     mkdir: (dir) => {
       mkdirSync(dir, { recursive: true });
+    },
+    realpath: (path) => {
+      try {
+        return realpathSync(path);
+      } catch {
+        // Not there, or a link with nothing on the end of it. Either way there
+        // is no real path to contain, and the caller reports the absence.
+        return null;
+      }
     },
     freeBytes: (dir) => {
       try {

@@ -1,4 +1,4 @@
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { GatewayError } from "@omni/ir";
 import { bodiesDirFor, type DatabaseStats, type MaintenanceRepo, type Settings } from "@omni/store";
 import { parseOrThrow, retentionSchema } from "./schemas.ts";
@@ -18,6 +18,28 @@ async function withExclusive<T>(label: string, operation: () => Promise<T>): Pro
   if (exclusive !== null) {
     throw new GatewayError("CONFLICT", `${exclusive} is already running on this database`);
   }
+  exclusive = label;
+  try {
+    return await operation();
+  } finally {
+    exclusive = null;
+  }
+}
+
+/**
+ * The same lock, for a caller that would rather step aside than fail.
+ *
+ * The maintenance sweep is the one: it runs hourly, it has nothing to say about
+ * a restore in progress, and an error every time the two coincided would be an
+ * error about a condition that resolves itself before the next tick. Returns
+ * null when the lock was busy, which is distinguishable from any result an
+ * operation here returns.
+ */
+async function withExclusiveOrSkip<T>(
+  label: string,
+  operation: () => Promise<T>,
+): Promise<T | null> {
+  if (exclusive !== null) return null;
   exclusive = label;
   try {
     return await operation();
@@ -67,6 +89,8 @@ export type DatabaseDeps = {
     copyFile: (from: string, to: string) => void;
     /** Creates a directory and its parents; an existing one is fine. */
     mkdir: (dir: string) => void;
+    /** Every symlink resolved, or null when the path is not there. */
+    realpath: (path: string) => string | null;
     /** Free space on the filesystem holding `dir`, or null when unknowable. */
     freeBytes: (dir: string) => number | null;
     /** Recursive size of a directory tree. Zero when it does not exist. */
@@ -127,11 +151,25 @@ function parseSnapshotName(name: string): { at: number; reason: string } | null 
  * assertion then re-derives the answer from the resolved path, so a future
  * loosening of the pattern — a reason with a dot in it, say — cannot quietly
  * become a way to name the live database, which is one `..` away from here.
+ *
+ * Neither is enough on its own, and neither sees a symlink: `resolve` collapses
+ * `..` textually and stops there, so a link inside the snapshots directory
+ * names a path that is contained on paper and is not on disk. The third check
+ * asks the filesystem where both really are — the same `realpathSync`
+ * containment the static file route uses in `app.ts`, for the same reason.
+ * A directory that is itself a link is fine; a file that leaves it is not.
  */
 function snapshotPath(deps: DatabaseDeps, id: string): string {
   const dir = resolve(snapshotsDir(deps));
   const path = resolve(dir, id);
   if (parseSnapshotName(id) === null || dirname(path) !== dir) {
+    throw new GatewayError("BAD_REQUEST", "invalid snapshot id");
+  }
+
+  // A path that does not resolve does not exist yet, and the callers that care
+  // report that themselves. Nothing to contain until there is.
+  const real = deps.fs.realpath(path);
+  if (real !== null && dirname(real) !== (deps.fs.realpath(dir) ?? dir)) {
     throw new GatewayError("BAD_REQUEST", "invalid snapshot id");
   }
   return path;
@@ -199,8 +237,12 @@ const DAY_MS = 86_400_000;
  * a little over it is honest headroom. Filling the filesystem an installation is
  * running on is a worse outcome than a refused backup, and it is the failure a
  * scheduled snapshot would keep repeating.
+ *
+ * Exported because a caller staging an import has to reserve the same room for
+ * the undo snapshot that import is about to take, and two spellings of one
+ * headroom is a budget that does not add up.
  */
-const SNAPSHOT_HEADROOM = 1.1;
+export const SNAPSHOT_HEADROOM = 1.1;
 
 function retentionOf(settings: Settings): RetentionPolicy {
   return { keepLatest: settings.snapshotKeepLatest, maxAgeDays: settings.snapshotMaxAgeDays };
@@ -215,14 +257,101 @@ function retentionOf(settings: Settings): RetentionPolicy {
  * numbers say, because an installation with no snapshot at all is the state
  * retention exists to prevent rather than to cause.
  */
-function applyRetention(deps: DatabaseDeps, policy: RetentionPolicy, now: number): void {
+function applyRetention(deps: DatabaseDeps, policy: RetentionPolicy, now: number): number {
   const dir = snapshotsDir(deps);
   const cutoff = now - policy.maxAgeDays * DAY_MS;
-  listSnapshots(deps).forEach((snapshot, index) => {
+  const snapshots = listSnapshots(deps);
+  // The only undo there is for the restore it preceded, and `force` only kept
+  // it alive while it was being written. Ordinary housekeeping running an hour
+  // or five manual snapshots later must not be what deletes it.
+  const undo = snapshots.find((snapshot) => snapshot.reason === "preRestore")?.id;
+
+  let removed = 0;
+  snapshots.forEach((snapshot, index) => {
     if (index === 0) return;
+    if (snapshot.id === undo) return;
     if (index < policy.keepLatest && snapshot.createdAt >= cutoff) return;
     deps.fs.unlink(join(dir, snapshot.id));
+    removed++;
   });
+  return removed;
+}
+
+/**
+ * Retention on a schedule, rather than only on the way out of a create.
+ *
+ * Called from the create path *and* from the maintenance sweep, because
+ * otherwise neither bound is real: `maxAgeDays` expires nothing on an
+ * installation that has stopped taking snapshots, and a lowered `keepLatest`
+ * prunes nothing until somebody happens to take another one. The policy an
+ * operator saved has to run whether or not they come back.
+ */
+export async function pruneSnapshots(deps: DatabaseDeps): Promise<number> {
+  const removed = await withExclusiveOrSkip("a snapshot sweep", async () =>
+    applyRetention(deps, retentionOf(await deps.store.config.getSettings()), deps.now()),
+  );
+  return removed ?? 0;
+}
+
+/** The prefix a streamed import is staged under, before it is anything else. */
+const IMPORT_STAGING_PREFIX = "omni-import-";
+/** And the suffix, which is what says it is not a database anyone may open. */
+const IMPORT_STAGING_SUFFIX = ".sqlite.part";
+/** What a candidate is called for the instant between the close and the rename. */
+const INCOMING_SUFFIX = ".incoming";
+
+/**
+ * How long a staging file must have sat untouched before the sweep takes it.
+ *
+ * The mtime is the signal and not the name, because the file that must survive
+ * this is the one an upload is still writing into — a couple of gibibytes over
+ * a slow link can outlast any wall-clock bound worth setting, and its mtime
+ * moves with every chunk. An hour is comfortably longer than a swap, which is a
+ * rename, and comfortably shorter than leaving a database-sized file on an
+ * operator's disk until they notice it.
+ */
+const STAGING_MAX_AGE_MS = 60 * 60 * 1000;
+
+/** Where the caller of `importSnapshot` should put the bytes it is given. */
+export function stagedImportPath(deps: DatabaseDeps, token: string): string {
+  return join(
+    dirname(deps.store.databasePath),
+    `${IMPORT_STAGING_PREFIX}${token}${IMPORT_STAGING_SUFFIX}`,
+  );
+}
+
+/**
+ * Removes staging files no operation is holding any more.
+ *
+ * Two of them exist and both are the size of a database: the upload a refused
+ * import wrote, and the `${db}.incoming` a swap that failed after its rename
+ * left behind. Nothing else looks at the installation directory, so without
+ * this they accumulate silently on exactly the disk the gateway runs from.
+ *
+ * Unguarded by the exclusive lock, deliberately: the age bound already excludes
+ * everything an operation could be holding, and a sweep that had to wait for
+ * one would be a sweep that skips the tick after a long restore.
+ */
+export function sweepStaging(deps: DatabaseDeps): number {
+  const live = deps.store.databasePath;
+  const dir = dirname(live);
+  const incoming = `${basename(live)}${INCOMING_SUFFIX}`;
+  const staleBefore = deps.now() - STAGING_MAX_AGE_MS;
+
+  let removed = 0;
+  for (const entry of deps.fs.readdir(dir)) {
+    const staged =
+      entry === incoming ||
+      (entry.startsWith(IMPORT_STAGING_PREFIX) && entry.endsWith(IMPORT_STAGING_SUFFIX));
+    if (!staged) continue;
+
+    const path = join(dir, entry);
+    const stat = deps.fs.stat(path);
+    if (stat === null || stat.mtimeMs >= staleBefore) continue;
+    deps.fs.unlink(path);
+    removed++;
+  }
+  return removed;
 }
 
 /**
@@ -296,6 +425,17 @@ export class SwapFailedError extends Error {
   constructor(
     readonly preRestoreSnapshotId: string,
     override readonly cause: unknown,
+    /**
+     * Whether the handle was opened again before this was raised.
+     *
+     * The swap closes the database and a failure between there and the reopen
+     * leaves nothing holding it open, so the recovery this error points at —
+     * read the panel, restore `preRestoreSnapshotId` — would run against a dead
+     * handle. The reopen is attempted on the way out and can itself fail, and a
+     * caller that has to decide what to keep serving needs to know which
+     * happened rather than assume the better one.
+     */
+    readonly reopened: boolean,
   ) {
     super("the database swap failed and the database may be incomplete");
     this.name = "SwapFailedError";
@@ -320,6 +460,26 @@ export type RestoreResult = {
   adminPasswordChanged: boolean;
 };
 
+/** How many table names a refusal will name before it starts counting. */
+const NAMED_TABLES = 5;
+
+/**
+ * What a candidate database actually holds, for a refusal an operator can act on.
+ *
+ * "Not one of ours" alone does not say which file they picked, and the likely
+ * mistake is the wrong database from the right host. `inspect` already reads
+ * this list to decide whether the file is ours, so naming it costs nothing and
+ * answers the only question the refusal raises. Schema identifiers and never
+ * row contents, and bounded, because a foreign database can have any number of
+ * tables and an error message cannot.
+ */
+function describeTables(tables: readonly string[]): string {
+  if (tables.length === 0) return "it has no tables at all";
+  const named = tables.slice(0, NAMED_TABLES);
+  const rest = tables.length - named.length;
+  return `it has ${named.join(", ")}${rest > 0 ? ` and ${rest} more` : ""}`;
+}
+
 /**
  * Puts `candidate` in place of the live database.
  *
@@ -341,7 +501,7 @@ async function swapIn(
     throw new GatewayError(
       "BAD_REQUEST",
       inspection.quickCheck === "ok"
-        ? "that file is a database, but not one of ours"
+        ? `that file is a database, but not one of ours: ${describeTables(inspection.tables)}`
         : `that file failed its integrity check: ${inspection.quickCheck}`,
     );
   }
@@ -357,17 +517,41 @@ async function swapIn(
 
   const live = deps.store.databasePath;
   const staged = `${live}.incoming`;
+
+  // Outside the try below, and that placement is the whole point of it.
+  // Copying a snapshot beside the live database is where a full disk actually
+  // shows up, and it happens with nothing closed and nothing moved — the live
+  // file is byte for byte what it was. Inside the try it would be reported as a
+  // failed swap, which is the one failure a caller answers by refusing client
+  // traffic until the process is restarted.
   try {
     if (candidate.consume) deps.fs.rename(candidate.path, staged);
     else deps.fs.copyFile(candidate.path, staged);
+  } catch (error) {
+    // A partial copy is a database-shaped file nobody asked for.
+    deps.fs.unlink(staged);
+    throw error;
+  }
 
+  try {
     deps.store.close();
     deps.fs.unlink(`${live}-wal`);
     deps.fs.unlink(`${live}-shm`);
     deps.fs.rename(staged, live);
     await deps.store.reopen();
   } catch (error) {
-    throw new SwapFailedError(preRestoreSnapshot.id, error);
+    // Best effort, and unconditional: whatever file is at `live` now, a closed
+    // handle serves nothing and hides everything. The panel that reports this
+    // failure and the second attempt an operator makes from it both read
+    // through this store, so leaving it shut turns one bad window into an
+    // outage that only a process restart ends.
+    let reopened = true;
+    try {
+      await deps.store.reopen();
+    } catch {
+      reopened = false;
+    }
+    throw new SwapFailedError(preRestoreSnapshot.id, error, reopened);
   }
 
   // After the reopen rather than inside the try: the swap is over and succeeded,

@@ -9,10 +9,12 @@ import {
   importSnapshot,
   listSnapshots,
   MAX_IMPORT_BYTES,
+  pruneSnapshots,
   putRetention,
   resolveSnapshotForDownload,
   restoreSnapshot,
   SwapFailedError,
+  sweepStaging,
   vacuum,
 } from "../src/database.ts";
 
@@ -126,6 +128,8 @@ function deps(
         files.set(to, files.get(from) ?? 0);
       },
       mkdir: (dir) => log.push(`mkdir:${dir}`),
+      // No links unless a test says so; a path that exists resolves to itself.
+      realpath: (path) => (files.has(path) ? path : null),
       freeBytes: () => (input.freeBytes === undefined ? 10 ** 12 : input.freeBytes),
       dirBytes: () => 0,
     },
@@ -221,6 +225,41 @@ describe("snapshot ids are a closed pattern, not a path", () => {
     expect(() => resolveSnapshotForDownload(deps({ files }), missing)).toThrow(GatewayError);
   });
 
+  /**
+   * The check the pattern and the lexical containment both pass.
+   *
+   * `resolve` collapses `..` and nothing else, so a symlink inside the
+   * snapshots directory names a path that is textually contained and really is
+   * not — and the live database is one link away. Reaching this needs local
+   * write access to the installation directory, but the guard is the one thing
+   * standing between a caller-supplied id and `unlink`, so it resolves what the
+   * filesystem would resolve rather than what the string looks like.
+   */
+  test("refuses an id whose file is a symlink pointing out of the directory", () => {
+    const d = deps({ files });
+    d.fs.realpath = (path) => (path === `${SNAPSHOTS}/${existing}` ? DB : path);
+
+    expect(() => resolveSnapshotForDownload(d, existing)).toThrow(GatewayError);
+    expect(() => deleteSnapshot(d, existing)).toThrow(GatewayError);
+    expect(d.files.has(DB)).toBe(true);
+    expect(d.log).toEqual([]);
+  });
+
+  test("allows a snapshots directory that is itself a symlink", () => {
+    // Containment is against where the directory really is, not where it is
+    // spelled: an operator who points `snapshots/` at another volume has not
+    // done anything wrong.
+    const d = deps({ files });
+    d.fs.realpath = (path) =>
+      path === SNAPSHOTS
+        ? "/mnt/backups"
+        : path === `${SNAPSHOTS}/${existing}`
+          ? `/mnt/backups/${existing}`
+          : path;
+
+    expect(resolveSnapshotForDownload(d, existing).path).toBe(`${SNAPSHOTS}/${existing}`);
+  });
+
   test("deletes a real snapshot and nothing else", () => {
     const d = deps({ files });
     deleteSnapshot(d, existing);
@@ -273,6 +312,147 @@ describe("retention runs after a create", () => {
     const d = deps({ files: older, settings: { snapshotKeepLatest: 1, snapshotMaxAgeDays: 1 } });
     await createSnapshot(d, { reason: "preRestore", force: true });
     expect(listSnapshots(d)).toHaveLength(4);
+  });
+
+  /**
+   * The undo has to survive the *next* policy run too, not only its own.
+   *
+   * `force` skips retention while the pre-restore snapshot is being written and
+   * nothing after that treats it differently, so at the default `keepLatest` a
+   * handful of manual snapshots is enough to delete the only way back from a
+   * restore taken minutes earlier. It is described everywhere as the recovery
+   * path; ordinary housekeeping must not be what removes it.
+   */
+  test("the newest pre-restore snapshot survives later retention runs", async () => {
+    const undo = name(AT - 5 * DAY, "preRestore");
+    const d = deps({
+      files: {
+        [DB]: 4_096,
+        [`${SNAPSHOTS}/${undo}`]: 100,
+        [`${SNAPSHOTS}/${name(AT - 4 * DAY)}`]: 100,
+        [`${SNAPSHOTS}/${name(AT - 3 * DAY)}`]: 100,
+        [`${SNAPSHOTS}/${name(AT - 2 * DAY)}`]: 100,
+      },
+      settings: { snapshotKeepLatest: 2, snapshotMaxAgeDays: 1 },
+    });
+
+    await createSnapshot(d, { reason: "manual" });
+
+    const kept = listSnapshots(d).map((s) => s.id);
+    expect(kept).toContain(undo);
+    // And it is an exemption rather than a reprieve for everything: every
+    // manual copy past the policy is still gone, age bound included.
+    expect(kept).toEqual([name(AT), undo]);
+  });
+
+  test("exempts only the newest pre-restore snapshot, not every one ever taken", async () => {
+    const newer = name(AT - 1 * DAY, "preRestore");
+    const older = name(AT - 9 * DAY, "preRestore");
+    const d = deps({
+      files: { [DB]: 4_096, [`${SNAPSHOTS}/${newer}`]: 100, [`${SNAPSHOTS}/${older}`]: 100 },
+      settings: { snapshotKeepLatest: 1, snapshotMaxAgeDays: 2 },
+    });
+
+    await createSnapshot(d, { reason: "manual" });
+    expect(listSnapshots(d).map((s) => s.id)).toEqual([name(AT), newer]);
+  });
+});
+
+/**
+ * Retention on a schedule, which is the only way either bound ever fires on an
+ * installation that has stopped taking snapshots.
+ *
+ * `maxAgeDays` expires nothing and a lowered `keepLatest` prunes nothing while
+ * the only caller of retention is the create path, so the policy an operator
+ * saved is a policy that never runs. The dashboard tells them it runs on the
+ * hourly sweep; this is that.
+ */
+describe("pruneSnapshots", () => {
+  const older = {
+    [DB]: 4_096,
+    [`${SNAPSHOTS}/${name(AT - 3 * DAY)}`]: 100,
+    [`${SNAPSHOTS}/${name(AT - 2 * DAY)}`]: 100,
+    [`${SNAPSHOTS}/${name(AT - 1 * DAY)}`]: 100,
+  };
+
+  test("applies the count bound without waiting for a create", async () => {
+    const d = deps({ files: older, settings: { snapshotKeepLatest: 2, snapshotMaxAgeDays: 365 } });
+    expect(await pruneSnapshots(d)).toBe(1);
+    expect(listSnapshots(d).map((s) => s.createdAt)).toEqual([AT - DAY, AT - 2 * DAY]);
+  });
+
+  test("applies the age bound without waiting for a create", async () => {
+    const d = deps({
+      files: older,
+      settings: { snapshotKeepLatest: 50, snapshotMaxAgeDays: 2 },
+      now: AT,
+    });
+    expect(await pruneSnapshots(d)).toBe(1);
+    expect(listSnapshots(d).map((s) => s.createdAt)).toEqual([AT - DAY, AT - 2 * DAY]);
+  });
+
+  test("steps aside rather than failing when an operation holds the database", async () => {
+    // Hourly, and with nothing to say about a restore in progress. An error
+    // line every time the two coincided would be noise about a condition that
+    // resolves itself before the next tick.
+    const d = deps({ files: older, settings: { snapshotKeepLatest: 1, snapshotMaxAgeDays: 365 } });
+    let release = () => {};
+    d.store.maintenance.vacuum = () => new Promise<void>((resolve) => (release = resolve));
+
+    const running = vacuum(d);
+    expect(await pruneSnapshots(d)).toBe(0);
+    expect(listSnapshots(d)).toHaveLength(3);
+
+    release();
+    await running;
+  });
+});
+
+/**
+ * The files an interrupted operation leaves beside the database.
+ *
+ * A refused import leaves its upload, and a failed swap after the rename leaves
+ * `${db}.incoming`. Both are database-sized and nothing else sweeps the
+ * installation directory, so they go on the same tick as everything else.
+ */
+describe("sweepStaging", () => {
+  const HOUR = 3_600_000;
+  const staged = `${DB.slice(0, DB.lastIndexOf("/"))}/omni-import-abc123.sqlite.part`;
+
+  test("removes an upload and an incoming file nothing has touched for an hour", () => {
+    const d = deps({
+      files: { [DB]: 4_096, [staged]: 900, [`${DB}.incoming`]: 2_000 },
+      now: AT + 2 * HOUR,
+    });
+    expect(sweepStaging(d)).toBe(2);
+    expect(d.files.has(staged)).toBe(false);
+    expect(d.files.has(`${DB}.incoming`)).toBe(false);
+  });
+
+  test("leaves a staging file an upload could still be writing into", () => {
+    // The mtime is the signal and not the name: a 2 GiB import over a slow link
+    // is still being written to, and sweeping it out from under the request
+    // that is streaming it would be the sweep causing the failure.
+    const d = deps({ files: { [DB]: 4_096, [staged]: 900 }, now: AT + 60_000 });
+    expect(sweepStaging(d)).toBe(0);
+    expect(d.files.has(staged)).toBe(true);
+  });
+
+  test("never takes the live database, its journal, or anything in snapshots", () => {
+    const d = deps({
+      files: {
+        [DB]: 4_096,
+        [`${DB}-wal`]: 900,
+        [`${DB}-shm`]: 32,
+        [`${SNAPSHOTS}/${name(AT - DAY)}`]: 100,
+      },
+      now: AT + 100 * DAY,
+    });
+    expect(sweepStaging(d)).toBe(0);
+    expect(d.log).toEqual([]);
+    expect([...d.files.keys()].sort()).toEqual(
+      [DB, `${DB}-wal`, `${DB}-shm`, `${SNAPSHOTS}/${name(AT - DAY)}`].sort(),
+    );
   });
 });
 
@@ -366,6 +546,42 @@ describe("restoreSnapshot", () => {
     expect(d.log).toEqual([`inspect:${SNAPSHOTS}/${id}`]);
   });
 
+  /**
+   * "Not one of ours" alone does not tell an operator which file they picked.
+   *
+   * The likely mistake is the wrong database from the right host, and `inspect`
+   * already reads the table list to decide `ok` — so the refusal says what it
+   * found rather than making them go and look. Schema identifiers only, from a
+   * file an authenticated admin supplied, and bounded so a database with two
+   * hundred tables does not become a two hundred item error message.
+   */
+  test("names what a foreign database holds, so the wrong file is recognisable", async () => {
+    const d = deps({
+      files,
+      inspect: { ok: false, quickCheck: "ok", tables: ["orders", "products", "users"], counts: {} },
+    });
+
+    const error = await restoreSnapshot(d, id).catch((thrown: unknown) => thrown);
+    expect((error as GatewayError).message).toContain("orders, products, users");
+  });
+
+  test("bounds the table list rather than printing a whole schema", async () => {
+    const tables = Array.from({ length: 30 }, (_, i) => `t${i}`);
+    const d = deps({ files, inspect: { ok: false, quickCheck: "ok", tables, counts: {} } });
+
+    const error = await restoreSnapshot(d, id).catch((thrown: unknown) => thrown);
+    const message = (error as GatewayError).message;
+    expect(message).toContain("t0, t1, t2, t3, t4 and 25 more");
+    expect(message).not.toContain("t6");
+  });
+
+  test("says so plainly when a candidate has no tables at all", async () => {
+    const d = deps({ files, inspect: { ok: false, quickCheck: "ok", tables: [], counts: {} } });
+
+    const error = await restoreSnapshot(d, id).catch((thrown: unknown) => thrown);
+    expect((error as GatewayError).message).toContain("no tables at all");
+  });
+
   test("rejects a traversing id before it inspects, snapshots, or closes anything", async () => {
     const d = deps({ files });
     expect(restoreSnapshot(d, "../omnigateway.db")).rejects.toThrow(GatewayError);
@@ -396,6 +612,30 @@ describe("restoreSnapshot", () => {
     expect((await restoreSnapshot(lost, id)).adminPasswordChanged).toBe(true);
   });
 
+  /**
+   * The likeliest failure of this whole feature, and the one that must not
+   * quiesce the gateway.
+   *
+   * Copying a multi-gigabyte snapshot beside the live database is where ENOSPC
+   * lands, and it lands before anything is closed: the live file is byte for
+   * byte what it was. Reporting that as a failed swap is what makes a caller
+   * refuse client traffic until an operator restarts the process, over a
+   * database that was never touched.
+   */
+  test("a staging copy that fails is an ordinary error, not a failed swap", async () => {
+    const d = deps({ files });
+    d.fs.copyFile = () => {
+      throw new Error("ENOSPC: no space left on device");
+    };
+
+    const error = await restoreSnapshot(d, id).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(SwapFailedError);
+    // Nothing was closed, so there is nothing to be unsure about.
+    expect(d.log).not.toContain("close");
+    expect(d.files.get(DB)).toBe(4_096);
+  });
+
   test("marks a failure inside the swap, so a caller can keep its latch closed", async () => {
     // The one genuinely bad window. Everything before the swap leaves the live
     // database untouched and is an ordinary error; this is not, and it has to be
@@ -405,6 +645,43 @@ describe("restoreSnapshot", () => {
       throw new Error("EXDEV");
     };
     expect(restoreSnapshot(d, id)).rejects.toThrow(SwapFailedError);
+  });
+
+  /**
+   * The recovery path has to be reachable, and it runs through the same handle.
+   *
+   * Once `close()` has run there is nothing on the failure path that opens the
+   * database again, so the panel an operator would read the failure on, and the
+   * second attempt they would make from it, both run against a dead handle. The
+   * reopen is best effort and says which it was, because a caller deciding
+   * whether to keep refusing client work should not have to guess.
+   */
+  test("reopens the handle after a failed swap, and says that it did", async () => {
+    const d = deps({ files });
+    d.fs.rename = () => {
+      throw new Error("EXDEV: cross-device link not permitted");
+    };
+
+    const error = await restoreSnapshot(d, id).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(SwapFailedError);
+    expect((error as SwapFailedError).reopened).toBe(true);
+    expect(d.log.at(-1)).toBe("reopen");
+  });
+
+  test("says so when the handle could not be reopened either", async () => {
+    const d = deps({ files });
+    d.fs.rename = () => {
+      throw new Error("EXDEV: cross-device link not permitted");
+    };
+    d.store.reopen = async () => {
+      throw new Error("unable to open database file");
+    };
+
+    const error = await restoreSnapshot(d, id).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(SwapFailedError);
+    expect((error as SwapFailedError).reopened).toBe(false);
+    // The original failure is still the one an operator is shown.
+    expect((error as SwapFailedError).cause).toBeInstanceOf(Error);
   });
 });
 

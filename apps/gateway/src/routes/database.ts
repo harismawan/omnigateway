@@ -1,4 +1,4 @@
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import {
   type AdminAuth,
   createSnapshot,
@@ -17,7 +17,9 @@ import {
   requestShutdown,
   resolveSnapshotForDownload,
   restoreSnapshot,
+  SNAPSHOT_HEADROOM,
   SwapFailedError,
+  stagedImportPath,
   vacuum,
 } from "@omni/control";
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
@@ -78,6 +80,23 @@ async function swap(
   operation: () => Promise<RestoreResult>,
 ): Promise<RestoreResult> {
   const startedAt = deps.now();
+  /**
+   * Whether this call is the one that shut the gate.
+   *
+   * Two mutating requests can overlap — a double-clicked button, two tabs, a
+   * restore and an import — and the single-flight guard that refuses the second
+   * one lives inside the operation, which the gateway only reaches after
+   * closing the latch. So the second call closes a latch that is already
+   * closed, fails without touching anything, and would otherwise reopen it
+   * while the first is between `close()` and `reopen()`. It is also how a
+   * failed swap stays quiesced through the ordinary errors an operator's next
+   * attempts may raise.
+   *
+   * Read before the close and never after: `close()` sets its flag
+   * synchronously, so there is no point between these two lines at which
+   * another request can run.
+   */
+  const closedHere = !deps.latch.isClosed();
   const quiesce = await deps.latch.close(deps.quiesceDeadlineMs ?? QUIESCE_DEADLINE_MS);
   if (!quiesce.drained) {
     logger.warn("client requests still in flight at the quiesce deadline", {
@@ -89,6 +108,13 @@ async function swap(
   try {
     const result = await operation();
     deps.snapshots?.invalidate();
+    // Unconditional, unlike the failure path: a swap that completed leaves a
+    // database that is known good, and that is the answer even when the latch
+    // was already shut by an earlier swap that failed. Restoring the undo
+    // snapshot is the documented recovery, and it has to end the outage rather
+    // than inherit it. Nothing can be mid-swap here — the single-flight guard
+    // in `@omni/control` refuses rather than queues, so a second operation that
+    // succeeds is one that started after the first released.
     deps.latch.open();
     logger.warn("database replaced", {
       snapshotId: result.preRestoreSnapshot.id,
@@ -124,13 +150,17 @@ async function swap(
       // half-swapped, and answering client traffic out of it is worse than
       // answering none. `/api/*` is still up, which is how an operator reaches
       // the snapshot named here.
-      logger.error("database swap failed; client requests stay refused", {
-        snapshotId: error.preRestoreSnapshotId,
-        reason: label,
-      });
+      logger.error(
+        error.reopened
+          ? "database swap failed; client requests stay refused"
+          : "database swap failed and the database could not be reopened; restart this process",
+        { snapshotId: error.preRestoreSnapshotId, reason: label },
+      );
       throw new GatewayError("INTERNAL", error.message);
     }
-    deps.latch.open();
+    // Only what this call shut. A failure that closed nothing has no business
+    // opening anything.
+    if (closedHere) deps.latch.open();
     throw error;
   }
 }
@@ -146,15 +176,47 @@ async function swap(
  * Staged beside the live database rather than in `/tmp` because the import path
  * renames it into place, and a rename across filesystems fails — which would
  * turn an ordinary import into a failed swap.
+ *
+ * Bounded twice over. The cap is what this gateway will accept at all; the
+ * budget is what the disk can take, which is the smaller number on any machine
+ * whose database is not already enormous. `createSnapshot` demands room before
+ * `VACUUM INTO` for exactly this reason, and this is the path that accepts
+ * operator-supplied bytes — without it, staging fills the filesystem the
+ * gateway is running from and the import then asks for room for its undo
+ * snapshot on top.
  */
-async function stageUpload(deps: DatabaseRouteDeps, request: Request): Promise<string> {
+async function stageUpload(
+  deps: DatabaseRouteDeps,
+  database: DatabaseDeps,
+  request: Request,
+): Promise<string> {
   const cap = deps.maxImportBytes ?? MAX_IMPORT_BYTES;
-  const path = join(
-    dirname(deps.store.databasePath),
-    `omni-import-${crypto.randomUUID()}.sqlite.part`,
-  );
+  // Named by `@omni/control` rather than here, because the maintenance sweep
+  // has to recognise what this leaves behind and two spellings of one filename
+  // is a sweep that silently stops finding anything.
+  const path = stagedImportPath(database, crypto.randomUUID());
   const body = request.body;
   if (body === null) throw new GatewayError("BAD_REQUEST", "a database import needs a body");
+
+  const dir = dirname(deps.store.databasePath);
+  const free = deps.fs.freeBytes(dir);
+  // The undo snapshot this import will take of the live database lands on the
+  // same filesystem, so it is not room the upload may have.
+  const reserve = Math.ceil((deps.fs.stat(deps.store.databasePath)?.size ?? 0) * SNAPSHOT_HEADROOM);
+  // Null is "this filesystem will not say", which is not the same as "no room".
+  const budget = free === null ? cap : Math.max(0, free - reserve);
+  const diskBound = budget < cap;
+  const limit = diskBound ? budget : cap;
+  /** Whichever of the two bounds this upload actually ran into. */
+  const refuse = () =>
+    diskBound
+      ? new GatewayError("CONFLICT", "not enough free disk space to stage a database import")
+      : new GatewayError("BAD_REQUEST", `a database import may not exceed ${cap} bytes`);
+
+  // A declared length is refused before the sink is opened; a chunked body
+  // declares none, which is why the same limit is enforced on what lands.
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) throw refuse();
 
   const sink = Bun.file(path).writer();
   const reader = body.getReader();
@@ -164,9 +226,9 @@ async function stageUpload(deps: DatabaseRouteDeps, request: Request): Promise<s
       const chunk = await reader.read();
       if (chunk.done === true) break;
       written += chunk.value.byteLength;
-      if (written > cap) {
+      if (written > limit) {
         await reader.cancel();
-        throw new GatewayError("BAD_REQUEST", `a database import may not exceed ${cap} bytes`);
+        throw refuse();
       }
       sink.write(chunk.value);
     }
@@ -278,8 +340,20 @@ export function databaseRoutes(deps: DatabaseRouteDeps) {
        */
       .post("/api/database/import", async ({ request }) => {
         await requireAdmin(request, deps.admin);
-        const path = await stageUpload(deps, request);
-        return swap(deps, logger, "import", () => importSnapshot(database, { path }));
+        const path = await stageUpload(deps, database, request);
+        try {
+          return await swap(deps, logger, "import", () => importSnapshot(database, { path }));
+        } catch (error) {
+          // `@omni/control` removes the staged file on every path where it took
+          // ownership of it, but the single-flight guard rejects *before* the
+          // operation body — so a refused import would otherwise leave up to
+          // the byte cap sitting beside the database with nothing to sweep it.
+          // Unlinking a path that is already gone is a no-op, which is what
+          // makes this safe to do on every failure rather than on a guess about
+          // which one it was.
+          deps.fs.unlink(path);
+          throw error;
+        }
       })
 
       .put("/api/database/retention", async ({ request }) => {
