@@ -417,6 +417,17 @@ export type Settings = {
    * store.
    */
   bodyLoggingCaptureStreamChunks: boolean;
+  /**
+   * How many database snapshots survive regardless of age.
+   *
+   * Bounded rather than optional. A snapshot is a whole copy of the database, so
+   * an unbounded directory of them is a disk-full incident waiting for a busy
+   * week; the reference implementation this feature follows added retention only
+   * after 48,999 files against a 5 MB database.
+   */
+  snapshotKeepLatest: number;
+  /** How long a snapshot outside the keep-latest window is kept. */
+  snapshotMaxAgeDays: number;
 };
 
 export interface CredentialRepo {
@@ -774,4 +785,6 @@ export const DEFAULT_SETTINGS: Settings = {
   rtkEnabled: false,
   bodyLoggingEnabled: false,
   bodyLoggingCaptureStreamChunks: false,
+  snapshotKeepLatest: 5,
+  snapshotMaxAgeDays: 30,
 };

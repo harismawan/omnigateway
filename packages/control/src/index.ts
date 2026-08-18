@@ -47,8 +47,39 @@ export {
   refreshCredential,
   removeCredential,
 } from "./credentials.ts";
+export {
+  createSnapshot,
+  type DatabaseDeps,
+  type DatabaseOverview,
+  type DatabaseStore,
+  deleteSnapshot,
+  getDatabaseOverview,
+  importSnapshot,
+  listSnapshots,
+  MAX_IMPORT_BYTES,
+  putRetention,
+  type RestoreResult,
+  type RetentionPolicy,
+  resolveSnapshotForDownload,
+  restoreSnapshot,
+  SNAPSHOTS_DIRNAME,
+  type SnapshotInfo,
+  type SnapshotReason,
+  SwapFailedError,
+  snapshotsDir,
+  vacuum,
+} from "./database.ts";
 export { type DryRunCandidate, type DryRunResult, dryRun } from "./dryRun.ts";
 export { type ApiKeySummary, type CreatedKey, createKey, listKeys, revokeKey } from "./keys.ts";
+export {
+  DOCKERENV_PATH,
+  describeLifecycle,
+  type LifecycleCapability,
+  type LifecycleDeps,
+  requestRestart,
+  requestShutdown,
+  type Supervisor,
+} from "./lifecycle.ts";
 export {
   type ModelLimits,
   modelDisplayName,
@@ -94,6 +125,7 @@ export {
   parseOrThrow,
   providerIdSchema,
   requireDimension,
+  retentionSchema,
   settingsSchema,
 } from "./schemas.ts";
 export { getSettings, putSettings } from "./settings.ts";

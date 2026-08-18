@@ -136,6 +136,20 @@ export const keyCreateSchema = z
   })
   .strict();
 
+/**
+ * How many database snapshots to keep, and for how long.
+ *
+ * Both bounds are floored at one. Keeping zero snapshots deletes the undo for
+ * the operation that just took it, and an age of zero days expires a snapshot
+ * the moment it is written; neither is a policy an operator means to set.
+ */
+export const retentionSchema = z
+  .object({
+    keepLatest: z.number().int().min(1).max(100),
+    maxAgeDays: z.number().int().min(1).max(3_650),
+  })
+  .strict();
+
 export const settingsSchema = z.object({
   weights: z
     .object({
@@ -163,6 +177,17 @@ export const settingsSchema = z.object({
   bodyLoggingEnabled: z.boolean(),
   /** Raw SSE frames per attempt. Gated apart because it is far the largest. */
   bodyLoggingCaptureStreamChunks: z.boolean(),
+  /**
+   * The one pair of settings fields that may be omitted.
+   *
+   * Retention is edited from the database panel through its own operation, so a
+   * settings save from a client that has never heard of it carries neither
+   * field. Required, they would make every such save a `BAD_REQUEST`; defaulted,
+   * they would quietly reset an operator's policy on every unrelated save. Absent
+   * means "not mentioned", and `putSettings` merges rather than replaces.
+   */
+  snapshotKeepLatest: retentionSchema.shape.keepLatest.optional(),
+  snapshotMaxAgeDays: retentionSchema.shape.maxAgeDays.optional(),
 });
 
 /** Only these credential fields are operator-editable. Secrets are not. */

@@ -107,8 +107,12 @@ describe("SettingsBoard", () => {
     await waitFor(() => {
       const put = stub.calls.find((call) => call.init?.method === "PUT");
       expect(put?.url).toBe("/api/settings");
+      // Snapshot retention is not on this form and is not sent by it: the
+      // database panel owns that policy, and the settings schema leaves both
+      // fields optional so a save from here cannot reset them.
+      const { snapshotKeepLatest: _keep, snapshotMaxAgeDays: _age, ...sent } = settings;
       expect(JSON.parse(String(put?.init?.body))).toEqual({
-        ...settings,
+        ...sent,
         weights: { ...settings.weights, cost: 4 },
       });
     });

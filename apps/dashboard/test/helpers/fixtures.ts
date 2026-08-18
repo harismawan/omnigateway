@@ -185,6 +185,8 @@ export const settings: Settings = {
   rtkEnabled: false,
   bodyLoggingEnabled: false,
   bodyLoggingCaptureStreamChunks: false,
+  snapshotKeepLatest: 5,
+  snapshotMaxAgeDays: 30,
 };
 
 /**
