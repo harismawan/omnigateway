@@ -130,6 +130,26 @@ Two things to design around:
 - Handlers run off the request path. Yours throwing costs you that event and
   nothing else.
 
+`onLimitReached` hands you a `dimension` and a `window`, and
+`@omnigateway/plugin-api/events` is where you get the vocabulary to interpret
+them — the two unions, and `WINDOW_MS` for how long a window actually is:
+
+```js
+import { WINDOW_MS } from "@omnigateway/plugin-api/events";
+
+ctx.events.onLimitReached((event) => {
+  if (Date.now() - lastSeen < WINDOW_MS[event.window]) return;
+});
+```
+
+Import it from `/events`, not from the package root, for the reason `/define`
+exists — the root carries the manifest schema and with it zod.
+
+Treat `dimension` and `window` together as the limit's identity. Nothing volatile
+is in the payload on purpose: a window's reset instant is recomputed on every
+evaluation, so keying on one turns "tell me when this fills" into "tell me
+forever once it has".
+
 ## 4. Logging
 
 ```js

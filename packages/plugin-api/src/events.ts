@@ -1,4 +1,47 @@
-import type { Dimension, Window } from "@omni/ratelimit/catalog";
+/**
+ * The limit vocabulary, as the plugin contract states it.
+ *
+ * Declared here rather than imported from `@omni/ratelimit/catalog`, and that is
+ * the whole point of this block. This package is published; that one is not, so
+ * an import would put `workspace:*` in the dependency list of a package
+ * strangers `npm install`, and it would resolve for nobody. The same import also
+ * dragged zod into every plugin's server bundle — `catalog.ts` builds
+ * `LimitConfig`'s schema at module scope, so one `WINDOW_MS` cost half a
+ * megabyte of validator.
+ *
+ * Nothing keeps these equal to the gateway's own lists except two things that
+ * both fail loudly. The host assigns its `Window` into `LimitReached.window` at
+ * the emit site, so a window added to the rate limiter and not to this union
+ * stops compiling there. And a test in `apps/gateway` — the one place that can
+ * see both packages — pins the names and the durations to the rate limiter's.
+ *
+ * Which way the drift is allowed to run matters: the rate limiter is the source
+ * of truth, because `DIMENSIONS` and `WINDOWS` are the JSON keys of
+ * `api_keys.limits` and a stored row outlives any contract. This is the mirror.
+ */
+export const DIMENSIONS = ["requests", "tokens", "spend", "concurrency"] as const;
+
+export type Dimension = (typeof DIMENSIONS)[number];
+
+export const WINDOWS = ["1m", "5h", "1w"] as const;
+
+export type Window = (typeof WINDOWS)[number];
+
+/**
+ * Nominal length of each window, for a plugin that has to interpret one.
+ *
+ * A plugin handed `window: "1w"` and no durations can do nothing with it but
+ * hardcode a number, which is the duplication this avoids — and it would be a
+ * silent one, where this is pinned.
+ *
+ * Nominal, because every window is counted sliding rather than fixed. Do not
+ * read these as reset instants; there are none.
+ */
+export const WINDOW_MS: Record<Window, number> = {
+  "1m": 60_000,
+  "5h": 5 * 60 * 60 * 1000,
+  "1w": 7 * 24 * 60 * 60 * 1000,
+};
 
 /**
  * One finished request, as a plugin sees it.

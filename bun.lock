@@ -122,7 +122,6 @@
       "name": "@omnigateway/plugin-api",
       "version": "0.0.0",
       "dependencies": {
-        "@omni/ratelimit": "workspace:*",
         "zod": "4.4.3",
       },
     },
@@ -182,7 +181,6 @@
       "name": "@omni/plugin-pokemon",
       "version": "1.0.0",
       "dependencies": {
-        "@omni/ratelimit": "workspace:*",
         "@omnigateway/plugin-api": "workspace:*",
       },
       "devDependencies": {

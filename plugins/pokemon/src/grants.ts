@@ -1,5 +1,5 @@
-import { WINDOW_MS } from "@omni/ratelimit/catalog";
 import type { LimitReached } from "@omnigateway/plugin-api";
+import { WINDOW_MS } from "@omnigateway/plugin-api/events";
 
 /**
  * A limit window's stable identity.

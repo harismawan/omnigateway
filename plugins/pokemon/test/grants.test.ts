@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { WINDOW_MS } from "@omni/ratelimit/catalog";
+import { WINDOW_MS } from "@omnigateway/plugin-api/events";
 import { decideGrant, grantSize, windowKey } from "../src/grants.ts";
 
 const NOW = 1_700_000_000_000;

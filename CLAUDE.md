@@ -96,7 +96,10 @@ and `bun run lint`.
     is a leaf holding the dimension and window unions, `LimitConfig`, and its zod schema;
     `@omni/store` imports that subpath alone and re-exports `LimitConfig` from `@omni/store/types`,
     which is the import the dashboard is already permitted. Limiter state — rings and gauges — lives
-    in `apps/gateway`, because state is not the package's job.
+    in `apps/gateway`, because state is not the package's job. `@omnigateway/plugin-api/events`
+    **mirrors** the unions and `WINDOW_MS` rather than importing them, because that package is
+    published and this one is not. This package stays the source of truth; the mirror is pinned by
+    `apps/gateway/test/plugins/limitVocabulary.test.ts`, the only place that may import both.
 15. Plugins load from `<root>/plugins/` at boot and receive a capability-scoped `PluginContext`:
     never `Store`, `HttpClient`, `AdminAuth`, decrypted credentials, or `process.env`. **It is a
     guardrail, not a sandbox** — a plugin shares the gateway's process and can import past all of
@@ -239,7 +242,15 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   must not break, and each has already been broken once.
 - `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` are the JSON keys of `api_keys.limits`, so
   a storage contract like RTK ids — but failing **closed**: an unknown name is a parse failure, never
-  a silent drop. Rename or remove only with a migration.
+  a silent drop. Rename or remove only with a migration, and update the mirror in
+  `@omnigateway/plugin-api/events` in the same change.
+- **Nothing a plugin imports may reach a core package.** `@omnigateway/plugin-api` and
+  `@omnigateway/dashboard-sdk` are published; every `@omni/*` package is not, so a single import
+  puts an unresolvable `workspace:*` into a stranger's dependency tree. It typechecks and tests
+  green inside this repo, because workspace resolution makes every internal package reachable —
+  which is exactly why it went unnoticed once. `packages/plugin-api/test/bundleWeight.test.ts`
+  builds each entry point and asserts zod appears only under the root; its first test asserts zod
+  *is* present there, because "absent" is also what a broken harness reports.
 - `admit`/`consume` claim the ring stamp and gauge **synchronously**, before any `await`, and roll
   back on refusal. Reading counters first and recording after lets concurrent requests judge one
   pre-burst snapshot — a ceiling of 3 admitted 10 parallel requests, and it needs no I/O to fire.

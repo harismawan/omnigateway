@@ -4,8 +4,7 @@
   "type": "module",
   "private": true,
   "dependencies": {
-    "@omnigateway/plugin-api": "workspace:*",
-    "@omni/ratelimit": "workspace:*"
+    "@omnigateway/plugin-api": "workspace:*"
   },
   "peerDependencies": {
     "@omnigateway/dashboard-sdk": "workspace:*",

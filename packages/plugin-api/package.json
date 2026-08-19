@@ -7,10 +7,10 @@
     ".": "./src/index.ts",
     "./manifest": "./src/manifest.ts",
     "./define": "./src/context.ts",
-    "./version": "./src/version.ts"
+    "./version": "./src/version.ts",
+    "./events": "./src/events.ts"
   },
   "dependencies": {
-    "@omni/ratelimit": "workspace:*",
     "zod": "4.4.3"
   }
 }
