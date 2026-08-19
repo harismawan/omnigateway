@@ -6,6 +6,8 @@
   },
   "include": [
     "packages/*/src/**/*",
+    "plugins/*/src/**/*",
+    "plugins/*/test/**/*",
     "packages/*/test/**/*",
     "apps/gateway/src/**/*",
     "apps/gateway/test/**/*",

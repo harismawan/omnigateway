@@ -4,7 +4,8 @@
   "type": "module",
   "workspaces": [
     "packages/*",
-    "apps/*"
+    "apps/*",
+    "plugins/*"
   ],
   "scripts": {
     "dev": "bun --watch apps/gateway/src/index.ts",
