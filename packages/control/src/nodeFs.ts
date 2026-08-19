@@ -2,14 +2,17 @@ import {
   copyFileSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
   statfsSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseDeps } from "./database.ts";
+import type { PluginFs } from "./plugins.ts";
 
 /**
  * The real filesystem, shaped the way `database.ts` asks for it.
@@ -97,5 +100,72 @@ export function nodeDatabaseFs(): DatabaseDeps["fs"] {
       }
     },
     dirBytes,
+  };
+}
+
+/**
+ * The real filesystem, shaped the way `plugins.ts` asks for it.
+ *
+ * Here rather than in the CLI for the reason `nodeDatabaseFs` is: the gateway
+ * and the CLI both administer a local installation's plugin directory, and a
+ * second copy would be the one that stops agreeing about what an absent
+ * directory means. Node's fs rather than Bun's, again for the same reason — this
+ * runs under a Bun server and under the CLI and must assume neither.
+ *
+ * Every convention `PluginFs` documents is honoured here and nowhere else: an
+ * absent directory reads as empty, an unreadable file reads as null, and
+ * removing a path that is not there is a no-op. Callers that had to check first
+ * would each be free to check differently.
+ */
+export function nodePluginFs(): PluginFs {
+  return {
+    readdir: (dir) => {
+      try {
+        return readdirSync(dir);
+      } catch {
+        return [];
+      }
+    },
+    readText: (path) => {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    readBytes: (path) => {
+      try {
+        // A `Buffer` is a `Uint8Array`, but a *view* into a pooled allocation
+        // for small reads. Copied so the returned array's byteOffset is zero and
+        // a caller slicing it cannot see a neighbouring read's bytes.
+        return new Uint8Array(readFileSync(path));
+      } catch {
+        return null;
+      }
+    },
+    writeBytes: (path, bytes) => {
+      writeFileSync(path, bytes);
+    },
+    isDirectory: (path) => {
+      try {
+        return statSync(path).isDirectory();
+      } catch {
+        return false;
+      }
+    },
+    isFile: (path) => {
+      try {
+        return statSync(path).isFile();
+      } catch {
+        return false;
+      }
+    },
+    mkdir: (dir) => {
+      mkdirSync(dir, { recursive: true });
+    },
+    rm: (path) => {
+      rmSync(path, { force: true, recursive: true });
+    },
+    rename: (from, to) => renameSync(from, to),
   };
 }

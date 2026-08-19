@@ -20,6 +20,7 @@
       "dependencies": {
         "@omni/control": "workspace:*",
         "@omni/ir": "workspace:*",
+        "@omni/plugins": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/router": "workspace:*",
         "@omni/store": "workspace:*",
@@ -85,6 +86,7 @@
       "dependencies": {
         "@node-rs/argon2": "2.0.2",
         "@omni/ir": "workspace:*",
+        "@omni/plugins": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",

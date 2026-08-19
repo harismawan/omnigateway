@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { listPlugins, orphanPluginTables, type PluginSummary, pluginsDir } from "@omni/control";
 import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError, type Context } from "../context.ts";
@@ -15,6 +16,7 @@ import {
   unitInstalled,
 } from "../service.ts";
 import { sourceHint } from "./console.ts";
+import { doctorPluginDeps, pluginDoctorLines } from "./plugins.ts";
 
 /** The command line that runs the gateway from this installation. */
 function gatewayArgv(root: string): string[] {
@@ -174,6 +176,28 @@ async function rollupState(ctx: Context): Promise<string | null> {
   }
 }
 
+/**
+ * `plugin_*` tables belonging to no installed plugin, or null when unknowable.
+ *
+ * Reported and never dropped, which is the store's own promise and the reason
+ * this is in `doctor` rather than in a sweep. A restore is exactly when a plugin
+ * is most likely to be temporarily missing — installed again a minute later by
+ * the same operator — so the tables that outlive it are a question for a human,
+ * not garbage.
+ *
+ * Null, not `[]`, when there is no database to ask or it will not open. An empty
+ * array is "nothing orphaned", which is a reassurance nobody computed.
+ */
+async function orphanTables(ctx: Context): Promise<string[] | null> {
+  if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
+  try {
+    return orphanPluginTables(doctorPluginDeps(), ctx.root.root, await ctx.store());
+  } catch {
+    // Already reported by `config` or `database` above.
+    return null;
+  }
+}
+
 export const doctor: Command = {
   usage: "doctor",
   summary: "Check what this CLI resolved, and whether it can do anything with it",
@@ -184,6 +208,10 @@ export const doctor: Command = {
     const unit = unitInstalled(deps);
     const status = await serviceStatus(deps);
     const usageRollup = await rollupState(ctx);
+    // Never throws over a broken plugin: an installation with one is exactly the
+    // installation whose operator is running `doctor`.
+    const plugins: PluginSummary[] = listPlugins(doctorPluginDeps(), deps.root);
+    const orphans = await orphanTables(ctx);
 
     const checks = {
       root: deps.root,
@@ -201,6 +229,9 @@ export const doctor: Command = {
       running: status.running,
       // Which log `omni console` will read, and whether there is one at all.
       consoleSource: consoleSource(deps).source,
+      pluginsDir: pluginsDir(deps.root),
+      plugins,
+      orphanPluginTables: orphans,
       // Repeated from stderr on purpose: `doctor` is the command an operator
       // runs to find out why the paths above are what they are, and `--json`
       // is read by scripts that never see stderr.
@@ -228,6 +259,24 @@ export const doctor: Command = {
         ["systemd unit", unit ? deps.scope : paint(ctx, "dim", "none")],
         ["gateway", ok(status.running, status.running ? "running" : "stopped")],
         ["console log", sourceHint(checks.consoleSource)],
+        // One row per plugin rather than a count. A count answers "are there
+        // plugins", and the question `doctor` is asked is "which one is wrong".
+        ...(plugins.length === 0
+          ? ([["plugins", paint(ctx, "dim", "none")]] as Array<[string, string]>)
+          : pluginDoctorLines(ctx, plugins).map(
+              (line, index) => [index === 0 ? "plugins" : "", line] as [string, string],
+            )),
+        [
+          "orphan plugin tables",
+          orphans === null
+            ? paint(ctx, "dim", "not checked")
+            : orphans.length === 0
+              ? ok(true, "none")
+              : // Named, not dropped. The store reports these and this command
+                // prints them; removing one is `omni plugin remove --purge`,
+                // which asks first.
+                paint(ctx, "yellow", `${orphans.length}: ${orphans.join(", ")}`),
+        ],
         ...checks.warnings.map(
           (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],
         ),
