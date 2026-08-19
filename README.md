@@ -773,6 +773,61 @@ runtime and never vendored into this repository or its published artifacts.
 reaches the same verdict the next boot will, from the same code, without loading
 the plugin.
 
+### Installing on a machine with no checkout
+
+`omni plugin install` takes a **local path** — a directory or a `.tgz` — and
+nothing else. There is no package name to resolve and no URL to fetch: getting
+the bytes onto the host is your job, which is the same posture as the rest of
+this section. Build once, ship the tarball, install from the path:
+
+```bash
+# wherever you build — a workstation, CI
+bun run build:plugins
+tar -czf pokemon.tgz -C plugins/pokemon/dist pokemon
+
+# on the host
+scp pokemon.tgz gateway-host:/tmp/
+ssh gateway-host 'omni plugin install /tmp/pokemon.tgz && omni plugin verify pokemon && omni restart'
+```
+
+**npm works as a way to distribute a plugin, not as a way to install one.**
+`omni` does not resolve package names. A published plugin is fetched with the
+tools you already have and installed from the file:
+
+```bash
+npm pack omnigateway-plugin-example     # writes omnigateway-plugin-example-1.0.0.tgz
+omni plugin install ./omnigateway-plugin-example-1.0.0.tgz
+```
+
+An `npm pack` tarball is rooted at `package/` rather than at the plugin's name,
+and that is fine: the manifest's `id` names the installed directory when the
+archive root does not.
+
+`omni plugin install https://…` is refused today — the control layer can fetch,
+but the CLI wires no fetcher, so nothing reaches the network. Plaintext `http://`
+is refused outright and always will be: what arrives over that fetch is code the
+gateway process will `import`, so anyone between you and the host would be
+choosing what the gateway runs.
+
+**In Docker**, the image carries the gateway only, so a plugin arrives on a
+volume rather than through the CLI. Mount it at `<root>/plugins/<id>` — the same
+layout `install` writes — and restart the container:
+
+```bash
+docker run --rm -p 9000:9000 \
+  -e OMNI_ENCRYPTION_KEY="$OMNI_ENCRYPTION_KEY" \
+  -v omnigateway-data:/data \
+  -v "$PWD/pokemon:/data/plugins/pokemon" \
+  omnigateway
+```
+
+**Do not mount it `:ro`** if the plugin declares the `files` capability. A
+plugin's cache lives at `<root>/plugins/<id>/data/`, inside its own directory, and
+the capability creates that directory on every call — so a read-only mount fails
+*reads* as well as writes, with an `EACCES` on `mkdir` rather than anything that
+names the mount. Keeping a plugin's code immutable while its cache stays
+writable is not expressible today; mount the directory read-write.
+
 Removing one keeps its data:
 
 ```bash

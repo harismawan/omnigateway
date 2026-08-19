@@ -191,6 +191,26 @@ entry.
 Plugins load once at boot. There is no hot reload: `install` writes files and
 tells you to restart.
 
+## 7. Shipping it
+
+`omni plugin install` takes a local path only — a directory or a `.tgz`. There is
+no package name to resolve and no URL to fetch, so distribution is yours to
+choose and the operator brings the bytes to the host themselves.
+
+A tarball is the portable form, and an `npm pack` archive is one: it is rooted at
+`package/` rather than at your plugin's name, and the host falls back to the
+manifest's `id` when the archive root does not name one. So publishing to npm
+works as a channel even though `omni` will not resolve a package name for you:
+
+```bash
+npm pack your-plugin                  # or: tar -czf your-plugin.tgz -C dist your-plugin
+omni plugin install ./your-plugin-1.0.0.tgz
+```
+
+Ship the built bundles and the manifest, nothing else. Your sources, tests and
+`node_modules` are not needed at runtime and every one of them is another file an
+operator has to trust.
+
 To remove:
 
 ```bash
