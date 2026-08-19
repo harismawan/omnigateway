@@ -7,7 +7,8 @@
     "dev": "vite",
     "test": "bun test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts ./test",
     "typecheck": "bun run generate:routes && tsc --noEmit",
-    "build": "bun run typecheck && vite build",
+    "build:shared": "vite build --config vite.shared.config.ts",
+    "build": "bun run typecheck && vite build && bun run build:shared",
     "preview": "vite preview"
   },
   "dependencies": {
