@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PLUGIN_API_VERSION, type PluginManifest, parseManifest } from "@omni/plugins";
+import { createStore, deriveKey } from "@omni/store";
+import { createPluginEventBus } from "../../src/plugins/events.ts";
 import type { LoadedPlugin } from "../../src/plugins/loader.ts";
+import { loadPlugins } from "../../src/plugins/loader.ts";
 import { PLUGIN_ASSET_PREFIX, pluginCatalog, pluginUiRoutes } from "../../src/plugins/ui.ts";
 
 let dir = "";
@@ -230,4 +233,93 @@ test("one plugin cannot reach another's bundle", async () => {
     new Request(`http://localhost${PLUGIN_ASSET_PREFIX}/pokemon/..%2f..%2fother%2fui%2fprivate.js`),
   );
   expect(response.status).toBe(404);
+});
+
+// ------------------------------------------------- loader → catalog → assets
+
+/**
+ * The seam three test files each touch and none of them crossed.
+ *
+ * `ui.test.ts` hand-built a `LoadedPlugin` with an `entry` the loader never
+ * produces; `loader.test.ts` used a real manifest but only asserted
+ * `compatible`; the console's tests stub the module loader and fetch no URL at
+ * all. So the catalog could publish a URL the asset route could not serve — and
+ * it did, for every manifest shaped the way the spec, the manifest example and
+ * `docs/writing-a-plugin.md` all prescribe.
+ *
+ * This test runs the real loader, the real catalog and the real asset route
+ * against a spec-shaped plugin, because the bug lived precisely in the gap
+ * between them.
+ */
+test("a spec-shaped plugin's advertised ui url actually serves", async () => {
+  const home = join(dir, "pokemon");
+  await mkdir(join(home, "server"), { recursive: true });
+  await mkdir(join(home, "ui"), { recursive: true });
+  await writeFile(
+    join(home, "omni-plugin.json"),
+    JSON.stringify({
+      id: "pokemon",
+      name: "Pokémon Companion",
+      version: "1.0.0",
+      api: PLUGIN_API_VERSION,
+      server: "server/index.js",
+      // Exactly what the spec and the docs prescribe.
+      ui: "ui/index.js",
+      sdk: "^1.0.0",
+      nav: { label: "Companion" },
+    }),
+  );
+  await writeFile(join(home, "server", "index.js"), "export default { setup() { return {}; } };");
+  await writeFile(join(home, "ui", "index.js"), "export default { mount: () => null };");
+
+  const store = await createStore({
+    path: join(dir, "t.db"),
+    encryptionKey: await deriveKey("0".repeat(64)),
+  });
+  const bus = createPluginEventBus({});
+  try {
+    const loaded = await loadPlugins({ root: dir, store, events: bus, sdkVersion: "1.0.0" });
+    expect(loaded.failures).toEqual([]);
+
+    const entry = pluginCatalog(loaded.plugins)[0]?.ui?.entry;
+    expect(entry).toBeDefined();
+    if (entry === undefined || entry === null) return;
+
+    const app = pluginUiRoutes({ admin: denyAdmin, plugins: loaded.plugins });
+    const response = await app.handle(new Request(`http://localhost${entry}`));
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("mount");
+  } finally {
+    bus.stop();
+    store.close();
+  }
+});
+
+test("the server entry and the manifest are never reachable as assets", async () => {
+  // The other way to fix the url mismatch is to serve from the plugin home,
+  // which would publish server/ and omni-plugin.json unauthenticated. This
+  // pins that it was not the fix chosen.
+  const home = join(dir, "pokemon");
+  await mkdir(join(home, "server"), { recursive: true });
+  await mkdir(join(home, "ui"), { recursive: true });
+  await writeFile(join(home, "omni-plugin.json"), "{}");
+  await writeFile(join(home, "server", "index.js"), "SECRET SERVER CODE");
+  await writeFile(join(home, "ui", "index.js"), "ui");
+
+  const plugin: LoadedPlugin = {
+    id: "pokemon",
+    manifest: manifest(),
+    routes: [],
+    ui: { dir: home, entry: "index.js", compatible: true },
+  };
+  const app = pluginUiRoutes({ admin: denyAdmin, plugins: [plugin] });
+
+  for (const path of ["..%2fserver%2findex.js", "..%2fomni-plugin.json"]) {
+    const response = await app.handle(
+      new Request(`http://localhost${PLUGIN_ASSET_PREFIX}/pokemon/${path}`),
+    );
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("SECRET SERVER CODE");
+  }
 });

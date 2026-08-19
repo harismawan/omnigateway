@@ -4,12 +4,15 @@ import { dirname, resolve, sep } from "node:path";
 /**
  * A plugin's own directory, and nothing else.
  *
- * Two checks, because either alone is bypassable. The lexical one catches `..`
- * and absolute paths before any I/O happens. The realpath one catches a symlink
- * whose text contains neither — the case string arithmetic cannot see, and the
- * reason the static file server in `app.ts` resolves before it compares. This is
- * the same guard in the same shape; it is duplicated in behaviour rather than
- * shared only because the two operate on different roots at different times.
+ * A lexical check catches `..` and absolute paths before any I/O; a walk to the
+ * deepest existing ancestor catches a symlink, which string arithmetic cannot
+ * see. Both reads and writes go through the same resolution — see
+ * `resolveInside` for why that symmetry is the whole point.
+ *
+ * Related in spirit to the static file server's resolve-then-compare in
+ * `app.ts`, but deliberately not shared with it: that one only ever reads an
+ * existing file, so it can resolve the target directly. This surface creates
+ * files, which is exactly where the harder case lives.
  */
 export type PluginFiles = {
   read(path: string): Promise<Uint8Array | null>;
@@ -20,34 +23,52 @@ export type PluginFiles = {
 /**
  * Resolves a plugin-supplied path inside `root`, or throws.
  *
- * `checkLink` is false for a write to a path that does not exist yet: realpath
- * fails on a missing file, so the parent directory is what gets resolved.
+ * One path for reads and writes, deliberately. The earlier version skipped
+ * symlink resolution entirely for writes — on the reasoning that `realpath`
+ * fails on a file that does not exist yet — and the result was that a plugin
+ * could overwrite a file *through* a symlink it could not read back through.
+ * That asymmetry is worse than either behaviour on its own, and it held while a
+ * test named "a symlink pointing out of the root is refused" passed, because
+ * that test only exercised `read`.
+ *
+ * The fix is to resolve the deepest ancestor that actually exists. For an
+ * existing target that is the target, so a symlinked file is caught. For a new
+ * file it is the parent, so a symlinked directory is caught. Anything below the
+ * deepest existing ancestor is created by `mkdir` as a real directory, so there
+ * is nothing left for a link to hide in.
  */
-async function resolveInside(root: string, path: string, checkLink: boolean): Promise<string> {
+async function resolveInside(root: string, path: string): Promise<string> {
   const rootReal = await realpath(root);
   const target = resolve(rootReal, path);
   const inside = (candidate: string): boolean =>
     candidate === rootReal || candidate.startsWith(`${rootReal}${sep}`);
 
+  // Lexical first: cheap, and it produces the comprehensible message. It cannot
+  // see a symlink, which is what the walk below is for.
   if (!inside(target)) throw new Error(`path is outside the plugin directory: ${path}`);
-  if (!checkLink) return target;
 
-  try {
-    // The link may or may not exist. If it does, where it actually lands is the
-    // only thing that matters.
-    const real = await realpath(target);
-    if (!inside(real)) throw new Error(`path is outside the plugin directory: ${path}`);
-    return real;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("outside")) throw error;
-    return target;
+  let probe = target;
+  for (;;) {
+    try {
+      if (!inside(await realpath(probe))) {
+        throw new Error(`path is outside the plugin directory: ${path}`);
+      }
+      return target;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("outside")) throw error;
+      const parent = dirname(probe);
+      // The root itself always exists and was resolved above, so this terminates
+      // there rather than walking to the filesystem root.
+      if (parent === probe || probe === rootReal) return target;
+      probe = parent;
+    }
   }
 }
 
 export function createPluginFiles(root: string): PluginFiles {
   return {
     async read(path) {
-      const target = await ensureRootThen(root, () => resolveInside(root, path, true));
+      const target = await ensureRootThen(root, () => resolveInside(root, path));
       try {
         const data = await readFile(target);
         return new Uint8Array(data);
@@ -59,12 +80,12 @@ export function createPluginFiles(root: string): PluginFiles {
       }
     },
     async write(path, data) {
-      const target = await ensureRootThen(root, () => resolveInside(root, path, false));
+      const target = await ensureRootThen(root, () => resolveInside(root, path));
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, data);
     },
     async exists(path) {
-      const target = await ensureRootThen(root, () => resolveInside(root, path, true));
+      const target = await ensureRootThen(root, () => resolveInside(root, path));
       try {
         await readFile(target);
         return true;

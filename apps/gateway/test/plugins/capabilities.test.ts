@@ -1,8 +1,18 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPluginFetch, createPluginFiles } from "../../src/plugins/capabilities.ts";
+
+/** Present-or-not, without importing a second fs surface into the assertions. */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await readFile(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 let root = "";
 
@@ -37,6 +47,42 @@ test("a traversing path is refused on every operation", async () => {
     await expect(files.read(path)).rejects.toThrow(/outside/);
     await expect(files.write(path, new Uint8Array([1]))).rejects.toThrow(/outside/);
   }
+});
+
+test("a WRITE through a symlinked file is refused, not only a read", async () => {
+  // The direction that matters, and the one that was missing. A read-only guard
+  // means a plugin can overwrite a file it can then never read back — and an
+  // operator symlinking data/cache onto a bigger disk, an ordinary thing to do,
+  // gets that behaviour silently.
+  const outside = join(root, "outside");
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, "victim.txt"), "original");
+
+  const files = createPluginFiles(join(root, "data"));
+  await files.write("keep.txt", new Uint8Array([1]));
+  await symlink(join(outside, "victim.txt"), join(root, "data", "link.txt"));
+
+  await expect(files.write("link.txt", new TextEncoder().encode("PWNED"))).rejects.toThrow(
+    /outside/,
+  );
+  expect(await readFile(join(outside, "victim.txt"), "utf8")).toBe("original");
+});
+
+test("a write through a symlinked DIRECTORY is refused", async () => {
+  // The target does not exist yet, so resolving only the target finds nothing to
+  // check. The deepest existing ancestor is the symlink, and that is what has to
+  // be resolved.
+  const outside = join(root, "outside");
+  await mkdir(outside, { recursive: true });
+
+  const files = createPluginFiles(join(root, "data"));
+  await files.write("keep.txt", new Uint8Array([1]));
+  await symlink(outside, join(root, "data", "linkdir"));
+
+  await expect(files.write("linkdir/new.txt", new TextEncoder().encode("PWNED"))).rejects.toThrow(
+    /outside/,
+  );
+  expect(await exists(join(outside, "new.txt"))).toBe(false);
 });
 
 test("a symlink pointing out of the root is refused", async () => {

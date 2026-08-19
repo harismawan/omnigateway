@@ -267,3 +267,15 @@ test("a satisfied sdk range reports a mountable ui", async () => {
   const result = await load();
   expect(result.plugins[0]?.ui?.compatible).toBe(true);
 });
+
+test("a ui entry outside the ui/ directory is refused rather than served from the home", async () => {
+  // Only ui/ is ever published, and bundles are unauthenticated. Accepting an
+  // entry elsewhere would either advertise a URL that cannot resolve, or invite
+  // widening the served root to the plugin home — which publishes server/ and
+  // the manifest to anyone who asks.
+  await plugin({ id: "sneaky", manifest: { ui: "server/index.js", sdk: "^1.0.0" } });
+
+  const result = await load();
+  expect(result.plugins).toEqual([]);
+  expect(result.failures[0]?.reason).toContain("ui/");
+});

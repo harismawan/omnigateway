@@ -271,10 +271,27 @@ export async function loadPlugins(deps: {
 
     const loaded: LoadedPlugin = { id, manifest, routes };
     if (manifest.ui !== undefined && manifest.sdk !== undefined) {
+      /**
+       * `manifest.ui` is relative to the plugin's home, like `server`. Only the
+       * `ui/` subtree is ever served, so the stored entry is relative to *that*
+       * and the prefix is stripped exactly once, here.
+       *
+       * Getting this wrong is silent in both directions. Leaving the prefix on
+       * makes the catalog advertise `/plugin-assets/<id>/ui/index.js`, which
+       * resolves to `<home>/ui/ui/index.js` and 404s — the console then reports
+       * a broken plugin rather than a broken host. Serving from `<home>` instead
+       * would fix the URL by publishing `server/` and the manifest to anyone who
+       * asks, since bundles are deliberately unauthenticated.
+       */
+      const UI_DIR = "ui/";
+      if (!manifest.ui.startsWith(UI_DIR)) {
+        fail(`ui entry must live under ${UI_DIR}, got ${manifest.ui}`);
+        continue;
+      }
       const compatible = Bun.semver.satisfies(deps.sdkVersion, manifest.sdk);
       loaded.ui = {
         dir: home,
-        entry: manifest.ui,
+        entry: manifest.ui.slice(UI_DIR.length),
         compatible,
         // An incompatible UI disables only the UI. The server half keeps
         // running: a plugin collecting data should not go dark because the
