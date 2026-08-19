@@ -7,6 +7,8 @@ import type {
   DatabaseOverview,
   DryRunResult,
   LifecycleCapability,
+  LimitConfig,
+  LimitReading,
   QuotaSample,
   QuotaWindow,
   RequestBodyResponse,
@@ -115,18 +117,51 @@ export function model(patch: Partial<VirtualModel> = {}): VirtualModel {
   };
 }
 
+/**
+ * A key as `/api/keys` returns it.
+ *
+ * `limitUsage` follows whatever `limits` ends up being, so a patch that sets a
+ * ceiling gets a reading for it without every caller restating the matrix
+ * twice. Patch it directly to say what has been used against one.
+ */
 export function apiKey(patch: Partial<ApiKeySummary> = {}): ApiKeySummary {
+  const limits = patch.limits === undefined ? { requests: { "1m": 120 } } : patch.limits;
   return {
     id: "key-1",
     label: "laptop",
     prefix: "omni_sk_a1b2",
     modelAllowlist: null,
-    rateLimitPerMin: 120,
+    limits,
+    limitUsage: readingsFor(limits),
     bodyLoggingOptOut: false,
     createdAt: NOW - 86_400_000,
     revokedAt: null,
     ...patch,
   };
+}
+
+/** One idle reading per configured ceiling, in the order the route emits them. */
+function readingsFor(limits: LimitConfig | null): LimitReading[] {
+  if (limits === null) return [];
+  const readings: LimitReading[] = [];
+  for (const dimension of ["requests", "tokens", "spend"] as const) {
+    const windows = limits[dimension];
+    if (windows === undefined) continue;
+    for (const window of ["1m", "5h", "1w"] as const) {
+      const limit: number | null | undefined = windows[window as keyof typeof windows];
+      if (limit === undefined || limit === null) continue;
+      readings.push({ dimension, window, limit, used: 0 });
+    }
+  }
+  if (limits.concurrency !== undefined && limits.concurrency !== null) {
+    readings.push({
+      dimension: "concurrency",
+      window: null,
+      limit: limits.concurrency,
+      used: null,
+    });
+  }
+  return readings;
 }
 
 export function log(patch: Partial<RequestLog> = {}): RequestLog {

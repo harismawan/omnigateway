@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { openDb } from "@omni/store";
 import { health, requestLog, seedCredential } from "@omni/testkit";
 import { serviceLogs } from "../src/service.ts";
 import { cli, fakeService, makeRoot, openStore, TEST_KEY } from "./helpers/harness.ts";
@@ -646,6 +647,61 @@ test("a command run under --root says so when it refuses an ambient OMNI_DB_PATH
   expect(result.out).not.toContain(ambient);
 });
 
+/**
+ * The rollup is derived, so a disagreement with `request_logs` is repairable —
+ * but only by someone who knows about it, and nothing else on the installation
+ * would ever say. Long-window rate limits are enforced from these buckets.
+ */
+test("doctor checks the usage rollup against the rows it summarizes", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  await store.usage.append(requestLog({ id: "r1", apiKeyId: "k1", at: 1_000_000 }));
+  store.close();
+
+  const healthy = await cli(["doctor", "--json"], { root, service });
+  expect((JSON.parse(healthy.out) as { usageRollup: string }).usageRollup).toBe(
+    "ok (1 hourly buckets)",
+  );
+
+  // A bucket for an hour that has no rows, which is what a restored file or a
+  // prune that forgot the rollup leaves behind.
+  const damaged = await openStore(root);
+  await damaged.usage.append(requestLog({ id: "r2", apiKeyId: "k1", at: 5_000_000 }));
+  damaged.close();
+  const withoutRows = await openStore(root);
+  await withoutRows.usage.prune(4_000_000);
+  withoutRows.close();
+  const restored = await openStore(root);
+  await restored.usage.append(requestLog({ id: "r3", apiKeyId: "k1", at: 9_000_000 }));
+  restored.close();
+
+  const stillOk = await cli(["doctor", "--json"], { root, service });
+  expect((JSON.parse(stillOk.out) as { usageRollup: string }).usageRollup).toMatch(/^ok /);
+});
+
+test("doctor reports a rollup that disagrees with request_logs", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  await store.usage.append(requestLog({ id: "r1", apiKeyId: "k1", at: 1_000_000 }));
+  store.close();
+
+  // Rows removed without their bucket, exactly as a hand-edited or foreign
+  // database can arrive.
+  const meddled = await openStore(root);
+  await meddled.usage.recent(1);
+  meddled.close();
+  const db = openDb(`${root}/omnigateway.db`);
+  db.run("DELETE FROM request_logs");
+  db.close();
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const body = JSON.parse(result.out) as { usageRollup: string };
+  expect(result.code).toBe(0);
+  expect(body.usageRollup).toBe("1 of 0 hourly buckets disagree with request_logs");
+});
+
 test("doctor reports the ambient database path it refused", async () => {
   const root = await installation();
   const ambient = "/home/operator/.config/omnigateway/omnigateway.db";
@@ -683,6 +739,9 @@ test("doctor still works when the installation has no encryption key", async () 
   expect(result.code).toBe(0);
   expect(body.encryptionKey).toBe("missing");
   expect(body.configError).toMatch(/OMNI_ENCRYPTION_KEY/);
+  // Nothing could be opened, so the rollup was not checked — which is a state
+  // of its own and not a clean bill of health.
+  expect(body.usageRollup).toBeNull();
 });
 
 test("start runs the gateway that belongs to this root", async () => {

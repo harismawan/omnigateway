@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import { type DatabaseInspection, DEFAULT_SETTINGS, type Settings } from "@omni/store";
+import { type CaptureLogger, captureLogger } from "@omni/testkit";
 import {
   createSnapshot,
   type DatabaseDeps,
@@ -28,6 +29,7 @@ type Fake = DatabaseDeps & {
   /** What happened, in order. Restore is an ordering contract, so order is asserted. */
   log: string[];
   settings: Settings;
+  logger: CaptureLogger;
 };
 
 /**
@@ -51,10 +53,16 @@ function deps(
      * unless a test says otherwise.
      */
     adminHash?: { before: string | null; after: string | null };
+    /**
+     * A rollup rebuild that throws, which is the one step of a restore that is
+     * allowed to fail after the swap has already succeeded.
+     */
+    rebuildFails?: boolean;
   } = {},
 ): Fake {
   const files = new Map<string, number>(Object.entries(input.files ?? { [DB]: 4_096 }));
   const log: string[] = [];
+  const logger = captureLogger();
   const settings: Settings = { ...DEFAULT_SETTINGS, ...input.settings };
   const adminHash = input.adminHash ?? {
     before: "argon2-of-the-same",
@@ -66,6 +74,7 @@ function deps(
     files,
     log,
     settings,
+    logger,
     now: () => input.now ?? AT,
     store: {
       databasePath: DB,
@@ -93,6 +102,12 @@ function deps(
           return (
             input.inspect ?? { ok: true, quickCheck: "ok", tables: [], counts: { settings: 1 } }
           );
+        },
+      },
+      usage: {
+        rebuildRollup: async () => {
+          log.push("rebuildRollup");
+          if (input.rebuildFails === true) throw new Error("no space left on device");
         },
       },
       close: () => log.push("close"),
@@ -503,6 +518,10 @@ describe("restoreSnapshot", () => {
       `unlink:${DB}-shm`,
       `rename:${DB}.incoming->${DB}`,
       "reopen",
+      // After the reopen, never before: the rollup is derived from the rows in
+      // whichever file is now live, and a rebuild against the outgoing handle
+      // would summarize the database being replaced.
+      "rebuildRollup",
     ]);
   });
 
@@ -613,6 +632,59 @@ describe("restoreSnapshot", () => {
   });
 
   /**
+   * The rebuild is the last thing a restore does, and it is the only one it is
+   * allowed to lose.
+   *
+   * By the time it runs the swap has succeeded and the restored database is
+   * live, so a throw here would report a restore that worked as one that
+   * failed — and a caller reading `adminPasswordChanged` off the result never
+   * reaches it, leaving sessions minted under the old password valid against
+   * the new one. The rollup is derived and `doctor` audits it; the invalidation
+   * is neither.
+   */
+  test("a rollup rebuild that fails still returns a result and reports the password change", async () => {
+    const d = deps({
+      files,
+      rebuildFails: true,
+      adminHash: { before: "argon2-of-old", after: "argon2-of-new" },
+    });
+
+    const result = await restoreSnapshot(d, id);
+    expect(result.ok).toBe(true);
+    expect(result.adminPasswordChanged).toBe(true);
+    expect(result.preRestoreSnapshot.reason).toBe("preRestore");
+    // Degraded, not silent: the operator is told the counters are stale and
+    // what audits them.
+    expect(d.logger.records).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        msg: "usage rollup not rebuilt after the swap; run omni doctor",
+      }),
+    );
+  });
+
+  test("the rebuild runs after the hashes have been compared, not in front of them", async () => {
+    // Ordering rather than outcome, because the outcome above only shows the
+    // guard. A rebuild that throws in front of the comparison skips it however
+    // well guarded it is, so the comparison has to have already happened.
+    const d = deps({ files, adminHash: { before: "argon2-of-old", after: "argon2-of-new" } });
+    const order: string[] = [];
+    const hashes = d.store.config.getAdminPasswordHash;
+    d.store.config.getAdminPasswordHash = async () => {
+      order.push("getAdminPasswordHash");
+      return await hashes();
+    };
+    const rebuild = d.store.usage.rebuildRollup;
+    d.store.usage.rebuildRollup = async () => {
+      order.push("rebuildRollup");
+      await rebuild();
+    };
+
+    await restoreSnapshot(d, id);
+    expect(order).toEqual(["getAdminPasswordHash", "getAdminPasswordHash", "rebuildRollup"]);
+  });
+
+  /**
    * The likeliest failure of this whole feature, and the one that must not
    * quiesce the gateway.
    *
@@ -712,6 +784,7 @@ describe("importSnapshot", () => {
       `unlink:${DB}-shm`,
       `rename:${DB}.incoming->${DB}`,
       "reopen",
+      "rebuildRollup",
     ]);
     expect(result.ok).toBe(true);
   });

@@ -23,7 +23,7 @@ function stubKeys(overrides: Parameters<typeof createFetchStub>[0] = {}) {
           label: "ci",
           prefix: "omni_sk_c3d4",
           modelAllowlist: ["fast"],
-          rateLimitPerMin: null,
+          limits: {},
         }),
         apiKey({
           id: "key-3",
@@ -58,7 +58,7 @@ describe("KeysBoard", () => {
     expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(2);
   });
 
-  test("creating a key sends the label, allowlist, and limit", async () => {
+  test("creating a key sends the label, allowlist, and limits", async () => {
     const user = userEvent.setup();
     const stub = stubKeys({ "POST /api/keys": () => minted });
     renderWithProviders(<KeysBoard />);
@@ -67,7 +67,9 @@ describe("KeysBoard", () => {
     const dialog = await screen.findByRole("dialog");
 
     await user.type(within(dialog).getByLabelText("Label"), "ci-runner");
-    await user.type(within(dialog).getByLabelText("Rate limit"), "60");
+    await user.click(within(dialog).getByRole("button", { name: "Limits" }));
+    await user.type(within(dialog).getByLabelText("Requests per minute"), "60");
+    await user.type(within(dialog).getByLabelText("Spend per week"), "25.5");
     await user.click(within(dialog).getByRole("button", { name: "Create key" }));
 
     await waitFor(() => {
@@ -76,11 +78,30 @@ describe("KeysBoard", () => {
         JSON.stringify({
           label: "ci-runner",
           modelAllowlist: null,
-          rateLimitPerMin: 60,
+          limits: { requests: { "1m": 60 }, spend: { "1w": 25.5 } },
           bodyLoggingOptOut: false,
         }),
       );
     });
+  });
+
+  /**
+   * Nine ceilings unfolded over an operator who only ever wanted a label would
+   * be a worse default than the one field this replaced.
+   */
+  test("the limit matrix is folded away until it is asked for", async () => {
+    const user = userEvent.setup();
+    stubKeys();
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: /Create a key/ }));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(within(dialog).queryByLabelText("Requests per minute")).toBeNull();
+    expect(within(dialog).getByText("no limits; this key is unbounded")).toBeTruthy();
+
+    await user.click(within(dialog).getByRole("button", { name: "Limits" }));
+    expect(within(dialog).getByLabelText("Requests per minute")).toBeTruthy();
   });
 
   /**
@@ -109,6 +130,26 @@ describe("KeysBoard", () => {
     });
   });
 
+  test("a blank rate limit submits an empty matrix rather than a null inside one", async () => {
+    // `{}` is unlimited, and so is an omitted pair. Sending
+    // `{ requests: { "1m": null } }` would say the same thing in a second
+    // spelling that every reader then has to handle.
+    const user = userEvent.setup();
+    const stub = stubKeys({ "POST /api/keys": () => minted });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: /Create a key/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Label"), "unbounded");
+    await user.click(within(dialog).getByRole("button", { name: "Create key" }));
+
+    await waitFor(() => {
+      const post = stub.calls.find((call) => call.init?.method === "POST");
+      const body = JSON.parse(String(post?.init?.body)) as { limits: unknown };
+      expect(body.limits).toEqual({});
+    });
+  });
+
   test("an opted-out key is listed as such rather than looking like any other", async () => {
     stubKeys({
       "GET /api/keys": () => ({
@@ -124,6 +165,30 @@ describe("KeysBoard", () => {
     const ordinary = screen.getByText("laptop").closest("tr");
     if (ordinary === null) throw new Error("the ordinary key has no row");
     expect(within(ordinary).queryByText("no bodies")).toBeNull();
+  });
+
+  /**
+   * `null` limits mean the gateway cannot read what is stored and refuses the
+   * key. Rendering that as the dash used for "no limits" would put the one row
+   * needing attention next to the ones that need none.
+   */
+  test("a key whose limits cannot be read is shown as broken rather than unlimited", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [apiKey(), apiKey({ id: "key-2", label: "meddled", limits: null })],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const row = (await screen.findByText("meddled")).closest("tr");
+    if (row === null) throw new Error("the unreadable key has no row");
+    expect(within(row).getByText("unreadable")).toBeTruthy();
+
+    // The healthy key keeps its own ceiling: one broken row is one broken row.
+    const ordinary = screen.getByText("laptop").closest("tr");
+    if (ordinary === null) throw new Error("the ordinary key has no row");
+    expect(within(ordinary).getByText("1 limit")).toBeTruthy();
+    expect(within(ordinary).queryByText("unreadable")).toBeNull();
   });
 
   test("the raw key is shown once, with a warning that it is the only copy", async () => {
@@ -155,18 +220,42 @@ describe("KeysBoard", () => {
     ).toBeTruthy();
   });
 
-  test("a fractional rate limit is refused before it is sent", async () => {
+  test("a fractional request ceiling is refused before it is sent", async () => {
     const user = userEvent.setup();
     const stub = stubKeys();
     renderWithProviders(<KeysBoard />);
 
     await user.click(await screen.findByRole("button", { name: /Create a key/ }));
     const dialog = await screen.findByRole("dialog");
-    await user.type(within(dialog).getByLabelText("Rate limit"), "1.5");
+    await user.click(within(dialog).getByRole("button", { name: "Limits" }));
+    await user.type(within(dialog).getByLabelText("Requests per minute"), "1.5");
     await user.click(within(dialog).getByRole("button", { name: "Create key" }));
 
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "The rate limit must be a whole number of requests per minute, or blank for none.",
+      "Requests per minute must be a whole number above zero, or blank for no limit.",
+    );
+    expect(stub.calls.some((call) => call.init?.method === "POST")).toBe(false);
+  });
+
+  /**
+   * Zero is not a ceiling of zero, it is a key that can do nothing — and it is
+   * a whole number and a finite one, so the integer check beside it never sees
+   * it. Refused here rather than at the route, because here it can name the
+   * field the operator typed into.
+   */
+  test("a ceiling of zero is refused before it is sent", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys();
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: /Create a key/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Limits" }));
+    await user.type(within(dialog).getByLabelText("Requests per minute"), "0");
+    await user.click(within(dialog).getByRole("button", { name: "Create key" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Requests per minute must be a whole number above zero, or blank for no limit.",
     );
     expect(stub.calls.some((call) => call.init?.method === "POST")).toBe(false);
   });
@@ -185,6 +274,151 @@ describe("KeysBoard", () => {
 
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url === "/api/keys/key-1")).toBe(true);
+    });
+  });
+
+  /**
+   * A key has one cell and may have three ceilings, so the summary has to pick
+   * one. The shortest window is the wrong answer and so is the first
+   * configured: a key idle this minute and one request from its weekly ceiling
+   * would read as comfortable in either.
+   */
+  test("the cell summarises the count and the limit nearest exhaustion", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            limits: { requests: { "1m": 60 }, tokens: { "1w": 1_000_000 } },
+            limitUsage: [
+              { dimension: "requests", window: "1m", limit: 60, used: 6 },
+              { dimension: "tokens", window: "1w", limit: 1_000_000, used: 900_000 },
+            ],
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const row = (await screen.findByText("laptop")).closest("tr");
+    if (row === null) throw new Error("the key has no row");
+    expect(within(row).getByText("2 limits")).toBeTruthy();
+    expect(within(row).getByText("Tokens per week 1,000,000, 90% used")).toBeTruthy();
+    expect(within(row).queryByText(/Requests per minute/)).toBeNull();
+  });
+
+  /**
+   * Both ceilings are already passed, so a share clamped to 100% cannot tell
+   * them apart and the summary falls back to whichever was walked first.
+   *
+   * Being over a ceiling is ordinary rather than exceptional: `tokens` and
+   * `spend` debit once a response completes, so a key finishes one request past
+   * either of them. The row that most needs attention is the one furthest past,
+   * and 500% over is a different situation from 10% over.
+   */
+  test("the cell separates two ceilings that are both already passed", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            limits: { requests: { "1m": 60 }, tokens: { "1w": 1_000 } },
+            limitUsage: [
+              { dimension: "requests", window: "1m", limit: 60, used: 66 },
+              { dimension: "tokens", window: "1w", limit: 1_000, used: 5_000 },
+            ],
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const row = (await screen.findByText("laptop")).closest("tr");
+    if (row === null) throw new Error("the key has no row");
+    expect(within(row).getByText("Tokens per week 1,000, 500% used")).toBeTruthy();
+    expect(within(row).queryByText(/Requests per minute/)).toBeNull();
+  });
+
+  test("the full matrix is behind a disclosure rather than in the cell", async () => {
+    const user = userEvent.setup();
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            limits: { requests: { "1m": 60 }, concurrency: 8 },
+            limitUsage: [
+              { dimension: "requests", window: "1m", limit: 60, used: 45 },
+              { dimension: "concurrency", window: null, limit: 8, used: null },
+            ],
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const toggle = await screen.findByRole("button", { name: "Show limits for laptop" });
+    expect(screen.queryByRole("meter")).toBeNull();
+
+    await user.click(toggle);
+    expect(
+      await screen.findByRole("meter", { name: "laptop, Requests per minute, 75% used" }),
+    ).toBeTruthy();
+    // A gauge held in the serving process has no bar to draw, and drawing an
+    // empty one would claim the key is idle.
+    expect(screen.getAllByRole("meter")).toHaveLength(1);
+    expect(screen.getByText(/in flight now, counted in the gateway process/)).toBeTruthy();
+  });
+
+  /**
+   * Editable after creation, unlike `bodyLoggingOptOut`. A weekly spend cap that
+   * cannot be adjusted without minting a new key and redeploying every client is
+   * a cap that gets set to unlimited instead.
+   */
+  test("limits are editable after creation, and the matrix is sent whole", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({
+        keys: [apiKey({ limits: { requests: { "1m": 60 }, tokens: { "1w": 1_000_000 } } })],
+      }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+
+    // The stored matrix is what the form starts from, not a blank one.
+    const perMinute = within(dialog).getByLabelText("Requests per minute");
+    expect((perMinute as HTMLInputElement).value).toBe("60");
+
+    await user.clear(perMinute);
+    await user.type(perMinute, "90");
+    await user.clear(within(dialog).getByLabelText("Tokens per week"));
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.url).toBe("/api/keys/key-1/limits");
+      // Cleared, not merged: the whole matrix is sent, so a blank field is how
+      // a ceiling is removed.
+      expect(put?.init?.body).toBe(JSON.stringify({ limits: { requests: { "1m": 90 } } }));
+    });
+  });
+
+  test("clearing every field leaves the key unlimited rather than broken", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey({ limits: { requests: { "1m": 60 } } })] }),
+      "PUT /api/keys/key-1/limits": () => apiKey({ limits: {} }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.clear(within(dialog).getByLabelText("Requests per minute"));
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.init?.body).toBe(JSON.stringify({ limits: {} }));
     });
   });
 

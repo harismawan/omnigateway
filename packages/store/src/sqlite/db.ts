@@ -7,7 +7,9 @@ import rtkMetrics005 from "./migrations/005_rtk_metrics.sql" with { type: "text"
 import rtkUsage006 from "./migrations/006_rtk_usage.sql" with { type: "text" };
 import quotaSamples007 from "./migrations/007_quota_samples.sql" with { type: "text" };
 import bodyLogging008 from "./migrations/008_body_logging.sql" with { type: "text" };
-import { backfillDaily, backfillRtkUsage } from "./rollup.ts";
+import keyLimits009 from "./migrations/009_key_limits.sql" with { type: "text" };
+import usageRollup010 from "./migrations/010_usage_rollup.sql" with { type: "text" };
+import { backfillDaily, backfillRtkUsage, rebuildRollup } from "./rollup.ts";
 
 /**
  * `after` runs inside the migration's own transaction, for the cases where the
@@ -23,6 +25,10 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
   { id: 6, sql: rtkUsage006, after: backfillRtkUsage },
   { id: 7, sql: quotaSamples007 },
   { id: 8, sql: bodyLogging008 },
+  { id: 9, sql: keyLimits009 },
+  // The backfill is the rebuild: seeding a fresh table and repairing a suspect
+  // one are the same grouped select, so they cannot drift apart.
+  { id: 10, sql: usageRollup010, after: rebuildRollup },
 ];
 
 /**

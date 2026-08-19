@@ -26,6 +26,8 @@ type HarnessOptions = {
   fs?: Partial<DatabaseDeps["fs"]>;
   lifecycle?: Partial<DatabaseRouteDeps["lifecycle"]>;
   maxImportBytes?: number;
+  /** The one step of a restore that runs after the swap has already succeeded. */
+  rebuildRollupFails?: boolean;
 };
 
 /**
@@ -85,6 +87,12 @@ async function harness(options: HarnessOptions = {}) {
       snapshotTo: async (path) => {
         if (held !== null) await held;
         await store.maintenance.snapshotTo(path);
+      },
+    },
+    usage: {
+      rebuildRollup: async () => {
+        if (options.rebuildRollupFails === true) throw new Error("no space left on device");
+        await store.usage.rebuildRollup();
       },
     },
   };
@@ -302,6 +310,36 @@ test("a restore that changes the admin password ends the session that asked for 
   const restored = await call("POST", `/api/database/snapshots/${created.id}/restore`);
   // The operator asked for this, so the operator is told how it went. Their own
   // response is not the one the invalidation is allowed to eat.
+  expect(restored.status).toBe(200);
+  expect(((await restored.json()) as { adminPasswordChanged: boolean }).adminPasswordChanged).toBe(
+    true,
+  );
+
+  expect((await call("GET", "/api/database")).status).toBe(401);
+
+  cleanup();
+});
+
+/**
+ * The same invariant, with the restore's last step broken.
+ *
+ * The rollup rebuild runs after the swap has already succeeded, so a throw from
+ * it used to surface as a failed restore — and this route only reads
+ * `adminPasswordChanged` on the success path. The database on disk was the
+ * restored one either way, which left the new password live and every session
+ * minted under the old one still valid. Asserting the 401 rather than the
+ * response body, because the invalidation is the security property and the
+ * boolean is only how it is reached.
+ */
+test("a restore whose rollup rebuild fails still ends the session it invalidated", async () => {
+  const { call, login, admin, snapshot, cleanup } = await harness({ rebuildRollupFails: true });
+
+  const created = await snapshot();
+  await admin.setPassword("correct-horse-battery");
+  await login("correct-horse-battery");
+  expect((await call("GET", "/api/database")).status).toBe(200);
+
+  const restored = await call("POST", `/api/database/snapshots/${created.id}/restore`);
   expect(restored.status).toBe(200);
   expect(((await restored.json()) as { adminPasswordChanged: boolean }).adminPasswordChanged).toBe(
     true,

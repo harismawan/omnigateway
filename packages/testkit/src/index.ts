@@ -10,6 +10,7 @@ import type { ProviderAdapter } from "@omni/providers";
 import { healthKey, type Snapshot } from "@omni/router";
 import type {
   ApiKey,
+  ApiKeyInput,
   Credential,
   CredentialHealth,
   CredentialSecrets,
@@ -190,7 +191,7 @@ export async function seedCredential(store: Store, overrides: SeedCredentialInpu
  */
 export async function seedApiKey(
   store: Store,
-  overrides: Partial<Omit<ApiKey, "createdAt" | "revokedAt">> = {},
+  overrides: Partial<ApiKeyInput> = {},
 ): Promise<{ raw: string; key: ApiKey }> {
   const raw = generateApiKey();
   const key = await store.keys.create({
@@ -199,7 +200,7 @@ export async function seedApiKey(
     prefix: raw.slice(0, 12),
     hash: await hashApiKey(raw),
     modelAllowlist: null,
-    rateLimitPerMin: null,
+    limits: {},
     bodyLoggingOptOut: false,
     ...overrides,
   });

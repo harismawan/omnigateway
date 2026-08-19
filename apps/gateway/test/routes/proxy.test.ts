@@ -1436,7 +1436,15 @@ test("enforces exact model allowlists before dispatch", async () => {
   expect(sends).toBe(1);
 });
 
-test("fixed-window rate limits are atomic, per-key, and roll over at the boundary", async () => {
+/**
+ * The regression the sliding window exists to close.
+ *
+ * `Math.floor(now / WINDOW_MS) * WINDOW_MS` reset the count on a clock edge, so
+ * a key limited to N could send N at T+59s and N more at T+61s — twice its
+ * ceiling with no rule broken. Written against that behaviour, so a revert to a
+ * fixed window fails here rather than passing quietly.
+ */
+test("rate limits are atomic, per-key, and refuse a burst across the minute boundary", async () => {
   let now = 59_999;
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
@@ -1446,8 +1454,8 @@ test("fixed-window rate limits are atomic, per-key, and roll over at the boundar
       targets: [target({ provider: "anthropic", model: "claude-opus-4" })],
     }),
   );
-  const first = await seedApiKey(store, { rateLimitPerMin: 2 });
-  const second = await seedApiKey(store, { rateLimitPerMin: 1 });
+  const first = await seedApiKey(store, { limits: { requests: { "1m": 2 } } });
+  const second = await seedApiKey(store, { limits: { requests: { "1m": 1 } } });
   let sends = 0;
   const logger = captureLogger();
   const adapters = stubAdapters(EVENTS);
@@ -1506,9 +1514,23 @@ test("fixed-window rate limits are atomic, per-key, and roll over at the boundar
   expect(logger.lines.join("\n")).not.toContain(first.raw);
   expect(logger.lines.join("\n")).not.toContain(second.raw);
 
+  // One millisecond past the old fixed window's edge. The bucket that used to
+  // reset here still holds every request from 59_999, so the key is still at its
+  // ceiling and a second full allowance is refused.
   now = 60_000;
+  expect((await request(first.raw)).status).toBe(429);
+  expect((await request(second.raw)).status).toBe(429);
+  expect(sends).toBe(3);
+
+  // The window frees up exactly one minute after the burst that filled it —
+  // 59_999 + 60_000 — rather than on the next clock edge. Asserted at the tick,
+  // because a window off by one is a window that is not sliding.
+  now = 119_998;
+  expect((await request(first.raw)).status).toBe(429);
+  now = 119_999;
   expect((await request(first.raw)).status).toBe(200);
   expect((await request(second.raw)).status).toBe(200);
+  expect(sends).toBe(5);
 });
 
 test("models route returns only models in the calling key allowlist", async () => {

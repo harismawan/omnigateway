@@ -14,7 +14,7 @@ import {
   credentialsShow,
 } from "./commands/credentials.ts";
 import { dbBackup, dbMigrate, dbRestore, dbSnapshots, dbStats, dbVacuum } from "./commands/db.ts";
-import { keysCreate, keysList, keysRevoke } from "./commands/keys.ts";
+import { keysCreate, keysLimits, keysList, keysRevoke } from "./commands/keys.ts";
 import {
   modelsCatalog,
   modelsDryRun,
@@ -78,6 +78,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
 
   "keys list": keysList,
   "keys create": keysCreate,
+  "keys limits": keysLimits,
   "keys revoke": keysRevoke,
 
   "settings get": settingsGet,

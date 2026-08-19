@@ -1,17 +1,20 @@
-import { Plus } from "lucide-react";
-import { useState } from "react";
+import { ChevronDown, ChevronRight, Plus, SlidersHorizontal } from "lucide-react";
+import { Fragment, useState } from "react";
 import styled from "styled-components";
 import { useKeys, useRevokeKey } from "../../api/queries.ts";
-import type { ApiKeySummary } from "../../api/types.ts";
+import type { ApiKeySummary, LimitReading } from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatDateTime } from "../../lib/format.ts";
-import { Button } from "../../ui/Button.tsx";
+import { Button, IconButton } from "../../ui/Button.tsx";
 import { Chip } from "../../ui/Chip.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Legend, Row, ScrollX, Truncate } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
+import { EditLimitsDialog } from "./EditLimitsDialog.tsx";
+import { LimitMatrix } from "./LimitMatrix.tsx";
+import { describeSlot, formatLimitValue, fractionOf, nearestExhaustion } from "./limits.ts";
 import { MintKeyDialog } from "./MintKeyDialog.tsx";
 
 const Allow = styled(Row)`
@@ -24,10 +27,41 @@ const Revoked = styled.span`
   color: ${({ theme }) => theme.color.inkFaint};
 `;
 
+/** The nearest-exhaustion line under the count, quiet enough to stay secondary. */
+const Nearest = styled.span`
+  font-size: 11px;
+  color: ${({ theme }) => theme.color.inkDim};
+`;
+
+const Summary = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+`;
+
+/**
+ * The one limit that will deny first, which is the only one a summary can carry.
+ *
+ * A key with three ceilings has one cell, and the shortest window is the wrong
+ * answer: a key idle this minute and one request from its weekly ceiling would
+ * read as comfortable. `concurrency` cannot be ranked here — it is an in-flight
+ * gauge held in the serving process — so a key limited only by it says so.
+ */
+function describeNearest(nearest: LimitReading | null): string {
+  if (nearest === null) return "usage not counted here";
+  const share = fractionOf(nearest);
+  const name = describeSlot({ dimension: nearest.dimension, window: nearest.window });
+  const ceiling = formatLimitValue(nearest.dimension, nearest.limit);
+  return `${name} ${ceiling}, ${share === null ? "—" : Math.round(share * 100)}% used`;
+}
+
 export function KeysBoard() {
   const keys = useKeys();
   const revoke = useRevokeKey();
   const [minting, setMinting] = useState(false);
+  const [editing, setEditing] = useState<ApiKeySummary | null>(null);
+  const [opened, setOpened] = useState<string | null>(null);
   const [doomed, setDoomed] = useState<ApiKeySummary | null>(null);
 
   const rows = keys.data ?? [];
@@ -78,7 +112,7 @@ export function KeysBoard() {
                   <Th>Label</Th>
                   <Th>Prefix</Th>
                   <Th>Allowed models</Th>
-                  <Th $align="right">Rate limit</Th>
+                  <Th $align="right">Limits</Th>
                   <Th $align="right">Created</Th>
                   <Th>Body capture</Th>
                   <Th>Status</Th>
@@ -86,63 +120,128 @@ export function KeysBoard() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((key) => (
-                  <Tr key={key.id}>
-                    <Td>
-                      <Truncate style={{ maxWidth: "24ch", display: "block" }}>
-                        {key.label}
-                      </Truncate>
-                    </Td>
-                    <Td $mono>{key.prefix}…</Td>
-                    <Td>
-                      {key.modelAllowlist === null ? (
-                        <Legend>every model</Legend>
-                      ) : key.modelAllowlist.length === 0 ? (
-                        <Chip $tone="down">no models</Chip>
-                      ) : (
-                        <Allow>
-                          {key.modelAllowlist.map((model) => (
-                            <Chip key={model}>{model}</Chip>
-                          ))}
-                        </Allow>
-                      )}
-                    </Td>
-                    <Td $align="right" $mono>
-                      {key.rateLimitPerMin === null ? "—" : `${key.rateLimitPerMin}/min`}
-                    </Td>
-                    <Td $align="right" $mono>
-                      {formatDateTime(key.createdAt)}
-                    </Td>
-                    <Td>
-                      {/* An opted-out key is never captured whatever the
-                          settings say, and that is a promise made to whoever
-                          holds it — so it is listed rather than left in the
-                          database for an auditor to find. */}
-                      {key.bodyLoggingOptOut ? <Chip>no bodies</Chip> : <Legend>—</Legend>}
-                    </Td>
-                    <Td>
-                      {key.revokedAt === null ? (
-                        <Chip $tone="ok">active</Chip>
-                      ) : (
-                        <Revoked title={formatDateTime(key.revokedAt)}>
-                          <Chip>revoked</Chip>
-                        </Revoked>
-                      )}
-                    </Td>
-                    <Td $align="right">
-                      {key.revokedAt === null ? (
-                        <Button
-                          type="button"
-                          $variant="danger"
-                          $size="sm"
-                          onClick={() => setDoomed(key)}
-                        >
-                          Revoke
-                        </Button>
+                {rows.map((key) => {
+                  const open = opened === key.id;
+                  const nearest = nearestExhaustion(key.limitUsage);
+                  return (
+                    <Fragment key={key.id}>
+                      <Tr>
+                        <Td>
+                          <Truncate style={{ maxWidth: "24ch", display: "block" }}>
+                            {key.label}
+                          </Truncate>
+                        </Td>
+                        <Td $mono>{key.prefix}…</Td>
+                        <Td>
+                          {key.modelAllowlist === null ? (
+                            <Legend>every model</Legend>
+                          ) : key.modelAllowlist.length === 0 ? (
+                            <Chip $tone="down">no models</Chip>
+                          ) : (
+                            <Allow>
+                              {key.modelAllowlist.map((model) => (
+                                <Chip key={model}>{model}</Chip>
+                              ))}
+                            </Allow>
+                          )}
+                        </Td>
+                        <Td $align="right">
+                          {/* A summary, not the matrix: a table per row is not
+                              what an at-a-glance board is for, so the count
+                              leads and the limit that will deny first sits
+                              under it. The rest is behind the disclosure.
+
+                              Null limits are not a dash: the gateway refuses
+                              this key until the stored column is fixed, so
+                              showing it as unlimited would name the
+                              healthiest-looking row on the board as the broken
+                              one. */}
+                          {key.limits === null ? (
+                            <Chip $tone="down">unreadable</Chip>
+                          ) : key.limitUsage.length === 0 ? (
+                            <Legend>no limits</Legend>
+                          ) : (
+                            <Summary>
+                              <span>
+                                {key.limitUsage.length} limit
+                                {key.limitUsage.length === 1 ? "" : "s"}
+                              </span>
+                              <Nearest>{describeNearest(nearest)}</Nearest>
+                            </Summary>
+                          )}
+                        </Td>
+                        <Td $align="right" $mono>
+                          {formatDateTime(key.createdAt)}
+                        </Td>
+                        <Td>
+                          {/* An opted-out key is never captured whatever the
+                              settings say, and that is a promise made to whoever
+                              holds it — so it is listed rather than left in the
+                              database for an auditor to find. */}
+                          {key.bodyLoggingOptOut ? <Chip>no bodies</Chip> : <Legend>—</Legend>}
+                        </Td>
+                        <Td>
+                          {key.revokedAt === null ? (
+                            <Chip $tone="ok">active</Chip>
+                          ) : (
+                            <Revoked title={formatDateTime(key.revokedAt)}>
+                              <Chip>revoked</Chip>
+                            </Revoked>
+                          )}
+                        </Td>
+                        <Td $align="right">
+                          <Row $gap={1} $justify="flex-end">
+                            {/* Nothing configured is nothing to unfold, so the
+                                control is absent rather than opening onto an
+                                empty panel. */}
+                            {key.limitUsage.length === 0 ? null : (
+                              <IconButton
+                                type="button"
+                                $variant="ghost"
+                                $size="sm"
+                                aria-expanded={open}
+                                aria-label={`${open ? "Hide" : "Show"} limits for ${key.label}`}
+                                title={`${open ? "Hide" : "Show"} limits for ${key.label}`}
+                                onClick={() => setOpened(open ? null : key.id)}
+                              >
+                                {open ? <ChevronDown /> : <ChevronRight />}
+                              </IconButton>
+                            )}
+                            {key.revokedAt === null ? (
+                              <>
+                                <IconButton
+                                  type="button"
+                                  $variant="ghost"
+                                  $size="sm"
+                                  aria-label={`Edit limits for ${key.label}`}
+                                  title={`Edit limits for ${key.label}`}
+                                  onClick={() => setEditing(key)}
+                                >
+                                  <SlidersHorizontal />
+                                </IconButton>
+                                <Button
+                                  type="button"
+                                  $variant="danger"
+                                  $size="sm"
+                                  onClick={() => setDoomed(key)}
+                                >
+                                  Revoke
+                                </Button>
+                              </>
+                            ) : null}
+                          </Row>
+                        </Td>
+                      </Tr>
+                      {open ? (
+                        <Tr>
+                          <Td colSpan={8}>
+                            <LimitMatrix label={key.label} readings={key.limitUsage} />
+                          </Td>
+                        </Tr>
                       ) : null}
-                    </Td>
-                  </Tr>
-                ))}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </Table>
           </ScrollX>
@@ -150,6 +249,16 @@ export function KeysBoard() {
       </Module>
 
       <MintKeyDialog open={minting} onOpenChange={setMinting} />
+
+      {/* Keyed by the row, so opening a second key starts from that key's
+          matrix rather than from whatever was typed into the last one. */}
+      <EditLimitsDialog
+        key={editing?.id ?? "none"}
+        apiKey={editing}
+        onOpenChange={(next) => {
+          if (!next) setEditing(null);
+        }}
+      />
 
       <Confirm
         open={doomed !== null}

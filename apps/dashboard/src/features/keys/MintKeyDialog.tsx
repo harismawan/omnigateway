@@ -1,3 +1,4 @@
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { useState } from "react";
 import styled from "styled-components";
 import { useCreateKey, useModels } from "../../api/queries.ts";
@@ -9,6 +10,8 @@ import { Modal } from "../../ui/Modal.tsx";
 import { Legend, Mono, Row, Stack } from "../../ui/primitives.ts";
 import { describeError } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
+import { LimitFields } from "./LimitFields.tsx";
+import { draftFrom, draftToLimits, type LimitDraft } from "./limits.ts";
 
 const Choices = styled.div`
   display: flex;
@@ -52,6 +55,11 @@ const Once = styled.p`
   color: ${({ theme }) => theme.color.inkDim};
 `;
 
+/** Opens the limit matrix, which is folded away until it is asked for. */
+const Disclosure = styled(Button)`
+  gap: 4px;
+`;
+
 /** Matches `Field`'s own hint, for a control that draws its own label. */
 const Hint = styled.p`
   font-size: 11px;
@@ -77,7 +85,8 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
   const [label, setLabel] = useState("");
   const [unrestricted, setUnrestricted] = useState(true);
   const [allowed, setAllowed] = useState<string[]>([]);
-  const [rateLimit, setRateLimit] = useState("");
+  const [limits, setLimits] = useState<LimitDraft>(() => draftFrom({}));
+  const [showLimits, setShowLimits] = useState(false);
   const [optOut, setOptOut] = useState(false);
   const [minted, setMinted] = useState<MintedKey | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -86,7 +95,8 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
     setLabel("");
     setUnrestricted(true);
     setAllowed([]);
-    setRateLimit("");
+    setLimits(draftFrom({}));
+    setShowLimits(false);
     setOptOut(false);
     setMinted(null);
     setProblem(null);
@@ -98,13 +108,16 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
     onOpenChange(next);
   };
 
+  /** Counted from the typed fields so a collapsed section still says what is in it. */
+  const configured = Object.values(limits).filter((value) => value.trim().length > 0).length;
+
   const submit = () => {
-    const trimmed = rateLimit.trim();
-    const limit = trimmed.length === 0 ? null : Number(trimmed);
-    if (limit !== null && (!Number.isInteger(limit) || limit < 1)) {
-      setProblem(
-        "The rate limit must be a whole number of requests per minute, or blank for none.",
-      );
+    const matrix = draftToLimits(limits);
+    if ("problem" in matrix) {
+      // The section may be collapsed over the field that is wrong, so it opens
+      // rather than leaving an alert pointing at something nobody can see.
+      setShowLimits(true);
+      setProblem(matrix.problem);
       return;
     }
     setProblem(null);
@@ -112,7 +125,10 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
       {
         label: label.trim().length === 0 ? "api key" : label.trim(),
         modelAllowlist: unrestricted ? null : allowed,
-        rateLimitPerMin: limit,
+        // `{}` is unlimited, and an omitted pair says the same thing as a null
+        // one — so blank fields submit an empty matrix rather than nulls inside
+        // dimension objects nobody asked for.
+        limits: matrix.limits,
         bodyLoggingOptOut: optOut,
       },
       {
@@ -202,22 +218,29 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
             )}
           </Stack>
 
-          <Field
-            label="Rate limit"
-            hint="Requests per minute for this key. Leave blank for no limit. Counted per process, and reset when the gateway restarts."
-          >
-            {(props) => (
-              <Input
-                {...props}
-                type="number"
-                min={1}
-                step={1}
-                value={rateLimit}
-                placeholder="no limit"
-                onChange={(event) => setRateLimit(event.target.value)}
-              />
-            )}
-          </Field>
+          {/* Collapsed by default, so minting a key with no limits stays a
+              two-field operation. Nine ceilings unfolded over every operator
+              who only ever wanted a label would be a worse default than the
+              one field this replaces. */}
+          <Stack $gap={2}>
+            <Row $gap={2}>
+              <Disclosure
+                type="button"
+                $size="sm"
+                aria-expanded={showLimits}
+                onClick={() => setShowLimits((open) => !open)}
+              >
+                {showLimits ? <ChevronDown /> : <ChevronRight />}
+                Limits
+              </Disclosure>
+              <Legend as="span">
+                {configured === 0
+                  ? "no limits; this key is unbounded"
+                  : `${configured} limit${configured === 1 ? "" : "s"} set`}
+              </Legend>
+            </Row>
+            {showLimits ? <LimitFields draft={limits} onChange={setLimits} /> : null}
+          </Stack>
 
           {/* Settable only here. A client handed a key on the promise that its
               payloads are never retained must not have that reversed later by

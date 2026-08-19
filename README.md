@@ -186,6 +186,51 @@ Mint a key for your client. **It is printed once and stored only as a hash:**
 omni keys create --label laptop
 ```
 
+Bound what the key can do with `--limit <dimension>:<window>=<value>`, repeated
+once per pair. An unset pair is unlimited:
+
+```bash
+omni keys create --label ci --limit requests:1m=60
+```
+
+Every window is *sliding*, so a key cannot spend two windows' allowance either
+side of a clock edge. `requests` and `tokens` take `1m`, `5h`, and `1w`; `spend`
+takes `5h` and `1w`; `concurrency` is not a window at all but a ceiling on
+requests in flight at once.
+
+`tokens` and `spend` are debited once a response completes, because an exact
+token count exists only then — a key at its ceiling is refused on its *next*
+request rather than its current one. The `5h` and `1w` counts come from
+`request_logs`, so a `1w` limit on an installation that prunes logs after three
+days really enforces three days. They are cached for thirty seconds and can
+therefore read slightly high, never low: the key is refused early rather than
+let past a ceiling you set. If the database cannot answer, those windows stop
+enforcing and the gateway logs it; `requests` at `1m` and `concurrency` are held
+in memory and go on enforcing exactly. Everything here is counted per process
+and reset when the gateway restarts — which for `concurrency` is correct, since
+in-flight requests die with the process.
+
+> **Breaking:** `--rate-limit N` is removed, not aliased. Use
+> `--limit requests:1m=N`. A script still passing the old flag stops with an
+> unknown-flag error rather than quietly taking a deprecated path.
+
+Limits are editable after the key exists, unlike `--no-bodies` below. `omni keys
+list` prints a compact summary; the full matrix and what has gone against it
+need one key's id:
+
+```bash
+omni keys limits <id>
+omni keys limits <id> --set tokens:1w=50000000
+omni keys limits <id> --unset spend:5h
+```
+
+`--unset` names a pair that is actually set, so a typo fails rather than
+reporting a change it did not make. The usage shown counts completed requests
+still inside each window, so it reads at or below what the running gateway is
+enforcing, and `concurrency` shows no figure at all — the gauge lives in the
+gateway process, not in the database. The console's Keys screen shows the same
+matrix behind each row's disclosure and edits it there.
+
 Now use it:
 
 ```bash
@@ -530,6 +575,16 @@ a database file from elsewhere, up to 2 GiB, which is how you move an installati
 to another machine — bring `OMNI_ENCRYPTION_KEY` with it, or the credentials in it
 are unreadable. Either way the file is integrity-checked before anything is
 touched, and a copy of what was there is taken first.
+
+**A restore ends by rebuilding the hourly usage rollup, and that step blocks.**
+The rollup is what rate limits count their 5h and 1w windows from, and no file an
+operator hands over says whether its counters agree with its rows — so it is
+recomputed rather than trusted. `bun:sqlite` is synchronous, so the grouped scan
+holds the event loop: roughly 0.4 s per 500k request-log rows, 1.6 s per 2M, and
+about 6.5 s at 8M. `/api/*` and `/health` do not answer during it. It is the last
+thing a restore does, after the swap has already succeeded, and a failure is
+logged rather than raised — the database is live either way, and `omni doctor`
+reports a rollup that disagrees with its rows.
 
 **`omni db restore <id>` refuses while a gateway is running** against that
 installation, and there is no override flag. A second process can open its own

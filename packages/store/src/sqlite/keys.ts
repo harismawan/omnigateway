@@ -1,4 +1,6 @@
 import type { Database } from "bun:sqlite";
+import { type Logger, noopLogger } from "@omni/ir";
+import { type LimitConfig, parseLimitConfig } from "@omni/ratelimit/catalog";
 import type { ApiKey, KeyRepo } from "../types.ts";
 
 const PREFIX = "sk-omni-";
@@ -32,19 +34,46 @@ type Row = {
   prefix: string;
   hash: string;
   model_allowlist: string | null;
-  rate_limit_per_min: number | null;
+  limits: string;
   body_logging_opt_out: number;
   created_at: number;
   revoked_at: number | null;
 };
 
-const toKey = (r: Row): ApiKey => ({
+/**
+ * An unreadable `limits` value marks the key rather than being discarded — and
+ * rather than throwing.
+ *
+ * `parseRtkFilters` may drop an id it does not know because the worst outcome is
+ * a gap in reported history. A limit dropped the same way reads as "no limit"
+ * and fails open on a ceiling the operator explicitly set, so `null` is returned
+ * as its own state and refused later at the auth chokepoint.
+ *
+ * Throwing here was the obvious first answer and the wrong blast radius: `toKey`
+ * serves `list` as well as `findByHash`, so one meddled row took away the very
+ * listing an operator would use to find it, in both the console and the CLI.
+ * Refuse at auth, degrade at list.
+ */
+function parseLimits(id: string, raw: string, logger: Logger): LimitConfig | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parseLimitConfig(parsed);
+  } catch {
+    // Named, so the failure is not silent. The cause is deliberately not
+    // rendered: it is a zod message built from the stored value, and `LogFields`
+    // is a redaction boundary rather than a place to paste one.
+    logger.error("api key limits unreadable", { apiKeyId: id });
+    return null;
+  }
+}
+
+const toKey = (r: Row, logger: Logger): ApiKey => ({
   id: r.id,
   label: r.label,
   prefix: r.prefix,
   hash: r.hash,
   modelAllowlist: r.model_allowlist === null ? null : (JSON.parse(r.model_allowlist) as string[]),
-  rateLimitPerMin: r.rate_limit_per_min,
+  limits: parseLimits(r.id, r.limits, logger),
   // Only a stored 1 opts out; anything else leaves the key on the
   // installation-wide setting, which is itself off by default.
   bodyLoggingOptOut: r.body_logging_opt_out === 1,
@@ -52,21 +81,24 @@ const toKey = (r: Row): ApiKey => ({
   revokedAt: r.revoked_at,
 });
 
-export function createKeyRepo(db: Database): KeyRepo {
+export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRepo {
   return {
     async list() {
-      return db.query<Row, []>("SELECT * FROM api_keys ORDER BY created_at DESC").all().map(toKey);
+      return db
+        .query<Row, []>("SELECT * FROM api_keys ORDER BY created_at DESC")
+        .all()
+        .map((row) => toKey(row, logger));
     },
 
     async findByHash(hash: string) {
       const row = db.query<Row, [string]>("SELECT * FROM api_keys WHERE hash = ?").get(hash);
-      return row ? toKey(row) : null;
+      return row ? toKey(row, logger) : null;
     },
 
     async create(input) {
       const now = Date.now();
       db.run(
-        `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, rate_limit_per_min,
+        `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
                                body_logging_opt_out, created_at, revoked_at)
          VALUES (?,?,?,?,?,?,?,?,NULL)`,
         [
@@ -75,12 +107,25 @@ export function createKeyRepo(db: Database): KeyRepo {
           input.prefix,
           input.hash,
           input.modelAllowlist === null ? null : JSON.stringify(input.modelAllowlist),
-          input.rateLimitPerMin,
+          // Validated on the way in as well as on the way out, so a caller that
+          // reached past the control schema cannot write a shape no reader can
+          // parse and lock its own key out.
+          JSON.stringify(parseLimitConfig(input.limits)),
           input.bodyLoggingOptOut ? 1 : 0,
           now,
         ],
       );
       return { ...input, createdAt: now, revokedAt: null };
+    },
+
+    async setLimits(id: string, limits: LimitConfig) {
+      db.run("UPDATE api_keys SET limits = ? WHERE id = ?", [
+        // Same guard as `create`, and for the same reason: an edit that reached
+        // past the control schema must not be able to write a matrix the next
+        // reader refuses, which is a key locked out of `/v1` by its own repair.
+        JSON.stringify(parseLimitConfig(limits)),
+        id,
+      ]);
     },
 
     async revoke(id: string) {

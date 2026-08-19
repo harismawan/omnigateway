@@ -15,6 +15,7 @@ OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway:
 - `packages/ir`: provider-neutral domain model
 - `packages/providers`: provider adapters and catalog
 - `packages/router`: pure routing
+- `packages/ratelimit`: pure API-key limit evaluation and sliding-window counting
 - `packages/rtk`: tool-result filters, applied in dispatch before routing
 - `packages/store`: persistence and encryption
 - `packages/testkit`: shared test fixtures
@@ -86,6 +87,12 @@ and `bun run lint`.
 13. `packages/rtk` stays pure like `ir` and `router`: no I/O, clocks, or randomness. It rewrites
     tool-result content only and preserves errors and non-tool-result blocks. `@omni/rtk/catalog` is
     a leaf holding the filter-id union; `@omni/store` imports that subpath alone.
+14. `packages/ratelimit` stays pure the same way; `now` is always a parameter and the counters are
+    supplied by the caller, so the package never learns where they came from. `@omni/ratelimit/catalog`
+    is a leaf holding the dimension and window unions, `LimitConfig`, and its zod schema;
+    `@omni/store` imports that subpath alone and re-exports `LimitConfig` from `@omni/store/types`,
+    which is the import the dashboard is already permitted. Limiter state — rings and gauges — lives
+    in `apps/gateway`, because state is not the package's job.
 
 ## Adding a provider
 
@@ -225,12 +232,56 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   inherits. `OMNI_ROOT` does not suppress it: both are ambient.
 - API-key rate limits and quota cooldowns are process-local and reset on restart.
 - `usage.append` must run at most once per request ID; duplicate completion double-counts
-  `usage_daily`. Pending rows contain placeholder metrics; inspect `state`, not `status`.
+  `usage_daily` and `usage_rollup` alike. Pending rows contain placeholder metrics; inspect `state`,
+  not `status`.
+- `usage_rollup` is derived, never authoritative: `request_logs` is the source of truth and
+  `rebuildRollup` reproduces every bucket from it. It is written in `append`'s transaction, pruned
+  with the rows it summarizes, rebuilt after a restore or import, and compared by `omni doctor`. A
+  read of it is flat where a `SELECT SUM` over the window grows without bound — and `bun:sqlite` is
+  synchronous, so that scan blocked the whole event loop, not one request. For the same reason a
+  timeout around a store read is a bound that cannot fire; do not add one back.
 - `quota_windows` stores provider observations, not gateway counts. Missing data means unknown, not
   unlimited. Probe failure must never disable a credential.
 - RTK filter ids are persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is a storage
   contract, not an internal enum. `isRtkFilterId` drops unknown ids on read, so renaming one loses
   history silently rather than failing. Add ids freely; rename or remove only with a migration.
+- The limit vocabulary — `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` — is persisted as
+  the JSON keys of `api_keys.limits` in every row, so it is a storage contract of the same class.
+  Unlike RTK ids it fails **closed**: an unknown dimension or window is a parse failure, never a
+  silent drop, because a limit read as "no limit" fails open on a ceiling the operator set. Add
+  names freely; rename or remove only with a migration.
+- Refuse at auth, degrade at list. A row whose `limits` will not parse reads back as
+  `ApiKey.limits === null`, distinct from `{}`, and `authenticateApiKey` turns that into
+  `INTERNAL` — not `AUTH`, which would blame a credential that is fine. `keys.list()` must never
+  throw over one such row: `toKey` serves the listing as well as the auth lookup, and the listing is
+  how an operator finds the row to fix. Nothing may collapse the null into `{}` on the way to the
+  CLI or console.
+- `limits` is the one field on a key that is editable after minting, through `setKeyLimits` and
+  `PUT /api/keys/:id/limits`; `bodyLoggingOptOut` deliberately has no such path. An opt-out is a
+  promise to whoever holds the key, while a limit is the operator's own ceiling on their own
+  installation. The matrix is written whole — `{}` is how the last limit goes away, and it must land
+  as `{}` rather than a husk like `{"requests":{}}` or the outer `null` that means unreadable.
+- The usage on `ApiKeySummary.limitUsage` is committed rows only, so it is a floor on what the
+  limiter sees and never the limiter's own number: the gateway adds a process-local delta and the
+  `concurrency` gauge is not stored at all, which is why its `used` is `null` rather than `0`.
+- API-key limits are enforced over *sliding* windows. A fixed window resets on a clock edge and lets
+  a key spend a whole window's allowance either side of one, at every window size. `1m` is exact from
+  a ring of timestamps in `apps/gateway`; longer windows read `usage.sumSince`, which must filter
+  `state = 'done'` or every in-flight request's placeholder metrics inflate the count.
+- A long-window count is `usage.sumSince` plus the in-memory delta since that read, cached 30s. The
+  composition may over-count — events aging out between the read and now are not subtracted — and
+  must never under-count, so the delta keeps everything recorded at or after the read instant. A
+  limiter whose error ran the other way could be walked through by timing the refresh. A failed or
+  slow `sumSince` serves the request and logs it through existing `LogFields` keys; only the long
+  windows degrade, because `requests` at `1m` and `concurrency` never touch the store.
+- The token and spend debit lives in `finishLog`, beside `usage.append` and never inside
+  `@omni/store`. That site already runs at most once per request id, which is exactly the guarantee
+  the debit needs and would otherwise have to re-establish.
+- The concurrency gauge is decremented at request scope and nowhere else. A streaming handler returns
+  its `Response` while the request is still running, so a `finally` around the handler body fires
+  when the head is sent, and a decrement beside the debit sits behind a store write. Streams free the
+  slot from `sseResponse`'s run-once completion, which covers a drained stream, a broken one, and a
+  hang-up alike. No window expires a gauge: a leak locks the key out until restart, silently.
 - `ProviderModelChoice.auth` is enforced at write time in `putModel`, never at routing. Which ways
   in exist is installation state, so the catalog exports the fact (`catalogModelAuths`) and control
   owns the rule. A provider with no credential is unknown rather than blocked, an unlisted model is
@@ -262,7 +313,12 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   file keeps every page and every caller reports reclaiming nothing.
 - Restoring writes another installation's admin password hash without passing through `setPassword`,
   which is what clears sessions. Restore compares the hash across the swap and invalidates only when
-  it differs.
+  it differs. Nothing may sit between the swap and that comparison: the swap has already succeeded by
+  then, so a step that throws in front of it skips the invalidation while the new password is live.
+- `swapIn` ends by rebuilding `usage_rollup`, after the hash comparison and guarded. `bun:sqlite` is
+  synchronous, so the rebuild blocks the event loop — and therefore `/api/*` and `/health` — for
+  ≈0.4 s per 500k `request_logs` rows, ≈1.6 s at 2M, ≈6.5 s at 8M. Document the cost rather than hide
+  it; a stale rollup is a `doctor` complaint, a failed restore is an outage.
 - `omni db restore` refuses while a gateway is running and has no override. The dashboard swaps
   inside the process owning the handle; a second process cannot quiesce that connection, and renaming
   the file under it corrupts the database being rescued.

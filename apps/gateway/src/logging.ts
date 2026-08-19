@@ -173,6 +173,15 @@ export async function routeLog(
 export type BodyWriter = (log: RequestLog) => Promise<void>;
 
 /**
+ * Charges one finished request against whatever counts a key's usage.
+ *
+ * A callback rather than the limiter itself, so this module keeps knowing only
+ * about a store and a logger, and so the site below can be read without going
+ * and finding out what a rate limiter does.
+ */
+export type UsageDebit = (keyId: string, usage: { tokens: number; costUsd: number }) => void;
+
+/**
  * Persists a finished request log, completing the pending row if one was
  * written, and with it whatever bodies were captured for the request.
  *
@@ -185,6 +194,12 @@ export type BodyWriter = (log: RequestLog) => Promise<void>;
  * runs twice, and an artifact write has the same shape of problem. It runs
  * second and in a `try` of its own: the row is the record every operator relies
  * on, and an opt-in body corpus must not be able to cost them one.
+ *
+ * `debit` runs here for the same reason, and beside the append rather than
+ * inside it: `@omni/store` keeps rows behind itself and has no business knowing
+ * a gateway limiter exists, while this function is already the one site that
+ * runs at most once per request id. A second lifecycle hook next to it would
+ * have to re-establish that guarantee; a debit here inherits it.
  */
 export async function finishLog(
   store: Store,
@@ -192,11 +207,32 @@ export async function finishLog(
   keyId: string | null,
   logger: Logger = noopLogger,
   bodies?: BodyWriter,
+  debit?: UsageDebit,
 ): Promise<void> {
   try {
     await store.usage.append({ ...log, apiKeyId: keyId });
   } catch (error) {
     report(logger, "failed to persist request log", log.id, error);
+  }
+  // Whether or not the row landed: a key that spent the tokens spent them, and
+  // the limiter should not forget them because a write failed under load.
+  //
+  // The reach of that is one cache TTL, not forever, and the limit of it is
+  // worth stating rather than discovering. A debit lives in the in-memory delta
+  // until the next store read-through, which trims anything older than the
+  // instant it read — and the row this debit stood in for is not in that read,
+  // because it was never written. So a failed write is covered for as long as
+  // the delta holds it and not beyond. Retaining such debits across the trim
+  // would fix that and would double-count every debit whose row did land, which
+  // is the worse of the two errors and the one this design refuses.
+  //
+  // All four token classes are disjoint — `Usage.inputTokens` is uncached
+  // input — so summing them double-counts none.
+  if (keyId !== null && debit !== undefined) {
+    debit(keyId, {
+      tokens: log.inputTokens + log.outputTokens + log.cacheReadTokens + log.cacheWriteTokens,
+      costUsd: log.costUsd,
+    });
   }
   if (bodies === undefined) return;
   try {

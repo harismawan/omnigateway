@@ -1,4 +1,5 @@
 import { GatewayError } from "@omni/ir";
+import { limitConfigSchema } from "@omni/ratelimit/catalog";
 import type { UsageDimension, UsageGrain } from "@omni/store";
 import { z } from "zod";
 
@@ -123,7 +124,13 @@ export const keyCreateSchema = z
     label: z.string().min(1).default("api key"),
     /** Null means every configured model. An empty array would mean none. */
     modelAllowlist: z.array(z.string().min(1)).nullable().default(null),
-    rateLimitPerMin: z.number().int().positive().nullable().default(null),
+    /**
+     * The sparse `(dimension, window)` matrix. `{}` is unlimited.
+     *
+     * Strict all the way down, so an unknown dimension or window name is
+     * refused here rather than stored and later read as no limit at all.
+     */
+    limits: limitConfigSchema.default({}),
     /**
      * Suppresses body capture for this key whatever the settings say.
      *
@@ -135,6 +142,21 @@ export const keyCreateSchema = z
     bodyLoggingOptOut: z.boolean().default(false),
   })
   .strict();
+
+/**
+ * The one part of a key that may be edited after it is minted.
+ *
+ * Sent whole rather than as a patch: `limits` is one JSON document, `{}` is a
+ * meaningful value, and a partial body would have to distinguish "leave this
+ * pair alone" from "clear it" in a shape where absent and null already both
+ * mean unlimited. A caller that wants to change one pair reads the matrix,
+ * edits it, and sends it back.
+ *
+ * `bodyLoggingOptOut` is deliberately not here. An opt-out is a promise to
+ * whoever holds the key and must not be revocable behind their back; a limit is
+ * the operator's own ceiling on their own installation.
+ */
+export const keyLimitsSchema = z.object({ limits: limitConfigSchema }).strict();
 
 /**
  * How many database snapshots to keep, and for how long.

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
-import { CliError } from "../context.ts";
+import { CliError, type Context } from "../context.ts";
 import { emit, fields, note, paint } from "../output.ts";
 import { gatewayEntrypoint } from "../runtime.ts";
 import {
@@ -146,6 +146,34 @@ export const serviceUninstall: Command = {
   },
 };
 
+/**
+ * Whether the hourly usage rollup still agrees with the rows it summarizes.
+ *
+ * The rollup is what long-window rate limits are enforced from, and it is
+ * derived: a disagreement means a key is being judged against history that is
+ * not what the log holds, in either direction. Null where there is nothing to
+ * check or nothing to check it with — a missing database, an unreadable
+ * configuration, a store that will not open — because `doctor` is the command
+ * an operator runs when those are exactly the things that are wrong.
+ *
+ * A full grouped scan of `request_logs`, which is the cost `sumSince` exists to
+ * keep off the request path. It is paid here because this is a diagnostic
+ * someone typed, not something the gateway does to itself.
+ */
+async function rollupState(ctx: Context): Promise<string | null> {
+  if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
+  try {
+    const audit = await (await ctx.store()).usage.auditRollup();
+    return audit.ok
+      ? `ok (${audit.buckets} hourly buckets)`
+      : `${audit.mismatched} of ${audit.buckets} hourly buckets disagree with request_logs`;
+  } catch {
+    // The reason is already reported by `config` or `database` above; a second
+    // rendering of the same fault would say nothing new.
+    return null;
+  }
+}
+
 export const doctor: Command = {
   usage: "doctor",
   summary: "Check what this CLI resolved, and whether it can do anything with it",
@@ -155,6 +183,7 @@ export const doctor: Command = {
     const key = ctx.env.OMNI_ENCRYPTION_KEY;
     const unit = unitInstalled(deps);
     const status = await serviceStatus(deps);
+    const usageRollup = await rollupState(ctx);
 
     const checks = {
       root: deps.root,
@@ -166,6 +195,7 @@ export const doctor: Command = {
       encryptionKey: typeof key === "string" ? `present (${key.length} chars)` : "missing",
       configError: ctx.configError,
       gatewayEntrypoint: gatewayEntrypoint(deps.root),
+      usageRollup,
       unitInstalled: unit,
       supervisor: status.supervisor,
       running: status.running,
@@ -189,6 +219,12 @@ export const doctor: Command = {
         ["encryption key", checks.encryptionKey],
         ["config", checks.configError === null ? ok(true, "ok") : ok(false, checks.configError)],
         ["entrypoint", checks.gatewayEntrypoint ?? ok(false, "not found")],
+        [
+          "usage rollup",
+          checks.usageRollup === null
+            ? paint(ctx, "dim", "not checked")
+            : ok(checks.usageRollup.startsWith("ok"), checks.usageRollup),
+        ],
         ["systemd unit", unit ? deps.scope : paint(ctx, "dim", "none")],
         ["gateway", ok(status.running, status.running ? "running" : "stopped")],
         ["console log", sourceHint(checks.consoleSource)],

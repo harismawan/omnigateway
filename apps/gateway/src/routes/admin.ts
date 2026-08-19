@@ -23,6 +23,7 @@ import {
   removeCredential,
   removeModel,
   revokeKey,
+  setKeyLimits,
   setupFiles,
 } from "@omni/control";
 import { GatewayError, type Logger, noopLogger, parseLogLevel } from "@omni/ir";
@@ -281,6 +282,20 @@ export function adminRoutes(deps: AdminDeps) {
         // The only response that ever contains a key. It exists in plaintext
         // nowhere else, so an operator who loses it must issue a new one.
         return createKey(deps.store, await readJson(request));
+      })
+
+      /**
+       * The one field on a key that is editable after minting.
+       *
+       * `bodyLoggingOptOut` has no route like this on purpose: it is a promise
+       * to whoever holds the key. A limit is the operator's own ceiling on
+       * their own installation, and a weekly spend cap that cannot be adjusted
+       * without minting a new key and redeploying every client is a cap that
+       * gets set to unlimited instead.
+       */
+      .put("/api/keys/:id/limits", async ({ request, params }) => {
+        await requireAdmin(request, deps.admin);
+        return setKeyLimits(deps.store, params.id, await readJson(request));
       })
 
       .delete("/api/keys/:id", async ({ request, params }) => {

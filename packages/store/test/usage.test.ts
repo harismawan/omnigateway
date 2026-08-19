@@ -454,3 +454,172 @@ test("the migration seeds the rollup from logs already on disk", () => {
   expect(row?.input_tokens).toBe(30);
   db.close();
 });
+
+/**
+ * The pending-row filter, seeded so an unfiltered implementation fails loudly
+ * rather than by a margin.
+ *
+ * A pending row's tokens and cost are placeholder zeros in production, which is
+ * exactly why an unfiltered sum is invisible under normal data. These carry
+ * absurd metrics instead, so a `sumSince` that forgets `state = 'done'` reports
+ * a number nobody could mistake for a real one.
+ */
+test("sumSince excludes pending rows, whose metrics are placeholders and not measurements", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(
+    log({ id: "done", at: now - 1_000, inputTokens: 1, outputTokens: 2, costUsd: 0.5 }),
+  );
+  await s.usage.begin(
+    log({
+      id: "flying",
+      at: now - 500,
+      state: "pending",
+      inputTokens: 999_999,
+      outputTokens: 888_888,
+      cacheReadTokens: 777_777,
+      cacheWriteTokens: 666_666,
+      costUsd: 4_242.42,
+    }),
+  );
+
+  const sums = await s.usage.sumSince("k1", now - 60_000);
+  expect(sums).toEqual({ requests: 1, tokens: 33, costUsd: 0.5 });
+  s.close();
+});
+
+test("sumSince adds all four token columns, which are disjoint classes", async () => {
+  // `Usage.inputTokens` is uncached input, and cache reads and writes are priced
+  // once each, so summing the four double-counts nothing.
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(
+    log({
+      id: "r1",
+      at: now - 1_000,
+      inputTokens: 1,
+      outputTokens: 20,
+      cacheReadTokens: 300,
+      cacheWriteTokens: 4_000,
+      costUsd: 0.25,
+    }),
+  );
+  await s.usage.append(
+    log({
+      id: "r2",
+      at: now - 900,
+      inputTokens: 50_000,
+      outputTokens: 600_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0.75,
+    }),
+  );
+
+  const sums = await s.usage.sumSince("k1", now - 60_000);
+  expect(sums.tokens).toBe(4_321 + 650_000);
+  expect(sums.requests).toBe(2);
+  expect(sums.costUsd).toBeCloseTo(1.0, 10);
+  s.close();
+});
+
+test("sumSince is bounded below by its instant and above by nothing", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "stale", at: now - 120_000 }));
+  await s.usage.append(log({ id: "edge", at: now - 60_000 }));
+  await s.usage.append(log({ id: "fresh", at: now - 1 }));
+
+  // Inclusive at the lower bound, so a window is `[since, ∞)` and a row landing
+  // exactly on the boundary is counted once rather than lost between two reads.
+  expect((await s.usage.sumSince("k1", now - 60_000)).requests).toBe(2);
+  expect((await s.usage.sumSince("k1", now - 59_999)).requests).toBe(1);
+  s.close();
+});
+
+/**
+ * The instant a sliding window actually frees a slot, which is the whole reason
+ * this query exists: `now + windowMs` is what every other path reports, and on a
+ * weekly window that is a `Retry-After` of seven days for a key that regains a
+ * slot in an hour.
+ */
+test("oldestSince reports the oldest retained row, which is when the window next frees a slot", async () => {
+  const s = await store();
+  const now = Date.now();
+  // Written out of order, so an implementation reading the first row rather than
+  // the minimum answers with the wrong one.
+  await s.usage.append(log({ id: "middle", at: now - 20_000 }));
+  await s.usage.append(log({ id: "oldest", at: now - 50_000 }));
+  await s.usage.append(log({ id: "newest", at: now - 1_000 }));
+
+  expect(await s.usage.oldestSince("k1", now - 60_000)).toBe(now - 50_000);
+  // The window moved past the oldest two, so the answer moves with it.
+  expect(await s.usage.oldestSince("k1", now - 30_000)).toBe(now - 20_000);
+  s.close();
+});
+
+/**
+ * Same filter as `sumSince`, and load-bearing for a different reason. A request
+ * admitted a moment ago is the newest row there is, but it is also the one whose
+ * `at` a broken query would most often return — reporting that the window frees
+ * nothing for a whole window, which is the overstatement this query replaces.
+ */
+test("oldestSince excludes pending rows, which are admissions rather than measurements", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "done", at: now - 10_000 }));
+  await s.usage.begin(log({ id: "flying", at: now - 90_000, state: "pending" }));
+
+  expect(await s.usage.oldestSince("k1", now - 120_000)).toBe(now - 10_000);
+  s.close();
+});
+
+test("oldestSince is null where the key has nothing in the window, and counts one key only", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "stale", at: now - 120_000 }));
+  await s.usage.append(log({ id: "theirs", at: now - 1_000, apiKeyId: "k2" }));
+
+  // Nothing retained is null, not zero: zero is an instant in 1970 and would be
+  // read as a window that freed a slot fifty-six years ago.
+  expect(await s.usage.oldestSince("k1", now - 60_000)).toBeNull();
+  expect(await s.usage.oldestSince("nobody", 0)).toBeNull();
+  // Inclusive at the lower bound, matching `sumSince`, so the row the sum counts
+  // is the row this reports.
+  expect(await s.usage.oldestSince("k1", now - 120_000)).toBe(now - 120_000);
+  expect(await s.usage.oldestSince("k2", 0)).toBe(now - 1_000);
+  s.close();
+});
+
+/**
+ * Correctness-adjacent rather than an optimisation: without a composite index
+ * leading with the key, a weekly lookup for one key scans every row in the week
+ * for every key on the install.
+ */
+test("oldestSince is served by idx_request_logs_key_at", async () => {
+  const db = openDb(":memory:");
+  const plan = db
+    .query<{ detail: string }, [string, number]>(
+      `EXPLAIN QUERY PLAN
+       SELECT MIN(at) FROM request_logs
+        WHERE api_key_id = ? AND state = 'done' AND at >= ?`,
+    )
+    .all("k1", 0)
+    .map((row) => row.detail)
+    .join(" ");
+  expect(plan).toContain("idx_request_logs_key_at");
+  db.close();
+});
+
+test("sumSince counts one key only, and an unknown key is zero rather than everything", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "mine", at: now - 1_000, apiKeyId: "k1" }));
+  await s.usage.append(log({ id: "theirs", at: now - 1_000, apiKeyId: "k2", costUsd: 9.99 }));
+  await s.usage.append(log({ id: "anonymous", at: now - 1_000, apiKeyId: null }));
+
+  expect((await s.usage.sumSince("k1", 0)).requests).toBe(1);
+  expect((await s.usage.sumSince("k2", 0)).costUsd).toBeCloseTo(9.99, 10);
+  expect(await s.usage.sumSince("nobody", 0)).toEqual({ requests: 0, tokens: 0, costUsd: 0 });
+  s.close();
+});

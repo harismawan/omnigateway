@@ -74,7 +74,15 @@ export {
   vacuum,
 } from "./database.ts";
 export { type DryRunCandidate, type DryRunResult, dryRun } from "./dryRun.ts";
-export { type ApiKeySummary, type CreatedKey, createKey, listKeys, revokeKey } from "./keys.ts";
+export {
+  type ApiKeySummary,
+  type CreatedKey,
+  createKey,
+  type LimitReading,
+  listKeys,
+  revokeKey,
+  setKeyLimits,
+} from "./keys.ts";
 export {
   DOCKERENV_PATH,
   describeLifecycle,

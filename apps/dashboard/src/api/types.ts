@@ -8,7 +8,9 @@ import type {
   Credential,
   CredentialHealth,
   DatabaseStats,
+  Dimension,
   DisabledReason,
+  LimitConfig,
   QuotaSample,
   QuotaWindow,
   RequestLog,
@@ -19,6 +21,7 @@ import type {
   UsageDimension,
   UsageGrain,
   VirtualModel,
+  Window,
   // The `/types` subpath is provider-neutral domain types only; the package
   // root would drag SQLite and encryption into the browser build graph.
 } from "@omni/store/types";
@@ -37,8 +40,10 @@ export type {
   Credential,
   CredentialHealth,
   DatabaseStats,
+  Dimension,
   DisabledReason,
   ErrorCode,
+  LimitConfig,
   ProviderId,
   QuotaSample,
   QuotaWindow,
@@ -50,6 +55,7 @@ export type {
   UsageDimension,
   UsageGrain,
   VirtualModel,
+  Window,
 };
 
 export type ApiErrorBody = { error: { code: ErrorCode | string; message: string } };
@@ -125,16 +131,60 @@ export type ModelsResponse = { models: VirtualModel[] };
 /** The key is never persisted in plaintext, so this response is the only copy. */
 export type MintedKey = { id: string; label: string; prefix: string; key: string };
 
-/** `hash` is withheld by the route: not a secret, but not worth publishing. */
-export type ApiKeySummary = Omit<ApiKey, "hash">;
+/**
+ * `hash` is withheld by the route: not a secret, but not worth publishing.
+ *
+ * `limits` arrives nullable, and the null is load-bearing rather than an
+ * absence: it says the gateway could not parse what is stored and is refusing
+ * the key until an operator fixes it. Rendering it like `{}` would present the
+ * one row that needs attention as the least interesting on the board.
+ */
+export type ApiKeySummary = Omit<ApiKey, "hash"> & {
+  /**
+   * One entry per configured limit, so the board can render the matrix without
+   * knowing which `(dimension, window)` pairs are meaningful. Empty for an
+   * unlimited key, and empty for one whose stored matrix could not be parsed:
+   * there is nothing to measure against a ceiling nobody can read.
+   */
+  limitUsage: LimitReading[];
+};
+
+/**
+ * One ceiling and what has gone against it.
+ *
+ * Mirrored rather than imported: the shape is assembled in `@omni/control`,
+ * which the console may not reach into. `used` counts completed requests still
+ * inside the window, so it is a floor on what the limiter sees rather than the
+ * limiter's own number — the gateway adds an in-memory delta this route cannot.
+ */
+export type LimitReading = {
+  dimension: Dimension;
+  /** Null for `concurrency`, which is a gauge and has no window. */
+  window: Window | null;
+  limit: number;
+  /**
+   * Null where no stored row measures it, which today means `concurrency`
+   * alone. Zero would claim the gauge is empty; null says nobody asked it.
+   */
+  used: number | null;
+};
 
 export type KeysResponse = { keys: ApiKeySummary[] };
+
+/** The whole matrix, sent whole. `{}` leaves the key unlimited. */
+export type KeyLimitsInput = { limits: LimitConfig };
 
 export type KeyCreateInput = {
   label: string;
   /** Null means every configured model; an empty array means none. */
   modelAllowlist: string[] | null;
-  rateLimitPerMin: number | null;
+  /**
+   * The sparse `(dimension, window)` matrix. `{}` is unlimited.
+   *
+   * Not nullable, unlike the same field on `ApiKeySummary`: unreadable is a
+   * state a reader discovers, never one a minting form may ask for.
+   */
+  limits: LimitConfig;
   /** Settable only here: there is no route that turns capture back on for a key. */
   bodyLoggingOptOut: boolean;
 };

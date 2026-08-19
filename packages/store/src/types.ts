@@ -1,5 +1,14 @@
 import type { ProviderId } from "@omni/ir";
+import type { LimitConfig } from "@omni/ratelimit/catalog";
 import type { RtkFilterId } from "@omni/rtk/catalog";
+
+/**
+ * Re-exported so the console can name the shape it renders and submits.
+ *
+ * The dashboard is permitted `@omni/store/types` and not runtime store code, and
+ * this keeps that the one import it needs rather than a second permitted path.
+ */
+export type { Dimension, LimitConfig, Window } from "@omni/ratelimit/catalog";
 
 export type BreakerState = "closed" | "open" | "halfOpen";
 export type AuthType = "oauth" | "apiKey";
@@ -330,7 +339,21 @@ export type ApiKey = {
   prefix: string;
   hash: string;
   modelAllowlist: string[] | null;
-  rateLimitPerMin: number | null;
+  /**
+   * The sparse `(dimension, window)` matrix bounding what this key can do, or
+   * `null` when the stored column could not be parsed.
+   *
+   * `{}` is unlimited, and so is an explicit `null` at any pair inside the
+   * matrix. The outer `null` is a different fact and must never collapse into
+   * `{}`: "no limits configured" and "the configured limits are unreadable"
+   * differ by whether a ceiling the operator set is being honoured, and reading
+   * the second as the first fails open on exactly that ceiling.
+   *
+   * It is a read-side state only — `KeyRepo.create` refuses to write a shape no
+   * reader can parse — so a row is unreadable because the column was edited by
+   * hand or written by a build that knew a name this one does not.
+   */
+  limits: LimitConfig | null;
   /**
    * Suppresses body capture for this key whatever the settings say.
    *
@@ -583,10 +606,41 @@ export interface BodyRepo {
   sweepOrphans(): Promise<number>;
 }
 
+/**
+ * A key as it is minted.
+ *
+ * `limits` is non-nullable here where `ApiKey` allows null: the unreadable state
+ * is something a reader discovers, never something a writer may ask for.
+ */
+export type ApiKeyInput = Omit<ApiKey, "createdAt" | "revokedAt" | "limits"> & {
+  limits: LimitConfig;
+};
+
 export interface KeyRepo {
+  /**
+   * Every key, including any whose `limits` could not be parsed — those carry
+   * `limits: null`. One meddled row must not cost an operator the listing that
+   * is how they would find it.
+   */
   list(): Promise<ApiKey[]>;
   findByHash(hash: string): Promise<ApiKey | null>;
-  create(input: Omit<ApiKey, "createdAt" | "revokedAt">): Promise<ApiKey>;
+  /** Throws on a `limits` shape no reader could parse, rather than storing it. */
+  create(input: ApiKeyInput): Promise<ApiKey>;
+  /**
+   * Replaces one key's limit matrix, whole.
+   *
+   * The one field on a key that is editable after minting, and deliberately so:
+   * `bodyLoggingOptOut` is a promise to whoever holds the key, while a limit is
+   * the operator's own ceiling on their own installation. A weekly spend cap
+   * that cannot be adjusted without minting a new key and redeploying every
+   * client is a cap that gets set to unlimited instead.
+   *
+   * Replaces rather than merges, for the same reason `create` validates: the
+   * stored value is one JSON document and a partial write would have to be
+   * read, merged, and re-validated somewhere, which is a caller's decision
+   * rather than a repo's. Throws on a shape no reader could parse.
+   */
+  setLimits(id: string, limits: LimitConfig): Promise<void>;
   revoke(id: string): Promise<void>;
 }
 
@@ -641,6 +695,24 @@ export type UsageBucket = {
   durationMsSum: number;
 };
 
+/**
+ * One key's consumption inside a window.
+ *
+ * `tokens` is `input + output + cacheRead + cacheWrite`. `Usage.inputTokens` is
+ * uncached input, so the four columns are disjoint classes and summing them
+ * double-counts nothing.
+ */
+export type UsageSums = { requests: number; tokens: number; costUsd: number };
+
+/** What comparing the hourly rollup against the rows it summarizes found. */
+export type RollupAudit = {
+  /** Buckets `request_logs` says should exist. Zero on an install with no traffic. */
+  buckets: number;
+  /** Buckets missing, extra, or disagreeing on a counter. */
+  mismatched: number;
+  ok: boolean;
+};
+
 export interface UsageRepo {
   /**
    * Records a request that has started. Writes no rollup: a request that has
@@ -667,6 +739,66 @@ export interface UsageRepo {
   sweepPending(): Promise<number>;
   recent(limit: number): Promise<RequestLog[]>;
   aggregate(q: UsageQuery): Promise<UsageBucket[]>;
+  /**
+   * What one API key has consumed since an instant, for the sliding windows a
+   * rate limiter cannot hold in memory.
+   *
+   * Separate from `aggregate`, which groups by reporting dimension and is the
+   * wrong shape and the wrong cost for a check on the request hot path.
+   *
+   * Exactly sliding, and bounded: read from `usage_rollup` for the hours wholly
+   * inside the window and from `request_logs` for the partial hour the instant
+   * lands in. `bun:sqlite` is synchronous, so a query here blocks the whole
+   * event loop for its duration — the scan this replaced grew with everything
+   * the install had ever served, and took ten seconds at eight million rows.
+   *
+   * Pending rows are excluded. Their tokens and cost are placeholder zeros, not
+   * measurements, and including them adds one placeholder per in-flight request
+   * to every long-window count — invisibly, and increasingly under load, which
+   * is exactly when the limit matters.
+   */
+  sumSince(apiKeyId: string, sinceMs: number): Promise<UsageSums>;
+  /**
+   * Recomputes the hourly rollup from `request_logs`, whole.
+   *
+   * The rollup is derived, never authoritative: the log is the source of truth
+   * and every bucket is reproducible from it. That is what makes a disagreement
+   * a repairable cache rather than two records neither of which can be
+   * believed. Run after a database restore and by the `010` migration, and
+   * never on the request path — it is a full grouped scan.
+   */
+  rebuildRollup(): Promise<void>;
+  /**
+   * Compares every rollup bucket against the rows it summarizes.
+   *
+   * A diagnostic, with the same full-scan cost `sumSince` exists to avoid, so
+   * it is run by `omni doctor` and by nothing that serves a request.
+   */
+  auditRollup(): Promise<RollupAudit>;
+  /**
+   * The `at` of the oldest completed row this key still has inside a window, or
+   * null where it has none.
+   *
+   * The instant a sliding window actually frees a slot: that row plus the
+   * window's length. Every other count in this repo answers how much has been
+   * used; this one answers when some of it stops counting, which is the only
+   * honest figure to put in a `Retry-After`.
+   *
+   * Read only when a request is being refused. A window's far end is
+   * `now + windowMs`, which is the safe over-statement to report on the path
+   * where nothing acts on it, and this is a second query on a hot path.
+   *
+   * Served by `idx_request_logs_key_at`, and pending rows are excluded for the
+   * same reason `sumSince` excludes them: a request admitted a moment ago is
+   * not a measurement, and letting one answer here would report that the window
+   * frees nothing for a whole window.
+   */
+  oldestSince(apiKeyId: string, sinceMs: number): Promise<number | null>;
+  /**
+   * Drops rows older than an instant, and the hourly buckets that summarized
+   * them: a counter that outlives its rows reports history the log no longer
+   * holds, to a limiter and to `auditRollup` alike.
+   */
   prune(olderThan: number): Promise<number>;
   /** Prunes the daily rollup, which is kept far longer than the raw logs. */
   pruneDaily(olderThan: number): Promise<number>;

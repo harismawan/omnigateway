@@ -22,6 +22,7 @@ import type {
   DryRunNeed,
   DryRunResult,
   KeyCreateInput,
+  KeyLimitsInput,
   KeysResponse,
   LifecycleCapability,
   LogsResponse,
@@ -559,6 +560,25 @@ export function useCreateKey(): UseMutationResult<MintedKey, Error, KeyCreateInp
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: KeyCreateInput) => post<MintedKey>("/api/keys", input),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
+  });
+}
+
+/**
+ * Replaces one key's limits.
+ *
+ * The only field on a key that is editable after minting. `bodyLoggingOptOut`
+ * has no mutation like this on purpose: it is a promise to whoever holds the
+ * key, while a limit is the operator's own ceiling on their own installation.
+ */
+export function useSetKeyLimits(): UseMutationResult<
+  ApiKeySummary,
+  Error,
+  { id: string } & KeyLimitsInput
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, limits }) => put<ApiKeySummary>(`/api/keys/${id}/limits`, { limits }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
   });
 }
