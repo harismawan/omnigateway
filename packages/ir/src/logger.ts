@@ -29,6 +29,20 @@ export type LogFields = {
   credentialId?: string | undefined;
   apiKeyId?: string | undefined;
   /**
+   * Which installed plugin a line is about.
+   *
+   * Safe to widen the allowlist by, because it is not operator text: a plugin id
+   * is validated against `^[a-z][a-z0-9-]{0,31}$` before the plugin is loaded, so
+   * the value here is a bounded identifier from a closed character set — the same
+   * class as `snapshotId` and `supervisor`, and unlike `reason`.
+   *
+   * It is also the only field a plugin's own logger can influence, and it cannot
+   * set it: the host binds this to the id it validated and a plugin has no way to
+   * pass fields of its own. That is what keeps third-party code from reaching
+   * stdout with a token or a prompt in hand.
+   */
+  plugin?: string | undefined;
+  /**
    * Which snapshot a maintenance line is about.
    *
    * The filename, which is generated from an instant and a closed set of
@@ -80,6 +94,7 @@ const FIELD_ORDER = [
   "requestedModel",
   "credentialId",
   "apiKeyId",
+  "plugin",
   "snapshotId",
   "attempt",
   "attempts",

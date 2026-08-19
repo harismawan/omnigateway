@@ -7,6 +7,7 @@ import type {
   CredentialRepo,
   KeyRepo,
   MaintenanceRepo,
+  PluginRepo,
   RoutingChange,
   Store,
   UsageRepo,
@@ -17,6 +18,7 @@ import { createCredentialRepo } from "./credentials.ts";
 import { openDb } from "./db.ts";
 import { createKeyRepo } from "./keys.ts";
 import { createMaintenanceRepo } from "./maintenance.ts";
+import { createPluginRepo } from "./plugins.ts";
 import { createUsageRepo } from "./usage.ts";
 
 /**
@@ -33,6 +35,7 @@ type Handle = {
   usage: UsageRepo;
   bodies: BodyRepo;
   maintenance: MaintenanceRepo;
+  plugins: PluginRepo;
 };
 
 /**
@@ -85,6 +88,11 @@ export async function createStore(opts: {
       // should end up somewhere nobody backs up or nobody prunes.
       bodies: createBodyRepo(db, opts.encryptionKey, bodiesDirFor(opts.path)),
       maintenance: createMaintenanceRepo(db),
+      // Plugin tables live in this same file, so they ride snapshots, restores,
+      // and `vacuum()` with everything else — and are closed and reopened by a
+      // swap with everything else, which is why this is a handle repo and not
+      // something a plugin is handed a `Database` to build for itself.
+      plugins: createPluginRepo(db),
     };
   };
 
@@ -169,6 +177,27 @@ export async function createStore(opts: {
       vacuum: () => handle.maintenance.vacuum(),
       snapshotTo: (path) => handle.maintenance.snapshotTo(path),
       inspect: (path) => handle.maintenance.inspect(path),
+    },
+
+    plugins: {
+      migrate: (pluginId, migrations) => handle.plugins.migrate(pluginId, migrations),
+      run: (pluginId, sql, params) => handle.plugins.run(pluginId, sql, params),
+      // Method shorthand, not an arrow, for the three generic ones only: an
+      // arrow assigned to a generic signature erases the parameter to `unknown`
+      // at the point of implementation. The forwarding is the same — `handle` is
+      // still read on every call, never captured.
+      all<T>(pluginId: string, sql: string, params?: unknown[]): T[] {
+        return handle.plugins.all<T>(pluginId, sql, params);
+      },
+      get<T>(pluginId: string, sql: string, params?: unknown[]): T | null {
+        return handle.plugins.get<T>(pluginId, sql, params);
+      },
+      transaction<T>(pluginId: string, fn: () => T): T {
+        return handle.plugins.transaction(pluginId, fn);
+      },
+      listTables: (pluginId) => handle.plugins.listTables(pluginId),
+      dropAll: (pluginId) => handle.plugins.dropAll(pluginId),
+      orphanTables: (installedIds) => handle.plugins.orphanTables(installedIds),
     },
 
     routing: {
