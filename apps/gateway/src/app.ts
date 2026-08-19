@@ -99,8 +99,10 @@ export type AppDeps = {
   /**
    * Emits finished requests to plugin handlers, threaded down to `finishLog`.
    *
-   * Optional and absent by default: an install with no plugins never allocates
-   * an event, and the proxy path is unchanged for it.
+   * Optional, and boot passes it only when at least one plugin loaded. That
+   * matters because `finishLog` builds the payload before calling it, so an
+   * install with no plugins would otherwise allocate a `RequestCompleted` on
+   * every authenticated request to hand to a bus with no subscribers.
    */
   emit?: PluginEmit;
   /**
@@ -112,6 +114,8 @@ export type AppDeps = {
    * would make them construct a document to exercise a handler.
    */
   pluginUi?: readonly LoadedPlugin[];
+  /** Re-applies loaded plugins' schema after a database swap. See `swapIn`. */
+  reapplyPluginSchema?: () => Promise<void>;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -271,6 +275,9 @@ export function createApp(deps: AppDeps) {
     .use(
       databaseRoutes({
         store: deps.store,
+        ...(deps.reapplyPluginSchema === undefined
+          ? {}
+          : { reapplyPluginSchema: deps.reapplyPluginSchema }),
         admin,
         latch,
         snapshots,

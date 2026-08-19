@@ -100,6 +100,22 @@ export type DatabaseDeps = {
   };
   now: () => number;
   /**
+   * Re-applies the schema of whatever plugins the caller currently has loaded.
+   *
+   * Optional, and injected rather than reached for, because `@omni/control`
+   * knows nothing about callers: a CLI restore has no loaded plugins and passes
+   * nothing, while a gateway does and passes a closure over them.
+   *
+   * A restored database is any database. One taken before a plugin was installed
+   * does not carry that plugin's tables, and the plugin is still loaded and still
+   * holding a context whose every query would throw "no such table" until someone
+   * restarted the process. Re-applying is cheap — each plugin's ledger is
+   * consulted and already-applied versions are skipped — and it is the same
+   * decision the rollup rebuild makes: recompute rather than trust the
+   * provenance of a file an operator handed over.
+   */
+  reapplyPluginSchema?: () => Promise<void>;
+  /**
    * Where a degraded step reports itself. Optional, and `noopLogger` when a
    * caller has nothing to log to — a CLI restore is still a restore.
    */
@@ -589,6 +605,20 @@ async function swapIn(
     (deps.logger ?? noopLogger).warn("usage rollup not rebuilt after the swap; run omni doctor", {
       // The message only, as every other store failure logs: a fault must not
       // drag a row's contents into stdout.
+      reason: error instanceof Error ? error.message : "unknown",
+    });
+  }
+
+  // Last, and swallowed, for exactly the reasons the rollup rebuild above is.
+  // By here the new database is live and `adminPasswordChanged` has been decided;
+  // a throw from this line would report a successful restore as a failed one and
+  // skip the session invalidation the caller performs from that flag. A plugin
+  // whose schema did not come back reports it on its own next query, which is a
+  // complaint an operator can act on; a skipped invalidation is silent.
+  try {
+    await deps.reapplyPluginSchema?.();
+  } catch (error) {
+    (deps.logger ?? noopLogger).warn("plugin schema not reapplied after the swap; restart", {
       reason: error instanceof Error ? error.message : "unknown",
     });
   }

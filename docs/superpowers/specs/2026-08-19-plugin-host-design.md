@@ -84,7 +84,7 @@ control, that decision must be revisited before, not after.
   "sdk": "^1.0.0",
   "server": "server/index.js",
   "ui": "ui/index.js",
-  "nav": { "label": "Companion", "icon": "sparkles" },
+  "nav": { "label": "Companion" },
   "capabilities": ["storage", "files", "net:outbound", "events:request", "events:limit"],
   "origins": ["https://pokeapi.co", "https://raw.githubusercontent.com"]
 }
@@ -164,10 +164,15 @@ Never handed over: `Store`, `HttpClient`, `AdminAuth`, decrypted credentials,
 from `@omni/ratelimit/catalog`; the host re-exports them through the plugin API
 so a plugin does not import a core package to name them.
 
-`config` is the plugin's own settings: a JSON object stored per plugin and
-edited by the operator, seeded from an optional `defaults` block in the
-manifest. It is not the gateway's settings table — a plugin can neither read nor
-write core configuration.
+`config` is the plugin's own settings, and it is **not** the gateway's settings
+table: a plugin can neither read nor write core configuration.
+
+As shipped it carries the manifest's `defaults` block and nothing else. The
+per-plugin stored, operator-editable form this section originally described is
+deferred, because nothing in the first plugin needs it and an editing surface
+with no consumer is a schema plus a panel plus a migration to guess at. The
+shape is chosen so adding it later is additive: a plugin already reads
+`ctx.config` and does not know where a value came from.
 
 ### Logging
 
@@ -223,8 +228,14 @@ sharing the process can call global `fetch` — and it is worth having anyway.
 
 Note the interaction with boundary rule 8: all outbound *provider* HTTP goes
 through `HttpClient`. This is not provider traffic and does not route through
-it, but the bound fetch applies the same timeout and retry discipline so a slow
-third-party host cannot wedge a plugin indefinitely.
+it. The bound fetch applies a request timeout of its own, so a third-party host
+that accepts a connection and never answers cannot hold a plugin's promise for
+the life of the process.
+
+It does **not** retry, and deliberately: `HttpClient`'s retry policy is built
+around provider semantics — rate-limit headers, idempotency, failover to another
+credential — none of which mean anything for an arbitrary third-party GET. A
+plugin that wants a retry knows what it is fetching and can write one.
 
 ## Storage and migrations
 

@@ -402,7 +402,6 @@ export type LifecycleCapability = {
 export type PluginNav = {
   label: string;
   /** A name from the plugin's manifest. The console picks its own glyph. */
-  icon?: string | undefined;
 };
 
 export type PluginUiInfo = {

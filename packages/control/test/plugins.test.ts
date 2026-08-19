@@ -7,6 +7,7 @@ import { nodePluginFs } from "../src/nodeFs.ts";
 import {
   installPlugin,
   listPlugins,
+  MAX_PLUGIN_BYTES,
   orphanPluginTables,
   type PluginDeps,
   type PluginStore,
@@ -122,8 +123,14 @@ const encoder = new TextEncoder();
  * every machine and no test spawns anything. The checksum is computed even
  * though the reader ignores it: a fixture that is not a real tar would let a
  * reader bug hide behind a fixture bug.
+ *
+ * `declaredSize` overrides the size field only, leaving the body as written. It
+ * exists for the two archives a real `tar` will never produce and the reader
+ * must still survive — one that promises more than it carries, and one that
+ * promises more than the ceiling allows. It is written before the checksum, so
+ * even those fixtures are headers a real tar reader would accept.
  */
-function tarEntry(path: string, body: string, type = "0"): Uint8Array {
+function tarEntry(path: string, body: string, type = "0", declaredSize?: number): Uint8Array {
   const header = new Uint8Array(512);
   const put = (text: string, offset: number, length: number) => {
     header.set(encoder.encode(text).subarray(0, length), offset);
@@ -133,7 +140,7 @@ function tarEntry(path: string, body: string, type = "0"): Uint8Array {
   put("0000000\0", 108, 8);
   put("0000000\0", 116, 8);
   const bytes = encoder.encode(body);
-  put(`${bytes.length.toString(8).padStart(11, "0")}\0`, 124, 12);
+  put(`${(declaredSize ?? bytes.length).toString(8).padStart(11, "0")}\0`, 124, 12);
   put("00000000000\0", 136, 12);
   header[156] = type.charCodeAt(0);
   put("ustar\0", 257, 6);
@@ -149,9 +156,8 @@ function tarEntry(path: string, body: string, type = "0"): Uint8Array {
   return padded;
 }
 
-function makeTarball(entries: Array<[string, string, string?]>): Uint8Array {
-  const blocks = entries.map(([path, body, type]) => tarEntry(path, body, type ?? "0"));
-  // Two zero blocks close an archive.
+/** Concatenates entry blocks and closes the archive with the two zero blocks. */
+function seal(blocks: Uint8Array[]): Uint8Array {
   const total = blocks.reduce((sum, block) => sum + block.length, 0) + 1024;
   const out = new Uint8Array(total);
   let offset = 0;
@@ -162,13 +168,21 @@ function makeTarball(entries: Array<[string, string, string?]>): Uint8Array {
   return out;
 }
 
-function writeTarball(name: string, entries: Array<[string, string, string?]>): string {
+function makeTarball(entries: Array<[string, string, string?]>): Uint8Array {
+  return seal(entries.map(([path, body, type]) => tarEntry(path, body, type ?? "0")));
+}
+
+/** Puts arbitrary bytes on disk under a name, for archives `makeTarball` cannot express. */
+function writeArchive(name: string, bytes: Uint8Array): string {
   const base = mkdtempSync(join(tmpdir(), "omni-plugin-tgz-"));
   roots.push(base);
   const path = join(base, name);
-  const tar = makeTarball(entries);
-  writeFileSync(path, name.endsWith(".tgz") ? Bun.gzipSync(new Uint8Array(tar)) : tar);
+  writeFileSync(path, name.endsWith(".tgz") ? Bun.gzipSync(new Uint8Array(bytes)) : bytes);
   return path;
+}
+
+function writeTarball(name: string, entries: Array<[string, string, string?]>): string {
+  return writeArchive(name, makeTarball(entries));
 }
 
 /* -------------------------------------------------------------------- verify */
@@ -543,6 +557,136 @@ describe("installPlugin", () => {
     expect(existsSync(join(root, "..", "escaped.js"))).toBe(false);
   });
 
+  test("an absolute entry name is refused", async () => {
+    // `..` is the escape everyone tests for; a leading `/` is the one that needs
+    // no traversal at all. It matters that this is refused in the reader rather
+    // than survived by the join later: `join(root, "/etc/passwd")` happens to
+    // land back inside the root, so a reader that accepted the name would look
+    // correct on this machine and be one path helper away from not being.
+    const root = makeRoot();
+    const archive = writeTarball("evil.tar", [
+      ["package/omni-plugin.json", JSON.stringify(MANIFEST)],
+      ["/etc/passwd", "root:x:0:0"],
+    ]);
+
+    await expect(installPlugin(deps, root, archive)).rejects.toThrow(/unsafe path/);
+    expect(listPlugins(deps, root)).toEqual([]);
+  });
+
+  test("a GNU long-name entry names the file, and the ustar header it precedes does not", async () => {
+    // A path over 100 bytes does not fit a ustar header, so GNU tar emits an `L`
+    // entry carrying the real name and follows it with a header holding a stub.
+    // The reader honours the `L` name — asserted here against a stub that could
+    // never be mistaken for a truncation of it, so a reader that ignored the `L`
+    // entry could not pass by accident.
+    const root = makeRoot();
+    const longPath =
+      "package/gnu-longlink-needs-a-path-over-one-hundred-bytes/and-this-second-directory-takes-it-there/deep.js";
+    expect(longPath.length).toBeGreaterThan(100);
+    const archive = writeTarball("long.tar", [
+      ["package/omni-plugin.json", JSON.stringify(MANIFEST)],
+      ["././@LongLink", longPath, "L"],
+      ["package/IGNORED-STUB", "export const deep = 1;\n"],
+    ]);
+
+    const result = await installPlugin(deps, root, archive);
+
+    expect(result.id).toBe("poke-dex");
+    const installed = join(root, "plugins", "poke-dex");
+    expect(
+      readFileSync(
+        join(
+          installed,
+          "gnu-longlink-needs-a-path-over-one-hundred-bytes",
+          "and-this-second-directory-takes-it-there",
+          "deep.js",
+        ),
+        "utf8",
+      ),
+    ).toBe("export const deep = 1;\n");
+    // The stub was a name, not a file. Anything landing under it means the `L`
+    // entry was read as metadata and then thrown away.
+    expect(existsSync(join(installed, "IGNORED-STUB"))).toBe(false);
+  });
+
+  test("a long name is path-checked exactly like a short one", async () => {
+    // The check that matters. An `L` entry is a second way to name a file, and a
+    // second way to name a file is a second place to forget the path check —
+    // which would make every guard above bypassable by writing the same escape
+    // one entry earlier.
+    const root = makeRoot();
+    const archive = writeTarball("evil.tar", [
+      ["package/omni-plugin.json", JSON.stringify(MANIFEST)],
+      ["././@LongLink", "package/../../escaped-by-longlink.js", "L"],
+      ["package/harmless.js", "boom"],
+    ]);
+
+    await expect(installPlugin(deps, root, archive)).rejects.toThrow(/unsafe path/);
+    expect(existsSync(join(root, "..", "escaped-by-longlink.js"))).toBe(false);
+  });
+
+  test("an archive declaring more than the ceiling is refused without carrying the bytes", async () => {
+    // The tar bomb, and the reason the ceiling reads the header rather than the
+    // body: this fixture is a few kilobytes on disk and claims to be 32MB. A
+    // reader that unpacked first and measured after would have to allocate the
+    // whole declared size to discover it was not allowed to, which is the
+    // resource kill the ceiling exists to prevent — so the test asserts the
+    // refusal happens on an archive that never carries the bytes at all.
+    const root = makeRoot();
+    const bomb = seal([
+      tarEntry("package/omni-plugin.json", JSON.stringify(MANIFEST)),
+      tarEntry("package/bomb.bin", "", "0", MAX_PLUGIN_BYTES + 1),
+    ]);
+    expect(bomb.byteLength).toBeLessThan(MAX_PLUGIN_BYTES);
+    const archive = writeArchive("bomb.tar", bomb);
+
+    await expect(installPlugin(deps, root, archive)).rejects.toThrow(
+      new RegExp(`more than ${MAX_PLUGIN_BYTES} bytes`),
+    );
+    expect(listPlugins(deps, root)).toEqual([]);
+  });
+
+  test("the ceiling counts entries the reader skips, not only the files it keeps", async () => {
+    // The same bomb hidden in metadata. pax and GNU headers are skipped for their
+    // *content*, but their declared bodies are bytes the reader still has to walk
+    // past, so a ceiling that counted only the files it kept could be walked
+    // around by putting the size on an entry that is never stored. Declared on a
+    // `g` header here — the one bsdtar emits by default, so it is the entry type
+    // most likely to be trusted without thinking.
+    const root = makeRoot();
+    const archive = writeArchive(
+      "pax-bomb.tar",
+      seal([
+        tarEntry("pax_global_header", "", "g", MAX_PLUGIN_BYTES + 1),
+        tarEntry("package/omni-plugin.json", JSON.stringify(MANIFEST)),
+      ]),
+    );
+
+    await expect(installPlugin(deps, root, archive)).rejects.toThrow(
+      new RegExp(`more than ${MAX_PLUGIN_BYTES} bytes`),
+    );
+    expect(listPlugins(deps, root)).toEqual([]);
+  });
+
+  test("a truncated archive is refused rather than installed short", async () => {
+    // `subarray` clamps instead of throwing, so a download cut off mid-entry
+    // used to unpack into a file holding whatever arrived and install cleanly.
+    // The plugin then fails at `import` time, in a message about its code rather
+    // than about its delivery, and the operator debugs the wrong thing.
+    const root = makeRoot();
+    const whole = makeTarball([
+      ["package/omni-plugin.json", JSON.stringify(MANIFEST)],
+      ["package/server.js", "x".repeat(2000)],
+    ]);
+    // Drop the closing zero blocks and two blocks of the last body, leaving a
+    // header that promises 2000 bytes above an archive that ends after 1024.
+    const cut = whole.slice(0, whole.byteLength - 1024 - 1024);
+    const archive = writeArchive("cut.tar", cut);
+
+    await expect(installPlugin(deps, root, archive)).rejects.toThrow(/truncated/);
+    expect(listPlugins(deps, root)).toEqual([]);
+  });
+
   test("reinstalling replaces the tree rather than merging into it", async () => {
     const root = makeRoot();
     await installPlugin(deps, root, source("poke-dex", MANIFEST, { "old.js": "old" }));
@@ -568,6 +712,28 @@ describe("installPlugin", () => {
     await expect(
       installPlugin(deps, makeRoot(), "https://example.invalid/plugin.tgz"),
     ).rejects.toThrow(GatewayError);
+  });
+
+  test("a plaintext url is refused, and refused before the fetcher is consulted", async () => {
+    // What comes back from this fetch is `import`ed into the gateway process, so
+    // whoever sits on the wire picks what the gateway runs. The refusal is
+    // asserted against a caller that *has* a fetcher, because the interesting
+    // case is not "nobody wired one up" — it is the day somebody does. And the
+    // fetcher must go untouched: refusing after the download would still have
+    // pulled the bytes from a plaintext origin.
+    const asked: string[] = [];
+    const fetching: PluginDeps = {
+      ...deps,
+      fetchBytes: async (url) => {
+        asked.push(url);
+        return new Uint8Array(0);
+      },
+    };
+
+    await expect(
+      installPlugin(fetching, makeRoot(), "http://example.invalid/p.tgz"),
+    ).rejects.toThrow(/https/);
+    expect(asked).toEqual([]);
   });
 
   test("a url spec is unpacked through the injected fetcher and nothing else", async () => {

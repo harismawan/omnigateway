@@ -25,6 +25,24 @@ export type PluginEventStats = {
   queued: number;
 };
 
+/**
+ * How a drain is deferred, and how a deferred one is cancelled.
+ *
+ * Injected for the same reason clocks and log sinks are throughout this
+ * codebase: without it, "stop cancels the pending drain" is untestable. Bun's
+ * `process.getActiveResourcesInfo()` reports nothing for timers, so there is no
+ * way to observe a timeout from outside — and an assertion that cannot fail is
+ * how a claim like this one ends up in a test name and not in the code.
+ */
+export type DrainScheduler = (run: () => void) => () => void;
+
+const defaultScheduler: DrainScheduler = (run) => {
+  // A macrotask rather than a microtask: a microtask drain would still run
+  // before the response is handed back, which defeats the point.
+  const timer = setTimeout(run, 0);
+  return () => clearTimeout(timer);
+};
+
 export type PluginEventBus = {
   onRequestCompleted(pluginId: string, run: (event: RequestCompleted) => void): void;
   onLimitReached(pluginId: string, run: (event: LimitReached) => void): void;
@@ -58,9 +76,14 @@ export type PluginEventBus = {
  * process dies is gone. A plugin needing exact accounting must reconcile from
  * its own storage and must never treat this stream as a ledger.
  */
-export function createPluginEventBus(opts: { logger?: Logger; capacity?: number }): PluginEventBus {
+export function createPluginEventBus(opts: {
+  logger?: Logger;
+  capacity?: number;
+  scheduler?: DrainScheduler;
+}): PluginEventBus {
   const logger = opts.logger ?? noopLogger;
   const capacity = opts.capacity ?? DEFAULT_CAPACITY;
+  const scheduler = opts.scheduler ?? defaultScheduler;
 
   const requestHandlers: Handler<RequestCompleted>[] = [];
   const limitHandlers: Handler<LimitReached>[] = [];
@@ -70,6 +93,8 @@ export function createPluginEventBus(opts: { logger?: Logger; capacity?: number 
   let handlerErrors = 0;
   let draining = false;
   let live = true;
+  /** Cancels the pending drain. A drain outliving the bus is a timer leak. */
+  let cancelDrain: (() => void) | undefined;
 
   /**
    * Reported once per drain rather than once per drop.
@@ -79,8 +104,19 @@ export function createPluginEventBus(opts: { logger?: Logger; capacity?: number 
    */
   let droppedSinceReport = 0;
 
+  /**
+   * Handler failures since the last drain, by plugin.
+   *
+   * Batched for the reason drops are. A plugin whose handler always throws
+   * throws once per event, which is once per proxied request — a line each
+   * turns one broken plugin into a log volume problem on top of it, and buries
+   * whatever else was being diagnosed at the time.
+   */
+  const errorsSinceReport = new Map<string, number>();
+
   const drain = (): void => {
     draining = false;
+    cancelDrain = undefined;
     if (!live) return;
     // Taken whole: a handler that emits would otherwise extend the array being
     // iterated and let one plugin starve the drain indefinitely.
@@ -95,13 +131,20 @@ export function createPluginEventBus(opts: { logger?: Logger; capacity?: number 
           (handler.run as (event: unknown) => void)(item.event);
         } catch {
           handlerErrors++;
-          // No error body and no event fields: this line crosses into the log
-          // from code authored outside the repository, and `LogFields` is a
-          // closed allowlist. The plugin id is the actionable part.
-          logger.warn("plugin event handler failed", { plugin: handler.pluginId });
+          errorsSinceReport.set(
+            handler.pluginId,
+            (errorsSinceReport.get(handler.pluginId) ?? 0) + 1,
+          );
         }
       }
     }
+    for (const [pluginId, count] of errorsSinceReport) {
+      // No error body and no event fields: this line reports on code authored
+      // outside the repository, and `LogFields` is a closed allowlist. The
+      // plugin id and a count are the actionable parts.
+      logger.warn("plugin event handler failed", { plugin: pluginId, count });
+    }
+    errorsSinceReport.clear();
     if (droppedSinceReport > 0) {
       logger.warn("plugin event queue overflowed", { count: droppedSinceReport });
       droppedSinceReport = 0;
@@ -111,9 +154,7 @@ export function createPluginEventBus(opts: { logger?: Logger; capacity?: number 
   const schedule = (): void => {
     if (draining || !live) return;
     draining = true;
-    // A macrotask rather than a microtask: a microtask drain would still run
-    // before the response is handed back, which defeats the point.
-    setTimeout(drain, 0);
+    cancelDrain = scheduler(drain);
   };
 
   const enqueue = (item: Queued, subscribers: number): void => {
@@ -149,6 +190,13 @@ export function createPluginEventBus(opts: { logger?: Logger; capacity?: number 
     stop() {
       live = false;
       queue.length = 0;
+      // Cleared rather than merely disarmed. `drain` already returns early once
+      // `live` is false, so leaving the timeout pending would be harmless and
+      // still wrong: a test that asserts no timer is left behind would be
+      // asserting nothing, and a process waiting to exit would wait for it.
+      cancelDrain?.();
+      cancelDrain = undefined;
+      draining = false;
     },
   };
 }

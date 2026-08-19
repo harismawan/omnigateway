@@ -105,6 +105,16 @@ async function ensureRootThen<T>(root: string, then: () => Promise<T>): Promise<
 export type PluginFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 /**
+ * How long a plugin's outbound request may hang before it is abandoned.
+ *
+ * Without this a third-party host that accepts a connection and never answers
+ * holds the plugin's promise for the life of the process. Generous, because the
+ * point is to bound a hang rather than to enforce a latency budget: a plugin
+ * fetching a slow asset over a bad link should still succeed.
+ */
+const PLUGIN_FETCH_TIMEOUT_MS = 30_000;
+
+/**
  * `fetch`, bound to the origins the manifest declared.
  *
  * Origin equality, never a prefix or suffix compare: under `endsWith`,
@@ -123,18 +133,28 @@ export type PluginFetch = (url: string, init?: RequestInit) => Promise<Response>
  */
 export function createPluginFetch(
   origins: readonly string[],
-  deps: { fetchImpl?: PluginFetch } = {},
+  deps: { fetchImpl?: PluginFetch; timeoutMs?: number } = {},
 ): PluginFetch {
   const fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
   // Normalised through `URL` so a declared "https://host/" and a requested
   // "https://host" compare equal without either side being trimmed at parse.
   const allowed = new Set(origins.map((origin) => new URL(origin).origin));
 
+  const timeoutMs = deps.timeoutMs ?? PLUGIN_FETCH_TIMEOUT_MS;
+
   return async (url, init) => {
     const parsed = new URL(url);
     if (!allowed.has(parsed.origin)) {
       throw new Error(`origin ${parsed.origin} is not in the allowlist`);
     }
-    return fetchImpl(url, { ...init, redirect: "manual" });
+    // A plugin's own signal is honoured rather than replaced: it may be
+    // cancelling for its own reasons, and the timeout is a ceiling on top of
+    // that rather than a substitute for it.
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const signal =
+      init?.signal === undefined || init.signal === null
+        ? timeout
+        : AbortSignal.any([init.signal, timeout]);
+    return fetchImpl(url, { ...init, redirect: "manual", signal });
   };
 }

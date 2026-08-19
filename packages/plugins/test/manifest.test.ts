@@ -35,7 +35,7 @@ test("a full manifest round-trips", () => {
   const manifest = base({
     ui: "ui/index.js",
     sdk: "^1.0.0",
-    nav: { label: "Companion", icon: "sparkles" },
+    nav: { label: "Companion" },
     capabilities: ["storage", "files", "net:outbound", "events:request", "events:limit"],
     origins: ["https://pokeapi.co", "https://raw.githubusercontent.com"],
   });
@@ -127,4 +127,14 @@ test("safeParseManifest reports why rather than throwing", () => {
   const result = safeParseManifest(base({ id: "../escape" }));
   expect(result.ok).toBe(false);
   if (!result.ok) expect(result.reason).toContain("id");
+});
+
+test("a nav icon is refused, because nothing renders one", () => {
+  // The field existed, validated, travelled to the console and was ignored:
+  // every plugin got the same glyph. `.strict()` refusing it is the honest
+  // state — a manifest key that silently does nothing reads as supported and
+  // produces a bug report. Re-adding it once an icon set exists breaks no
+  // manifest, because nothing can be relying on it today.
+  expect(safeParseManifest(base({ nav: { label: "Companion", icon: "sparkles" } })).ok).toBe(false);
+  expect(safeParseManifest(base({ nav: { label: "Companion" } })).ok).toBe(true);
 });

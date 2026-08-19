@@ -46,7 +46,7 @@ say the same thing in your own README.
   "sdk": "^1.0.0",
   "server": "server/index.js",
   "ui": "ui/index.js",
-  "nav": { "label": "Companion", "icon": "sparkles" },
+  "nav": { "label": "Companion" },
   "capabilities": ["storage", "files", "net:outbound", "events:request"],
   "origins": ["https://pokeapi.co"]
 }
@@ -185,15 +185,18 @@ tells you to restart.
 To remove:
 
 ```bash
-omni plugin remove my-plugin              # keeps your tables
-omni plugin remove my-plugin --purge      # drops them too, after confirming
+omni plugin remove my-plugin              # keeps your tables, deletes your data/
+omni plugin remove my-plugin --purge      # drops the tables too, after confirming
 ```
 
 ## Things that will bite
 
-- **A snapshot carries your tables but not your `data/` directory.** After a
-  restore the two disagree until your cache refills. Treat a missing file as
-  normal, never as corruption — after a restore, every file is missing.
+- **`data/` is a cache and nothing else.** It is excluded from snapshots, so it
+  has no restore path, and `omni plugin remove` deletes it along with your
+  directory. Anything you cannot rebuild belongs in a table, not there. After a
+  restore your tables and your files disagree until the cache refills — treat a
+  missing file as normal, never as corruption, because after a restore every
+  file is missing.
 - **Your growth counters cannot be recomputed from `request_logs`.** Retention
   prunes it, so anything derived from it runs backwards after a sweep. Accumulate
   instead.

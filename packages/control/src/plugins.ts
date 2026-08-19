@@ -452,12 +452,17 @@ function isSafeArchivePath(path: string): boolean {
  * tree after the path check has already passed, and a plugin that needs one is a
  * plugin nobody has audited.
  *
- * pax and GNU extended headers are skipped rather than refused. bsdtar — which
- * is `tar` on macOS — emits a pax header before every entry by default, so
- * refusing them would reject most archives built on a Mac. Their metadata is
- * ignored; the ustar header that follows carries a usable name in every case
- * this installer accepts, and the one case it does not (a path over 255 bytes)
- * fails the manifest lookup with a comprehensible message.
+ * pax headers (`x`, `g`) and GNU long *link* names (`K`) are skipped rather than
+ * refused. bsdtar — which is `tar` on macOS — emits a pax header before every
+ * entry by default, so refusing them would reject most archives built on a Mac.
+ * Their metadata is ignored; the ustar header that follows carries a usable name
+ * in every case this installer accepts.
+ *
+ * A GNU long *file* name (`L`) is the one extended header that is read rather
+ * than skipped, because its ustar successor does not carry a usable name — GNU
+ * writes a truncated placeholder there. The name it carries is then judged by
+ * exactly the same `isSafeArchivePath` call as any other, which is the point:
+ * an entry does not get a laxer path check for having arrived by a longer route.
  */
 function readTar(bytes: Uint8Array): Map<string, Uint8Array> {
   const files = new Map<string, Uint8Array>();
@@ -476,6 +481,36 @@ function readTar(bytes: Uint8Array): Map<string, Uint8Array> {
     const prefix = fieldText(header, 345, 155);
 
     offset += BLOCK;
+
+    // The ceiling is judged on what the header *declares*, before anything asks
+    // whether those bytes are present, and it counts every entry body rather
+    // than only the files that survive the filters below. Both halves matter. A
+    // bomb is refused for declaring the size, so no version of it has to be read
+    // to be refused; and a thousand pax headers cannot carry between them what a
+    // single entry would be refused for, which counting only kept files would
+    // allow. Declared sizes are also what makes this check cheap: it fires on the
+    // header, not on the copy.
+    total += size;
+    if (total > MAX_PLUGIN_BYTES) {
+      throw new GatewayError(
+        "BAD_REQUEST",
+        `archive unpacks to more than ${MAX_PLUGIN_BYTES} bytes`,
+      );
+    }
+
+    // A short archive is a corrupt download, not a small plugin. `subarray`
+    // clamps rather than throwing, so without this a truncated tarball installs
+    // a truncated file and says nothing — the plugin then fails later, somewhere
+    // that cannot tell a bad download from bad code. Compared unpadded: the two
+    // zero blocks that close an archive are conventional, and some writers omit
+    // the padding after the final entry, so requiring it would refuse archives
+    // that carry every byte they promised.
+    if (offset + size > bytes.length) {
+      throw new GatewayError(
+        "BAD_REQUEST",
+        `archive is truncated: entry ${name || "(unnamed)"} declares ${size} bytes and the archive ends before them`,
+      );
+    }
     const data = bytes.subarray(offset, offset + size);
     // Entry bodies are padded out to a block boundary.
     offset += Math.ceil(size / BLOCK) * BLOCK;
@@ -504,13 +539,6 @@ function readTar(bytes: Uint8Array): Map<string, Uint8Array> {
       throw new GatewayError("BAD_REQUEST", `archive contains an unsafe path: ${path}`);
     }
 
-    total += size;
-    if (total > MAX_PLUGIN_BYTES) {
-      throw new GatewayError(
-        "BAD_REQUEST",
-        `archive unpacks to more than ${MAX_PLUGIN_BYTES} bytes`,
-      );
-    }
     // Copied out of the archive buffer rather than referenced into it, so the
     // whole tarball is not held alive by one small file.
     files.set(path, new Uint8Array(data));
@@ -590,7 +618,18 @@ function readTree(fs: PluginFs, dir: string, prefix = ""): Map<string, Uint8Arra
 }
 
 async function loadPayload(deps: PluginDeps, spec: string): Promise<Payload> {
-  if (spec.startsWith("http://") || spec.startsWith("https://")) {
+  // Plaintext is refused rather than upgraded. What arrives over this fetch is
+  // code the gateway process will `import`, so a network position between the
+  // operator and the host is a position that chooses what the gateway runs;
+  // there is no integrity check downstream that would notice. Silently rewriting
+  // to `https://` would be worse than refusing — it would install *something*
+  // from a URL the operator did not type. No caller injects `fetchBytes` today,
+  // which is exactly why this belongs here now: the restriction has to already
+  // be true on the day someone wires one up.
+  if (spec.startsWith("http://")) {
+    throw new GatewayError("BAD_REQUEST", "plugins may only be installed over https");
+  }
+  if (spec.startsWith("https://")) {
     if (deps.fetchBytes === undefined) {
       throw new GatewayError("BAD_REQUEST", "this caller cannot install from a URL");
     }

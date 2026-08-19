@@ -730,13 +730,19 @@ the plugin.
 Removing one keeps its data:
 
 ```bash
-omni plugin remove some-plugin          # directory goes, tables stay
+omni plugin remove some-plugin          # directory goes, database tables stay
 omni plugin remove some-plugin --purge  # tables too, after confirming
 ```
 
 That default is deliberate. A plugin directory can be reinstalled from the
 package it came from; whatever it accumulated in your database cannot be
-reinstalled from anything. For the same reason, restoring a snapshot onto an
+reinstalled from anything.
+
+Note what "directory goes" includes: a plugin's `data/` directory is removed
+with it. That directory holds cached files a plugin can rebuild — it is excluded
+from [snapshots](#snapshots-and-restore) for that reason, so it has no restore
+path and is not meant to need one. Only the database tables are kept, and only
+those are what `--purge` additionally drops. For the same reason, restoring a snapshot onto an
 installation that no longer has a plugin leaves that plugin's tables in place —
 `omni doctor` reports them, and nothing removes them for you.
 

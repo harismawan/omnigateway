@@ -10,6 +10,7 @@ import {
   type PluginLogFields,
   type PluginLogger,
   type PluginManifest,
+  type PluginMigration,
   type PluginRoute,
   type PluginStorage,
   safeParseManifest,
@@ -32,6 +33,14 @@ export type LoadedPlugin = {
   id: string;
   manifest: PluginManifest;
   routes: readonly PluginRoute[];
+  /**
+   * Retained so a database restore can re-apply them.
+   *
+   * A snapshot taken before this plugin was installed does not carry its
+   * tables, and the plugin stays loaded across the swap holding a context whose
+   * every query would then throw until the process restarted.
+   */
+  migrations: readonly PluginMigration[];
   ui?: LoadedPluginUi;
 };
 
@@ -213,11 +222,15 @@ export async function loadPlugins(deps: {
     }
 
     let routes: readonly PluginRoute[] = [];
+    let migrations: readonly PluginMigration[] = [];
     if (manifest.server !== undefined) {
       const entry = resolve(home, manifest.server);
-      // The manifest schema already rejects `..` and absolute entries. This
-      // resolves the result anyway, because that check is lexical and a symlink
-      // is not.
+      // A second lexical check. The manifest schema already rejects `..` and
+      // absolute entries; this catches a join that escaped anyway. It does NOT
+      // resolve symlinks — `resolve` is purely lexical — and it does not need
+      // to: the server entry is imported into this process with full privileges
+      // either way, so a link is not the boundary here. The `files` capability
+      // is where link resolution matters, and it does it there.
       if (entry !== home && !entry.startsWith(`${home}${sep}`)) {
         fail(`server entry resolves outside the plugin directory`);
         continue;
@@ -241,8 +254,9 @@ export async function loadPlugins(deps: {
         continue;
       }
 
-      if (definition.migrations !== undefined && definition.migrations.length > 0) {
-        const applied = deps.store.plugins.migrate(id, definition.migrations);
+      migrations = definition.migrations ?? [];
+      if (migrations.length > 0) {
+        const applied = deps.store.plugins.migrate(id, migrations);
         if (applied.failed !== undefined) {
           // Whatever committed before the failure stays applied and stays
           // recorded — see the store's migrate for why a batch transaction here
@@ -269,7 +283,7 @@ export async function loadPlugins(deps: {
       }
     }
 
-    const loaded: LoadedPlugin = { id, manifest, routes };
+    const loaded: LoadedPlugin = { id, manifest, routes, migrations };
     if (manifest.ui !== undefined && manifest.sdk !== undefined) {
       /**
        * `manifest.ui` is relative to the plugin's home, like `server`. Only the

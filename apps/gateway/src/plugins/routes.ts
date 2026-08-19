@@ -227,6 +227,13 @@ export function pluginRoutes(deps: PluginRouteDeps): Elysia {
         case "DELETE":
           app.delete(path, handle);
           break;
+        default:
+          // Reachable despite the union: a plugin is compiled elsewhere, so its
+          // `method` is whatever its bundle actually emitted. Silently not
+          // mounting it leaves the author with a route that 404s and no reason
+          // anywhere, which is the same failure `mountPath` refuses to produce.
+          logger.error("plugin route method not supported", { plugin: plugin.id });
+          break;
       }
     }
   }

@@ -170,3 +170,35 @@ test("a malformed url is refused rather than passed to fetch", async () => {
   });
   await expect(bound("not-a-url")).rejects.toThrow();
 });
+
+test("a hung host does not hold a plugin's request forever", async () => {
+  // Without a ceiling, a third-party that accepts the connection and never
+  // answers holds the promise for the life of the process. The spec promised
+  // this discipline and the implementation had none.
+  const bound = createPluginFetch(["https://slow.example"], {
+    timeoutMs: 10,
+    fetchImpl: (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      }),
+  });
+
+  await expect(bound("https://slow.example/hang")).rejects.toThrow();
+});
+
+test("a plugin's own abort signal still works alongside the timeout", async () => {
+  // The timeout is a ceiling on top of the caller's intent, not a replacement
+  // for it: a plugin cancelling for its own reasons must still be able to.
+  const controller = new AbortController();
+  const bound = createPluginFetch(["https://slow.example"], {
+    timeoutMs: 60_000,
+    fetchImpl: (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      }),
+  });
+
+  const pending = bound("https://slow.example/hang", { signal: controller.signal });
+  controller.abort();
+  await expect(pending).rejects.toThrow(/aborted/);
+});

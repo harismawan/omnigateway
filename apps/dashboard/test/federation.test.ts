@@ -2,7 +2,9 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import React from "react";
 import { SHARED_IMPORTS, sharedEntryName } from "../shared/manifest.ts";
+import * as reactShim from "../shared/react.ts";
 
 const sharedDir = join(dirname(fileURLToPath(import.meta.url)), "..", "shared");
 
@@ -46,6 +48,69 @@ test("a CommonJS package is re-exported by destructuring, never by `export *`", 
 
     expect(statements.some((line) => line.startsWith("export *"))).toBe(false);
     expect(statements.some((line) => line.startsWith("export const {"))).toBe(true);
+  }
+});
+
+/**
+ * React keys `shared/react.ts` deliberately does not re-export.
+ *
+ * Named one at a time, with a reason each, rather than matched by a pattern.
+ * Every exclusion here is `__`-prefixed or `unstable_`-prefixed or otherwise
+ * shouts "internal" — but "it looked internal" is exactly the judgement this
+ * test exists to stop anyone making at a glance, and a predicate would let the
+ * next such key through without anyone deciding anything. React adding a key,
+ * of any shape, should cost one line and one thought.
+ */
+const NOT_RE_EXPORTED: ReadonlyArray<readonly [string, string]> = [
+  [
+    "__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE",
+    "React's private dispatcher. Shared through the single React instance the whole point of this shim is to preserve, never through an import.",
+  ],
+  [
+    "__COMPILER_RUNTIME",
+    "The React Compiler's own runtime, resolved by compiled output rather than written by hand.",
+  ],
+  [
+    "act",
+    "A test utility. It is not in `@types/react`'s public surface either, so federating it would not even typecheck, and a plugin's tests do not run through the federation boundary.",
+  ],
+  [
+    "unstable_useCacheRefresh",
+    "The `unstable_` prefix is React's own statement that it carries no compatibility promise; this boundary is versioned and cannot re-export something that is not.",
+  ],
+];
+
+test("the React shim re-exports every public React export", () => {
+  // The silent failure this catches: React ships a new export, the hand-written
+  // list in `shared/react.ts` does not gain it, and a plugin importing it gets
+  // `undefined` at runtime with nothing failing at build time. Same class as the
+  // `export *` trap above, arriving by upgrade instead of by authorship.
+  const held = new Set(NOT_RE_EXPORTED.map(([name]) => name));
+
+  // Read off the module namespace rather than parsed out of the file, so the
+  // test measures what the shim actually exports rather than what its source
+  // looks like. `default` is the whole namespace object and is not a React key.
+  const exported = new Set(Object.keys(reactShim));
+  exported.delete("default");
+
+  const expected = Object.keys(React).filter((name) => !held.has(name));
+
+  // Compared both ways by a single equality. A missing name is the upgrade case;
+  // an extra name is the reverse — React removed or renamed an export and the
+  // shim is now re-exporting `undefined` under a name plugins still import.
+  expect([...exported].sort()).toEqual(expected.sort());
+});
+
+test("every deliberately withheld React key is still a React key", () => {
+  // The exclusion list rots in the other direction too: React drops a key, the
+  // entry outlives it, and the reason for it becomes unfalsifiable — the next
+  // reader cannot tell a live decision from a fossil. `captureOwnerStack` is the
+  // near miss to keep in mind: it is re-exported, and it is development-only, so
+  // it is present here and absent from a production build. That asymmetry is
+  // React's, and it is faithfully reproduced rather than papered over.
+  for (const [name, reason] of NOT_RE_EXPORTED) {
+    expect(reason.length).toBeGreaterThan(0);
+    expect(Object.keys(React)).toContain(name);
   }
 });
 

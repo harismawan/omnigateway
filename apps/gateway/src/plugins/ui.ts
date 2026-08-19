@@ -26,7 +26,7 @@ export type PluginCatalogEntry = {
   id: string;
   name: string;
   version: string;
-  nav: { label: string; icon?: string | undefined } | null;
+  nav: { label: string } | null;
   ui: {
     /** Absolute URL the console imports, or null when there is no UI at all. */
     entry: string | null;

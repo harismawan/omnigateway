@@ -27,7 +27,7 @@ function manifest(over: Record<string, unknown> = {}): PluginManifest {
     api: PLUGIN_API_VERSION,
     ui: "index.js",
     sdk: "^1.0.0",
-    nav: { label: "Companion", icon: "sparkles" },
+    nav: { label: "Companion" },
     ...over,
   });
 }
@@ -41,6 +41,7 @@ async function withUi(opts: { compatible?: boolean; body?: string } = {}): Promi
     id: "pokemon",
     manifest: manifest(),
     routes: [],
+    migrations: [],
     ui: { dir: home, entry: "index.js", compatible: opts.compatible ?? true },
   };
 }
@@ -63,6 +64,7 @@ test("an incompatible ui is listed with its reason and NO entry url", () => {
       id: "pokemon",
       manifest: manifest(),
       routes: [],
+      migrations: [],
       ui: { dir: dir, entry: "index.js", compatible: false, reason: "requires sdk ^9.0.0" },
     },
   ]);
@@ -80,6 +82,7 @@ test("a compatible ui gets a url under the asset prefix", () => {
       id: "pokemon",
       manifest: manifest(),
       routes: [],
+      migrations: [],
       ui: { dir: dir, entry: "index.js", compatible: true },
     },
   ]);
@@ -92,6 +95,7 @@ test("a backend-only plugin is listed with no ui at all", () => {
       id: "quiet",
       manifest: manifest({ id: "quiet", ui: undefined, sdk: undefined, server: "server/index.js" }),
       routes: [],
+      migrations: [],
     },
   ]);
   expect(entries[0]?.ui).toBeNull();
@@ -311,6 +315,7 @@ test("the server entry and the manifest are never reachable as assets", async ()
     id: "pokemon",
     manifest: manifest(),
     routes: [],
+    migrations: [],
     ui: { dir: home, entry: "index.js", compatible: true },
   };
   const app = pluginUiRoutes({ admin: denyAdmin, plugins: [plugin] });

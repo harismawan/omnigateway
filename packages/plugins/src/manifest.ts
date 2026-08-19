@@ -103,10 +103,19 @@ const originSchema = z.string().refine(
   { message: "origin must be scheme://host with no path, query or fragment" },
 );
 
+/**
+ * No `icon`. The field existed, was validated, was carried all the way to the
+ * console, and was then ignored — every plugin got the same glyph.
+ *
+ * Choosing an icon means agreeing on the set a manifest may name, and nothing
+ * has made that decision. A field that silently does nothing is worse than an
+ * absent one: it reads as supported and produces a bug report. Adding it back
+ * once the set exists is additive and breaks no manifest, because `.strict()`
+ * only rejects keys it does not know.
+ */
 const navSchema = z
   .object({
     label: z.string().min(1).max(32),
-    icon: z.string().min(1).max(64).optional(),
   })
   .strict();
 

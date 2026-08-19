@@ -89,17 +89,38 @@ test("a plugin only receives events it subscribed to", async () => {
   bus.stop();
 });
 
-test("stop drains nothing further and leaves no timer behind", async () => {
-  // Tests in this repo must not leak timers or listeners. A bus that scheduled
-  // a drain and was never stopped would keep the loop alive past the test.
-  const bus = createPluginEventBus({});
+test("stop drains nothing further and clears the pending timer", async () => {
+  // Two claims, and the name used to make only the first one honestly. `drain`
+  // returns early once the bus is stopped, so "nothing further is delivered"
+  // held whether or not the timeout was cleared — the timer half was untested
+  // and, read literally, false.
+  //
+  // The scheduler is injected so the cancel is observable at all. Bun's
+  // `process.getActiveResourcesInfo()` reports nothing for timers, so from
+  // outside there is no way to tell "disarmed" from "cleared" — and a pending
+  // timeout keeps a process from exiting even when its callback does nothing.
+  let armed = 0;
+  let cancelled = 0;
+  const bus = createPluginEventBus({
+    scheduler: (run) => {
+      armed++;
+      const timer = setTimeout(run, 0);
+      return () => {
+        cancelled++;
+        clearTimeout(timer);
+      };
+    },
+  });
   const seen: string[] = [];
   bus.onRequestCompleted("p", (e) => seen.push(e.requestId));
 
   bus.emitRequestCompleted(completed());
-  bus.stop();
-  await settle();
+  expect(armed).toBe(1);
 
+  bus.stop();
+  expect(cancelled).toBe(1);
+
+  await settle();
   expect(seen).toEqual([]);
 });
 
@@ -112,5 +133,33 @@ test("emitting with no subscribers costs nothing and queues nothing", async () =
   expect(bus.stats().dropped).toBe(0);
   expect(bus.stats().queued).toBe(0);
   await settle();
+  bus.stop();
+});
+
+test("a handler that always throws is reported once per drain, not once per event", async () => {
+  // The drop counter beside this one is batched with the reasoning written out;
+  // the error path did the opposite. A plugin whose handler always throws throws
+  // once per proxied request, and a line each buries whatever an operator was
+  // actually diagnosing.
+  const lines: Array<{ msg: string; fields: unknown }> = [];
+  const logger = {
+    debug: () => {},
+    info: () => {},
+    warn: (msg: string, fields?: unknown) => lines.push({ msg, fields }),
+    error: () => {},
+    enabled: () => true,
+  };
+  const bus = createPluginEventBus({ logger });
+  bus.onRequestCompleted("bad", () => {
+    throw new Error("always");
+  });
+
+  for (let i = 0; i < 5; i++) bus.emitRequestCompleted(completed({ requestId: `r${i}` }));
+  await settle();
+
+  const failures = lines.filter((l) => l.msg === "plugin event handler failed");
+  expect(failures).toHaveLength(1);
+  expect(failures[0]?.fields).toEqual({ plugin: "bad", count: 5 });
+  expect(bus.stats().handlerErrors).toBe(5);
   bus.stop();
 });

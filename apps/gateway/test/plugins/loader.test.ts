@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { PLUGIN_API_VERSION } from "@omni/plugins";
 import type { Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
+import { captureLogger } from "@omni/testkit";
 import { createPluginEventBus } from "../../src/plugins/events.ts";
 import { loadPlugins } from "../../src/plugins/loader.ts";
 
@@ -278,4 +279,85 @@ test("a ui entry outside the ui/ directory is refused rather than served from th
   const result = await load();
   expect(result.plugins).toEqual([]);
   expect(result.failures[0]?.reason).toContain("ui/");
+});
+
+// -------------------------------------------------- the plugin logger
+
+/**
+ * The one path from third-party code to stdout, and until now the one function
+ * in this feature with no tests at all.
+ *
+ * `LogFields` is a closed allowlist and a redaction boundary — it is what makes
+ * "a prompt never reaches stdout" a compiler guarantee rather than a review
+ * habit. A plugin holds a logger that can reach exactly one free-text field,
+ * capped and filtered. These assert that cap and that filter, because a comment
+ * saying so is not a guarantee.
+ */
+async function logFrom(body: string): Promise<ReturnType<typeof captureLogger>> {
+  await plugin({ id: "talker", server: body });
+  const logger = captureLogger();
+  const bus = createPluginEventBus({});
+  await loadPlugins({ root, store, events: bus, sdkVersion: "1.0.0", logger }).finally(() =>
+    bus.stop(),
+  );
+  return logger;
+}
+
+test("a plugin's log line is stamped with the id the host validated", async () => {
+  const logger = await logFrom(
+    `export default { setup(ctx) { ctx.logger.info("hello"); return {}; } };`,
+  );
+  const line = logger.records.find((r) => r.msg === "hello");
+  expect(line?.fields.plugin).toBe("talker");
+});
+
+test("a plugin cannot forge the plugin field or pass fields of its own", async () => {
+  // The id is bound by the host. A plugin passing `plugin` gets ignored, and
+  // anything outside the three permitted keys never reaches a field at all.
+  const logger = await logFrom(
+    `export default { setup(ctx) {
+       ctx.logger.info("hello", { plugin: "someone-else", requestId: "req_1", reason: "raw" });
+       return {};
+     } };`,
+  );
+  const line = logger.records.find((r) => r.msg === "hello");
+  expect(line?.fields.plugin).toBe("talker");
+  expect(line?.fields.requestId).toBeUndefined();
+  // `reason` is reachable only through `event`, never by passing it directly.
+  expect(line?.fields.reason).toBeUndefined();
+});
+
+test("a plugin's event label lands in reason, sanitised", async () => {
+  const logger = await logFrom(
+    `export default { setup(ctx) { ctx.logger.info("hi", { event: "egg.hatched:shiny-1" }); return {}; } };`,
+  );
+  expect(logger.records.find((r) => r.msg === "hi")?.fields.reason).toBe("egg.hatched:shiny-1");
+});
+
+test("an event label cannot smuggle prose, whitespace or punctuation into a log line", async () => {
+  // The filter is the point. Anything a prompt or a token is made of — spaces,
+  // slashes, quotes, newlines, equals signs — is stripped rather than quoted.
+  const logger = await logFrom(
+    `export default { setup(ctx) {
+       ctx.logger.info("hi", { event: "user said: hello world / \\"quoted\\"\\nsecret=sk-abc" });
+       return {};
+     } };`,
+  );
+  const reason = logger.records.find((r) => r.msg === "hi")?.fields.reason;
+  expect(reason).toBe("usersaid:helloworldquotedsecretsk-abc");
+});
+
+test("an event label is capped, so a body cannot ride along inside one", async () => {
+  const logger = await logFrom(
+    `export default { setup(ctx) { ctx.logger.info("hi", { event: "a".repeat(500) }); return {}; } };`,
+  );
+  expect(logger.records.find((r) => r.msg === "hi")?.fields.reason).toBe("a".repeat(64));
+});
+
+test("count and durationMs pass through, and nothing else does", async () => {
+  const logger = await logFrom(
+    `export default { setup(ctx) { ctx.logger.warn("m", { count: 3, durationMs: 12 }); return {}; } };`,
+  );
+  const line = logger.records.find((r) => r.msg === "m");
+  expect(line?.fields).toEqual({ plugin: "talker", count: 3, durationMs: 12 });
 });

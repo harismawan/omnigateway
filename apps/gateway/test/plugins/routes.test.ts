@@ -67,13 +67,36 @@ test("an unauthenticated request is refused and the handler never runs", async (
   expect(ran).toBe(false);
 });
 
-test("a stale session token is refused as well", async () => {
-  const { call } = await harness([{ id: "hatch", routes: [route("/thing", () => ({ json: 1 }))] }]);
-  const res = await call("GET", "/api/plugins/hatch/thing", undefined, false);
-  expect(res.status).toBe(401);
+test("a session token that has aged past its ttl is refused", async () => {
+  // This test previously never built a stale token: the harness pins the clock,
+  // so it called with no cookie at all, asserted 401, and was a duplicate of the
+  // test above it. Session expiry could have been entirely broken and it passed.
+  //
+  // A movable clock is the whole point — the same token has to work before the
+  // ttl and fail after it, or the assertion is about something else.
+  const store = await memoryStore();
+  let clock = NOW;
+  const admin = createAdminAuth(store, { now: () => clock, sessionTtlMs: SESSION_TTL_MS });
+  await admin.setPassword("hunter2hunter2");
+  const token = await admin.login("hunter2hunter2");
+  if (token === null) throw new Error("test admin login failed");
 
-  const authed = await call("GET", "/api/plugins/hatch/thing");
-  expect(authed.status).toBe(200);
+  const app = pluginRoutes({
+    admin,
+    plugins: [{ id: "hatch", routes: [route("/thing", () => ({ json: 1 }))] }],
+    logger: captureLogger(),
+  });
+  const call = () =>
+    app.handle(
+      new Request("http://localhost/api/plugins/hatch/thing", {
+        headers: { cookie: `${ADMIN_COOKIE}=${token}` },
+      }),
+    );
+
+  expect((await call()).status).toBe(200);
+
+  clock += SESSION_TTL_MS + 1;
+  expect((await call()).status).toBe(401);
 });
 
 test("every method is guarded, not only the readable one", async () => {

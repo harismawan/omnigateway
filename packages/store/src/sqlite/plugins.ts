@@ -46,8 +46,14 @@ const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
  * pasted from a query someone ran against `request_logs`, a `DELETE` whose
  * `FROM` was never edited to the plugin's own table. It stops honest mistakes
  * and makes no claim beyond that.
+ *
+ * Exported for the drift guard in `test/plugins.test.ts`, which opens a freshly
+ * migrated database and asserts this list *is* its table set. "Enumerated rather
+ * than derived" is only safe while something enforces the enumeration: migration
+ * 012 adding a table nobody adds here would otherwise open a silent hole in the
+ * denylist, which is the one failure mode a guardrail may not have.
  */
-const CORE_TABLES = [
+export const CORE_TABLES = [
   "api_keys",
   "credential_health",
   "credentials",

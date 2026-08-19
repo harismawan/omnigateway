@@ -11,12 +11,20 @@
  * being explicit is a feature rather than a chore: this is the federation
  * boundary, so what a plugin may import from React is a contract worth writing
  * down and versioning.
+ *
+ * Explicit and hand-written means it can also fall behind, in the same silent
+ * way: React adds an export, the list does not, and a plugin importing it gets
+ * `undefined` with no build error anywhere. `test/federation.test.ts` compares
+ * this list against `Object.keys(React)` so an upgrade that widens React's
+ * surface fails the suite instead of a plugin. Two names are held back on
+ * purpose and are listed there with the reason.
  */
 import React from "react";
 
 export default React;
 
 export const {
+  Activity,
   Children,
   Component,
   Fragment,
@@ -24,6 +32,9 @@ export const {
   PureComponent,
   StrictMode,
   Suspense,
+  cache,
+  cacheSignal,
+  captureOwnerStack,
   cloneElement,
   createContext,
   createElement,
@@ -40,6 +51,7 @@ export const {
   useDebugValue,
   useDeferredValue,
   useEffect,
+  useEffectEvent,
   useId,
   useImperativeHandle,
   useInsertionEffect,

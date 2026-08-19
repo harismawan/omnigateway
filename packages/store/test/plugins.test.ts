@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/sqlite/db.ts";
-import { createPluginRepo } from "../src/sqlite/plugins.ts";
+import { CORE_TABLES, createPluginRepo } from "../src/sqlite/plugins.ts";
 import type { PluginMigration, PluginRepo } from "../src/types.ts";
 
 /**
@@ -58,6 +58,29 @@ test("migration 011 creates the plugin ledger with a composite key", () => {
     db.run("INSERT INTO plugin_migrations (plugin_id, version, applied_at) VALUES ('a', 1, 2)"),
   ).toThrow();
   db.run("INSERT INTO plugin_migrations (plugin_id, version, applied_at) VALUES ('b', 1, 3)");
+  db.close();
+});
+
+test("CORE_TABLES is exactly the table set a freshly migrated database holds", () => {
+  // The drift guard. `CORE_TABLES` is enumerated from the migration files rather
+  // than derived from the schema, which is the right call — the denylist must not
+  // change meaning because a plugin created a table — but it only stays true
+  // while something enforces it. Migration 012 adding a table nobody adds to the
+  // list leaves a name a plugin may then write to freely, and nothing anywhere
+  // says so. This test is what says so, and it fails on the migration that opens
+  // the hole rather than on the plugin that finds it.
+  const db = tempDb();
+
+  // `type = 'table'` already excludes indexes and views. What it does not exclude
+  // is SQLite's own bookkeeping tables — `sqlite_sequence`, `sqlite_stat1` — which
+  // appear when a feature that needs them is used and belong to no migration.
+  // They are dropped by name prefix rather than by a general filter, and the
+  // prefix is safe *because SQLite reserves it*: the assertion below is the proof
+  // that this cannot hide a core table, since no migration is able to create one.
+  const created = tableNames(db).filter((name) => !name.startsWith("sqlite_"));
+  expect(() => db.run("CREATE TABLE sqlite_smuggled (id INTEGER PRIMARY KEY)")).toThrow();
+
+  expect(created).toEqual([...CORE_TABLES].sort());
   db.close();
 });
 
