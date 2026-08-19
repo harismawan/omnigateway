@@ -302,6 +302,29 @@ An ESM bundle built against `packages/dashboard-sdk`, rendered inline under a
 - Dex, filterable by rarity, showing shiny and nature.
 - Shop and bag.
 
+**Amended during implementation: `focus` is not built, and five states ship.**
+
+The other five are derivable from one stored instant — `last_credit_at`, added by
+migration 5 and written only where tokens are credited. `focus` is not. It can
+only mean a burst of recent requests, which needs per-request history the plugin
+deliberately does not keep: growth counters here accumulate precisely because
+`request_logs` is pruned by retention and anything derived from it runs backwards
+after a sweep.
+
+So `focus` would have had to be either a state that never fires or one that fires
+on a threshold with nothing behind it. Five honest states are better than six with
+one that means nothing, and a reader of the panel cannot tell the difference from
+the outside — which is exactly why it had to be decided rather than approximated.
+
+Building it later is a storage change, not a UI one: it needs a short rolling
+count of credits per key, and the natural place is the plugin's own table rather
+than anything the host would have to start recording.
+
+**Also amended: the key selector is free text.** A plugin has no capability to
+enumerate API keys, so the panel cannot offer a list. That is a host gap rather
+than a UI shortcut, and widening the plugin contract to close it wants its own
+amendment to the host design.
+
 All sprite and species requests go to the plugin's own routes. The browser never
 contacts `pokeapi.co` or `raw.githubusercontent.com`.
 
