@@ -388,3 +388,37 @@ test("a non-numeric species id is refused before any lookup", async () => {
   });
   expect(response?.status).toBe(400);
 });
+
+test("a held item cannot be spent, however the request is spelled", async () => {
+  // `shinyCharm` costs a whole rare graduation and is bought once to be held
+  // forever. `consume` decrements whatever item it is handed and has no notion
+  // of a passive one, so the only thing standing between a three-billion-token
+  // purchase and a single-use consumable is the allowlist in `parseHeldItem`.
+  //
+  // That allowlist used to be shadowed by an exported `PASSIVE_ITEMS` set that
+  // nothing read — the right fact in the wrong place, stating a rule while a
+  // literal elsewhere enforced it. The set is gone and this is what replaced it.
+  await boot();
+  spend(ITEM_PRICES.shinyCharm);
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const bought = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "item", item: "shinyCharm" },
+  });
+  expect(bought?.status).toBeUndefined();
+  expect(readCompanion(storage, KEY)?.state?.inventory.shinyCharm).toBe(1);
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const refused = await use?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { item: "shinyCharm" },
+  });
+
+  // 400, not 409: the item is held, so "none-held" would be a lie. It is not
+  // spendable at all, which is a bad request rather than a conflict.
+  expect(refused?.status).toBe(400);
+  expect(readCompanion(storage, KEY)?.state?.inventory.shinyCharm).toBe(1);
+});

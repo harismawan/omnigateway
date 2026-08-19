@@ -142,9 +142,6 @@ export type ItemKind = keyof typeof ITEM_PRICES;
 
 export const ITEM_KINDS = Object.keys(ITEM_PRICES) as readonly ItemKind[];
 
-/** An item held rather than consumed: bought once, in effect while owned. */
-export const PASSIVE_ITEMS: ReadonlySet<ItemKind> = new Set<ItemKind>(["shinyCharm"]);
-
 export const FRESH_EGG_BASE_PRICE = 1_000_000_000;
 
 /**

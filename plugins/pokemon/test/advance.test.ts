@@ -247,3 +247,55 @@ test("garbage is null, not a fresh companion", () => {
   expect(parseState("[1,2,3]")).toBeNull();
   expect(parseState("null")).toBeNull();
 });
+
+test("a corrupt path with more stages than the step cap cannot spin the loop", () => {
+  // `MAX_TRANSITIONS_PER_ADVANCE` is the loop's only bound, and until this test
+  // nothing reached it: a legitimate path is three stages, and the two ways out
+  // of the loop after a graduation — no `pendingHatch`, no progress — both stop
+  // it long before 64. So the cap looked like a guard against nothing.
+  //
+  // It is not. `plannedPath` comes off a JSON blob in the database, and nothing
+  // between there and here bounds its length. A row with a thousand stages and
+  // enough credited tokens to clear every one of them is the case this defends,
+  // and the defence is worth having precisely because the input is stored rather
+  // than computed.
+  const stages = 500;
+  const path = Array.from({ length: stages }, (_, index) => index + 1);
+  const state: CompanionState = {
+    ...freshState(),
+    active: {
+      baseId: 1,
+      plannedPath: path,
+      stageIndex: 0,
+      usedAtStage: 0,
+      rarity: "common",
+      isShiny: false,
+      nature: "hardy",
+      dittoDisguise: null,
+      dittoRevealed: false,
+    },
+  };
+
+  // Far more than the whole path could ever need, so the loop is bounded by the
+  // cap and by nothing else.
+  const result = advance(state, graduationTotal("common") * stages);
+
+  // The cap is a ceiling on transitions per call, not a refusal: what it must
+  // not do is loop unboundedly, and what it must not do either is lose the
+  // progress. Growth is preserved and the next call picks up where this stopped.
+  expect(result.events.length).toBeLessThanOrEqual(64);
+  expect(result.state.active?.stageIndex).toBeLessThanOrEqual(64);
+  expect(result.state.active?.stageIndex).toBeGreaterThan(0);
+
+  // The one place this file's headline property does not hold, and it is worth
+  // being explicit rather than surprised by it later. `advance` is idempotent in
+  // its *total*, so a second call with the same number normally changes nothing.
+  // When the cap binds it does not: the call did as much as it was allowed and
+  // the next one continues, walking a corrupt path 64 stages at a time until it
+  // runs out. That is the intended trade — bounded work per call, no progress
+  // lost, guaranteed termination — and it costs nothing in practice because a
+  // real path is three stages and never reaches the cap at all.
+  const again = advance(result.state, graduationTotal("common") * stages);
+  expect(again.state.active?.stageIndex).toBeGreaterThan(result.state.active?.stageIndex ?? 0);
+  expect(again.events.length).toBeLessThanOrEqual(64);
+});
