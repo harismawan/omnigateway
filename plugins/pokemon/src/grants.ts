@@ -1,5 +1,5 @@
-import type { LimitReached } from "@omni/plugins";
 import { WINDOW_MS } from "@omni/ratelimit/catalog";
+import type { LimitReached } from "@omnigateway/plugin-api";
 
 /**
  * A limit window's stable identity.

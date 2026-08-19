@@ -20,10 +20,10 @@
       "dependencies": {
         "@omni/control": "workspace:*",
         "@omni/ir": "workspace:*",
-        "@omni/plugins": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/router": "workspace:*",
         "@omni/store": "workspace:*",
+        "@omnigateway/plugin-api": "workspace:*",
       },
       "devDependencies": {
         "@omni/testkit": "workspace:*",
@@ -36,10 +36,10 @@
         "@dnd-kit/sortable": "^10.0.0",
         "@fontsource-variable/archivo": "^5.3.0",
         "@fontsource-variable/spline-sans-mono": "^5.3.0",
-        "@omni/dashboard-sdk": "workspace:*",
         "@omni/ir": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/store": "workspace:*",
+        "@omnigateway/dashboard-sdk": "workspace:*",
         "@tanstack/react-query": "^5.101.4",
         "@tanstack/react-router": "^1.170.25",
         "lucide-react": "^1.31.0",
@@ -70,13 +70,13 @@
         "@node-rs/argon2": "2.0.2",
         "@omni/control": "workspace:*",
         "@omni/ir": "workspace:*",
-        "@omni/plugins": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
         "@omni/rtk": "workspace:*",
         "@omni/store": "workspace:*",
         "@omni/testkit": "workspace:*",
+        "@omnigateway/plugin-api": "workspace:*",
         "elysia": "1.4.29",
         "zod": "4.4.3",
       },
@@ -87,11 +87,11 @@
       "dependencies": {
         "@node-rs/argon2": "2.0.2",
         "@omni/ir": "workspace:*",
-        "@omni/plugins": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
         "@omni/store": "workspace:*",
+        "@omnigateway/plugin-api": "workspace:*",
         "zod": "4.4.3",
       },
       "devDependencies": {
@@ -99,10 +99,10 @@
       },
     },
     "packages/dashboard-sdk": {
-      "name": "@omni/dashboard-sdk",
+      "name": "@omnigateway/dashboard-sdk",
       "version": "0.0.0",
       "dependencies": {
-        "@omni/plugins": "workspace:*",
+        "@omnigateway/plugin-api": "workspace:*",
       },
       "devDependencies": {
         "@types/react": "^19.2.0",
@@ -118,8 +118,8 @@
       "name": "@omni/ir",
       "version": "0.0.0",
     },
-    "packages/plugins": {
-      "name": "@omni/plugins",
+    "packages/plugin-api": {
+      "name": "@omnigateway/plugin-api",
       "version": "0.0.0",
       "dependencies": {
         "@omni/ratelimit": "workspace:*",
@@ -182,13 +182,13 @@
       "name": "@omni/plugin-pokemon",
       "version": "1.0.0",
       "dependencies": {
-        "@omni/plugins": "workspace:*",
         "@omni/ratelimit": "workspace:*",
+        "@omnigateway/plugin-api": "workspace:*",
       },
       "devDependencies": {
         "@happy-dom/global-registrator": "^20.11.2",
-        "@omni/dashboard-sdk": "workspace:*",
         "@omni/store": "workspace:*",
+        "@omnigateway/dashboard-sdk": "workspace:*",
         "@tanstack/react-query": "^5.101.4",
         "@testing-library/react": "^16.3.2",
         "@testing-library/user-event": "^14.6.1",
@@ -199,7 +199,7 @@
         "styled-components": "^6.5.1",
       },
       "peerDependencies": {
-        "@omni/dashboard-sdk": "workspace:*",
+        "@omnigateway/dashboard-sdk": "workspace:*",
         "@tanstack/react-query": "^5.101.4",
         "react": "^19.2.8",
         "styled-components": "^6.5.1",
@@ -347,15 +347,11 @@
 
     "@omni/dashboard": ["@omni/dashboard@workspace:apps/dashboard"],
 
-    "@omni/dashboard-sdk": ["@omni/dashboard-sdk@workspace:packages/dashboard-sdk"],
-
     "@omni/gateway": ["@omni/gateway@workspace:apps/gateway"],
 
     "@omni/ir": ["@omni/ir@workspace:packages/ir"],
 
     "@omni/plugin-pokemon": ["@omni/plugin-pokemon@workspace:plugins/pokemon"],
-
-    "@omni/plugins": ["@omni/plugins@workspace:packages/plugins"],
 
     "@omni/providers": ["@omni/providers@workspace:packages/providers"],
 
@@ -368,6 +364,10 @@
     "@omni/store": ["@omni/store@workspace:packages/store"],
 
     "@omni/testkit": ["@omni/testkit@workspace:packages/testkit"],
+
+    "@omnigateway/dashboard-sdk": ["@omnigateway/dashboard-sdk@workspace:packages/dashboard-sdk"],
+
+    "@omnigateway/plugin-api": ["@omnigateway/plugin-api@workspace:packages/plugin-api"],
 
     "@oxc-project/types": ["@oxc-project/types@0.142.0", "", {}, "sha512-7W+2q5AKQVU36fkaryontrHn3YDt1RyUYXatw9i5H8ocYe2sPKSFB6eS8WNPeRKiN1qAWWZUPm7gwFzJGrccqQ=="],
 

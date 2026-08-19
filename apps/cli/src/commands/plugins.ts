@@ -9,7 +9,7 @@ import {
   removePlugin,
   verifyPlugin,
 } from "@omni/control";
-import { DASHBOARD_SDK_VERSION } from "@omni/plugins";
+import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { boolFlag, type Parsed, requirePositional, stringFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError, type Context } from "../context.ts";

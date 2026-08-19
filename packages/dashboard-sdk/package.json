@@ -1,5 +1,5 @@
 {
-  "name": "@omni/dashboard-sdk",
+  "name": "@omnigateway/dashboard-sdk",
   "version": "0.0.0",
   "type": "module",
   "private": true,
@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@omni/plugins": "workspace:*"
+    "@omnigateway/plugin-api": "workspace:*"
   },
   "peerDependencies": {
     "@tanstack/react-query": ">=5",

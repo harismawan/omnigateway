@@ -1,7 +1,7 @@
 import type { GatewayError, LogFields } from "@omni/ir";
 import { type Logger, noopLogger, type ProviderId } from "@omni/ir";
-import type { RequestCompleted } from "@omni/plugins";
 import type { RequestLog, Store } from "@omni/store";
+import type { RequestCompleted } from "@omnigateway/plugin-api";
 
 type CompletedOverrides = Pick<RequestLog, "status"> &
   Partial<Omit<RequestLog, "id" | "state" | "at" | "status">>;

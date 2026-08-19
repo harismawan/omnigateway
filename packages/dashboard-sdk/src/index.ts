@@ -1,5 +1,5 @@
 /**
- * `@omni/dashboard-sdk` — what a plugin's UI bundle builds against.
+ * `@omnigateway/dashboard-sdk` — what a plugin's UI bundle builds against.
  *
  * Four things and no more: a way to declare a UI, a way to call your own
  * backend, the palette names you may use, and the version the host will check
@@ -38,7 +38,7 @@
  * to mount — or the reverse, a plugin disabled with a version reason that its
  * own SDK insists is satisfied. One source, imported.
  */
-export { DASHBOARD_SDK_VERSION as SDK_VERSION } from "@omni/plugins/version";
+export { DASHBOARD_SDK_VERSION as SDK_VERSION } from "@omnigateway/plugin-api/version";
 
 export {
   createPluginApi,

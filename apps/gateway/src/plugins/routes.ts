@@ -1,6 +1,6 @@
 import type { AdminAuth } from "@omni/control";
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
-import type { PluginRequest, PluginResponse, PluginRoute } from "@omni/plugins";
+import type { PluginRequest, PluginResponse, PluginRoute } from "@omnigateway/plugin-api";
 import { Elysia } from "elysia";
 import { apiErrorHandler, apiErrorResponse, requireAdmin } from "../routes/http.ts";
 

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { PluginFetch, PluginFiles } from "@omni/plugins";
+import type { PluginFetch, PluginFiles } from "@omnigateway/plugin-api";
 import { ANIMATED_SPECIES_MAX } from "../src/balance.ts";
 import { type PokeApiDeps, speciesDetail, speciesIndex, spriteBytes } from "../src/pokeapi.ts";
 

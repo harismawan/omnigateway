@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
-import type { PluginRequest, PluginResponse, PluginRoute } from "@omni/plugins";
 import type { HttpClient } from "@omni/providers";
 import { captureLogger, memoryStore } from "@omni/testkit";
+import type { PluginRequest, PluginResponse, PluginRoute } from "@omnigateway/plugin-api";
 import { createApp } from "../../src/app.ts";
 import { type MountedPlugin, pluginRoutes } from "../../src/plugins/routes.ts";
 

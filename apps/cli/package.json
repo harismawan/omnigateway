@@ -9,7 +9,7 @@
   "dependencies": {
     "@omni/control": "workspace:*",
     "@omni/ir": "workspace:*",
-    "@omni/plugins": "workspace:*",
+    "@omnigateway/plugin-api": "workspace:*",
     "@omni/providers": "workspace:*",
     "@omni/router": "workspace:*",
     "@omni/store": "workspace:*"

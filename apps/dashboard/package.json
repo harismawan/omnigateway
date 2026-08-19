@@ -16,7 +16,7 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@fontsource-variable/archivo": "^5.3.0",
     "@fontsource-variable/spline-sans-mono": "^5.3.0",
-    "@omni/dashboard-sdk": "workspace:*",
+    "@omnigateway/dashboard-sdk": "workspace:*",
     "@omni/ir": "workspace:*",
     "@omni/providers": "workspace:*",
     "@omni/store": "workspace:*",

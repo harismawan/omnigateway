@@ -11,9 +11,9 @@ import {
   tailFile,
 } from "@omni/control";
 import { createLogger, type Logger } from "@omni/ir";
-import { DASHBOARD_SDK_VERSION } from "@omni/plugins";
 import { nodeHttpClient } from "@omni/providers";
 import { createStore, deriveKey } from "@omni/store";
+import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { createApp } from "./app.ts";
 import { createDeferredStop, createShutdown, type Shutdown } from "./lifecycle.ts";
 import { startMaintenance } from "./maintenance.ts";

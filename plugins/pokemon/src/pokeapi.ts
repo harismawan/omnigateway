@@ -22,7 +22,7 @@
  * the network or a real directory by accident.
  */
 
-import type { PluginFetch, PluginFiles } from "@omni/plugins";
+import type { PluginFetch, PluginFiles } from "@omnigateway/plugin-api";
 import { ANIMATED_SPECIES_MAX, hasAnimatedSprite } from "./balance.ts";
 import type { SpeciesCandidate } from "./roll.ts";
 

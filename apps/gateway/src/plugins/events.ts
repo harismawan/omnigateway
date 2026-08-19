@@ -1,5 +1,5 @@
 import { type Logger, noopLogger } from "@omni/ir";
-import type { LimitReached, RequestCompleted } from "@omni/plugins";
+import type { LimitReached, RequestCompleted } from "@omnigateway/plugin-api";
 
 /**
  * How many undelivered events the bus will hold before it starts dropping.

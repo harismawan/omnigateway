@@ -1,4 +1,4 @@
-import type { PluginMigration, PluginStorage } from "@omni/plugins/define";
+import type { PluginMigration, PluginStorage } from "@omnigateway/plugin-api/define";
 import type { CompanionEvent } from "./advance.ts";
 import { advance } from "./advance.ts";
 import { freshEggPrice, type GuaranteedTier, ITEM_PRICES, type ItemKind } from "./balance.ts";

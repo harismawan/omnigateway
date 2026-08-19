@@ -1,4 +1,4 @@
-import { definePluginUI, type PluginUiProps } from "@omni/dashboard-sdk";
+import { definePluginUI, type PluginUiProps } from "@omnigateway/dashboard-sdk";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import styled from "styled-components";

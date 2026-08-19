@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DASHBOARD_SDK_VERSION } from "@omni/plugins/manifest";
+import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api/manifest";
 import { SDK_VERSION } from "../src/index.ts";
 
 test("SDK_VERSION is the host's DASHBOARD_SDK_VERSION, not a copy of it", () => {

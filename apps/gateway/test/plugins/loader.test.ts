@@ -2,10 +2,10 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PLUGIN_API_VERSION } from "@omni/plugins";
 import type { Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
 import { captureLogger } from "@omni/testkit";
+import { PLUGIN_API_VERSION } from "@omnigateway/plugin-api";
 import { createPluginEventBus } from "../../src/plugins/events.ts";
 import { loadPlugins } from "../../src/plugins/loader.ts";
 

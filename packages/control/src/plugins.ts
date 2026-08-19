@@ -7,7 +7,7 @@ import {
   PLUGIN_API_VERSION,
   type PluginManifest,
   safeParseManifest,
-} from "@omni/plugins/manifest";
+} from "@omnigateway/plugin-api/manifest";
 
 /**
  * Administering plugins: what is installed, whether it would load, and how one

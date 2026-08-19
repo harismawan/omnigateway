@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { type Logger, noopLogger } from "@omni/ir";
+import type { Store } from "@omni/store";
 import {
   isApiCompatible,
   PLUGIN_API_VERSION,
@@ -14,8 +15,7 @@ import {
   type PluginRoute,
   type PluginStorage,
   safeParseManifest,
-} from "@omni/plugins";
-import type { Store } from "@omni/store";
+} from "@omnigateway/plugin-api";
 import { createPluginFetch, createPluginFiles } from "./capabilities.ts";
 import type { PluginEventBus } from "./events.ts";
 

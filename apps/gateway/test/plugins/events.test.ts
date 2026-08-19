@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { RequestCompleted } from "@omni/plugins";
+import type { RequestCompleted } from "@omnigateway/plugin-api";
 import { createPluginEventBus } from "../../src/plugins/events.ts";
 
 function completed(over: Partial<RequestCompleted> = {}): RequestCompleted {

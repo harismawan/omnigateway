@@ -2,7 +2,7 @@
 // re-exports the manifest schema and with it zod, which a plugin never needs at
 // runtime — importing it bundled half a megabyte of validator into every plugin
 // that only wanted an identity function and some types.
-import { definePlugin, type PluginContext, type PluginRoute } from "@omni/plugins/define";
+import { definePlugin, type PluginContext, type PluginRoute } from "@omnigateway/plugin-api/define";
 import type { CompanionEvent } from "./advance.ts";
 import {
   EGG_HATCH_THRESHOLD,

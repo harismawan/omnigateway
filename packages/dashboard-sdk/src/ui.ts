@@ -62,7 +62,7 @@ export type PluginUiDefinition = {
  * The identity function earns its place by being the one symbol on both sides
  * of the contract: an author looks up `definePluginUI` and gets the definition
  * typed and completed by their editor, and the host has exactly one shape to
- * look for. `definePlugin` in `@omni/plugins` is the same function for the same
+ * look for. `definePlugin` in `@omnigateway/plugin-api` is the same function for the same
  * reason on the server half, and the pair reads as one idea.
  *
  * It does not, and cannot, validate at runtime — it runs inside the plugin's

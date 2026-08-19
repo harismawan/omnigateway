@@ -2,9 +2,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PluginStorage } from "@omni/plugins";
 import type { Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
+import type { PluginStorage } from "@omnigateway/plugin-api";
 import { EGG_HATCH_THRESHOLD, ITEM_PRICES } from "../src/balance.ts";
 import { freshState, serialiseState } from "../src/state.ts";
 import {

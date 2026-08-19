@@ -1,5 +1,5 @@
 {
-  "name": "@omni/plugins",
+  "name": "@omnigateway/plugin-api",
   "version": "0.0.0",
   "type": "module",
   "private": true,

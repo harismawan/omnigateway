@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { RequestCompleted } from "@omni/plugins";
 import type { RequestLog, Store } from "@omni/store";
+import type { RequestCompleted } from "@omnigateway/plugin-api";
 import { finishLog, newCompletedRequestLog } from "../../src/logging.ts";
 
 /** A store that records appends, and can be told to fail one. */

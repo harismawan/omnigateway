@@ -62,7 +62,7 @@ here and never escaped anywhere downstream.
 
 `api` is the host's plugin-API major. A mismatch skips the plugin at boot.
 
-`sdk` is a semver range over `@omni/dashboard-sdk`. A mismatch disables **only**
+`sdk` is a semver range over `@omnigateway/dashboard-sdk`. A mismatch disables **only**
 the UI — the server half keeps running, so a plugin that collects data does not
 go dark because the console's React moved.
 
@@ -76,7 +76,7 @@ without it.
 ## 2. The server half
 
 ```js
-import { definePlugin } from "@omni/plugins/define";
+import { definePlugin } from "@omnigateway/plugin-api/define";
 
 export default definePlugin({
   migrations: [
@@ -97,7 +97,7 @@ export default definePlugin({
 });
 ```
 
-Import from `@omni/plugins/define`, not from the package root. The root
+Import from `@omnigateway/plugin-api/define`, not from the package root. The root
 re-exports the manifest schema and with it zod, which your bundle never needs at
 runtime — it is half a megabyte of validator attached to an identity function
 and some types.
@@ -148,7 +148,7 @@ away.
 ## 5. The UI half
 
 ```js
-import { definePluginUI } from "@omni/dashboard-sdk";
+import { definePluginUI } from "@omnigateway/dashboard-sdk";
 
 export default definePluginUI({
   mount({ pluginId, api }) {

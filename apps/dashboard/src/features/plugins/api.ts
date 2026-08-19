@@ -1,4 +1,4 @@
-import { pluginApiPath } from "@omni/dashboard-sdk";
+import { pluginApiPath } from "@omnigateway/dashboard-sdk";
 import { del, get, post, put } from "../../api/client.ts";
 
 /**

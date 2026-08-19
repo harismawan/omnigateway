@@ -6,9 +6,15 @@ short of context, not because the work stalled.
 **Branch:** `feat/plugin-host` · **PR:** [#78](https://github.com/harismawan/omnigateway/pull/78)
 · 31 commits, 112 files, ~15.7k insertions.
 
-**Green as of this writing:** `bun run test:all` → 2433 core + 391 dashboard + 14
+**Green as of this writing:** `bun run test:all` → 2469 core + 391 dashboard + 14
 plugin UI, `bun run typecheck` clean, `bun run lint` clean. Run all three before
 believing anything below.
+
+**One unexplained failure, once.** A single core test failed in one run and has
+not reproduced in ten since, and the run scrolled before the name was captured.
+It is recorded rather than dismissed: if you see a core failure that vanishes on
+re-run, it is probably this one and it is worth naming, not re-running until it
+is green.
 
 Delete this file when the work it describes is merged. It is a baton, not
 documentation.
@@ -38,54 +44,36 @@ Docs are in four places on purpose: `CLAUDE.md` boundary 15 + traps,
 
 ---
 
-## In flight when this was written
+## Install from a URL or an npm name — landed
 
-**A subagent is adding install-from-URL and install-from-npm-name.** Check
-`git status` first — if `packages/control/src/plugins.ts` and
-`apps/cli/src/commands/plugins.ts` are dirty, it is unfinished or was
-interrupted.
+`omni plugin install` now takes a directory, a local tarball, an `https://` URL,
+or a package name, tried in that order. Filesystem-first is the safe order: a
+published package must never shadow the directory an operator is standing in.
 
-Its brief: `https://` tarball install (the `fetchBytes` dep and the `http://`
-refusal already existed; the CLI injected no fetcher), plus `<name>` and
-`<name>@<version>` resolved through the npm registry. Requirements it was given —
-verify these hold before trusting it:
+Three refusals carry it, all before the bytes are fetched — the tarball host is
+pinned to the registry's (port included), integrity is required rather than
+preferred, and only exact versions or `dist-tags.latest` resolve. Nothing
+executes: two fetches, a digest, and the tar reader that already existed.
 
-- Integrity verified against the packument's `dist.integrity`, refusing a
-  mismatch **and** refusing when neither integrity nor shasum is present.
-- `https://` only, including the resolved tarball URL.
-- Registry injected, defaulting to `https://registry.npmjs.org`.
-- A semver *range* is refused; exact version or `dist-tags.latest` only.
-- Scoped names work — the leading `@` and the version `@` are different things.
-- Nothing executes: no `npm` subprocess, no install scripts.
-
-If it did not finish, its work is self-contained enough to redo from that list.
+Verified independently of the subagent that wrote it, because its own mutation
+list is the thing under test: three mutations it did *not* enumerate — stripping
+the port from the host pin, decoding SRI as hex instead of base64, and comparing
+digests by length instead of value — each turned the suite red, and the file
+restored to its original `sha256`.
 
 ---
 
 ## Next, in order
 
-### 1. Rename the two SDK packages to their public names
+### 1. ~~Rename the two SDK packages~~ — done
 
-**Decided:** `@omni/plugins` → `@omnigateway/plugin-api`, and
-`@omni/dashboard-sdk` → `@omnigateway/dashboard-sdk`.
-
-Do this **after** the install subagent lands — 31 files reference these names and
-two of them are files that subagent owns.
-
-```bash
-grep -rl "@omni/plugins\|@omni/dashboard-sdk" --include=*.ts --include=*.tsx --include=*.json . \
-  | grep -v node_modules | grep -v graphify-out
-```
-
-Rename **in the workspace**, not at packaging time. The point is that
-`plugins/pokemon` imports exactly what an external plugin imports; rewriting
-names during the build would leave the companion on the internal name and hide
-contract gaps — which has already happened once, see `WINDOW_MS` below.
-
-Subpaths must survive: `@omnigateway/plugin-api/define`,
-`/manifest`, `/version`. The `/define` split exists because importing the package
-root pulls the manifest schema and with it zod — half a megabyte of validator into
-a plugin bundle. There is a test and a doc line about this; keep both true.
+`@omni/plugins` → `@omnigateway/plugin-api` (directory `packages/plugins` →
+`packages/plugin-api` too, because a directory named `plugins` beside the
+top-level `plugins/` of *installed* plugins was a coin-flip for a reader), and
+`@omni/dashboard-sdk` → `@omnigateway/dashboard-sdk`. 35 files, done in the
+workspace rather than at packaging time so `plugins/pokemon` imports exactly what
+an external plugin will. All four subpaths survive and are in use:
+`@omnigateway/plugin-api`, `/define`, `/manifest`, `/version`.
 
 ### 2. Make them publishable
 
@@ -121,10 +109,32 @@ grants note below) while the host was still settling.
 The evidence that extraction matters: `plugins/pokemon/src/grants.ts` imports
 `WINDOW_MS` from `@omni/ratelimit/catalog` — a core package the host does **not**
 re-export through the plugin API. It only compiles because workspace resolution
-makes every internal package reachable. An external plugin could not do this. Fix
-by re-exporting the rate-limit vocabulary through the plugin API, or by
-amending the host spec to say plugins may depend on `@omni/ratelimit/catalog`
-directly.
+makes every internal package reachable. An external plugin could not do this.
+
+**This is also a half-megabyte bug, and it is the next thing to decide.** Measured,
+not reasoned: `bun run --cwd plugins/pokemon build` emits a **564 KB** server
+bundle with 550 occurrences of `zod` in it. `@omni/ratelimit/catalog` imports zod
+on line 1 for `LimitConfig`'s schema, so one three-entry duration table drags the
+whole validator in — and that defeats the entire reason the `/define` subpath
+exists.
+
+An earlier note in this file claimed the split bought a 31 KB server bundle. That
+claim is **false for the current tree**, and it was false before the rename too: a
+build of commit `53465a9` in a scratch worktree emits the identical 0.58 MB with
+the identical 550 zod hits. Whatever produced 31 KB was measured against a
+`grants.ts` that did not yet reach into the rate limiter. Do not trust a bundle
+number in a doc again without running the build — that is what this whole entry
+is.
+
+The fork, which wants a human: either (a) split the zod-free vocabulary
+(`Window`, `WINDOW_MS`, the unions) out of `packages/ratelimit/src/catalog.ts`
+into a pure leaf that `catalog.ts` re-exports, then re-export *that* through the
+plugin API — values unchanged, so the storage contract in CLAUDE.md holds; or (b)
+let the companion own its own grant-cadence table, on the argument that how often
+a plugin hands out candy is its policy and only incidentally aligns with the
+operator's rate-limit windows. (a) keeps one vocabulary and touches a
+storage-contract file; (b) touches nothing core and accepts a second copy of three
+numbers. Not resolved here on purpose.
 
 ---
 

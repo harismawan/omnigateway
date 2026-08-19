@@ -14,7 +14,7 @@ OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway:
 - `packages/control`: admin operations shared by gateway routes and CLI
 - `packages/dashboard-sdk`: what a plugin's UI bundle builds against
 - `packages/ir`: provider-neutral domain model
-- `packages/plugins`: pure plugin manifest schema, context and event types
+- `packages/plugin-api`: pure plugin manifest schema, context and event types
 - `packages/providers`: provider adapters and catalog
 - `packages/router`: pure routing
 - `packages/ratelimit`: pure API-key limit evaluation and sliding-window counting
@@ -84,7 +84,7 @@ and `bun run lint`.
 12. Dashboard calls `/api/*` only, with one exception: `/health`, polled to watch the gateway leave
     and return across a restart. During a restart there is no session and no authenticated surface
     to probe, so liveness is the one question `/api/*` cannot answer. It may import
-    `@omni/store/types`, `@omni/ir`, catalog subpath, and `@omni/dashboard-sdk`, but not provider
+    `@omni/store/types`, `@omni/ir`, catalog subpath, and `@omnigateway/dashboard-sdk`, but not provider
     adapters, HTTP client, or runtime store code. The SDK is permitted because it is a browser leaf
     with no imports at all, and because the alternative was a second copy of the rule about what may
     leave a plugin's own API prefix — a rule held in two places is one that ends up true in one.
@@ -102,7 +102,7 @@ and `bun run lint`.
     guardrail, not a sandbox** — a plugin shares the gateway's process and can import past all of
     it. What it buys is that accidental overreach is impossible and that a plugin's intent is
     auditable from its manifest. Say that plainly wherever it comes up; a reader who believes
-    otherwise makes worse decisions than one who knows. `packages/plugins` stays pure like `ir`;
+    otherwise makes worse decisions than one who knows. `packages/plugin-api` stays pure like `ir`;
     the loader, context and event bus live in `apps/gateway`. Every load failure is skipped and
     reported, never fatal: the proxy path depends on no plugin and must not become able to.
 
