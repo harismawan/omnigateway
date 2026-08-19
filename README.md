@@ -718,11 +718,33 @@ A plugin adds routes, storage, and a screen in the console to one installation,
 without being part of OmniGateway. Most installations run none.
 
 ```bash
-omni plugin install ./some-plugin     # unpacks it; runs nothing from the package
+omni plugin install ./some-plugin     # a directory, or a .tgz
+omni plugin install https://…/x.tgz   # a tarball over https, never http
+omni plugin install some-plugin@1.2.3 # a package name, through the npm registry
 omni plugin verify some-plugin        # every check the next boot will run
 omni plugin list                      # what is installed, and whether it would load
 omni restart                          # plugins load at boot, so this is required
 ```
+
+**Nothing in the package is executed by any of these.** There is no dependency
+resolution, no `node_modules`, and no lifecycle script — the installer fetches,
+checks, and unpacks, and the plugin's own code is first imported at the next boot.
+
+A spec is resolved filesystem-first: directory, then local tarball, then URL,
+then registry. That order is the safe one. The reverse would let a published
+package shadow the directory you are standing in and turn `omni plugin install
+some-plugin` into a download nobody asked for.
+
+Installing by name refuses more than it accepts, and each refusal happens before
+any bytes are fetched: the tarball must be served from the registry's own host,
+the registry must advertise an integrity hash or a shasum, and only an exact
+version or the registry's `latest` resolves — no ranges, no other dist-tags. Use
+`--registry` (or `OMNI_PLUGIN_REGISTRY`) for a private registry; it must be
+`https://`.
+
+A URL you type is different, and the difference is the point: nothing downstream
+has a digest to check it against, so TLS to the host you named is the only
+assurance there is. That is why `http://` is refused rather than upgraded.
 
 `omni plugin list` prints what this installation has — id, name, version, the
 plugin API and console SDK it was built against, the capabilities it declared,
@@ -740,10 +762,15 @@ origins it declared — use `omni plugin verify <id>`.
 
 ### Available plugins
 
-There is no registry and no directory to browse. A plugin is a directory or a
-tarball you point `omni plugin install` at, and you are expected to know where it
-came from — see the [security note](#security) for why that is the model rather
-than an omission.
+There is no curated directory to browse, and there is no plan for one. A plugin
+is a directory, a tarball, a URL or a package name you point `omni plugin
+install` at, and you are expected to know where it came from — see the
+[security note](#security) for why that is the model rather than an omission.
+
+Resolving a name through npm makes distribution easier; it does not make an
+unknown plugin safer. Integrity checking proves you received the bytes the
+registry advertised, and nothing about who wrote them or what they do once the
+gateway imports them.
 
 One ships in this repository:
 
@@ -775,10 +802,20 @@ the plugin.
 
 ### Installing on a machine with no checkout
 
-`omni plugin install` takes a **local path** — a directory or a `.tgz` — and
-nothing else. There is no package name to resolve and no URL to fetch: getting
-the bytes onto the host is your job, which is the same posture as the rest of
-this section. Build once, ship the tarball, install from the path:
+A published plugin installs by name, and the host needs no checkout and no build
+toolchain:
+
+```bash
+omni plugin install omnigateway-plugin-example
+omni plugin verify example && omni restart
+```
+
+An `npm pack` tarball is rooted at `package/` rather than at the plugin's name,
+and that is fine: the manifest's `id` names the installed directory when the
+archive root does not.
+
+For a plugin you build yourself and do not publish, ship the tarball and install
+from the path:
 
 ```bash
 # wherever you build — a workstation, CI
@@ -790,24 +827,10 @@ scp pokemon.tgz gateway-host:/tmp/
 ssh gateway-host 'omni plugin install /tmp/pokemon.tgz && omni plugin verify pokemon && omni restart'
 ```
 
-**npm works as a way to distribute a plugin, not as a way to install one.**
-`omni` does not resolve package names. A published plugin is fetched with the
-tools you already have and installed from the file:
-
-```bash
-npm pack omnigateway-plugin-example     # writes omnigateway-plugin-example-1.0.0.tgz
-omni plugin install ./omnigateway-plugin-example-1.0.0.tgz
-```
-
-An `npm pack` tarball is rooted at `package/` rather than at the plugin's name,
-and that is fine: the manifest's `id` names the installed directory when the
-archive root does not.
-
-`omni plugin install https://…` is refused today — the control layer can fetch,
-but the CLI wires no fetcher, so nothing reaches the network. Plaintext `http://`
-is refused outright and always will be: what arrives over that fetch is code the
-gateway process will `import`, so anyone between you and the host would be
-choosing what the gateway runs.
+Plaintext `http://` is refused outright and always will be: what arrives over
+that fetch is code the gateway process will `import`, so anyone between you and
+the host would be choosing what the gateway runs. Silently upgrading to `https://`
+would be worse — it would install *something* from a URL you did not type.
 
 **In Docker**, the image carries the gateway only, so a plugin arrives on a
 volume rather than through the CLI. Mount it at `<root>/plugins/<id>` — the same

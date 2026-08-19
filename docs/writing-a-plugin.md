@@ -26,6 +26,22 @@ does not contain hostile code, which can `import` from `@omni/store` and read
 Install plugins you wrote or audited. If you are packaging one for other people,
 say the same thing in your own README.
 
+## What to install
+
+```bash
+bun add @omnigateway/plugin-api        # the server half
+bun add @omnigateway/dashboard-sdk     # only if you ship a console panel
+```
+
+Both publish TypeScript sources — Bun imports them directly, so there is no build
+step on their side and no dual-package hazard. If you typecheck with `tsc`, use
+`"moduleResolution": "bundler"`.
+
+Nothing else from this repository is available to you. The `@omni/*` packages are
+internal and unpublished; an import of one resolves inside this repo and nowhere
+else, which is a failure that waits until someone other than you tries to build
+your plugin.
+
 ## Layout
 
 ```
@@ -213,18 +229,32 @@ tells you to restart.
 
 ## 7. Shipping it
 
-`omni plugin install` takes a local path only — a directory or a `.tgz`. There is
-no package name to resolve and no URL to fetch, so distribution is yours to
-choose and the operator brings the bytes to the host themselves.
-
-A tarball is the portable form, and an `npm pack` archive is one: it is rooted at
-`package/` rather than at your plugin's name, and the host falls back to the
-manifest's `id` when the archive root does not name one. So publishing to npm
-works as a channel even though `omni` will not resolve a package name for you:
+`omni plugin install` takes a directory, a `.tgz`, an `https://` URL, or an npm
+package name. Publishing to npm is the least work for whoever installs it:
 
 ```bash
-npm pack your-plugin                  # or: tar -czf your-plugin.tgz -C dist your-plugin
-omni plugin install ./your-plugin-1.0.0.tgz
+npm publish                           # your plugin, built
+omni plugin install your-plugin       # or your-plugin@1.2.3, or @scope/your-plugin
+```
+
+Ship the built bundles and the manifest through `files`, nothing else. An
+`npm pack` archive is rooted at `package/` rather than at your plugin's name, and
+the host falls back to the manifest's `id` when the archive root does not name
+one — so a normal npm package works without you arranging anything.
+
+Two constraints worth knowing before you pick a registry. The tarball must be
+served from the registry's own host, which is true of npm and of a mirror but not
+of a registry that proxies another's tarballs by URL. And the registry must
+advertise `dist.integrity` or `dist.shasum`; a package with neither is refused
+rather than installed unchecked. Only an exact version or `latest` resolves —
+`omni` has no semver resolver and will not guess at a range.
+
+If you would rather not publish, a tarball at a URL or handed over directly works
+the same way:
+
+```bash
+tar -czf your-plugin.tgz -C dist your-plugin
+omni plugin install ./your-plugin.tgz
 ```
 
 Ship the built bundles and the manifest, nothing else. Your sources, tests and
