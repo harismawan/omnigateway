@@ -83,16 +83,14 @@ something:
 | `spend` (USD) | — | ✓ | ✓ | rollup + delta, debited on completion |
 | `concurrency` | *no window — a gauge* | | | in-flight count in this process |
 
-There is no `spend` at `1m` — a per-minute dollar ceiling is a rate limit in
-costume, and `requests` and `tokens` already shape burst at that horizon. There
-is no `1d`; `usage_daily` is the reporting rollup and every extra window is
-another counter to keep and another header to render.
+No `spend` at `1m` — a per-minute dollar ceiling is a rate limit in costume, and
+`requests` and `tokens` already shape burst there. No `1d` either; `usage_daily`
+is the reporting rollup, and every extra window is another counter to keep and
+another header to render.
 
-Every window **slides**. A fixed window resets on a clock edge, which lets a key
+Every window **slides**. A fixed one resets on a clock edge, letting a key
 limited to sixty a minute send sixty at `T+59s` and sixty more at `T+61s` — twice
-its ceiling, no rule broken, at every window size. The `1m` count is therefore an
-exact ring of timestamps, and the long windows are a bucket sum plus whatever has
-been debited since it was read.
+its ceiling, no rule broken, at every window size.
 
 ```mermaid
 flowchart TD
@@ -108,60 +106,55 @@ flowchart TD
 
 Three things in that picture are load-bearing.
 
-**The claim is synchronous.** Everything the check needs — the ring stamp, the
-gauge — is taken before the first `await`, and given back if the request is
-refused. Reading the counters first and recording after would let every
-concurrent request for a key judge the same pre-burst snapshot, which is not a
-narrow race: it needs no I/O, because the `await` alone is enough to yield.
+**The claim is synchronous.** The ring stamp and the gauge are taken before the
+first `await`, and given back if the request is refused. Reading counters first
+and recording after would let every concurrent request for a key judge the same
+pre-burst snapshot — not a narrow race, since the `await` alone is enough to
+yield and no I/O need be involved.
 
 **The arithmetic is a pure package.** `@omni/ratelimit` holds no clock and no
 state; `now` is a parameter and the counters are handed to it, so it never learns
-whether a number came from memory or from SQLite. The rings and the gauge live in
-`apps/gateway`, because state is not the package's job. That split is what makes
-the sliding-window arithmetic testable without a gateway, a store, or a clock.
+whether a number came from memory or from SQLite. Rings and gauge live in
+`apps/gateway`, which is what makes the arithmetic testable without a gateway, a
+store, or a clock.
 
 **The counts may run high and never low.** A long window is a rollup read cached
-for thirty seconds plus an in-memory delta, and requests that age out inside that
-window are not subtracted — so the figure can be slightly stale in the direction
-of *refusing early*. The opposite error would be a limiter you could walk through
-by timing the cache refresh, which is a property an attacker can find and an
-operator cannot.
+thirty seconds plus an in-memory delta, and requests aging out inside that window
+are not subtracted — so the figure errs toward *refusing early*. The opposite
+error is a limiter you can walk through by timing the cache refresh, which an
+attacker can find and an operator cannot.
 
-`tokens` and `spend` are debited once a response completes, because an exact
-count exists only then: a key at its ceiling is refused on its *next* request. So
-is `requests` at `5h` and `1w`, for a different reason — those read committed
-rows, and an admission recorded in the delta but pruned before its row landed
-would be counted in neither place. A concurrent burst can therefore overshoot a
-long request ceiling by the number in flight, which is exactly what the
-`concurrency` gauge is for.
+`tokens` and `spend` debit on completion, because an exact count exists only
+then: a key at its ceiling is refused on its *next* request. So does `requests`
+at `5h`/`1w`, for a different reason — those read committed rows, and an
+admission held in the delta but pruned before its row landed would be counted
+nowhere. A concurrent burst can therefore overshoot a long request ceiling by the
+number in flight, which is what the `concurrency` gauge bounds.
 
-The gauge is the one number with no expiry, which makes its release the most
-dangerous line here. A non-streaming request frees it in a request-scope
-`finally`; a stream frees it from `sseResponse`'s run-once completion, because a
-streaming handler returns as soon as the head is ready and the request goes on
-running. A decrement beside the debit would never run for a client that hung up,
-and one in the `finally` would run while the stream was still going. Either leaks
-a slot no window reclaims, and locks the key out silently.
+That gauge is the one number with no expiry, which makes its release the most
+dangerous line here. Non-streaming frees it in a request-scope `finally`; a
+stream frees it from `sseResponse`'s run-once completion, because a streaming
+handler returns as soon as the head is ready while the request runs on. A
+decrement beside the debit never runs for a client that hung up; one in the
+`finally` runs mid-stream. Either leaks a slot nothing reclaims, silently.
 
-If the store cannot answer, the long windows stop enforcing and the gateway logs
-it. `requests` at `1m` and `concurrency` are pure memory and go on enforcing
-exactly, which is the whole justification for serving the request rather than
-refusing it: the limits that stop abuse fastest are the ones that never touch the
+If the store cannot answer, long windows stop enforcing and the gateway logs it,
+while `1m` and `concurrency` go on exactly — which is the justification for
+serving rather than refusing: the limits that stop abuse fastest never touch the
 database.
 
-Limits are stored as one validated JSON object on `api_keys.limits`. The
-dimension and window names are therefore persisted in every row — a storage
-contract of the same class as `RTK_FILTER_IDS`, with the opposite failure mode.
-An unknown RTK id is dropped on read; an unknown limit key is a **parse failure**,
-because a limit read as "no limit" fails open on a ceiling an operator set. That
-refusal lands at authentication, not in the row parser: `keys.list()` still
-returns a key whose limits will not parse, marked, so the operator can find and
-repair the one bad row instead of being locked out of the whole listing.
+Limits live as one validated JSON object on `api_keys.limits`, so the dimension
+and window names are persisted in every row — a storage contract like
+`RTK_FILTER_IDS` with the opposite failure mode. An unknown RTK id is dropped on
+read; an unknown limit key is a **parse failure**, because a limit read as "no
+limit" fails open on a ceiling an operator set. That refusal lands at
+authentication rather than in the row parser, so `keys.list()` still returns the
+unparseable key, marked — the listing is how an operator finds the row to fix.
 
-What a client sees is each vendor's own dialect — `anthropic-ratelimit-*` on
-`/v1/messages`, `x-ratelimit-*` on `/v1/chat/completions`, `Retry-After` on every
-429 — so an SDK backs off with the code it already ships. `spend` and
-`concurrency` are rendered on neither: no vendor defines a header for them.
+Clients see each vendor's own dialect — `anthropic-ratelimit-*`,
+`x-ratelimit-*`, and `Retry-After` on every 429 — so an SDK backs off with the
+code it already ships. `spend` and `concurrency` appear on neither: no vendor
+defines a header for them.
 
 ## Routing
 

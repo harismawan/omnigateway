@@ -230,58 +230,49 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   `.env`, so otherwise the flag picks the root and an unrelated checkout picks its database. The
   suppression is warned on stderr, reported by `doctor`, and removed from the env a spawned gateway
   inherits. `OMNI_ROOT` does not suppress it: both are ambient.
-- API-key rate limits and quota cooldowns are process-local and reset on restart.
+- Quota cooldowns are process-local and reset on restart. So are `1m` and `concurrency`; `5h` and
+  `1w` come from the database and survive one.
 - `usage.append` must run at most once per request ID; duplicate completion double-counts
   `usage_daily` and `usage_rollup` alike. Pending rows contain placeholder metrics; inspect `state`,
   not `status`.
 - `usage_rollup` is derived, never authoritative: `request_logs` is the source of truth and
-  `rebuildRollup` reproduces every bucket from it. It is written in `append`'s transaction, pruned
-  with the rows it summarizes, rebuilt after a restore or import, and compared by `omni doctor`. A
-  read of it is flat where a `SELECT SUM` over the window grows without bound — and `bun:sqlite` is
-  synchronous, so that scan blocked the whole event loop, not one request. For the same reason a
-  timeout around a store read is a bound that cannot fire; do not add one back.
+  `rebuildRollup` reproduces every bucket from it. Written in `append`'s transaction, pruned with the
+  rows it summarizes, rebuilt after a restore, compared by `omni doctor`. It replaced a `SELECT SUM`
+  whose cost grew without bound — and `bun:sqlite` is synchronous, so that scan blocked the whole
+  event loop, not one request. For the same reason a timeout around a store read cannot fire; do not
+  add one back.
 - `quota_windows` stores provider observations, not gateway counts. Missing data means unknown, not
   unlimited. Probe failure must never disable a credential.
 - RTK filter ids are persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is a storage
   contract, not an internal enum. `isRtkFilterId` drops unknown ids on read, so renaming one loses
   history silently rather than failing. Add ids freely; rename or remove only with a migration.
-- The limit vocabulary — `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` — is persisted as
-  the JSON keys of `api_keys.limits` in every row, so it is a storage contract of the same class.
-  Unlike RTK ids it fails **closed**: an unknown dimension or window is a parse failure, never a
-  silent drop, because a limit read as "no limit" fails open on a ceiling the operator set. Add
-  names freely; rename or remove only with a migration.
-- Refuse at auth, degrade at list. A row whose `limits` will not parse reads back as
-  `ApiKey.limits === null`, distinct from `{}`, and `authenticateApiKey` turns that into
-  `INTERNAL` — not `AUTH`, which would blame a credential that is fine. `keys.list()` must never
-  throw over one such row: `toKey` serves the listing as well as the auth lookup, and the listing is
-  how an operator finds the row to fix. Nothing may collapse the null into `{}` on the way to the
-  CLI or console.
-- `limits` is the one field on a key that is editable after minting, through `setKeyLimits` and
-  `PUT /api/keys/:id/limits`; `bodyLoggingOptOut` deliberately has no such path. An opt-out is a
-  promise to whoever holds the key, while a limit is the operator's own ceiling on their own
-  installation. The matrix is written whole — `{}` is how the last limit goes away, and it must land
-  as `{}` rather than a husk like `{"requests":{}}` or the outer `null` that means unreadable.
-- The usage on `ApiKeySummary.limitUsage` is committed rows only, so it is a floor on what the
-  limiter sees and never the limiter's own number: the gateway adds a process-local delta and the
-  `concurrency` gauge is not stored at all, which is why its `used` is `null` rather than `0`.
-- API-key limits are enforced over *sliding* windows. A fixed window resets on a clock edge and lets
-  a key spend a whole window's allowance either side of one, at every window size. `1m` is exact from
-  a ring of timestamps in `apps/gateway`; longer windows read `usage.sumSince`, which must filter
-  `state = 'done'` or every in-flight request's placeholder metrics inflate the count.
-- A long-window count is `usage.sumSince` plus the in-memory delta since that read, cached 30s. The
-  composition may over-count — events aging out between the read and now are not subtracted — and
-  must never under-count, so the delta keeps everything recorded at or after the read instant. A
-  limiter whose error ran the other way could be walked through by timing the refresh. A failed or
-  slow `sumSince` serves the request and logs it through existing `LogFields` keys; only the long
-  windows degrade, because `requests` at `1m` and `concurrency` never touch the store.
-- The token and spend debit lives in `finishLog`, beside `usage.append` and never inside
-  `@omni/store`. That site already runs at most once per request id, which is exactly the guarantee
-  the debit needs and would otherwise have to re-establish.
-- The concurrency gauge is decremented at request scope and nowhere else. A streaming handler returns
-  its `Response` while the request is still running, so a `finally` around the handler body fires
-  when the head is sent, and a decrement beside the debit sits behind a store write. Streams free the
-  slot from `sseResponse`'s run-once completion, which covers a drained stream, a broken one, and a
-  hang-up alike. No window expires a gauge: a leak locks the key out until restart, silently.
+- Rate limiting is explained in `ARCHITECTURE.md#rate-limiting`; these are the invariants a change
+  must not break.
+- `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` are the JSON keys of `api_keys.limits`, so
+  a storage contract like RTK ids — but failing **closed**: an unknown name is a parse failure, never
+  a silent drop. Rename or remove only with a migration.
+- Refuse at auth, degrade at list. An unparseable `limits` reads back as `null`, distinct from `{}`,
+  and `authenticateApiKey` turns it into `INTERNAL` — not `AUTH`, which would blame a credential that
+  is fine. `keys.list()` must never throw over such a row: `toKey` serves the listing too, and the
+  listing is how an operator finds the row to fix. Nothing may collapse that `null` into `{}`.
+- `limits` is the only field editable after minting (`setKeyLimits`, `PUT /api/keys/:id/limits`);
+  `bodyLoggingOptOut` deliberately is not — an opt-out is a promise to whoever holds the key, a limit
+  is the operator's own ceiling. The matrix is written whole: `{}` is how the last limit goes away,
+  never a husk like `{"requests":{}}`.
+- Windows *slide*. `1m` is an exact ring in `apps/gateway`; longer windows are `usage.sumSince` —
+  which must filter `state = 'done'` — plus an in-memory delta, cached 30s. The composition may
+  over-count and must **never** under-count, so the delta keeps everything at or after the read
+  instant; the other direction is walkable by timing the refresh. A failed `sumSince` serves the
+  request and logs through existing `LogFields` keys, degrading long windows only, because `1m` and
+  `concurrency` never touch the store.
+- The token and spend debit lives in `finishLog` beside `usage.append`, never inside `@omni/store`:
+  that site already runs at most once per request id, which is the guarantee the debit needs.
+- The concurrency gauge is released at request scope and nowhere else. A streaming handler returns
+  while the request still runs, so a `finally` around the handler body fires at head-send, and a
+  decrement beside the debit sits behind a store write; streams free it from `sseResponse`'s
+  run-once completion. No window expires a gauge — a leak locks the key out until restart, silently.
+- `ApiKeySummary.limitUsage` counts committed rows only: a floor on what the limiter sees, never its
+  number. `concurrency.used` is `null`, not `0`, because the gauge is not stored.
 - `ProviderModelChoice.auth` is enforced at write time in `putModel`, never at routing. Which ways
   in exist is installation state, so the catalog exports the fact (`catalogModelAuths`) and control
   owns the rule. A provider with no credential is unknown rather than blocked, an unlisted model is

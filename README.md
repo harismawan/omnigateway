@@ -213,16 +213,13 @@ takes `5h` and `1w`; `concurrency` is not a window at all but a ceiling on
 requests in flight at once.
 
 `tokens` and `spend` are debited once a response completes, because an exact
-token count exists only then — a key at its ceiling is refused on its *next*
-request rather than its current one. The `5h` and `1w` counts come from
-`request_logs`, so a `1w` limit on an installation that prunes logs after three
-days really enforces three days. They are cached for thirty seconds and can
-therefore read slightly high, never low: the key is refused early rather than
-let past a ceiling you set. If the database cannot answer, those windows stop
-enforcing and the gateway logs it; `requests` at `1m` and `concurrency` are held
-in memory and go on enforcing exactly. Everything here is counted per process
-and reset when the gateway restarts — which for `concurrency` is correct, since
-in-flight requests die with the process.
+count exists only then — a key at its ceiling is refused on its *next* request.
+The `5h` and `1w` counts derive from `request_logs`, so a `1w` limit on an
+installation that prunes logs after three days really enforces three days. They
+are cached for thirty seconds and so can read slightly high, never low: refused
+early rather than let past a ceiling you set. If the database cannot answer they
+stop enforcing and the gateway logs it, while `1m` and `concurrency` are held in
+memory and go on enforcing exactly.
 
 > **Breaking:** `--rate-limit N` is removed, not aliased. Use
 > `--limit requests:1m=N`. A script still passing the old flag stops with an
@@ -240,10 +237,9 @@ omni keys limits <id> --unset spend:5h
 
 `--unset` names a pair that is actually set, so a typo fails rather than
 reporting a change it did not make. The usage shown counts completed requests
-still inside each window, so it reads at or below what the running gateway is
-enforcing, and `concurrency` shows no figure at all — the gauge lives in the
-gateway process, not in the database. The console's Keys screen shows the same
-matrix behind each row's disclosure and edits it there.
+only, so it reads at or below what the gateway is enforcing, and `concurrency`
+shows no figure — that gauge lives in the process, not the database. The
+console's Keys screen shows and edits the same matrix.
 
 Now use it:
 
@@ -494,14 +490,13 @@ omni bodies req_550e8400-… --json   # the artifact, for a script
 ```
 
 **The bare command withholds the bodies and prints only the frame.** Every other
-read in the CLI prints everything it has; this one prints conversations. A
-terminal keeps scrollback, a multiplexer keeps a logged pane, and whoever runs
-this during an incident is usually sharing that screen. Asking for the bodies
-costs one flag; printing them by default costs a prompt corpus in someone's
-session log, silently. The frame still tells you the detail state, when the
-capture landed, its size on disk, whether anything was truncated, and each
-attempt's provider and byte counts — labelled `pre-RTK` for the client request
-and `post-RTK` for every attempt request, because those are not the same payload.
+CLI read prints everything it has; this one prints conversations, and whoever
+runs it during an incident is usually sharing that screen. Asking costs one
+flag; printing by default costs a prompt corpus in someone's scrollback,
+silently. The frame still gives you the state, capture time, size on disk, any
+truncation, and each attempt's provider and byte counts — labelled `pre-RTK` for
+the client request and `post-RTK` for attempts, because they are not the same
+payload.
 
 A request with no artifact is an answer rather than an error, and the three
 answers are different: `not captured` means capture was not running, `captured,
@@ -560,17 +555,13 @@ past 64 KB, arrays to their last 24 items, nesting past 6 levels, objects to 80
 keys — so a stored artifact is always valid JSON. An artifact still over 512 KB
 after that has its bodies replaced by a marker recording why.
 
-**Sizing a volume.** 512 KB is a *plaintext* cap and encryption emits hex, so one
-artifact can reach roughly 1 MB on disk. With the 100,000-row cap, the worst case
-for the whole body corpus is therefore about **100 GB**, not 50. Real traffic is
-nowhere near that — most artifacts are a few kilobytes — but that is the number
-to size against if you enable capture on a busy gateway.
-
-**Sizing memory.** The same 512 KB is also the cap on each captured body held in
-memory while a request is in flight, and there is one of those per side per
-attempt. Worst case per captured request is therefore about 512 KB × (attempts +
-1), so a request that fails over twice can hold a few megabytes until it
-finishes. Multiply by your concurrency before enabling capture on a small box.
+**Sizing.** 512 KB is a *plaintext* cap and encryption emits hex, so one artifact
+can reach ~1 MB on disk: with the 100,000-row cap the corpus worst case is about
+**100 GB**, not 50. Most artifacts are a few kilobytes, but that is the number to
+size a volume against. The same cap applies per body held in memory while a
+request is in flight, one per side per attempt — so ~512 KB × (attempts + 1) per
+captured request. Multiply by your concurrency before enabling this on a small
+box.
 
 ## Snapshots and restore
 
