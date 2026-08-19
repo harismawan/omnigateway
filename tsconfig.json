@@ -7,7 +7,7 @@
   "include": [
     "packages/*/src/**/*",
     "plugins/*/src/**/*",
-    "plugins/*/test/**/*",
+    "plugins/*/test/**/*.ts",
     "packages/*/test/**/*",
     "apps/gateway/src/**/*",
     "apps/gateway/test/**/*",

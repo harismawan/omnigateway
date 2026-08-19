@@ -186,11 +186,16 @@
         "@omni/ratelimit": "workspace:*",
       },
       "devDependencies": {
+        "@happy-dom/global-registrator": "^20.11.2",
         "@omni/dashboard-sdk": "workspace:*",
         "@omni/store": "workspace:*",
         "@tanstack/react-query": "^5.101.4",
+        "@testing-library/react": "^16.3.2",
+        "@testing-library/user-event": "^14.6.1",
         "@types/react": "^19.2.0",
+        "@types/react-dom": "^19.2.0",
         "react": "^19.2.8",
+        "react-dom": "^19.2.8",
         "styled-components": "^6.5.1",
       },
       "peerDependencies": {

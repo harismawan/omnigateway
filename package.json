@@ -14,13 +14,14 @@
     "start": "bun apps/gateway/src/index.ts",
     "test": "bun test",
     "test:dashboard": "bun run --cwd apps/dashboard test",
-    "test:all": "bun test && bun run test:dashboard",
+    "test:all": "bun test && bun run test:dashboard && bun run test:plugins",
     "lint": "biome check .",
     "fmt": "biome format --write .",
     "typecheck:core": "tsc --noEmit --pretty false -p tsconfig.json",
     "typecheck:dashboard": "bun run --cwd apps/dashboard typecheck",
-    "typecheck": "bun run typecheck:core && bun run typecheck:dashboard",
-    "build:npm": "bun scripts/build-npm.ts"
+    "typecheck": "bun run typecheck:core && bun run typecheck:dashboard && bun run --cwd plugins/pokemon typecheck",
+    "build:npm": "bun scripts/build-npm.ts",
+    "test:plugins": "bun run --cwd plugins/pokemon test:ui"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.7",

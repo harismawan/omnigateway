@@ -22,11 +22,18 @@
     "react": "^19.2.8",
     "styled-components": "^6.5.1",
     "@tanstack/react-query": "^5.101.4",
-    "@types/react": "^19.2.0"
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "react-dom": "^19.2.8",
+    "@happy-dom/global-registrator": "^20.11.2",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1"
   },
   "scripts": {
+    "test:ui": "bun test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts ./test/ui.test.tsx",
     "build:server": "bun build src/server.ts --outfile dist/server/index.js --target bun --format esm",
     "build:ui": "NODE_ENV=production bun build ui/index.tsx --outfile dist/ui/index.js --target browser --format esm --production --external react --external react-dom --external 'react/jsx-runtime' --external styled-components --external '@tanstack/react-query'",
-    "build": "bun run build:server && bun run build:ui && cp omni-plugin.json dist/"
+    "build": "bun run build:server && bun run build:ui && cp omni-plugin.json dist/",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   }
 }

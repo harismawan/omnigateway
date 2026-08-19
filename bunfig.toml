@@ -1,2 +1,5 @@
 [test]
-pathIgnorePatterns = ["apps/dashboard/test/**"]
+# Both entries are here for one reason: these suites register a DOM, and
+# registration mutates process-wide globals. Run inside the root suite they
+# leak a DOM into every other file that shares the process.
+pathIgnorePatterns = ["apps/dashboard/test/**", "plugins/*/test/**/*.tsx"]

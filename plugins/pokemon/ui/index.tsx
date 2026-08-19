@@ -129,6 +129,12 @@ function shopLabel(entry: ShopEntry): string {
 }
 
 function Companion({ pluginId, api }: PluginUiProps) {
+  // Two states, not one. The field has to keep what is being typed, and the
+  // panel has to keep what was asked for, because the moment those are the same
+  // value the first keystroke commits: the field is replaced by a lookup of a
+  // one-character key id and the rest of the id has nowhere to go. Committing on
+  // submit also means one request per key rather than one per keystroke.
+  const [draft, setDraft] = useState("");
   const [keyId, setKeyId] = useState("");
   const client = useQueryClient();
 
@@ -150,11 +156,20 @@ function Companion({ pluginId, api }: PluginUiProps) {
         <p>
           <Dim>Each API key raises its own Pokémon. Enter a key id to see it.</Dim>
         </p>
-        <input
-          aria-label="API key id"
-          onChange={(event) => setKeyId(event.target.value)}
-          placeholder="key id"
-        />
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            setKeyId(draft.trim());
+          }}
+        >
+          <input
+            aria-label="API key id"
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder="key id"
+            value={draft}
+          />
+          <Button type="submit">Show</Button>
+        </form>
       </Panel>
     );
   }
