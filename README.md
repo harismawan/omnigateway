@@ -701,7 +701,48 @@ Worth knowing before you deploy it:
 - Behind a reverse proxy, set `OMNI_BASE_URL` to the public HTTPS origin so
   OAuth callbacks match what the providers have registered.
 - The gateway talks to your providers and to nobody else. No telemetry, no CDN
-  fonts, no third-party origins.
+  fonts, no third-party origins. A plugin may declare outbound origins of its
+  own, and `omni plugin list` shows exactly which ones each installed plugin
+  asked for.
+- **Plugins run inside the gateway process, with its privileges.** The
+  capability context they are handed is a guardrail against mistakes, not a
+  sandbox against malice: a plugin shares the process holding your encryption
+  key and decrypted provider credentials, and can reach past the context if it
+  wants to. Install plugins you wrote or audited, and read a plugin's manifest —
+  it lists every capability and outbound origin it asked for.
+
+## Plugins
+
+A plugin adds routes, storage, and a screen in the console to one installation,
+without being part of OmniGateway. Most installations run none.
+
+```bash
+omni plugin install ./some-plugin     # unpacks it; runs nothing from the package
+omni plugin verify some-plugin        # every check the next boot will run
+omni plugin list                      # what is installed, and what each asked for
+omni restart                          # plugins load at boot, so this is required
+```
+
+`verify` is the one to run before restarting a gateway that people are using: it
+reaches the same verdict the next boot will, from the same code, without loading
+the plugin.
+
+Removing one keeps its data:
+
+```bash
+omni plugin remove some-plugin          # directory goes, tables stay
+omni plugin remove some-plugin --purge  # tables too, after confirming
+```
+
+That default is deliberate. A plugin directory can be reinstalled from the
+package it came from; whatever it accumulated in your database cannot be
+reinstalled from anything. For the same reason, restoring a snapshot onto an
+installation that no longer has a plugin leaves that plugin's tables in place —
+`omni doctor` reports them, and nothing removes them for you.
+
+Read the [security note](#security) on what a plugin can reach before installing
+one you did not write. To write one, see
+[docs/writing-a-plugin.md](docs/writing-a-plugin.md).
 
 ## Development
 

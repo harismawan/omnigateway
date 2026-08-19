@@ -12,7 +12,9 @@ OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway:
 - `apps/dashboard`: admin console served by gateway
 - `apps/cli`: local `omni` CLI
 - `packages/control`: admin operations shared by gateway routes and CLI
+- `packages/dashboard-sdk`: what a plugin's UI bundle builds against
 - `packages/ir`: provider-neutral domain model
+- `packages/plugins`: pure plugin manifest schema, context and event types
 - `packages/providers`: provider adapters and catalog
 - `packages/router`: pure routing
 - `packages/ratelimit`: pure API-key limit evaluation and sliding-window counting
@@ -93,6 +95,14 @@ and `bun run lint`.
     `@omni/store` imports that subpath alone and re-exports `LimitConfig` from `@omni/store/types`,
     which is the import the dashboard is already permitted. Limiter state — rings and gauges — lives
     in `apps/gateway`, because state is not the package's job.
+15. Plugins load from `<root>/plugins/` at boot and receive a capability-scoped `PluginContext`:
+    never `Store`, `HttpClient`, `AdminAuth`, decrypted credentials, or `process.env`. **It is a
+    guardrail, not a sandbox** — a plugin shares the gateway's process and can import past all of
+    it. What it buys is that accidental overreach is impossible and that a plugin's intent is
+    auditable from its manifest. Say that plainly wherever it comes up; a reader who believes
+    otherwise makes worse decisions than one who knows. `packages/plugins` stays pure like `ir`;
+    the loader, context and event bus live in `apps/gateway`. Every load failure is skipped and
+    reported, never fatal: the proxy path depends on no plugin and must not become able to.
 
 ## Adding a provider
 
@@ -100,6 +110,13 @@ The nine-step procedure lives in [docs/adding-a-provider.md](docs/adding-a-provi
 compiler will enumerate for you, what it cannot find, the per-provider files, and why `wire.ts` and
 `decode.ts` are forked rather than shared. Read it before adding one — several steps exist because
 skipping them produced a bug that read as something else entirely.
+
+## Writing a plugin
+
+The procedure lives in [docs/writing-a-plugin.md](docs/writing-a-plugin.md): the manifest, the
+capability context, the storage placeholder, the event guarantees, and how a UI bundle shares the
+console's React. Read it before adding or reviewing one. `ARCHITECTURE.md#plugins` explains why the
+surface is shaped that way; boundary 15 above is the short version.
 
 ## TypeScript and dashboard style
 
@@ -280,6 +297,31 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
 - `swapIn` rebuilds `usage_rollup` last and guarded, for that reason. It blocks the loop; the cost is
   measured in `README.md` and must stay documented rather than hidden.
 - `omni db restore` refuses while a gateway is running and has no override.
+- Plugin tables are `plugin_<id>_<name>`, written by the host from a `{{name}}` placeholder, and
+  tracked in `plugin_migrations` on a track independent of core's `001..`. Core's next migration
+  number is unaffected by any plugin. Plugin migrations apply **one transaction each**: a batch
+  transaction would make a plugin failing on migration 5 silently revert 1–4 on every later boot.
+- A restore onto an install without that plugin leaves orphan `plugin_*` tables. They stay, and
+  `omni doctor` reports them. **Nothing auto-drops them** — a restore is exactly when a plugin may
+  not be installed yet, and the drop is irreversible. `omni plugin remove` keeps tables too; only
+  `--purge` drops them, and it confirms first.
+- Plugin events are **at-most-once and not durable**: one queued when the process dies is gone, and
+  a full queue drops rather than grows. Anything needing exact accounting must reconcile from its
+  own storage. `RequestCompleted` is emitted from `finishLog` because that is already the one site
+  running at most once per request id — the same reason the usage debit is there.
+- The console externalises `react`, `react-dom`, `styled-components` and `@tanstack/react-query`
+  and resolves them through an import map, so the console and every plugin share one instance; two
+  React copies throw "invalid hook call". `apps/dashboard/shared/manifest.ts` is the single list
+  feeding the externals, the import map and the shared build. **`export * from "react"` does not
+  work and does not warn** — React is CommonJS, so the re-export compiles to a module exporting
+  only `default`. The shims destructure the default instead.
+- Plugin UI assets are served at `/plugin-assets/<id>/…`, not `/plugins/<id>/…`, which would
+  collide with the console's own client-side routes. Bundles are unauthenticated like the console's
+  own JavaScript; the catalog at `/api/plugins` is admin-gated, because what is gated is data.
+- A literal `../` never reaches a route handler — `URL` normalises it before routing, so a test
+  asserting 404 for that input proves nothing. Only percent-encoded forms reach a guard, and they
+  arrive undecoded. Two path checks here were deleted after mutation showed `realpath` already
+  decided every case; decoration in a security path invites the belief that something is being done.
 
 ## Subagent workflow
 
