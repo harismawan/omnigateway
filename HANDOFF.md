@@ -6,7 +6,7 @@ short of context, not because the work stalled.
 **Branch:** `feat/plugin-host` · **PR:** [#78](https://github.com/harismawan/omnigateway/pull/78)
 · 37 commits.
 
-**Green as of this writing:** `bun run test:all` → 2490 core + 391 dashboard + 14
+**Green as of this writing:** `bun run test:all` → 2493 core + 391 dashboard + 37
 plugin UI, `bun run typecheck` clean, `bun run lint` clean. Run all three before
 believing anything below.
 
@@ -141,11 +141,17 @@ with — the first deleted after a test pinned the allowlist that was doing its
 job, the second covered by a test that feeds `advance` a corrupt 500-stage path.
 These remain, both Minor:
 
-- The companion's UI implements roughly a third of its spec section: no rarity
-  filter, no bag, no activity states. The plugin also has **no capability to
-  enumerate API keys**, so the panel takes a key id as free text. That may be a
-  genuine host gap worth a spec amendment rather than a UI task.
+- The plugin has **no capability to enumerate API keys**, so the panel takes a key
+  id as free text. This is the last real gap in the companion's UI and it is
+  probably a host gap rather than a UI task: a `keys:read` capability is a
+  widening of the plugin contract and wants a spec amendment before code.
 - Plugin UI federation is exercised in a built console, never in `vite dev`.
+
+The bag, the Dex rarity filter and the activity state are done. `focus` — one of
+the six states the spec names — is deliberately not implemented: it can only mean
+a burst of recent requests, and the plugin stores one instant per key and no
+per-request history, so it would either never fire or fire arbitrarily. If you
+want it, that is a storage change, not a UI one.
 
 ---
 
@@ -154,12 +160,21 @@ These remain, both Minor:
 Read these before writing tests here. Ten tests were found that passed against
 broken code, several written in this branch.
 
-**Two shapes recur.** An assertion broad enough to be true whether or not the
+**Three shapes recur.** An assertion broad enough to be true whether or not the
 behaviour is right (`expect(status).not.toBe(200)` was true of a 500-instead-of-401
-bug). And two fixture values that happen to be equal, so swapping which one the
-code reads is invisible — this appeared three separate times: `eggUsage` and
+bug). Two fixture values that happen to be equal, so swapping which one the code
+reads is invisible — this appeared three separate times: `eggUsage` and
 `progress`, a graduation `nature` equal to the parser's fallback, and incubated
 tokens equal to earned tokens.
+
+And the one that is hardest to see, because every individual test looks careful:
+**a fixture that never holds the two values whose confusion is the bug.** The Dex
+filter's predicate was `e.rarity === filter`; mutating it to `.includes(filter)`
+passed all 36 UI tests. `"uncommon".includes("common")` is true, so filtering to
+`common` would have shown every uncommon graduate — but the shared fixture had no
+`uncommon` entry, and no test ever filtered to `common`. Four tests covered that
+filter and none of them could fail. When a value is compared against a set, ask
+which *pair* in that set could be confused, and put both in one fixture.
 
 **Mutate before believing a test.** Every guard in this branch was checked by
 breaking it and watching something go red. Guards that survived mutation were
