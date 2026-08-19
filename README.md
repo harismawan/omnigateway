@@ -708,8 +708,9 @@ Worth knowing before you deploy it:
 Contributing, or running from a checkout? See
 [ARCHITECTURE.md](ARCHITECTURE.md) for how the system fits together,
 [CLAUDE.md](CLAUDE.md) for the repository map, architectural boundaries, and
-conventions, and `docs/superpowers/specs/` for the design documents behind each
-feature.
+conventions, [docs/adding-a-provider.md](docs/adding-a-provider.md) for the
+provider checklist, and `docs/superpowers/specs/` for the design documents
+behind each feature.
 
 ```bash
 git clone https://github.com/harismawan/omnigateway.git
