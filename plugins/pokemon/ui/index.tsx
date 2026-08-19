@@ -40,6 +40,10 @@ type CompanionView = {
     caughtAt: number;
   }>;
   shop: Array<{ entry: ShopEntry; price: number }>;
+  /** What the current stage or incubation costs. */
+  nextThreshold: number;
+  /** How far into it this companion is. */
+  progress: number;
 };
 
 type ShopEntry = { kind: "item"; item: string } | { kind: "egg"; tier: Rarity | null };
@@ -113,6 +117,15 @@ const Notice = styled.p`
   color: var(--warn);
 `;
 
+/** An egg, drawn rather than fetched — there is no sprite for one. */
+const EggMark = styled.div`
+  width: 96px;
+  height: 96px;
+  border-radius: 50% 50% 45% 45%;
+  background: var(--panel-raised);
+  border: 2px solid var(--rule-strong);
+`;
+
 function spriteUrl(pluginId: string, speciesId: number, shiny: boolean): string {
   return `/api/plugins/${pluginId}/sprite/${speciesId}${shiny ? "?shiny=1" : ""}`;
 }
@@ -144,8 +157,15 @@ function Companion({ pluginId, api }: PluginUiProps) {
     enabled: keyId !== "",
   });
 
+  // A money surface that fails silently is worse than one that fails loudly.
+  // A 409 carries the reason — insufficient, unreadable, missing — and the
+  // operator gets it rather than a panel that refetches and looks unchanged.
+  const [refusal, setRefusal] = useState<string | null>(null);
   const buy = useMutation({
     mutationFn: (entry: ShopEntry) => api.post(`keys/${keyId}/purchase`, entry),
+    onMutate: () => setRefusal(null),
+    onError: (error: unknown) =>
+      setRefusal(error instanceof Error ? error.message : "the purchase was refused"),
     onSuccess: () => client.invalidateQueries({ queryKey: ["companion", keyId] }),
   });
 
@@ -201,8 +221,13 @@ function Companion({ pluginId, api }: PluginUiProps) {
     <Panel>
       <h2>Companion</h2>
       <Row>
+        {/*
+          An egg is drawn, never fetched. The sprite route parses its parameter
+          as an integer, so the old `/sprite/egg` was a guaranteed 400 and a
+          broken-image icon on every unhatched companion.
+        */}
         {species === undefined || species === null ? (
-          <Sprite alt="An egg, not yet hatched" src={`/api/plugins/${pluginId}/sprite/egg`} />
+          <EggMark aria-label="An egg, not yet hatched" role="img" />
         ) : (
           <Sprite
             alt={`Species ${species}${active?.isShiny === true ? ", shiny" : ""}`}
@@ -215,7 +240,12 @@ function Companion({ pluginId, api }: PluginUiProps) {
               <div>
                 Egg{view.state.eggTier === null ? "" : ` (${view.state.eggTier}+ guaranteed)`}
               </div>
-              <Dim>{formatTokens(view.state.eggUsage)} tokens incubated</Dim>
+              <Dim>
+                {formatTokens(view.progress)} / {formatTokens(view.nextThreshold)} tokens incubated
+              </Dim>
+              <Meter aria-label="Incubation">
+                <Fill $pct={(view.progress / Math.max(1, view.nextThreshold)) * 100} />
+              </Meter>
             </>
           ) : (
             <>
@@ -225,9 +255,12 @@ function Companion({ pluginId, api }: PluginUiProps) {
                 {active.dittoDisguise === null ? "" : " · ?"}
               </div>
               <Dim>{active.nature}</Dim>
-              <Meter>
-                <Fill $pct={(active.usedAtStage / Math.max(1, active.usedAtStage + 1)) * 100} />
+              <Meter aria-label="Growth to the next evolution">
+                <Fill $pct={(view.progress / Math.max(1, view.nextThreshold)) * 100} />
               </Meter>
+              <Dim>
+                {formatTokens(view.progress)} / {formatTokens(view.nextThreshold)} to the next stage
+              </Dim>
             </>
           )}
         </div>
@@ -252,6 +285,8 @@ function Companion({ pluginId, api }: PluginUiProps) {
           </Button>
         ))}
       </Row>
+
+      {refusal === null ? null : <Notice role="alert">{refusal}</Notice>}
 
       <h3>Pokédex</h3>
       {view.dex.length === 0 ? (

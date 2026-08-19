@@ -21,7 +21,8 @@
     "typecheck:dashboard": "bun run --cwd apps/dashboard typecheck",
     "typecheck": "bun run typecheck:core && bun run typecheck:dashboard && bun run --cwd plugins/pokemon typecheck",
     "build:npm": "bun scripts/build-npm.ts",
-    "test:plugins": "bun run --cwd plugins/pokemon test:ui"
+    "test:plugins": "bun run --cwd plugins/pokemon test:ui",
+    "build:plugins": "bun run --cwd plugins/pokemon build"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.7",

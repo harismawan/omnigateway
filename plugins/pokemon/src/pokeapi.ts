@@ -454,9 +454,13 @@ function parseCachedIndex(raw: unknown): SpeciesCandidate[] | null {
     const id = asFiniteNumber(record.id);
     const captureRate = asFiniteNumber(record.captureRate);
     const forms = asFiniteNumber(record.forms);
-    if (id === null || captureRate === null || forms === null) return null;
+    const finalId = asFiniteNumber(record.finalId);
+    // `finalId` is newer than the first cache format. A cache without it is
+    // rejected whole rather than defaulted, so the rebuild happens once instead
+    // of the diversity weighting silently comparing against undefined forever.
+    if (id === null || captureRate === null || forms === null || finalId === null) return null;
     if (!isFetchableSpeciesId(id)) return null;
-    candidates.push({ id, captureRate, forms });
+    candidates.push({ id, captureRate, forms, finalId });
   }
   return candidates.length === 0 ? null : candidates;
 }
@@ -510,10 +514,24 @@ export async function speciesIndex(deps: PokeApiDeps): Promise<readonly SpeciesC
   const candidates: SpeciesCandidate[] = [];
   for (const detail of details) {
     if (detail === null) continue;
-    candidates.push({ id: detail.id, captureRate: detail.captureRate, forms: detail.chain.length });
+    // Base forms only. `chain` is the line from its base, so a species that is
+    // not its own first entry is a mid-chain form — rollable, it would give its
+    // line a second price, because rarity comes from the rolled species' own
+    // capture rate. Free to determine here: the details are already loaded.
+    if (detail.chain[0] !== detail.id) continue;
+    candidates.push({
+      id: detail.id,
+      captureRate: detail.captureRate,
+      forms: detail.chain.length,
+      finalId: detail.chain[detail.chain.length - 1] ?? detail.id,
+    });
   }
 
-  if (candidates.length === ids.length) await writeJson(deps, INDEX_PATH, candidates);
+  // Cached only when every species answered. A partial index still rolls fine —
+  // 600 candidates is a game — but caching one makes a bad afternoon permanent,
+  // since a cached asset is never refetched. Completeness is measured against
+  // the details fetched, not the candidates kept: most species are not bases.
+  if (details.every((detail) => detail !== null)) await writeJson(deps, INDEX_PATH, candidates);
   return candidates;
 }
 

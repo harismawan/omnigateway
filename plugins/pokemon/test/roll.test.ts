@@ -8,13 +8,19 @@ import {
 import { NATURES, type Roll, roll, type SpeciesCandidate } from "../src/roll.ts";
 
 /** A spread of candidates across every rarity band, all with animations. */
+/**
+ * Base forms only, which is what the index now emits — and every one has a
+ * `finalId` distinct from its `id` where the line has evolutions, so the
+ * diversity weighting is testable. It compared a candidate's own id against a
+ * set of finals before, which for any multi-form line is inert.
+ */
 const CANDIDATES: SpeciesCandidate[] = [
-  { id: 1, captureRate: 45, forms: 3 }, // rare band
-  { id: 10, captureRate: 255, forms: 3 }, // common, multi-form → ditto-eligible
-  { id: 19, captureRate: 255, forms: 2 }, // common, multi-form
-  { id: 100, captureRate: 190, forms: 1 }, // common, single form
-  { id: 144, captureRate: 3, forms: 1 }, // rare band (a legendary in practice)
-  { id: 200, captureRate: 90, forms: 2 }, // uncommon
+  { id: 1, captureRate: 45, forms: 3, finalId: 3 }, // rare band
+  { id: 10, captureRate: 255, forms: 3, finalId: 12 }, // common, multi-form → ditto-eligible
+  { id: 19, captureRate: 255, forms: 2, finalId: 20 }, // common, multi-form
+  { id: 100, captureRate: 190, forms: 1, finalId: 100 }, // common, single form
+  { id: 144, captureRate: 3, forms: 1, finalId: 144 }, // rare band (a legendary in practice)
+  { id: 200, captureRate: 90, forms: 2, finalId: 201 }, // uncommon
 ];
 
 function rollWith(seed: number, over: Partial<Parameters<typeof roll>[0]> = {}): Roll | null {
@@ -73,7 +79,7 @@ test("an unsatisfiable guarantee hatches nothing rather than throwing", () => {
   // The candidate index is fetched from a third party. "Not arrived yet" has to
   // read as an egg that has not hatched, not as a crash on the request path.
   const result = roll({
-    candidates: [{ id: 10, captureRate: 255, forms: 1 }],
+    candidates: [{ id: 10, captureRate: 255, forms: 1, finalId: 10 }],
     seed: 1,
     guarantee: "rare",
     hasShinyCharm: false,
@@ -123,7 +129,10 @@ test("a Ditto is rarer than a shiny, and both actually occur", () => {
 test("Ditto is never hatched directly", () => {
   // It is reachable only by revealing a disguise. In the candidate pool it
   // would otherwise be an ordinary common.
-  const withDitto = [...CANDIDATES, { id: DITTO_SPECIES_ID, captureRate: 255, forms: 1 }];
+  const withDitto = [
+    ...CANDIDATES,
+    { id: DITTO_SPECIES_ID, captureRate: 255, forms: 1, finalId: DITTO_SPECIES_ID },
+  ];
   for (let seed = 1; seed <= 500; seed++) {
     expect(rollWith(seed, { candidates: withDitto })?.speciesId).not.toBe(DITTO_SPECIES_ID);
   }
@@ -133,8 +142,8 @@ test("a species with no animated sprite is never chosen", () => {
   // A still sprite beside moving ones reads as broken rather than as variety.
   const withUnanimated = [
     ...CANDIDATES,
-    { id: ANIMATED_SPECIES_MAX + 1, captureRate: 255, forms: 1 },
-    { id: 900, captureRate: 255, forms: 1 },
+    { id: ANIMATED_SPECIES_MAX + 1, captureRate: 255, forms: 1, finalId: ANIMATED_SPECIES_MAX + 1 },
+    { id: 900, captureRate: 255, forms: 1, finalId: 900 },
   ];
   for (let seed = 1; seed <= 500; seed++) {
     const id = rollWith(seed, { candidates: withUnanimated })?.speciesId ?? 0;
@@ -145,10 +154,15 @@ test("a species with no animated sprite is never chosen", () => {
 test("an already-collected species is less likely, but not impossible", () => {
   // Weighted down rather than excluded: excluding outright makes the last few
   // species unreachable once everything else is collected.
-  const target = 100;
-  const freely = rate((r) => r.speciesId === target, 2000);
-  const collected = rate((r) => r.speciesId === target, 2000, {
-    collectedFinals: new Set([target]),
+  // Down-weighted by the line's FINAL, which is the id a Dex records. Using a
+  // multi-form line here is the point: with the old comparison — a candidate's
+  // own id against a set of finals — this test could only ever pass for a
+  // single-form species, where base and final happen to be the same number.
+  const base = 10;
+  const final = 12;
+  const freely = rate((r) => r.speciesId === base, 2000);
+  const collected = rate((r) => r.speciesId === base, 2000, {
+    collectedFinals: new Set([final]),
   });
 
   expect(collected).toBeLessThan(freely);

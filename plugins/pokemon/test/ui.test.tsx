@@ -133,6 +133,8 @@ type CompanionView = {
     caughtAt: number;
   }>;
   shop: Array<{ entry: ShopEntry; price: number }>;
+  nextThreshold: number;
+  progress: number;
 };
 
 function active(patch: Partial<Active> = {}): Active {
@@ -155,6 +157,10 @@ function view(patch: Partial<CompanionView> = {}): CompanionView {
     wallet: 0,
     dex: [],
     shop: [],
+    // Distinct from every other number in the fixture, so a component that
+    // renders the wrong one is visible rather than coincidentally right.
+    nextThreshold: 5_000_000,
+    progress: 1_240_000,
     ...patch,
   };
 }
@@ -223,7 +229,12 @@ describe("an egg", () => {
     renderCompanion(
       serving(
         view({
-          state: { active: null, eggUsage: 1_240_000, eggTier: null, inventory: {} },
+          // `eggUsage` and `progress` are deliberately different. The panel reads
+          // the server-computed `progress`, and with both set to the same number
+          // a component that read the wrong one would look correct.
+          state: { active: null, eggUsage: 7_777_777, eggTier: null, inventory: {} },
+          progress: 1_240_000,
+          nextThreshold: 5_000_000,
           tokensTotal: 9_000_000,
           wallet: 2_500,
         }),
@@ -232,7 +243,7 @@ describe("an egg", () => {
     await lookUp(KEY);
 
     expect(await screen.findByRole("img", { name: "An egg, not yet hatched" })).toBeTruthy();
-    expect(screen.getByText("1.2M tokens incubated")).toBeTruthy();
+    expect(screen.getByText("1.2M / 5.0M tokens incubated")).toBeTruthy();
     expect(screen.getByText("9.0M tokens earned · 2,500 to spend")).toBeTruthy();
     expect(screen.getByText("Egg")).toBeTruthy();
   });

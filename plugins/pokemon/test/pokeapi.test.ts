@@ -396,8 +396,11 @@ test("the index covers the animated range and is not refetched", async () => {
   const api = deps(net, files);
 
   const index = await speciesIndex(api);
+  // Base forms only, so the index is a subset of the range rather than all of
+  // it. In this fixture every species is its own single-form chain, so the two
+  // coincide — the base-form filter has its own test below, where they do not.
   expect(index.length).toBe(ANIMATED_SPECIES_MAX);
-  expect(index[0]).toEqual({ id: 1, captureRate: 45, forms: 1 });
+  expect(index[0]).toEqual({ id: 1, captureRate: 45, forms: 1, finalId: 1 });
   expect(index[index.length - 1]?.id).toBe(ANIMATED_SPECIES_MAX);
   expect(calls.length).toBeGreaterThan(0);
   expect(store.has("species/index.json")).toBe(true);
@@ -415,13 +418,15 @@ test("a cached index answers on its own, without touching the species cache", as
   const { files, store } = memoryFiles();
   store.set(
     "species/index.json",
-    new TextEncoder().encode(JSON.stringify([{ id: 25, captureRate: 190, forms: 2 }])),
+    new TextEncoder().encode(JSON.stringify([{ id: 25, captureRate: 190, forms: 2, finalId: 26 }])),
   );
   const { net, calls } = stubNet(() => {
     throw new Error("the cached index should have answered this");
   });
 
-  expect(await speciesIndex(deps(net, files))).toEqual([{ id: 25, captureRate: 190, forms: 2 }]);
+  expect(await speciesIndex(deps(net, files))).toEqual([
+    { id: 25, captureRate: 190, forms: 2, finalId: 26 },
+  ]);
   expect(calls).toEqual([]);
   expect(store.size).toBe(1); // nothing else was read into existence or written
 });
@@ -485,7 +490,18 @@ test("the index reports the line length as forms, deduplicating shared chains", 
   });
 
   const index = await speciesIndex(deps(net, files));
-  expect(index.slice(0, 3).map((candidate) => candidate.forms)).toEqual([3, 3, 3]);
+  // Only the base of the shared chain is a candidate, and it reports the whole
+  // line's length. Its two evolutions are not rollable at all.
+  //
+  // This is also the test that covers the base-form filter, and it is the only
+  // place it can be covered honestly: it needs a fixture where a chain has
+  // several members, so that "only the base survives" is a claim about the
+  // builder rather than about a literal. Rarity is read from the rolled
+  // species' own capture rate, so a mid-chain candidate gives its line a second
+  // price — Metapod at 120 is uncommon where Caterpie at 255 is common, the
+  // same line for two and a half times the work.
+  const shared = index.filter((candidate) => candidate.id <= 3);
+  expect(shared).toEqual([{ id: 1, captureRate: 45, forms: 3, finalId: 3 }]);
   // Bulbasaur, Ivysaur and Venusaur share one chain, which is fetched once.
   expect(chainFetches.filter((url) => url.endsWith("/evolution-chain/1")).length).toBe(1);
 });

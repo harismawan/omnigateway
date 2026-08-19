@@ -5,10 +5,12 @@
 import { definePlugin, type PluginContext, type PluginRoute } from "@omni/plugins/define";
 import type { CompanionEvent } from "./advance.ts";
 import {
+  EGG_HATCH_THRESHOLD,
   freshEggPrice,
   ITEM_KINDS,
   ITEM_PRICES,
   type ItemKind,
+  phaseThreshold,
   RARE_CANDY_XP,
   rarityFromCaptureRate,
 } from "./balance.ts";
@@ -40,15 +42,35 @@ import {
  * time and never retroactively, so changing it never rewrites history or
  * de-evolves anything.
  */
+const MAX_MULTIPLIER = 1_000;
+
 function multiplierFrom(config: Readonly<Record<string, unknown>>): number {
   const raw = config.multiplier;
   if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 1;
-  return raw;
+  // Capped rather than trusted. A mistyped 1e21 pushes `tokens_total` past
+  // MAX_SAFE_INTEGER, where addition silently stops being addition and the
+  // growth meter quietly becomes fiction. A thousand already graduates a
+  // legendary in an afternoon, so nothing legitimate is above it.
+  return Math.min(raw, MAX_MULTIPLIER);
 }
 
-/** A stable id for a Dex row, from the facts of the graduation rather than a clock. */
-function dexId(apiKeyId: string, event: Extract<CompanionEvent, { kind: "graduated" }>): string {
-  return `${apiKeyId}:${event.baseId}:${event.finalId}:${event.isShiny ? "s" : "n"}:${Date.now()}`;
+/**
+ * A Dex row id.
+ *
+ * `now` is passed rather than read, like everything else in this plugin — and a
+ * counter is mixed in because two graduations can land in the same millisecond
+ * when a large credit carries through several lines at once. A primary-key
+ * collision would throw *after* `settle` had already written the state back,
+ * losing the graduation with nothing to say so.
+ */
+let dexSequence = 0;
+function dexId(
+  apiKeyId: string,
+  event: Extract<CompanionEvent, { kind: "graduated" }>,
+  now: number,
+): string {
+  dexSequence += 1;
+  return `${apiKeyId}:${event.baseId}:${event.finalId}:${now}:${dexSequence}`;
 }
 
 export default definePlugin({
@@ -66,6 +88,24 @@ export default definePlugin({
     if (storage === undefined) throw new Error("the companion needs the storage capability");
 
     const multiplier = multiplierFrom(ctx.config);
+
+    /**
+     * One prefetch at a time, per key.
+     *
+     * `prefetchHatch` is fired unawaited from the panel route, and building the
+     * species index is ~1300 requests against an unpaid public API. Without this
+     * every poll of a panel whose egg has no species launches another crawl, and
+     * concurrent polls stack — which is a way to be rate-limited by PokéAPI for
+     * being impolite rather than for doing anything useful.
+     */
+    const inFlight = new Map<string, Promise<void>>();
+    const prefetchOnce = (apiKeyId: string, state: CompanionState): Promise<void> => {
+      const existing = inFlight.get(apiKeyId);
+      if (existing !== undefined) return existing;
+      const started = prefetchHatch(apiKeyId, state).finally(() => inFlight.delete(apiKeyId));
+      inFlight.set(apiKeyId, started);
+      return started;
+    };
 
     /**
      * Applies whatever the credited total has earned, and writes any graduation
@@ -91,7 +131,7 @@ export default definePlugin({
             nature: event.nature,
             caughtAt: ctx.now(),
           },
-          dexId(apiKeyId, event),
+          dexId(apiKeyId, event, ctx.now()),
         );
         ctx.logger.info("companion graduated", { event: "companion.graduated", count: 1 });
       }
@@ -124,16 +164,22 @@ export default definePlugin({
       if (rolled === null) return;
 
       const detail = await speciesDetail({ net, files }, rolled.speciesId);
-      const path = detail?.chain ?? [rolled.speciesId];
+      // No detail, no hatch. Defaulting to a one-form common would pick a
+      // graduation total from thin air — the same class of invisible wrong guess
+      // `parseState` refuses to make — and the egg would carry it for its whole
+      // life. Waiting costs a retry on the next poll and nothing else.
+      if (detail === null) return;
+      const path = detail.chain;
       // Derived here rather than at roll time, and that is what lets a legendary
       // ever be hatched. The candidate index carries capture rates only, so the
       // roll cannot see the legendary flags — the detail can, so a legendary
       // that came through the rare band is recorded as legendary and costs a
       // legendary's graduation rather than a rare's.
-      const rarity =
-        detail === null
-          ? "common"
-          : rarityFromCaptureRate(detail.captureRate, detail.isLegendary, detail.isMythical);
+      const rarity = rarityFromCaptureRate(
+        detail.captureRate,
+        detail.isLegendary,
+        detail.isMythical,
+      );
 
       const current = readCompanion(storage, apiKeyId);
       // Re-read rather than trusting the state this started from: an await
@@ -191,7 +237,7 @@ export default definePlugin({
         }
 
         setGrantedAt(storage, event.apiKeyId, key, decision.at);
-        storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+        storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
           JSON.stringify({
             ...row.state,
             inventory: {
@@ -199,6 +245,7 @@ export default definePlugin({
               rareCandy: row.state.inventory.rareCandy + decision.count,
             },
           }),
+          ctx.now(),
           event.apiKeyId,
         ]);
         ctx.logger.info("companion candy granted", {
@@ -220,8 +267,9 @@ export default definePlugin({
 
           // Best effort and deliberately not awaited: a prefetch is an
           // optimisation for the next hatch, and the panel should render now.
-          if (row.state !== null) void prefetchHatch(apiKeyId, row.state).catch(() => {});
+          if (row.state !== null) void prefetchOnce(apiKeyId, row.state).catch(() => {});
 
+          const active = row.state?.active ?? null;
           return {
             json: {
               // Null rather than a fresh companion, so "cannot be read" and "has
@@ -231,6 +279,20 @@ export default definePlugin({
               wallet: wallet(row),
               dex: readDex(storage, apiKeyId),
               shop: shopCatalogue(),
+              /**
+               * What the current stage costs, so the panel can draw a meter that
+               * means something.
+               *
+               * Computed here rather than in the browser because the thresholds
+               * are the economy: shipping the balance table to the client would
+               * put the rules in two places, and the one that drifts is the one
+               * nobody is looking at.
+               */
+              nextThreshold:
+                active === null
+                  ? EGG_HATCH_THRESHOLD
+                  : phaseThreshold(active.rarity, active.plannedPath.length, active.stageIndex),
+              progress: active === null ? (row.state?.eggUsage ?? 0) : active.usedAtStage,
             },
           };
         },

@@ -53,10 +53,29 @@ export type Nature = (typeof NATURES)[number];
  * they fall inside the rare filter at their natural weight.
  */
 export type SpeciesCandidate = {
+  /**
+   * A **base** form, and only ever a base form.
+   *
+   * Mid-chain species used to be candidates too, and that made one evolution
+   * line cost several different prices: a roll landing on Metapod (capture 120,
+   * uncommon, 1.875B) and one landing on Caterpie (capture 255, common, 750M)
+   * produced the same line for two and a half times the work. Rarity is read
+   * from the rolled species' capture rate, so the only way for a line to have
+   * one price is for only its base to be rollable.
+   */
   id: number;
   captureRate: number;
   /** Forms in the evolution line, for the Ditto-disguise condition. */
   forms: number;
+  /**
+   * The last form in the line.
+   *
+   * Carried so diversity weighting can compare like with like. The Dex records
+   * finals, and the weighting used to test a candidate's own id against that
+   * set — which for any multi-form line compares a base against a final and is
+   * therefore inert, silently, for exactly the species that have evolutions.
+   */
+  finalId: number;
 };
 
 export type Roll = {
@@ -140,7 +159,7 @@ export function roll(input: RollInput): Roll | null {
   // 255 is common, a rate of 3 is not.
   const weights = eligible.map((candidate) => {
     const base = Math.max(1, candidate.captureRate);
-    return input.collectedFinals.has(candidate.id) ? base * COLLECTED_WEIGHT : base;
+    return input.collectedFinals.has(candidate.finalId) ? base * COLLECTED_WEIGHT : base;
   });
   const total = weights.reduce((a, b) => a + b, 0);
 
