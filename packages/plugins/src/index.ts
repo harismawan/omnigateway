@@ -1,12 +1,3 @@
-export {
-  CAPABILITIES,
-  type Capability,
-  isApiCompatible,
-  parseManifest,
-  PLUGIN_API_VERSION,
-  type PluginManifest,
-  safeParseManifest,
-} from "./manifest.ts";
 export type {
   LimitReached,
   PluginEventMap,
@@ -14,3 +5,12 @@ export type {
   PluginEvents,
   RequestCompleted,
 } from "./events.ts";
+export {
+  CAPABILITIES,
+  type Capability,
+  isApiCompatible,
+  PLUGIN_API_VERSION,
+  type PluginManifest,
+  parseManifest,
+  safeParseManifest,
+} from "./manifest.ts";

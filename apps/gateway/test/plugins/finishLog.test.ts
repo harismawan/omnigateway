@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
 import type { RequestCompleted } from "@omni/plugins";
 import type { RequestLog, Store } from "@omni/store";
-import { newCompletedRequestLog } from "../../src/logging.ts";
-import { finishLog } from "../../src/logging.ts";
+import { finishLog, newCompletedRequestLog } from "../../src/logging.ts";
 
 /** A store that records appends, and can be told to fail one. */
 function stubStore(opts: { failAppend?: boolean } = {}): { store: Store; appends: RequestLog[] } {
