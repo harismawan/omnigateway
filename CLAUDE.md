@@ -111,7 +111,9 @@ and `bun run lint`.
 The nine-step procedure lives in [docs/adding-a-provider.md](docs/adding-a-provider.md): what the
 compiler will enumerate for you, what it cannot find, the per-provider files, and why `wire.ts` and
 `decode.ts` are forked rather than shared. Read it before adding one — several steps exist because
-skipping them produced a bug that read as something else entirely.
+skipping them produced a bug that read as something else entirely. `ARCHITECTURE.md#providers`
+explains why an adapter is those four files and why outbound HTTP is `node:http` rather than
+`fetch`; boundaries 2, 8, 9 and 10 above are the short version.
 
 ## Writing a plugin
 
