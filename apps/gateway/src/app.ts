@@ -21,7 +21,9 @@ import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "./egress/anthropic.ts";
 import { openaiErrorBody } from "./egress/openai.ts";
 import type { PluginEmit } from "./logging.ts";
+import type { LoadedPlugin } from "./plugins/loader.ts";
 import { type MountedPlugin, pluginRoutes } from "./plugins/routes.ts";
+import { pluginUiRoutes } from "./plugins/ui.ts";
 import { createQuiesceLatch, type QuiesceLatch } from "./quiesce.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectRoutes } from "./routes/connect.ts";
@@ -101,6 +103,15 @@ export type AppDeps = {
    * an event, and the proxy path is unchanged for it.
    */
   emit?: PluginEmit;
+  /**
+   * The same plugins as `plugins`, carrying what only the console needs: the
+   * manifest, the nav entry, and whether the UI bundle is compatible.
+   *
+   * A separate field rather than a widened `plugins` because almost every test
+   * that mounts plugin routes has no interest in a manifest, and requiring one
+   * would make them construct a document to exercise a handler.
+   */
+  pluginUi?: readonly LoadedPlugin[];
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -283,6 +294,13 @@ export function createApp(deps: AppDeps) {
       pluginRoutes({
         admin,
         plugins: deps.plugins ?? [],
+        logger,
+      }),
+    )
+    .use(
+      pluginUiRoutes({
+        admin,
+        plugins: deps.pluginUi ?? [],
         logger,
       }),
     )

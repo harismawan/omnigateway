@@ -200,6 +200,7 @@ async function main(): Promise<void> {
     discoveryMirrors: config.exposeClaudeCodeAliases,
     bodyLoggingAllowed: config.bodyLoggingAllowed,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
+    pluginUi: loadedPlugins.plugins,
     emit: (event) => pluginEvents.emitRequestCompleted(event),
     lifecycle: {
       env: process.env,
