@@ -38,7 +38,7 @@
  * to mount — or the reverse, a plugin disabled with a version reason that its
  * own SDK insists is satisfied. One source, imported.
  */
-export { DASHBOARD_SDK_VERSION as SDK_VERSION } from "@omni/plugins/manifest";
+export { DASHBOARD_SDK_VERSION as SDK_VERSION } from "@omni/plugins/version";
 
 export {
   createPluginApi,

@@ -72,7 +72,7 @@ without it.
 ## 2. The server half
 
 ```js
-import { definePlugin } from "@omni/plugins";
+import { definePlugin } from "@omni/plugins/define";
 
 export default definePlugin({
   migrations: [
@@ -92,6 +92,11 @@ export default definePlugin({
   },
 });
 ```
+
+Import from `@omni/plugins/define`, not from the package root. The root
+re-exports the manifest schema and with it zod, which your bundle never needs at
+runtime — it is half a megabyte of validator attached to an identity function
+and some types.
 
 Routes mount under `/api/plugins/<id>/` and the **host** wraps them in the admin
 check. You cannot opt out, and you do not write the guard.

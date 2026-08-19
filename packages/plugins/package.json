@@ -5,7 +5,9 @@
   "private": true,
   "exports": {
     ".": "./src/index.ts",
-    "./manifest": "./src/manifest.ts"
+    "./manifest": "./src/manifest.ts",
+    "./define": "./src/context.ts",
+    "./version": "./src/version.ts"
   },
   "dependencies": {
     "@omni/ratelimit": "workspace:*",

@@ -1,24 +1,10 @@
 import { z } from "zod";
 
-/**
- * The plugin API major the host implements.
- *
- * A manifest declares the major it was built against and is skipped on
- * mismatch. Bump this whenever `PluginContext`, an event payload, or this
- * manifest schema changes in a way an existing plugin would not survive.
- */
-export const PLUGIN_API_VERSION = 1;
+// Re-exported from the dependency-free module they live in; see version.ts for
+// why they are not declared here beside the schema.
+export { DASHBOARD_SDK_VERSION, PLUGIN_API_VERSION } from "./version.ts";
 
-/**
- * The dashboard SDK version the shipped console provides.
- *
- * A plugin's manifest declares an `sdk` semver range and the host checks it
- * against this. Separate from `PLUGIN_API_VERSION` on purpose: a backend-only
- * plugin should not stop loading because the console's React moved, and a UI
- * incompatibility should disable only the UI. This lives here rather than in the
- * dashboard because the gateway performs the check and cannot import an app.
- */
-export const DASHBOARD_SDK_VERSION = "1.0.0";
+import { PLUGIN_API_VERSION } from "./version.ts";
 
 /**
  * Every capability the host knows how to construct.

@@ -10,9 +10,22 @@
     "@omni/plugins": "workspace:*"
   },
   "peerDependencies": {
-    "@omni/dashboard-sdk": "workspace:*"
+    "@omni/dashboard-sdk": "workspace:*",
+    "react": "^19.2.8",
+    "styled-components": "^6.5.1",
+    "@tanstack/react-query": "^5.101.4"
   },
   "devDependencies": {
-    "@omni/store": "workspace:*"
+    "@omni/store": "workspace:*",
+    "@omni/dashboard-sdk": "workspace:*",
+    "react": "^19.2.8",
+    "styled-components": "^6.5.1",
+    "@tanstack/react-query": "^5.101.4",
+    "@types/react": "^19.2.0"
+  },
+  "scripts": {
+    "build:server": "bun build src/server.ts --outfile dist/server/index.js --target bun --format esm",
+    "build:ui": "NODE_ENV=production bun build ui/index.tsx --outfile dist/ui/index.js --target browser --format esm --production --external react --external react-dom --external 'react/jsx-runtime' --external styled-components --external '@tanstack/react-query'",
+    "build": "bun run build:server && bun run build:ui && cp omni-plugin.json dist/"
   }
 }

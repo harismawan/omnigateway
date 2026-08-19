@@ -185,10 +185,18 @@
         "@omni/plugins": "workspace:*",
       },
       "devDependencies": {
+        "@omni/dashboard-sdk": "workspace:*",
         "@omni/store": "workspace:*",
+        "@tanstack/react-query": "^5.101.4",
+        "@types/react": "^19.2.0",
+        "react": "^19.2.8",
+        "styled-components": "^6.5.1",
       },
       "peerDependencies": {
         "@omni/dashboard-sdk": "workspace:*",
+        "@tanstack/react-query": "^5.101.4",
+        "react": "^19.2.8",
+        "styled-components": "^6.5.1",
       },
     },
   },
