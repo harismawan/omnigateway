@@ -4,9 +4,9 @@ For the orchestrator picking this up. Written because the originating session ra
 short of context, not because the work stalled.
 
 **Branch:** `feat/plugin-host` · **PR:** [#78](https://github.com/harismawan/omnigateway/pull/78)
-· 31 commits, 112 files, ~15.7k insertions.
+· 37 commits.
 
-**Green as of this writing:** `bun run test:all` → 2469 core + 391 dashboard + 14
+**Green as of this writing:** `bun run test:all` → 2490 core + 391 dashboard + 14
 plugin UI, `bun run typecheck` clean, `bun run lint` clean. Run all three before
 believing anything below.
 
@@ -75,29 +75,34 @@ workspace rather than at packaging time so `plugins/pokemon` imports exactly wha
 an external plugin will. All four subpaths survive and are in use:
 `@omnigateway/plugin-api`, `/define`, `/manifest`, `/version`.
 
-### 2. Make them publishable
+### 2. ~~Make them publishable~~ — done in the repo, blocked on an account
 
-Both are `private: true` at version `0.0.0`, and `scripts/build-npm.ts` does not
-ship them. **Until this is done no external plugin can be built at all** — the
-companion only compiles because it is a workspace sibling.
+Both carry real versions, metadata and READMEs, and `release.yml` publishes each
+if its version is not already on npm. `npm pack --dry-run` gives 9.8 KB and
+9.1 KB — sources, README, LICENSE, nothing else.
 
-- Drop `private`, set both to `1.0.0` — matching `PLUGIN_API_VERSION = 1` and
-  `DASHBOARD_SDK_VERSION = "1.0.0"`. Deliberately *not* the gateway's `0.3.x`: a
-  package whose npm version disagrees with the compatibility number it exports is
-  two numbers for one thing.
-- Publish from `.github/workflows/release.yml`, skipping a version already on npm
-  so re-tagging the gateway does not try to republish an unchanged SDK.
-- **`@omnigateway` is not a personal scope and does not exist yet.** Checked
-  against the registry: both names are unpublished (404), `scope:omnigateway`
-  returns zero packages, and `omnigateway` itself is maintained by **`harismawan`**
-  — so the scope is not that account's own. Publishing under it needs an npm **org**
-  named `omnigateway`, free for public packages, with `harismawan` as a member.
-  That is an account action for a human, not a release-workflow change; nothing in
-  CI can create it.
-- **Trusted publishing is per package.** The workflow publishes with no token via
-  OIDC, resolved from a policy configured on npmjs.com. A brand-new package name
-  has no policy, so the first publish of each needs one created up front or a
-  one-off granular token. This is the most likely thing to break the release.
+The versions are `PLUGIN_API_VERSION` and `DASHBOARD_SDK_VERSION`, not the
+gateway's tag, and `packages/plugin-api/test/publishable.test.ts` pins them there
+along with the rule that broke this once: a published package may name no
+unpublished one, checked in its dependencies *and* in its source, because a
+type-only import needs no dependency entry and ships a specifier nobody can
+resolve.
+
+**Two things remain and neither is a code change.** They are the reason nothing
+is published yet.
+
+- **The `@omnigateway` scope does not exist.** Both names are unpublished (404),
+  `scope:omnigateway` returns zero packages, and `omnigateway` itself is
+  maintained by **`harismawan`** — so the scope is not that account's own.
+  Publishing needs an npm **org** of that name, free for public packages, with
+  `harismawan` as a member.
+- **Trusted publishing is configured per package.** The workflow publishes with
+  no token, via OIDC against a policy set on npmjs.com. A brand-new package name
+  has no policy, so each of these needs one created before its first publish or
+  the step fails on permissions without saying why.
+
+Until both are done, tagging a release runs the new step, finds nothing published,
+attempts a publish, and fails. Do the account work first or expect a red release.
 
 ### 3. Then extract the companion (agreed sequencing, not yet started)
 
@@ -106,46 +111,36 @@ Move `plugins/pokemon` to its own repository with its own CI and npm package,
 deliberate: the in-repo integration test caught a real design bug (see the candy
 grants note below) while the host was still settling.
 
-The evidence that extraction matters: `plugins/pokemon/src/grants.ts` imports
-`WINDOW_MS` from `@omni/ratelimit/catalog` — a core package the host does **not**
-re-export through the plugin API. It only compiles because workspace resolution
-makes every internal package reachable. An external plugin could not do this.
+The companion no longer depends on anything internal — `plugins/pokemon`'s only
+dependency is `@omnigateway/plugin-api`. That was not true a few commits ago and
+it is what makes extraction a move rather than a rewrite.
 
-**This is also a half-megabyte bug, and it is the next thing to decide.** Measured,
-not reasoned: `bun run --cwd plugins/pokemon build` emits a **564 KB** server
-bundle with 550 occurrences of `zod` in it. `@omni/ratelimit/catalog` imports zod
-on line 1 for `LimitConfig`'s schema, so one three-entry duration table drags the
-whole validator in — and that defeats the entire reason the `/define` subpath
-exists.
+What it took is worth reading before the move, because the same trap is waiting
+for anyone who writes the next plugin. `grants.ts` imported `WINDOW_MS` from
+`@omni/ratelimit/catalog`, whose first line is `import { z } from "zod"`. One
+three-entry duration table put **564 KB** and 550 occurrences of zod into the
+companion's server bundle, defeating the entire reason the `/define` split
+exists, and nothing failed — it typechecked, the suite was green, and a doc went
+on claiming a 31 KB bundle for as long as it was false. Removing the import takes
+the same build to **36 KB**. Both numbers are measured, not reasoned.
 
-An earlier note in this file claimed the split bought a 31 KB server bundle. That
-claim is **false for the current tree**, and it was false before the rename too: a
-build of commit `53465a9` in a scratch worktree emits the identical 0.58 MB with
-the identical 550 zod hits. Whatever produced 31 KB was measured against a
-`grants.ts` that did not yet reach into the rate limiter. Do not trust a bundle
-number in a doc again without running the build — that is what this whole entry
-is.
-
-The fork, which wants a human: either (a) split the zod-free vocabulary
-(`Window`, `WINDOW_MS`, the unions) out of `packages/ratelimit/src/catalog.ts`
-into a pure leaf that `catalog.ts` re-exports, then re-export *that* through the
-plugin API — values unchanged, so the storage contract in CLAUDE.md holds; or (b)
-let the companion own its own grant-cadence table, on the argument that how often
-a plugin hands out candy is its policy and only incidentally aligns with the
-operator's rate-limit windows. (a) keeps one vocabulary and touches a
-storage-contract file; (b) touches nothing core and accepts a second copy of three
-numbers. Not resolved here on purpose.
+The plugin API now declares the limit vocabulary itself. The rate limiter stays
+the source of truth (`DIMENSIONS` and `WINDOWS` are the JSON keys of
+`api_keys.limits`), the API mirrors it, and two things keep the mirror honest:
+the host's emit site fails to compile if a window is added to one and not the
+other, and `apps/gateway/test/plugins/limitVocabulary.test.ts` pins the durations,
+which no type can see.
 
 ---
 
 ## Open review findings, deliberately deferred
 
 Two review passes ran (host, then companion) and found four Criticals between
-them, all fixed. These remain, all Minor:
+them, all fixed. `PASSIVE_ITEMS` and `MAX_TRANSITIONS_PER_ADVANCE` are now dealt
+with — the first deleted after a test pinned the allowlist that was doing its
+job, the second covered by a test that feeds `advance` a corrupt 500-stage path.
+These remain, both Minor:
 
-- `PASSIVE_ITEMS` in `plugins/pokemon/src/balance.ts:146` is exported and unused.
-- `MAX_TRANSITIONS_PER_ADVANCE` in `advance.ts` is unreachable by any test — every
-  break path leaves no carry.
 - The companion's UI implements roughly a third of its spec section: no rarity
   filter, no bag, no activity states. The plugin also has **no capability to
   enumerate API keys**, so the panel takes a key id as free text. That may be a
