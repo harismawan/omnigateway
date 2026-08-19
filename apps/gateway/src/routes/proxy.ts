@@ -42,6 +42,7 @@ import {
   finishLog,
   newCompletedRequestLog,
   newPendingRequestLog,
+  type PluginEmit,
   reportRejection,
   routeLog,
   type UsageDebit,
@@ -70,10 +71,19 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
    * runs exactly the path it ran before capture existed.
    */
   bodyLoggingAllowed?: boolean;
+  /**
+   * Announces finished requests to plugin handlers.
+   *
+   * Threaded to `finishLog` rather than called here, because that function is
+   * the one site running at most once per request id — the guarantee a plugin
+   * accumulating per-request quantities needs, and the reason the usage debit
+   * lives there too.
+   */
+  emit?: PluginEmit;
 };
 
 type ResolvedProxyDeps = DispatchDeps &
-  Pick<ProxyDeps, "requestId" | "rateLimiter" | "bodyLoggingAllowed"> & {
+  Pick<ProxyDeps, "requestId" | "rateLimiter" | "bodyLoggingAllowed" | "emit"> & {
     keepaliveMs: number;
     logger: Logger;
   };
@@ -585,7 +595,7 @@ async function handle(
       // lines about the process itself. The console reads those rows; stdout
       // carries what never becomes one. `requestId` is on both, and joins them.
       logged = true;
-      await finishLog(deps.store, completed, keyId, deps.logger, writeBodies, debit);
+      await finishLog(deps.store, completed, keyId, deps.logger, writeBodies, debit, deps.emit);
     };
 
     if (chatRequest.stream) {
@@ -700,7 +710,8 @@ async function handle(
     // it at the earlier `finishLog`, and writing a second one here would be the
     // duplicate write the `logged` flag exists to prevent.
     if (collector !== null && !logged) collector.client.response = rejection;
-    if (!logged) await finishLog(deps.store, completed, keyId, deps.logger, writeBodies, debit);
+    if (!logged)
+      await finishLog(deps.store, completed, keyId, deps.logger, writeBodies, debit, deps.emit);
     // Not an access line: this fires only when a request failed outright, which
     // a busy gateway does rarely. It exists because the row cannot hold the
     // reason — `request_logs` has a status and an error code and no room for

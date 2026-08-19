@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   type CommandRunner,
   type ConsoleDeps,
@@ -11,12 +11,15 @@ import {
   tailFile,
 } from "@omni/control";
 import { createLogger, type Logger } from "@omni/ir";
+import { DASHBOARD_SDK_VERSION } from "@omni/plugins";
 import { nodeHttpClient } from "@omni/providers";
 import { createStore, deriveKey } from "@omni/store";
 import { createApp } from "./app.ts";
 import { createDeferredStop, createShutdown, type Shutdown } from "./lifecycle.ts";
 import { startMaintenance } from "./maintenance.ts";
 import { startRefreshScheduler } from "./oauth/scheduler.ts";
+import { createPluginEventBus } from "./plugins/events.ts";
+import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
 
 function stdoutLogger(level: "debug" | "info" | "warn" | "error"): Logger {
@@ -162,6 +165,29 @@ async function main(): Promise<void> {
     process.exit(1);
   };
 
+  /**
+   * Plugins live beside the database, for the reason body artifacts do: one
+   * installation is one directory. A plugins path that could point elsewhere is
+   * one an operator can lose track of, and a restore would then reunite a
+   * database with somebody else's plugins.
+   */
+  const pluginRoot = join(dirname(config.databasePath), "plugins");
+  const pluginEvents = createPluginEventBus({ logger });
+  const loadedPlugins = await loadPlugins({
+    root: pluginRoot,
+    store,
+    events: pluginEvents,
+    sdkVersion: DASHBOARD_SDK_VERSION,
+    logger,
+    now,
+  });
+  for (const failure of loadedPlugins.failures) {
+    // Already logged by the loader; counted here so one line states the shape of
+    // the install rather than making an operator total up warnings.
+    logger.warn("plugin unavailable", { plugin: failure.id, reason: failure.reason });
+  }
+  logger.info("plugins resolved", { count: loadedPlugins.plugins.length });
+
   const app = createApp({
     store,
     baseUrl: config.baseUrl,
@@ -173,6 +199,8 @@ async function main(): Promise<void> {
     console,
     discoveryMirrors: config.exposeClaudeCodeAliases,
     bodyLoggingAllowed: config.bodyLoggingAllowed,
+    plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
+    emit: (event) => pluginEvents.emitRequestCompleted(event),
     lifecycle: {
       env: process.env,
       fileExists: (path) => existsSync(path),
@@ -203,7 +231,10 @@ async function main(): Promise<void> {
 
   shutdown = createShutdown({
     logger,
-    stopLoops: [stopMaintenance, stopRefreshScheduler, stopQuotaPoller],
+    // The event bus is a loop like the others: it holds a pending drain and
+    // must stop before the process does, or a queued handler runs against a
+    // store that is already closed.
+    stopLoops: [stopMaintenance, stopRefreshScheduler, stopQuotaPoller, () => pluginEvents.stop()],
     stopServer: async () => {
       await app.stop();
     },

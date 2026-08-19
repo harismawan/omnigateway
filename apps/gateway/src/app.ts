@@ -20,6 +20,7 @@ import type { LoadRegistry } from "./dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "./egress/anthropic.ts";
 import { openaiErrorBody } from "./egress/openai.ts";
+import type { PluginEmit } from "./logging.ts";
 import { type MountedPlugin, pluginRoutes } from "./plugins/routes.ts";
 import { createQuiesceLatch, type QuiesceLatch } from "./quiesce.ts";
 import { adminRoutes } from "./routes/admin.ts";
@@ -93,6 +94,13 @@ export type AppDeps = {
    * existed.
    */
   plugins?: readonly MountedPlugin[];
+  /**
+   * Emits finished requests to plugin handlers, threaded down to `finishLog`.
+   *
+   * Optional and absent by default: an install with no plugins never allocates
+   * an event, and the proxy path is unchanged for it.
+   */
+  emit?: PluginEmit;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -233,6 +241,7 @@ export function createApp(deps: AppDeps) {
         ...(deps.loadRegistry === undefined ? {} : { loadRegistry: deps.loadRegistry }),
         discoveryMirrors: deps.discoveryMirrors === true,
         bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
+        ...(deps.emit === undefined ? {} : { emit: deps.emit }),
       }),
     )
     .use(

@@ -10,6 +10,17 @@ import { z } from "zod";
 export const PLUGIN_API_VERSION = 1;
 
 /**
+ * The dashboard SDK version the shipped console provides.
+ *
+ * A plugin's manifest declares an `sdk` semver range and the host checks it
+ * against this. Separate from `PLUGIN_API_VERSION` on purpose: a backend-only
+ * plugin should not stop loading because the console's React moved, and a UI
+ * incompatibility should disable only the UI. This lives here rather than in the
+ * dashboard because the gateway performs the check and cannot import an app.
+ */
+export const DASHBOARD_SDK_VERSION = "1.0.0";
+
+/**
  * Every capability the host knows how to construct.
  *
  * A manifest is authored outside this repository, so this list is a

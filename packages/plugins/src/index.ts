@@ -24,6 +24,7 @@ export type {
 export {
   CAPABILITIES,
   type Capability,
+  DASHBOARD_SDK_VERSION,
   isApiCompatible,
   PLUGIN_API_VERSION,
   type PluginManifest,
