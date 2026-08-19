@@ -11,3 +11,4 @@ apps/dashboard/src/routeTree.gen.ts
 # Claude Code and SDD scratch workspaces
 .claude/
 .superpowers/
+graphify-out/

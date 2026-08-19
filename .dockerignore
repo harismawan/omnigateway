@@ -5,4 +5,5 @@ node_modules
 .env
 .git
 docs
+graphify-out
 apps/dashboard/dist
