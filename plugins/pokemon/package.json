@@ -28,9 +28,9 @@
   },
   "scripts": {
     "test:ui": "bun test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts ./test/ui.test.tsx",
-    "build:server": "bun build src/server.ts --outfile dist/server/index.js --target bun --format esm",
-    "build:ui": "NODE_ENV=production bun build ui/index.tsx --outfile dist/ui/index.js --target browser --format esm --production --external react --external react-dom --external 'react/jsx-runtime' --external styled-components --external '@tanstack/react-query'",
-    "build": "bun run build:server && bun run build:ui && cp omni-plugin.json dist/",
+    "build:server": "bun build src/server.ts --outfile dist/pokemon/server/index.js --target bun --format esm",
+    "build:ui": "NODE_ENV=production bun build ui/index.tsx --outfile dist/pokemon/ui/index.js --target browser --format esm --production --external react --external react-dom --external 'react/jsx-runtime' --external styled-components --external '@tanstack/react-query'",
+    "build": "bun run build:server && bun run build:ui && cp omni-plugin.json dist/pokemon/",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   }
 }

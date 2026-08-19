@@ -356,6 +356,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni credentials …` | list, show, enable, disable, retier, refresh, remove |
 | `omni models …` | list, show, put, remove, `dry-run`, `catalog` |
 | `omni keys …` | list, create, revoke |
+| `omni plugin …` | list, verify, install, remove; see [Plugins](#plugins) |
 | `omni settings get` / `set` | routing weights, retention, deadlines, and the runtime switches |
 | `omni admin set-password` | change the console password |
 | `omni db migrate` | create or upgrade the database |
@@ -702,8 +703,8 @@ Worth knowing before you deploy it:
   OAuth callbacks match what the providers have registered.
 - The gateway talks to your providers and to nobody else. No telemetry, no CDN
   fonts, no third-party origins. A plugin may declare outbound origins of its
-  own, and `omni plugin list` shows exactly which ones each installed plugin
-  asked for.
+  own, and `omni plugin verify <id>` shows exactly which ones it asked for — as
+  does its manifest, which is a plain file you can read before installing.
 - **Plugins run inside the gateway process, with its privileges.** The
   capability context they are handed is a guardrail against mistakes, not a
   sandbox against malice: a plugin shares the process holding your encryption
@@ -719,9 +720,54 @@ without being part of OmniGateway. Most installations run none.
 ```bash
 omni plugin install ./some-plugin     # unpacks it; runs nothing from the package
 omni plugin verify some-plugin        # every check the next boot will run
-omni plugin list                      # what is installed, and what each asked for
+omni plugin list                      # what is installed, and whether it would load
 omni restart                          # plugins load at boot, so this is required
 ```
+
+`omni plugin list` prints what this installation has — id, name, version, the
+plugin API and console SDK it was built against, the capabilities it declared,
+and whether the gateway would load it:
+
+```
+ID       NAME               VERSION  API  SDK     CAPABILITIES                    STATE
+pokemon  Pokémon Companion  1.0.0    1    ^1.0.0  storage,files,net:outbound,…    ok
+```
+
+A plugin that would *not* load is listed with the reason rather than hidden,
+because a plugin missing from the console is exactly what you are trying to
+explain. For one plugin's full detail — its entry points and the outbound
+origins it declared — use `omni plugin verify <id>`.
+
+### Available plugins
+
+There is no registry and no directory to browse. A plugin is a directory or a
+tarball you point `omni plugin install` at, and you are expected to know where it
+came from — see the [security note](#security) for why that is the model rather
+than an omission.
+
+One ships in this repository:
+
+| Plugin | What it does |
+| --- | --- |
+| [`pokemon`](plugins/pokemon) | A Pokémon companion. Each gateway key raises one that hatches, evolves, and graduates into a Pokédex on the tokens that key spends, with a shop that spends a wallet of those same tokens. |
+
+It is not installed by default, is not in the npm package, and is not in the
+Docker image. Build it from a checkout and install the result:
+
+```bash
+bun run build:plugins                              # writes plugins/pokemon/dist/pokemon
+omni plugin install ./plugins/pokemon/dist/pokemon
+omni restart
+```
+
+The path ends in `pokemon` because the installer takes the target directory name
+from the source and refuses a manifest whose id disagrees with it — so a plugin
+cannot be installed under a name that is not its own.
+
+It needs outbound access to `pokeapi.co` and `raw.githubusercontent.com` for
+species data and sprites, which its manifest declares and `omni plugin verify
+pokemon` prints back. Those assets are Nintendo and Game Freak intellectual property, fetched at
+runtime and never vendored into this repository or its published artifacts.
 
 `verify` is the one to run before restarting a gateway that people are using: it
 reaches the same verdict the next boot will, from the same code, without loading
