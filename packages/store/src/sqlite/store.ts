@@ -115,6 +115,7 @@ export async function createStore(opts: {
       remove: (id) => handle.credentials.remove(id),
       listHealth: () => handle.credentials.listHealth(),
       saveHealth: (rows) => handle.credentials.saveHealth(rows),
+      updateHealth: (id, model, apply) => handle.credentials.updateHealth(id, model, apply),
       listQuota: () => handle.credentials.listQuota(),
       saveQuota: (rows) => handle.credentials.saveQuota(rows),
       listQuotaSamples: (q) => handle.credentials.listQuotaSamples(q),

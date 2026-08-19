@@ -469,7 +469,30 @@ export interface CredentialRepo {
   ): Promise<void>;
   remove(id: string): Promise<void>;
   listHealth(): Promise<CredentialHealth[]>;
+  /**
+   * Writes whole rows, last writer wins.
+   *
+   * Correct for seeding and for an operator editing a row outright. Not for a
+   * transition: a caller that derives its row from an earlier read loses any
+   * write that landed in between. Use `updateHealth` for those.
+   */
   saveHealth(rows: CredentialHealth[]): Promise<void>;
+  /**
+   * Applies a health transition atomically, and returns the row it persisted.
+   *
+   * `apply` runs inside the write transaction against the row as it is on disk
+   * rather than a caller's snapshot, so two transitions on one credential cannot
+   * lose each other's increment. It receives `null` when no row exists yet.
+   *
+   * `apply` must be synchronous. `bun:sqlite` is synchronous, and that is the
+   * only reason the read and the write cannot be interleaved; an `await` inside
+   * `apply` would reopen the race this exists to close.
+   */
+  updateHealth(
+    credentialId: string,
+    model: string,
+    apply: (current: CredentialHealth | null) => CredentialHealth,
+  ): Promise<CredentialHealth>;
   listQuota(): Promise<QuotaWindow[]>;
   /** Also appends a sample per window whose reading moved. See `QuotaSample`. */
   saveQuota(rows: QuotaWindow[]): Promise<void>;

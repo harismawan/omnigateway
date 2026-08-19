@@ -13,7 +13,6 @@ import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import {
   blankHealth,
   type Candidate,
-  healthKey,
   rank,
   recordFailure,
   recordSuccess,
@@ -21,6 +20,7 @@ import {
 } from "@omni/router";
 import { transformRequest } from "@omni/rtk";
 import type {
+  CredentialHealth,
   CredentialSecrets,
   CredentialView,
   RequestLog,
@@ -282,13 +282,25 @@ export async function dispatch(
   if (signal.aborted) eager.release();
   else signal.addEventListener("abort", releaseOnAbort, { once: true });
 
-  const persistHealth = async (next: ReturnType<typeof recordSuccess>): Promise<void> => {
-    await deps.store.credentials.saveHealth([next]);
+  /**
+   * Records a health transition for one candidate.
+   *
+   * `transition` is applied to the row on disk, inside the store's write
+   * transaction — not to `snapshot.health`, which was read before the upstream
+   * call and is stale by the time any of this runs. Two requests failing the
+   * same credential at once each count, and a rate limit landing after a hard
+   * failure no longer carries that failure's count back to what it was.
+   */
+  const persistHealth = async (
+    candidate: Candidate,
+    transition: (current: CredentialHealth) => CredentialHealth,
+  ): Promise<void> => {
+    const credentialId = candidate.credential.id;
+    const { model } = candidate.target;
+    await deps.store.credentials.updateHealth(credentialId, model, (current) =>
+      transition(current ?? blankHealth(credentialId, model)),
+    );
   };
-
-  const healthFor = (candidate: Candidate) =>
-    snapshot.health.get(healthKey(candidate.credential.id, candidate.target.model)) ??
-    blankHealth(candidate.credential.id, candidate.target.model);
 
   async function* run(): AsyncGenerator<StreamEvent, void, undefined> {
     try {
@@ -459,8 +471,8 @@ export async function dispatch(
                   );
                   yield event;
                   try {
-                    await persistHealth(
-                      recordFailure(healthFor(candidate), {
+                    await persistHealth(candidate, (current) =>
+                      recordFailure(current, {
                         settings: snapshot.settings,
                         now: deps.now(),
                         code: event.code,
@@ -504,8 +516,8 @@ export async function dispatch(
                 );
               }
 
-              await persistHealth(
-                recordSuccess(healthFor(candidate), {
+              await persistHealth(candidate, (current) =>
+                recordSuccess(current, {
                   settings: snapshot.settings,
                   now: deps.now(),
                   ttftMs: log.ttftMs,
@@ -581,8 +593,8 @@ export async function dispatch(
               }
 
               const failure = lastError as GatewayError;
-              await persistHealth(
-                recordFailure(healthFor(candidate), {
+              await persistHealth(candidate, (current) =>
+                recordFailure(current, {
                   settings: snapshot.settings,
                   now: deps.now(),
                   code: failure.code,

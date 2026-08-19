@@ -41,6 +41,42 @@ type Row = {
   updated_at: number;
 };
 
+type HealthRow = {
+  credential_id: string;
+  model: string;
+  breaker_state: string;
+  consecutive_failures: number;
+  opened_at: number | null;
+  rate_limited_until: number | null;
+  ewma_ttft_ms: number | null;
+  last_used_at: number | null;
+};
+
+function toHealth(r: HealthRow): CredentialHealth {
+  return {
+    credentialId: r.credential_id,
+    model: r.model,
+    breakerState: r.breaker_state as BreakerState,
+    consecutiveFailures: r.consecutive_failures,
+    openedAt: r.opened_at,
+    rateLimitedUntil: r.rate_limited_until,
+    ewmaTtftMs: r.ewma_ttft_ms,
+    lastUsedAt: r.last_used_at,
+  };
+}
+
+const UPSERT_HEALTH = `INSERT INTO credential_health
+   (credential_id, model, breaker_state, consecutive_failures, opened_at,
+    rate_limited_until, ewma_ttft_ms, last_used_at)
+ VALUES (?,?,?,?,?,?,?,?)
+ ON CONFLICT (credential_id, model) DO UPDATE SET
+   breaker_state = excluded.breaker_state,
+   consecutive_failures = excluded.consecutive_failures,
+   opened_at = excluded.opened_at,
+   rate_limited_until = excluded.rate_limited_until,
+   ewma_ttft_ms = excluded.ewma_ttft_ms,
+   last_used_at = excluded.last_used_at`;
+
 export function createCredentialRepo(
   db: Database,
   key: CryptoKey,
@@ -276,45 +312,11 @@ export function createCredentialRepo(
     },
 
     async listHealth() {
-      type H = {
-        credential_id: string;
-        model: string;
-        breaker_state: string;
-        consecutive_failures: number;
-        opened_at: number | null;
-        rate_limited_until: number | null;
-        ewma_ttft_ms: number | null;
-        last_used_at: number | null;
-      };
-      return db
-        .query<H, []>("SELECT * FROM credential_health")
-        .all()
-        .map((r) => ({
-          credentialId: r.credential_id,
-          model: r.model,
-          breakerState: r.breaker_state as BreakerState,
-          consecutiveFailures: r.consecutive_failures,
-          openedAt: r.opened_at,
-          rateLimitedUntil: r.rate_limited_until,
-          ewmaTtftMs: r.ewma_ttft_ms,
-          lastUsedAt: r.last_used_at,
-        }));
+      return db.query<HealthRow, []>("SELECT * FROM credential_health").all().map(toHealth);
     },
 
     async saveHealth(rows: CredentialHealth[]) {
-      const stmt = db.prepare(
-        `INSERT INTO credential_health
-           (credential_id, model, breaker_state, consecutive_failures, opened_at,
-            rate_limited_until, ewma_ttft_ms, last_used_at)
-         VALUES (?,?,?,?,?,?,?,?)
-         ON CONFLICT (credential_id, model) DO UPDATE SET
-           breaker_state = excluded.breaker_state,
-           consecutive_failures = excluded.consecutive_failures,
-           opened_at = excluded.opened_at,
-           rate_limited_until = excluded.rate_limited_until,
-           ewma_ttft_ms = excluded.ewma_ttft_ms,
-           last_used_at = excluded.last_used_at`,
-      );
+      const stmt = db.prepare(UPSERT_HEALTH);
       db.transaction(() => {
         for (const r of rows) {
           stmt.run(
@@ -330,6 +332,38 @@ export function createCredentialRepo(
         }
       })();
       emit({ type: "healthSaved", rows });
+    },
+
+    async updateHealth(credentialId, model, apply) {
+      const current = db.prepare<HealthRow, [string, string]>(
+        "SELECT * FROM credential_health WHERE credential_id = ? AND model = ?",
+      );
+      const stmt = db.prepare(UPSERT_HEALTH);
+
+      // Read and write in one transaction. `apply` is synchronous and so is
+      // bun:sqlite, so nothing can land between the two — which is the whole
+      // point: a caller computing from a row it read earlier would overwrite
+      // whatever arrived in the meantime.
+      const written = db.transaction((): CredentialHealth => {
+        const row = current.get(credentialId, model);
+        const next = apply(row === null ? null : toHealth(row));
+        stmt.run(
+          next.credentialId,
+          next.model,
+          next.breakerState,
+          next.consecutiveFailures,
+          next.openedAt,
+          next.rateLimitedUntil,
+          next.ewmaTtftMs,
+          next.lastUsedAt,
+        );
+        return next;
+      })();
+
+      // The row that reached disk, not the one proposed: the snapshot cache
+      // patches its map from this without re-reading.
+      emit({ type: "healthSaved", rows: [written] });
+      return written;
     },
 
     async listQuota() {
