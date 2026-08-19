@@ -277,6 +277,18 @@ export default definePlugin({
               state: row.state,
               tokensTotal: row.tokensTotal,
               wallet: wallet(row),
+              /**
+               * When this key last earned, for the panel's activity state.
+               *
+               * The instant rather than a derived label, because the elapsed
+               * time is what the panel actually draws with and a label computed
+               * here would be stale by the time it was rendered — a companion
+               * that fell asleep between the poll and the paint.
+               *
+               * Null for a row written before the column existed, and that is a
+               * fact the panel renders rather than one it guesses around.
+               */
+              lastCreditAt: row.lastCreditAt,
               dex: readDex(storage, apiKeyId),
               shop: shopCatalogue(),
               /**

@@ -31,12 +31,23 @@ type CompanionView = {
   } | null;
   tokensTotal: number;
   wallet: number;
+  /**
+   * When this key last earned, or null for a save that predates the column.
+   *
+   * Distinct from anything derived from `updated_at`: a purchase moves that and
+   * not this, which is the whole reason the column exists.
+   */
+  lastCreditAt: number | null;
   dex: Array<{
     id: string;
     baseId: number;
     finalId: number;
+    /** The full evolution line, as `readDex` returns it. */
+    chainOrder: number[];
     rarity: Rarity;
     isShiny: boolean;
+    /** Null for a graduation recorded before natures were stored. */
+    nature: string | null;
     caughtAt: number;
   }>;
   shop: Array<{ entry: ShopEntry; price: number }>;
@@ -117,6 +128,28 @@ const Notice = styled.p`
   color: var(--warn);
 `;
 
+/** One Dex cell: the sprite plus what the sprite alone cannot say. */
+const Cell = styled.figure`
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+`;
+
+const Caption = styled.figcaption`
+  color: var(--ink-dim);
+  font-size: 11px;
+  text-align: center;
+`;
+
+/** One bag entry: what is held, how many, and what can be done with it. */
+const BagItem = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+`;
+
 /** An egg, drawn rather than fetched — there is no sprite for one. */
 const EggMark = styled.div`
   width: 96px;
@@ -136,9 +169,67 @@ function formatTokens(value: number): string {
   return value.toLocaleString();
 }
 
+/**
+ * A stored item name as a person reads it: `rareCandy` becomes "rare candy".
+ *
+ * Split out of `shopLabel` rather than copied into the bag. The two surfaces
+ * name the same things, and two derivations of one label is how "rare candy" in
+ * the shop ends up next to "rareCandy" in the bag.
+ */
+function itemLabel(item: string): string {
+  return item.replace(/([A-Z])/g, " $1").toLowerCase();
+}
+
 function shopLabel(entry: ShopEntry): string {
-  if (entry.kind === "item") return entry.item.replace(/([A-Z])/g, " $1").toLowerCase();
+  if (entry.kind === "item") return itemLabel(entry.item);
   return entry.tier === null ? "fresh egg" : `fresh egg (${entry.tier}+)`;
+}
+
+/**
+ * Items the `use` route will accept.
+ *
+ * A mirror of `parseHeldItem`'s allowlist on the server, and deliberately a
+ * mirror rather than a fetched fact: `shinyCharm` is passive, so posting it is a
+ * 400 and offering the button would be offering a guaranteed error. The server
+ * stays the enforcement — this only keeps the panel from asking.
+ */
+const CONSUMABLE_ITEMS: readonly string[] = ["rareCandy", "mint"];
+
+/** Rarity filters, with `null` meaning no filter at all. */
+const RARITY_FILTERS: ReadonlyArray<Rarity | null> = [
+  null,
+  "common",
+  "uncommon",
+  "rare",
+  "legendary",
+];
+
+/**
+ * How the sprite is behaving, from how long ago this key last earned.
+ *
+ * Five states, not the spec's six. `focus` is **absent on purpose**: it would
+ * have to mean a burst of recent requests, and the plugin stores one instant per
+ * key rather than any per-request history, so there is nothing here that could
+ * tell a burst from a trickle. A state that never fires is dead code and one
+ * that fires arbitrarily is a lie about the key's traffic; either is worse than
+ * five honest ones. It arrives the day something records request times.
+ */
+type Activity = "egg" | "working" | "idle" | "tired" | "sleep";
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+
+export function activityOf(hasActive: boolean, lastCreditAt: number | null, now: number): Activity {
+  if (!hasActive) return "egg";
+  // Null is "never observed earning", which reads as asleep rather than as
+  // busy. A save from before the column existed lands here, and so does a key
+  // that has only ever been shopped at.
+  if (lastCreditAt === null) return "sleep";
+  const elapsed = now - lastCreditAt;
+  if (elapsed < 5 * MINUTE_MS) return "working";
+  if (elapsed < HOUR_MS) return "idle";
+  if (elapsed < 8 * HOUR_MS) return "tired";
+  return "sleep";
 }
 
 function Companion({ pluginId, api }: PluginUiProps) {
@@ -149,6 +240,7 @@ function Companion({ pluginId, api }: PluginUiProps) {
   // submit also means one request per key rather than one per keystroke.
   const [draft, setDraft] = useState("");
   const [keyId, setKeyId] = useState("");
+  const [rarityFilter, setRarityFilter] = useState<Rarity | null>(null);
   const client = useQueryClient();
 
   const companion = useQuery({
@@ -166,6 +258,18 @@ function Companion({ pluginId, api }: PluginUiProps) {
     onMutate: () => setRefusal(null),
     onError: (error: unknown) =>
       setRefusal(error instanceof Error ? error.message : "the purchase was refused"),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["companion", keyId] }),
+  });
+
+  // The other half of a grant, and the reason the bag exists at all: the `use`
+  // route was written so a granted candy could be spent, and until this
+  // mutation nothing in the console ever called it. Same shape as `buy` on
+  // purpose — one refusal surface, one invalidation.
+  const use = useMutation({
+    mutationFn: (item: string) => api.post(`keys/${keyId}/use`, { item }),
+    onMutate: () => setRefusal(null),
+    onError: (error: unknown) =>
+      setRefusal(error instanceof Error ? error.message : "the item could not be used"),
     onSuccess: () => client.invalidateQueries({ queryKey: ["companion", keyId] }),
   });
 
@@ -216,6 +320,16 @@ function Companion({ pluginId, api }: PluginUiProps) {
 
   const { active } = view.state;
   const species = active === null ? null : active.plannedPath[active.stageIndex];
+  // Read at render rather than held in state: the panel repaints on every
+  // refetch, and a clock kept in state would need a timer whose only job is to
+  // make the word "idle" appear a few seconds earlier.
+  const activity = activityOf(active !== null, view.lastCreditAt, Date.now());
+
+  // Zero-count entries are not held, so they are not shown — a bag listing
+  // something it does not contain is the same lie in the other direction.
+  const held = Object.entries(view.state.inventory).filter(([, count]) => count > 0);
+
+  const dex = rarityFilter === null ? view.dex : view.dex.filter((e) => e.rarity === rarityFilter);
 
   return (
     <Panel>
@@ -263,6 +377,14 @@ function Companion({ pluginId, api }: PluginUiProps) {
               </Dim>
             </>
           )}
+          {/*
+            Text, not a tint. The console's rule is that colour means provider
+            identity or state, and even where a state may be coloured it may not
+            be the *only* way the state is legible.
+          */}
+          <div aria-label={`Activity: ${activity}`} role="status">
+            {activity}
+          </div>
         </div>
       </Row>
 
@@ -286,22 +408,80 @@ function Companion({ pluginId, api }: PluginUiProps) {
         ))}
       </Row>
 
+      <h3>Bag</h3>
+      {held.length === 0 ? (
+        <Dim>Nothing in the bag.</Dim>
+      ) : (
+        <Row>
+          {held.map(([item, count]) => (
+            <BagItem key={item}>
+              <span>
+                {itemLabel(item)} · {count}
+              </span>
+              {CONSUMABLE_ITEMS.includes(item) ? (
+                <Button disabled={use.isPending} onClick={() => use.mutate(item)} type="button">
+                  Use {itemLabel(item)}
+                </Button>
+              ) : (
+                // No button, and not a disabled one either: a disabled button
+                // says "not right now", and this is never spendable at all.
+                <Dim>held</Dim>
+              )}
+            </BagItem>
+          ))}
+        </Row>
+      )}
+
       {refusal === null ? null : <Notice role="alert">{refusal}</Notice>}
 
       <h3>Pokédex</h3>
       {view.dex.length === 0 ? (
         <Dim>Nothing graduated yet.</Dim>
       ) : (
-        <Grid>
-          {view.dex.map((entry) => (
-            <img
-              alt={`${entry.rarity}${entry.isShiny ? " shiny" : ""} species ${entry.finalId}`}
-              key={entry.id}
-              src={spriteUrl(pluginId, entry.finalId, entry.isShiny)}
-              style={{ width: "64px", height: "64px", imageRendering: "pixelated" }}
-            />
-          ))}
-        </Grid>
+        <>
+          <Row>
+            {RARITY_FILTERS.map((rarity) => (
+              // Pressed, not disabled. Disabling the active filter takes the
+              // one control that says which filter is active out of the tab
+              // order, and `aria-pressed` already says it — to a screen reader
+              // as well as to the eye.
+              <Button
+                aria-pressed={rarityFilter === rarity}
+                key={rarity ?? "all"}
+                onClick={() => setRarityFilter(rarity)}
+                type="button"
+              >
+                {rarity ?? "all"}
+              </Button>
+            ))}
+          </Row>
+          {dex.length === 0 ? (
+            // Not "Nothing graduated yet." A filter that hides everything and an
+            // empty collection are different facts, and showing the second in
+            // place of the first reads as a bug in the filter.
+            <Dim>No {rarityFilter} graduates yet.</Dim>
+          ) : (
+            <Grid>
+              {dex.map((entry) => (
+                <Cell key={entry.id}>
+                  <img
+                    alt={`${entry.rarity}${entry.isShiny ? " shiny" : ""} species ${entry.finalId}`}
+                    src={spriteUrl(pluginId, entry.finalId, entry.isShiny)}
+                    style={{ width: "64px", height: "64px", imageRendering: "pixelated" }}
+                  />
+                  {/*
+                    Nature is captioned rather than folded into the sprite's alt
+                    text: the alt text names the thing, and a nullable field
+                    inside an accessible name makes the name of an old entry
+                    differ from the name of a new one for no reason a reader
+                    could guess.
+                  */}
+                  {entry.nature === null ? null : <Caption>{entry.nature}</Caption>}
+                </Cell>
+              ))}
+            </Grid>
+          )}
+        </>
       )}
     </Panel>
   );

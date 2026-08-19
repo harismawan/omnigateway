@@ -9,6 +9,7 @@ import type { PluginContext, PluginRoute, PluginStorage } from "@omnigateway/plu
 import { WINDOW_MS } from "@omnigateway/plugin-api/events";
 import { EGG_HATCH_THRESHOLD, graduationTotal, ITEM_PRICES } from "../src/balance.ts";
 import companion from "../src/server.ts";
+import { freshState, serialiseState } from "../src/state.ts";
 import { readCompanion, readDex } from "../src/store.ts";
 
 /**
@@ -387,6 +388,91 @@ test("a non-numeric species id is refused before any lookup", async () => {
     body: null,
   });
   expect(response?.status).toBe(400);
+});
+
+test("earning stamps the credit instant, and the panel route reports it", async () => {
+  // The one signal the panel's activity state is derived from. It has to be the
+  // instant rather than a label, and it has to come from the credit rather than
+  // from the row changing.
+  await boot();
+  clock = 1_700_000_123_000;
+  spend(2_000);
+
+  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_123_000);
+
+  // The second credit takes a different path — the row exists now, so this is
+  // the `ON CONFLICT` branch rather than the insert — and the panel needs the
+  // latest instant, not the first one ever recorded.
+  clock = 1_700_000_456_000;
+  spend(3_000, "req_second");
+  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_456_000);
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(found?.json).toMatchObject({ lastCreditAt: 1_700_000_456_000 });
+});
+
+test("shopping is not working: a purchase leaves the credit instant alone", async () => {
+  // `updated_at` moves here and `last_credit_at` must not, which is the whole
+  // reason the column was added rather than the existing one being read. A
+  // companion whose operator bought a mint has not served a request.
+  await boot();
+  clock = 1_700_000_500_000;
+  spend(ITEM_PRICES.mint * 2);
+
+  clock = 1_700_009_000_000;
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const bought = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "item", item: "mint" },
+  });
+  expect(bought?.status).toBeUndefined();
+  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_500_000);
+
+  // And neither does spending what was bought.
+  clock = 1_700_012_000_000;
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const used = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "mint" } });
+  expect(used?.status).toBeUndefined();
+  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_500_000);
+});
+
+test("a companion written before the column still reads back after it is added", async () => {
+  // Migration safety. An install that has been running since before migration 5
+  // has rows with no `last_credit_at`, and adding the column must leave every
+  // one of them readable — growth, wallet and save intact, with the new field
+  // reading as "never observed" rather than as an instant nobody recorded.
+  const earlier = (companion.migrations ?? []).filter((m) => m.version <= 4);
+  expect(earlier).toHaveLength(4);
+  expect(store.plugins.migrate("pokemon", earlier).failed).toBeUndefined();
+
+  store.plugins.run(
+    "pokemon",
+    `INSERT INTO {{companion}} (api_key_id, state, tokens_total, tokens_spent, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [KEY, serialiseState(freshState()), 4_321, 21, 111, 222],
+  );
+
+  // `boot` runs the full migration list, so version 5 lands on the row above.
+  await boot();
+
+  const row = readCompanion(storage, KEY);
+  expect(row?.tokensTotal).toBe(4_321);
+  expect(row?.tokensSpent).toBe(21);
+  expect(row?.state).not.toBeNull();
+  expect(row?.lastCreditAt).toBeNull();
+
+  // And the panel route serves it rather than throwing on the missing value.
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(found?.status).toBeUndefined();
+  expect(found?.json).toMatchObject({ lastCreditAt: null, tokensTotal: 4_321 });
+
+  // The next credit fills it in, so the row is not permanently activity-less.
+  clock = 1_700_000_777_000;
+  spend(9);
+  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_777_000);
 });
 
 test("a held item cannot be spent, however the request is spelled", async () => {

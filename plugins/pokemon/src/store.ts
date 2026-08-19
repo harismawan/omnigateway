@@ -61,6 +61,19 @@ export const MIGRATIONS: readonly PluginMigration[] = [
       )
     `,
   },
+  {
+    version: 5,
+    // When this key last *earned*, which `updated_at` is not: a purchase, an
+    // item use and a settle all bump that, so it answers "when did the row
+    // change" rather than "when did traffic arrive". The panel needs the second
+    // one to say whether a companion is working or asleep.
+    //
+    // Nullable with no default, deliberately. A companion written before this
+    // column existed has never had a credit *observed*, and backfilling
+    // `updated_at` into it would invent traffic that may never have happened —
+    // an idle-looking companion is a smaller lie than a working-looking one.
+    sql: `ALTER TABLE {{companion}} ADD COLUMN last_credit_at INTEGER`,
+  },
 ];
 
 /**
@@ -88,6 +101,8 @@ export type CompanionRow = {
   state: CompanionState | null;
   tokensTotal: number;
   tokensSpent: number;
+  /** When tokens last landed, or null for a row that predates the column. */
+  lastCreditAt: number | null;
 };
 
 /** Spendable balance. Growth is never rewound by a purchase; only this shrinks. */
@@ -100,11 +115,13 @@ type StoredCompanion = {
   state: string;
   tokens_total: number;
   tokens_spent: number;
+  last_credit_at: number | null;
 };
 
 export function readCompanion(storage: PluginStorage, apiKeyId: string): CompanionRow | null {
   const row = storage.get<StoredCompanion>(
-    "SELECT api_key_id, state, tokens_total, tokens_spent FROM {{companion}} WHERE api_key_id = ?",
+    `SELECT api_key_id, state, tokens_total, tokens_spent, last_credit_at
+     FROM {{companion}} WHERE api_key_id = ?`,
     [apiKeyId],
   );
   if (row === null) return null;
@@ -113,6 +130,11 @@ export function readCompanion(storage: PluginStorage, apiKeyId: string): Compani
     state: parseState(row.state),
     tokensTotal: row.tokens_total,
     tokensSpent: row.tokens_spent,
+    // Taken straight from the column. A `?? null` here was tried and deleted:
+    // migration 5 gives every row the column and `bun:sqlite` hands back SQL
+    // NULL as `null`, so the coalesce could not change an outcome — and no
+    // mutation of it could fail a test, which is the definition of decoration.
+    lastCreditAt: row.last_credit_at,
   };
 }
 
@@ -127,6 +149,10 @@ export function readCompanion(storage: PluginStorage, apiKeyId: string): Compani
  * The counter only ever increases. It is never recomputed from `request_logs`,
  * because retention prunes that table and a recomputed meter would run backwards
  * after a sweep — a Pokémon de-evolving because an operator tidied a database.
+ *
+ * This is the **only** site that writes `last_credit_at`. Purchases, item uses
+ * and settles all move `updated_at` and must leave this one alone, or the
+ * panel's activity state would read a shopping trip as work.
  */
 export function creditTokens(
   storage: PluginStorage,
@@ -136,12 +162,13 @@ export function creditTokens(
 ): void {
   if (tokens <= 0) return;
   storage.run(
-    `INSERT INTO {{companion}} (api_key_id, state, tokens_total, tokens_spent, created_at, updated_at)
-     VALUES (?, ?, ?, 0, ?, ?)
+    `INSERT INTO {{companion}} (api_key_id, state, tokens_total, tokens_spent, created_at, updated_at, last_credit_at)
+     VALUES (?, ?, ?, 0, ?, ?, ?)
      ON CONFLICT(api_key_id) DO UPDATE SET
        tokens_total = tokens_total + excluded.tokens_total,
-       updated_at = excluded.updated_at`,
-    [apiKeyId, serialiseState(freshState()), Math.trunc(tokens), now, now],
+       updated_at = excluded.updated_at,
+       last_credit_at = excluded.last_credit_at`,
+    [apiKeyId, serialiseState(freshState()), Math.trunc(tokens), now, now, now],
   );
 }
 
