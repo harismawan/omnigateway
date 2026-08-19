@@ -1,13 +1,12 @@
 {
   "name": "@omnigateway/dashboard-sdk",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
-  "private": true,
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@omnigateway/plugin-api": "workspace:*"
+    "@omnigateway/plugin-api": "^1.0.0"
   },
   "peerDependencies": {
     "@tanstack/react-query": ">=5",
@@ -17,5 +16,30 @@
   },
   "devDependencies": {
     "@types/react": "^19.2.0"
+  },
+  "description": "Build a UI panel for an OmniGateway plugin against the admin console's React",
+  "keywords": [
+    "omnigateway",
+    "plugin",
+    "sdk",
+    "react"
+  ],
+  "license": "MIT",
+  "author": "Harismawan <mail@harismawan.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harismawan/omnigateway.git"
+  },
+  "homepage": "https://github.com/harismawan/omnigateway/blob/main/docs/writing-a-plugin.md",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
   }
 }

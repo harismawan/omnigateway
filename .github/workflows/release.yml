@@ -71,6 +71,39 @@ jobs:
         run: npm publish --access public
         working-directory: dist/npm
 
+      # The two SDK packages a plugin author installs. Unlike the gateway they
+      # carry their own versions, and those versions are not this tag: they are
+      # `PLUGIN_API_VERSION` and `DASHBOARD_SDK_VERSION`, the numbers the host
+      # actually enforces a manifest against. Tying them to the gateway's tag
+      # would republish an identical contract on every patch release and make
+      # the `sdk` ranges in every manifest mean nothing.
+      #
+      # The consequence is that most releases publish neither, so an unchanged
+      # version is skipped rather than failing the run. `npm view` is the check;
+      # a registry lookup that errors for any other reason leaves the version
+      # unset and the publish is attempted, which fails loudly rather than
+      # silently skipping.
+      #
+      # Order matters: the SDK depends on the API, so the API goes first. A
+      # brand-new package name has no trusted-publishing policy on npmjs.com and
+      # cannot get one automatically — the first publish of each needs that
+      # policy created up front, or it fails here with a permissions error that
+      # does not say so.
+      - name: Publish the plugin SDKs
+        run: |
+          set -euo pipefail
+          for dir in packages/plugin-api packages/dashboard-sdk; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            if [ "$(npm view "$name@$version" version 2>/dev/null || true)" = "$version" ]; then
+              echo "$name@$version is already published; skipping"
+            else
+              echo "publishing $name@$version"
+              cp LICENSE "$dir/LICENSE"
+              (cd "$dir" && npm publish --access public)
+            fi
+          done
+
       # After the publish, never before. A release created first would announce
       # a version that a failing publish then never puts on npm, and the fix
       # would be deleting a release people may already have seen. This way the

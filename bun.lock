@@ -100,9 +100,9 @@
     },
     "packages/dashboard-sdk": {
       "name": "@omnigateway/dashboard-sdk",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "dependencies": {
-        "@omnigateway/plugin-api": "workspace:*",
+        "@omnigateway/plugin-api": "^1.0.0",
       },
       "devDependencies": {
         "@types/react": "^19.2.0",
@@ -120,7 +120,7 @@
     },
     "packages/plugin-api": {
       "name": "@omnigateway/plugin-api",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "dependencies": {
         "zod": "4.4.3",
       },

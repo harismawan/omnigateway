@@ -12,3 +12,6 @@ apps/dashboard/src/routeTree.gen.ts
 .claude/
 .superpowers/
 graphify-out/
+# Copied in by the release workflow; the repository has one at the root.
+packages/plugin-api/LICENSE
+packages/dashboard-sdk/LICENSE
