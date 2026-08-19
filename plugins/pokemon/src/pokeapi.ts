@@ -143,9 +143,9 @@ const decoder = new TextDecoder();
 async function readJson(deps: PokeApiDeps, path: string): Promise<unknown> {
   try {
     const bytes = await deps.files.read(path);
-    // A zero-byte file is a truncated write, not an asset. Treating it as a hit
-    // would cache a permanent failure that only a manual `rm` could clear.
-    if (bytes === null || bytes.length === 0) return null;
+    if (bytes === null) return null;
+    // A truncated write needs no branch of its own: an empty or partial document
+    // fails to parse, and the `catch` below already means "refetch".
     return JSON.parse(decoder.decode(bytes)) as unknown;
   } catch {
     return null;

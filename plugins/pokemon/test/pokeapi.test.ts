@@ -127,6 +127,43 @@ test("a 404 sprite returns null rather than caching an error page", async () => 
   expect(store.size).toBe(0);
 });
 
+test("a zero-byte cached sprite is refetched rather than served", async () => {
+  // A truncated write is not an asset. Served as a hit it would be a permanent
+  // blank image that only a manual `rm` could clear — "never refetched" applied
+  // to a file that was never a sprite.
+  const { files, store } = memoryFiles();
+  store.set("sprites/25.gif", new Uint8Array(0));
+  const { net, calls } = stubNet(() => new Response(GIF));
+
+  expect(await spriteBytes(deps(net, files), 25, false)).toEqual(GIF);
+  expect(calls).toEqual([`${SPRITE_BASE}/25.gif`]);
+  expect(store.get("sprites/25.gif")).toEqual(GIF);
+});
+
+test("an empty 200 response is not a sprite and is not cached", async () => {
+  // A proxy or a CDN returning 200 with nothing in it is the failure that looks
+  // most like success. Cached, it would be indistinguishable from a real sprite
+  // forever.
+  const { files, store } = memoryFiles();
+  const { net } = stubNet(() => new Response(new Uint8Array(0), { status: 200 }));
+  expect(await spriteBytes(deps(net, files), 25, false)).toBeNull();
+  expect(store.size).toBe(0);
+});
+
+test("an unreadable sprite cache degrades to a fetch", async () => {
+  // A permissions error on `data/` must cost the cache, not the request.
+  const { files } = memoryFiles();
+  const unreadable: PluginFiles = {
+    ...files,
+    read: async () => {
+      throw new Error("EACCES");
+    },
+  };
+  const { net, calls } = stubNet(() => new Response(GIF));
+  expect(await spriteBytes(deps(net, unreadable), 25, false)).toEqual(GIF);
+  expect(calls).toEqual([`${SPRITE_BASE}/25.gif`]);
+});
+
 test("a species outside the animated range is refused before any fetch", async () => {
   const { files, store } = memoryFiles();
   const { net, calls } = stubNet(() => new Response(GIF));
@@ -209,9 +246,10 @@ test("a branching chain yields one line, not the whole tree", async () => {
   // nine-element chain would tell the economy otherwise.
   const { files } = memoryFiles();
   const { net } = stubNet((url) => {
-    if (url.endsWith("/pokemon-species/134")) {
+    const species = /\/pokemon-species\/(\d+)$/.exec(url);
+    if (species !== null) {
       return json(
-        speciesDoc(134, {
+        speciesDoc(Number(species[1]), {
           evolution_chain: { url: "https://pokeapi.co/api/v2/evolution-chain/67/" },
         }),
       );
@@ -221,8 +259,12 @@ test("a branching chain yields one line, not the whole tree", async () => {
     }
     return notFound();
   });
+  const api = deps(net, files);
 
-  expect((await speciesDetail(deps(net, files), 134))?.chain).toEqual([133, 134]);
+  expect((await speciesDetail(api, 134))?.chain).toEqual([133, 134]);
+  // And from *above* the branch point: Eevee's own line takes one branch, so it
+  // is two stages long. Flattening the tree would make it four.
+  expect((await speciesDetail(api, 133))?.chain).toEqual([133, 134]);
 });
 
 test("a chain member outside the animated range is dropped from the line", async () => {
