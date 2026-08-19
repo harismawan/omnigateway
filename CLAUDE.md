@@ -84,8 +84,10 @@ and `bun run lint`.
 12. Dashboard calls `/api/*` only, with one exception: `/health`, polled to watch the gateway leave
     and return across a restart. During a restart there is no session and no authenticated surface
     to probe, so liveness is the one question `/api/*` cannot answer. It may import
-    `@omni/store/types`, `@omni/ir`, and catalog subpath, but not provider adapters, HTTP client, or
-    runtime store code.
+    `@omni/store/types`, `@omni/ir`, catalog subpath, and `@omni/dashboard-sdk`, but not provider
+    adapters, HTTP client, or runtime store code. The SDK is permitted because it is a browser leaf
+    with no imports at all, and because the alternative was a second copy of the rule about what may
+    leave a plugin's own API prefix — a rule held in two places is one that ends up true in one.
 13. `packages/rtk` stays pure like `ir` and `router`: no I/O, clocks, or randomness. It rewrites
     tool-result content only and preserves errors and non-tool-result blocks. `@omni/rtk/catalog` is
     a leaf holding the filter-id union; `@omni/store` imports that subpath alone.
