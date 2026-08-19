@@ -1,12 +1,16 @@
 # Writing a plugin
 
-A plugin adds routes, storage and console UI to an OmniGateway installation
-without being part of this repository. This is the procedure, and the reasons
-several steps exist at all.
+The procedure for adding a plugin, and the reasons several of its steps exist at
+all. Kept out of [CLAUDE.md](../CLAUDE.md) for the reason the provider checklist
+is: you need it on the day you write a plugin and never otherwise, and that file
+is loaded into every session.
 
-Read this alongside
-[the host design](superpowers/specs/2026-08-19-plugin-host-design.md), which
-records why the surface is shaped this way.
+For the boundary that governs plugin code — what the capability context hands
+over and what it never does — see [CLAUDE.md](../CLAUDE.md#architectural-boundaries)
+rule 15. [ARCHITECTURE.md](../ARCHITECTURE.md#plugins) has the trust posture, the
+storage track, the event guarantees and why the console shares one React, and
+[the host design](superpowers/specs/2026-08-19-plugin-host-design.md) records the
+decisions behind all of it.
 
 ## Before anything else: what a plugin can reach
 

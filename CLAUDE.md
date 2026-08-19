@@ -117,8 +117,8 @@ skipping them produced a bug that read as something else entirely.
 
 The procedure lives in [docs/writing-a-plugin.md](docs/writing-a-plugin.md): the manifest, the
 capability context, the storage placeholder, the event guarantees, and how a UI bundle shares the
-console's React. Read it before adding or reviewing one. `ARCHITECTURE.md#plugins` explains why the
-surface is shaped that way; boundary 15 above is the short version.
+console's React. Read it before adding or reviewing one — it opens with what a plugin can reach,
+which decides whether the rest of it is a good idea.
 
 ## TypeScript and dashboard style
 
