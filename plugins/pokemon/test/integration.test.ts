@@ -120,6 +120,7 @@ test("the plugin subscribes to both events and exposes its routes", async () => 
     "GET /keys/:id",
     "GET /sprite/:species",
     "POST /keys/:id/purchase",
+    "POST /keys/:id/use",
   ]);
 });
 
@@ -252,15 +253,44 @@ test("a weekly ceiling pays at most weekly, and never on the install itself", as
   expect(candy()).toBe(10);
 });
 
-test("a short window re-arms on its own schedule, not the weekly one", async () => {
+test("a five-hour window re-arms on its own schedule, not the weekly one", async () => {
   await boot();
   spend(1_000);
-  const short: LimitReached = { apiKeyId: KEY, dimension: "requests", window: "1m", at: 1 };
+  const short: LimitReached = { apiKeyId: KEY, dimension: "requests", window: "5h", at: 1 };
 
   onLimit?.(short);
-  clock += WINDOW_MS["1m"];
+  clock += WINDOW_MS["5h"];
   onLimit?.(short);
   expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(1);
+});
+
+test("a minute ceiling pays nothing, however often it is hit", async () => {
+  // Rated by its own length it would pay a candy a minute — 100M XP each,
+  // ~144B a day against a 750M–6B graduation. The economy's premise is that
+  // growth costs work, and a minute is not a span in which work happened.
+  await boot();
+  spend(1_000);
+  const minute: LimitReached = { apiKeyId: KEY, dimension: "requests", window: "1m", at: 1 };
+  for (let i = 0; i < 5; i++) {
+    onLimit?.(minute);
+    clock += WINDOW_MS["1m"];
+  }
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(0);
+});
+
+test("a key at every ceiling at once is paid for none of them", async () => {
+  // The install-instant windfall, end to end. Seeding is per window, so each of
+  // these seeds and none pays — the earlier per-key flag paid for every window
+  // after the first, up to eleven free candies for a key merely already at its
+  // limits.
+  await boot();
+  spend(1_000);
+  for (const dimension of ["tokens", "requests", "spend"] as const) {
+    for (const window of ["1w", "5h"] as const) {
+      onLimit?.({ apiKeyId: KEY, dimension, window, at: 1 });
+    }
+  }
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(0);
 });
 
 test("a limit on a key with no companion is ignored rather than crashing", async () => {

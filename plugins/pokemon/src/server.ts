@@ -14,10 +14,11 @@ import {
 } from "./balance.ts";
 import { decideGrant, windowKey } from "./grants.ts";
 import { speciesDetail, speciesIndex, spriteBytes } from "./pokeapi.ts";
-import { roll } from "./roll.ts";
+import { NATURES, roll } from "./roll.ts";
 import type { CompanionState } from "./state.ts";
 import { hasShinyCharm } from "./state.ts";
 import {
+  consume,
   creditTokens,
   lastGrantedAt,
   MIGRATIONS,
@@ -84,10 +85,10 @@ export default definePlugin({
           {
             baseId: event.baseId,
             finalId: event.finalId,
-            chainOrder: [event.baseId, event.finalId],
+            chainOrder: event.chainOrder,
             rarity: event.rarity,
             isShiny: event.isShiny,
-            nature: null,
+            nature: event.nature,
             caughtAt: ctx.now(),
           },
           dexId(apiKeyId, event),
@@ -177,17 +178,14 @@ export default definePlugin({
         const decision = decideGrant({
           window: event.window,
           lastGrantedAt: lastGrantedAt(storage, event.apiKeyId, key),
-          seeded: row.state.grantSeeded,
           now: ctx.now(),
         });
 
         if (!decision.grant) {
+          // Seeding is a write to the grants table alone: the window records
+          // that it has been seen, and the companion's own state is untouched.
           if (decision.seedAt !== undefined) {
             setGrantedAt(storage, event.apiKeyId, key, decision.seedAt);
-            storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
-              JSON.stringify({ ...row.state, grantSeeded: true }),
-              event.apiKeyId,
-            ]);
           }
           return;
         }
@@ -263,6 +261,31 @@ export default definePlugin({
             // caching hard, and it is why the panel stays responsive offline.
             cacheControl: "public, max-age=31536000, immutable",
           };
+        },
+      },
+      {
+        method: "POST",
+        path: "/keys/:id/use",
+        handler: (request) => {
+          // The other half of a grant. Without this route a granted candy was a
+          // counter that only ever went up: the shop's rare candy applied its XP
+          // and charged the wallet, and nothing anywhere read `inventory`. A
+          // whole spec section, a table and an event subscription produced
+          // something unspendable.
+          const apiKeyId = request.params.id ?? "";
+          const item = parseHeldItem(request.body);
+          if (item === null) return { status: 400, json: { error: "unknown item" } };
+
+          const result = consume(
+            storage,
+            apiKeyId,
+            item,
+            (state) => useItem(state, item),
+            ctx.now(),
+          );
+          if (!result.ok) return { status: 409, json: { error: result.reason } };
+          settleAndRecord(apiKeyId);
+          return { json: { ok: true } };
         },
       },
       {
@@ -344,18 +367,49 @@ function applyPurchase(state: CompanionState, entry: ShopEntry): CompanionState 
   if (entry.kind === "egg") {
     return { ...state, active: null, eggUsage: 0, eggTier: entry.tier, pendingHatch: null };
   }
-  if (entry.item === "rareCandy") {
-    // Injected as growth through the same path everything else uses, so a candy
-    // can carry a stage and evolve exactly as earned tokens would.
-    return state.active === null
-      ? { ...state, eggUsage: state.eggUsage + RARE_CANDY_XP }
-      : {
-          ...state,
-          active: { ...state.active, usedAtStage: state.active.usedAtStage + RARE_CANDY_XP },
-        };
-  }
+  // A bought candy is stocked rather than spent on the spot, so buying and
+  // being granted one put the same thing in the same place — and `use` is the
+  // single site that applies the effect.
   return {
     ...state,
     inventory: { ...state.inventory, [entry.item]: (state.inventory[entry.item] ?? 0) + 1 },
   };
+}
+
+/** Items a player holds and spends, as opposed to the passive charm. */
+export type HeldItem = "rareCandy" | "mint";
+
+function parseHeldItem(body: unknown): HeldItem | null {
+  if (typeof body !== "object" || body === null) return null;
+  const item = (body as Record<string, unknown>).item;
+  return item === "rareCandy" || item === "mint" ? item : null;
+}
+
+/**
+ * What spending a held item does.
+ *
+ * A candy is injected as growth through the same field earned tokens land in,
+ * so it carries a stage and evolves exactly as work would — no separate path,
+ * no separate rules.
+ *
+ * A mint rerolls the nature, which is cosmetic and affects nothing else. It was
+ * previously a no-op that incremented a counter nobody read, and a test asserted
+ * that counter, pinning the no-op as correct.
+ */
+function useItem(state: CompanionState, item: HeldItem): CompanionState {
+  if (item === "mint") {
+    if (state.active === null) return state;
+    const index = NATURES.indexOf(state.active.nature);
+    // Deterministic rather than random: `advance` and everything around it is
+    // pure, and a reroll that needed entropy would be the one call in the plugin
+    // that could not be reproduced. Cycling is a reroll a player can repeat.
+    const nature = NATURES[(index + 1) % NATURES.length] as (typeof NATURES)[number];
+    return { ...state, active: { ...state.active, nature } };
+  }
+  return state.active === null
+    ? { ...state, eggUsage: state.eggUsage + RARE_CANDY_XP }
+    : {
+        ...state,
+        active: { ...state.active, usedAtStage: state.active.usedAtStage + RARE_CANDY_XP },
+      };
 }

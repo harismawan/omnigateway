@@ -1,4 +1,5 @@
 import { EGG_HATCH_THRESHOLD, phaseThreshold, type Rarity } from "./balance.ts";
+import type { Nature } from "./roll.ts";
 import type { CompanionState, MonState } from "./state.ts";
 
 /**
@@ -12,7 +13,22 @@ import type { CompanionState, MonState } from "./state.ts";
 export type CompanionEvent =
   | { kind: "hatched"; speciesId: number; isShiny: boolean; ditto: boolean }
   | { kind: "evolved"; from: number; to: number }
-  | { kind: "graduated"; baseId: number; finalId: number; rarity: Rarity; isShiny: boolean };
+  | {
+      kind: "graduated";
+      baseId: number;
+      finalId: number;
+      /**
+       * The whole line, base first.
+       *
+       * Carried on the event because the Dex stores it and `advance` is the only
+       * thing that knows it — reconstructing `[baseId, finalId]` at the call
+       * site lost every middle form and wrote `[50, 50]` for a one-form line.
+       */
+      chainOrder: readonly number[];
+      rarity: Rarity;
+      isShiny: boolean;
+      nature: Nature;
+    };
 
 export type AdvanceResult = {
   state: CompanionState;
@@ -41,37 +57,39 @@ const MAX_TRANSITIONS_PER_ADVANCE = 64;
  */
 export function advance(state: CompanionState, tokensTotal: number): AdvanceResult {
   const gained = Math.max(0, Math.trunc(tokensTotal) - state.consumedTotal);
-  if (gained === 0) return { state, events: [] };
 
   const events: CompanionEvent[] = [];
   let next: CompanionState = { ...state, consumedTotal: Math.trunc(tokensTotal) };
-  let carry = gained;
 
-  for (let step = 0; step < MAX_TRANSITIONS_PER_ADVANCE && carry > 0; step++) {
+  // Credit first, then look for transitions the new total makes possible. The
+  // two are separate on purpose: an earlier version gated the whole function on
+  // `gained > 0`, which meant an injected effect — a rare candy — sat in
+  // `usedAtStage` past its threshold and did not evolve until the next real
+  // request happened to arrive. On a revoked key that request never comes.
+  if (gained > 0) {
+    next =
+      next.active === null
+        ? { ...next, eggUsage: next.eggUsage + gained }
+        : { ...next, active: { ...next.active, usedAtStage: next.active.usedAtStage + gained } };
+  }
+
+  for (let step = 0; step < MAX_TRANSITIONS_PER_ADVANCE; step++) {
     if (next.active === null) {
-      const total = next.eggUsage + carry;
-      if (total < EGG_HATCH_THRESHOLD) {
-        next = { ...next, eggUsage: total };
-        carry = 0;
-        break;
-      }
+      if (next.eggUsage < EGG_HATCH_THRESHOLD) break;
       // The egg has met its threshold. Whether it can open is a different
       // question: the species is rolled ahead of time, and without that roll
-      // there is nothing to become. The tokens are held at the threshold rather
-      // than spent, so the moment a roll lands the hatch happens with its
-      // progress intact.
-      if (next.pendingHatch === null) {
-        next = { ...next, eggUsage: total };
-        carry = 0;
-        break;
-      }
+      // there is nothing to become. The progress waits rather than draining, so
+      // the moment a roll lands the hatch happens with its incubation intact.
+      if (next.pendingHatch === null) break;
 
       const hatch = next.pendingHatch;
       const active: MonState = {
-        baseId: hatch.speciesId,
+        baseId: hatch.path[0] ?? hatch.speciesId,
         plannedPath: hatch.path,
         stageIndex: 0,
-        usedAtStage: 0,
+        // Everything past the threshold carries into the hatchling rather than
+        // being lost, so a burst that overshoots is not punished.
+        usedAtStage: next.eggUsage - EGG_HATCH_THRESHOLD,
         rarity: hatch.rarity,
         isShiny: hatch.isShiny,
         nature: hatch.nature,
@@ -84,30 +102,22 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
         isShiny: active.isShiny,
         ditto: active.dittoDisguise !== null,
       });
-      // Everything past the threshold carries into the hatchling rather than
-      // being lost, so a burst that overshoots is not punished.
-      carry = total - EGG_HATCH_THRESHOLD;
       next = { ...next, active, eggUsage: 0, eggTier: null, pendingHatch: null };
       continue;
     }
 
     const mon = next.active;
     const needed = phaseThreshold(mon.rarity, mon.plannedPath.length, mon.stageIndex);
-    const atStage = mon.usedAtStage + carry;
-    if (atStage < needed) {
-      next = { ...next, active: { ...mon, usedAtStage: atStage } };
-      carry = 0;
-      break;
-    }
+    if (mon.usedAtStage < needed) break;
 
-    carry = atStage - needed;
-    const isFinalStage = mon.stageIndex >= mon.plannedPath.length - 1;
-
-    if (!isFinalStage) {
-      const from = mon.plannedPath[mon.stageIndex] as number;
-      const to = mon.plannedPath[mon.stageIndex + 1] as number;
-      events.push({ kind: "evolved", from, to });
-      next = { ...next, active: { ...mon, stageIndex: mon.stageIndex + 1, usedAtStage: 0 } };
+    const excess = mon.usedAtStage - needed;
+    if (mon.stageIndex < mon.plannedPath.length - 1) {
+      events.push({
+        kind: "evolved",
+        from: mon.plannedPath[mon.stageIndex] as number,
+        to: mon.plannedPath[mon.stageIndex + 1] as number,
+      });
+      next = { ...next, active: { ...mon, stageIndex: mon.stageIndex + 1, usedAtStage: excess } };
       continue;
     }
 
@@ -115,21 +125,14 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
       kind: "graduated",
       baseId: mon.baseId,
       finalId: mon.plannedPath[mon.plannedPath.length - 1] as number,
+      chainOrder: mon.plannedPath,
       rarity: mon.rarity,
       isShiny: mon.isShiny,
+      nature: mon.nature,
     });
-    // Graduating returns to an egg, carrying the overflow. The Dex row is the
+    // Graduating returns to an egg carrying the overflow. The Dex row is the
     // caller's to write from the event: this function owns no storage.
-    next = { ...next, active: null, eggUsage: 0, eggTier: null, pendingHatch: null };
-  }
-
-  // Whatever could not be spent still counts as consumed. Holding it back would
-  // make the meter disagree with the credited total, and the disagreement would
-  // grow every time a transition was blocked on a missing roll.
-  if (carry > 0 && next.active !== null) {
-    next = { ...next, active: { ...next.active, usedAtStage: next.active.usedAtStage + carry } };
-  } else if (carry > 0) {
-    next = { ...next, eggUsage: next.eggUsage + carry };
+    next = { ...next, active: null, eggUsage: excess, eggTier: null, pendingHatch: null };
   }
 
   return { state: next, events };

@@ -8,6 +8,7 @@ import { createStore, deriveKey } from "@omni/store";
 import { EGG_HATCH_THRESHOLD, ITEM_PRICES } from "../src/balance.ts";
 import { freshState, serialiseState } from "../src/state.ts";
 import {
+  consume,
   creditTokens,
   lastGrantedAt,
   MIGRATIONS,
@@ -290,4 +291,57 @@ test("a state written by hand still round-trips", () => {
     KEY,
   ]);
   expect(readCompanion(storage, KEY)?.state).toEqual(freshState());
+});
+
+test("a credit onto an unreadable save never overwrites it", () => {
+  // The single most irreversible thing this plugin can do, and it was untested:
+  // the existing coverage credited BEFORE corrupting the row, so adding
+  // `state = excluded.state` to the ON CONFLICT would have left the whole suite
+  // green while destroying every unreadable save on the next request.
+  creditTokens(storage, KEY, 1_000, 1);
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["{ broken", KEY]);
+
+  creditTokens(storage, KEY, 5_000, 2);
+
+  const raw = storage.get<{ state: string; tokens_total: number }>(
+    "SELECT state, tokens_total FROM {{companion}} WHERE api_key_id = ?",
+    [KEY],
+  );
+  expect(raw?.state).toBe("{ broken");
+  // The counter still advances: the tokens were spent whether or not the save
+  // can be read, and losing them would compound one problem into two.
+  expect(raw?.tokens_total).toBe(6_000);
+});
+
+test("a held item is spent from inventory, not from the wallet", () => {
+  // A granted candy was never bought. Charging for it would charge twice.
+  creditTokens(storage, KEY, 1_000, 1);
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+    JSON.stringify({ ...freshState(), inventory: { rareCandy: 2, mint: 0, shinyCharm: 0 } }),
+    KEY,
+  ]);
+
+  const result = consume(storage, KEY, "rareCandy", (s) => s, 2);
+  expect(result.ok).toBe(true);
+
+  const row = readCompanion(storage, KEY);
+  expect(row?.state?.inventory.rareCandy).toBe(1);
+  expect(row?.tokensSpent).toBe(0);
+});
+
+test("an item nobody holds cannot be spent", () => {
+  creditTokens(storage, KEY, 1_000, 1);
+  expect(consume(storage, KEY, "rareCandy", (s) => s, 2)).toEqual({
+    ok: false,
+    reason: "none-held",
+  });
+});
+
+test("a held item cannot be spent against an unreadable save", () => {
+  creditTokens(storage, KEY, 1_000, 1);
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["nonsense", KEY]);
+  expect(consume(storage, KEY, "rareCandy", (s) => s, 2)).toEqual({
+    ok: false,
+    reason: "unreadable",
+  });
 });

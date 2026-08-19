@@ -58,14 +58,16 @@ test("an egg with no rolled species holds at its threshold instead of opening", 
   expect(result.state.active).toBeNull();
   expect(result.state.eggUsage).toBe(EGG_HATCH_THRESHOLD * 3);
 
-  // And it opens the moment a roll lands, with the progress intact.
+  // And it opens the moment a roll lands, needing no further tokens.
+  //
+  // This assertion used to read the other way — that nothing moves without a new
+  // credit — and that was the bug: a state already past its threshold sat there
+  // until the next request happened to arrive, which on a quiet or revoked key
+  // is never. Transitions are driven by the state now, not by the arrival of
+  // tokens.
   const withRoll = advance({ ...result.state, pendingHatch: readyEgg().pendingHatch }, 0);
-  expect(withRoll.events).toEqual([]); // no new tokens, so nothing moves yet
-  const nudged = advance(
-    { ...result.state, pendingHatch: readyEgg().pendingHatch },
-    EGG_HATCH_THRESHOLD * 3 + 1,
-  );
-  expect(nudged.events[0]?.kind).toBe("hatched");
+  expect(withRoll.events[0]?.kind).toBe("hatched");
+  expect(withRoll.state.active?.usedAtStage).toBe(EGG_HATCH_THRESHOLD * 2);
 });
 
 test("a stage completes into an evolution, and the overflow carries", () => {
@@ -91,6 +93,34 @@ test("a whole line graduates and returns to an egg", () => {
   const graduation = result.events.at(-1);
   expect(graduation).toMatchObject({ kind: "graduated", baseId: 1, finalId: 3, rarity: "common" });
   expect(result.state.active).toBeNull();
+});
+
+test("a graduation carries the whole line and the nature, not just its ends", () => {
+  // The Dex stores `chain_order`, and `advance` is the only thing that knows the
+  // line. Rebuilding `[baseId, finalId]` at the call site lost every middle form
+  // and wrote `[50, 50]` for a one-form line — with the column, the reader and
+  // the spec all expecting a chain.
+  // A nature that is NOT the parser's fallback, deliberately. An earlier version
+  // of this used "hardy" — which is also the default — so replacing the field
+  // with a hard-coded default was invisible and the mutation survived.
+  const start = readyEgg({
+    pendingHatch: {
+      speciesId: 1,
+      path: [1, 2, 3],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      ditto: false,
+    },
+  });
+  const result = advance(start, EGG_HATCH_THRESHOLD + graduationTotal("common"));
+  const graduation = result.events.at(-1);
+
+  expect(graduation).toMatchObject({
+    kind: "graduated",
+    chainOrder: [1, 2, 3],
+    nature: "sassy",
+  });
 });
 
 test("a one-form line graduates without ever evolving", () => {

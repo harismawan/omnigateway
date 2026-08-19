@@ -85,7 +85,6 @@ export type CompanionState = {
    * Without it, installing the plugin against an account already at its ceiling
    * pays out retroactively for windows it never watched fill.
    */
-  grantSeeded: boolean;
 };
 
 export function freshState(): CompanionState {
@@ -96,7 +95,6 @@ export function freshState(): CompanionState {
     eggTier: null,
     pendingHatch: null,
     inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
-    grantSeeded: false,
   };
 }
 
@@ -220,7 +218,6 @@ export function parseState(raw: string): CompanionState | null {
     eggTier: eggTier === null || eggTier === "legendary" ? null : eggTier,
     pendingHatch,
     inventory,
-    grantSeeded: parsed.grantSeeded === true,
   };
 }
 

@@ -15,14 +15,23 @@ export function windowKey(event: Pick<LimitReached, "dimension" | "window">): st
 }
 
 /**
- * How many candies a window is worth when it fills.
+ * How many candies a window is worth when it fills, or zero for one that pays
+ * nothing.
  *
- * A weekly ceiling is a week of work and a short one is an afternoon's burst, so
- * they are not worth the same. Split by span rather than by dimension, because
- * what is being rewarded is the length of the effort.
+ * A weekly ceiling is a week of work and a five-hour one is an afternoon's
+ * burst. A one-minute ceiling is neither, and it pays nothing at all — rated by
+ * its own duration it would pay a candy a minute, which at 100M XP each is
+ * ~144B a day against a 750M–6B graduation. The economy's whole premise is that
+ * growth costs real work, and a minute window is a rate at which no work
+ * happened.
+ *
+ * Split by span rather than by dimension, because what is rewarded is the
+ * length of the effort.
  */
 export function grantSize(window: LimitReached["window"]): number {
-  return window === "1w" ? 5 : 1;
+  if (window === "1w") return 5;
+  if (window === "5h") return 1;
+  return 0;
 }
 
 export type GrantDecision =
@@ -54,15 +63,21 @@ export type GrantDecision =
  */
 export function decideGrant(input: {
   window: LimitReached["window"];
-  /** When this window last paid, or null for never. */
+  /** When this window last paid or was seeded, or null for never seen. */
   lastGrantedAt: number | null;
-  /** Whether this key has been observed at all. */
-  seeded: boolean;
   now: number;
 }): GrantDecision {
-  if (!input.seeded) return { grant: false, seedAt: input.now };
-  if (input.lastGrantedAt !== null && input.now - input.lastGrantedAt < WINDOW_MS[input.window]) {
-    return { grant: false };
-  }
+  if (grantSize(input.window) === 0) return { grant: false };
+
+  // Seeded PER WINDOW, which is the correction. Seeding per key meant the first
+  // window seen recorded the install and every OTHER window paid immediately on
+  // its first event — with four dimensions and three window lengths, up to
+  // eleven free candies at the install instant, for a key that was merely
+  // already at its ceilings. The spec forbids exactly that by name, and a
+  // per-key flag cannot express it: what needs to be "seen before" is the
+  // window, because the window is what pays.
+  if (input.lastGrantedAt === null) return { grant: false, seedAt: input.now };
+
+  if (input.now - input.lastGrantedAt < WINDOW_MS[input.window]) return { grant: false };
   return { grant: true, count: grantSize(input.window), at: input.now };
 }

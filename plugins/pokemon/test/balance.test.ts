@@ -84,11 +84,25 @@ test("a rare candy costs more than the growth it grants", () => {
   expect(ITEM_PRICES.rareCandy).toBe(RARE_CANDY_XP * 5);
 });
 
-test("one candy cannot skip a stage, even the cheapest one", () => {
-  // A candy is meant to be a nudge. If its XP cleared a whole stage it would
-  // chain through evolutions and graduate a line in a single click.
-  const cheapestStage = phaseThreshold("common", 1, 0);
-  expect(RARE_CANDY_XP).toBeLessThan(cheapestStage);
+test("one candy cannot skip a stage, minimised over every form count", () => {
+  // A candy is a nudge. If its XP cleared a whole stage it would chain through
+  // evolutions and graduate a line in a single click.
+  //
+  // This used to compare against `phaseThreshold("common", 1, 0)` — a one-form
+  // line, whose only stage IS the whole graduation total, 750M. That is the
+  // most expensive stage in the game, so the assertion held with 7x the margin
+  // it claimed and would have survived raising the candy to 700M. The cheapest
+  // stage is the first of a four-form line at 75M, which the candy already
+  // exceeds; the tightest case a real chain produces is the three-form common
+  // at 125M.
+  const cheapest = Math.min(...[1, 2, 3, 4].map((forms) => phaseThreshold("common", forms, 0)));
+  expect(cheapest).toBe(phaseThreshold("common", 4, 0));
+
+  // Stated against the tightest chain the parser can actually produce, and
+  // asserted as a ratio so the margin itself is visible rather than implied.
+  const tightestRealLine = phaseThreshold("common", 3, 0);
+  expect(RARE_CANDY_XP).toBeLessThan(tightestRealLine);
+  expect(tightestRealLine / RARE_CANDY_XP).toBeGreaterThanOrEqual(1.25);
 });
 
 test("egg incubation is small next to a single stage, so an egg is a prelude", () => {

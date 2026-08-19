@@ -4,14 +4,11 @@ import { decideGrant, grantSize, windowKey } from "../src/grants.ts";
 
 const NOW = 1_700_000_000_000;
 
-test("a window's key is its dimension and window, and nothing volatile", () => {
-  // The bug this prevents has shipped twice, in two codebases. A reset instant
+test("a window's key is its dimension and its length", () => {
+  // The bug this prevents has shipped twice, in two codebases: a reset instant
   // is recomputed on every evaluation, so keying on it re-fires the grant on
   // every refresh while the key sits at its ceiling.
   expect(windowKey({ dimension: "tokens", window: "1w" })).toBe("tokens:1w");
-  expect(windowKey({ dimension: "spend", window: "5h" })).toBe(
-    windowKey({ dimension: "spend", window: "5h" }),
-  );
 });
 
 test("different windows on the same dimension are different keys", () => {
@@ -21,81 +18,70 @@ test("different windows on the same dimension are different keys", () => {
   );
 });
 
-test("a week's ceiling is worth more than an afternoon's", () => {
+test("a week is worth more than an afternoon, and a minute is worth nothing", () => {
+  // A one-minute ceiling rated by its own duration would pay a candy a minute —
+  // 100M XP each, ~144B a day, against a 750M–6B graduation. The economy's
+  // premise is that growth costs real work, and a minute is not a span in which
+  // work happened.
   expect(grantSize("1w")).toBe(5);
   expect(grantSize("5h")).toBe(1);
-  expect(grantSize("1m")).toBe(1);
+  expect(grantSize("1m")).toBe(0);
 });
 
-test("the first sighting of a key seeds and pays nothing", () => {
-  // Installing against a key already at its ceiling must not be a backdated
-  // windfall.
-  const decision = decideGrant({ window: "1w", lastGrantedAt: null, seeded: false, now: NOW });
-  expect(decision.grant).toBe(false);
-  if (decision.grant) return;
-  expect(decision.seedAt).toBe(NOW);
+test("a minute window never pays, however long it has been", () => {
+  expect(decideGrant({ window: "1m", lastGrantedAt: NOW - WINDOW_MS["1w"], now: NOW }).grant).toBe(
+    false,
+  );
+  expect(decideGrant({ window: "1m", lastGrantedAt: null, now: NOW })).toEqual({ grant: false });
 });
 
-test("a seeded key's next filled window pays", () => {
-  expect(decideGrant({ window: "1w", lastGrantedAt: null, seeded: true, now: NOW })).toEqual({
-    grant: true,
-    count: 5,
-    at: NOW,
-  });
-});
-
-test("a key parked at its ceiling is not paid on every evaluation", () => {
-  // `LimitReached` fires continuously while a key is at its limit. Paying each
-  // time turns a rate limit into a faucet.
-  const justPaid = decideGrant({
-    window: "1w",
-    lastGrantedAt: NOW,
-    seeded: true,
-    now: NOW + 1_000,
-  });
-  expect(justPaid).toEqual({ grant: false });
-});
-
-test("a window pays again once its own duration has passed", () => {
-  // The correction that an integration test forced, and the reason this is a
-  // rate limit rather than an edge trigger. There is no event for a window
-  // emptying — `LimitReached` says nothing when a key drops below its ceiling —
-  // so an "already paid" latch never re-arms and the window pays exactly once
-  // for the life of the installation. A window cannot legitimately fill more
-  // often than its own length, so that length is the rate.
-  for (const window of ["1m", "5h", "1w"] as const) {
-    const justBefore = decideGrant({
-      window,
-      lastGrantedAt: NOW,
-      seeded: true,
-      now: NOW + WINDOW_MS[window] - 1,
-    });
-    expect(justBefore).toEqual({ grant: false });
-
-    const after = decideGrant({
-      window,
-      lastGrantedAt: NOW,
-      seeded: true,
-      now: NOW + WINDOW_MS[window],
-    });
-    expect(after).toEqual({ grant: true, count: grantSize(window), at: NOW + WINDOW_MS[window] });
+test("a window that has never been seen seeds itself and pays nothing", () => {
+  // Per WINDOW, not per key. This test previously asserted the opposite — that a
+  // seeded *key* pays on another window's first event — and so pinned the bug:
+  // with four dimensions and three lengths, an install against a key already at
+  // its ceilings paid out up to eleven free candies at the install instant, for
+  // work nobody watched happen.
+  for (const window of ["1w", "5h"] as const) {
+    const decision = decideGrant({ window, lastGrantedAt: null, now: NOW });
+    expect(decision.grant).toBe(false);
+    if (decision.grant) return;
+    expect(decision.seedAt).toBe(NOW);
   }
 });
 
-test("a short window re-arms sooner than a long one", () => {
-  // Each window is rated by its own length rather than by one shared cooldown,
-  // so a minute limit is not throttled to a weekly cadence.
-  const at = NOW + WINDOW_MS["1m"];
-  expect(decideGrant({ window: "1m", lastGrantedAt: NOW, seeded: true, now: at }).grant).toBe(true);
-  expect(decideGrant({ window: "1w", lastGrantedAt: NOW, seeded: true, now: at }).grant).toBe(
-    false,
-  );
+test("a key at every ceiling at once is paid for none of them", () => {
+  // The install-instant windfall, stated as the scenario rather than the rule.
+  // Every window is unseen, so every window seeds and none pays.
+  const windows = ["1w", "5h"] as const;
+  const total = windows
+    .map((window) => decideGrant({ window, lastGrantedAt: null, now: NOW }))
+    .reduce((sum, d) => sum + (d.grant ? d.count : 0), 0);
+  expect(total).toBe(0);
 });
 
-test("seeding takes precedence, so the very first event never pays", () => {
-  // Both conditions true at once: an unseeded key whose window looks payable is
-  // still the install moment, not an achievement.
-  expect(decideGrant({ window: "1w", lastGrantedAt: null, seeded: false, now: NOW }).grant).toBe(
-    false,
-  );
+test("a seeded window pays once its own duration has passed", () => {
+  for (const window of ["1w", "5h"] as const) {
+    expect(
+      decideGrant({ window, lastGrantedAt: NOW, now: NOW + WINDOW_MS[window] - 1 }).grant,
+    ).toBe(false);
+    expect(decideGrant({ window, lastGrantedAt: NOW, now: NOW + WINDOW_MS[window] })).toEqual({
+      grant: true,
+      count: grantSize(window),
+      at: NOW + WINDOW_MS[window],
+    });
+  }
+});
+
+test("a key parked at its ceiling is not a faucet", () => {
+  // `LimitReached` fires continuously while a key is at its limit; paying each
+  // time turns a rate limit into an income.
+  expect(decideGrant({ window: "1w", lastGrantedAt: NOW, now: NOW + 1_000 })).toEqual({
+    grant: false,
+  });
+});
+
+test("each window re-arms on its own schedule, not a shared one", () => {
+  const at = NOW + WINDOW_MS["5h"];
+  expect(decideGrant({ window: "5h", lastGrantedAt: NOW, now: at }).grant).toBe(true);
+  expect(decideGrant({ window: "1w", lastGrantedAt: NOW, now: at }).grant).toBe(false);
 });

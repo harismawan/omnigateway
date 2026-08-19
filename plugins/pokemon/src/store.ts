@@ -287,6 +287,45 @@ export function shopPrice(entry: ShopEntry): number {
   return entry.kind === "item" ? ITEM_PRICES[entry.item] : freshEggPrice(entry.tier);
 }
 
+export type ConsumeResult =
+  | { ok: true; row: CompanionRow }
+  | { ok: false; reason: "none-held" | "unreadable" | "missing" };
+
+/**
+ * Spends one held item.
+ *
+ * The counterpart to `purchase`, and separate from it because the two take from
+ * different places: a purchase debits the wallet, this decrements inventory. A
+ * granted candy was never bought, so charging for it would be charging twice.
+ *
+ * Refuses on an unreadable save for the same reason `purchase` does — the state
+ * an effect mutates cannot be read, and writing a fresh one over it would
+ * destroy what could not be read.
+ */
+export function consume(
+  storage: PluginStorage,
+  apiKeyId: string,
+  item: ItemKind,
+  applyToState: (state: CompanionState) => CompanionState,
+  now: number,
+): ConsumeResult {
+  const row = readCompanion(storage, apiKeyId);
+  if (row === null) return { ok: false, reason: "missing" };
+  if (row.state === null) return { ok: false, reason: "unreadable" };
+  if ((row.state.inventory[item] ?? 0) <= 0) return { ok: false, reason: "none-held" };
+
+  const nextState = applyToState({
+    ...row.state,
+    inventory: { ...row.state.inventory, [item]: (row.state.inventory[item] ?? 0) - 1 },
+  });
+  storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
+    serialiseState(nextState),
+    now,
+    apiKeyId,
+  ]);
+  return { ok: true, row: { ...row, state: nextState } };
+}
+
 export type PurchaseResult =
   | { ok: true; row: CompanionRow }
   | { ok: false; reason: "insufficient" | "unreadable" | "missing" };
