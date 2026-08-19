@@ -8,6 +8,7 @@
     "./manifest": "./src/manifest.ts"
   },
   "dependencies": {
+    "@omni/ratelimit": "workspace:*",
     "zod": "4.4.3"
   }
 }

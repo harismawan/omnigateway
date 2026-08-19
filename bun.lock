@@ -68,6 +68,7 @@
         "@node-rs/argon2": "2.0.2",
         "@omni/control": "workspace:*",
         "@omni/ir": "workspace:*",
+        "@omni/plugins": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
@@ -102,6 +103,7 @@
       "name": "@omni/plugins",
       "version": "0.0.0",
       "dependencies": {
+        "@omni/ratelimit": "workspace:*",
         "zod": "4.4.3",
       },
     },
