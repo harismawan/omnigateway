@@ -70,17 +70,21 @@ graph TD
   store["@omni/store<br/><i>SQLite + field encryption</i>"]
   providers["@omni/providers<br/><i>adapters, wire codecs,<br/>catalog, HTTP client</i>"]
   rtk["@omni/rtk<br/><i>tool-result filters</i>"]
+  ratelimit["@omni/ratelimit<br/><i>key limit arithmetic;<br/>no clock, no state</i>"]
   ir["@omni/ir<br/><i>domain model — depends on nothing</i>"]
 
   gateway --> control
   gateway --> rtk
+  gateway --> ratelimit
   cli --> control
   dashboard -. "types + catalog only" .-> providers
   dashboard -. "types only" .-> store
   control --> router
+  control --> ratelimit
   router --> store
   router --> providers
   store --> rtk
+  store --> ratelimit
   providers --> ir
   rtk --> ir
   store --> ir
@@ -90,6 +94,14 @@ Arrows read *depends on*, and the direction never reverses. Two rules do most of
 the work: `@omni/ir` is side-effect free and imports nothing, and `@omni/router`
 is a pure function — no network, no database, no timers. Everything that has to
 touch the world is pushed up into the gateway process.
+
+`@omni/ratelimit` is the same shape applied to key limits: it decides whether a
+request is over a ceiling, and it holds no clock and no counters — `now` is a
+parameter and the counts are handed to it, so it never learns whether a number
+came from memory or from SQLite. It imports nothing but its schema validator, not
+even `@omni/ir`. The rings and the in-flight gauge live in the gateway, because
+state is not the package's job, and that split is what lets sliding-window
+arithmetic be tested without a gateway, a store, or a clock.
 
 The dashboard's edges are dotted because they are type-level only.
 `@omni/providers/catalog` is deliberately kept import-free so model lists can be
