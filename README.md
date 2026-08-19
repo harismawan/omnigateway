@@ -39,7 +39,9 @@ omni start
   routes by *pace*: 5% remaining is fine minutes before a reset and urgent with
   six days to run.
 - **Issues its own keys.** Hand out gateway keys with per-key model allowlists
-  and rate limits instead of sharing provider credentials.
+  instead of sharing provider credentials, and bound each one by requests,
+  tokens, dollars, or requests in flight — per minute, per five hours, and per
+  week.
 - **Reports usage.** Requests, tokens, and cost by provider, model, key, and
   day — metadata only.
 - **Backs itself up.** Snapshot the database from the console or the CLI, see
@@ -270,6 +272,36 @@ once.
 
 Most tools that accept a custom base URL work unchanged: set it to
 `http://127.0.0.1:9000` and use a gateway key where the provider key goes.
+
+### Rate-limit headers
+
+Every response carries the limit headers of the surface you asked on, so an SDK
+backs off using the code it already ships — the Anthropic dialect on
+`/v1/messages`, the OpenAI one on `/v1/chat/completions`:
+
+```http
+anthropic-ratelimit-requests-limit: 2000        x-ratelimit-limit-requests: 2000
+anthropic-ratelimit-requests-remaining: 1841    x-ratelimit-remaining-requests: 1841
+anthropic-ratelimit-requests-reset: 2026-08-19T14:32:07Z   x-ratelimit-reset-requests: 4h51m22s
+```
+
+`requests-remaining` counts the request you are being answered, as both vendors
+define it. `tokens-remaining` does not, and cannot: the response is still being
+written when the header goes out, so its token cost is not yet known and
+subtracting anything would be an invented number rather than a measured one.
+
+Where a key has several windows on one dimension, the headers report the one
+**nearest exhaustion** — a key comfortable per-minute but one request from its
+weekly ceiling shows you the weekly figures, not the reassuring ones.
+
+`spend` and `concurrency` are rendered on neither dialect, because no vendor
+defines a header for them and a number no client parses is noise in every
+response.
+
+A refusal is `429` with `Retry-After` in seconds, alongside the usual error body.
+The wait is computed from the oldest request still inside the window that
+refused you, so a weekly ceiling tells you when a slot actually frees rather than
+parking you for seven days.
 
 ### Tools and routing
 
@@ -625,7 +657,10 @@ again from the host.
 Worth knowing before you deploy it:
 
 - **One machine, one operator.** No multi-tenancy, no clustering, no shared
-  state. Rate limits are counted per process and reset when it restarts.
+  state. The `1m` window and the `concurrency` gauge are counted in the gateway
+  process and reset when it restarts; `5h` and `1w` are counted from the database
+  and survive one. Two gateways over one database would not see each other's
+  short-window counts.
 - **Two grains of usage history.** Detailed request logs are pruned after 30
   days by default; a daily rollup is kept for 400 days. A day is your host's
   local midnight, fixed when the row is written.
