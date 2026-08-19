@@ -20,6 +20,7 @@ import type { LoadRegistry } from "./dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "./egress/anthropic.ts";
 import { openaiErrorBody } from "./egress/openai.ts";
+import { type MountedPlugin, pluginRoutes } from "./plugins/routes.ts";
 import { createQuiesceLatch, type QuiesceLatch } from "./quiesce.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectRoutes } from "./routes/connect.ts";
@@ -83,6 +84,15 @@ export type AppDeps = {
    * answering `ok` for something that did not happen.
    */
   lifecycle?: LifecycleDeps;
+  /**
+   * Loaded plugins and the routes each returned from `setup`.
+   *
+   * Empty by default, and the overwhelming majority of installs leave it that
+   * way: with no plugins the block below adds one `Elysia` instance holding no
+   * routes, so an install without plugins behaves exactly as it did before this
+   * existed.
+   */
+  plugins?: readonly MountedPlugin[];
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -184,6 +194,12 @@ export function createApp(deps: AppDeps) {
    */
   const admitted = new WeakMap<Request, () => void>();
 
+  /**
+   * Composition order is load-bearing in one place: `pluginRoutes` sits after
+   * every core route module and before the `/*` catch-all. Mounted after the
+   * catch-all every plugin route would be a 404; mounted before `adminRoutes` a
+   * plugin could claim `/api/keys`.
+   */
   return new Elysia()
     .onRequest(({ request }) => {
       const path = new URL(request.url).pathname;
@@ -251,6 +267,13 @@ export function createApp(deps: AppDeps) {
         providers: OAUTH_PROVIDERS,
         http,
         now,
+        logger,
+      }),
+    )
+    .use(
+      pluginRoutes({
+        admin,
+        plugins: deps.plugins ?? [],
         logger,
       }),
     )
