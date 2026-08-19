@@ -411,7 +411,8 @@ flowchart TD
   stage --> swap["close handle · unlink stale -wal/-shm<br/>rename into place · reopen()"]
   swap -- fails --> wedged(["<b>SwapFailedError</b><br/>best-effort reopen, then latch stays shut<br/><i>pre-restore id logged</i>"])
   swap -- ok --> inval["invalidate the routing snapshot<br/>end admin sessions <i>iff</i> the password hash changed"]
-  inval --> open(["latch reopens"])
+  inval --> roll["rebuild usage_rollup<br/><i>guarded; a failure is a doctor complaint</i>"]
+  roll --> open(["latch reopens"])
 ```
 
 The error seam is the distinction worth internalizing. Everything before the swap
@@ -469,6 +470,17 @@ them, so a restore that writes a different password hash is that same "log
 everyone out" event arriving by another door. The hashes are compared across the
 swap and only a boolean leaves the operation, so restoring this installation's own
 snapshot leaves the operator signed in.
+
+A restore ends by rebuilding `usage_rollup`, and the *ordering* is the point.
+Nothing may sit between the swap and the password comparison: by then the swap
+has already succeeded, so a step that throws in front of the comparison skips the
+session invalidation while the restored password is live. The rebuild therefore
+runs last, and guarded — a stale rollup is an `omni doctor` complaint, a restore
+that aborts after swapping is an outage. It is recomputed rather than trusted
+because nothing in a file an operator hands over says whether its counters agree
+with its rows. `bun:sqlite` is synchronous, so it blocks the loop — and so
+`/api/*` and `/health` — for ≈0.4 s per 500k `request_logs` rows, ≈1.6 s at 2M,
+≈6.5 s at 8M.
 
 The CLI cannot do any of this, and refuses rather than trying: `omni db restore`
 stops if a gateway is running against that installation, with no override. A

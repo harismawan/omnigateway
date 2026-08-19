@@ -247,10 +247,13 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   contract, not an internal enum. `isRtkFilterId` drops unknown ids on read, so renaming one loses
   history silently rather than failing. Add ids freely; rename or remove only with a migration.
 - Rate limiting is explained in `ARCHITECTURE.md#rate-limiting`; these are the invariants a change
-  must not break.
+  must not break, and each has already been broken once.
 - `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` are the JSON keys of `api_keys.limits`, so
   a storage contract like RTK ids — but failing **closed**: an unknown name is a parse failure, never
   a silent drop. Rename or remove only with a migration.
+- `admit`/`consume` claim the ring stamp and gauge **synchronously**, before any `await`, and roll
+  back on refusal. Reading counters first and recording after lets concurrent requests judge one
+  pre-burst snapshot — a ceiling of 3 admitted 10 parallel requests, and it needs no I/O to fire.
 - Refuse at auth, degrade at list. An unparseable `limits` reads back as `null`, distinct from `{}`,
   and `authenticateApiKey` turns it into `INTERNAL` — not `AUTH`, which would blame a credential that
   is fine. `keys.list()` must never throw over such a row: `toKey` serves the listing too, and the
@@ -292,27 +295,21 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   files disagree until `sweepOrphans` reconciles them; that is expected, not a bug.
 - A snapshot still carries encrypted credentials and API-key hashes. Downloads are `no-store`, and
   the file is inert only because `OMNI_ENCRYPTION_KEY` is not in it.
-- Restart asks systemd rather than signalling itself. The unit sets `Restart=on-failure`, so a
-  handled SIGTERM exits 0 and reads as success — self-SIGTERM stops the gateway for good. `--no-block`
-  is required: systemd tears down the unit cgroup including the `systemctl` client it just spawned.
-- The quiesce latch gates `/v1/*` only. `/api/*` and `/health` stay live through a swap, because an
-  operator watching a restore recovers through exactly those routes.
+- The lifecycle and swap rules below are explained in `ARCHITECTURE.md#replacing-the-database-while-it-is-open`
+  and `#stopping-and-restarting`. Each one looks arbitrary alone and is not; read the section before
+  changing any of them.
+- Restart asks systemd, never self-SIGTERM (which stops the gateway for good), and `--no-block` is
+  required.
+- The quiesce latch gates `/v1/*` only; `/api/*` and `/health` stay live through a swap.
 - `store.close()` is idempotent and `reopen()` tolerates a closed handle, so restore is close → swap
-  → reopen. Repo methods forward per call to the inner handle: bind one to a local and it dies at the
-  next swap.
-- `vacuum()` must checkpoint. In WAL mode the rewrite lands in the log, so page count falls while the
-  file keeps every page and every caller reports reclaiming nothing.
-- Restoring writes another installation's admin password hash without passing through `setPassword`,
-  which is what clears sessions. Restore compares the hash across the swap and invalidates only when
-  it differs. Nothing may sit between the swap and that comparison: the swap has already succeeded by
-  then, so a step that throws in front of it skips the invalidation while the new password is live.
-- `swapIn` ends by rebuilding `usage_rollup`, after the hash comparison and guarded. `bun:sqlite` is
-  synchronous, so the rebuild blocks the event loop — and therefore `/api/*` and `/health` — for
-  ≈0.4 s per 500k `request_logs` rows, ≈1.6 s at 2M, ≈6.5 s at 8M. Document the cost rather than hide
-  it; a stale rollup is a `doctor` complaint, a failed restore is an outage.
-- `omni db restore` refuses while a gateway is running and has no override. The dashboard swaps
-  inside the process owning the handle; a second process cannot quiesce that connection, and renaming
-  the file under it corrupts the database being rescued.
+  → reopen. Repo methods forward per call: bind one to a local and it dies at the next swap.
+- `vacuum()` must checkpoint, or page count falls while the file keeps every page.
+- Restore compares the admin password hash across the swap and invalidates sessions only when it
+  differs. **Nothing may sit between the swap and that comparison** — the swap has already succeeded,
+  so anything throwing in front of it skips the invalidation while the new password is live.
+- `swapIn` rebuilds `usage_rollup` last and guarded, for that reason. It blocks the loop; the cost is
+  measured in `README.md` and must stay documented rather than hidden.
+- `omni db restore` refuses while a gateway is running and has no override.
 
 ## Subagent workflow
 
