@@ -104,7 +104,7 @@ export function pluginUiRoutes(deps: {
       await requireAdmin(request, deps.admin);
       return { plugins: pluginCatalog(deps.plugins) };
     })
-    .get(`${PLUGIN_ASSET_PREFIX}/:id/*`, ({ params, request, set }) => {
+    .get(`${PLUGIN_ASSET_PREFIX}/:id/*`, ({ params, set }) => {
       const notFound = () => {
         set.status = 404;
         return { error: { code: "NOT_FOUND", message: "no such plugin asset" } };

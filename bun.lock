@@ -97,6 +97,22 @@
         "@omni/testkit": "workspace:*",
       },
     },
+    "packages/dashboard-sdk": {
+      "name": "@omni/dashboard-sdk",
+      "version": "0.0.0",
+      "dependencies": {
+        "@omni/plugins": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/react": "^19.2.0",
+      },
+      "peerDependencies": {
+        "@tanstack/react-query": ">=5",
+        "react": ">=19",
+        "react-dom": ">=19",
+        "styled-components": ">=6",
+      },
+    },
     "packages/ir": {
       "name": "@omni/ir",
       "version": "0.0.0",
@@ -302,6 +318,8 @@
     "@omni/control": ["@omni/control@workspace:packages/control"],
 
     "@omni/dashboard": ["@omni/dashboard@workspace:apps/dashboard"],
+
+    "@omni/dashboard-sdk": ["@omni/dashboard-sdk@workspace:packages/dashboard-sdk"],
 
     "@omni/gateway": ["@omni/gateway@workspace:apps/gateway"],
 

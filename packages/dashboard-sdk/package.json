@@ -1,0 +1,21 @@
+{
+  "name": "@omni/dashboard-sdk",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@omni/plugins": "workspace:*"
+  },
+  "peerDependencies": {
+    "@tanstack/react-query": ">=5",
+    "react": ">=19",
+    "react-dom": ">=19",
+    "styled-components": ">=6"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0"
+  }
+}
