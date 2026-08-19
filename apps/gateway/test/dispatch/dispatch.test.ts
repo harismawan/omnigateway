@@ -653,6 +653,74 @@ test("a rate limit parks the credential without opening the breaker", async () =
   store.close();
 });
 
+// Both dispatches take their snapshot before either writes: `dispatch` builds it
+// eagerly, while the generator body that writes health does not run until it is
+// drained. That is the concurrent interleaving, reproduced without depending on
+// how the scheduler orders two in-flight requests.
+test("concurrent failures on one credential both count", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ maxAttempts: 1 });
+  const first = await dispatch(
+    req,
+    deps(
+      store,
+      stubAdapter(() => new GatewayError("UPSTREAM", "boom")),
+    ),
+    new AbortController().signal,
+    "req_a",
+  );
+  const second = await dispatch(
+    req,
+    deps(
+      store,
+      stubAdapter(() => new GatewayError("UPSTREAM", "boom")),
+    ),
+    new AbortController().signal,
+    "req_b",
+  );
+
+  await drain(first.events);
+  await drain(second.events);
+
+  const rows = await store.credentials.listHealth();
+  expect(rows[0]?.consecutiveFailures).toBe(2);
+  store.close();
+});
+
+// A soft failure carries the rest of the row forward from what it read. Reading
+// a stale row therefore does not just lose an increment, it restores the count
+// and breaker state from before the hard failure that landed in between.
+test("a rate limit landing after a hard failure does not resurrect its count", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ maxAttempts: 1 });
+  const soft = await dispatch(
+    req,
+    deps(
+      store,
+      stubAdapter(() => new GatewayError("RATE_LIMIT", "slow down", { retryAfterMs: 30_000 })),
+    ),
+    new AbortController().signal,
+    "req_soft",
+  );
+  const hard = await dispatch(
+    req,
+    deps(
+      store,
+      stubAdapter(() => new GatewayError("UPSTREAM", "boom")),
+    ),
+    new AbortController().signal,
+    "req_hard",
+  );
+
+  await drain(hard.events);
+  await drain(soft.events);
+
+  const rows = await store.credentials.listHealth();
+  expect(rows[0]?.consecutiveFailures).toBe(1);
+  expect(rows[0]?.rateLimitedUntil).toBe(1_030_000);
+  store.close();
+});
+
 test("a success records latency and marks the credential used", async () => {
   const store = await seeded(1);
   const adapter = stubAdapter(() => textStream("hi"));
@@ -1475,7 +1543,7 @@ test("a failed health write cannot rewrite an outcome the client already has", a
       ...store,
       credentials: {
         ...store.credentials,
-        saveHealth: () => Promise.reject(new Error("HEALTH_WRITE_SENTINEL")),
+        updateHealth: () => Promise.reject(new Error("HEALTH_WRITE_SENTINEL")),
       },
     },
   };

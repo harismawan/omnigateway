@@ -2,7 +2,12 @@ import { expect, test } from "bun:test";
 import { deriveKey } from "../src/encryption.ts";
 import { createCredentialRepo } from "../src/sqlite/credentials.ts";
 import { openDb } from "../src/sqlite/db.ts";
-import { SAME_WINDOW_TOLERANCE_MS, WINDOW_DURATION_MS } from "../src/types.ts";
+import {
+  type CredentialHealth,
+  type RoutingChange,
+  SAME_WINDOW_TOLERANCE_MS,
+  WINDOW_DURATION_MS,
+} from "../src/types.ts";
 
 async function setup() {
   const db = openDb(":memory:");
@@ -27,6 +32,17 @@ const input = {
   refreshToken: "test-token-2",
   apiKey: null,
   idToken: null,
+};
+
+const blank: CredentialHealth = {
+  credentialId: "c1",
+  model: "m",
+  breakerState: "closed",
+  consecutiveFailures: 0,
+  openedAt: null,
+  rateLimitedUntil: null,
+  ewmaTtftMs: null,
+  lastUsedAt: null,
 };
 
 test("create then get round-trips metadata", async () => {
@@ -404,6 +420,86 @@ test("saveHealth upserts rather than duplicating", async () => {
   const health = await repo.listHealth();
   expect(health).toHaveLength(1);
   expect(health[0]?.consecutiveFailures).toBe(2);
+  db.close();
+});
+
+// A transition reads the row as it is on disk, inside the write transaction, so
+// two of them cannot lose each other's increment the way two whole-row upserts
+// computed from one snapshot do.
+test("updateHealth increments compose rather than overwrite", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  const bump = (current: CredentialHealth | null): CredentialHealth => ({
+    ...(current ?? blank),
+    consecutiveFailures: (current?.consecutiveFailures ?? 0) + 1,
+  });
+
+  await repo.updateHealth("c1", "m", bump);
+  await repo.updateHealth("c1", "m", bump);
+
+  const health = await repo.listHealth();
+  expect(health).toHaveLength(1);
+  expect(health[0]?.consecutiveFailures).toBe(2);
+  db.close();
+});
+
+test("updateHealth hands apply a null row when none exists yet", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  let seen: CredentialHealth | null | undefined;
+
+  const written = await repo.updateHealth("c1", "m", (current) => {
+    seen = current;
+    return { ...blank, breakerState: "open", openedAt: 42 };
+  });
+
+  expect(seen).toBeNull();
+  expect(written.breakerState).toBe("open");
+  expect(await repo.listHealth()).toEqual([written]);
+  db.close();
+});
+
+test("updateHealth returns the row it persisted", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  await repo.saveHealth([{ ...blank, consecutiveFailures: 4, ewmaTtftMs: 250 }]);
+
+  const written = await repo.updateHealth("c1", "m", (current) => ({
+    ...(current ?? blank),
+    consecutiveFailures: (current?.consecutiveFailures ?? 0) + 1,
+  }));
+
+  expect(written.consecutiveFailures).toBe(5);
+  expect(written.ewmaTtftMs).toBe(250);
+  expect(await repo.listHealth()).toEqual([written]);
+  db.close();
+});
+
+// The snapshot cache patches its map in place from this payload without
+// rebuilding, so the emitted row has to be the post-transition one. It comes
+// from the same binding that was written, so what this pins is that one change
+// fires and that it carries the result of the fresh read rather than a count
+// derived from whatever the caller last saw.
+test("updateHealth emits one healthSaved carrying the transition's result", async () => {
+  const db = openDb(":memory:");
+  const changes: RoutingChange[] = [];
+  const repo = createCredentialRepo(db, await deriveKey("test-secret-value-for-unit-tests"), (c) =>
+    changes.push(c),
+  );
+  await repo.create(input);
+  await repo.saveHealth([{ ...blank, consecutiveFailures: 7 }]);
+  changes.length = 0;
+
+  const written = await repo.updateHealth("c1", "m", (current) => ({
+    ...(current ?? blank),
+    consecutiveFailures: (current?.consecutiveFailures ?? 0) + 1,
+  }));
+
+  expect(changes).toHaveLength(1);
+  const change = changes[0];
+  if (change?.type !== "healthSaved") throw new Error("expected a healthSaved change");
+  expect(change.rows).toEqual([written]);
+  expect(change.rows[0]?.consecutiveFailures).toBe(8);
   db.close();
 });
 

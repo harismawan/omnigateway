@@ -471,7 +471,7 @@ test("gives a stream that broke on the gateway's own error a terminal status", a
   // A health write is the one piece of dispatch that runs outside its own error
   // handling, so a store failure there escapes the generator as a throw instead
   // of an error event.
-  store.credentials.saveHealth = async () => {
+  store.credentials.updateHealth = async () => {
     throw new Error("HEALTH_WRITE_SENTINEL");
   };
 
@@ -1067,7 +1067,7 @@ test("records a failure that coincided with a hang-up as the failure it was", as
   const controller = new AbortController();
   // Dispatch records the failure, then writes health — and the client gives up
   // in that window. The write is what escapes; the abort is a bystander.
-  store.credentials.saveHealth = async () => {
+  store.credentials.updateHealth = async () => {
     controller.abort();
     throw new Error("HEALTH_WRITE_SENTINEL");
   };

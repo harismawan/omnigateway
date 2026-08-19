@@ -71,10 +71,30 @@ successful health transition instead of triggering pre-commit failover or a post
 - Dispatch adapter yielding partial events then returning: failed health and status 502.
 - Both client surfaces, streaming and non-streaming, before and after commit.
 
-### 2. Concurrent health updates lose breaker and rate-limit state ⛔️ Deffered
+### 2. Concurrent health updates lose breaker and rate-limit state ⚠️ Partly fixed
 
 **Severity:** High  
 **Confidence:** 10/10
+
+**Status (2026-08-19):** the atomicity half is fixed; the ordering half is not.
+
+`CredentialRepo.updateHealth` applies a transition to the row as it is on disk, inside the write
+transaction, and dispatch's three terminal paths now use it instead of computing a replacement row
+from `snapshot.health`. Lost increments and the soft-failure resurrection below are gone. This
+needed no schema change: `bun:sqlite` is synchronous, so a read and a write inside one
+`db.transaction` cannot be interleaved — the same reason `ApiKeyRateLimiter.admit` can claim its
+gauge before its first `await`.
+
+What remains is **stale success clears newer protection**, scenario two below. Both writes are now
+individually atomic but can still arrive out of causal order, and as this document already notes, a
+transaction cannot distinguish an older attempt completing after a newer event. That needs a
+revision or transition-sequence column and a migration. Required tests 2, 3 and 4 stay open;
+required test 1 is covered by `concurrent failures on one credential both count`, and the
+resurrection case by `a rate limit landing after a hard failure does not resurrect its count`, both
+in `apps/gateway/test/dispatch/dispatch.test.ts`.
+
+The description below is kept as written, because it is still an accurate account of what the code
+did and half of it is still true.
 
 Every dispatch reads credential health into a detached request-start snapshot. Terminal paths then
 calculate a complete replacement row from that snapshot and perform a blind SQLite upsert.
