@@ -236,9 +236,6 @@ the next request's ranking reflects this one.
 
 ## Providers
 
-`docs/adding-a-provider.md` is the procedure; this section is why the shape is
-what it is.
-
 Five adapters, each a directory of the same four files:
 
 ```mermaid
