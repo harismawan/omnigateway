@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { basename, join, resolve, sep } from "node:path";
 import { GatewayError } from "@omni/ir";
 import {
@@ -123,8 +124,24 @@ export type PluginDeps = {
    * network, and absent when the caller does not intend to allow one — an
    * install from a URL then fails saying so, rather than silently working in
    * production and being untested.
+   *
+   * `accept` is a hint, not a contract: the npm registry serves two different
+   * documents at one URL and the abbreviated one is chosen by the header, so
+   * the caller that owns the transport has to be told which is wanted. It is
+   * optional precisely so a fetcher may ignore it — a stub in a test does, and
+   * so does any registry that only knows how to serve the full document.
    */
-  fetchBytes?: (url: string) => Promise<Uint8Array>;
+  fetchBytes?: (url: string, accept?: string) => Promise<Uint8Array>;
+  /**
+   * Where a bare package name is resolved, defaulting to `DEFAULT_NPM_REGISTRY`.
+   *
+   * An injected option rather than an environment read, for boundary rule 6:
+   * this package must not learn what the variable is called, because the same
+   * resolution is reached from a CLI flag, from an installation's `.env`, and
+   * from a test that sets neither. Must be `https://`, checked before anything
+   * is fetched.
+   */
+  registry?: string;
 };
 
 /**
@@ -617,15 +634,342 @@ function readTree(fs: PluginFs, dir: string, prefix = ""): Map<string, Uint8Arra
   return files;
 }
 
+/* ------------------------------------------------------------ npm registry */
+
+/** Where a bare package name resolves when the caller names no registry. */
+export const DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org";
+
+/**
+ * What the packument request asks for.
+ *
+ * The abbreviated document is a different document, not a truncated one: it
+ * drops READMEs and maintainer records and keeps `dist-tags`, `versions`, and
+ * every `dist` field this resolver reads. Asking for it is the difference
+ * between a few kilobytes and several megabytes on a popular name. The full
+ * document is accepted too — every field read below is present in both — so a
+ * registry that has never heard of the abbreviated type still works.
+ */
+export const NPM_PACKUMENT_ACCEPT =
+  "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*";
+
+/**
+ * An npm package name, and the version the operator typed after it.
+ *
+ * Lowercase only, which is stricter than the registry's own rule for names
+ * published before it tightened. That is deliberate: this pattern is the gate
+ * between "this is a package name" and "this is a path that does not exist",
+ * and a mistyped path should get the path error rather than a 404 from a
+ * registry it was never meant to reach. Nothing that carries a `/` outside a
+ * scope, a leading dot, or a backslash can pass, so no spec that is really a
+ * filesystem path resolves as a name.
+ */
+const NPM_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+
+/**
+ * An exact version, and only an exact version.
+ *
+ * `^1.2.3`, `~1.2`, `1.x`, `*`, and a dist-tag like `next` are all refused by
+ * this, and the refusal is the feature. Resolving any of them means comparing a
+ * range against every version in the packument, which is a semver resolver —
+ * something this project does not have and should not grow inside an installer.
+ * `Bun.semver` could satisfy a range, but choosing the *best* match from a set,
+ * with prerelease rules, is the part that is not one call. Refusing names what
+ * is accepted, so the operator's next command is the right one.
+ */
+const EXACT_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
+
+/** Hashes an SRI string may name that this installer knows how to compute. */
+const SRI_ALGORITHMS = ["sha512", "sha384", "sha256"] as const;
+type SriAlgorithm = (typeof SRI_ALGORITHMS)[number];
+
+type NpmSpec = { name: string; version: string | null };
+
+/** The `dist` block, narrowed to the three fields that decide anything. */
+type NpmDist = { tarball: string; integrity: string | null; shasum: string | null };
+
+/** One hash to check the downloaded bytes against, expected value in hex. */
+type Digest = { algorithm: SriAlgorithm | "sha1"; expected: string; source: string };
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * Splits `<name>` or `<name>@<version>`, or returns null for anything that is
+ * not a package name at all.
+ *
+ * The two `@` characters in `@scope/name@1.2.3` mean different things and the
+ * split is `lastIndexOf`, never `indexOf`. A scope's `@` is at index 0 and is
+ * part of the name, which is exactly why the guard is `at <= 0` rather than
+ * `at === -1`: `@scope/name` with no version has its only `@` at 0, and reading
+ * that as a separator would ask the registry for the empty package and call
+ * `scope/name` a version.
+ */
+function parseNpmSpec(spec: string): NpmSpec | null {
+  const at = spec.lastIndexOf("@");
+  const name = at <= 0 ? spec : spec.slice(0, at);
+  const version = at <= 0 ? null : spec.slice(at + 1);
+  // 214 is the registry's own ceiling, scope included.
+  if (name.length > 214 || !NPM_NAME_PATTERN.test(name)) return null;
+  return { name, version };
+}
+
+/**
+ * The registry to talk to, refused here rather than at the socket.
+ *
+ * Plaintext is refused for the reason the `http://` spec is: a packument
+ * arriving over plaintext chooses both the tarball URL and the digest it will
+ * be checked against, so an attacker on that wire picks what the gateway
+ * imports and then certifies it. Checked before any request is made, so a
+ * misconfigured registry costs nothing and leaks nothing.
+ */
+function registryUrl(deps: PluginDeps): URL {
+  const raw = deps.registry ?? DEFAULT_NPM_REGISTRY;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new GatewayError("BAD_REQUEST", `registry ${raw} is not a URL`);
+  }
+  if (url.protocol !== "https:") {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `plugins may only be installed over https; ${raw} is not`,
+    );
+  }
+  return url;
+}
+
+/**
+ * Where the packument lives.
+ *
+ * A scope's slash is percent-encoded rather than left as a path separator: it
+ * is one path segment on the registry, and leaving it raw would also be the
+ * only way a name could reach outside the registry's package space. The name
+ * has already passed `NPM_NAME_PATTERN`, so there is nothing else in it to
+ * encode; this is belt and braces on the one character that pattern allows.
+ */
+function packumentUrl(registry: URL, name: string): string {
+  return `${registry.href.replace(/\/+$/, "")}/${name.replace("/", "%2f")}`;
+}
+
+/** Reads the one version's `dist` block out of whatever the registry served. */
+function resolveDist(document: unknown, spec: NpmSpec): { version: string; dist: NpmDist } {
+  const root = asRecord(document);
+  if (root === null) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `the registry's answer for ${spec.name} is not a package`,
+    );
+  }
+  const versions = asRecord(root.versions);
+  if (versions === null) {
+    throw new GatewayError("BAD_REQUEST", `the registry lists no versions of ${spec.name}`);
+  }
+
+  let wanted = spec.version;
+  if (wanted === null) {
+    // No version means the tag npm itself defaults to. Only `latest`: any other
+    // tag is a moving name that would have to be typed, and typing one is the
+    // range case this installer refuses.
+    const tags = asRecord(root["dist-tags"]);
+    wanted = tags === null ? null : asString(tags.latest);
+    if (wanted === null) {
+      throw new GatewayError(
+        "BAD_REQUEST",
+        `the registry names no dist-tags.latest for ${spec.name}; install ${spec.name}@<exact version>`,
+      );
+    }
+  }
+
+  const entry = asRecord(versions[wanted]);
+  if (entry === null) {
+    throw new GatewayError("BAD_REQUEST", `the registry has no version ${wanted} of ${spec.name}`);
+  }
+  const dist = asRecord(entry.dist);
+  const tarball = dist === null ? null : asString(dist.tarball);
+  if (dist === null || tarball === null) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `the registry's entry for ${spec.name}@${wanted} names no tarball`,
+    );
+  }
+  return {
+    version: wanted,
+    dist: { tarball, integrity: asString(dist.integrity), shasum: asString(dist.shasum) },
+  };
+}
+
+/**
+ * Judges the advertised tarball URL against the registry that advertised it.
+ *
+ * **The host is pinned to the registry's.** A packument is a document that
+ * names the URL its own bytes will be fetched from, so an off-host `tarball` is
+ * an origin chosen by whoever served that document — and the fetcher follows
+ * redirects, so leaving the choice open would let a mirror aim the install at
+ * anything and the request would go there before any digest was consulted.
+ * Pinning does not make the bytes trustworthy; the digest does that. It bounds
+ * *where the gateway is made to connect*, which the digest cannot.
+ *
+ * The cost is real and is accepted: a registry that proxies another one's
+ * tarballs by URL rather than by mirroring them will be refused. That operator
+ * still has `omni plugin install https://<that host>/<tarball>`, which is the
+ * same install with the origin typed by the person who chose it instead of by
+ * the document. Port is part of `host`, so a private registry on `:4873` serves
+ * its own tarballs from `:4873` and nothing else.
+ */
+function checkTarballUrl(tarball: string, registry: URL, what: string): void {
+  let url: URL;
+  try {
+    url = new URL(tarball);
+  } catch {
+    throw new GatewayError("BAD_REQUEST", `the registry gave ${what} a tarball that is not a URL`);
+  }
+  if (url.protocol !== "https:") {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `plugins may only be installed over https; the registry points ${what} at ${tarball}`,
+    );
+  }
+  if (url.host !== registry.host) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `registry ${registry.host} points ${what} at ${url.host}; ` +
+        "install that URL directly if it is the one you meant",
+    );
+  }
+}
+
+/**
+ * Every hash the packument advertised, or a refusal when it advertised none.
+ *
+ * Computed *before* the tarball is fetched, so a package that cannot be checked
+ * is refused without downloading it. Absent metadata is refused rather than
+ * shrugged at: these bytes become a module the gateway process `import`s, and
+ * "the registry did not say" is not a reason to run something — it is the exact
+ * state a mirror stripping its own metadata would produce.
+ *
+ * `integrity` wins when it is present and names an algorithm this can compute.
+ * `shasum` is a sha1 and is the fallback rather than the equal, because it is
+ * all the registry has for packages published before SRI existed; a registry
+ * that omits `integrity` has already chosen sha1 for us either way, so refusing
+ * it here would buy nothing and would refuse real packages.
+ */
+function digestsFor(dist: NpmDist, what: string): Digest[] {
+  const digests: Digest[] = [];
+  if (dist.integrity !== null) {
+    // SRI allows several, whitespace separated. Any one matching is a pass, per
+    // the spec: they are alternatives, not a set that must all hold.
+    for (const entry of dist.integrity.trim().split(/\s+/)) {
+      const dash = entry.indexOf("-");
+      const algorithm = dash === -1 ? "" : entry.slice(0, dash);
+      const value = dash === -1 ? "" : entry.slice(dash + 1);
+      if (value.length === 0) continue;
+      const known = SRI_ALGORITHMS.find((candidate) => candidate === algorithm);
+      // An unknown algorithm is skipped rather than refused *here*: it may sit
+      // beside one that is known, and the empty-list refusal below catches the
+      // case where it does not. A `md5-` on its own therefore still refuses.
+      if (known === undefined) continue;
+      digests.push({
+        algorithm: known,
+        expected: Buffer.from(value, "base64").toString("hex"),
+        source: `${known} integrity`,
+      });
+    }
+  }
+  if (digests.length === 0 && dist.shasum !== null && /^[0-9a-f]{40}$/i.test(dist.shasum)) {
+    digests.push({ algorithm: "sha1", expected: dist.shasum.toLowerCase(), source: "sha1 shasum" });
+  }
+  if (digests.length === 0) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `the registry advertises no usable integrity or shasum for ${what}; ` +
+        "refusing to install bytes nothing vouches for",
+    );
+  }
+  return digests;
+}
+
+/** Refuses bytes that are not what the packument said they would be. */
+function verifyDigests(bytes: Uint8Array, digests: readonly Digest[], what: string): void {
+  for (const digest of digests) {
+    const actual = new Bun.CryptoHasher(digest.algorithm).update(bytes).digest("hex");
+    if (actual === digest.expected) return;
+  }
+  const first = digests[0];
+  throw new GatewayError(
+    "BAD_REQUEST",
+    `${what} does not match the ${first?.source ?? "digest"} the registry advertised; ` +
+      "the download was corrupted or the registry served something else",
+  );
+}
+
+/**
+ * Resolves a package name through a registry and returns its unpacked tree.
+ *
+ * Two fetches and no third: the packument, then the one tarball it named. No
+ * dependency resolution, no `node_modules`, no lifecycle script, no subprocess
+ * — a plugin is a self-contained tree, and everything that makes `npm install`
+ * a code-execution event is absent by construction rather than by flag.
+ */
+async function npmPayload(deps: PluginDeps, spec: NpmSpec): Promise<Payload> {
+  if (spec.version !== null && !EXACT_VERSION_PATTERN.test(spec.version)) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `${spec.name}@${spec.version} is not an exact version; this installer resolves no ranges ` +
+        `or tags — install ${spec.name}@1.2.3, or ${spec.name} for the registry's latest`,
+    );
+  }
+  const fetchBytes = deps.fetchBytes;
+  if (fetchBytes === undefined) {
+    throw new GatewayError("BAD_REQUEST", "this caller cannot install from a registry");
+  }
+  // Before the first request, so a plaintext registry is refused rather than
+  // consulted and then refused.
+  const registry = registryUrl(deps);
+
+  const document: unknown = parseJson(
+    await fetchBytes(packumentUrl(registry, spec.name), NPM_PACKUMENT_ACCEPT),
+    `the registry's answer for ${spec.name}`,
+  );
+  const { version, dist } = resolveDist(document, spec);
+  const what = `${spec.name}@${version}`;
+
+  checkTarballUrl(dist.tarball, registry, what);
+  // Both of these refuse before the download rather than after it.
+  const digests = digestsFor(dist, what);
+
+  const bytes = await fetchBytes(dist.tarball);
+  verifyDigests(bytes, digests, what);
+
+  return stripRoot(readTar(gunzipIfNeeded(bytes)));
+}
+
+function parseJson(bytes: Uint8Array, what: string): unknown {
+  try {
+    return JSON.parse(decoder.decode(bytes)) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new GatewayError("BAD_REQUEST", `${what} is not valid JSON: ${detail}`);
+  }
+}
+
 async function loadPayload(deps: PluginDeps, spec: string): Promise<Payload> {
   // Plaintext is refused rather than upgraded. What arrives over this fetch is
   // code the gateway process will `import`, so a network position between the
   // operator and the host is a position that chooses what the gateway runs;
   // there is no integrity check downstream that would notice. Silently rewriting
   // to `https://` would be worse than refusing — it would install *something*
-  // from a URL the operator did not type. No caller injects `fetchBytes` today,
-  // which is exactly why this belongs here now: the restriction has to already
-  // be true on the day someone wires one up.
+  // from a URL the operator did not type. A URL typed by hand carries no digest
+  // for anything downstream to check, which is the whole difference between
+  // this branch and the registry one below: there, the packument advertises a
+  // hash and a mismatch is refused; here, TLS to the host the operator named is
+  // the only assurance there is, so it is not optional.
   if (spec.startsWith("http://")) {
     throw new GatewayError("BAD_REQUEST", "plugins may only be installed over https");
   }
@@ -647,10 +991,22 @@ async function loadPayload(deps: PluginDeps, spec: string): Promise<Payload> {
   }
 
   const bytes = deps.fs.readBytes(source);
-  if (bytes === null) {
-    throw new GatewayError("BAD_REQUEST", `no directory or archive at ${source}`);
-  }
-  return stripRoot(readTar(gunzipIfNeeded(bytes)));
+  if (bytes !== null) return stripRoot(readTar(gunzipIfNeeded(bytes)));
+
+  // The registry is the last thing tried, and that order is the safe one. A
+  // spec naming something that is on this disk installs what is on this disk;
+  // only a spec that names nothing local can reach the network. The reverse —
+  // registry first — would let a published package shadow the directory an
+  // operator is standing in and turn `omni plugin install poke-dex` into a
+  // download without anyone typing a URL. A local file shadowing a package is
+  // the same ambiguity pointing the harmless way.
+  const npm = parseNpmSpec(spec);
+  if (npm !== null) return npmPayload(deps, npm);
+
+  throw new GatewayError(
+    "BAD_REQUEST",
+    `no directory or archive at ${source}, and "${spec}" is not a package name`,
+  );
 }
 
 /**
@@ -667,7 +1023,14 @@ async function loadPayload(deps: PluginDeps, spec: string): Promise<Payload> {
  * not a `package.json` `prepare`. The installer parses tar and writes bytes; it
  * has no path to a subprocess and never imports the entry. Verifying a plugin is
  * `omni plugin verify`, which also runs nothing, and the first time any of it
- * executes is the gateway's next boot — which is why the result says so.
+ * executes is the gateway's next boot — which is why the result says so. That
+ * holds for a package name too: resolving one through a registry is two fetches
+ * and a digest check, never `npm`, so nothing about the remote path reintroduces
+ * the execution the local path was careful to avoid.
+ *
+ * A `spec` is a directory, a tarball path, an `https://` URL, or an npm name
+ * with an optional exact version — tried in that order, so nothing reaches the
+ * network while something local answers.
  *
  * Replacing an existing install is allowed and is done by swapping directories:
  * the new tree is written beside the old one and renamed over it, so an install

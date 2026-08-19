@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GatewayError } from "@omni/ir";
-import { nodePluginFs } from "../src/nodeFs.ts";
+import { nodeFetchBytes, nodePluginFs } from "../src/nodeFs.ts";
 import {
   installPlugin,
   listPlugins,
@@ -755,6 +755,570 @@ describe("installPlugin", () => {
 
     expect(asked).toEqual(["https://example.invalid/p.tgz"]);
     expect(result.id).toBe("poke-dex");
+  });
+});
+
+/* ------------------------------------------------------------- npm registry */
+
+/**
+ * A registry that exists entirely inside the test.
+ *
+ * `fetchBytes` is the only way out of the installer, so a fake that answers two
+ * URLs and throws on a third is a complete network: anything the resolver
+ * fetches that these tests did not arrange shows up as a thrown "unexpected
+ * fetch" rather than as a silent request. `asked` is asserted as often as the
+ * result is, because half of what this code promises is about requests it must
+ * *not* make — a refusal that happens after the download is not the refusal
+ * these tests are checking for.
+ */
+const REGISTRY = "https://registry.test";
+
+function tgzFor(version: string): Uint8Array {
+  return Bun.gzipSync(
+    new Uint8Array(
+      makeTarball([
+        ["package/omni-plugin.json", JSON.stringify({ ...MANIFEST, version })],
+        ["package/server.js", "export default {};"],
+      ]),
+    ),
+  );
+}
+
+function sriFor(bytes: Uint8Array): string {
+  return `sha512-${new Bun.CryptoHasher("sha512").update(bytes).digest("base64")}`;
+}
+
+function shasumFor(bytes: Uint8Array): string {
+  return new Bun.CryptoHasher("sha1").update(bytes).digest("hex");
+}
+
+/** One version as the packument advertises it. Every field has a usable default. */
+type Advertised = {
+  bytes?: Uint8Array;
+  tarball?: string;
+  /** `null` omits the field, which is how a registry with no SRI is expressed. */
+  integrity?: string | null;
+  shasum?: string;
+};
+
+type FakeRegistry = {
+  deps: PluginDeps;
+  asked: string[];
+  accepts: Array<string | undefined>;
+};
+
+function fakeRegistry(input: {
+  name: string;
+  versions: Record<string, Advertised>;
+  /** `null` serves a packument with no `dist-tags`. Defaults to the last version. */
+  latest?: string | null;
+  /** Tags beside `latest`, which must never be what an unversioned spec picks. */
+  tags?: Record<string, string>;
+  registry?: string;
+  /** Serves this instead of a packument, for the documents JSON cannot describe. */
+  packumentBytes?: Uint8Array;
+}): FakeRegistry {
+  const base = input.registry ?? REGISTRY;
+  const asked: string[] = [];
+  const accepts: Array<string | undefined> = [];
+  const served = new Map<string, Uint8Array>();
+  const versions: Record<string, unknown> = {};
+
+  for (const [version, advertised] of Object.entries(input.versions)) {
+    const bytes = advertised.bytes ?? tgzFor(version);
+    const tarball = advertised.tarball ?? `${base}/${input.name}/-/pkg-${version}.tgz`;
+    const dist: Record<string, unknown> = { tarball };
+    if (advertised.integrity !== null) dist.integrity = advertised.integrity ?? sriFor(bytes);
+    if (advertised.shasum !== undefined) dist.shasum = advertised.shasum;
+    versions[version] = { name: input.name, version, dist };
+    served.set(tarball, bytes);
+  }
+
+  const latest = input.latest === undefined ? Object.keys(input.versions).at(-1) : input.latest;
+  const tags = {
+    ...input.tags,
+    ...(latest === null || latest === undefined ? {} : { latest }),
+  };
+  const document = {
+    name: input.name,
+    ...(Object.keys(tags).length === 0 ? {} : { "dist-tags": tags }),
+    versions,
+  };
+  served.set(
+    `${base}/${input.name.replace("/", "%2f")}`,
+    input.packumentBytes ?? encoder.encode(JSON.stringify(document)),
+  );
+
+  return {
+    asked,
+    accepts,
+    deps: {
+      fs: nodePluginFs(),
+      registry: base,
+      fetchBytes: async (url, accept) => {
+        asked.push(url);
+        accepts.push(accept);
+        const bytes = served.get(url);
+        if (bytes === undefined) throw new Error(`unexpected fetch: ${url}`);
+        return bytes;
+      },
+    },
+  };
+}
+
+describe("installPlugin from the npm registry", () => {
+  test("a bare name resolves through dist-tags.latest and installs", async () => {
+    const root = makeRoot();
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.0.0": {}, "1.4.2": {} },
+      latest: "1.4.2",
+    });
+
+    const result = await installPlugin(registry.deps, root, "poke-dex");
+
+    expect(result.id).toBe("poke-dex");
+    expect(result.version).toBe("1.4.2");
+    expect(existsSync(join(root, "plugins", "poke-dex", "server.js"))).toBe(true);
+    // Two requests, in this order, and nothing else. No `npm`, no dependency
+    // walk, no second registry round trip.
+    expect(registry.asked).toEqual([
+      `${REGISTRY}/poke-dex`,
+      `${REGISTRY}/poke-dex/-/pkg-1.4.2.tgz`,
+    ]);
+    // The abbreviated packument is asked for by name; the tarball fetch carries
+    // no preference at all.
+    expect(registry.accepts[0]).toContain("vnd.npm.install-v1+json");
+    expect(registry.accepts[1]).toBeUndefined();
+  });
+
+  test("an exact version installs that version rather than the latest", async () => {
+    const root = makeRoot();
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": {}, "2.0.0": {} },
+      latest: "2.0.0",
+    });
+
+    const result = await installPlugin(registry.deps, root, "poke-dex@1.4.2");
+
+    // The version is read out of the *installed manifest*, so this cannot pass
+    // by the resolver picking the right URL and unpacking the other tarball.
+    expect(result.version).toBe("1.4.2");
+    expect(registry.asked[1]).toBe(`${REGISTRY}/poke-dex/-/pkg-1.4.2.tgz`);
+  });
+
+  test("a scoped name is one path segment, and its leading @ is not a version", async () => {
+    const root = makeRoot();
+    const registry = fakeRegistry({ name: "@team/poke-dex", versions: { "1.4.2": {} } });
+
+    const result = await installPlugin(registry.deps, root, "@team/poke-dex");
+
+    // Percent-encoded: the registry keeps a scoped package at one segment, and
+    // a raw slash would be a different URL entirely.
+    expect(registry.asked[0]).toBe(`${REGISTRY}/@team%2fpoke-dex`);
+    // The package name and the plugin id are different namespaces. `@team/…`
+    // could never be a plugin id, so the manifest decides where it lands.
+    expect(result.id).toBe("poke-dex");
+  });
+
+  test("a scoped name with a version splits at the second @, not the first", async () => {
+    const root = makeRoot();
+    const registry = fakeRegistry({
+      name: "@team/poke-dex",
+      versions: { "1.4.2": {}, "2.0.0": {} },
+      latest: "2.0.0",
+    });
+
+    const result = await installPlugin(registry.deps, root, "@team/poke-dex@1.4.2");
+
+    expect(registry.asked[0]).toBe(`${REGISTRY}/@team%2fpoke-dex`);
+    expect(result.version).toBe("1.4.2");
+  });
+
+  test("a version range is refused by name, before anything is fetched", async () => {
+    const registry = fakeRegistry({ name: "poke-dex", versions: { "1.4.2": {} } });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex@^1.0.0")).rejects.toThrow(
+      /exact version/,
+    );
+    // The refusal is the point, but so is its timing: resolving a range would
+    // mean reading the packument to compare against, so a range that reaches
+    // the network has already been half-resolved.
+    expect(registry.asked).toEqual([]);
+  });
+
+  test("a dist-tag other than latest is refused, naming what is accepted", async () => {
+    const registry = fakeRegistry({ name: "poke-dex", versions: { "1.4.2": {} } });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex@next")).rejects.toThrow(
+      /poke-dex@1\.2\.3/,
+    );
+    expect(registry.asked).toEqual([]);
+  });
+
+  test("bytes that do not match the advertised integrity are refused", async () => {
+    const root = makeRoot();
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: {
+        // The packument vouches for one archive and the registry serves
+        // another: a compromised mirror, or a cache that answered the wrong
+        // key. Either way the operator asked for the thing the digest names.
+        "1.4.2": { integrity: sriFor(tgzFor("6.6.6")) },
+      },
+    });
+
+    await expect(installPlugin(registry.deps, root, "poke-dex")).rejects.toThrow(/does not match/);
+    // Downloaded, judged, and discarded: nothing reached the plugins directory.
+    expect(listPlugins(registry.deps, root)).toEqual([]);
+    expect(registry.asked).toHaveLength(2);
+  });
+
+  test("a sha1 shasum is verified when the registry advertises no integrity", async () => {
+    const root = makeRoot();
+    const bytes = tgzFor("1.4.2");
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": { bytes, integrity: null, shasum: shasumFor(bytes) } },
+    });
+
+    const result = await installPlugin(registry.deps, root, "poke-dex");
+
+    expect(result.version).toBe("1.4.2");
+  });
+
+  test("a shasum that does not match is refused like an integrity mismatch", async () => {
+    const root = makeRoot();
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: {
+        "1.4.2": { integrity: null, shasum: shasumFor(tgzFor("6.6.6")) },
+      },
+    });
+
+    await expect(installPlugin(registry.deps, root, "poke-dex")).rejects.toThrow(/does not match/);
+    expect(listPlugins(registry.deps, root)).toEqual([]);
+  });
+
+  test("a package advertising neither integrity nor shasum is refused, undownloaded", async () => {
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": { integrity: null } },
+    });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex")).rejects.toThrow(
+      /no usable integrity or shasum/,
+    );
+    // One request. There is nothing to check these bytes against, so fetching
+    // them would be downloading code on a promise nobody made.
+    expect(registry.asked).toHaveLength(1);
+  });
+
+  test("an integrity naming only an algorithm this cannot compute is refused", async () => {
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": { integrity: "md5-1B2M2Y8AsgTpgAmY7PhCfg==" } },
+    });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex")).rejects.toThrow(
+      /no usable integrity or shasum/,
+    );
+    expect(registry.asked).toHaveLength(1);
+  });
+
+  test("an unknown algorithm beside a known one is ignored, not fatal", async () => {
+    const root = makeRoot();
+    const bytes = tgzFor("1.4.2");
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      // SRI lists alternatives. A registry that adds a hash this host has never
+      // heard of must not thereby become uninstallable.
+      versions: { "1.4.2": { bytes, integrity: `md5-abcd ${sriFor(bytes)}` } },
+    });
+
+    const result = await installPlugin(registry.deps, root, "poke-dex");
+
+    expect(result.version).toBe("1.4.2");
+  });
+
+  test("a plaintext tarball url in the packument is refused, undownloaded", async () => {
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": { tarball: "http://registry.test/poke-dex/-/pkg-1.4.2.tgz" } },
+    });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex")).rejects.toThrow(/https/);
+    expect(registry.asked).toHaveLength(1);
+  });
+
+  test("a tarball on a host other than the registry's is refused, undownloaded", async () => {
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      // The packument is the document that names its own download location, so
+      // an off-host tarball is an origin chosen by whoever served it.
+      versions: { "1.4.2": { tarball: "https://cdn.evil.test/poke-dex/-/pkg-1.4.2.tgz" } },
+    });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex")).rejects.toThrow(
+      /cdn\.evil\.test/,
+    );
+    expect(registry.asked).toHaveLength(1);
+  });
+
+  test("a registry on a different port is a different host", async () => {
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      registry: "https://registry.test:4873",
+      versions: { "1.4.2": { tarball: "https://registry.test/poke-dex/-/pkg-1.4.2.tgz" } },
+    });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex")).rejects.toThrow(
+      /registry\.test:4873/,
+    );
+  });
+
+  test("a private registry serves its own tarballs and is believed", async () => {
+    const root = makeRoot();
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      registry: "https://npm.corp.test:4873/repo",
+      versions: { "1.4.2": {} },
+    });
+
+    const result = await installPlugin(registry.deps, root, "poke-dex");
+
+    expect(registry.asked[0]).toBe("https://npm.corp.test:4873/repo/poke-dex");
+    expect(result.version).toBe("1.4.2");
+  });
+
+  test("a plaintext registry is refused before it is consulted", async () => {
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      registry: "http://registry.test",
+      versions: { "1.4.2": {} },
+    });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex")).rejects.toThrow(/https/);
+    expect(registry.asked).toEqual([]);
+  });
+
+  test("the default registry is npm's, and it is not reached by accident", async () => {
+    const asked: string[] = [];
+    const fetching: PluginDeps = {
+      ...deps,
+      fetchBytes: async (url) => {
+        asked.push(url);
+        throw new Error("no network in tests");
+      },
+    };
+
+    await expect(installPlugin(fetching, makeRoot(), "poke-dex")).rejects.toThrow();
+
+    expect(asked).toEqual(["https://registry.npmjs.org/poke-dex"]);
+  });
+
+  test("a package name is refused when the caller injected no fetcher", async () => {
+    await expect(installPlugin(deps, makeRoot(), "poke-dex")).rejects.toThrow(/registry/);
+  });
+
+  test("a version the registry does not have is refused, naming it", async () => {
+    const registry = fakeRegistry({ name: "poke-dex", versions: { "1.4.2": {} } });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex@9.9.9")).rejects.toThrow(
+      /no version 9\.9\.9/,
+    );
+    expect(registry.asked).toHaveLength(1);
+  });
+
+  test("a packument with no dist-tags.latest asks for an exact version instead", async () => {
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": {} },
+      latest: null,
+      // A tag *is* published, just not that one. No version means `latest` and
+      // only `latest`: falling back to whatever tag happens to be there would
+      // install a prerelease on an operator who typed no version at all.
+      tags: { next: "1.4.2" },
+    });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex")).rejects.toThrow(
+      /dist-tags\.latest/,
+    );
+    expect(registry.asked).toHaveLength(1);
+  });
+
+  test("latest is preferred over every other tag", async () => {
+    const root = makeRoot();
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": {}, "2.0.0": {} },
+      latest: "1.4.2",
+      tags: { next: "2.0.0" },
+    });
+
+    const result = await installPlugin(registry.deps, root, "poke-dex");
+
+    expect(result.version).toBe("1.4.2");
+  });
+
+  test("a packument that is not JSON is refused as the registry's problem", async () => {
+    const registry = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": {} },
+      packumentBytes: encoder.encode("<html>404</html>"),
+    });
+
+    await expect(installPlugin(registry.deps, makeRoot(), "poke-dex")).rejects.toThrow(
+      /not valid JSON/,
+    );
+  });
+
+  test("no code from a registry package is executed", async () => {
+    const root = makeRoot();
+    const sentinel = join(root, "install-script-ran");
+    const side = `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(sentinel)}, "ran");\n`;
+    const bytes = Bun.gzipSync(
+      new Uint8Array(
+        makeTarball([
+          ["package/omni-plugin.json", JSON.stringify(MANIFEST)],
+          [
+            "package/package.json",
+            JSON.stringify({
+              name: "poke-dex",
+              scripts: { preinstall: "node evil.js", postinstall: "node evil.js" },
+            }),
+          ],
+          ["package/evil.js", side],
+          ["package/server.js", `${side}export default { setup() {} };\n`],
+        ]),
+      ),
+    );
+    const registry = fakeRegistry({ name: "poke-dex", versions: { "1.4.2": { bytes } } });
+
+    await installPlugin(registry.deps, root, "poke-dex");
+
+    // The remote path is the local path plus two fetches and a digest. It does
+    // not acquire a subprocess on the way.
+    expect(existsSync(sentinel)).toBe(false);
+    expect(existsSync(join(root, "plugins", "poke-dex", "evil.js"))).toBe(true);
+  });
+
+  test("a spec that is neither a path nor a package name says both", async () => {
+    const registry = fakeRegistry({ name: "poke-dex", versions: { "1.4.2": {} } });
+
+    await expect(
+      installPlugin(registry.deps, makeRoot(), "./nowhere/../Poke_Dex!"),
+    ).rejects.toThrow(/not a package name/);
+    expect(registry.asked).toEqual([]);
+  });
+
+  test("something on disk wins over a package of the same name", async () => {
+    const root = makeRoot();
+    const from = source("poke-dex", MANIFEST);
+    const registry = fakeRegistry({ name: "poke-dex", versions: { "9.9.9": {} } });
+    const cwd = process.cwd();
+
+    try {
+      process.chdir(join(from, ".."));
+      const result = await installPlugin(registry.deps, root, "poke-dex");
+
+      // The ambiguity is resolved towards the disk in every case. The other
+      // order would turn a directory an operator is standing in into a silent
+      // download, which is the version of this that cannot be undone by looking.
+      expect(result.version).toBe("1.4.2");
+      expect(registry.asked).toEqual([]);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+});
+
+/* ----------------------------------------------------------- the fetcher */
+
+/**
+ * `nodeFetchBytes` with its `fetch` injected, which is the only reason that
+ * option exists. Nothing here opens a socket.
+ */
+type FetchInput = Parameters<typeof fetch>[0];
+type FetchInit = Parameters<typeof fetch>[1];
+
+function stubFetch(handler: (url: string, init: FetchInit) => Response): typeof fetch {
+  return (async (input: FetchInput, init?: FetchInit) =>
+    handler(String(input), init)) as typeof fetch;
+}
+
+describe("nodeFetchBytes", () => {
+  test("returns the body and forwards the accept hint", async () => {
+    const seen: Array<string | undefined> = [];
+    const fetchBytes = nodeFetchBytes({
+      fetchImpl: stubFetch((_url, init) => {
+        const headers = new Headers(init?.headers);
+        seen.push(headers.get("accept") ?? undefined);
+        return new Response(new Uint8Array([1, 2, 3]));
+      }),
+    });
+
+    expect(await fetchBytes("https://registry.test/thing", "application/json")).toEqual(
+      new Uint8Array([1, 2, 3]),
+    );
+    expect(seen).toEqual(["application/json"]);
+  });
+
+  test("refuses a plaintext url without making the request", async () => {
+    let called = false;
+    const fetchBytes = nodeFetchBytes({
+      fetchImpl: stubFetch(() => {
+        called = true;
+        return new Response(new Uint8Array(0));
+      }),
+    });
+
+    // Restated at the transport because this is the last place it can be true.
+    await expect(fetchBytes("http://registry.test/thing")).rejects.toThrow(/https/);
+    expect(called).toBe(false);
+  });
+
+  test("an error status is an error, not an empty download", async () => {
+    const fetchBytes = nodeFetchBytes({
+      fetchImpl: stubFetch(() => new Response("nope", { status: 404 })),
+    });
+
+    // A 404 body unpacked as a tarball would fail somewhere far away from the
+    // typo that caused it.
+    await expect(fetchBytes("https://registry.test/thing")).rejects.toThrow(/404/);
+  });
+
+  test("a body over the ceiling is refused and the transfer is cancelled", async () => {
+    let cancelled = false;
+    const fetchBytes = nodeFetchBytes({
+      maxBytes: 8,
+      fetchImpl: stubFetch(() => {
+        // Ten four-byte chunks and no `content-length`. Finite on purpose: a
+        // fixture that streamed forever would hang rather than fail if the
+        // ceiling were ever removed, and a hang is not a failing test.
+        let sent = 0;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (sent++ >= 10) {
+                controller.close();
+                return;
+              }
+              controller.enqueue(new Uint8Array(4));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+        );
+      }),
+    });
+
+    // An endless body: the ceiling has to be enforced while reading, because
+    // there is no content-length here to have believed.
+    await expect(fetchBytes("https://registry.test/thing")).rejects.toThrow(/more than 8 bytes/);
+    expect(cancelled).toBe(true);
   });
 });
 

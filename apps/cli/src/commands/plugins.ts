@@ -1,6 +1,7 @@
 import {
   installPlugin,
   listPlugins,
+  nodeFetchBytes,
   nodePluginFs,
   type PluginDeps,
   type PluginSummary,
@@ -9,7 +10,7 @@ import {
   verifyPlugin,
 } from "@omni/control";
 import { DASHBOARD_SDK_VERSION } from "@omni/plugins";
-import { boolFlag, requirePositional } from "../args.ts";
+import { boolFlag, type Parsed, requirePositional, stringFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError, type Context } from "../context.ts";
 import { emit, fields, note, paint, table } from "../output.ts";
@@ -35,6 +36,33 @@ function pluginDeps(): PluginDeps {
 }
 
 /**
+ * The deps `install` needs, which are the read-only ones plus a way out to the
+ * network.
+ *
+ * Only this command gets a fetcher. `list`, `verify`, and `doctor` answer from
+ * the disk and would be answering a different question if a slow registry could
+ * make them hang, so the dep they are handed has no way to reach one — boundary
+ * rule 11's "inject every side effect" read the strict way, where a command
+ * that cannot do a thing is better than one that merely does not.
+ *
+ * The registry comes from the flag, then from the installation's environment,
+ * and otherwise from control's default. The flag wins because it is the more
+ * specific statement, the same order `--db` has over `OMNI_DB_PATH`; a blank
+ * value in either is the variable being unset by a shell, not a request to
+ * install from the empty string.
+ */
+function installDeps(ctx: Context, args: Parsed): PluginDeps {
+  const flag = stringFlag(args.values, "registry");
+  const raw = flag ?? ctx.env.OMNI_PLUGIN_REGISTRY;
+  const registry = raw === undefined || raw.trim().length === 0 ? undefined : raw.trim();
+  return {
+    ...pluginDeps(),
+    fetchBytes: nodeFetchBytes(),
+    ...(registry === undefined ? {} : { registry }),
+  };
+}
+
+/**
  * One plugin's state as a single cell.
  *
  * Three words rather than two, because "would not load" and "loads with
@@ -56,7 +84,7 @@ export const pluginList: Command = {
 
     emit(ctx, writer, { pluginsDir: pluginsDir(root), plugins }, () => {
       if (plugins.length === 0) {
-        return `no plugins installed; unpack one into ${pluginsDir(root)} with: omni plugin install <path>`;
+        return `no plugins installed; unpack one into ${pluginsDir(root)} with: omni plugin install <path-or-package>`;
       }
       const rows = plugins.map((plugin) => [
         plugin.id,
@@ -140,11 +168,12 @@ export const pluginVerify: Command = {
 };
 
 export const pluginInstall: Command = {
-  usage: "plugin install <path-or-tarball>",
+  usage: "plugin install <path|tarball|https url|package[@version]> [--registry <url>]",
   summary: "Unpack a plugin into this installation, running nothing from it",
+  options: { registry: { type: "string" } },
   async run(args, { ctx, writer }) {
-    const spec = requirePositional(args, 0, "plugin directory or tarball");
-    const result = await installPlugin(pluginDeps(), ctx.root.root, spec);
+    const spec = requirePositional(args, 0, "plugin directory, tarball, url, or package name");
+    const result = await installPlugin(installDeps(ctx, args), ctx.root.root, spec);
 
     emit(ctx, writer, result, () => {
       note(

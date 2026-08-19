@@ -181,6 +181,82 @@ describe("omni plugin install", () => {
     expect(result.code).toBe(0);
     expect(existsSync(sentinel)).toBe(false);
   });
+
+  /**
+   * The remote specs, driven through the CLI and reaching no network.
+   *
+   * Every case below is refused *before* the first request, which is what makes
+   * them testable here at all: the harness has no seam for a stubbed fetcher, so
+   * a test that got as far as a socket would be a test that opened one. That is
+   * also why they are worth having — each one asserts that a refusal happens
+   * early, and "early" is the property an end-to-end test can see that a unit
+   * test of the resolver cannot.
+   */
+  test("a plaintext url is refused", async () => {
+    const result = await cli(["plugin", "install", "http://example.invalid/p.tgz"], {
+      root: makeRoot(),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("https");
+  });
+
+  test("a version range is refused, naming what would be accepted", async () => {
+    const result = await cli(["plugin", "install", "omni-plugin-nope@^1.0.0"], {
+      root: makeRoot(),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("exact version");
+    expect(result.err).toContain("omni-plugin-nope@1.2.3");
+  });
+
+  test("a scoped name keeps its @ and takes its version from the second one", async () => {
+    const result = await cli(["plugin", "install", "@team/omni-plugin-nope@1.x"], {
+      root: makeRoot(),
+    });
+
+    expect(result.code).not.toBe(0);
+    // The whole scoped name, and only the trailing `1.x` as the version. A
+    // split at the first `@` would report the package as "" and the version as
+    // "team/omni-plugin-nope@1.x".
+    expect(result.err).toContain("@team/omni-plugin-nope@1.x is not an exact version");
+  });
+
+  test("--registry decides where a package name resolves, and must be https", async () => {
+    const result = await cli(
+      ["plugin", "install", "omni-plugin-nope", "--registry", "http://from-flag.test"],
+      { root: makeRoot() },
+    );
+
+    expect(result.code).not.toBe(0);
+    // Reaching this message means the CLI injected a fetcher *and* passed the
+    // registry through: without the fetcher the refusal would be a different
+    // one, about this caller not being able to install from a registry.
+    expect(result.err).toContain("http://from-flag.test");
+  });
+
+  test("an installation's .env names a registry too", async () => {
+    const root = makeRoot({ OMNI_PLUGIN_REGISTRY: "http://from-env.test" });
+
+    const result = await cli(["plugin", "install", "omni-plugin-nope"], { root });
+
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("http://from-env.test");
+  });
+
+  test("the flag wins over the environment, as --db does", async () => {
+    const root = makeRoot({ OMNI_PLUGIN_REGISTRY: "http://from-env.test" });
+
+    const result = await cli(
+      ["plugin", "install", "omni-plugin-nope", "--registry", "http://from-flag.test"],
+      { root },
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("http://from-flag.test");
+    expect(result.err).not.toContain("from-env");
+  });
 });
 
 describe("omni plugin remove", () => {
