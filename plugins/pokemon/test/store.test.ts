@@ -9,13 +9,13 @@ import { EGG_HATCH_THRESHOLD, ITEM_PRICES } from "../src/balance.ts";
 import { freshState, serialiseState } from "../src/state.ts";
 import {
   creditTokens,
-  grantedTier,
+  lastGrantedAt,
   MIGRATIONS,
   purchase,
   readCompanion,
   readDex,
   recordGraduation,
-  setGrantedTier,
+  setGrantedAt,
   settle,
   wallet,
 } from "../src/store.ts";
@@ -267,20 +267,20 @@ test("one key cannot see another key's dex", () => {
 
 // ---------------------------------------------------------------- grants
 
-test("a grant tier is remembered per key and window", () => {
+test("a grant instant is remembered per key and window", () => {
   // Persisted rather than held in memory, because in memory a restart re-grants
-  // forever.
-  expect(grantedTier(storage, KEY, "tokens:1w")).toBe(0);
-  setGrantedTier(storage, KEY, "tokens:1w", 2);
-  expect(grantedTier(storage, KEY, "tokens:1w")).toBe(2);
-  expect(grantedTier(storage, KEY, "requests:1m")).toBe(0);
-  expect(grantedTier(storage, "key_other", "tokens:1w")).toBe(0);
+  // forever. Null for never, so "not yet" and "paid at epoch" stay apart.
+  expect(lastGrantedAt(storage, KEY, "tokens:1w")).toBeNull();
+  setGrantedAt(storage, KEY, "tokens:1w", 5_000);
+  expect(lastGrantedAt(storage, KEY, "tokens:1w")).toBe(5_000);
+  expect(lastGrantedAt(storage, KEY, "requests:1m")).toBeNull();
+  expect(lastGrantedAt(storage, "key_other", "tokens:1w")).toBeNull();
 });
 
-test("a grant tier can be lowered again, so a window that empties can re-arm", () => {
-  setGrantedTier(storage, KEY, "tokens:1w", 2);
-  setGrantedTier(storage, KEY, "tokens:1w", 0);
-  expect(grantedTier(storage, KEY, "tokens:1w")).toBe(0);
+test("a later grant replaces the earlier instant", () => {
+  setGrantedAt(storage, KEY, "tokens:1w", 5_000);
+  setGrantedAt(storage, KEY, "tokens:1w", 9_000);
+  expect(lastGrantedAt(storage, KEY, "tokens:1w")).toBe(9_000);
 });
 
 test("a state written by hand still round-trips", () => {

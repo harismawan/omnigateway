@@ -52,9 +52,11 @@ export const MIGRATIONS: readonly PluginMigration[] = [
     version: 4,
     sql: `
       CREATE TABLE {{grants}} (
-        api_key_id   TEXT NOT NULL,
-        window_key   TEXT NOT NULL,
-        granted_tier INTEGER NOT NULL,
+        api_key_id TEXT NOT NULL,
+        window_key TEXT NOT NULL,
+        -- An instant, not a tier. A grant is rate-limited by the window's own
+        -- duration, because nothing tells this plugin when a window empties.
+        granted_at INTEGER NOT NULL,
         PRIMARY KEY (api_key_id, window_key)
       )
     `,
@@ -251,25 +253,29 @@ export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
   return entries;
 }
 
-/** What a key has already been paid for, so a grant fires on an edge and not a level. */
-export function grantedTier(storage: PluginStorage, apiKeyId: string, windowKey: string): number {
-  const row = storage.get<{ granted_tier: number }>(
-    "SELECT granted_tier FROM {{grants}} WHERE api_key_id = ? AND window_key = ?",
-    [apiKeyId, windowKey],
-  );
-  return row?.granted_tier ?? 0;
-}
-
-export function setGrantedTier(
+/** When this window last paid, or null for never. */
+export function lastGrantedAt(
   storage: PluginStorage,
   apiKeyId: string,
   windowKey: string,
-  tier: number,
+): number | null {
+  const row = storage.get<{ granted_at: number }>(
+    "SELECT granted_at FROM {{grants}} WHERE api_key_id = ? AND window_key = ?",
+    [apiKeyId, windowKey],
+  );
+  return row?.granted_at ?? null;
+}
+
+export function setGrantedAt(
+  storage: PluginStorage,
+  apiKeyId: string,
+  windowKey: string,
+  at: number,
 ): void {
   storage.run(
-    `INSERT INTO {{grants}} (api_key_id, window_key, granted_tier) VALUES (?, ?, ?)
-     ON CONFLICT(api_key_id, window_key) DO UPDATE SET granted_tier = excluded.granted_tier`,
-    [apiKeyId, windowKey, tier],
+    `INSERT INTO {{grants}} (api_key_id, window_key, granted_at) VALUES (?, ?, ?)
+     ON CONFLICT(api_key_id, window_key) DO UPDATE SET granted_at = excluded.granted_at`,
+    [apiKeyId, windowKey, at],
   );
 }
 

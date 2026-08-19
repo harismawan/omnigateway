@@ -7,7 +7,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@omni/plugins": "workspace:*"
+    "@omni/plugins": "workspace:*",
+    "@omni/ratelimit": "workspace:*"
   },
   "peerDependencies": {
     "@omni/dashboard-sdk": "workspace:*",

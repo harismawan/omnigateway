@@ -183,6 +183,7 @@
       "version": "1.0.0",
       "dependencies": {
         "@omni/plugins": "workspace:*",
+        "@omni/ratelimit": "workspace:*",
       },
       "devDependencies": {
         "@omni/dashboard-sdk": "workspace:*",

@@ -19,14 +19,14 @@ import type { CompanionState } from "./state.ts";
 import { hasShinyCharm } from "./state.ts";
 import {
   creditTokens,
-  grantedTier,
+  lastGrantedAt,
   MIGRATIONS,
   purchase,
   readCompanion,
   readDex,
   recordGraduation,
   type ShopEntry,
-  setGrantedTier,
+  setGrantedAt,
   settle,
   wallet,
 } from "./store.ts";
@@ -176,13 +176,14 @@ export default definePlugin({
 
         const decision = decideGrant({
           window: event.window,
-          grantedTier: grantedTier(storage, event.apiKeyId, key),
+          lastGrantedAt: lastGrantedAt(storage, event.apiKeyId, key),
           seeded: row.state.grantSeeded,
+          now: ctx.now(),
         });
 
         if (!decision.grant) {
-          if (decision.seedTo !== undefined) {
-            setGrantedTier(storage, event.apiKeyId, key, decision.seedTo);
+          if (decision.seedAt !== undefined) {
+            setGrantedAt(storage, event.apiKeyId, key, decision.seedAt);
             storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
               JSON.stringify({ ...row.state, grantSeeded: true }),
               event.apiKeyId,
@@ -191,7 +192,7 @@ export default definePlugin({
           return;
         }
 
-        setGrantedTier(storage, event.apiKeyId, key, decision.tier);
+        setGrantedAt(storage, event.apiKeyId, key, decision.at);
         storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
           JSON.stringify({
             ...row.state,
