@@ -96,40 +96,10 @@ and `bun run lint`.
 
 ## Adding a provider
 
-1. Start at `ProviderId` in `packages/ir/src/request.ts`. Adding a member makes the compiler
-   enumerate every exhaustive `Record<ProviderId, …>`; let it drive the work rather than keeping a
-   checklist. What it cannot find: hardcoded provider lists in tests (`kimi`, `custom`, `catalog`,
-   `proxy`), the dashboard's duplicated `PROVIDER_LABEL`, `PASTE_HINT`, and `PROVIDER_ORDER` maps,
-   the `--p-<id>` oklch pair in `theme/GlobalStyle.ts`, and free-text `"provider must be one of …"`
-   strings in CLI and control. Beware assertions that still pass by prefix.
-2. No store migration. `credentials.provider` is `TEXT` with no `CHECK`, and `providerData` is
-   free-form.
-3. Directory is `packages/providers/src/<id>/`: `index.ts` transport, `wire.ts` IR to request,
-   `decode.ts` stream to IR, `models.ts` catalog entry, plus `device.ts` where the provider wants a
-   stable client fingerprint. Mint fingerprints synthetically at connect time and freeze them onto
-   the credential; never read the real hostname or machine id.
-4. Fork `wire.ts` and `decode.ts` per provider. Never import another provider's directory: vendors
-   look alike on paper and diverge in practice, and a shared encoder collects a branch per quirk.
-   `custom/` predates this rule and shows the cost — it imports `../kimi/` and `../openai/` and pays
-   with a regex rewriting degradation prefixes afterwards. Shared infrastructure stays shared
-   (`usageFromPromptTotal`, `parseSse`, `httpError`, `orderHeaders`).
-5. Add `PROFILES.<id>` and `BODY_ORDER.<id>`. State in a comment whether the header set was captured
-   from real traffic or constructed, as the kimi profile does. Put any version string the upstream
-   gates on behind `env()` so a stale value is an operator fix, not a release.
-6. OAuth is optional — `OAUTH_PROVIDERS` is `Partial`. Omit `usage` when there is no quota surface,
-   so accounts read as unknown rather than unlimited. Refresh must retain the previous refresh token
-   when a response omits one. Endpoints read from OIDC discovery must be validated as HTTPS on the
-   provider's own domain before use, and a discovery failure is `UPSTREAM`, never `AUTH` — `AUTH`
-   disables the credential.
-7. Where a provider serves OAuth and API-key traffic from different hosts, or from different paths
-   on one host as `kilo` does, select the URL by credential type in the adapter and assert the split
-   in a test. Crossing them surfaces as a billing or entitlement error, which reads as anything but
-   a routing bug.
-8. A provider that prices by request size cannot be expressed in `ProviderModelPricing`. Pick a
-   tier, say so in a comment, and warn operators in `README.md`.
-9. Cover streaming and non-streaming, and mutation-test the load-bearing assertions — URL selection,
-   usage-token arithmetic, tool call and result round-trip, mid-conversation system placement.
-   Verify each anchor fails when its behaviour is broken; a green suite is not evidence of coverage.
+The nine-step procedure lives in [docs/adding-a-provider.md](docs/adding-a-provider.md): what the
+compiler will enumerate for you, what it cannot find, the per-provider files, and why `wire.ts` and
+`decode.ts` are forked rather than shared. Read it before adding one — several steps exist because
+skipping them produced a bug that read as something else entirely.
 
 ## TypeScript and dashboard style
 
@@ -230,58 +200,52 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   `.env`, so otherwise the flag picks the root and an unrelated checkout picks its database. The
   suppression is warned on stderr, reported by `doctor`, and removed from the env a spawned gateway
   inherits. `OMNI_ROOT` does not suppress it: both are ambient.
-- API-key rate limits and quota cooldowns are process-local and reset on restart.
+- Quota cooldowns are process-local and reset on restart. So are `1m` and `concurrency`; `5h` and
+  `1w` come from the database and survive one.
 - `usage.append` must run at most once per request ID; duplicate completion double-counts
   `usage_daily` and `usage_rollup` alike. Pending rows contain placeholder metrics; inspect `state`,
   not `status`.
 - `usage_rollup` is derived, never authoritative: `request_logs` is the source of truth and
-  `rebuildRollup` reproduces every bucket from it. It is written in `append`'s transaction, pruned
-  with the rows it summarizes, rebuilt after a restore or import, and compared by `omni doctor`. A
-  read of it is flat where a `SELECT SUM` over the window grows without bound — and `bun:sqlite` is
-  synchronous, so that scan blocked the whole event loop, not one request. For the same reason a
-  timeout around a store read is a bound that cannot fire; do not add one back.
+  `rebuildRollup` reproduces every bucket from it. Written in `append`'s transaction, pruned with the
+  rows it summarizes, rebuilt after a restore, compared by `omni doctor`. It replaced a `SELECT SUM`
+  whose cost grew without bound — and `bun:sqlite` is synchronous, so that scan blocked the whole
+  event loop, not one request. For the same reason a timeout around a store read cannot fire; do not
+  add one back.
 - `quota_windows` stores provider observations, not gateway counts. Missing data means unknown, not
   unlimited. Probe failure must never disable a credential.
 - RTK filter ids are persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is a storage
   contract, not an internal enum. `isRtkFilterId` drops unknown ids on read, so renaming one loses
   history silently rather than failing. Add ids freely; rename or remove only with a migration.
-- The limit vocabulary — `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` — is persisted as
-  the JSON keys of `api_keys.limits` in every row, so it is a storage contract of the same class.
-  Unlike RTK ids it fails **closed**: an unknown dimension or window is a parse failure, never a
-  silent drop, because a limit read as "no limit" fails open on a ceiling the operator set. Add
-  names freely; rename or remove only with a migration.
-- Refuse at auth, degrade at list. A row whose `limits` will not parse reads back as
-  `ApiKey.limits === null`, distinct from `{}`, and `authenticateApiKey` turns that into
-  `INTERNAL` — not `AUTH`, which would blame a credential that is fine. `keys.list()` must never
-  throw over one such row: `toKey` serves the listing as well as the auth lookup, and the listing is
-  how an operator finds the row to fix. Nothing may collapse the null into `{}` on the way to the
-  CLI or console.
-- `limits` is the one field on a key that is editable after minting, through `setKeyLimits` and
-  `PUT /api/keys/:id/limits`; `bodyLoggingOptOut` deliberately has no such path. An opt-out is a
-  promise to whoever holds the key, while a limit is the operator's own ceiling on their own
-  installation. The matrix is written whole — `{}` is how the last limit goes away, and it must land
-  as `{}` rather than a husk like `{"requests":{}}` or the outer `null` that means unreadable.
-- The usage on `ApiKeySummary.limitUsage` is committed rows only, so it is a floor on what the
-  limiter sees and never the limiter's own number: the gateway adds a process-local delta and the
-  `concurrency` gauge is not stored at all, which is why its `used` is `null` rather than `0`.
-- API-key limits are enforced over *sliding* windows. A fixed window resets on a clock edge and lets
-  a key spend a whole window's allowance either side of one, at every window size. `1m` is exact from
-  a ring of timestamps in `apps/gateway`; longer windows read `usage.sumSince`, which must filter
-  `state = 'done'` or every in-flight request's placeholder metrics inflate the count.
-- A long-window count is `usage.sumSince` plus the in-memory delta since that read, cached 30s. The
-  composition may over-count — events aging out between the read and now are not subtracted — and
-  must never under-count, so the delta keeps everything recorded at or after the read instant. A
-  limiter whose error ran the other way could be walked through by timing the refresh. A failed or
-  slow `sumSince` serves the request and logs it through existing `LogFields` keys; only the long
-  windows degrade, because `requests` at `1m` and `concurrency` never touch the store.
-- The token and spend debit lives in `finishLog`, beside `usage.append` and never inside
-  `@omni/store`. That site already runs at most once per request id, which is exactly the guarantee
-  the debit needs and would otherwise have to re-establish.
-- The concurrency gauge is decremented at request scope and nowhere else. A streaming handler returns
-  its `Response` while the request is still running, so a `finally` around the handler body fires
-  when the head is sent, and a decrement beside the debit sits behind a store write. Streams free the
-  slot from `sseResponse`'s run-once completion, which covers a drained stream, a broken one, and a
-  hang-up alike. No window expires a gauge: a leak locks the key out until restart, silently.
+- Rate limiting is explained in `ARCHITECTURE.md#rate-limiting`; these are the invariants a change
+  must not break, and each has already been broken once.
+- `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` are the JSON keys of `api_keys.limits`, so
+  a storage contract like RTK ids — but failing **closed**: an unknown name is a parse failure, never
+  a silent drop. Rename or remove only with a migration.
+- `admit`/`consume` claim the ring stamp and gauge **synchronously**, before any `await`, and roll
+  back on refusal. Reading counters first and recording after lets concurrent requests judge one
+  pre-burst snapshot — a ceiling of 3 admitted 10 parallel requests, and it needs no I/O to fire.
+- Refuse at auth, degrade at list. An unparseable `limits` reads back as `null`, distinct from `{}`,
+  and `authenticateApiKey` turns it into `INTERNAL` — not `AUTH`, which would blame a credential that
+  is fine. `keys.list()` must never throw over such a row: `toKey` serves the listing too, and the
+  listing is how an operator finds the row to fix. Nothing may collapse that `null` into `{}`.
+- `limits` is the only field editable after minting (`setKeyLimits`, `PUT /api/keys/:id/limits`);
+  `bodyLoggingOptOut` deliberately is not — an opt-out is a promise to whoever holds the key, a limit
+  is the operator's own ceiling. The matrix is written whole: `{}` is how the last limit goes away,
+  never a husk like `{"requests":{}}`.
+- Windows *slide*. `1m` is an exact ring in `apps/gateway`; longer windows are `usage.sumSince` —
+  which must filter `state = 'done'` — plus an in-memory delta, cached 30s. The composition may
+  over-count and must **never** under-count, so the delta keeps everything at or after the read
+  instant; the other direction is walkable by timing the refresh. A failed `sumSince` serves the
+  request and logs through existing `LogFields` keys, degrading long windows only, because `1m` and
+  `concurrency` never touch the store.
+- The token and spend debit lives in `finishLog` beside `usage.append`, never inside `@omni/store`:
+  that site already runs at most once per request id, which is the guarantee the debit needs.
+- The concurrency gauge is released at request scope and nowhere else. A streaming handler returns
+  while the request still runs, so a `finally` around the handler body fires at head-send, and a
+  decrement beside the debit sits behind a store write; streams free it from `sseResponse`'s
+  run-once completion. No window expires a gauge — a leak locks the key out until restart, silently.
+- `ApiKeySummary.limitUsage` counts committed rows only: a floor on what the limiter sees, never its
+  number. `concurrency.used` is `null`, not `0`, because the gauge is not stored.
 - `ProviderModelChoice.auth` is enforced at write time in `putModel`, never at routing. Which ways
   in exist is installation state, so the catalog exports the fact (`catalogModelAuths`) and control
   owns the rule. A provider with no credential is unknown rather than blocked, an unlisted model is
@@ -301,27 +265,21 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   files disagree until `sweepOrphans` reconciles them; that is expected, not a bug.
 - A snapshot still carries encrypted credentials and API-key hashes. Downloads are `no-store`, and
   the file is inert only because `OMNI_ENCRYPTION_KEY` is not in it.
-- Restart asks systemd rather than signalling itself. The unit sets `Restart=on-failure`, so a
-  handled SIGTERM exits 0 and reads as success — self-SIGTERM stops the gateway for good. `--no-block`
-  is required: systemd tears down the unit cgroup including the `systemctl` client it just spawned.
-- The quiesce latch gates `/v1/*` only. `/api/*` and `/health` stay live through a swap, because an
-  operator watching a restore recovers through exactly those routes.
+- The lifecycle and swap rules below are explained in `ARCHITECTURE.md#replacing-the-database-while-it-is-open`
+  and `#stopping-and-restarting`. Each one looks arbitrary alone and is not; read the section before
+  changing any of them.
+- Restart asks systemd, never self-SIGTERM (which stops the gateway for good), and `--no-block` is
+  required.
+- The quiesce latch gates `/v1/*` only; `/api/*` and `/health` stay live through a swap.
 - `store.close()` is idempotent and `reopen()` tolerates a closed handle, so restore is close → swap
-  → reopen. Repo methods forward per call to the inner handle: bind one to a local and it dies at the
-  next swap.
-- `vacuum()` must checkpoint. In WAL mode the rewrite lands in the log, so page count falls while the
-  file keeps every page and every caller reports reclaiming nothing.
-- Restoring writes another installation's admin password hash without passing through `setPassword`,
-  which is what clears sessions. Restore compares the hash across the swap and invalidates only when
-  it differs. Nothing may sit between the swap and that comparison: the swap has already succeeded by
-  then, so a step that throws in front of it skips the invalidation while the new password is live.
-- `swapIn` ends by rebuilding `usage_rollup`, after the hash comparison and guarded. `bun:sqlite` is
-  synchronous, so the rebuild blocks the event loop — and therefore `/api/*` and `/health` — for
-  ≈0.4 s per 500k `request_logs` rows, ≈1.6 s at 2M, ≈6.5 s at 8M. Document the cost rather than hide
-  it; a stale rollup is a `doctor` complaint, a failed restore is an outage.
-- `omni db restore` refuses while a gateway is running and has no override. The dashboard swaps
-  inside the process owning the handle; a second process cannot quiesce that connection, and renaming
-  the file under it corrupts the database being rescued.
+  → reopen. Repo methods forward per call: bind one to a local and it dies at the next swap.
+- `vacuum()` must checkpoint, or page count falls while the file keeps every page.
+- Restore compares the admin password hash across the swap and invalidates sessions only when it
+  differs. **Nothing may sit between the swap and that comparison** — the swap has already succeeded,
+  so anything throwing in front of it skips the invalidation while the new password is live.
+- `swapIn` rebuilds `usage_rollup` last and guarded, for that reason. It blocks the loop; the cost is
+  measured in `README.md` and must stay documented rather than hidden.
+- `omni db restore` refuses while a gateway is running and has no override.
 
 ## Subagent workflow
 

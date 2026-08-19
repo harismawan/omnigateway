@@ -39,7 +39,9 @@ omni start
   routes by *pace*: 5% remaining is fine minutes before a reset and urgent with
   six days to run.
 - **Issues its own keys.** Hand out gateway keys with per-key model allowlists
-  and rate limits instead of sharing provider credentials.
+  instead of sharing provider credentials, and bound each one by requests,
+  tokens, dollars, or requests in flight — per minute, per five hours, and per
+  week.
 - **Reports usage.** Requests, tokens, and cost by provider, model, key, and
   day — metadata only.
 - **Backs itself up.** Snapshot the database from the console or the CLI, see
@@ -68,17 +70,21 @@ graph TD
   store["@omni/store<br/><i>SQLite + field encryption</i>"]
   providers["@omni/providers<br/><i>adapters, wire codecs,<br/>catalog, HTTP client</i>"]
   rtk["@omni/rtk<br/><i>tool-result filters</i>"]
+  ratelimit["@omni/ratelimit<br/><i>key limit arithmetic;<br/>no clock, no state</i>"]
   ir["@omni/ir<br/><i>domain model — depends on nothing</i>"]
 
   gateway --> control
   gateway --> rtk
+  gateway --> ratelimit
   cli --> control
   dashboard -. "types + catalog only" .-> providers
   dashboard -. "types only" .-> store
   control --> router
+  control --> ratelimit
   router --> store
   router --> providers
   store --> rtk
+  store --> ratelimit
   providers --> ir
   rtk --> ir
   store --> ir
@@ -88,6 +94,14 @@ Arrows read *depends on*, and the direction never reverses. Two rules do most of
 the work: `@omni/ir` is side-effect free and imports nothing, and `@omni/router`
 is a pure function — no network, no database, no timers. Everything that has to
 touch the world is pushed up into the gateway process.
+
+`@omni/ratelimit` is the same shape applied to key limits: it decides whether a
+request is over a ceiling, and it holds no clock and no counters — `now` is a
+parameter and the counts are handed to it, so it never learns whether a number
+came from memory or from SQLite. It imports nothing but its schema validator, not
+even `@omni/ir`. The rings and the in-flight gauge live in the gateway, because
+state is not the package's job, and that split is what lets sliding-window
+arithmetic be tested without a gateway, a store, or a clock.
 
 The dashboard's edges are dotted because they are type-level only.
 `@omni/providers/catalog` is deliberately kept import-free so model lists can be
@@ -199,16 +213,13 @@ takes `5h` and `1w`; `concurrency` is not a window at all but a ceiling on
 requests in flight at once.
 
 `tokens` and `spend` are debited once a response completes, because an exact
-token count exists only then — a key at its ceiling is refused on its *next*
-request rather than its current one. The `5h` and `1w` counts come from
-`request_logs`, so a `1w` limit on an installation that prunes logs after three
-days really enforces three days. They are cached for thirty seconds and can
-therefore read slightly high, never low: the key is refused early rather than
-let past a ceiling you set. If the database cannot answer, those windows stop
-enforcing and the gateway logs it; `requests` at `1m` and `concurrency` are held
-in memory and go on enforcing exactly. Everything here is counted per process
-and reset when the gateway restarts — which for `concurrency` is correct, since
-in-flight requests die with the process.
+count exists only then — a key at its ceiling is refused on its *next* request.
+The `5h` and `1w` counts derive from `request_logs`, so a `1w` limit on an
+installation that prunes logs after three days really enforces three days. They
+are cached for thirty seconds and so can read slightly high, never low: refused
+early rather than let past a ceiling you set. If the database cannot answer they
+stop enforcing and the gateway logs it, while `1m` and `concurrency` are held in
+memory and go on enforcing exactly.
 
 > **Breaking:** `--rate-limit N` is removed, not aliased. Use
 > `--limit requests:1m=N`. A script still passing the old flag stops with an
@@ -226,10 +237,9 @@ omni keys limits <id> --unset spend:5h
 
 `--unset` names a pair that is actually set, so a typo fails rather than
 reporting a change it did not make. The usage shown counts completed requests
-still inside each window, so it reads at or below what the running gateway is
-enforcing, and `concurrency` shows no figure at all — the gauge lives in the
-gateway process, not in the database. The console's Keys screen shows the same
-matrix behind each row's disclosure and edits it there.
+only, so it reads at or below what the gateway is enforcing, and `concurrency`
+shows no figure — that gauge lives in the process, not the database. The
+console's Keys screen shows and edits the same matrix.
 
 Now use it:
 
@@ -270,6 +280,36 @@ once.
 
 Most tools that accept a custom base URL work unchanged: set it to
 `http://127.0.0.1:9000` and use a gateway key where the provider key goes.
+
+### Rate-limit headers
+
+Every response carries the limit headers of the surface you asked on, so an SDK
+backs off using the code it already ships — the Anthropic dialect on
+`/v1/messages`, the OpenAI one on `/v1/chat/completions`:
+
+```http
+anthropic-ratelimit-requests-limit: 2000        x-ratelimit-limit-requests: 2000
+anthropic-ratelimit-requests-remaining: 1841    x-ratelimit-remaining-requests: 1841
+anthropic-ratelimit-requests-reset: 2026-08-19T14:32:07Z   x-ratelimit-reset-requests: 4h51m22s
+```
+
+`requests-remaining` counts the request you are being answered, as both vendors
+define it. `tokens-remaining` does not, and cannot: the response is still being
+written when the header goes out, so its token cost is not yet known and
+subtracting anything would be an invented number rather than a measured one.
+
+Where a key has several windows on one dimension, the headers report the one
+**nearest exhaustion** — a key comfortable per-minute but one request from its
+weekly ceiling shows you the weekly figures, not the reassuring ones.
+
+`spend` and `concurrency` are rendered on neither dialect, because no vendor
+defines a header for them and a number no client parses is noise in every
+response.
+
+A refusal is `429` with `Retry-After` in seconds, alongside the usual error body.
+The wait is computed from the oldest request still inside the window that
+refused you, so a weekly ceiling tells you when a slot actually frees rather than
+parking you for seven days.
 
 ### Tools and routing
 
@@ -450,14 +490,13 @@ omni bodies req_550e8400-… --json   # the artifact, for a script
 ```
 
 **The bare command withholds the bodies and prints only the frame.** Every other
-read in the CLI prints everything it has; this one prints conversations. A
-terminal keeps scrollback, a multiplexer keeps a logged pane, and whoever runs
-this during an incident is usually sharing that screen. Asking for the bodies
-costs one flag; printing them by default costs a prompt corpus in someone's
-session log, silently. The frame still tells you the detail state, when the
-capture landed, its size on disk, whether anything was truncated, and each
-attempt's provider and byte counts — labelled `pre-RTK` for the client request
-and `post-RTK` for every attempt request, because those are not the same payload.
+CLI read prints everything it has; this one prints conversations, and whoever
+runs it during an incident is usually sharing that screen. Asking costs one
+flag; printing by default costs a prompt corpus in someone's scrollback,
+silently. The frame still gives you the state, capture time, size on disk, any
+truncation, and each attempt's provider and byte counts — labelled `pre-RTK` for
+the client request and `post-RTK` for attempts, because they are not the same
+payload.
 
 A request with no artifact is an answer rather than an error, and the three
 answers are different: `not captured` means capture was not running, `captured,
@@ -516,17 +555,13 @@ past 64 KB, arrays to their last 24 items, nesting past 6 levels, objects to 80
 keys — so a stored artifact is always valid JSON. An artifact still over 512 KB
 after that has its bodies replaced by a marker recording why.
 
-**Sizing a volume.** 512 KB is a *plaintext* cap and encryption emits hex, so one
-artifact can reach roughly 1 MB on disk. With the 100,000-row cap, the worst case
-for the whole body corpus is therefore about **100 GB**, not 50. Real traffic is
-nowhere near that — most artifacts are a few kilobytes — but that is the number
-to size against if you enable capture on a busy gateway.
-
-**Sizing memory.** The same 512 KB is also the cap on each captured body held in
-memory while a request is in flight, and there is one of those per side per
-attempt. Worst case per captured request is therefore about 512 KB × (attempts +
-1), so a request that fails over twice can hold a few megabytes until it
-finishes. Multiply by your concurrency before enabling capture on a small box.
+**Sizing.** 512 KB is a *plaintext* cap and encryption emits hex, so one artifact
+can reach ~1 MB on disk: with the 100,000-row cap the corpus worst case is about
+**100 GB**, not 50. Most artifacts are a few kilobytes, but that is the number to
+size a volume against. The same cap applies per body held in memory while a
+request is in flight, one per side per attempt — so ~512 KB × (attempts + 1) per
+captured request. Multiply by your concurrency before enabling this on a small
+box.
 
 ## Snapshots and restore
 
@@ -625,7 +660,10 @@ again from the host.
 Worth knowing before you deploy it:
 
 - **One machine, one operator.** No multi-tenancy, no clustering, no shared
-  state. Rate limits are counted per process and reset when it restarts.
+  state. The `1m` window and the `concurrency` gauge are counted in the gateway
+  process and reset when it restarts; `5h` and `1w` are counted from the database
+  and survive one. Two gateways over one database would not see each other's
+  short-window counts.
 - **Two grains of usage history.** Detailed request logs are pruned after 30
   days by default; a daily rollup is kept for 400 days. A day is your host's
   local midnight, fixed when the row is written.
@@ -670,8 +708,9 @@ Worth knowing before you deploy it:
 Contributing, or running from a checkout? See
 [ARCHITECTURE.md](ARCHITECTURE.md) for how the system fits together,
 [CLAUDE.md](CLAUDE.md) for the repository map, architectural boundaries, and
-conventions, and `docs/superpowers/specs/` for the design documents behind each
-feature.
+conventions, [docs/adding-a-provider.md](docs/adding-a-provider.md) for the
+provider checklist, and `docs/superpowers/specs/` for the design documents
+behind each feature.
 
 ```bash
 git clone https://github.com/harismawan/omnigateway.git
