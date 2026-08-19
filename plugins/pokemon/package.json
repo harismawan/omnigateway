@@ -11,5 +11,8 @@
   },
   "peerDependencies": {
     "@omni/dashboard-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@omni/store": "workspace:*"
   }
 }

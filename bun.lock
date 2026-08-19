@@ -184,6 +184,9 @@
       "dependencies": {
         "@omni/plugins": "workspace:*",
       },
+      "devDependencies": {
+        "@omni/store": "workspace:*",
+      },
       "peerDependencies": {
         "@omni/dashboard-sdk": "workspace:*",
       },
