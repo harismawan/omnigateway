@@ -3,7 +3,7 @@ import { join, resolve, sep } from "node:path";
 import type { AdminAuth } from "@omni/control";
 import { type Logger, noopLogger } from "@omni/ir";
 import { Elysia } from "elysia";
-import { requireAdmin } from "../routes/http.ts";
+import { apiErrorHandler, requireAdmin } from "../routes/http.ts";
 import type { LoadedPlugin } from "./loader.ts";
 
 /**
@@ -99,7 +99,12 @@ export function pluginUiRoutes(deps: {
     }
   }
 
+  // Without this a GatewayError from `requireAdmin` escapes unmapped: the
+  // catalog answers 500 with a plain-text body where every other /api route
+  // answers 401 with a JSON envelope. A console cannot tell "log in again" from
+  // "the gateway is broken" from the first, and neither can an operator.
   return new Elysia()
+    .onError(apiErrorHandler)
     .get("/api/plugins", async ({ request }) => {
       await requireAdmin(request, deps.admin);
       return { plugins: pluginCatalog(deps.plugins) };

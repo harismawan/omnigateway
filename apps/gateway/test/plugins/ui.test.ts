@@ -97,11 +97,18 @@ test("a backend-only plugin is listed with no ui at all", () => {
 
 // ---------------------------------------------------------------- catalog route
 
-test("the catalog is admin-gated", async () => {
-  // Which plugins an installation runs is state about that installation.
+test("the catalog is admin-gated, and refuses the way every other /api route does", async () => {
+  // Asserted as 401-with-an-envelope rather than "not 200". The weaker form is
+  // what let this ship answering 500 with a plain-text body: the route was
+  // genuinely gated, and the refusal was unmapped because no error handler was
+  // attached. A console cannot tell "log in again" from "the gateway is broken"
+  // from a 500, and neither can an operator reading a log.
   const app = pluginUiRoutes({ admin: denyAdmin, plugins: [] });
   const response = await app.handle(new Request("http://localhost/api/plugins"));
-  expect(response.status).not.toBe(200);
+
+  expect(response.status).toBe(401);
+  expect(response.headers.get("content-type")).toContain("application/json");
+  expect(await response.json()).toMatchObject({ error: { code: "AUTH" } });
 });
 
 // ---------------------------------------------------------------- assets
