@@ -772,29 +772,26 @@ unknown plugin safer. Integrity checking proves you received the bytes the
 registry advertised, and nothing about who wrote them or what they do once the
 gateway imports them.
 
-One ships in this repository:
+None ship in this repository, deliberately. The first one did, and moving it out
+is what proved the plugin API actually works from outside: while it built as a
+workspace sibling it could reach internal packages no published plugin can, and
+two bugs hid in exactly that gap.
 
 | Plugin | What it does |
 | --- | --- |
-| [`pokemon`](plugins/pokemon) | A Pokémon companion. Each gateway key raises one that hatches, evolves, and graduates into a Pokédex on the tokens that key spends, with a shop that spends a wallet of those same tokens. |
-
-It is not installed by default, is not in the npm package, and is not in the
-Docker image. Build it from a checkout and install the result:
+| [`omnigateway-plugin-pokemon`](https://github.com/harismawan/omnigateway-plugin-pokemon) | A Pokémon companion. Each gateway key raises one that hatches, evolves, and graduates into a Pokédex on the tokens that key spends, with a shop that spends a wallet of those same tokens. |
 
 ```bash
-bun run build:plugins                              # writes plugins/pokemon/dist/pokemon
-omni plugin install ./plugins/pokemon/dist/pokemon
+omni plugin install omnigateway-plugin-pokemon
+omni plugin verify pokemon
 omni restart
 ```
 
-The path ends in `pokemon` because the installer takes the target directory name
-from the source and refuses a manifest whose id disagrees with it — so a plugin
-cannot be installed under a name that is not its own.
-
 It needs outbound access to `pokeapi.co` and `raw.githubusercontent.com` for
 species data and sprites, which its manifest declares and `omni plugin verify
-pokemon` prints back. Those assets are Nintendo and Game Freak intellectual property, fetched at
-runtime and never vendored into this repository or its published artifacts.
+pokemon` prints back. Those assets are Nintendo and Game Freak intellectual
+property, fetched at runtime and never vendored — into that repository, this one,
+or anything either publishes.
 
 `verify` is the one to run before restarting a gateway that people are using: it
 reaches the same verdict the next boot will, from the same code, without loading
@@ -819,13 +816,19 @@ from the path:
 
 ```bash
 # wherever you build — a workstation, CI
-bun run build:plugins
-tar -czf pokemon.tgz -C plugins/pokemon/dist pokemon
+bun run build                                      # your plugin's own build
+tar -czf my-plugin.tgz -C dist my-plugin
 
 # on the host
-scp pokemon.tgz gateway-host:/tmp/
-ssh gateway-host 'omni plugin install /tmp/pokemon.tgz && omni plugin verify pokemon && omni restart'
+scp my-plugin.tgz gateway-host:/tmp/
+ssh gateway-host 'omni plugin install /tmp/my-plugin.tgz && omni plugin verify my-plugin && omni restart'
 ```
+
+Whatever you pack, the manifest must sit at the **root** of the archive once one
+wrapping directory is stripped. A build that nests it — `dist/my-plugin/omni-plugin.json`
+inside a tarball made from the repository root — is refused with "has no
+omni-plugin.json at its root", and that is the most common way a plugin that
+builds fine turns out not to install.
 
 Plaintext `http://` is refused outright and always will be: what arrives over
 that fetch is code the gateway process will `import`, so anyone between you and
