@@ -185,6 +185,44 @@ test("a reference to a core table is refused", () => {
   db.close();
 });
 
+test("a core table is refused however the identifier is cased", () => {
+  // SQLite matches identifiers without regard to case, so `API_KEYS` is the same
+  // table as `api_keys`. The guard's regex was case-sensitive, which meant it
+  // refused the lowercase spelling and let the uppercase one through — a plugin
+  // running `DELETE FROM API_KEYS` reached and could empty core's key table.
+  //
+  // Every fixture in the test above is lowercase, which is why nothing caught it:
+  // the one spelling that mattered was the one the fixtures never held.
+  //
+  // This is not primarily about a hostile plugin — the capability context is a
+  // guardrail rather than a sandbox, and hostile code can import the store
+  // directly. It is about the ordinary habit of writing SQL in capitals, which
+  // is exactly the accidental overreach the guardrail exists to make impossible.
+  const { db, plugins } = repo();
+  plugins.migrate("pokemon", [CREATE_CAUGHT]);
+
+  for (const sql of [
+    "SELECT * FROM API_KEYS",
+    "DELETE FROM API_KEYS",
+    "SELECT * FROM Api_Keys",
+    "SELECT * FROM REQUEST_LOGS",
+    'DELETE FROM "CREDENTIALS"',
+    "DELETE FROM [Settings]",
+    "DELETE FROM Plugin_Migrations",
+  ]) {
+    // The reason is asserted, not merely that something threw. A statement can
+    // fail for a dozen uninteresting reasons — a typo, a missing column — and a
+    // bare `toThrow()` would go green for any of them while the guard did
+    // nothing.
+    expect(() => plugins.run("pokemon", sql)).toThrow(/core table/i);
+  }
+
+  // And the plugin's own tables still work, so the fix did not simply refuse
+  // everything: `plugin_pokemon_caught` contains no core name as a whole word.
+  expect(() => plugins.run("pokemon", "SELECT * FROM {{caught}}")).not.toThrow();
+  db.close();
+});
+
 test("the plugin's own tables are not mistaken for the core ones they end in", () => {
   // `plugin_pokemon_settings` contains `settings`, and a denylist matching on
   // substrings rather than word boundaries would refuse the plugin's own table.

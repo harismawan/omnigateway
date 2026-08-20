@@ -177,32 +177,6 @@
         "@omni/store": "workspace:*",
       },
     },
-    "plugins/pokemon": {
-      "name": "@omni/plugin-pokemon",
-      "version": "1.0.0",
-      "dependencies": {
-        "@omnigateway/plugin-api": "workspace:*",
-      },
-      "devDependencies": {
-        "@happy-dom/global-registrator": "^20.11.2",
-        "@omni/store": "workspace:*",
-        "@omnigateway/dashboard-sdk": "workspace:*",
-        "@tanstack/react-query": "^5.101.4",
-        "@testing-library/react": "^16.3.2",
-        "@testing-library/user-event": "^14.6.1",
-        "@types/react": "^19.2.0",
-        "@types/react-dom": "^19.2.0",
-        "react": "^19.2.8",
-        "react-dom": "^19.2.8",
-        "styled-components": "^6.5.1",
-      },
-      "peerDependencies": {
-        "@omnigateway/dashboard-sdk": "workspace:*",
-        "@tanstack/react-query": "^5.101.4",
-        "react": "^19.2.8",
-        "styled-components": "^6.5.1",
-      },
-    },
   },
   "packages": {
     "@babel/code-frame": ["@babel/code-frame@7.29.7", "", { "dependencies": { "@babel/helper-validator-identifier": "^7.29.7", "js-tokens": "^4.0.0", "picocolors": "^1.1.1" } }, "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw=="],
@@ -348,8 +322,6 @@
     "@omni/gateway": ["@omni/gateway@workspace:apps/gateway"],
 
     "@omni/ir": ["@omni/ir@workspace:packages/ir"],
-
-    "@omni/plugin-pokemon": ["@omni/plugin-pokemon@workspace:plugins/pokemon"],
 
     "@omni/providers": ["@omni/providers@workspace:packages/providers"],
 
