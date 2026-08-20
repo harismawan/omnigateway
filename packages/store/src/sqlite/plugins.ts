@@ -115,7 +115,37 @@ function stripNoise(sql: string): string {
   while (i < sql.length) {
     const c = sql[i];
     const next = sql[i + 1];
-    if (c === "'") {
+    if (c === '"' || c === "`" || c === "[") {
+      // A quoted identifier, copied through rather than erased: it may *be* a
+      // core name, and that is exactly what the denylist is looking for.
+      //
+      // It has to be recognised at all because an apostrophe inside one would
+      // otherwise open a phantom string literal and erase everything to the next
+      // quote — `WITH "a'b" AS (SELECT 1) DELETE FROM api_keys` reached
+      // `api_keys` with the guard reading an empty statement. Nobody types that
+      // by accident, so this is not the hole that mattered; the comment above
+      // claiming every quoting form was handled is what mattered, and it is now
+      // true rather than aspirational.
+      const close = c === "[" ? "]" : c;
+      out += c;
+      i += 1;
+      while (i < sql.length) {
+        if (sql[i] === close) {
+          // `""` and ``` `` ``` are escaped quotes inside the identifier. `]` has
+          // no escape form in SQLite, so it always closes.
+          if (close !== "]" && sql[i + 1] === close) {
+            out += close + close;
+            i += 2;
+            continue;
+          }
+          break;
+        }
+        out += sql[i];
+        i += 1;
+      }
+      out += close;
+      i += 1;
+    } else if (c === "'") {
       i += 1;
       while (i < sql.length) {
         if (sql[i] === "'") {
@@ -172,6 +202,24 @@ function assertPluginId(pluginId: string): void {
  * drift, and the drift would be discovered by a plugin doing at runtime what it
  * was refused at install — so there is one, called from every entry point.
  */
+/**
+ * Statements that reconfigure the connection rather than touch a table.
+ *
+ * The gateway's database handle is shared, so these do not act on the plugin —
+ * they act on everyone. `PRAGMA journal_mode = WAL;` opens half the SQLite
+ * migration guides on the internet, and pasting it here takes the *whole
+ * gateway* out of WAL; `PRAGMA foreign_keys=OFF` disables enforcement for core's
+ * own writes; `ATTACH` bolts another file onto the connection and hands it a
+ * name the placeholder rules never see. `VACUUM` is refused for the reason
+ * recorded in `CLAUDE.md`: core's own `vacuum()` must checkpoint first or page
+ * count falls while the file keeps every page.
+ *
+ * Matched at the start of the statement only. A column called `pragma` or a
+ * plugin storing the word is doing nothing wrong, and this guard exists to stop
+ * an accident, not to hunt for the string.
+ */
+const CONNECTION_STATEMENT = /^\s*(pragma|attach|detach|vacuum)\b/i;
+
 function prepare(pluginId: string, sql: string): string {
   assertPluginId(pluginId);
   const expanded = sql.replace(PLACEHOLDER, (_match, name: string) => {
@@ -183,11 +231,61 @@ function prepare(pluginId: string, sql: string): string {
     return tableFor(pluginId, name);
   });
 
-  const found = CORE_TABLE_REFERENCE.exec(stripNoise(expanded));
+  const stripped = stripNoise(expanded);
+
+  const connection = CONNECTION_STATEMENT.exec(stripped);
+  if (connection !== null) {
+    throw new Error(
+      `plugin sql may not ${connection[1]?.toUpperCase()}: the database handle is the gateway's, ` +
+        "and this would reconfigure it for everything sharing it",
+    );
+  }
+
+  const found = CORE_TABLE_REFERENCE.exec(stripped);
   if (found !== null) {
     throw new Error(`plugin sql may not reference the core table ${found[0]}`);
   }
   return expanded;
+}
+
+/** Every object name in the schema, so a migration can be judged by what it left. */
+function schemaObjects(db: Database): Set<string> {
+  const rows = db.query<{ name: string }, []>("SELECT name FROM sqlite_master").all();
+  return new Set(rows.map((row) => row.name));
+}
+
+/**
+ * Refuses a migration that created anything outside the plugin's own namespace.
+ *
+ * Checked by comparing the schema before and after rather than by parsing the
+ * statement, because parsing DDL to find its target is exactly the job a regex
+ * does badly — and this cannot be fooled by quoting, whitespace, a `CREATE` the
+ * guard did not anticipate, or several statements in one string.
+ *
+ * The accident is forgetting the placeholder: `CREATE TABLE notes (…)` instead
+ * of `CREATE TABLE {{notes}} (…)`. Before this, that succeeded, put `notes` in
+ * core's schema, and then vanished — `listTables` filters on the plugin prefix
+ * so it never appeared, `orphanTables` could not see it, and `remove --purge`
+ * could not drop it. It survived forever, and the failure it eventually produced
+ * was a core migration colliding with a squatted name at boot, which reads as a
+ * bug in core.
+ *
+ * Throwing here rolls the migration back, since it runs inside that migration's
+ * own transaction — so the refusal leaves no half-made schema behind.
+ *
+ * `sqlite_`-prefixed names are SQLite's own: `sqlite_autoindex_*` appears
+ * whenever a table declares a `PRIMARY KEY` or `UNIQUE`, and is not the plugin's
+ * doing.
+ */
+function assertOwnNamespace(db: Database, pluginId: string, before: Set<string>): void {
+  const prefix = `${PREFIX}${pluginId}_`;
+  for (const name of schemaObjects(db)) {
+    if (before.has(name) || name.startsWith(prefix) || name.startsWith("sqlite_")) continue;
+    throw new Error(
+      `plugin migration created ${name}, which is outside this plugin's namespace — ` +
+        `name it {{…}} so it becomes ${prefix}…`,
+    );
+  }
 }
 
 /**
@@ -285,8 +383,13 @@ export function createPluginRepo(db: Database): PluginRepo {
           // The recording insert is inside it, so "the schema changed" and "we
           // know the schema changed" commit together or not at all — a crash
           // between the two would otherwise re-run a migration that already ran.
+          const before = schemaObjects(db);
           db.transaction(() => {
             db.run(sql);
+            // Inside the transaction, so a migration that squatted a name
+            // outside its namespace is rolled back rather than reported after
+            // the fact. The check is the schema itself, not the statement.
+            assertOwnNamespace(db, pluginId, before);
             db.run(
               "INSERT INTO plugin_migrations (plugin_id, version, applied_at) VALUES (?,?,?)",
               [pluginId, migration.version, Date.now()],
