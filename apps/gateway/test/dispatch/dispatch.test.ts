@@ -1434,6 +1434,81 @@ test("prints why a non-retryable attempt failed, naming the target it failed on"
   store.close();
 });
 
+/**
+ * The line an operator gets for the gateway's own defect, which used to be blank.
+ *
+ * `INTERNAL` prints at `error` precisely because it is this gateway's fault, and
+ * an `AggregateError` carries its detail in `errors` with an empty message of its
+ * own. Copying that message verbatim rendered `reason=` with nothing after it —
+ * and `request_logs` holds no message, so the failure was recoverable nowhere.
+ */
+test("names an error that carries no message instead of logging a blank reason", async () => {
+  const store = await seeded(1);
+  const logger = captureLogger();
+  const adapter = stubAdapter(() => new AggregateError([new Error("something odd")]));
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(rejections(logger)).toHaveLength(1);
+  expect(rejections(logger)[0]?.fields?.reason).toBe("AggregateError");
+});
+
+/** The same blank-reason defect on the path that explains a dead refresh token. */
+test("names a refresh failure that carries no message", async () => {
+  const store = await seeded(1);
+  const logger = captureLogger();
+  const adapter = stubAdapter(() => new GatewayError("AUTH", "token rejected"));
+
+  const outcome = await dispatch(
+    req,
+    {
+      ...deps(store, adapter),
+      logger,
+      refresh: (): Promise<CredentialSecrets> => {
+        throw new AggregateError([]);
+      },
+    },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  const failures = logger.records.filter((record) => record.msg === "credential refresh failed");
+  expect(failures).toHaveLength(1);
+  expect(failures[0]?.fields?.reason).toBe("AggregateError");
+});
+
+test("retries a transport failure that arrives as an aggregate of connect errors", async () => {
+  const store = await seeded(2);
+  const logger = captureLogger();
+  const adapter = stubAdapter(
+    () => new AggregateError([new Error("connect ECONNREFUSED 160.79.104.10:443")]),
+  );
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  // NETWORK is retryable, so both seeded candidates are tried and the pool is
+  // reported exhausted. INTERNAL stopped at the first and served a 500 instead.
+  expect(adapter.calls).toEqual(["test-token-1", "test-token-2"]);
+  expect(rejections(logger)[0]?.fields).toMatchObject({
+    code: "ALL_CANDIDATES_FAILED",
+    status: 503,
+    attempts: 2,
+  });
+});
+
 test("prints one rejection line when the candidate pool is exhausted", async () => {
   const store = await seeded(2);
   const logger = captureLogger();
