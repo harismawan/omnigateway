@@ -78,8 +78,17 @@ export const CORE_TABLES = [
  * characters is a word character. They also do *not* fire on this repo's own
  * expansions: `plugin_pokemon_settings` has a `_` before `settings`, `_` is a
  * word character, so there is no boundary there to match.
+ *
+ * **Case-insensitive, and that flag is load-bearing rather than tidy.** SQLite
+ * matches identifiers without regard to case, so `DELETE FROM API_KEYS` reaches
+ * exactly the table `api_keys` names. Without the flag this guard refused the
+ * lowercase spelling and let the uppercase one through to core data — which is
+ * not an exotic attack but the ordinary habit of writing SQL in capitals.
+ * Nothing else here needs to change: plugin table names are matched against
+ * `^[a-z][a-z0-9_]{0,31}$` before expansion, so there is no lowercase-only
+ * assumption downstream for this to disturb.
  */
-const CORE_TABLE_REFERENCE = new RegExp(`\\b(?:${CORE_TABLES.join("|")})\\b`);
+const CORE_TABLE_REFERENCE = new RegExp(`\\b(?:${CORE_TABLES.join("|")})\\b`, "i");
 
 /** What may be handed to SQLite as a bound parameter. */
 type Binding = string | number | bigint | boolean | null | Uint8Array;
