@@ -779,10 +779,10 @@ two bugs hid in exactly that gap.
 
 | Plugin | What it does |
 | --- | --- |
-| [`omnigateway-plugin-pokemon`](https://github.com/harismawan/omnigateway-plugin-pokemon) | A Pokémon companion. Each gateway key raises one that hatches, evolves, and graduates into a Pokédex on the tokens that key spends, with a shop that spends a wallet of those same tokens. |
+| [`@omnigateway/pokemon`](https://github.com/harismawan/omnigateway-plugin-pokemon) | A Pokémon companion. Each gateway key raises one that hatches, evolves, and graduates into a Pokédex on the tokens that key spends, with a shop that spends a wallet of those same tokens. |
 
 ```bash
-omni plugin install omnigateway-plugin-pokemon
+omni plugin install @omnigateway/pokemon
 omni plugin verify pokemon
 omni restart
 ```
