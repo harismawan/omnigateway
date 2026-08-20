@@ -29,7 +29,7 @@ import type {
 } from "@omni/store";
 import { newCompletedRequestLog, reasonField, reportRejection } from "../logging.ts";
 import { attempt } from "./attempt.ts";
-import { classify } from "./classify.ts";
+import { classify, describeError } from "./classify.ts";
 import type { LoadRegistry } from "./loadRegistry.ts";
 import { priceOf } from "./price.ts";
 import type { RoutingSnapshotSource } from "./snapshotCache.ts";
@@ -534,7 +534,7 @@ export async function dispatch(
                   ? { code: "TIMEOUT" as const }
                   : classify(error);
               const { code } = classifiedError;
-              const message = error instanceof Error ? error.message : "attempt failed";
+              const message = describeError(error);
               lastError = rewrap(classifiedError, message);
 
               if (
@@ -568,7 +568,7 @@ export async function dispatch(
                       : classify(refreshError);
                   const refreshMessage =
                     refreshError instanceof Error
-                      ? refreshError.message
+                      ? describeError(refreshError)
                       : "credential refresh failed";
                   lastError = rewrap(classified, refreshMessage);
                   // The refresh *attempt* is logged above. Without this the
