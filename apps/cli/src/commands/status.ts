@@ -1,4 +1,5 @@
 import { type BurnEstimate, createAdminAuth, credentialStatus } from "@omni/control";
+import { describeError } from "@omni/ir";
 import type { QuotaWindow } from "@omni/store";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -70,7 +71,7 @@ export const status: Command = {
     try {
       store = await ctx.store();
     } catch (error) {
-      storeError = error instanceof Error ? error.message : "could not open the database";
+      storeError = describeError(error, "could not open the database");
     }
 
     const persistent =
@@ -144,7 +145,7 @@ export const adminSetPassword: Command = {
     try {
       await admin.setPassword(password);
     } catch (error) {
-      throw new CliError(error instanceof Error ? error.message : "could not set the password");
+      throw new CliError(describeError(error, "could not set the password"));
     }
 
     // Sessions live in the gateway's memory, not here, so an operator who

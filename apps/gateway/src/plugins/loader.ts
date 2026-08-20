@@ -1,6 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { type Logger, noopLogger } from "@omni/ir";
+import { describeError, type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
 import {
   isApiCompatible,
@@ -147,7 +147,7 @@ function buildContext(deps: {
 }
 
 function reason(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return describeError(error, String(error));
 }
 
 /**

@@ -81,6 +81,28 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
   INTERNAL: 500,
 };
 
+/**
+ * What to print when an error has to explain itself in one field.
+ *
+ * `LogFields.reason` carries `error.message`, and not every error has one:
+ * `AggregateError` — how node reports a failed multi-address connect, with
+ * `autoSelectFamily` on by default — keeps its detail in `errors` and leaves
+ * its own message empty. Copying that verbatim rendered `reason=` with nothing
+ * after it, on the lines that exist to explain a failure, and `request_logs`
+ * holds no message, so the reason was recoverable from nowhere.
+ *
+ * The name is not the detail, but it is never empty. `fallback` stays a
+ * parameter because each caller knows what it was doing and the generic
+ * "unknown" is worse than "could not open the database" at every one of them.
+ *
+ * Safe for `reason`'s redaction rules: it returns the message the caller would
+ * already have passed, or a constructor name, which is a bounded identifier.
+ */
+export function describeError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  return error.message.length > 0 ? error.message : error.name;
+}
+
 export class GatewayError extends Error {
   readonly code: ErrorCode;
   readonly retryable: boolean;

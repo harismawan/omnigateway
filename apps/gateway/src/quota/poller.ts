@@ -1,5 +1,5 @@
 import { type PollerDeps, poll } from "@omni/control";
-import { noopLogger } from "@omni/ir";
+import { describeError, noopLogger } from "@omni/ir";
 
 /**
  * Starts the poll loop at the interval in settings.
@@ -23,7 +23,7 @@ export async function startQuotaPoller(deps: PollerDeps): Promise<() => void> {
     void poll(deps)
       .catch((error: unknown) => {
         logger.error("quota poll failed", {
-          reason: error instanceof Error ? error.message : "unknown",
+          reason: describeError(error, "unknown"),
         });
       })
       .finally(() => {

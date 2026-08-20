@@ -1,5 +1,5 @@
 import type { GatewayError, LogFields } from "@omni/ir";
-import { type Logger, noopLogger, type ProviderId } from "@omni/ir";
+import { describeError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { RequestLog, Store } from "@omni/store";
 import type { RequestCompleted } from "@omnigateway/plugin-api";
 
@@ -125,7 +125,7 @@ function report(logger: Logger, what: string, requestId: string, error: unknown)
   logger.warn(what, {
     requestId,
     // The message only; a store error must not drag a row's contents into stdout.
-    reason: error instanceof Error ? error.message : "unknown",
+    reason: describeError(error, "unknown"),
   });
 }
 

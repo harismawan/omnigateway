@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { describeError } from "@omni/ir";
 
 export class UsageError extends Error {}
 
@@ -42,7 +43,7 @@ export function parse(argv: readonly string[], options: OptionSpec = {}): Parsed
     });
     return { positionals: result.positionals, values: result.values };
   } catch (error) {
-    throw new UsageError(error instanceof Error ? error.message : "could not parse arguments");
+    throw new UsageError(describeError(error, "could not parse arguments"));
   }
 }
 

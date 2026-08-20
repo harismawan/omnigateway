@@ -1,3 +1,4 @@
+import { describeError } from "@omni/ir";
 import type { Store, VirtualModel } from "@omni/store";
 import { listCredentials } from "./credentials.ts";
 import { type ModelLimits, modelDisplayName, resolveModelLimits } from "./modelLimits.ts";
@@ -75,7 +76,7 @@ function settingsObject(existing: string | undefined): Record<string, unknown> {
     }
     return parsed as Record<string, unknown>;
   } catch (error) {
-    const reason = error instanceof Error ? error.message : "invalid JSON";
+    const reason = describeError(error, "invalid JSON");
     throw new Error(`cannot parse existing settings.json: ${reason}`);
   }
 }

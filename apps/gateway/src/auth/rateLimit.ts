@@ -1,4 +1,4 @@
-import { GatewayError, type Logger, noopLogger } from "@omni/ir";
+import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
 import {
   type CounterSnapshot,
   type Decision,
@@ -475,7 +475,7 @@ export class ApiKeyRateLimiter {
         apiKeyId: keyId,
         // The message only, for the same reason the counter read logs only the
         // message: a store failure must not drag a row's contents into stdout.
-        reason: error instanceof Error ? error.message : "unknown",
+        reason: describeError(error, "unknown"),
       });
       return null;
     }
@@ -605,7 +605,7 @@ export class ApiKeyRateLimiter {
         apiKeyId: keyId,
         // The message only. A store failure must not drag a row's contents,
         // let alone a key, into stdout.
-        reason: error instanceof Error ? error.message : "unknown",
+        reason: describeError(error, "unknown"),
       });
       // Nothing absorbed the list this time, and nothing will until the store
       // answers again, so it is bounded here instead. Without this the fault

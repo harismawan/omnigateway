@@ -1,5 +1,5 @@
 import { basename, dirname, join, resolve } from "node:path";
-import { GatewayError, type Logger, noopLogger } from "@omni/ir";
+import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
 import { bodiesDirFor, type DatabaseStats, type MaintenanceRepo, type Settings } from "@omni/store";
 import { parseOrThrow, retentionSchema } from "./schemas.ts";
 
@@ -605,7 +605,7 @@ async function swapIn(
     (deps.logger ?? noopLogger).warn("usage rollup not rebuilt after the swap; run omni doctor", {
       // The message only, as every other store failure logs: a fault must not
       // drag a row's contents into stdout.
-      reason: error instanceof Error ? error.message : "unknown",
+      reason: describeError(error, "unknown"),
     });
   }
 
@@ -619,7 +619,7 @@ async function swapIn(
     await deps.reapplyPluginSchema?.();
   } catch (error) {
     (deps.logger ?? noopLogger).warn("plugin schema not reapplied after the swap; restart", {
-      reason: error instanceof Error ? error.message : "unknown",
+      reason: describeError(error, "unknown"),
     });
   }
 

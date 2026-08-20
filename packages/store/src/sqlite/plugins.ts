@@ -1,4 +1,5 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
+import { describeError } from "@omni/ir";
 import type { PluginMigrateResult, PluginMigration, PluginRepo } from "../types.ts";
 
 /**
@@ -404,7 +405,7 @@ export function createPluginRepo(db: Database): PluginRepo {
             applied,
             failed: {
               version: migration.version,
-              reason: error instanceof Error ? error.message : String(error),
+              reason: describeError(error, String(error)),
             },
           };
         }

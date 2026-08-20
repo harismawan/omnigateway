@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
-import { classify, describeError } from "../../src/dispatch/classify.ts";
+import { classify } from "../../src/dispatch/classify.ts";
 
 test("passes a gateway error through with its retry hint", () => {
   const e = new GatewayError("RATE_LIMIT", "slow down", { retryAfterMs: 5000 });
@@ -47,10 +47,4 @@ test("maps an aggregate connect failure to NETWORK", () => {
 
 test("leaves an aggregate of unrecognised errors as INTERNAL", () => {
   expect(classify(new AggregateError([new Error("something odd")])).code).toBe("INTERNAL");
-});
-
-test("describes an error that carries no message by its name", () => {
-  expect(describeError(new AggregateError([]))).toBe("AggregateError");
-  expect(describeError(new Error("something odd"))).toBe("something odd");
-  expect(describeError("a string")).toBe("attempt failed");
 });

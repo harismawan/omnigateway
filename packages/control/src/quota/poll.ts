@@ -1,4 +1,4 @@
-import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
+import { describeError, GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { CredentialView, QuotaWindow, Store } from "@omni/store";
 import { SCHEDULER_REFRESH_LEAD_MS } from "../oauth/lead.ts";
@@ -141,7 +141,7 @@ export async function poll(deps: PollerDeps): Promise<number> {
           credentialId: credential.id,
           code: error instanceof GatewayError ? error.code : "INTERNAL",
           ...(rateLimited ? { retryAfterMs: RATE_LIMIT_COOLDOWN_MS } : {}),
-          reason: error instanceof Error ? error.message : "unknown",
+          reason: describeError(error, "unknown"),
         });
       }
     }

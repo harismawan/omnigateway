@@ -1,5 +1,5 @@
 import { type Refresher, SCHEDULER_REFRESH_LEAD_MS } from "@omni/control";
-import { GatewayError, type Logger, noopLogger } from "@omni/ir";
+import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
 import type { CredentialView, Store } from "@omni/store";
 
 /**
@@ -68,7 +68,7 @@ export async function sweep(deps: SchedulerDeps): Promise<number> {
         provider: credential.provider,
         credentialId: credential.id,
         code,
-        reason: error instanceof Error ? error.message : "unknown",
+        reason: describeError(error, "unknown"),
       });
     }
   }
@@ -90,7 +90,7 @@ export function startRefreshScheduler(deps: SchedulerDeps): () => void {
     void sweep(deps)
       .catch((error: unknown) => {
         logger.error("token refresh sweep failed", {
-          reason: error instanceof Error ? error.message : "unknown",
+          reason: describeError(error, "unknown"),
         });
       })
       .finally(() => {

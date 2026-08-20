@@ -1,5 +1,6 @@
 import {
   collect,
+  describeError,
   type ErrorCode,
   estimateInputTokens,
   GatewayError,
@@ -218,7 +219,7 @@ function errorResponse(
 
 function asGatewayError(error: unknown): GatewayError {
   if (error instanceof GatewayError) return error;
-  return new GatewayError("INTERNAL", error instanceof Error ? error.message : "internal error");
+  return new GatewayError("INTERNAL", describeError(error, "internal error"));
 }
 
 /** Serializes SSE frames and drains the stream, logging once it is done. */

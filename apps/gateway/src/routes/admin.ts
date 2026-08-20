@@ -26,7 +26,7 @@ import {
   setKeyLimits,
   setupFiles,
 } from "@omni/control";
-import { GatewayError, type Logger, noopLogger, parseLogLevel } from "@omni/ir";
+import { describeError, GatewayError, type Logger, noopLogger, parseLogLevel } from "@omni/ir";
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
 import {
@@ -106,10 +106,7 @@ export function adminRoutes(deps: AdminDeps) {
         try {
           created = await deps.admin.setInitialPassword(body.password);
         } catch (error) {
-          throw new GatewayError(
-            "BAD_REQUEST",
-            error instanceof Error ? error.message : "invalid password",
-          );
+          throw new GatewayError("BAD_REQUEST", describeError(error, "invalid password"));
         }
         if (!created) {
           set.status = 409;
@@ -267,7 +264,7 @@ export function adminRoutes(deps: AdminDeps) {
         } catch (error) {
           throw new GatewayError(
             "BAD_REQUEST",
-            error instanceof Error ? error.message : "invalid Claude model mapping",
+            describeError(error, "invalid Claude model mapping"),
           );
         }
       })

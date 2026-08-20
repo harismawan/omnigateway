@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { basename, join, resolve, sep } from "node:path";
-import { GatewayError } from "@omni/ir";
+import { describeError, GatewayError } from "@omni/ir";
 import {
   type Capability,
   isApiCompatible,
@@ -226,7 +226,7 @@ function readManifest(fs: PluginFs, home: string): PluginManifest | PluginProble
   try {
     document = JSON.parse(raw) as unknown;
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = describeError(error, String(error));
     return {
       check: "manifest",
       reason: `${MANIFEST_FILENAME} is not valid JSON: ${detail}`,
@@ -573,7 +573,7 @@ function gunzipIfNeeded(bytes: Uint8Array): Uint8Array {
     // `Uint8Array` read off disk carries `ArrayBufferLike` — which includes one.
     return Bun.gunzipSync(new Uint8Array(bytes));
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = describeError(error, String(error));
     throw new GatewayError("BAD_REQUEST", `could not decompress the archive: ${detail}`);
   }
 }
@@ -954,7 +954,7 @@ function parseJson(bytes: Uint8Array, what: string): unknown {
   try {
     return JSON.parse(decoder.decode(bytes)) as unknown;
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = describeError(error, String(error));
     throw new GatewayError("BAD_REQUEST", `${what} is not valid JSON: ${detail}`);
   }
 }
@@ -1053,7 +1053,7 @@ export async function installPlugin(
   try {
     document = JSON.parse(decoder.decode(raw)) as unknown;
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = describeError(error, String(error));
     throw new GatewayError("BAD_REQUEST", `${MANIFEST_FILENAME} is not valid JSON: ${detail}`);
   }
 
