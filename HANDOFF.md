@@ -96,13 +96,21 @@ is published yet.
   maintained by **`harismawan`** — so the scope is not that account's own.
   Publishing needs an npm **org** of that name, free for public packages, with
   `harismawan` as a member.
-- **Trusted publishing is configured per package.** The workflow publishes with
-  no token, via OIDC against a policy set on npmjs.com. A brand-new package name
-  has no policy, so each of these needs one created before its first publish or
-  the step fails on permissions without saying why.
+- **Trusted publishing cannot be configured for a package that does not exist,
+  and that is npm's limitation, not this repo's.** The policy lives on a
+  package's settings page and there is no settings page until a version exists;
+  npm has no pre-registration the way PyPI does (npm/cli#8544). So OIDC can never
+  perform a package's *first* publish. Each name must be created once with a
+  token first.
 
-Until both are done, tagging a release runs the new step, finds nothing published,
-attempts a publish, and fails. Do the account work first or expect a red release.
+  The agreed bootstrap: publish an empty `0.0.1` under `--tag bootstrap` so it
+  never becomes `latest`, configure the trusted publisher on the now-existing
+  package page, then let a tag ship `1.0.0` from CI with provenance. Placeholder
+  contents are two files and no code, generated outside the repo so the version
+  pin in `publishable.test.ts` is never touched.
+
+Until this is done, tagging a release runs the publish step and fails. Do the
+account work first or expect a red release.
 
 ### 3. Then extract the companion (agreed sequencing, not yet started)
 

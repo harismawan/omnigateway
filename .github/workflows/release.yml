@@ -84,11 +84,19 @@ jobs:
       # unset and the publish is attempted, which fails loudly rather than
       # silently skipping.
       #
-      # Order matters: the SDK depends on the API, so the API goes first. A
-      # brand-new package name has no trusted-publishing policy on npmjs.com and
-      # cannot get one automatically — the first publish of each needs that
-      # policy created up front, or it fails here with a permissions error that
-      # does not say so.
+      # Order matters: the SDK depends on the API, so the API goes first.
+      #
+      # A package that does not exist on npm cannot be published from here, and
+      # that is npm's limitation rather than this workflow's. Trusted publishing
+      # is configured on a package's settings page, and there is no settings page
+      # until a version exists — npm has no pre-registration the way PyPI does
+      # (npm/cli#8544). So each new package name has to be created once with a
+      # token before OIDC can ever work for it, and until that is done this step
+      # fails with a permissions error that does not explain itself.
+      #
+      # Both current names were bootstrapped by publishing an empty `0.0.1` under
+      # `--tag bootstrap`, so it never became `latest`, and the real versions ship
+      # from here with provenance. Do the same for a third.
       - name: Publish the plugin SDKs
         run: |
           set -euo pipefail
