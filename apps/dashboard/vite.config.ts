@@ -43,7 +43,33 @@ export default defineConfig(({ command }) => ({
     ...(command === "build" ? [importMap()] : []),
   ],
   resolve: {
-    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+    alias: [
+      { find: "@", replacement: fileURLToPath(new URL("./src", import.meta.url)) },
+      // `use-sync-external-store` is CommonJS, requires React, and React is
+      // external — three facts a bundle cannot hold at once. Rolldown emits a
+      // `require` stub that throws on load, which took the console down in 0.4.0
+      // and 0.4.1. Aliased to ESM equivalents in `src/shims/`, where the import
+      // of React is an ordinary external and resolves through the import map.
+      //
+      // Matched by pattern and not by exact specifier because six different
+      // spellings reach this package from `recharts`, `react-redux`,
+      // `@reduxjs/toolkit` and `@tanstack/react-store` — with and without
+      // `/shim`, with and without `.js`. Any one of them left unaliased brings
+      // the CommonJS back. `with-selector` is listed first: `shim` is a prefix
+      // of `shim/with-selector`, so the looser pattern would otherwise win.
+      {
+        find: /^use-sync-external-store\/(?:shim\/)?with-selector(?:\.js)?$/,
+        replacement: fileURLToPath(
+          new URL("./src/shims/use-sync-external-store-with-selector.ts", import.meta.url),
+        ),
+      },
+      {
+        find: /^use-sync-external-store(?:\/shim)?(?:\/index)?(?:\.js)?$/,
+        replacement: fileURLToPath(
+          new URL("./src/shims/use-sync-external-store.ts", import.meta.url),
+        ),
+      },
+    ],
   },
   build: {
     // The gateway serves this directory as static files in production.
