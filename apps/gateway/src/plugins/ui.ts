@@ -49,8 +49,22 @@ export function pluginCatalog(plugins: readonly LoadedPlugin[]): PluginCatalogEn
             // incompatible bundle could still import it by accident, and the
             // failure would arrive as a render crash rather than as the disabled
             // nav entry the operator is supposed to see.
+            //
+            // The version is in the query because a bundle's path is the same
+            // string at every version, and two things key off that string: the
+            // console's `useMemo` over the entry, and the browser's ES module
+            // map, which is keyed by URL for the lifetime of a document. Without
+            // it, a console tab open across an `omni plugin install` keeps the
+            // old module and reports the new version beside it — which is how
+            // this was found. `cache-control: no-cache` on the asset route does
+            // not help, because nothing there is an HTTP cache hit; the module
+            // is already resolved.
+            //
+            // A query rather than a path segment, so the file the router
+            // resolves is unchanged and no traversal check has to learn about
+            // it.
             entry: plugin.ui.compatible
-              ? `${PLUGIN_ASSET_PREFIX}/${plugin.id}/${plugin.ui.entry}`
+              ? `${PLUGIN_ASSET_PREFIX}/${plugin.id}/${plugin.ui.entry}?v=${encodeURIComponent(plugin.manifest.version)}`
               : null,
             compatible: plugin.ui.compatible,
             ...(plugin.ui.reason === undefined ? {} : { reason: plugin.ui.reason }),

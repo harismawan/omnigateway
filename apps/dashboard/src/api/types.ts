@@ -408,6 +408,12 @@ export type PluginUiInfo = {
   /**
    * The URL the console imports, under `/plugin-assets/<id>/`.
    *
+   * Carries the plugin's version as `?v=`, and it must be imported whole. The
+   * query is what makes a reinstalled bundle a URL the browser has not already
+   * resolved — the module map is keyed by URL for the lifetime of a document,
+   * so a stripped one would leave a console tab on the previous build while
+   * reporting the new version beside it.
+   *
    * `null` whenever the bundle is incompatible: the gateway withholds the URL
    * on purpose, so a console that ignored `compatible` would still have nothing
    * to import and could not turn a version mismatch into a render crash.
