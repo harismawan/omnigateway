@@ -187,7 +187,14 @@ export async function loadPlugins(deps: {
   }
 
   for (const id of entries.sort()) {
-    const home = join(deps.root, id);
+    // `resolve`, not `join`: the containment check below compares this against
+    // `resolve(home, entry)`, which is always absolute. A relative root would
+    // therefore never match and every plugin would be refused as "outside the
+    // plugin directory" — which is exactly what shipped. The gateway derives
+    // its root from the database path, and that path is relative whenever the
+    // installation is configured with a bare filename, so this was the ordinary
+    // case rather than an exotic one.
+    const home = resolve(deps.root, id);
     const fail = (why: string): void => {
       failures.push({ id, reason: why });
       logger.warn("plugin skipped", { plugin: id, reason: why });

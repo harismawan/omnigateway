@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
 import { captureLogger } from "@omni/testkit";
@@ -364,4 +364,39 @@ test("count and durationMs pass through, and nothing else does", async () => {
   );
   const line = logger.records.find((r) => r.msg === "m");
   expect(line?.fields).toEqual({ plugin: "talker", count: 3, durationMs: 12 });
+});
+
+test("a relative plugin root still loads, because that is what the gateway passes", async () => {
+  // The bug this exists for shipped in 0.4.0 and refused every plugin on every
+  // install whose database path is a bare filename — which is the ordinary
+  // configuration, not an exotic one. The gateway derives its plugin root from
+  // `dirname(databasePath)`, so a relative database path makes the root the
+  // relative string `plugins`.
+  //
+  // The containment check compares `resolve(home, entry)` — always absolute —
+  // against `home`. With a relative `home` the two can never match and every
+  // plugin was skipped as "server entry resolves outside the plugin directory".
+  //
+  // Nothing caught it because every other fixture in this file builds an
+  // absolute temp directory, and `omni plugin verify` resolves absolute paths
+  // too — so the CLI reported `ok` while the gateway refused the same plugin.
+  await plugin({ id: "relative" });
+
+  const previous = process.cwd();
+  process.chdir(dirname(root));
+  try {
+    const bus = createPluginEventBus({});
+    const loaded = await loadPlugins({
+      // Relative, exactly as the gateway builds it.
+      root: basename(root),
+      store,
+      events: bus,
+      sdkVersion: "1.0.0",
+    }).finally(() => bus.stop());
+
+    expect(loaded.failures).toEqual([]);
+    expect(loaded.plugins.map((p) => p.id)).toEqual(["relative"]);
+  } finally {
+    process.chdir(previous);
+  }
 });
