@@ -12,20 +12,6 @@ const NETWORK_HINTS = [
 ];
 
 /**
- * What to print when an error has to explain itself in one field.
- *
- * `reason` carries `error.message`, and an `AggregateError` has none of its own —
- * so copying it verbatim rendered `reason=` with nothing after it, on the one
- * line (`code=INTERNAL`, at `error`) that exists to explain the gateway's own
- * defect. `request_logs` holds no message, so that left the failure recoverable
- * from nowhere. The name is not the detail, but it is never empty.
- */
-export function describeError(error: unknown): string {
-  if (!(error instanceof Error)) return "attempt failed";
-  return error.message.length > 0 ? error.message : error.name;
-}
-
-/**
  * Turns anything thrown during an attempt into canonical facts.
  *
  * `provider` rides along because it is the only record of who wrote the

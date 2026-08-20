@@ -1,6 +1,7 @@
 import { DISPATCH_REFRESH_LEAD_MS } from "@omni/control";
 import {
   type ChatRequest,
+  describeError,
   GatewayError,
   HTTP_STATUS,
   type Logger,
@@ -29,7 +30,7 @@ import type {
 } from "@omni/store";
 import { newCompletedRequestLog, reasonField, reportRejection } from "../logging.ts";
 import { attempt } from "./attempt.ts";
-import { classify, describeError } from "./classify.ts";
+import { classify } from "./classify.ts";
 import type { LoadRegistry } from "./loadRegistry.ts";
 import { priceOf } from "./price.ts";
 import type { RoutingSnapshotSource } from "./snapshotCache.ts";
@@ -215,7 +216,7 @@ export async function dispatch(
     clearDeadline();
     if (isClientAbort(error)) return fail("TIMEOUT", "client disconnected", true);
     const { code } = classify(error);
-    return fail(code, error instanceof Error ? error.message : "unresolvable model");
+    return fail(code, describeError(error, "unresolvable model"));
   }
 
   const { candidates, excluded } = rank({
@@ -490,7 +491,7 @@ export async function dispatch(
                       requestId,
                       provider: candidate.target.provider,
                       credentialId: candidate.credential.id,
-                      reason: healthError instanceof Error ? healthError.message : "unknown",
+                      reason: describeError(healthError, "unknown"),
                     });
                   }
                   return;
@@ -534,7 +535,7 @@ export async function dispatch(
                   ? { code: "TIMEOUT" as const }
                   : classify(error);
               const { code } = classifiedError;
-              const message = describeError(error);
+              const message = describeError(error, "attempt failed");
               lastError = rewrap(classifiedError, message);
 
               if (
@@ -566,10 +567,7 @@ export async function dispatch(
                     deadlineAt !== null && dispatchSignal.aborted
                       ? { code: "TIMEOUT" as const }
                       : classify(refreshError);
-                  const refreshMessage =
-                    refreshError instanceof Error
-                      ? describeError(refreshError)
-                      : "credential refresh failed";
+                  const refreshMessage = describeError(refreshError, "credential refresh failed");
                   lastError = rewrap(classified, refreshMessage);
                   // The refresh *attempt* is logged above. Without this the
                   // failure is not, so a dead refresh token reads as a refresh

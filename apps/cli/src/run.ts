@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { type ConnectFlows, createConnectFlows, OAUTH_PROVIDERS } from "@omni/control";
-import { GatewayError } from "@omni/ir";
+import { describeError, GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { boolFlag, parse, UsageError } from "./args.ts";
@@ -68,7 +68,7 @@ export async function run(
   try {
     args = parse(resolved.rest, resolved.command.options ?? {});
   } catch (error) {
-    writer.err(error instanceof Error ? error.message : "could not parse arguments");
+    writer.err(describeError(error, "could not parse arguments"));
     writer.err(`usage: omni ${resolved.command.usage}`);
     return 2;
   }
@@ -133,7 +133,7 @@ export async function run(
       writer.err(`${error.code}: ${error.message}`);
       return 1;
     }
-    writer.err(error instanceof Error ? error.message : "unknown error");
+    writer.err(describeError(error, "unknown error"));
     return 1;
   } finally {
     ctx.close();

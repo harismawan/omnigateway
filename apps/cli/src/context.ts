@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { type Config, loadConfig } from "@omni/control";
+import { describeError } from "@omni/ir";
 import { createStore, deriveKey, type Store } from "@omni/store";
 import type { Parsed } from "./args.ts";
 import { boolFlag, stringFlag } from "./args.ts";
@@ -181,7 +182,7 @@ export function createContext(parsed: Parsed, options: ContextOptions = {}): Con
   try {
     config = loadConfig(env);
   } catch (error) {
-    configError = error instanceof Error ? error.message : "invalid configuration";
+    configError = describeError(error, "invalid configuration");
   }
 
   const configuredPath = dbFlag ?? config?.databasePath ?? "omnigateway.db";

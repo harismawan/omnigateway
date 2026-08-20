@@ -1,5 +1,5 @@
 import { type DatabaseDeps, nodeDatabaseFs, pruneSnapshots, sweepStaging } from "@omni/control";
-import { type Logger, noopLogger } from "@omni/ir";
+import { describeError, type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
 
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
@@ -104,7 +104,7 @@ export function startMaintenance(deps: MaintenanceDeps): () => void {
       )
       .catch((error: unknown) => {
         logger.error("snapshot sweeping failed", {
-          reason: error instanceof Error ? error.message : "unknown",
+          reason: describeError(error, "unknown"),
         });
       });
 
@@ -126,7 +126,7 @@ export function startMaintenance(deps: MaintenanceDeps): () => void {
       )
       .catch((error: unknown) => {
         logger.error("log pruning failed", {
-          reason: error instanceof Error ? error.message : "unknown",
+          reason: describeError(error, "unknown"),
         });
       });
   }, SWEEP_INTERVAL_MS);

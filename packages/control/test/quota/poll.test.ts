@@ -2,7 +2,7 @@ import { beforeEach, expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import { type CredentialSecrets, type Store, sameWindow, type UsageSecrets } from "@omni/store";
-import { memoryStore, seedCredential } from "@omni/testkit";
+import { captureLogger, memoryStore, seedCredential } from "@omni/testkit";
 import { parseOpenAIUsage } from "../../src/oauth/openai.ts";
 import type { OAuthProvider, UsageReport } from "../../src/oauth/types.ts";
 import { poll, probe, RATE_LIMIT_COOLDOWN_MS, resetQuotaCooldowns } from "../../src/quota/poll.ts";
@@ -163,6 +163,30 @@ test("a failing probe leaves the previous snapshot standing and never disables",
   expect(rows[0]?.used).toBe(40);
   expect(rows[0]?.observedAt).toBe(NOW - 60_000);
   expect((await store.credentials.get("c1"))?.enabled).toBe(true);
+});
+
+/**
+ * Observed in production: `quota probe failed … code=INTERNAL reason=`.
+ *
+ * The probe's transport failed with an `AggregateError`, which keeps its detail
+ * in `errors` and has no message of its own, so the field that exists to say why
+ * the probe failed said nothing at all.
+ */
+test("names a probe failure that carries no message", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1" });
+  const logger = captureLogger();
+
+  await poll({
+    ...deps(store, async () => {
+      throw new AggregateError([new Error("connect ECONNREFUSED 2607:6bc0::10:443")]);
+    }),
+    logger,
+  });
+
+  const failures = logger.records.filter((record) => record.msg === "quota probe failed");
+  expect(failures).toHaveLength(1);
+  expect(failures[0]?.fields?.reason).toBe("AggregateError");
 });
 
 test("a probe that reports nothing writes nothing", async () => {

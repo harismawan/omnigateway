@@ -10,7 +10,7 @@ import {
   resolveConsoleSource,
   tailFile,
 } from "@omni/control";
-import { createLogger, type Logger } from "@omni/ir";
+import { createLogger, describeError, type Logger } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import { createStore, deriveKey } from "@omni/store";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
@@ -291,7 +291,7 @@ try {
   await main();
 } catch (error) {
   logger.error("gateway boot failed", {
-    reason: error instanceof Error ? error.message : "unknown",
+    reason: describeError(error, "unknown"),
   });
   process.exit(1);
 }

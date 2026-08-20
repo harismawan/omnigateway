@@ -1,4 +1,5 @@
 import type { Logger } from "@omni/ir";
+import { describeError } from "@omni/ir";
 
 export type ShutdownMode = "graceful" | "force";
 
@@ -86,7 +87,7 @@ export function createShutdown(deps: ShutdownDeps): Shutdown {
       (error: unknown) => {
         clearTimeout(timer);
         deps.logger.error("shutdown failed", {
-          reason: error instanceof Error ? error.message : "unknown",
+          reason: describeError(error, "unknown"),
         });
         exitAfterClosingStore(1);
       },
