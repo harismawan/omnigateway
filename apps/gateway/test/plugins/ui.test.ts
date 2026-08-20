@@ -86,7 +86,36 @@ test("a compatible ui gets a url under the asset prefix", () => {
       ui: { dir: dir, entry: "index.js", compatible: true },
     },
   ]);
-  expect(entries[0]?.ui?.entry).toBe(`${PLUGIN_ASSET_PREFIX}/pokemon/index.js`);
+  expect(entries[0]?.ui?.entry).toBe(`${PLUGIN_ASSET_PREFIX}/pokemon/index.js?v=1.0.0`);
+});
+
+/** The catalog entry for one plugin at one version. */
+function entryAt(version: string): string | null | undefined {
+  return pluginCatalog([
+    {
+      id: "pokemon",
+      manifest: manifest({ version }),
+      routes: [],
+      migrations: [],
+      ui: { dir: dir, entry: "index.js", compatible: true },
+    },
+  ])[0]?.ui?.entry;
+}
+
+test("a reinstalled bundle gets a url the browser has not already resolved", () => {
+  // The bug this closes was reported as "the console shows the new version but
+  // the panel still behaves like the old one", and every layer below the
+  // browser was correct: npm, disk, the restarted process, and the bytes on the
+  // wire all carried the new build.
+  //
+  // The URL did not. It was the same string at every version, and two things
+  // key off it — `PluginBoard`'s `useMemo` over the entry, and the browser's
+  // own ES module map, which is keyed by URL for the lifetime of a document. So
+  // a console tab open across a reinstall kept the old module while
+  // `/api/plugins` reported the new version beside it. `cache-control:
+  // no-cache` could not help: nothing was an HTTP cache hit, the module was
+  // simply already resolved.
+  expect(entryAt("1.0.0")).not.toBe(entryAt("1.0.1"));
 });
 
 test("a backend-only plugin is listed with no ui at all", () => {
@@ -144,6 +173,23 @@ test("a bundle is not cached immutably, because install replaces it in place", a
     new Request(`http://localhost${PLUGIN_ASSET_PREFIX}/pokemon/index.js`),
   );
   expect(response.headers.get("cache-control")).toBe("no-cache");
+});
+
+test("a versioned bundle url still serves, because the query is not part of the path", async () => {
+  // The whole fix is worthless if the cache-buster reaches `resolve()` as part
+  // of the filename: every bundle would 404 and every plugin panel would go
+  // dark. The catalog's own URL is used rather than a hand-built one, so this
+  // fails if the two ever disagree.
+  const plugin = await withUi();
+  const entry = pluginCatalog([plugin])[0]?.ui?.entry;
+  expect(entry).toContain("?v=");
+  if (entry === undefined || entry === null) return;
+
+  const app = pluginUiRoutes({ admin: denyAdmin, plugins: [plugin] });
+  const response = await app.handle(new Request(`http://localhost${entry}`));
+
+  expect(response.status).toBe(200);
+  expect(await response.text()).toContain("export default");
 });
 
 test("an incompatible plugin serves nothing at all", async () => {
