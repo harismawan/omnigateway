@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   type CommandRunner,
   type ConsoleDeps,
@@ -185,7 +185,10 @@ async function main(): Promise<void> {
    * repeatedly.
    */
   const installRoot = process.env.OMNI_ROOT ?? dirname(config.databasePath);
-  const pluginRoot = join(installRoot, "plugins");
+  // Absolute, so the boot log names a directory an operator can go and look at.
+  // The loader resolves this itself and no longer depends on the caller, but a
+  // log line reading `path=plugins` is what made this take an hour to find.
+  const pluginRoot = resolve(installRoot, "plugins");
   const pluginEvents = createPluginEventBus({ logger });
   const loadedPlugins = await loadPlugins({
     root: pluginRoot,
