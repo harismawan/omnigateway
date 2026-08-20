@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import {
   Activity,
+  Blocks,
   Boxes,
   Cable,
   Database,
@@ -11,7 +12,9 @@ import {
   Terminal,
 } from "lucide-react";
 import type { ComponentType } from "react";
-import styled from "styled-components";
+import styled, { css } from "styled-components";
+import { usePlugins } from "../api/queries.ts";
+import { pluginNavEntries, pluginPath } from "../features/plugins/catalog.ts";
 
 type Destination = {
   to: string;
@@ -72,7 +75,8 @@ const Rail = styled.nav`
   }
 `;
 
-const Item = styled(Link)`
+/** The face every rail entry wears, whether or not it can be followed. */
+const face = css`
   display: flex;
   align-items: center;
   gap: ${({ theme }) => theme.space(2)};
@@ -92,6 +96,10 @@ const Item = styled(Link)`
     height: 15px;
     flex: none;
   }
+`;
+
+const Item = styled(Link)`
+  ${face}
 
   &:hover {
     background: ${({ theme }) => theme.color.panelSunk};
@@ -105,7 +113,53 @@ const Item = styled(Link)`
   }
 `;
 
+/**
+ * A plugin whose interface this console cannot load.
+ *
+ * A button rather than a styled link, so that "cannot be followed" is carried
+ * by the element itself: a disabled button is unreachable by keyboard and by
+ * pointer without a handler that has to remember to refuse. A link with an
+ * `aria-disabled` attribute still navigates.
+ */
+const Blocked = styled.button`
+  ${face}
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
+  white-space: normal;
+  background: none;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  color: ${({ theme }) => theme.color.inkFaint};
+  cursor: not-allowed;
+  font-family: inherit;
+
+  svg {
+    margin-top: 2px;
+  }
+`;
+
+const BlockedLines = styled.span`
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+`;
+
+const Reason = styled.span`
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 1.3;
+  color: ${({ theme }) => theme.color.warn};
+`;
+
 export function RailNav() {
+  // A rail that renders nothing until the catalog answers would flicker on every
+  // navigation, so the core entries are drawn immediately and plugins arrive
+  // when they do. A failed request leaves the console entirely usable.
+  const plugins = usePlugins();
+
   return (
     <Rail aria-label="Console sections">
       {DESTINATIONS.map(({ to, label, blurb, Icon }) => (
@@ -114,6 +168,22 @@ export function RailNav() {
           {label}
         </Item>
       ))}
+      {pluginNavEntries(plugins.data ?? []).map(({ id, label, disabledReason }) =>
+        disabledReason === null ? (
+          <Item key={id} to={pluginPath(id)} title={`Provided by the ${id} plugin`}>
+            <Blocks />
+            {label}
+          </Item>
+        ) : (
+          <Blocked key={id} type="button" disabled>
+            <Blocks />
+            <BlockedLines>
+              {label}
+              <Reason>{disabledReason}</Reason>
+            </BlockedLines>
+          </Blocked>
+        ),
+      )}
     </Rail>
   );
 }

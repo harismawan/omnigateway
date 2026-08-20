@@ -20,6 +20,7 @@ designs live in `docs/superpowers/specs/`.
 - [Background loops](#background-loops)
   - [Stopping and restarting](#stopping-and-restarting)
 - [The console and the CLI](#the-console-and-the-cli)
+- [Plugins](#plugins)
 
 ## What a request actually does
 
@@ -600,3 +601,84 @@ only asymmetry between the two front ends. `GET /api/settings` additionally
 reports `bodyLoggingAllowed` beside the settings, because the runtime toggle is
 meaningless without the boot-time key and a console that knew only the setting
 would render a switch that silently does nothing.
+
+## Plugins
+
+A plugin adds routes, storage and console UI to one installation without being
+part of this repository. They are loaded from `<root>/plugins/` at boot, in
+lexicographic id order so two installs with the same plugins behave the same way.
+`docs/writing-a-plugin.md` is the procedure; this section is why the shape is
+what it is.
+
+### The trust boundary, which is not one
+
+A plugin is `import`ed into the gateway process, and that process holds the
+encryption key, decrypted provider credentials, admin session state and API-key
+hashes. Bun offers no in-process sandbox. The capability context is therefore a
+**guardrail rather than a sandbox**: it makes accidental overreach impossible and
+a plugin's intent auditable from its manifest, and it does not stop hostile code,
+which can reach past it by importing the store directly.
+
+A supervised subprocess with an IPC protocol would be a real boundary. It was
+considered and deferred on cost — process supervision, protocol versioning,
+restart semantics — and the decision is recorded rather than assumed. If this
+project ever accepts plugins it does not control, that is the point to revisit,
+before rather than after.
+
+### Every failure is survivable
+
+A malformed manifest, an incompatible API major, an entry that will not import, a
+setup that throws, a migration that fails: each skips one plugin, is reported to
+stdout and to `omni doctor`, and leaves the gateway serving. The asymmetry is
+deliberate. The proxy path depends on no plugin and must not become able to, and
+a gateway that refuses to start because an optional cosmetic feature has a syntax
+error has converted a nuisance into an outage — while also removing the console
+an operator would use to find out which plugin to remove.
+
+### Storage rides the database, on its own track
+
+Plugin tables live in the gateway's own SQLite file, so a plugin's data moves
+with a snapshot and a restore like everything else. They are named
+`plugin_<id>_<name>` by the host from a `{{name}}` placeholder the plugin writes,
+and tracked in `plugin_migrations` independently of core's numbering — core's
+next migration is unaffected by anything a plugin does.
+
+Plugin migrations apply one transaction each rather than one for the batch. A
+single transaction reads tidier and is wrong: a plugin failing on migration 5
+would silently revert 1 through 4 on every subsequent boot, turning one bad
+migration into repeated data loss.
+
+Restoring onto an install that lacks a plugin leaves orphan `plugin_*` tables.
+They stay, `omni doctor` reports them, and nothing drops them automatically — a
+restore is precisely when a plugin may not be installed yet, and the drop is
+irreversible.
+
+### Events are at-most-once, and say so
+
+`RequestCompleted` is emitted from `finishLog`, which is already the one site
+running at most once per request id — the same guarantee, and the same reason,
+that put the rate-limiter's token debit there. Handlers run off the request path
+through a bounded queue: nothing runs on the caller's stack, a throwing handler
+costs that plugin its event and nothing else, and a full queue drops rather than
+grows, because an unbounded queue behind a slow handler is a memory leak that
+only appears under load.
+
+Delivery is explicitly **not durable**. An event queued when the process dies is
+gone. That is fine for a counter and wrong for a ledger, and the distinction is
+documented rather than left for someone to assume the wrong half.
+
+### The console shares one React
+
+Plugins render inline in the console, which means both halves must hold the same
+React instance — two copies make every plugin hook throw. So the console
+externalises `react`, `react-dom`, `styled-components` and `@tanstack/react-query`
+rather than bundling them, and an import map in `index.html` resolves those bare
+specifiers to a shared runtime built beside it. The specifier list, the import
+map and the shared build's entry points are one object in
+`apps/dashboard/shared/manifest.ts`, because those three drifting apart fails in
+three different and equally unhelpful ways.
+
+An `sdk` range that the shipped console does not satisfy disables only the UI, and
+the nav entry renders disabled carrying the reason. A plugin that collects data
+should not go dark because the console's React moved, and an operator should get
+a sentence rather than a blank page.

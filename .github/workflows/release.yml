@@ -64,9 +64,63 @@ jobs:
       # Node 22 ships an npm older than 11.5.1, the floor for trusted publishing.
       - run: npm install -g npm@latest
 
-      # No token and no `--provenance`: trusted publishing supplies the
-      # credential from the OIDC token above, and attaches the provenance
-      # attestation itself.
+      # The two SDK packages a plugin author installs. Unlike the gateway they
+      # carry their own versions, and those versions are not this tag: they are
+      # `PLUGIN_API_VERSION` and `DASHBOARD_SDK_VERSION`, the numbers the host
+      # actually enforces a manifest against. Tying them to the gateway's tag
+      # would republish an identical contract on every patch release and make
+      # the `sdk` ranges in every manifest mean nothing.
+      #
+      # The consequence is that most releases publish neither, so an unchanged
+      # version is skipped rather than failing the run. `npm view` is the check;
+      # a registry lookup that errors for any other reason leaves the version
+      # unset and the publish is attempted, which fails loudly rather than
+      # silently skipping.
+      #
+      # Order matters: the SDK depends on the API, so the API goes first.
+      #
+      # A package that does not exist on npm cannot be published from here, and
+      # that is npm's limitation rather than this workflow's. Trusted publishing
+      # is configured on a package's settings page, and there is no settings page
+      # until a version exists — npm has no pre-registration the way PyPI does
+      # (npm/cli#8544). So each new package name has to be created once with a
+      # token before OIDC can ever work for it, and until that is done this step
+      # fails with a permissions error that does not explain itself.
+      #
+      # Both current names were bootstrapped by publishing an empty `0.0.1` under
+      # `--tag bootstrap`, so it never became `latest`, and the real versions ship
+      # from here with provenance. Do the same for a third.
+      - name: Publish the plugin SDKs
+        run: |
+          set -euo pipefail
+          for dir in packages/plugin-api packages/dashboard-sdk; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            if [ "$(npm view "$name@$version" version 2>/dev/null || true)" = "$version" ]; then
+              echo "$name@$version is already published; skipping"
+            else
+              echo "publishing $name@$version"
+              cp LICENSE "$dir/LICENSE"
+              (cd "$dir" && npm publish --access public)
+            fi
+          done
+
+      # The gateway goes last of the three, and the order is a risk decision
+      # rather than a preference. Every publish here is irreversible — npm allows
+      # unpublishing for 72 hours and not after — so when two of them must both
+      # happen, the one most likely to fail belongs first, where failing costs
+      # nothing but a re-tag.
+      #
+      # This step is the proven one: it has published every gateway version since
+      # v0.2.2 through the same OIDC exchange. The SDK step above is the unproven
+      # one, on package names whose trusted-publishing policies were configured by
+      # hand and cannot be verified from here — no API exposes them, so the first
+      # release is the test. Publishing the gateway first would mean discovering a
+      # bad policy with the gateway already on npm, the tag consumed, and a
+      # half-published release to explain.
+      #
+      # No token and no `--provenance`: trusted publishing supplies the credential
+      # from the OIDC token above, and attaches the provenance attestation itself.
       - name: Publish
         run: npm publish --access public
         working-directory: dist/npm

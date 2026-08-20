@@ -356,6 +356,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni credentials …` | list, show, enable, disable, retier, refresh, remove |
 | `omni models …` | list, show, put, remove, `dry-run`, `catalog` |
 | `omni keys …` | list, create, revoke |
+| `omni plugin …` | list, verify, install, remove; see [Plugins](#plugins) |
 | `omni settings get` / `set` | routing weights, retention, deadlines, and the runtime switches |
 | `omni admin set-password` | change the console password |
 | `omni db migrate` | create or upgrade the database |
@@ -701,7 +702,177 @@ Worth knowing before you deploy it:
 - Behind a reverse proxy, set `OMNI_BASE_URL` to the public HTTPS origin so
   OAuth callbacks match what the providers have registered.
 - The gateway talks to your providers and to nobody else. No telemetry, no CDN
-  fonts, no third-party origins.
+  fonts, no third-party origins. A plugin may declare outbound origins of its
+  own, and `omni plugin verify <id>` shows exactly which ones it asked for — as
+  does its manifest, which is a plain file you can read before installing.
+- **Plugins run inside the gateway process, with its privileges.** The
+  capability context they are handed is a guardrail against mistakes, not a
+  sandbox against malice: a plugin shares the process holding your encryption
+  key and decrypted provider credentials, and can reach past the context if it
+  wants to. Install plugins you wrote or audited, and read a plugin's manifest —
+  it lists every capability and outbound origin it asked for.
+
+## Plugins
+
+A plugin adds routes, storage, and a screen in the console to one installation,
+without being part of OmniGateway. Most installations run none.
+
+```bash
+omni plugin install ./some-plugin     # a directory, or a .tgz
+omni plugin install https://…/x.tgz   # a tarball over https, never http
+omni plugin install some-plugin@1.2.3 # a package name, through the npm registry
+omni plugin verify some-plugin        # every check the next boot will run
+omni plugin list                      # what is installed, and whether it would load
+omni restart                          # plugins load at boot, so this is required
+```
+
+**Nothing in the package is executed by any of these.** There is no dependency
+resolution, no `node_modules`, and no lifecycle script — the installer fetches,
+checks, and unpacks, and the plugin's own code is first imported at the next boot.
+
+A spec is resolved filesystem-first: directory, then local tarball, then URL,
+then registry. That order is the safe one. The reverse would let a published
+package shadow the directory you are standing in and turn `omni plugin install
+some-plugin` into a download nobody asked for.
+
+Installing by name refuses more than it accepts, and each refusal happens before
+any bytes are fetched: the tarball must be served from the registry's own host,
+the registry must advertise an integrity hash or a shasum, and only an exact
+version or the registry's `latest` resolves — no ranges, no other dist-tags. Use
+`--registry` (or `OMNI_PLUGIN_REGISTRY`) for a private registry; it must be
+`https://`.
+
+A URL you type is different, and the difference is the point: nothing downstream
+has a digest to check it against, so TLS to the host you named is the only
+assurance there is. That is why `http://` is refused rather than upgraded.
+
+`omni plugin list` prints what this installation has — id, name, version, the
+plugin API and console SDK it was built against, the capabilities it declared,
+and whether the gateway would load it:
+
+```
+ID       NAME               VERSION  API  SDK     CAPABILITIES                    STATE
+pokemon  Pokémon Companion  1.0.0    1    ^1.0.0  storage,files,net:outbound,…    ok
+```
+
+A plugin that would *not* load is listed with the reason rather than hidden,
+because a plugin missing from the console is exactly what you are trying to
+explain. For one plugin's full detail — its entry points and the outbound
+origins it declared — use `omni plugin verify <id>`.
+
+### Available plugins
+
+There is no curated directory to browse, and there is no plan for one. A plugin
+is a directory, a tarball, a URL or a package name you point `omni plugin
+install` at, and you are expected to know where it came from — see the
+[security note](#security) for why that is the model rather than an omission.
+
+Resolving a name through npm makes distribution easier; it does not make an
+unknown plugin safer. Integrity checking proves you received the bytes the
+registry advertised, and nothing about who wrote them or what they do once the
+gateway imports them.
+
+One ships in this repository:
+
+| Plugin | What it does |
+| --- | --- |
+| [`pokemon`](plugins/pokemon) | A Pokémon companion. Each gateway key raises one that hatches, evolves, and graduates into a Pokédex on the tokens that key spends, with a shop that spends a wallet of those same tokens. |
+
+It is not installed by default, is not in the npm package, and is not in the
+Docker image. Build it from a checkout and install the result:
+
+```bash
+bun run build:plugins                              # writes plugins/pokemon/dist/pokemon
+omni plugin install ./plugins/pokemon/dist/pokemon
+omni restart
+```
+
+The path ends in `pokemon` because the installer takes the target directory name
+from the source and refuses a manifest whose id disagrees with it — so a plugin
+cannot be installed under a name that is not its own.
+
+It needs outbound access to `pokeapi.co` and `raw.githubusercontent.com` for
+species data and sprites, which its manifest declares and `omni plugin verify
+pokemon` prints back. Those assets are Nintendo and Game Freak intellectual property, fetched at
+runtime and never vendored into this repository or its published artifacts.
+
+`verify` is the one to run before restarting a gateway that people are using: it
+reaches the same verdict the next boot will, from the same code, without loading
+the plugin.
+
+### Installing on a machine with no checkout
+
+A published plugin installs by name, and the host needs no checkout and no build
+toolchain:
+
+```bash
+omni plugin install omnigateway-plugin-example
+omni plugin verify example && omni restart
+```
+
+An `npm pack` tarball is rooted at `package/` rather than at the plugin's name,
+and that is fine: the manifest's `id` names the installed directory when the
+archive root does not.
+
+For a plugin you build yourself and do not publish, ship the tarball and install
+from the path:
+
+```bash
+# wherever you build — a workstation, CI
+bun run build:plugins
+tar -czf pokemon.tgz -C plugins/pokemon/dist pokemon
+
+# on the host
+scp pokemon.tgz gateway-host:/tmp/
+ssh gateway-host 'omni plugin install /tmp/pokemon.tgz && omni plugin verify pokemon && omni restart'
+```
+
+Plaintext `http://` is refused outright and always will be: what arrives over
+that fetch is code the gateway process will `import`, so anyone between you and
+the host would be choosing what the gateway runs. Silently upgrading to `https://`
+would be worse — it would install *something* from a URL you did not type.
+
+**In Docker**, the image carries the gateway only, so a plugin arrives on a
+volume rather than through the CLI. Mount it at `<root>/plugins/<id>` — the same
+layout `install` writes — and restart the container:
+
+```bash
+docker run --rm -p 9000:9000 \
+  -e OMNI_ENCRYPTION_KEY="$OMNI_ENCRYPTION_KEY" \
+  -v omnigateway-data:/data \
+  -v "$PWD/pokemon:/data/plugins/pokemon" \
+  omnigateway
+```
+
+**Do not mount it `:ro`** if the plugin declares the `files` capability. A
+plugin's cache lives at `<root>/plugins/<id>/data/`, inside its own directory, and
+the capability creates that directory on every call — so a read-only mount fails
+*reads* as well as writes, with an `EACCES` on `mkdir` rather than anything that
+names the mount. Keeping a plugin's code immutable while its cache stays
+writable is not expressible today; mount the directory read-write.
+
+Removing one keeps its data:
+
+```bash
+omni plugin remove some-plugin          # directory goes, database tables stay
+omni plugin remove some-plugin --purge  # tables too, after confirming
+```
+
+That default is deliberate. A plugin directory can be reinstalled from the
+package it came from; whatever it accumulated in your database cannot be
+reinstalled from anything.
+
+Note what "directory goes" includes: a plugin's `data/` directory is removed
+with it. That directory holds cached files a plugin can rebuild — it is excluded
+from [snapshots](#snapshots-and-restore) for that reason, so it has no restore
+path and is not meant to need one. Only the database tables are kept, and only
+those are what `--purge` additionally drops. For the same reason, restoring a snapshot onto an
+installation that no longer has a plugin leaves that plugin's tables in place —
+`omni doctor` reports them, and nothing removes them for you.
+
+Read the [security note](#security) on what a plugin can reach before installing
+one you did not write. To write one, see
+[docs/writing-a-plugin.md](docs/writing-a-plugin.md).
 
 ## Development
 

@@ -885,6 +885,115 @@ export interface MaintenanceRepo {
   inspect(path: string): Promise<DatabaseInspection>;
 }
 
+/**
+ * One numbered migration as a plugin ships it.
+ *
+ * `sql` is written against `{{name}}` placeholders rather than real table names;
+ * see `PluginRepo` for why the plugin never spells a table name itself.
+ */
+export type PluginMigration = {
+  version: number;
+  sql: string;
+};
+
+/**
+ * What one `migrate` call did, reported rather than thrown.
+ *
+ * A failing migration must not take the gateway down with it — the spec makes a
+ * plugin "skipped and reported, never fatal" — so the failure is a value the
+ * host logs and `omni doctor` surfaces, not an exception the boot path has to
+ * remember to catch. `applied` lists only the versions this call committed, so
+ * a second call on an unchanged plugin returns an empty array rather than
+ * repeating history.
+ *
+ * `failed` is absent, not `null`, when every unapplied migration committed:
+ * `exactOptionalPropertyTypes` is on, so the absence is checkable and cannot be
+ * confused with a present-but-empty failure.
+ */
+export type PluginMigrateResult = {
+  applied: number[];
+  failed?: { version: number; reason: string };
+};
+
+/**
+ * A plugin's own slice of the gateway database.
+ *
+ * Plugin tables live in the gateway's SQLite file rather than a sidecar of their
+ * own, so plugin data rides snapshots, restores, and `vacuum()` with everything
+ * else and an operator has one file to back up. The cost of that decision is
+ * that a plugin writes SQL into the same namespace core does, which is what the
+ * rest of this interface is about.
+ *
+ * Every method takes `pluginId` first. It is not decoration and it is not an
+ * audit field: it is the namespace. Plugin SQL never names a table. It writes
+ * `{{caught}}` and this repo expands that to `plugin_<pluginId>_caught`, so a
+ * plugin cannot name a table belonging to another plugin without the host
+ * handing it the other plugin's id, which nothing does.
+ *
+ * The guard on top of that expansion — a denylist of core table names — is a
+ * **guardrail, not a sandbox**, in exactly the sense the spec uses the phrase. A
+ * plugin runs `import`ed into the gateway process; it can import `@omni/store`
+ * directly and read whatever it likes. What this catches is the accident: a
+ * migration copy-pasted from a query against `request_logs`, a `DELETE` whose
+ * `FROM` was never edited. It does not and cannot stop code that means harm, and
+ * nothing built on top of it should be described as if it did.
+ */
+export interface PluginRepo {
+  /**
+   * Applies every unapplied migration in ascending version order, **each in its
+   * own transaction**, recording each as it commits.
+   *
+   * One transaction around the whole batch would be tidier and is wrong. A
+   * plugin whose migration 5 fails would have 1 through 4 rolled back with it,
+   * and since nothing was recorded, the next boot would apply 1 through 4 again
+   * and fail on 5 again — turning one bad migration into data loss repeated on
+   * every restart. Committing each one separately means a failure stops the
+   * plugin at a known, durable schema version that its author can write a
+   * migration 6 against.
+   *
+   * Already-applied versions are skipped. A failure stops the walk: later
+   * versions are not attempted, because a migration ordering exists precisely
+   * so that later ones may assume earlier ones ran.
+   */
+  migrate(pluginId: string, migrations: readonly PluginMigration[]): PluginMigrateResult;
+  /** Executes a statement. `sql` is placeholder-expanded and guarded first. */
+  run(pluginId: string, sql: string, params?: unknown[]): void;
+  /** Every matching row. Rows are shaped by the plugin's own query, not by us. */
+  all<T>(pluginId: string, sql: string, params?: unknown[]): T[];
+  /** The first matching row, or `null` when there is none. */
+  get<T>(pluginId: string, sql: string, params?: unknown[]): T | null;
+  /**
+   * Runs `fn` inside a transaction on the shared connection.
+   *
+   * `bun:sqlite` is synchronous and there is one connection, so this is a real
+   * transaction and also a real stall: everything the gateway does is behind it
+   * for its duration. Plugin work belongs off the request path for that reason.
+   */
+  transaction<T>(pluginId: string, fn: () => T): T;
+  /** This plugin's tables, by their real names, sorted. */
+  listTables(pluginId: string): string[];
+  /**
+   * Drops every table this plugin owns and forgets its migration history.
+   * Returns how many tables went.
+   *
+   * For `omni plugin remove --purge` and nothing else. Plain `remove` leaves the
+   * tables, because a plugin being uninstalled is not evidence its data is
+   * unwanted, and this operation has no undo.
+   */
+  dropAll(pluginId: string): number;
+  /**
+   * `plugin_*` tables belonging to no installed plugin, sorted.
+   *
+   * Restoring a snapshot taken on an install that had a plugin, onto one that
+   * does not, leaves these behind. They stay. This method **reports and never
+   * drops**: a restore is exactly when a plugin is most likely to be missing —
+   * installed a minute later by the same operator — and auto-dropping would
+   * destroy the data the restore was performed to recover. `omni doctor` prints
+   * what this returns and leaves the decision to a human.
+   */
+  orphanTables(installedIds: readonly string[]): string[];
+}
+
 export type RoutingChange =
   | { type: "healthSaved"; rows: CredentialHealth[] }
   | { type: "quotaSaved"; rows: QuotaWindow[] }
@@ -914,6 +1023,7 @@ export type Store = {
   usage: UsageRepo;
   bodies: BodyRepo;
   maintenance: MaintenanceRepo;
+  plugins: PluginRepo;
   routing: RoutingChangeSource;
   /**
    * Closes the current database handle and opens a new one at `databasePath`.

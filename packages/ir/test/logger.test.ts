@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createLogger,
   formatLine,
+  type LogFields,
   type LogLevel,
   noopLogger,
   parseLine,
@@ -261,5 +262,62 @@ describe("parseLine", () => {
     const parsed = parseLine(line);
     expect(parsed.msg).toBe("parsed");
     expect(parsed.raw).toContain("reason=x");
+  });
+});
+
+describe("the field allowlist and the render order stay in step", () => {
+  /**
+   * Every key of `LogFields`, with a value of the right type.
+   *
+   * The annotation is the point: `Required<LogFields>` makes the compiler reject
+   * this object the moment a field is added to the allowlist and not here, which
+   * is what turns "someone remembered" into "the build said so".
+   */
+  const everyField: Required<LogFields> = {
+    requestId: "req_1",
+    surface: "anthropic",
+    status: 200,
+    provider: "anthropic",
+    model: "m",
+    requestedModel: "rm",
+    credentialId: "c1",
+    apiKeyId: "k1",
+    plugin: "pokemon",
+    snapshotId: "s1",
+    attempt: 1,
+    attempts: 2,
+    code: "INTERNAL",
+    retryable: true,
+    stream: false,
+    inputTokens: 1,
+    outputTokens: 2,
+    cacheReadTokens: 3,
+    cacheWriteTokens: 4,
+    costUsd: 5,
+    ttftMs: 6,
+    durationMs: 7,
+    retryAfterMs: 8,
+    count: 9,
+    rawCount: 10,
+    dailyCount: 11,
+    quotaSampleCount: 12,
+    sizeBytes: 13,
+    host: "h",
+    port: 9000,
+    path: "/p",
+    supervisor: "systemd",
+    reason: "because",
+  };
+
+  test("a field in the allowlist is a field that renders", () => {
+    // FIELD_ORDER is `satisfies ReadonlyArray<keyof LogFields>`, which checks that
+    // every entry is a real key and NOT that every key has an entry. So a field
+    // added to the allowlist and forgotten in the order list typechecks, is
+    // accepted at the call site, and then silently never appears in a line —
+    // which reads as "the gateway did not log that" rather than as a bug here.
+    const line = formatLine("info", AT, "everything", everyField, false);
+    for (const key of Object.keys(everyField)) {
+      expect(line).toContain(`${key}=`);
+    }
   });
 });

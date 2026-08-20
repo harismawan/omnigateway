@@ -1,6 +1,7 @@
 import type { GatewayError, LogFields } from "@omni/ir";
 import { type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { RequestLog, Store } from "@omni/store";
+import type { RequestCompleted } from "@omnigateway/plugin-api";
 
 type CompletedOverrides = Pick<RequestLog, "status"> &
   Partial<Omit<RequestLog, "id" | "state" | "at" | "status">>;
@@ -201,6 +202,16 @@ export type UsageDebit = (keyId: string, usage: { tokens: number; costUsd: numbe
  * runs at most once per request id. A second lifecycle hook next to it would
  * have to re-establish that guarantee; a debit here inherits it.
  */
+/**
+ * Announces a finished request to plugin handlers.
+ *
+ * Takes the built payload rather than the log row: the translation from
+ * `RequestLog` to the narrower shape plugins see happens once, here, beside the
+ * guarantee that makes it correct. A caller that built its own would be a second
+ * site to keep in step with what plugins are allowed to know.
+ */
+export type PluginEmit = (event: RequestCompleted) => void;
+
 export async function finishLog(
   store: Store,
   log: RequestLog,
@@ -208,6 +219,7 @@ export async function finishLog(
   logger: Logger = noopLogger,
   bodies?: BodyWriter,
   debit?: UsageDebit,
+  emit?: PluginEmit,
 ): Promise<void> {
   try {
     await store.usage.append({ ...log, apiKeyId: keyId });
@@ -233,6 +245,46 @@ export async function finishLog(
       tokens: log.inputTokens + log.outputTokens + log.cacheReadTokens + log.cacheWriteTokens,
       costUsd: log.costUsd,
     });
+  }
+  /**
+   * Emitted here for the reason the debit is: this function is already the one
+   * site that runs at most once per request id, and a plugin accumulating
+   * per-request quantities needs exactly that guarantee. A second lifecycle hook
+   * elsewhere would have to re-establish it.
+   *
+   * The payload is narrower than the row on purpose — no credential id, no
+   * bodies, no headers. Widening it is a security change, because it crosses
+   * into code authored outside this repository.
+   *
+   * A key is required: every consumer of this event attributes to one, and a
+   * request that never authenticated has nothing to attribute to. `emit` itself
+   * only enqueues, so nothing here runs a plugin's code on the request path.
+   */
+  if (keyId !== null && emit !== undefined) {
+    try {
+      emit({
+        requestId: log.id,
+        apiKeyId: keyId,
+        provider: log.resolvedProvider,
+        model: log.resolvedModel ?? log.requestedModel,
+        tokens: {
+          input: log.inputTokens,
+          output: log.outputTokens,
+          cacheRead: log.cacheReadTokens,
+          cacheWrite: log.cacheWriteTokens,
+        },
+        costUsd: log.costUsd,
+        durationMs: log.durationMs,
+        ok: log.errorCode === null && log.status < 400,
+        at: log.at,
+      });
+    } catch (error) {
+      // The bus only enqueues, so reaching here means the bus itself broke
+      // rather than a plugin. Either way this function's contract is that it
+      // never throws: a logging failure must not turn a proxied request the
+      // client already received into an error.
+      report(logger, "failed to emit plugin event", log.id, error);
+    }
   }
   if (bodies === undefined) return;
   try {

@@ -1664,3 +1664,35 @@ test("a mirrored id routes to the pool it stands for", async () => {
   });
   expect(res.status).toBe(200);
 });
+
+test("a plugin sees exactly one event per request id, streaming and not", async () => {
+  // The spec names this property and nothing tested it. `finishLog` is called
+  // from two places in this file, gated by a `logged` flag, and the streaming
+  // path reaches the second one — so the guarantee lives in the interaction
+  // between them rather than in `finishLog` itself, where the existing tests
+  // call it directly.
+  //
+  // A double event is not cosmetic for the consumer this exists for: a growth
+  // counter would credit the same tokens twice, and there is no later
+  // reconciliation to catch it, because the event stream is the only ledger a
+  // plugin gets.
+  const seen: string[] = [];
+  const { call } = await harness(EVENTS, { emit: (event) => seen.push(event.requestId) });
+
+  await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  const streamed = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  await streamed.text();
+
+  expect(seen).toEqual(["req_1", "req_2"]);
+  expect(new Set(seen).size).toBe(seen.length);
+});

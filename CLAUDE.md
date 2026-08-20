@@ -12,7 +12,9 @@ OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway:
 - `apps/dashboard`: admin console served by gateway
 - `apps/cli`: local `omni` CLI
 - `packages/control`: admin operations shared by gateway routes and CLI
+- `packages/dashboard-sdk`: what a plugin's UI bundle builds against
 - `packages/ir`: provider-neutral domain model
+- `packages/plugin-api`: pure plugin manifest schema, context and event types
 - `packages/providers`: provider adapters and catalog
 - `packages/router`: pure routing
 - `packages/ratelimit`: pure API-key limit evaluation and sliding-window counting
@@ -82,8 +84,10 @@ and `bun run lint`.
 12. Dashboard calls `/api/*` only, with one exception: `/health`, polled to watch the gateway leave
     and return across a restart. During a restart there is no session and no authenticated surface
     to probe, so liveness is the one question `/api/*` cannot answer. It may import
-    `@omni/store/types`, `@omni/ir`, and catalog subpath, but not provider adapters, HTTP client, or
-    runtime store code.
+    `@omni/store/types`, `@omni/ir`, catalog subpath, and `@omnigateway/dashboard-sdk`, but not provider
+    adapters, HTTP client, or runtime store code. The SDK is permitted because it is a browser leaf
+    with no imports at all, and because the alternative was a second copy of the rule about what may
+    leave a plugin's own API prefix — a rule held in two places is one that ends up true in one.
 13. `packages/rtk` stays pure like `ir` and `router`: no I/O, clocks, or randomness. It rewrites
     tool-result content only and preserves errors and non-tool-result blocks. `@omni/rtk/catalog` is
     a leaf holding the filter-id union; `@omni/store` imports that subpath alone.
@@ -92,7 +96,18 @@ and `bun run lint`.
     is a leaf holding the dimension and window unions, `LimitConfig`, and its zod schema;
     `@omni/store` imports that subpath alone and re-exports `LimitConfig` from `@omni/store/types`,
     which is the import the dashboard is already permitted. Limiter state — rings and gauges — lives
-    in `apps/gateway`, because state is not the package's job.
+    in `apps/gateway`, because state is not the package's job. `@omnigateway/plugin-api/events`
+    **mirrors** the unions and `WINDOW_MS` rather than importing them, because that package is
+    published and this one is not. This package stays the source of truth; the mirror is pinned by
+    `apps/gateway/test/plugins/limitVocabulary.test.ts`, the only place that may import both.
+15. Plugins load from `<root>/plugins/` at boot and receive a capability-scoped `PluginContext`:
+    never `Store`, `HttpClient`, `AdminAuth`, decrypted credentials, or `process.env`. **It is a
+    guardrail, not a sandbox** — a plugin shares the gateway's process and can import past all of
+    it. What it buys is that accidental overreach is impossible and that a plugin's intent is
+    auditable from its manifest. Say that plainly wherever it comes up; a reader who believes
+    otherwise makes worse decisions than one who knows. `packages/plugin-api` stays pure like `ir`;
+    the loader, context and event bus live in `apps/gateway`. Every load failure is skipped and
+    reported, never fatal: the proxy path depends on no plugin and must not become able to.
 
 ## Adding a provider
 
@@ -100,6 +115,13 @@ The nine-step procedure lives in [docs/adding-a-provider.md](docs/adding-a-provi
 compiler will enumerate for you, what it cannot find, the per-provider files, and why `wire.ts` and
 `decode.ts` are forked rather than shared. Read it before adding one — several steps exist because
 skipping them produced a bug that read as something else entirely.
+
+## Writing a plugin
+
+The procedure lives in [docs/writing-a-plugin.md](docs/writing-a-plugin.md): the manifest, the
+capability context, the storage placeholder, the event guarantees, and how a UI bundle shares the
+console's React. Read it before adding or reviewing one — it opens with what a plugin can reach,
+which decides whether the rest of it is a good idea.
 
 ## TypeScript and dashboard style
 
@@ -220,7 +242,15 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   must not break, and each has already been broken once.
 - `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` are the JSON keys of `api_keys.limits`, so
   a storage contract like RTK ids — but failing **closed**: an unknown name is a parse failure, never
-  a silent drop. Rename or remove only with a migration.
+  a silent drop. Rename or remove only with a migration, and update the mirror in
+  `@omnigateway/plugin-api/events` in the same change.
+- **Nothing a plugin imports may reach a core package.** `@omnigateway/plugin-api` and
+  `@omnigateway/dashboard-sdk` are published; every `@omni/*` package is not, so a single import
+  puts an unresolvable `workspace:*` into a stranger's dependency tree. It typechecks and tests
+  green inside this repo, because workspace resolution makes every internal package reachable —
+  which is exactly why it went unnoticed once. `packages/plugin-api/test/bundleWeight.test.ts`
+  builds each entry point and asserts zod appears only under the root; its first test asserts zod
+  *is* present there, because "absent" is also what a broken harness reports.
 - `admit`/`consume` claim the ring stamp and gauge **synchronously**, before any `await`, and roll
   back on refusal. Reading counters first and recording after lets concurrent requests judge one
   pre-burst snapshot — a ceiling of 3 admitted 10 parallel requests, and it needs no I/O to fire.
@@ -280,6 +310,31 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
 - `swapIn` rebuilds `usage_rollup` last and guarded, for that reason. It blocks the loop; the cost is
   measured in `README.md` and must stay documented rather than hidden.
 - `omni db restore` refuses while a gateway is running and has no override.
+- Plugin tables are `plugin_<id>_<name>`, written by the host from a `{{name}}` placeholder, and
+  tracked in `plugin_migrations` on a track independent of core's `001..`. Core's next migration
+  number is unaffected by any plugin. Plugin migrations apply **one transaction each**: a batch
+  transaction would make a plugin failing on migration 5 silently revert 1–4 on every later boot.
+- A restore onto an install without that plugin leaves orphan `plugin_*` tables. They stay, and
+  `omni doctor` reports them. **Nothing auto-drops them** — a restore is exactly when a plugin may
+  not be installed yet, and the drop is irreversible. `omni plugin remove` keeps tables too; only
+  `--purge` drops them, and it confirms first.
+- Plugin events are **at-most-once and not durable**: one queued when the process dies is gone, and
+  a full queue drops rather than grows. Anything needing exact accounting must reconcile from its
+  own storage. `RequestCompleted` is emitted from `finishLog` because that is already the one site
+  running at most once per request id — the same reason the usage debit is there.
+- The console externalises `react`, `react-dom`, `styled-components` and `@tanstack/react-query`
+  and resolves them through an import map, so the console and every plugin share one instance; two
+  React copies throw "invalid hook call". `apps/dashboard/shared/manifest.ts` is the single list
+  feeding the externals, the import map and the shared build. **`export * from "react"` does not
+  work and does not warn** — React is CommonJS, so the re-export compiles to a module exporting
+  only `default`. The shims destructure the default instead.
+- Plugin UI assets are served at `/plugin-assets/<id>/…`, not `/plugins/<id>/…`, which would
+  collide with the console's own client-side routes. Bundles are unauthenticated like the console's
+  own JavaScript; the catalog at `/api/plugins` is admin-gated, because what is gated is data.
+- A literal `../` never reaches a route handler — `URL` normalises it before routing, so a test
+  asserting 404 for that input proves nothing. Only percent-encoded forms reach a guard, and they
+  arrive undecoded. Two path checks here were deleted after mutation showed `realpath` already
+  decided every case; decoration in a security path invites the belief that something is being done.
 
 ## Subagent workflow
 

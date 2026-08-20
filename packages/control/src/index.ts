@@ -99,7 +99,12 @@ export {
   type ServingCredential,
 } from "./modelLimits.ts";
 export { getModel, listModels, putModel, removeModel } from "./models.ts";
-export { nodeDatabaseFs } from "./nodeFs.ts";
+export {
+  type FetchBytesOptions,
+  nodeDatabaseFs,
+  nodeFetchBytes,
+  nodePluginFs,
+} from "./nodeFs.ts";
 export { OAUTH_PROVIDERS } from "./oauth/index.ts";
 export { DISPATCH_REFRESH_LEAD_MS, SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
 export { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
@@ -114,6 +119,28 @@ export type {
   PkceOAuthProvider,
   UsageReport,
 } from "./oauth/types.ts";
+export {
+  DEFAULT_NPM_REGISTRY,
+  installPlugin,
+  listPlugins,
+  MANIFEST_FILENAME,
+  MAX_PLUGIN_BYTES,
+  NPM_PACKUMENT_ACCEPT,
+  orphanPluginTables,
+  PLUGINS_DIRNAME,
+  type PluginDeps,
+  type PluginFs,
+  type PluginInstallResult,
+  type PluginProblem,
+  type PluginRemoveOptions,
+  type PluginRemoveResult,
+  type PluginReport,
+  type PluginStore,
+  type PluginSummary,
+  pluginsDir,
+  removePlugin,
+  verifyPlugin,
+} from "./plugins.ts";
 export { type BurnEstimate, type BurnInput, burnEstimates, burnFor } from "./quota/burn.ts";
 export {
   type GatewayRate,

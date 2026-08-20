@@ -397,3 +397,43 @@ export type LifecycleCapability = {
   /** Why the capability is what it is, when that is not obvious. */
   note?: string;
 };
+
+/** What a plugin asks for in the rail. Absent when the plugin adds no screen. */
+export type PluginNav = {
+  label: string;
+  /** A name from the plugin's manifest. The console picks its own glyph. */
+};
+
+export type PluginUiInfo = {
+  /**
+   * The URL the console imports, under `/plugin-assets/<id>/`.
+   *
+   * `null` whenever the bundle is incompatible: the gateway withholds the URL
+   * on purpose, so a console that ignored `compatible` would still have nothing
+   * to import and could not turn a version mismatch into a render crash.
+   */
+  entry: string | null;
+  compatible: boolean;
+  /** Why it is incompatible. Shown on the disabled rail entry, verbatim. */
+  reason?: string | undefined;
+};
+
+/**
+ * One installed plugin, as `/api/plugins` reports it.
+ *
+ * Mirrored rather than imported: the shape is assembled in
+ * `apps/gateway/src/plugins/ui.ts`, and per boundary 12 the console may not
+ * reach into the gateway for a type. The three states this file has to keep
+ * distinguishable are `ui === null` (backend-only, no screen at all),
+ * `ui.compatible === false` (a screen that will not load, named with a reason),
+ * and a live UI.
+ */
+export type PluginCatalogEntry = {
+  id: string;
+  name: string;
+  version: string;
+  nav: PluginNav | null;
+  ui: PluginUiInfo | null;
+};
+
+export type PluginsResponse = { plugins: PluginCatalogEntry[] };

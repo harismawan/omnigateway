@@ -28,6 +28,8 @@ import type {
   LogsResponse,
   MintedKey,
   ModelsResponse,
+  PluginCatalogEntry,
+  PluginsResponse,
   ProviderId,
   QuotaHistoryQuery,
   QuotaHistoryResponse,
@@ -77,6 +79,7 @@ export const queryKeys = {
   database: ["database"] as const,
   snapshots: ["database", "snapshots"] as const,
   lifecycle: ["lifecycle"] as const,
+  plugins: ["plugins"] as const,
 };
 
 /**
@@ -647,6 +650,22 @@ export function useConnectFinish(): UseMutationResult<
   return useMutation({
     mutationFn: (input) => post<{ id: string }>("/api/connect/finish", input),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.credentials }),
+  });
+}
+
+/**
+ * Which plugins this installation runs.
+ *
+ * Held for a long time on purpose: plugins are loaded at boot and installing one
+ * reports that a restart is required, so the set cannot change under a console
+ * that stays open. The rail reads this on every screen, and a refetch per
+ * navigation would be a request whose answer is known not to have moved.
+ */
+export function usePlugins(): UseQueryResult<PluginCatalogEntry[]> {
+  return useQuery({
+    queryKey: queryKeys.plugins,
+    queryFn: async ({ signal }) => (await get<PluginsResponse>("/api/plugins", signal)).plugins,
+    staleTime: 5 * 60_000,
   });
 }
 

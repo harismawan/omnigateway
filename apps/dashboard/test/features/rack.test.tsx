@@ -1,7 +1,14 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import { screen } from "@testing-library/react";
 import { Rack } from "../../src/components/Rack.tsx";
+import { createFetchStub } from "../helpers/fetchStub.ts";
 import { renderWithRouter } from "../helpers/render.tsx";
+
+// The rail asks which plugins are installed. Stubbed to an empty answer so
+// these assertions stay about the chassis, and so nothing here reaches a socket.
+beforeEach(() => {
+  createFetchStub({ "GET /api/plugins": () => ({ plugins: [] }) });
+});
 
 test("the rack owns viewport height and scrolls only its main content", async () => {
   renderWithRouter(

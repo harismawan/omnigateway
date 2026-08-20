@@ -29,6 +29,26 @@ export type LogFields = {
   credentialId?: string | undefined;
   apiKeyId?: string | undefined;
   /**
+   * Which installed plugin a line is about.
+   *
+   * Safe to widen the allowlist by, because it is not operator text: a plugin id
+   * is validated against `^[a-z][a-z0-9-]{0,31}$` before the plugin is loaded, so
+   * the value here is a bounded identifier from a closed character set — the same
+   * class as `snapshotId` and `supervisor`, and unlike `reason`.
+   *
+   * A plugin cannot set this. The host binds it to the id it validated, and the
+   * logger a plugin holds has no parameter for it.
+   *
+   * A plugin *can* reach `reason`, and this comment previously said the
+   * opposite. `createPluginLogger` routes a plugin's own `event` label there
+   * after capping it at 64 characters and stripping everything outside
+   * `[A-Za-z0-9._:-]`, so `hatch.completed` survives and a prompt does not fit
+   * and would not survive the filter if it did. That is the only path from
+   * third-party code to stdout, and widening either the cap or the character
+   * class is a security change on the same terms as widening this type.
+   */
+  plugin?: string | undefined;
+  /**
    * Which snapshot a maintenance line is about.
    *
    * The filename, which is generated from an instant and a closed set of
@@ -80,6 +100,7 @@ const FIELD_ORDER = [
   "requestedModel",
   "credentialId",
   "apiKeyId",
+  "plugin",
   "snapshotId",
   "attempt",
   "attempts",

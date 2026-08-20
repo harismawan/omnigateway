@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   type CommandRunner,
   type ConsoleDeps,
@@ -13,10 +13,13 @@ import {
 import { createLogger, type Logger } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import { createStore, deriveKey } from "@omni/store";
+import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { createApp } from "./app.ts";
 import { createDeferredStop, createShutdown, type Shutdown } from "./lifecycle.ts";
 import { startMaintenance } from "./maintenance.ts";
 import { startRefreshScheduler } from "./oauth/scheduler.ts";
+import { createPluginEventBus } from "./plugins/events.ts";
+import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
 
 function stdoutLogger(level: "debug" | "info" | "warn" | "error"): Logger {
@@ -162,6 +165,43 @@ async function main(): Promise<void> {
     process.exit(1);
   };
 
+  /**
+   * The installation directory, and from it the plugins directory.
+   *
+   * `OMNI_ROOT` first, because that is what the CLI resolves and what
+   * `omni plugin install` writes into. Falling back to the database's own
+   * directory covers a gateway started by hand with only `OMNI_DB_PATH`, and
+   * matches how body artifacts are placed: one installation is one directory.
+   *
+   * Both, rather than either alone. The database can sit outside the root — a
+   * `--db` flag or an ambient `OMNI_DB_PATH` puts it there, and that is a
+   * supported configuration. Resolving only from the database would then send
+   * the gateway looking somewhere `omni plugin install` never writes, and
+   * neither side would say anything: install succeeds, verify passes, doctor
+   * lists the plugin, and the gateway silently loads none of it.
+   *
+   * The path is logged for the same reason. A doctor that reports one directory
+   * while the gateway reads another is the failure this codebase documents
+   * repeatedly.
+   */
+  const installRoot = process.env.OMNI_ROOT ?? dirname(config.databasePath);
+  const pluginRoot = join(installRoot, "plugins");
+  const pluginEvents = createPluginEventBus({ logger });
+  const loadedPlugins = await loadPlugins({
+    root: pluginRoot,
+    store,
+    events: pluginEvents,
+    sdkVersion: DASHBOARD_SDK_VERSION,
+    logger,
+    now,
+  });
+  for (const failure of loadedPlugins.failures) {
+    // Already logged by the loader; counted here so one line states the shape of
+    // the install rather than making an operator total up warnings.
+    logger.warn("plugin unavailable", { plugin: failure.id, reason: failure.reason });
+  }
+  logger.info("plugins resolved", { count: loadedPlugins.plugins.length, path: pluginRoot });
+
   const app = createApp({
     store,
     baseUrl: config.baseUrl,
@@ -173,6 +213,29 @@ async function main(): Promise<void> {
     console,
     discoveryMirrors: config.exposeClaudeCodeAliases,
     bodyLoggingAllowed: config.bodyLoggingAllowed,
+    plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
+    pluginUi: loadedPlugins.plugins,
+    // Only when something could receive one. `finishLog` builds the payload
+    // before calling this, so passing it unconditionally would allocate a
+    // RequestCompleted on every authenticated request of every install — and
+    // almost every install runs no plugins at all.
+    ...(loadedPlugins.plugins.length === 0
+      ? {}
+      : { emit: (event) => pluginEvents.emitRequestCompleted(event) }),
+    // A restored database is any database, and one taken before a plugin was
+    // installed does not carry its tables. Already-applied versions are skipped,
+    // so this is cheap and idempotent.
+    reapplyPluginSchema: async () => {
+      for (const plugin of loadedPlugins.plugins) {
+        if (plugin.migrations.length === 0) continue;
+        const applied = store.plugins.migrate(plugin.id, plugin.migrations);
+        if (applied.failed !== undefined) {
+          throw new Error(
+            `plugin ${plugin.id} migration ${applied.failed.version}: ${applied.failed.reason}`,
+          );
+        }
+      }
+    },
     lifecycle: {
       env: process.env,
       fileExists: (path) => existsSync(path),
@@ -203,7 +266,10 @@ async function main(): Promise<void> {
 
   shutdown = createShutdown({
     logger,
-    stopLoops: [stopMaintenance, stopRefreshScheduler, stopQuotaPoller],
+    // The event bus is a loop like the others: it holds a pending drain and
+    // must stop before the process does, or a queued handler runs against a
+    // store that is already closed.
+    stopLoops: [stopMaintenance, stopRefreshScheduler, stopQuotaPoller, () => pluginEvents.stop()],
     stopServer: async () => {
       await app.stop();
     },

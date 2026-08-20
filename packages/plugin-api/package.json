@@ -1,0 +1,39 @@
+{
+  "name": "@omnigateway/plugin-api",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./define": "./src/context.ts",
+    "./version": "./src/version.ts",
+    "./events": "./src/events.ts"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "description": "Manifest schema, capability context and event types for OmniGateway plugins",
+  "keywords": [
+    "omnigateway",
+    "plugin",
+    "sdk"
+  ],
+  "license": "MIT",
+  "author": "Harismawan <mail@harismawan.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harismawan/omnigateway.git"
+  },
+  "homepage": "https://github.com/harismawan/omnigateway/blob/main/docs/writing-a-plugin.md",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  }
+}

@@ -23,6 +23,7 @@ import {
   modelsRemove,
   modelsShow,
 } from "./commands/models.ts";
+import { pluginInstall, pluginList, pluginRemove, pluginVerify } from "./commands/plugins.ts";
 import { quota } from "./commands/quota.ts";
 import {
   doctor,
@@ -80,6 +81,11 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "keys create": keysCreate,
   "keys limits": keysLimits,
   "keys revoke": keysRevoke,
+
+  "plugin list": pluginList,
+  "plugin verify": pluginVerify,
+  "plugin install": pluginInstall,
+  "plugin remove": pluginRemove,
 
   "settings get": settingsGet,
   "settings set": settingsSet,

@@ -9,6 +9,7 @@ import quotaSamples007 from "./migrations/007_quota_samples.sql" with { type: "t
 import bodyLogging008 from "./migrations/008_body_logging.sql" with { type: "text" };
 import keyLimits009 from "./migrations/009_key_limits.sql" with { type: "text" };
 import usageRollup010 from "./migrations/010_usage_rollup.sql" with { type: "text" };
+import pluginMigrations011 from "./migrations/011_plugin_migrations.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -29,6 +30,10 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
   // The backfill is the rebuild: seeding a fresh table and repairing a suspect
   // one are the same grouped select, so they cannot drift apart.
   { id: 10, sql: usageRollup010, after: rebuildRollup },
+  // Plugin migrations are tracked here but never *applied* here: this array is
+  // core's track, and a plugin's track is walked by `PluginRepo.migrate` at
+  // load. All migration 011 does is create the ledger that walk writes to.
+  { id: 11, sql: pluginMigrations011 },
 ];
 
 /**

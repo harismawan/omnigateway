@@ -23,6 +23,7 @@
         "@omni/providers": "workspace:*",
         "@omni/router": "workspace:*",
         "@omni/store": "workspace:*",
+        "@omnigateway/plugin-api": "workspace:*",
       },
       "devDependencies": {
         "@omni/testkit": "workspace:*",
@@ -38,6 +39,7 @@
         "@omni/ir": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/store": "workspace:*",
+        "@omnigateway/dashboard-sdk": "workspace:*",
         "@tanstack/react-query": "^5.101.4",
         "@tanstack/react-router": "^1.170.25",
         "lucide-react": "^1.31.0",
@@ -74,6 +76,7 @@
         "@omni/rtk": "workspace:*",
         "@omni/store": "workspace:*",
         "@omni/testkit": "workspace:*",
+        "@omnigateway/plugin-api": "workspace:*",
         "elysia": "1.4.29",
         "zod": "4.4.3",
       },
@@ -88,15 +91,39 @@
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
         "@omni/store": "workspace:*",
+        "@omnigateway/plugin-api": "workspace:*",
         "zod": "4.4.3",
       },
       "devDependencies": {
         "@omni/testkit": "workspace:*",
       },
     },
+    "packages/dashboard-sdk": {
+      "name": "@omnigateway/dashboard-sdk",
+      "version": "0.1.0",
+      "dependencies": {
+        "@omnigateway/plugin-api": "^0.1.0",
+      },
+      "devDependencies": {
+        "@types/react": "^19.2.0",
+      },
+      "peerDependencies": {
+        "@tanstack/react-query": ">=5",
+        "react": ">=19",
+        "react-dom": ">=19",
+        "styled-components": ">=6",
+      },
+    },
     "packages/ir": {
       "name": "@omni/ir",
       "version": "0.0.0",
+    },
+    "packages/plugin-api": {
+      "name": "@omnigateway/plugin-api",
+      "version": "0.1.0",
+      "dependencies": {
+        "zod": "4.4.3",
+      },
     },
     "packages/providers": {
       "name": "@omni/providers",
@@ -148,6 +175,32 @@
         "@omni/providers": "workspace:*",
         "@omni/router": "workspace:*",
         "@omni/store": "workspace:*",
+      },
+    },
+    "plugins/pokemon": {
+      "name": "@omni/plugin-pokemon",
+      "version": "1.0.0",
+      "dependencies": {
+        "@omnigateway/plugin-api": "workspace:*",
+      },
+      "devDependencies": {
+        "@happy-dom/global-registrator": "^20.11.2",
+        "@omni/store": "workspace:*",
+        "@omnigateway/dashboard-sdk": "workspace:*",
+        "@tanstack/react-query": "^5.101.4",
+        "@testing-library/react": "^16.3.2",
+        "@testing-library/user-event": "^14.6.1",
+        "@types/react": "^19.2.0",
+        "@types/react-dom": "^19.2.0",
+        "react": "^19.2.8",
+        "react-dom": "^19.2.8",
+        "styled-components": "^6.5.1",
+      },
+      "peerDependencies": {
+        "@omnigateway/dashboard-sdk": "workspace:*",
+        "@tanstack/react-query": "^5.101.4",
+        "react": "^19.2.8",
+        "styled-components": "^6.5.1",
       },
     },
   },
@@ -296,6 +349,8 @@
 
     "@omni/ir": ["@omni/ir@workspace:packages/ir"],
 
+    "@omni/plugin-pokemon": ["@omni/plugin-pokemon@workspace:plugins/pokemon"],
+
     "@omni/providers": ["@omni/providers@workspace:packages/providers"],
 
     "@omni/ratelimit": ["@omni/ratelimit@workspace:packages/ratelimit"],
@@ -307,6 +362,10 @@
     "@omni/store": ["@omni/store@workspace:packages/store"],
 
     "@omni/testkit": ["@omni/testkit@workspace:packages/testkit"],
+
+    "@omnigateway/dashboard-sdk": ["@omnigateway/dashboard-sdk@workspace:packages/dashboard-sdk"],
+
+    "@omnigateway/plugin-api": ["@omnigateway/plugin-api@workspace:packages/plugin-api"],
 
     "@oxc-project/types": ["@oxc-project/types@0.142.0", "", {}, "sha512-7W+2q5AKQVU36fkaryontrHn3YDt1RyUYXatw9i5H8ocYe2sPKSFB6eS8WNPeRKiN1qAWWZUPm7gwFzJGrccqQ=="],
 
