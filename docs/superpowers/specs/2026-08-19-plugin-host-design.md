@@ -81,7 +81,7 @@ control, that decision must be revisited before, not after.
   "name": "Pokémon Companion",
   "version": "1.0.0",
   "api": 1,
-  "sdk": "^1.0.0",
+  "sdk": "^0.1.0",
   "server": "server/index.js",
   "ui": "ui/index.js",
   "nav": { "label": "Companion" },

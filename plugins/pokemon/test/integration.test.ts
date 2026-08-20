@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import { createStore, deriveKey } from "@omni/store";
 import type { LimitReached, RequestCompleted } from "@omnigateway/plugin-api";
 import type { PluginContext, PluginRoute, PluginStorage } from "@omnigateway/plugin-api/define";
 import { WINDOW_MS } from "@omnigateway/plugin-api/events";
+import { DASHBOARD_SDK_VERSION, PLUGIN_API_VERSION } from "@omnigateway/plugin-api/version";
 import { EGG_HATCH_THRESHOLD, graduationTotal, ITEM_PRICES } from "../src/balance.ts";
 import companion from "../src/server.ts";
 import { freshState, serialiseState } from "../src/state.ts";
@@ -507,4 +509,24 @@ test("a held item cannot be spent, however the request is spelled", async () => 
   // spendable at all, which is a bad request rather than a conflict.
   expect(refused?.status).toBe(400);
   expect(readCompanion(storage, KEY)?.state?.inventory.shinyCharm).toBe(1);
+});
+
+test("the shipped manifest is compatible with the SDK and API the host ships", () => {
+  // The failure this catches is silent by design. A manifest whose `sdk` range
+  // no longer matches the console's version does not error — the host disables
+  // the UI and keeps the server half running, which is the right behaviour for a
+  // third-party plugin and exactly wrong for the one shipped in this repository.
+  // The panel would simply stop appearing, with nothing red anywhere.
+  //
+  // It has already been possible once: moving the SDK from 1.0.0 to 0.1.0 left
+  // this manifest on `^1.0.0`, and all 216 tests passed.
+  //
+  // `Bun.semver.satisfies` with the arguments in the host's order, so this asks
+  // the same question `loader.ts` asks rather than a similar one.
+  const manifest = JSON.parse(
+    readFileSync(join(import.meta.dir, "..", "omni-plugin.json"), "utf8"),
+  ) as { api: number; sdk: string };
+
+  expect(Bun.semver.satisfies(DASHBOARD_SDK_VERSION, manifest.sdk)).toBe(true);
+  expect(manifest.api).toBe(PLUGIN_API_VERSION);
 });

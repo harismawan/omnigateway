@@ -63,7 +63,7 @@ your plugin.
   "name": "Pokémon Companion",
   "version": "1.0.0",
   "api": 1,
-  "sdk": "^1.0.0",
+  "sdk": "^0.1.0",
   "server": "server/index.js",
   "ui": "ui/index.js",
   "nav": { "label": "Companion" },
@@ -76,11 +76,20 @@ your plugin.
 a URL segment, a SQL table prefix and a log field value, so it is validated once
 here and never escaped anywhere downstream.
 
-`api` is the host's plugin-API major. A mismatch skips the plugin at boot.
+`api` is the host's plugin-API **generation** — a counter that only goes up, not
+the npm major of `@omnigateway/plugin-api`. It is `1` today while that package is
+`0.1.x`, and the two are independent on purpose: semver resets a stabilising
+package to `1.0.0`, and a compatibility generation may never go backwards. A
+mismatch skips the plugin at boot, server half included.
 
-`sdk` is a semver range over `@omnigateway/dashboard-sdk`. A mismatch disables **only**
-the UI — the server half keeps running, so a plugin that collects data does not
-go dark because the console's React moved.
+`sdk` is a semver range over `@omnigateway/dashboard-sdk`, matched against the
+exact version the console ships. A mismatch disables **only** the UI — the server
+half keeps running, so a plugin that collects data does not go dark because the
+console's React moved.
+
+Note the range shape while the SDK is pre-1.0: `^0.1.0` means `>=0.1.0 <0.2.0`.
+Every minor is a breaking change until it reaches `1.0.0`, which is the correct
+promise for a contract that has not settled.
 
 `capabilities` is the whole list of what you get. Anything you did not declare
 is absent from the context, so reaching for it is a type error rather than a

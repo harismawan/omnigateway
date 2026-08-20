@@ -65,9 +65,14 @@ for it.
 
 ## Versioning
 
-The major is `PLUGIN_API_VERSION`, the number your manifest declares as `api`. A
-host implementing a different major skips your plugin at boot rather than
-loading it and failing later.
+`PLUGIN_API_VERSION` is the number your manifest declares as `api`, and a host
+implementing a different one skips your plugin at boot rather than loading it and
+failing later.
+
+It is **not** this package's npm major, and the two are independent on purpose. A
+compatibility generation only ever increases; semver resets a stabilising package
+from `0.x` to `1.0.0`. Tying them would force the generation backwards on exactly
+that day.
 
 ## Requirements
 

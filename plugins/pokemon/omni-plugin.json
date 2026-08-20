@@ -1,13 +1,17 @@
 {
   "id": "pokemon",
-  "name": "Pokémon Companion",
+  "name": "Pok\u00e9mon Companion",
   "version": "1.0.0",
   "api": 1,
-  "sdk": "^1.0.0",
+  "sdk": "^0.1.0",
   "server": "server/index.js",
   "ui": "ui/index.js",
-  "nav": { "label": "Companion" },
+  "nav": {
+    "label": "Companion"
+  },
   "capabilities": ["storage", "files", "net:outbound", "events:request", "events:limit"],
   "origins": ["https://pokeapi.co", "https://raw.githubusercontent.com"],
-  "defaults": { "multiplier": 1 }
+  "defaults": {
+    "multiplier": 1
+  }
 }

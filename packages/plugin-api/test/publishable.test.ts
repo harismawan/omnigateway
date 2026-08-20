@@ -92,12 +92,22 @@ describe("the packages a plugin author installs", () => {
     });
   }
 
-  test("the API package's major is the API version the host enforces", () => {
-    // A manifest declares `api: 1` and the host skips a plugin on mismatch. If
-    // the npm major and that number disagree, `npm install @omnigateway/plugin-api@2`
-    // gives a plugin that the host refuses to load for reasons no error explains.
-    const major = Number(manifest("packages/plugin-api").version.split(".")[0]);
-    expect(major).toBe(PLUGIN_API_VERSION);
+  test("the API package's generation is a counter, not its npm major", () => {
+    // These were pinned to each other, and the pin was wrong. `PLUGIN_API_VERSION`
+    // is a compatibility generation that only ever increases; an npm major is
+    // semver, and semver resets a stabilising package from `0.x` to `1.0.0`. Any
+    // rule mapping one to the other has to make the generation go backwards on
+    // exactly that day, which is the one thing it may never do.
+    //
+    // What is asserted instead is the property that made the pin attractive:
+    // both are visible, both are integers a human compares, and the generation
+    // is a positive whole number rather than whatever a version string happens
+    // to start with. Which one gates loading is not in doubt — only this one is.
+    expect(Number.isInteger(PLUGIN_API_VERSION)).toBe(true);
+    expect(PLUGIN_API_VERSION).toBeGreaterThan(0);
+
+    // And the npm version is semver, so a range in a manifest means something.
+    expect(manifest("packages/plugin-api").version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   test("the SDK package's version is the one manifest ranges are matched against", () => {

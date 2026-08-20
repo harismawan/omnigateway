@@ -1,12 +1,12 @@
 {
   "name": "@omnigateway/dashboard-sdk",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@omnigateway/plugin-api": "^1.0.0"
+    "@omnigateway/plugin-api": "^0.1.0"
   },
   "peerDependencies": {
     "@tanstack/react-query": ">=5",
