@@ -64,13 +64,6 @@ jobs:
       # Node 22 ships an npm older than 11.5.1, the floor for trusted publishing.
       - run: npm install -g npm@latest
 
-      # No token and no `--provenance`: trusted publishing supplies the
-      # credential from the OIDC token above, and attaches the provenance
-      # attestation itself.
-      - name: Publish
-        run: npm publish --access public
-        working-directory: dist/npm
-
       # The two SDK packages a plugin author installs. Unlike the gateway they
       # carry their own versions, and those versions are not this tag: they are
       # `PLUGIN_API_VERSION` and `DASHBOARD_SDK_VERSION`, the numbers the host
@@ -111,6 +104,26 @@ jobs:
               (cd "$dir" && npm publish --access public)
             fi
           done
+
+      # The gateway goes last of the three, and the order is a risk decision
+      # rather than a preference. Every publish here is irreversible — npm allows
+      # unpublishing for 72 hours and not after — so when two of them must both
+      # happen, the one most likely to fail belongs first, where failing costs
+      # nothing but a re-tag.
+      #
+      # This step is the proven one: it has published every gateway version since
+      # v0.2.2 through the same OIDC exchange. The SDK step above is the unproven
+      # one, on package names whose trusted-publishing policies were configured by
+      # hand and cannot be verified from here — no API exposes them, so the first
+      # release is the test. Publishing the gateway first would mean discovering a
+      # bad policy with the gateway already on npm, the tag consumed, and a
+      # half-published release to explain.
+      #
+      # No token and no `--provenance`: trusted publishing supplies the credential
+      # from the OIDC token above, and attaches the provenance attestation itself.
+      - name: Publish
+        run: npm publish --access public
+        working-directory: dist/npm
 
       # After the publish, never before. A release created first would announce
       # a version that a failing publish then never puts on npm, and the fix
