@@ -70,7 +70,11 @@ async function plugin(fixture: Fixture): Promise<void> {
   await mkdir(join(home, "server"), { recursive: true });
   const manifest = {
     id: fixture.id,
-    name: fixture.id,
+    // Deliberately not the id. They were equal in every fixture here, and
+    // the one in-tree manifest where they differed was the companion's —
+    // which left. With them equal, keying a plugin's storage namespace or
+    // its mount path off `name` instead of `id` passes the entire suite.
+    name: `The ${fixture.id} Plugin`,
     version: "1.0.0",
     api: PLUGIN_API_VERSION,
     server: "server/index.js",

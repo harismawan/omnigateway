@@ -484,3 +484,101 @@ test("dropAll on a plugin that never stored anything is zero", () => {
   expect(plugins.dropAll("pokemon")).toBe(0);
   db.close();
 });
+
+test("a migration that forgets the placeholder is refused, not silently accepted", () => {
+  // The single most likely plugin-author accident: `CREATE TABLE notes` instead
+  // of `CREATE TABLE {{notes}}`. It used to succeed, put `notes` in core's
+  // schema, and then disappear — `listTables` filters on the plugin prefix so it
+  // never showed up, `orphanTables` could not see it, and `remove --purge` could
+  // not drop it. It survived forever, and what it eventually produced was a core
+  // migration colliding with a squatted name at boot, reading as a core bug.
+  //
+  // Judged by comparing the schema before and after rather than by parsing the
+  // statement, so quoting, whitespace and multi-statement strings cannot dodge
+  // it.
+  const { db, plugins } = repo();
+  const result = plugins.migrate("pokemon", [
+    { version: 1, sql: "CREATE TABLE notes (id INTEGER PRIMARY KEY)" },
+  ]);
+
+  expect(result.applied).toEqual([]);
+  expect(result.failed?.version).toBe(1);
+  expect(result.failed?.reason).toMatch(/outside this plugin's namespace/);
+
+  // Rolled back, not merely reported: the refusal runs inside the migration's
+  // own transaction, so the table must not exist afterwards.
+  expect(tableNames(db)).not.toContain("notes");
+  expect(plugins.listTables("pokemon")).toEqual([]);
+  db.close();
+});
+
+test("a migration naming its own namespace still applies", () => {
+  // The other half, and the reason the check compares against a prefix rather
+  // than refusing every CREATE. Without this a fix for the test above could be
+  // "refuse everything" and still look green.
+  const { db, plugins } = repo();
+  const result = plugins.migrate("pokemon", [
+    { version: 1, sql: "CREATE TABLE {{notes}} (id INTEGER PRIMARY KEY, body TEXT)" },
+    { version: 2, sql: "CREATE INDEX {{notes_body}} ON {{notes}} (body)" },
+  ]);
+
+  expect(result.applied).toEqual([1, 2]);
+  expect(result.failed).toBeUndefined();
+  expect(plugins.listTables("pokemon")).toContain("plugin_pokemon_notes");
+  db.close();
+});
+
+test("a plugin may not reconfigure the connection it shares with the gateway", () => {
+  // These act on the handle, not on the plugin's tables, and the handle is the
+  // gateway's. `PRAGMA journal_mode = WAL;` opens half the SQLite migration
+  // guides on the internet — pasting it takes the whole gateway out of WAL,
+  // which is the most accident-shaped hole this guard has had.
+  const { db, plugins } = repo();
+  const before = db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get();
+
+  for (const sql of [
+    "PRAGMA foreign_keys=OFF",
+    "  pragma journal_mode = DELETE",
+    "PRAGMA synchronous=OFF",
+    "ATTACH DATABASE ':memory:' AS aux",
+    "DETACH DATABASE aux",
+    "VACUUM",
+  ]) {
+    expect(() => plugins.run("pokemon", sql)).toThrow(/may not/i);
+  }
+
+  // The settings are unchanged, which is the assertion that matters: a guard
+  // that threw *after* the pragma took effect would pass a refusal test and
+  // still have reconfigured the database.
+  expect(db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()).toEqual(
+    before as { foreign_keys: number },
+  );
+  db.close();
+});
+
+test("an apostrophe inside a quoted identifier does not blind the denylist", () => {
+  // `stripNoise` knew about `'…'`, `--` and `/* */` but not about `"…"`, so an
+  // apostrophe inside a quoted identifier opened a phantom string literal and
+  // erased the rest of the statement before the denylist read it. The guard then
+  // saw nothing and allowed `DELETE FROM api_keys` through.
+  //
+  // Nobody writes this by accident, so it was never the dangerous hole — the
+  // dangerous part was the comment above `stripNoise` claiming every quoting
+  // form was already handled. This keeps that claim true.
+  const { db, plugins } = repo();
+  db.run(
+    `INSERT INTO api_keys (id, label, prefix, hash, created_at)
+     VALUES ('k', 'a key', 'omni_', 'SECRET', 1)`,
+  );
+
+  for (const sql of [
+    `WITH "a'b" AS (SELECT 1) DELETE FROM api_keys`,
+    `SELECT "won't" ; DELETE FROM api_keys`,
+    "SELECT * FROM `it's` , api_keys",
+  ]) {
+    expect(() => plugins.run("pokemon", sql)).toThrow(/core table/i);
+  }
+
+  expect(db.query<{ c: number }, []>("SELECT count(*) c FROM api_keys").get()?.c).toBe(1);
+  db.close();
+});
