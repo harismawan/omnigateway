@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createLogger } from "@omni/ir";
-import { nodeHttpClient } from "../src/http-client.ts";
+import { CONNECT_ATTEMPT_TIMEOUT_MS, nodeHttpClient } from "../src/http-client.ts";
 
 /** Captures the literal request head, byte for byte, off the socket. */
 function rawServer(): {
@@ -167,4 +167,22 @@ test("aborts an in-flight request", async () => {
   expect(lines[0]).toContain("provider=anthropic");
   expect(lines[0]).toContain('reason="transport error"');
   server.stop(true);
+});
+
+/**
+ * Measured, not chosen: connecting to `api.anthropic.com` from a host with no
+ * IPv6 route failed 3 times in 99 attempts at the 500ms default, always as an
+ * `AggregateError` of `ETIMEDOUT` on the A record and `ECONNREFUSED` on the
+ * AAAA. Raising the timeout gave 212 successes in 212 attempts, and the connects
+ * that had been failing completed at 1007–1061ms — the discrete signature of a
+ * lost SYN recovering on Linux's one-second initial RTO, not gradual latency.
+ *
+ * So the invariant is the RTO, and that is what this guards: an attempt budget
+ * under one second abandons the connection before TCP can retransmit, turning a
+ * routine dropped packet into a failed request. Happy Eyeballs is left on; only
+ * the deadline it gives each family moves.
+ */
+test("gives a connect attempt longer than one TCP retransmit before abandoning it", () => {
+  const LINUX_INITIAL_RTO_MS = 1000;
+  expect(CONNECT_ATTEMPT_TIMEOUT_MS).toBeGreaterThan(LINUX_INITIAL_RTO_MS);
 });

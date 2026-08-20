@@ -281,6 +281,22 @@ Detailed compatibility rules and measured client behavior belong in relevant spe
   owns the rule. A provider with no credential is unknown rather than blocked, an unlisted model is
   unknown rather than forbidden, disabled credentials still count, and a target already stored under
   that id is exempt so removing a credential cannot make an unrelated edit unsavable.
+- **An `AggregateError` has no message of its own.** Node reports a failed multi-address connect
+  that way — `autoSelectFamily` is on by default — keeping each address's error in `errors` and
+  leaving `message` empty. Copying `error.message` verbatim therefore renders `reason=` with nothing
+  after it, and `request_logs` holds no message column, so on the proxy path the reason a request
+  failed was then recoverable from nowhere. `describeError` in `@omni/ir` is the one way to fill that
+  field; it falls back to the error's name, and every site that reports a `reason` goes through it.
+  `classify` recurses into `errors` for the same reason: matching only `name` and `message` saw `""`,
+  fell through to `INTERNAL`, and `RETRYABLE` marks that false — so a retryable transport failure
+  ended the request after one attempt and served a 500 blaming the gateway.
+- `CONNECT_ATTEMPT_TIMEOUT_MS` must stay above one TCP retransmit. Happy Eyeballs gives each address
+  family a fixed budget, and node's default is under Linux's one-second initial RTO, so a dropped SYN
+  — routine on a lossy path — is abandoned at ~500ms instead of recovering at ~1000ms. Where the
+  other family cannot serve (an AAAA record with no IPv6 route), both attempts are then exhausted and
+  the connect fails outright. Measured: 3 failures in 99 connects at the default, 0 in 212 once
+  raised, with the previously-failing connects completing at 1007–1061ms. The failure reads as a
+  provider outage and is not one.
 - Streaming responses need downstream `: keepalive` comments because provider heartbeats are
   decoded away. Keep server idle timeout above request deadline.
 - Stdout holds operational events; `request_logs` holds completed requests. Do not restore duplicate
