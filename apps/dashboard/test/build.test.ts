@@ -58,7 +58,12 @@ beforeAll(() => {
   if (built.exitCode !== 0) {
     throw new Error(`console build failed:\n${built.stderr.toString()}`);
   }
-});
+  // Bun's default hook timeout is five seconds, which a warm local build fits
+  // inside and a cold CI one does not. When it trips, the whole file fails as a
+  // single unnamed test — none of the assertions below run and the output names
+  // neither them nor the build — so the generous ceiling here is about the
+  // failure being legible, not about the build being slow.
+}, 300_000);
 
 describe("the built console", () => {
   test("contains no require stub, which throws the moment it is reached", () => {
