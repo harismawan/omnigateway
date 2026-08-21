@@ -1,34 +1,33 @@
 # OmniGateway Repository Guidance
 
-Agent guidance for repository work: architecture, boundaries, conventions, and durable traps.
-`README.md` serves operators; `ARCHITECTURE.md` explains how the system fits together; this file
-serves contributors. Update all that a change affects.
+Agent guidance for repo work: architecture, boundaries, conventions, durable traps.
+`README.md` serve operators; `ARCHITECTURE.md` explain how system fit together; this file serve
+contributors. Update all that change touch.
 
 ## Scope
 
-OmniGateway is a Bun/TypeScript monorepo for a self-hosted AI gateway:
+OmniGateway = Bun/TypeScript monorepo for self-hosted AI gateway:
 
-- `apps/gateway`: Elysia gateway and long-lived process loops
+- `apps/gateway`: Elysia gateway + long-lived process loops
 - `apps/dashboard`: admin console served by gateway
 - `apps/cli`: local `omni` CLI
-- `packages/control`: admin operations shared by gateway routes and CLI
-- `packages/dashboard-sdk`: what a plugin's UI bundle builds against
+- `packages/control`: admin ops shared by gateway routes + CLI
+- `packages/dashboard-sdk`: what plugin UI bundle build against
 - `packages/ir`: provider-neutral domain model
-- `packages/plugin-api`: pure plugin manifest schema, context and event types
-- `packages/providers`: provider adapters and catalog
+- `packages/plugin-api`: pure plugin manifest schema, context + event types
+- `packages/providers`: provider adapters + catalog
 - `packages/router`: pure routing
-- `packages/ratelimit`: pure API-key limit evaluation and sliding-window counting
+- `packages/ratelimit`: pure API-key limit eval + sliding-window counting
 - `packages/rtk`: tool-result filters, applied in dispatch before routing
-- `packages/store`: persistence and encryption
+- `packages/store`: persistence + encryption
 - `packages/testkit`: shared test fixtures
 
-Approved designs live in `docs/superpowers/specs/`; matching implementation plans live in
-`docs/superpowers/plans/`. Read relevant spec before changes, but verify current code because plans
-record past intent.
+Approved designs in `docs/superpowers/specs/`; matching plans in `docs/superpowers/plans/`. Read
+spec before change, but verify current code — plans record past intent.
 
 ## Commands
 
-Use Bun from repository root:
+Use Bun from repo root:
 
 ```bash
 bun install
@@ -44,12 +43,12 @@ bun run fmt
 Dashboard:
 
 ```bash
-bun run dev:dashboard              # Vite on 5173, proxies /api and /oauth to 9000
+bun run dev:dashboard              # Vite on 5173, proxies /api and /health to 9000
 bun run build:dashboard            # writes apps/dashboard/dist
 bun run --cwd apps/dashboard test  # happy-dom suite excluded from root tests
 ```
 
-CLI and release:
+CLI + release:
 
 ```bash
 bun apps/cli/src/index.ts --help
@@ -58,322 +57,314 @@ omni doctor --root <install>
 bun run build:npm v1.2.3
 ```
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`; tag is sole version source. Before claiming
-completion, run focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typecheck`,
-and `bun run lint`.
+Push `v*` tag run `.github/workflows/release.yml`; tag = sole version source. Before claim done: run
+focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typecheck`, `bun run lint`.
 
 ## Architectural boundaries
 
-1. `packages/ir` stays provider-independent and side-effect-free. Inject clocks and logger sinks;
-   never import `process`, `console`, or transport.
-2. Provider wire formats, headers, signing, stream decoding, and model catalogs stay in
+1. `packages/ir` stay provider-independent + side-effect-free. Inject clocks + logger sinks; never
+   import `process`, `console`, or transport.
+2. Provider wire formats, headers, signing, stream decoding, model catalogs stay in
    `packages/providers`.
-3. `packages/router` stays pure: no network, database, token refresh, or timers.
-4. Dispatch owns side effects, retries, refresh, deadlines, failover, and stream commit semantics.
+3. `packages/router` stay pure: no network, database, token refresh, timers.
+4. Dispatch own side effects, retries, refresh, deadlines, failover, stream commit semantics.
 5. Gateway routes authenticate, parse, apply key policy, call dispatch or `@omni/control`, render
-   compatible responses, and record metadata. Admin rules belong in `packages/control`, not handlers.
-6. `packages/control` knows nothing about caller type: no Elysia, cookies, argv, terminal, or timers.
+   compatible responses, record metadata. Admin rules belong in `packages/control`, not handlers.
+6. `packages/control` know nothing about caller type: no Elysia, cookies, argv, terminal, timers.
    Long-lived schedulers stay in `apps/gateway`.
-7. Store rows and secrets stay behind `@omni/store`; never expose encrypted or raw provider secrets.
-8. All outbound provider HTTP uses `HttpClient`; no direct production `fetch`.
-9. `@omni/providers/catalog` is browser-imported and must remain a leaf: model lists plus types only.
-10. Catalog pricing provides defaults. Router prices from saved targets; catalog edits affect new
-    targets only.
-11. CLI administers local installations through `@omni/control`, never `/api/*`. Inject every side
-    effect so tests never start processes or write outside temp directories.
-12. Dashboard calls `/api/*` only, with one exception: `/health`, polled to watch the gateway leave
-    and return across a restart. During a restart there is no session and no authenticated surface
-    to probe, so liveness is the one question `/api/*` cannot answer. It may import
-    `@omni/store/types`, `@omni/ir`, catalog subpath, and `@omnigateway/dashboard-sdk`, but not provider
-    adapters, HTTP client, or runtime store code. The SDK is permitted because it is a browser leaf
-    with no imports at all, and because the alternative was a second copy of the rule about what may
-    leave a plugin's own API prefix — a rule held in two places is one that ends up true in one.
-13. `packages/rtk` stays pure like `ir` and `router`: no I/O, clocks, or randomness. It rewrites
-    tool-result content only and preserves errors and non-tool-result blocks. `@omni/rtk/catalog` is
-    a leaf holding the filter-id union; `@omni/store` imports that subpath alone.
-14. `packages/ratelimit` stays pure the same way; `now` is always a parameter and the counters are
-    supplied by the caller, so the package never learns where they came from. `@omni/ratelimit/catalog`
-    is a leaf holding the dimension and window unions, `LimitConfig`, and its zod schema;
-    `@omni/store` imports that subpath alone and re-exports `LimitConfig` from `@omni/store/types`,
-    which is the import the dashboard is already permitted. Limiter state — rings and gauges — lives
-    in `apps/gateway`, because state is not the package's job. `@omnigateway/plugin-api/events`
-    **mirrors** the unions and `WINDOW_MS` rather than importing them, because that package is
-    published and this one is not. This package stays the source of truth; the mirror is pinned by
-    `apps/gateway/test/plugins/limitVocabulary.test.ts`, the only place that may import both.
-15. Plugins load from `<root>/plugins/` at boot and receive a capability-scoped `PluginContext`:
-    never `Store`, `HttpClient`, `AdminAuth`, decrypted credentials, or `process.env`. **It is a
-    guardrail, not a sandbox** — a plugin shares the gateway's process and can import past all of
-    it. What it buys is that accidental overreach is impossible and that a plugin's intent is
-    auditable from its manifest. Say that plainly wherever it comes up; a reader who believes
-    otherwise makes worse decisions than one who knows. `packages/plugin-api` stays pure like `ir`;
-    the loader, context and event bus live in `apps/gateway`. Every load failure is skipped and
-    reported, never fatal: the proxy path depends on no plugin and must not become able to.
+7. Store rows + secrets stay behind `@omni/store`; never expose encrypted or raw provider secrets.
+8. All outbound provider HTTP use `HttpClient`; no direct production `fetch`.
+9. `@omni/providers/catalog` browser-imported, must stay leaf: model lists plus types only.
+10. Catalog pricing give defaults. Router price from saved targets; catalog edits hit new targets
+    only.
+11. CLI administer local installs through `@omni/control`, never `/api/*`. Inject every side effect
+    so tests never start processes or write outside temp dirs.
+12. Dashboard call `/api/*` only, one exception: `/health`, polled to watch gateway leave and return
+    across restart. During restart no session and no authenticated surface to probe, so liveness is
+    the one question `/api/*` cannot answer. May import `@omni/store/types`, `@omni/ir`, catalog
+    subpath, `@omnigateway/dashboard-sdk`, but not provider adapters, HTTP client, runtime store
+    code. SDK permitted because browser leaf with no imports at all, and because alternative was
+    second copy of rule about what may leave plugin's own API prefix — rule held in two places is
+    one that end up true in one.
+13. `packages/rtk` stay pure like `ir` and `router`: no I/O, clocks, randomness. Rewrite tool-result
+    content only, preserve errors + non-tool-result blocks. `@omni/rtk/catalog` is leaf holding
+    filter-id union; `@omni/store` import that subpath alone.
+14. `packages/ratelimit` stay pure same way; `now` always a parameter, counters supplied by caller,
+    so package never learn where they came from. `@omni/ratelimit/catalog` is leaf holding dimension
+    + window unions, `LimitConfig`, its zod schema; `@omni/store` import that subpath alone and
+    re-export `LimitConfig` from `@omni/store/types`, the import dashboard already permitted.
+    Limiter state — rings + gauges — live in `apps/gateway`, because state not package's job.
+    `@omnigateway/plugin-api/events` **mirrors** the unions and `WINDOW_MS` rather than importing
+    them, because that package published and this one not. This package stay source of truth; mirror
+    pinned by `apps/gateway/test/plugins/limitVocabulary.test.ts`, only place that may import both.
+15. Plugins load from `<root>/plugins/` at boot, receive capability-scoped `PluginContext`: never
+    `Store`, `HttpClient`, `AdminAuth`, decrypted credentials, `process.env`. **It is a guardrail,
+    not a sandbox** — plugin share gateway's process and can import past all of it. What it buy:
+    accidental overreach impossible, plugin's intent auditable from manifest. Say that plainly
+    wherever it come up; reader who believe otherwise make worse decisions than one who know.
+    `packages/plugin-api` stay pure like `ir`; loader, context, event bus live in `apps/gateway`.
+    Every load failure skipped and reported, never fatal: proxy path depend on no plugin and must
+    not become able to.
 
 ## Adding a provider
 
-The nine-step procedure lives in [docs/adding-a-provider.md](docs/adding-a-provider.md): what the
-compiler will enumerate for you, what it cannot find, the per-provider files, and why `wire.ts` and
-`decode.ts` are forked rather than shared. Read it before adding one — several steps exist because
-skipping them produced a bug that read as something else entirely.
+Nine-step procedure in [docs/adding-a-provider.md](docs/adding-a-provider.md): what compiler
+enumerate for you, what it cannot find, per-provider files, why `wire.ts` and `decode.ts` forked not
+shared. Read before adding one — several steps exist because skipping them made bug that read as
+something else entirely.
 
 ## Writing a plugin
 
-The procedure lives in [docs/writing-a-plugin.md](docs/writing-a-plugin.md): the manifest, the
-capability context, the storage placeholder, the event guarantees, and how a UI bundle shares the
-console's React. Read it before adding or reviewing one — it opens with what a plugin can reach,
-which decides whether the rest of it is a good idea.
+Procedure in [docs/writing-a-plugin.md](docs/writing-a-plugin.md): manifest, capability context,
+storage placeholder, event guarantees, how UI bundle share console's React. Read before adding or
+reviewing one — it open with what plugin can reach, which decide whether rest of it good idea.
 
 ## TypeScript and dashboard style
 
 - Strict TypeScript; `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` stay enabled.
-- Never commit `any`, including tests. Use `unknown` plus narrowing or named types.
-- Use ESM imports with explicit `.ts` extensions. Match nearby naming and comment density.
-- Biome uses 2-space indentation and 100-column lines. Avoid unrelated refactors.
-- Dashboard uses styled-components, never Tailwind or CSS files.
-- Palette CSS variables live in `theme/GlobalStyle.ts`; `theme/tokens.ts` references them.
-- Colour means provider identity or state only. Prefix transient props with `$`.
+- Never commit `any`, tests included. Use `unknown` plus narrowing or named types.
+- Use ESM imports with explicit `.ts` extensions. Match nearby naming + comment density.
+- Biome use 2-space indent, 100-column lines. Avoid unrelated refactors.
+- Dashboard use styled-components, never Tailwind or CSS files.
+- Palette CSS variables live in `theme/GlobalStyle.ts`; `theme/tokens.ts` reference them.
+- Colour mean provider identity or state only. Prefix transient props with `$`.
 - Self-host fonts through `@fontsource`; never add third-party origins.
 
 ## Testing
 
 - Prefer behavior tests at narrowest stable boundary.
-- Use in-memory stores, synthetic credentials, and stub `HttpClient`; never call live providers.
-- Dispatch or adapter changes cover streaming and non-streaming paths.
+- Use in-memory stores, synthetic credentials, stub `HttpClient`; never call live providers.
+- Dispatch or adapter changes cover streaming + non-streaming paths.
 - Preserve pre-commit failover versus post-commit stream behavior.
-- Shared proxy changes test Anthropic and OpenAI error surfaces.
+- Shared proxy changes test Anthropic + OpenAI error surfaces.
 - Auth changes cover Bearer and `x-api-key`, malformed/conflicting input, revoked keys, allowlists,
-  and relevant rate limits.
-- Deadline tests distinguish gateway timeout from client cancellation and leave no timers/listeners.
-- Dashboard tests run under happy-dom. Use `test/helpers/fetchStub.ts`, `renderWithProviders`, and
-  `renderWithRouter`; assert visible text, roles, and accessible names. Re-query after async loads.
+  relevant rate limits.
+- Deadline tests distinguish gateway timeout from client cancellation, leave no timers/listeners.
+- Dashboard tests run under happy-dom. Use `test/helpers/fetchStub.ts`, `renderWithProviders`,
+  `renderWithRouter`; assert visible text, roles, accessible names. Re-query after async loads.
 
 ## Security and privacy
 
 - Never log prompt/response bodies, OAuth tokens, API keys, passwords, encryption keys, or arbitrary
   headers/metadata.
-- `LogFields` is a closed allowlist and redaction boundary. Treat new free-text fields as security
-  changes; never add an index signature.
-- Return raw gateway API keys once and store only hashes.
+- `LogFields` is closed allowlist + redaction boundary. Treat new free-text fields as security
+  changes; never add index signature.
+- Return raw gateway API keys once; store only hashes.
 - Encrypt provider credentials with required `OMNI_ENCRYPTION_KEY`; never add default secrets or
   commit `.env` files/databases.
-- Client errors omit provider tokens, credential IDs, and internal stacks.
+- Client errors omit provider tokens, credential IDs, internal stacks.
 - Preserve admin sessions on every `/api/*` route except documented setup/status/login flows.
 
 ## Client contracts
 
 Client surface:
 
-- `POST /v1/messages`: Anthropic-compatible request, response, SSE, and errors
-- `POST /v1/chat/completions`: OpenAI-compatible request, response, SSE, and errors
-- `GET /v1/models`: authenticated and filtered by key model allowlist
+- `POST /v1/messages`: Anthropic-compatible request, response, SSE, errors
+- `POST /v1/chat/completions`: OpenAI-compatible request, response, SSE, errors
+- `GET /v1/models`: authenticated, filtered by key model allowlist
 - `POST /v1/messages/count_tokens`: authenticated local estimate; no dispatch or usage row
 - `GET /health`: unauthenticated liveness
 
-Every `/v1/*` request accepts Bearer or `x-api-key`; reject conflicts. `null` model allowlist means
-unrestricted; empty array denies all models.
+Every `/v1/*` request accept Bearer or `x-api-key`; reject conflicts. `null` model allowlist mean
+unrestricted; empty array deny all models.
 
 Preserve these translation invariants:
 
-- Keep mid-conversation system messages in place; never fold them into request-level `system`.
+- Keep mid-conversation system messages in place; never fold into request-level `system`.
 - Forward `thinking` forms exactly. Never derive budgets from effort. Drop unsigned thinking before
-  Anthropic replay; preserve and accumulate Anthropic signatures.
-- Carry `anthropic-beta` as both header and body passthrough. Never synthesize a missing beta.
-- `ToolDef` is a union. `CustomToolDef` stays portable; `AnthropicToolDef` carries an exact
-  versioned `type` that is never normalized or upgraded. Versions live in
-  `packages/providers/src/anthropic/tools.ts`; unknown dated types are rejected, not prefix-matched.
-- Anthropic-native content blocks use the `anthropicNative` IR variant, keep their payload verbatim,
-  and stay out of tool-id correlation, orphan removal, cross-provider translation, and RTK.
-- An `AnthropicToolDef` or `anthropicNative` history block excludes every provider whose
-  `ANTHROPIC_NATIVE_TOOLS` entry is false at routing — currently everything except Anthropic.
-- `pauseTurn` is its own stop reason; never fold it into `endTurn` or `toolUse`.
-- Unknown Anthropic block types and SSE events fail visibly rather than being skipped.
-- Preserve cache-control breakpoint block, TTL, and order when target can express them. Record
-  degradations for requested features a provider cannot express.
+  Anthropic replay; preserve + accumulate Anthropic signatures.
+- Carry `anthropic-beta` as both header and body passthrough. Never synthesize missing beta.
+- `ToolDef` is union. `CustomToolDef` stay portable; `AnthropicToolDef` carry exact versioned `type`
+  never normalized or upgraded. Versions in `packages/providers/src/anthropic/tools.ts`; unknown
+  dated types rejected, not prefix-matched.
+- Anthropic-native content blocks use `anthropicNative` IR variant, keep payload verbatim, stay out
+  of tool-id correlation, orphan removal, cross-provider translation, RTK.
+- `AnthropicToolDef` or `anthropicNative` history block exclude every provider whose
+  `ANTHROPIC_NATIVE_TOOLS` entry false at routing — currently everything except Anthropic.
+- `pauseTurn` is own stop reason; never fold into `endTurn` or `toolUse`.
+- Unknown Anthropic block types + SSE events fail visibly, not skipped.
+- Preserve cache-control breakpoint block, TTL, order when target can express them. Record
+  degradations for requested features provider cannot express.
 - `Usage.inputTokens` is uncached input. Cache reads and 5m/1h writes are disjoint classes priced
-  once. Use `promptTokens()` when a client surface needs total prompt tokens.
-- Adapters stream upstream. OpenAI chat usage requires `stream_options.include_usage`; Responses API
-  reports usage on `response.completed`.
-- `/v1/models` reports smallest target window in a pool. Limits are advertised, not enforced.
-- Normalize `claude/<id>` aliases and `[1m]` before key allowlist checks. `claude/` remains reserved.
-- Gateway does not validate request-shape support per model; unsupported combinations surface as
-  upstream errors.
-- The OpenAI surface reads images from `messages[].images` (bare base64) and from `attachments` /
-  `experimental_attachments` as well as from `content`. Neither sidecar is an OpenAI field; they are
-  read because the clients that send them send no other copy. The payload's own container header
-  beats any declared type, and a remote URL is never fetched.
-- The two sidecars differ on what an unusable payload means, and the split is the contract.
-  `images` is Ollama's images-only field, so anything in it that is not image data is a
-  `BAD_REQUEST`. `attachments` is the SDK's general file envelope, where a PDF or a hosted URL is
-  ordinary: those are dropped, never refused, because they were dropped before the gateway read the
-  field and refusing now would break a caller that worked yesterday. Same reasoning as
-  `looseCacheControl`.
+  once. Use `promptTokens()` when client surface need total prompt tokens.
+- Adapters stream upstream. OpenAI chat usage need `stream_options.include_usage`; Responses API
+  report usage on `response.completed`.
+- `/v1/models` report smallest target window in pool. Limits advertised, not enforced.
+- Normalize `claude/<id>` aliases and `[1m]` before key allowlist checks. `claude/` stay reserved.
+- Gateway not validate request-shape support per model; unsupported combos surface as upstream
+  errors.
+- OpenAI surface read images from `messages[].images` (bare base64) and from `attachments` /
+  `experimental_attachments` as well as from `content`. Neither sidecar is OpenAI field; read
+  because clients that send them send no other copy. Payload's own container header beat any
+  declared type, and remote URL never fetched.
+- Two sidecars differ on what unusable payload mean, and split is the contract. `images` is Ollama's
+  images-only field, so anything in it that not image data is `BAD_REQUEST`. `attachments` is SDK's
+  general file envelope, where PDF or hosted URL is ordinary: those dropped, never refused, because
+  they were dropped before gateway read the field and refusing now would break caller that worked
+  yesterday. Same reasoning as `looseCacheControl`.
 
-Detailed compatibility rules and measured client behavior belong in relevant specs under
+Detailed compatibility rules + measured client behavior belong in relevant specs under
 `docs/superpowers/specs/`.
 
 ## Runtime and data traps
 
-- `OMNI_EXPOSE_CLAUDE_CODE_ALIASES` defaults off and is read at boot. `OMNI_BASE_URL` must be public
-  reverse-proxy origin. Changing `OMNI_ENCRYPTION_KEY` invalidates stored credentials.
-- CLI root resolution: `--root` > `OMNI_ROOT` > installation in cwd >
-  `~/.config/omnigateway`. Root `.env` intentionally overrides ambient environment.
+- `OMNI_EXPOSE_CLAUDE_CODE_ALIASES` default off, read at boot. `OMNI_BASE_URL` must be public
+  reverse-proxy origin. Changing `OMNI_ENCRYPTION_KEY` invalidate stored credentials.
+- CLI root resolution: `--root` > `OMNI_ROOT` > install in cwd > `~/.config/omnigateway`. Root
+  `.env` intentionally override ambient environment.
 - CLI database path: `--db` > that root's own `.env` > ambient `OMNI_DB_PATH` > `omnigateway.db` in
-  the root. A `--root` flag suppresses ambient `OMNI_DB_PATH` entirely — Bun preloads the cwd's
-  `.env`, so otherwise the flag picks the root and an unrelated checkout picks its database. The
-  suppression is warned on stderr, reported by `doctor`, and removed from the env a spawned gateway
-  inherits. `OMNI_ROOT` does not suppress it: both are ambient.
-- Quota cooldowns are process-local and reset on restart. So are `1m` and `concurrency`; `5h` and
-  `1w` come from the database and survive one.
-- `usage.append` must run at most once per request ID; duplicate completion double-counts
-  `usage_daily` and `usage_rollup` alike. Pending rows contain placeholder metrics; inspect `state`,
+  the root. A `--root` flag suppress ambient `OMNI_DB_PATH` entirely — Bun preload cwd's `.env`, so
+  otherwise flag pick the root and unrelated checkout pick its database. Suppression warned on
+  stderr, reported by `doctor`, removed from env spawned gateway inherit. `OMNI_ROOT` not suppress
+  it: both ambient.
+- Quota cooldowns process-local, reset on restart. So are `1m` and `concurrency`; `5h` and `1w` come
+  from database and survive one.
+- `usage.append` must run at most once per request ID; duplicate completion double-count
+  `usage_daily` and `usage_rollup` alike. Pending rows hold placeholder metrics; inspect `state`,
   not `status`.
-- `usage_rollup` is derived, never authoritative: `request_logs` is the source of truth and
-  `rebuildRollup` reproduces every bucket from it. Written in `append`'s transaction, pruned with the
-  rows it summarizes, rebuilt after a restore, compared by `omni doctor`. It replaced a `SELECT SUM`
-  whose cost grew without bound — and `bun:sqlite` is synchronous, so that scan blocked the whole
-  event loop, not one request. For the same reason a timeout around a store read cannot fire; do not
-  add one back.
-- `quota_windows` stores provider observations, not gateway counts. Missing data means unknown, not
-  unlimited. Probe failure must never disable a credential.
-- RTK filter ids are persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is a storage
-  contract, not an internal enum. `isRtkFilterId` drops unknown ids on read, so renaming one loses
-  history silently rather than failing. Add ids freely; rename or remove only with a migration.
-- Rate limiting is explained in `ARCHITECTURE.md#rate-limiting`; these are the invariants a change
-  must not break, and each has already been broken once.
-- `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` are the JSON keys of `api_keys.limits`, so
-  a storage contract like RTK ids — but failing **closed**: an unknown name is a parse failure, never
-  a silent drop. Rename or remove only with a migration, and update the mirror in
-  `@omnigateway/plugin-api/events` in the same change.
+- `usage_rollup` derived, never authoritative: `request_logs` is source of truth and `rebuildRollup`
+  reproduce every bucket from it. Written in `append`'s transaction, pruned with rows it summarizes,
+  rebuilt after restore, compared by `omni doctor`. It replaced `SELECT SUM` whose cost grew without
+  bound — and `bun:sqlite` is synchronous, so that scan blocked whole event loop, not one request.
+  Same reason a timeout around store read cannot fire; do not add one back.
+- `quota_windows` store provider observations, not gateway counts. Missing data mean unknown, not
+  unlimited. Probe failure must never disable credential.
+- RTK filter ids persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is storage contract,
+  not internal enum. `isRtkFilterId` drop unknown ids on read, so renaming one lose history silently
+  rather than failing. Add ids freely; rename or remove only with migration.
+- Rate limiting explained in `ARCHITECTURE.md#rate-limiting`; these are invariants a change must not
+  break, each already broken once.
+- `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` are JSON keys of `api_keys.limits`, so
+  storage contract like RTK ids — but failing **closed**: unknown name is parse failure, never
+  silent drop. Rename or remove only with migration, and update mirror in
+  `@omnigateway/plugin-api/events` in same change.
 - **Nothing a plugin imports may reach a core package.** `@omnigateway/plugin-api` and
-  `@omnigateway/dashboard-sdk` are published; every `@omni/*` package is not, so a single import
-  puts an unresolvable `workspace:*` into a stranger's dependency tree. It typechecks and tests
-  green inside this repo, because workspace resolution makes every internal package reachable —
-  which is exactly why it went unnoticed once. `packages/plugin-api/test/bundleWeight.test.ts`
-  builds each entry point and asserts zod appears only under the root; its first test asserts zod
-  *is* present there, because "absent" is also what a broken harness reports.
-- `admit`/`consume` claim the ring stamp and gauge **synchronously**, before any `await`, and roll
-  back on refusal. Reading counters first and recording after lets concurrent requests judge one
-  pre-burst snapshot — a ceiling of 3 admitted 10 parallel requests, and it needs no I/O to fire.
-- Refuse at auth, degrade at list. An unparseable `limits` reads back as `null`, distinct from `{}`,
-  and `authenticateApiKey` turns it into `INTERNAL` — not `AUTH`, which would blame a credential that
-  is fine. `keys.list()` must never throw over such a row: `toKey` serves the listing too, and the
-  listing is how an operator finds the row to fix. Nothing may collapse that `null` into `{}`.
-- `limits` is the only field editable after minting (`setKeyLimits`, `PUT /api/keys/:id/limits`);
-  `bodyLoggingOptOut` deliberately is not — an opt-out is a promise to whoever holds the key, a limit
-  is the operator's own ceiling. The matrix is written whole: `{}` is how the last limit goes away,
-  never a husk like `{"requests":{}}`.
-- Windows *slide*. `1m` is an exact ring in `apps/gateway`; longer windows are `usage.sumSince` —
-  which must filter `state = 'done'` — plus an in-memory delta, cached 30s. The composition may
-  over-count and must **never** under-count, so the delta keeps everything at or after the read
-  instant; the other direction is walkable by timing the refresh. A failed `sumSince` serves the
-  request and logs through existing `LogFields` keys, degrading long windows only, because `1m` and
-  `concurrency` never touch the store.
-- The token and spend debit lives in `finishLog` beside `usage.append`, never inside `@omni/store`:
-  that site already runs at most once per request id, which is the guarantee the debit needs.
-- The concurrency gauge is released at request scope and nowhere else. A streaming handler returns
-  while the request still runs, so a `finally` around the handler body fires at head-send, and a
-  decrement beside the debit sits behind a store write; streams free it from `sseResponse`'s
-  run-once completion. No window expires a gauge — a leak locks the key out until restart, silently.
-- `ApiKeySummary.limitUsage` counts committed rows only: a floor on what the limiter sees, never its
-  number. `concurrency.used` is `null`, not `0`, because the gauge is not stored.
-- `ProviderModelChoice.auth` is enforced at write time in `putModel`, never at routing. Which ways
-  in exist is installation state, so the catalog exports the fact (`catalogModelAuths`) and control
-  owns the rule. A provider with no credential is unknown rather than blocked, an unlisted model is
-  unknown rather than forbidden, disabled credentials still count, and a target already stored under
-  that id is exempt so removing a credential cannot make an unrelated edit unsavable.
-- **An `AggregateError` has no message of its own.** Node reports a failed multi-address connect
-  that way — `autoSelectFamily` is on by default — keeping each address's error in `errors` and
-  leaving `message` empty. Copying `error.message` verbatim therefore renders `reason=` with nothing
-  after it, and `request_logs` holds no message column, so on the proxy path the reason a request
-  failed was then recoverable from nowhere. `describeError` in `@omni/ir` is the one way to fill that
-  field; it falls back to the error's name, and every site that reports a `reason` goes through it.
-  `classify` recurses into `errors` for the same reason: matching only `name` and `message` saw `""`,
-  fell through to `INTERNAL`, and `RETRYABLE` marks that false — so a retryable transport failure
-  ended the request after one attempt and served a 500 blaming the gateway.
-- `CONNECT_ATTEMPT_TIMEOUT_MS` must stay above one TCP retransmit. Happy Eyeballs gives each address
-  family a fixed budget, and node's default is under Linux's one-second initial RTO, so a dropped SYN
-  — routine on a lossy path — is abandoned at ~500ms instead of recovering at ~1000ms. Where the
-  other family cannot serve (an AAAA record with no IPv6 route), both attempts are then exhausted and
-  the connect fails outright. Measured: 3 failures in 99 connects at the default, 0 in 212 once
-  raised, with the previously-failing connects completing at 1007–1061ms. The failure reads as a
-  provider outage and is not one.
-- Streaming responses need downstream `: keepalive` comments because provider heartbeats are
-  decoded away. Keep server idle timeout above request deadline.
-- Stdout holds operational events; `request_logs` holds completed requests. Do not restore duplicate
-  per-request access lines. `requestId` joins both.
-- Console can read only captured stdout: `OMNI_LOG_FILE`, journald, or none. `OMNI_LOG_FILE` names an
-  existing capture; it does not create one.
-- Docker image contains gateway only; npm package contains CLI, gateway, and dashboard.
-- OpenAI OAuth routes to narrower Codex surface. OAuth-specific encoding stays behind existing
-  `oauth` flag.
-- A snapshot is the database alone. `request_bodies/` is excluded, so a downloaded snapshot is never
-  a prompt corpus and its size never tracks prompt volume. After a restore, body rows and artifact
-  files disagree until `sweepOrphans` reconciles them; that is expected, not a bug.
-- A snapshot still carries encrypted credentials and API-key hashes. Downloads are `no-store`, and
-  the file is inert only because `OMNI_ENCRYPTION_KEY` is not in it.
-- The lifecycle and swap rules below are explained in `ARCHITECTURE.md#replacing-the-database-while-it-is-open`
-  and `#stopping-and-restarting`. Each one looks arbitrary alone and is not; read the section before
+  `@omnigateway/dashboard-sdk` published; every `@omni/*` package not, so single import put
+  unresolvable `workspace:*` into stranger's dependency tree. It typecheck and test green inside
+  this repo, because workspace resolution make every internal package reachable — exactly why it
+  went unnoticed once. `packages/plugin-api/test/bundleWeight.test.ts` build each entry point and
+  assert zod appear only under root; first test assert zod *is* present there, because "absent" is
+  also what broken harness report.
+- `admit`/`consume` claim ring stamp and gauge **synchronously**, before any `await`, and roll back
+  on refusal. Reading counters first and recording after let concurrent requests judge one pre-burst
+  snapshot — ceiling of 3 admitted 10 parallel requests, and it need no I/O to fire.
+- Refuse at auth, degrade at list. Unparseable `limits` read back as `null`, distinct from `{}`, and
+  `authenticateApiKey` turn it into `INTERNAL` — not `AUTH`, which would blame credential that is
+  fine. `keys.list()` must never throw over such a row: `toKey` serve the listing too, and listing
+  is how operator find the row to fix. Nothing may collapse that `null` into `{}`.
+- `limits` is only field editable after minting (`setKeyLimits`, `PUT /api/keys/:id/limits`);
+  `bodyLoggingOptOut` deliberately not — opt-out is promise to whoever hold the key, limit is
+  operator's own ceiling. Matrix written whole: `{}` is how last limit go away, never husk like
+  `{"requests":{}}`.
+- Windows *slide*. `1m` is exact ring in `apps/gateway`; longer windows are `usage.sumSince` — which
+  must filter `state = 'done'` — plus in-memory delta, cached 30s. Composition may over-count and
+  must **never** under-count, so delta keep everything at or after read instant; other direction
+  walkable by timing the refresh. Failed `sumSince` serve the request and log through existing
+  `LogFields` keys, degrading long windows only, because `1m` and `concurrency` never touch store.
+- Token and spend debit live in `finishLog` beside `usage.append`, never inside `@omni/store`: that
+  site already run at most once per request id, the guarantee debit need.
+- Concurrency gauge released at request scope and nowhere else. Streaming handler return while
+  request still run, so `finally` around handler body fire at head-send, and decrement beside debit
+  sit behind store write; streams free it from `sseResponse`'s run-once completion. No window expire
+  a gauge — leak lock the key out until restart, silently.
+- `ApiKeySummary.limitUsage` count committed rows only: floor on what limiter see, never its number.
+  `concurrency.used` is `null`, not `0`, because gauge not stored.
+- `ProviderModelChoice.auth` enforced at write time in `putModel`, never at routing. Which ways in
+  exist is installation state, so catalog export the fact (`catalogModelAuths`) and control own the
+  rule. Provider with no credential is unknown rather than blocked, unlisted model unknown rather
+  than forbidden, disabled credentials still count, and target already stored under that id exempt
+  so removing credential cannot make unrelated edit unsavable.
+- **An `AggregateError` has no message of its own.** Node report failed multi-address connect that
+  way — `autoSelectFamily` on by default — keeping each address's error in `errors` and leaving
+  `message` empty. Copying `error.message` verbatim therefore render `reason=` with nothing after
+  it, and `request_logs` hold no message column, so on proxy path the reason a request failed was
+  recoverable from nowhere. `describeError` in `@omni/ir` is the one way to fill that field; it fall
+  back to error's name, and every site reporting a `reason` go through it. `classify` recurse into
+  `errors` for same reason: matching only `name` and `message` saw `""`, fell through to `INTERNAL`,
+  and `RETRYABLE` mark that false — so retryable transport failure ended the request after one
+  attempt and served 500 blaming the gateway.
+- `CONNECT_ATTEMPT_TIMEOUT_MS` must stay above one TCP retransmit. Happy Eyeballs give each address
+  family fixed budget, and node's default is under Linux's one-second initial RTO, so dropped SYN —
+  routine on lossy path — abandoned at ~500ms instead of recovering at ~1000ms. Where other family
+  cannot serve (AAAA record with no IPv6 route), both attempts then exhausted and connect fail
+  outright. Measured: 3 failures in 99 connects at default, 0 in 212 once raised, previously-failing
+  connects completing at 1007–1061ms. Failure read as provider outage and is not one.
+- Streaming responses need downstream `: keepalive` comments because provider heartbeats decoded
+  away. Keep server idle timeout above request deadline.
+- Stdout hold operational events; `request_logs` hold completed requests. Do not restore duplicate
+  per-request access lines. `requestId` join both.
+- Console can read only captured stdout: `OMNI_LOG_FILE`, journald, or none. `OMNI_LOG_FILE` name
+  existing capture; it not create one.
+- Docker image contain gateway only; npm package contain CLI, gateway, dashboard.
+- OpenAI OAuth route to narrower Codex surface. OAuth-specific encoding stay behind existing `oauth`
+  flag.
+- Snapshot is database alone. `request_bodies/` excluded, so downloaded snapshot never a prompt
+  corpus and its size never track prompt volume. After restore, body rows and artifact files
+  disagree until `sweepOrphans` reconcile them; expected, not bug.
+- Snapshot still carry encrypted credentials and API-key hashes. Downloads are `no-store`, and file
+  inert only because `OMNI_ENCRYPTION_KEY` not in it.
+- Lifecycle and swap rules below explained in `ARCHITECTURE.md#replacing-the-database-while-it-is-open`
+  and `#stopping-and-restarting`. Each look arbitrary alone and is not; read the section before
   changing any of them.
-- Restart asks systemd, never self-SIGTERM (which stops the gateway for good), and `--no-block` is
+- Restart ask systemd, never self-SIGTERM (which stop the gateway for good), and `--no-block`
   required.
-- The quiesce latch gates `/v1/*` only; `/api/*` and `/health` stay live through a swap.
-- `store.close()` is idempotent and `reopen()` tolerates a closed handle, so restore is close → swap
-  → reopen. Repo methods forward per call: bind one to a local and it dies at the next swap.
-- `vacuum()` must checkpoint, or page count falls while the file keeps every page.
-- Restore compares the admin password hash across the swap and invalidates sessions only when it
-  differs. **Nothing may sit between the swap and that comparison** — the swap has already succeeded,
-  so anything throwing in front of it skips the invalidation while the new password is live.
-- `swapIn` rebuilds `usage_rollup` last and guarded, for that reason. It blocks the loop; the cost is
+- Quiesce latch gate `/v1/*` only; `/api/*` and `/health` stay live through swap.
+- `store.close()` idempotent and `reopen()` tolerate closed handle, so restore is close → swap →
+  reopen. Repo methods forward per call: bind one to local and it die at next swap.
+- `vacuum()` must checkpoint, or page count fall while file keep every page.
+- Restore compare admin password hash across swap and invalidate sessions only when it differ.
+  **Nothing may sit between the swap and that comparison** — swap already succeeded, so anything
+  throwing in front of it skip the invalidation while new password live.
+- `swapIn` rebuild `usage_rollup` last and guarded, for that reason. It block the loop; cost
   measured in `README.md` and must stay documented rather than hidden.
-- `omni db restore` refuses while a gateway is running and has no override.
-- Plugin tables are `plugin_<id>_<name>`, written by the host from a `{{name}}` placeholder, and
-  tracked in `plugin_migrations` on a track independent of core's `001..`. Core's next migration
-  number is unaffected by any plugin. Plugin migrations apply **one transaction each**: a batch
-  transaction would make a plugin failing on migration 5 silently revert 1–4 on every later boot.
-- A restore onto an install without that plugin leaves orphan `plugin_*` tables. They stay, and
-  `omni doctor` reports them. **Nothing auto-drops them** — a restore is exactly when a plugin may
-  not be installed yet, and the drop is irreversible. `omni plugin remove` keeps tables too; only
-  `--purge` drops them, and it confirms first.
-- Plugin events are **at-most-once and not durable**: one queued when the process dies is gone, and
-  a full queue drops rather than grows. Anything needing exact accounting must reconcile from its
-  own storage. `RequestCompleted` is emitted from `finishLog` because that is already the one site
-  running at most once per request id — the same reason the usage debit is there.
-- The console externalises `react`, `react-dom`, `styled-components` and `@tanstack/react-query`
-  and resolves them through an import map, so the console and every plugin share one instance; two
-  React copies throw "invalid hook call". `apps/dashboard/shared/manifest.ts` is the single list
-  feeding the externals, the import map and the shared build. **`export * from "react"` does not
-  work and does not warn** — React is CommonJS, so the re-export compiles to a module exporting
-  only `default`. The shims destructure the default instead.
-- Plugin UI assets are served at `/plugin-assets/<id>/…`, not `/plugins/<id>/…`, which would
-  collide with the console's own client-side routes. Bundles are unauthenticated like the console's
-  own JavaScript; the catalog at `/api/plugins` is admin-gated, because what is gated is data.
-- A literal `../` never reaches a route handler — `URL` normalises it before routing, so a test
-  asserting 404 for that input proves nothing. Only percent-encoded forms reach a guard, and they
-  arrive undecoded. Two path checks here were deleted after mutation showed `realpath` already
-  decided every case; decoration in a security path invites the belief that something is being done.
+- `omni db restore` refuse while gateway running, no override.
+- Plugin tables are `plugin_<id>_<name>`, written by host from `{{name}}` placeholder, tracked in
+  `plugin_migrations` on track independent of core's `001..`. Core's next migration number
+  unaffected by any plugin. Plugin migrations apply **one transaction each**: batch transaction
+  would make plugin failing on migration 5 silently revert 1–4 on every later boot.
+- Restore onto install without that plugin leave orphan `plugin_*` tables. They stay, and
+  `omni doctor` report them. **Nothing auto-drops them** — restore is exactly when plugin may not
+  be installed yet, and drop is irreversible. `omni plugin remove` keep tables too; only `--purge`
+  drop them, and it confirm first.
+- Plugin events are **at-most-once and not durable**: one queued when process die is gone, and full
+  queue drops rather than grows. Anything needing exact accounting must reconcile from own storage.
+  `RequestCompleted` emitted from `finishLog` because that already the one site running at most once
+  per request id — same reason usage debit there.
+- Console externalise `react`, `react-dom`, `styled-components`, `@tanstack/react-query` and resolve
+  them through import map, so console and every plugin share one instance; two React copies throw
+  "invalid hook call". `apps/dashboard/shared/manifest.ts` is single list feeding externals, import
+  map, shared build. **`export * from "react"` does not work and does not warn** — React is
+  CommonJS, so re-export compile to module exporting only `default`. Shims destructure the default
+  instead.
+- Plugin UI assets served at `/plugin-assets/<id>/…`, not `/plugins/<id>/…`, which would collide
+  with console's own client-side routes. Bundles unauthenticated like console's own JavaScript;
+  catalog at `/api/plugins` admin-gated, because what is gated is data.
+- Literal `../` never reach a route handler — `URL` normalise it before routing, so test asserting
+  404 for that input prove nothing. Only percent-encoded forms reach a guard, and they arrive
+  undecoded. Two path checks here deleted after mutation showed `realpath` already decided every
+  case; decoration in security path invite belief that something is being done.
 
 ## Subagent workflow
 
-- Orchestrator creates implementation subagent, then separate review subagent. Subagents do not spawn
+- Orchestrator create implementation subagent, then separate review subagent. Subagents do not spawn
   nested subagents.
-- Use `feat/*` branches for subagent implementation work; do not use worktrees.
+- Use `feat/*` branches for subagent implementation work; no worktrees.
 
 ## graphify
 
-This project can carry a knowledge graph at `graphify-out/` with god nodes, community structure, and
-cross-file relationships. `graphify-out/` is gitignored, so a fresh clone has none: if
-`graphify-out/graph.json` is absent, run `/graphify .` to build one, or skip the graph and read
-source directly. Every rule below is conditional on that file existing.
+This project can carry knowledge graph at `graphify-out/` with god nodes, community structure,
+cross-file relationships. `graphify-out/` gitignored, so fresh clone has none: if
+`graphify-out/graph.json` absent, run `/graphify .` to build one, or skip graph and read source
+directly. Every rule below conditional on that file existing.
 
 Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
-- AST extraction does not follow barrel re-exports: an import of `GatewayError` from `@omni/ir`
-  targets `packages_ir_src_index_gatewayerror`, but the symbol is defined in `errors.ts`, so the
-  edge dangles and is dropped at build. That silently zeroes the inbound degree of the types the
-  whole architecture turns on — `GatewayError`, `ChatRequest`, `Store`, `ProviderId`, `StreamEvent`,
-  `Logger`, `HttpClient` — so god-node rankings under-weight `packages/ir` and `packages/store`
-  until the endpoints are remapped to their defining module. Every `graphify update .` brings it
-  back.
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. Return scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain not surface enough context.
+- After modifying code, run `graphify update .` to keep graph current (AST-only, no API cost).
+- AST extraction not follow barrel re-exports: import of `GatewayError` from `@omni/ir` target
+  `packages_ir_src_index_gatewayerror`, but symbol defined in `errors.ts`, so edge dangle and drop
+  at build. That silently zero inbound degree of the types whole architecture turn on —
+  `GatewayError`, `ChatRequest`, `Store`, `ProviderId`, `StreamEvent`, `Logger`, `HttpClient` — so
+  god-node rankings under-weight `packages/ir` and `packages/store` until endpoints remapped to
+  their defining module. Every `graphify update .` bring it back.

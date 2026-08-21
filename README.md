@@ -161,11 +161,26 @@ omni connect anthropic     # or: openai, kimi, kilo, grok
 ```
 
 Every provider also takes a plain API key, if that is what you hold rather than
-a subscription. `custom` takes nothing else:
+a subscription:
 
 ```bash
 omni credentials add-key anthropic     # prompts for the key, or reads stdin
 ```
+
+There is a sixth provider, `custom`, which points an existing wire codec at an
+origin you supply — an endpoint you host or pay for that is not one of the five.
+It has no subscription to authorize, so there is no `omni connect custom`; it is
+an API key plus the endpoint to spend it against:
+
+```bash
+omni credentials add-key custom \
+  --endpoint-id my-endpoint --endpoint-label 'My endpoint' \
+  --origin https://api.example.com --protocol chat-completions
+```
+
+`--protocol` is `chat-completions` or `responses`, naming which codec to reuse.
+`--origin` is a bare origin — scheme and host, no path, query, or credentials in
+the URL.
 
 The console offers the same choice per provider on the Connect dialog.
 
@@ -353,10 +368,12 @@ Use `--db <path>` to point one command somewhere else.
 | `omni usage` | spend and tokens, by provider, model, key, or day |
 | `omni quota` | provider quota per window: use, burn rate, and when it runs out |
 | `omni connect <provider>` | authorize an account from the terminal |
-| `omni credentials …` | list, show, enable, disable, retier, refresh, remove |
-| `omni models …` | list, show, put, remove, `dry-run`, `catalog` |
-| `omni keys …` | list, create, revoke |
+| `omni credentials …` | list, show, enable, disable, `set`, `rm`, refresh, `add-key`, health |
+| `omni models …` | list, show, put, `rm`, `dry-run`, `catalog` |
+| `omni keys …` | list, create, `limits`, revoke |
 | `omni plugin …` | list, verify, install, remove; see [Plugins](#plugins) |
+| `omni service install` / `uninstall` | write or remove a systemd unit for this installation |
+| `omni setup claude` / `opencode` | point a client's config at this gateway |
 | `omni settings get` / `set` | routing weights, retention, deadlines, and the runtime switches |
 | `omni admin set-password` | change the console password |
 | `omni db migrate` | create or upgrade the database |
@@ -390,9 +407,11 @@ start` supervises the process itself with a pidfile under
 
 ### Restarting and stopping from the console
 
-The console's Database screen can restart and shut down the gateway. A restart
-only restarts if something would start the process again, so what the control
-does — and whether it is offered at all — depends on how this installation runs:
+The console can restart and shut down the gateway, from the foot of its sidebar
+— reachable from every screen, because a gateway you need to restart is rarely
+one you were looking at the Database screen of. A restart only restarts if
+something would start the process again, so what the control does — and whether
+it is offered at all — depends on how this installation runs:
 
 - **Under systemd**, it works. The gateway asks the manager rather than
   signalling itself — `systemctl [--user] --no-block restart
@@ -426,6 +445,20 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
 | `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](#recording-bodies) |
+| `OMNI_EXPOSE_CLAUDE_CODE_ALIASES` | No | off | Advertises the reserved `claude/*` aliases on `/v1/models`. Read at boot |
+| `OMNI_ROOT` | No | the installation in the current directory, else `~/.config/omnigateway` | Which installation the CLI acts on, when `--root` is not passed |
+| `OMNI_PLUGIN_REGISTRY` | No | the public npm registry | Registry `omni plugin install <name>` resolves through; must be `https://` |
+
+`OMNI_ROOT` is the one variable read from your shell and never from a root's `.env`, for the
+reason it has to be: a variable that selects the installation cannot live inside the installation
+it selects. A `--root` flag additionally suppresses an ambient `OMNI_DB_PATH`, and says so on
+stderr, so pointing the CLI at one installation from inside an unrelated checkout cannot pick up
+that checkout's database.
+
+The provider client-identity overrides — `OMNI_UA_*`, `OMNI_ORDER_*`, and the per-provider CLI
+version pins — are deliberately left out of this table and documented in `.env.example`. They
+change how the gateway identifies itself to a provider, which is not configuration in the sense
+the rest of this table is.
 
 Gateway events are written to stdout as one greppable line each: process lifecycle, OAuth
 refreshes, quota probes, failover, and errors.
@@ -441,12 +474,16 @@ bun apps/gateway/src/index.ts >> /var/log/omni.log 2>&1
 `omni start` does both for the gateway it supervises, and under systemd the journal needs no
 setup.
 
-Routing behaviour — weights, retry limits, request deadline, log retention,
-how often provider quota is polled — lives in the database, not the
-environment. Edit it with `omni settings set` or in the console.
-
-`.env.example` in the repository documents the optional provider
-client-identity overrides.
+Everything else lives in the database rather than the environment, so it can be
+changed without a restart: the six routing weights, `maxAttempts`,
+`requestDeadlineMs`, the circuit breaker's `breakerThreshold` and
+`breakerCooldownMs`, `logRetentionDays`, `quotaPollIntervalMs`, `rtkEnabled`,
+and the two body-capture switches. Edit them with `omni settings set` or in the
+console. `quotaPollIntervalMs` is the one exception: the poller reads it once at
+boot, so a change to it takes a restart. Snapshot retention —
+`snapshotKeepLatest` and `snapshotMaxAgeDays` — is stored alongside them but
+deliberately edited on the Database screen instead; see
+[Snapshots and restore](#snapshots-and-restore) for why.
 
 ## Recording bodies
 

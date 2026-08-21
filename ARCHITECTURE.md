@@ -1,12 +1,8 @@
 # Architecture
 
-How OmniGateway is put together, for contributors and anyone auditing the
-design. The [README](README.md#how-it-is-built) has the package map and the
-layering rules; this document is the detail behind them.
+How OmniGateway put together, for contributors and design auditors. [README](README.md#how-it-is-built) has package map and layering rules; this doc detail behind them.
 
-For the conventions that govern changes — architectural boundaries, testing
-expectations, and the traps worth knowing — see [CLAUDE.md](CLAUDE.md). Approved
-designs live in `docs/superpowers/specs/`.
+Conventions governing changes — architectural boundaries, testing expectations, traps — see [CLAUDE.md](CLAUDE.md). Approved designs live in `docs/superpowers/specs/`.
 
 ## Contents
 
@@ -24,8 +20,7 @@ designs live in `docs/superpowers/specs/`.
 
 ## What a request actually does
 
-`POST /v1/messages` and `POST /v1/chat/completions` are the same handler; the
-dialect is a parameter.
+`POST /v1/messages` and `POST /v1/chat/completions` same handler; dialect is parameter.
 
 ```mermaid
 sequenceDiagram
@@ -62,20 +57,13 @@ sequenceDiagram
   Disp->>Log: close out — tokens, cost, status
 ```
 
-Two details the diagram flattens. Credentials are decrypted at step 13 and not a
-moment earlier, so ranking ten candidates costs zero decryptions. And the log row
-is opened before the first attempt and closed exactly once — a client that hangs
-up mid-stream is recorded as such, not as a success.
+Two details diagram flattens. Credentials decrypt at step 13, not sooner — ranking ten candidates costs zero decryptions. Log row opens before first attempt, closes exactly once — client hanging up mid-stream recorded as such, not success.
 
-`GET /v1/models` is answered from the routing snapshot with no provider call, and
-`POST /v1/messages/count_tokens` is estimated locally — it deliberately writes no
-usage row.
+`GET /v1/models` answered from routing snapshot, no provider call. `POST /v1/messages/count_tokens` estimated locally — deliberately writes no usage row.
 
 ## Rate limiting
 
-Step 3 of that diagram is a sparse matrix, not a counter. A limit is a
-`(dimension, window)` pair, and the pairs that exist are the ones that mean
-something:
+Step 3 is sparse matrix, not counter. Limit = `(dimension, window)` pair. Pairs that exist are ones that mean something:
 
 | Dimension | 1m | 5h | 1w | Counted from |
 | --- | --- | --- | --- | --- |
@@ -84,14 +72,9 @@ something:
 | `spend` (USD) | — | ✓ | ✓ | rollup + delta, debited on completion |
 | `concurrency` | *no window — a gauge* | | | in-flight count in this process |
 
-No `spend` at `1m` — a per-minute dollar ceiling is a rate limit in costume, and
-`requests` and `tokens` already shape burst there. No `1d` either; `usage_daily`
-is the reporting rollup, and every extra window is another counter to keep and
-another header to render.
+No `spend` at `1m` — per-minute dollar ceiling is rate limit in costume; `requests` and `tokens` already shape burst there. No `1d` either; `usage_daily` is reporting rollup, and every extra window is another counter to keep, another header to render.
 
-Every window **slides**. A fixed one resets on a clock edge, letting a key
-limited to sixty a minute send sixty at `T+59s` and sixty more at `T+61s` — twice
-its ceiling, no rule broken, at every window size.
+Every window **slides**. Fixed one resets on clock edge, letting key limited to sixty a minute send sixty at `T+59s`, sixty more at `T+61s` — twice ceiling, no rule broken, at every window size.
 
 ```mermaid
 flowchart TD
@@ -105,64 +88,27 @@ flowchart TD
   debit -.-> counts
 ```
 
-Three things in that picture are load-bearing.
+Three things load-bearing there.
 
-**The claim is synchronous.** The ring stamp and the gauge are taken before the
-first `await`, and given back if the request is refused. Reading counters first
-and recording after would let every concurrent request for a key judge the same
-pre-burst snapshot — not a narrow race, since the `await` alone is enough to
-yield and no I/O need be involved.
+**Claim is synchronous.** Ring stamp and gauge taken before first `await`, given back if request refused. Read-first-record-after would let every concurrent request for a key judge same pre-burst snapshot — not narrow race, since `await` alone enough to yield and no I/O need be involved.
 
-**The arithmetic is a pure package.** `@omni/ratelimit` holds no clock and no
-state; `now` is a parameter and the counters are handed to it, so it never learns
-whether a number came from memory or from SQLite. Rings and gauge live in
-`apps/gateway`, which is what makes the arithmetic testable without a gateway, a
-store, or a clock.
+**Arithmetic is pure package.** `@omni/ratelimit` holds no clock, no state; `now` is parameter, counters handed to it, so it never learns whether number came from memory or SQLite. Rings and gauge live in `apps/gateway` — that what makes arithmetic testable without gateway, store, or clock.
 
-**The counts may run high and never low.** A long window is a rollup read cached
-thirty seconds plus an in-memory delta, and requests aging out inside that window
-are not subtracted — so the figure errs toward *refusing early*. The opposite
-error is a limiter you can walk through by timing the cache refresh, which an
-attacker can find and an operator cannot.
+**Counts may run high, never low.** Long window = rollup read cached thirty seconds plus in-memory delta; requests aging out inside that window not subtracted — figure errs toward *refusing early*. Opposite error is limiter you walk through by timing cache refresh, which attacker finds and operator cannot.
 
-`tokens` and `spend` debit on completion, because an exact count exists only
-then: a key at its ceiling is refused on its *next* request. So does `requests`
-at `5h`/`1w`, for a different reason — those read committed rows, and an
-admission held in the delta but pruned before its row landed would be counted
-nowhere. A concurrent burst can therefore overshoot a long request ceiling by the
-number in flight, which is what the `concurrency` gauge bounds.
+`tokens` and `spend` debit on completion, because exact count exists only then: key at ceiling refused on *next* request. So does `requests` at `5h`/`1w`, different reason — those read committed rows, and admission held in delta but pruned before its row landed counted nowhere. Concurrent burst can therefore overshoot long request ceiling by number in flight — what `concurrency` gauge bounds.
 
-That gauge is the one number with no expiry, which makes its release the most
-dangerous line here. Non-streaming frees it in a request-scope `finally`; a
-stream frees it from `sseResponse`'s run-once completion, because a streaming
-handler returns as soon as the head is ready while the request runs on. A
-decrement beside the debit never runs for a client that hung up; one in the
-`finally` runs mid-stream. Either leaks a slot nothing reclaims, silently.
+That gauge is one number with no expiry, making its release most dangerous line here. Non-streaming frees it in request-scope `finally`; stream frees it from `sseResponse`'s run-once completion, because streaming handler returns as soon as head ready while request runs on. Decrement beside debit never runs for client that hung up; one in `finally` runs mid-stream. Either leaks slot nothing reclaims, silently.
 
-If the store cannot answer, long windows stop enforcing and the gateway logs it,
-while `1m` and `concurrency` go on exactly — which is the justification for
-serving rather than refusing: the limits that stop abuse fastest never touch the
-database.
+If store cannot answer, long windows stop enforcing and gateway logs it, while `1m` and `concurrency` go on exactly — justification for serving rather than refusing: limits that stop abuse fastest never touch database.
 
-Limits live as one validated JSON object on `api_keys.limits`, so the dimension
-and window names are persisted in every row — a storage contract like
-`RTK_FILTER_IDS` with the opposite failure mode. An unknown RTK id is dropped on
-read; an unknown limit key is a **parse failure**, because a limit read as "no
-limit" fails open on a ceiling an operator set. That refusal lands at
-authentication rather than in the row parser, so `keys.list()` still returns the
-unparseable key, marked — the listing is how an operator finds the row to fix.
+Limits live as one validated JSON object on `api_keys.limits`, so dimension and window names persisted in every row — storage contract like `RTK_FILTER_IDS` with opposite failure mode. Unknown RTK id dropped on read; unknown limit key is **parse failure**, because limit read as "no limit" fails open on ceiling operator set. That refusal lands at authentication rather than row parser, so `keys.list()` still returns unparseable key, marked — listing is how operator finds row to fix.
 
-Clients see each vendor's own dialect — `anthropic-ratelimit-*`,
-`x-ratelimit-*`, and `Retry-After` on every 429 — so an SDK backs off with the
-code it already ships. `spend` and `concurrency` appear on neither: no vendor
-defines a header for them.
+Clients see each vendor's own dialect — `anthropic-ratelimit-*`, `x-ratelimit-*`, `Retry-After` on every 429 — so SDK backs off with code it already ships. `spend` and `concurrency` appear on neither: no vendor defines header for them.
 
 ## Routing
 
-The router is a pure function over an immutable snapshot of credentials, health,
-quota, models, and settings, plus a live count of in-flight requests. It returns
-candidates in the order to try them, and every excluded account with its reason —
-which is exactly what `omni models dry-run` prints.
+Router is pure function over immutable snapshot of credentials, health, quota, models, settings, plus live count of in-flight requests. Returns candidates in order to try, and every excluded account with its reason — exactly what `omni models dry-run` prints.
 
 ```mermaid
 flowchart LR
@@ -188,28 +134,17 @@ flowchart LR
   strat -.- opts["priority · roundRobin<br/>weighted · score"]
 ```
 
-The exclusion reading *provider said 429* is `credential_health.rate_limited_until`
-— an upstream account this gateway is routing around, set from a provider's own
-`Retry-After`. It is not the key limit above and not the quota-probe cooldown
-either. Three unrelated things in this codebase are called a rate limit, they sit
-at three different scopes — gateway key, provider credential, probe loop — and
-only the first is a policy an operator authors.
+Exclusion reading *provider said 429* is `credential_health.rate_limited_until` — upstream account this gateway routing around, set from provider's own `Retry-After`. Not the key limit above, not the quota-probe cooldown either. Three unrelated things in this codebase called rate limit, sitting at three scopes — gateway key, provider credential, probe loop — and only first is policy an operator authors.
 
-Weights shown are the defaults and are configurable. A request carrying an
-Anthropic-defined tool is excluded from every non-Anthropic target at the filter
-stage — which is why it fails at routing with the requirement named, rather than
-quietly losing the tool. The breaker's cooldown scales with consecutive failures.
+Weights shown are defaults, configurable. Request carrying Anthropic-defined tool excluded from every non-Anthropic target at filter stage — why it fails at routing with requirement named, rather than quietly losing tool. Breaker cooldown scales with consecutive failures.
 
-Nothing here is thrown away: the exclusion list with its reasons is exactly what
-`omni models dry-run` prints.
+Nothing here thrown away: exclusion list with reasons is exactly what `omni models dry-run` prints.
 
 ## Dispatch
 
-Dispatch is where the side effects the router refuses to have actually live: the
-request deadline, retries, failover, token refresh, health writes, cost pricing,
-and load accounting.
+Dispatch is where side effects router refuses to have actually live: request deadline, retries, failover, token refresh, health writes, cost pricing, load accounting.
 
-The important rule is the **commit point**:
+Important rule is **commit point**:
 
 ```mermaid
 flowchart TD
@@ -227,46 +162,46 @@ flowchart TD
   late -- no --> done(["end · usage · cost"])
 ```
 
-Everything left of the commit point is invisible to the client: a rate-limited or
-broken account is swapped for another and the request simply succeeds. Everything
-right of it is not, and pretending otherwise would corrupt the stream.
+Everything left of commit point invisible to client: rate-limited or broken account swapped for another, request simply succeeds. Everything right of it is not, and pretending otherwise would corrupt stream.
 
-Circuit-breaker state and latency are written back on every terminal outcome, so
-the next request's ranking reflects this one.
+Circuit-breaker state and latency written back on every terminal outcome, so next request's ranking reflects this one.
 
 ## Providers
 
-Five adapters, each a directory of the same four files:
+Six adapters. Five are directories of roughly same four files — `wire.ts`, `decode.ts`, `models.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types, `kimi` and `grok` carry `device.ts` for device-code flows.
 
 ```mermaid
 flowchart LR
   ir(["ChatRequest<br/>(IR)"]) --> wire["wire.ts<br/><i>IR → provider body</i>"]
-  wire --> http["http-client.ts<br/><b>node:http, not fetch</b>"]
-  http --> up[("Anthropic · OpenAI Responses<br/>Kimi · xAI · custom origin")]
+  wire --> http["http-client.ts<br/><b>node:http, not fetch</b><br/><i>autoSelectFamilyAttemptTimeout 3s</i>"]
+  http --> up[("Anthropic · OpenAI Responses<br/>Kimi · Kilo · xAI")]
   up --> dec["decode.ts<br/><i>SSE → StreamEvent</i>"]
   dec --> ev(["StreamEvent<br/>(IR)"])
   cat["models.ts → catalog<br/><i>pricing + limits, defaults only</i>"] -.-> wire
+
+  custom["<b>custom</b><br/><i>index.ts only — 62 lines</i>"] -. "borrows kimi's codec<br/>or openai's Responses codec" .-> wire
+  custom -. "operator-supplied origin" .-> http
 ```
 
-The `custom` adapter points another provider's codec at a different origin.
+Sixth, `custom`, has no `wire.ts` and no `decode.ts` of its own: existing codec pointed at operator-supplied origin, and that whole adapter.
 
-All outbound HTTP goes through one client, and that client is built on
-`node:http` rather than `fetch` for a specific reason: Bun's `fetch` alphabetizes
-request headers, which destroys the header order and casing providers use to
-recognize a first-party CLI. The client preserves both verbatim, and logs only
-host, path, status, and duration.
+All outbound HTTP goes through one client, built on `node:http` rather than `fetch` for specific reason: Bun's `fetch` alphabetizes request headers, destroying header order and casing providers use to recognize first-party CLI. Client preserves both verbatim, logs only host, path, status, duration.
 
-The catalog supplies defaults — pricing and context limits — at the moment you
-create a target. The router then prices from the saved target, so editing the
-catalog affects new targets only.
+One constant in that client worth naming, because failure it prevents reads as provider outage and is not one. Node's `autoSelectFamily` on by default, gives each address family fixed budget before moving to next — budget whose default is *below* Linux's one-second initial TCP retransmit timeout. So dropped SYN, routine on lossy path, abandoned at ~500 ms instead of recovering at ~1000 ms, and where other family cannot serve at all (AAAA record, no IPv6 route) both attempts spent and connect simply fails. `CONNECT_ATTEMPT_TIMEOUT_MS` raises it to 3 s, pinned by test asserting it stays above that RTO. Measured: 3 failures in 99 connects at default, 0 in 212 once raised, previously-failing connects completing at 1007–1061 ms.
+
+Catalog supplies defaults — pricing and context limits — at moment you create target. Router then prices from saved target, so editing catalog affects new targets only.
 
 ## Storage
 
-One SQLite file, WAL mode, ten migrations — plus, when body capture is on, a
-tree of encrypted artifacts beside it.
+One SQLite file, WAL mode, eleven migrations — plus, when body capture on, tree of encrypted artifacts beside it.
 
 ```mermaid
 flowchart TB
+  subgraph ledger[Schema ledgers]
+    mig["<b>migrations</b><br/>core's 001…011"]
+    pmig["<b>plugin_migrations</b><br/>one track per plugin,<br/><i>independent of core's numbering</i>"]
+  end
+
   subgraph accounts[Accounts]
     cred["<b>credentials</b><br/>access_token 🔒 refresh_token 🔒<br/>api_key 🔒 id_token 🔒"]
     health["<b>credential_health</b><br/>breaker · failures · ewma ttft"]
@@ -295,111 +230,37 @@ flowchart TB
   logs == "same transaction" ==> hourly
   logs -. "requestId" .- bodies
   bodies -. "rel_path" .-> artifact
+  pmig -. "plugin_&lt;id&gt;_&lt;name&gt;" .-> ptab["<i>plugin tables</i><br/>named by the host"]
 ```
 
-Writing the rollup in the *same transaction* as the log row is what lets a year of
-usage history survive the 30-day pruning of the detailed logs.
+Admin sessions not on that diagram because not in database: they live in `Map` in gateway process — why restart signs everyone out, why restore must end them explicitly rather than by replacing table.
 
-`quota_samples` is written in the same transaction as the snapshot it describes, and only
-when the reading actually changed — an idle account is re-read every poll interval and moves
-nothing. `quota_windows` therefore answers "what is true now" and carries liveness in its
-`observed_at`; `quota_samples` answers "how did it get here". The burn estimate needs only
-the former, so it works on an install with no accumulated history.
+Writing rollup in *same transaction* as log row is what lets year of usage history survive 30-day pruning of detailed logs.
 
-Encryption is a boundary, not a pass. Only the four 🔒 fields are sealed, with
-AES-256-GCM under a key derived from `OMNI_ENCRYPTION_KEY`, and decryption is
-lazy and purpose-scoped — a credential opens *for inference*, *for refresh*, or
-*for usage*, so ranking ten candidates costs zero decryptions. Gateway API keys
-are not stored at all, only their hashes.
+`quota_samples` written in same transaction as snapshot it describes, only when reading actually changed — idle account re-read every poll interval, moves nothing. `quota_windows` therefore answers "what is true now" and carries liveness in `observed_at`; `quota_samples` answers "how did it get here". Burn estimate needs only former, so works on install with no accumulated history.
 
-`request_bodies` is the one table whose payload is not in the database. Bodies
-are the largest thing this gateway could store — one conversation with a pasted
-file in it dwarfs the whole of `request_logs` — and inlining them would carry
-every prompt through the same page cache, the same WAL, and the same `VACUUM` as
-the routing tables, one `sqlite3` invocation from plaintext. The row therefore
-holds a pointer and a `sha256` **over the ciphertext**, so on-disk truncation is
-detectable by a reader that does not hold the key at all. That is what lets the
-reader answer `missing` or `corrupt` instead of raising: a file tree and a table
-that are not written transactionally together *will* drift, and expiry deletes
-file and row explicitly rather than by `ON DELETE CASCADE`, because a silently
-disabled `foreign_keys` pragma would turn expiry of a prompt corpus into
-indefinite retention of one.
+Encryption is boundary, not pass. Only four 🔒 fields sealed, AES-256-GCM under key derived from `OMNI_ENCRYPTION_KEY`, decryption lazy and purpose-scoped — credential opens *for inference*, *for refresh*, or *for usage*, so ranking ten candidates costs zero decryptions. Gateway API keys not stored at all, only hashes.
 
-Capture needs two keys — `OMNI_BODY_LOGGING_ALLOWED` at boot and
-`settings.bodyLoggingEnabled` at runtime — and a third can veto it: an API key
-carrying `body_logging_opt_out` is never captured. Both are checked in
-`apps/gateway/src/routes/proxy.ts` before any capture work begins. Reading back
-is `readRequestBody` in `@omni/control`, served by `GET /api/requests/:id/body`
-behind the same admin session as every other `/api/*` route.
+`request_bodies` is one table whose payload not in database. Bodies are largest thing this gateway could store — one conversation with pasted file dwarfs whole of `request_logs` — and inlining them would carry every prompt through same page cache, same WAL, same `VACUUM` as routing tables, one `sqlite3` invocation from plaintext. Row therefore holds pointer and `sha256` **over the ciphertext**, so on-disk truncation detectable by reader holding no key at all. That what lets reader answer `missing` or `corrupt` instead of raising: file tree and table not written transactionally together *will* drift, and expiry deletes file and row explicitly rather than by `ON DELETE CASCADE`, because silently disabled `foreign_keys` pragma would turn expiry of prompt corpus into indefinite retention of one.
 
-One artifact holds the client pair and every wire pair together, so a failover
-incident reads as one ordered story. The two are not the same payload: RTK's
-`transformRequest` runs in dispatch before routing, so `client.request` is the
-pre-filter conversation and every `attempts[].request` is the post-filter one.
-`request_logs` already records which filters ran and how much they removed but
-not *what*, and the artifact is the only place that can be read — which is why
-the console labels each side rather than presenting them as interchangeable.
+Capture needs two keys — `OMNI_BODY_LOGGING_ALLOWED` at boot, `settings.bodyLoggingEnabled` at runtime — and third can veto: API key carrying `body_logging_opt_out` never captured. Both checked in `apps/gateway/src/routes/proxy.ts` before any capture work begins. Reading back is `readRequestBody` in `@omni/control`, served by `GET /api/requests/:id/body` behind same admin session as every other `/api/*` route.
+
+One artifact holds client pair and every wire pair together, so failover incident reads as one ordered story. The two not same payload: RTK's `transformRequest` runs in dispatch before routing, so `client.request` is pre-filter conversation and every `attempts[].request` is post-filter one. `request_logs` already records which filters ran and how much they removed but not *what*; artifact is only place that can be read — why console labels each side rather than presenting them as interchangeable.
 
 ### Replacing the database while it is open
 
-A snapshot is `VACUUM INTO` a file in `snapshots/` beside the database. That
-folds the write-ahead log in by definition, so there is no `-wal` or `-shm` to
-handle on the way out, and it reads through SQLite rather than copying the file,
-so taking one against a live gateway yields a consistent database rather than a
-torn one. The `request_bodies/` tree is excluded by construction: including it
-would make every downloaded copy a prompt corpus and would make snapshot size
-track prompt volume rather than database size. A restore therefore leaves the two
-sides out of step, which is a state that already exists and is already handled:
-the orphan sweep above collects files the restored `bodies` table no longer
-references, and a row whose file is gone reads back as *captured, then lost*
-rather than raising.
-Retention — `keepLatest` and `maxAgeDays`, both enforced, newest always kept —
-prunes when a snapshot is written *and* on the hourly sweep. Both, because the
-create path alone is not a policy: an installation that stops taking snapshots
-never expires one, and lowering `keepLatest` does nothing until somebody happens
-to take another. The forced copy taken on the way into a restore skips the prune
-during its own creation and stays exempt from every later one, because the undo
-for an operation must not be deletable by the policy that operation runs under —
-nor by ordinary housekeeping five manual snapshots later. The same sweep removes
-staging files no operation is holding any more: an upload a refused import wrote,
-and the `${db}.incoming` a swap that failed after its rename left behind. Both
-are database-sized and nothing else looks at that directory.
+Snapshot is `VACUUM INTO` a file in `snapshots/` beside database. That folds write-ahead log in by definition, so no `-wal` or `-shm` to handle on way out, and it reads through SQLite rather than copying file, so taking one against live gateway yields consistent database, not torn one. `request_bodies/` tree excluded by construction: including it would make every downloaded copy a prompt corpus and make snapshot size track prompt volume rather than database size. Restore therefore leaves the two sides out of step — state that already exists and is already handled: orphan sweep above collects files restored `bodies` table no longer references, and row whose file is gone reads back as *captured, then lost* rather than raising.
+Retention — `keepLatest` and `maxAgeDays`, both enforced, newest always kept — prunes when snapshot written *and* on hourly sweep. Both, because create path alone is not policy: install that stops taking snapshots never expires one, and lowering `keepLatest` does nothing until somebody happens to take another. Forced copy taken on way into restore skips prune during its own creation and stays exempt from every later one, because undo for an operation must not be deletable by policy that operation runs under — nor by ordinary housekeeping five manual snapshots later. Same sweep removes staging files no operation holds any more: upload a refused import wrote, and `${db}.incoming` a swap that failed after its rename left behind. Both database-sized, nothing else looks at that directory.
 
-Restoring one replaces the file every repo reads from, inside the process that is
-reading it. Three pieces make that survivable.
+Restoring one replaces file every repo reads from, inside process reading it. Three pieces make that survivable.
 
-**The store is swappable.** `createStore` returns a stable outer object whose repo
-methods forward, *per call*, to a replaceable inner handle; `reopen()` closes the
-inner handle and opens a new one at the same path, and `close()` is idempotent so
-a restore can close, move a file, and reopen without a separate primitive. The
-indirection is not decoration. The store is captured by value into five long-lived
-holders at boot — the app, the refresher, and the three loops — and two dozen
-modules are typed against `Store`, so closing and re-opening a connection
-underneath them would leave every one of them holding repos bound to a dead
-`Database`. Reading the handle per call is what makes the swap invisible to them.
-It also means binding a repo method to a local defeats the whole mechanism and
-strands that local on the closed handle. Routing subscribers live on the outer
-object for the same reason: a listener registered at boot has to survive a
-restore.
+**Store is swappable.** `createStore` returns stable outer object whose repo methods forward, *per call*, to replaceable inner handle; `reopen()` closes inner handle and opens new one at same path, and `close()` is idempotent so restore can close, move file, reopen without separate primitive. Indirection not decoration. Store captured by value into five long-lived holders at boot — app, refresher, three loops — and two dozen modules typed against `Store`, so closing and re-opening connection underneath them would leave every one holding repos bound to dead `Database`. Reading handle per call is what makes swap invisible to them. Also means binding repo method to local defeats whole mechanism and strands that local on closed handle. Routing subscribers live on outer object for same reason: listener registered at boot must survive restore.
 
-**A quiesce latch gates client traffic, and only client traffic.** `/v1/*` is
-refused with a 503 and a `retry-after`, rendered by the same encoders the proxy
-uses so an SDK gets an error in the dialect it already parses. `/api/*` and
-`/health` stay live for the whole operation: the console is how an operator
-watches a restore and how they hear that it failed, so a latch that covered the
-whole server would black out the dashboard at the exact moment it is needed and
-take the load balancer's health check with it.
+**Quiesce latch gates client traffic, and only client traffic.** `/v1/*` refused with 503 and `retry-after`, rendered by same encoders proxy uses so SDK gets error in dialect it already parses. `/api/*` and `/health` stay live for whole operation: console is how operator watches restore and how they hear it failed, so latch covering whole server would black out dashboard at exact moment it needed and take load balancer's health check with it.
 
-What the latch waits for is requests being *answered*, not streams draining.
-Elysia's `onAfterResponse` fires when the response is handed back, which for SSE
-is long before the body ends. So the wait is bounded — ten seconds — and the latch
-stays shut for the whole swap rather than only until the in-flight count reaches
-zero, because a stream admitted before the close is still reading through the
-handle the swap is about to replace.
+What latch waits for is requests being *answered*, not streams draining. Elysia's `onAfterResponse` fires when response handed back, which for SSE is long before body ends. So wait is bounded — ten seconds — and latch stays shut for whole swap rather than only until in-flight count hits zero, because stream admitted before close still reads through handle swap is about to replace.
 
-**The sequence is ordered so that neither of the two things making it recoverable
-can be skipped:** nothing is closed until the candidate has been judged, and
-nothing is swapped until the undo exists.
+**Sequence ordered so neither of two things making it recoverable can be skipped:** nothing closed until candidate judged, nothing swapped until undo exists.
 
 ```mermaid
 flowchart TD
@@ -416,82 +277,26 @@ flowchart TD
   roll --> open(["latch reopens"])
 ```
 
-The error seam is the distinction worth internalizing. Everything before the swap
-— a file that fails `quick_check`, a file that is a database but not one of ours,
-no room on disk for the undo, **no room for the staging copy** — fails with the
-live database untouched, and the latch reopens immediately. The staging copy in
-particular sits outside the swap's `try`, because a full disk is where it
-actually fails and it fails having moved nothing: classing that as a failed swap
-would refuse `/v1` until an operator restarted the process, over a database that
-was never opened.
+Error seam is distinction worth internalizing. Everything before swap — file failing `quick_check`, file that is database but not ours, no room on disk for undo, **no room for staging copy** — fails with live database untouched, latch reopens immediately. Staging copy in particular sits outside swap's `try`, because full disk is where it actually fails and it fails having moved nothing: classing that as failed swap would refuse `/v1` until operator restarted process, over database never opened.
 
-A failure *during* the swap raises `SwapFailedError`, and the gateway
-deliberately leaves the latch shut: the file it would serve from is in an unknown
-state, and refusing client traffic beats answering out of a half-swapped
-database. The handle itself is reopened on the way out, best effort, and the
-error carries whether that worked — because both halves of the documented
-recovery run through it. `GET /api/database` reads PRAGMAs through that handle
-and a second attempt takes its own undo snapshot through it, so a swap that left
-the database closed would leave the panel blank and turn the retry into a
-different, unrecognised failure. `/api/*` is still up, which is how an operator
-reaches the pre-restore snapshot named in the log line.
+Failure *during* swap raises `SwapFailedError`, and gateway deliberately leaves latch shut: file it would serve from is in unknown state, and refusing client traffic beats answering out of half-swapped database. Handle itself reopened on way out, best effort, and error carries whether that worked — because both halves of documented recovery run through it. `GET /api/database` reads PRAGMAs through that handle and second attempt takes its own undo snapshot through it, so swap that left database closed would leave panel blank and turn retry into different, unrecognised failure. `/api/*` still up — how operator reaches pre-restore snapshot named in log line.
 
-The latch is reopened only by the call that shut it, and only on a failure. Two
-mutating requests can overlap — a double-clicked button, two tabs — and the
-single-flight guard that refuses the second lives *inside* the operation, which
-the gateway reaches only after closing the latch. Without that rule the refused
-request reopens the gate while the first is mid-swap, which is precisely the
-window the latch exists to cover. Success reopens unconditionally, because
-restoring the undo snapshot is the documented way out of a failed swap and it has
-to end that outage rather than inherit it.
+Latch reopened only by call that shut it, and only on failure. Two mutating requests can overlap — double-clicked button, two tabs — and single-flight guard refusing second lives *inside* operation, which gateway reaches only after closing latch. Without that rule refused request reopens gate while first mid-swap — precisely the window latch exists to cover. Success reopens unconditionally, because restoring undo snapshot is documented way out of failed swap and it must end that outage rather than inherit it.
 
-The required-tables check is the set migration 001 creates, not today's schema.
-`openDb` migrates a snapshot forward on the way in, so asserting the current
-tables would reject exactly the old backup an operator reaches for.
+Required-tables check is set migration 001 creates, not today's schema. `openDb` migrates snapshot forward on way in, so asserting current tables would reject exactly the old backup operator reaches for.
 
-Two smaller placements carry weight. The candidate is copied to a staging name
-*before* the handle closes, so the window with no database open is a rename and
-not a file copy. And an uploaded database is streamed to a temp file beside the
-live one rather than into `/tmp`, because the swap renames that file into place
-and a rename across filesystems fails. That upload is bounded twice: by the byte
-cap this gateway will accept at all, and by what the disk can take with room left
-for the undo snapshot the import is about to write — the same precheck
-`createSnapshot` runs, on the one path that accepts operator-supplied bytes. The
-stale
-`-wal` and `-shm` go while the handle is shut: they belong to the file being
-replaced, and SQLite reopening a new database beside another database's
-write-ahead log is how a restore becomes corruption.
+Two smaller placements carry weight. Candidate copied to staging name *before* handle closes, so window with no database open is a rename, not a file copy. And uploaded database streamed to temp file beside live one rather than into `/tmp`, because swap renames that file into place and rename across filesystems fails. That upload bounded twice: by byte cap this gateway accepts at all, and by what disk can take with room left for undo snapshot import about to write — same precheck `createSnapshot` runs, on the one path accepting operator-supplied bytes. Stale
+`-wal` and `-shm` go while handle shut: they belong to file being replaced, and SQLite reopening new database beside another database's write-ahead log is how restore becomes corruption.
 
-Two pieces of derived state do not survive the swap on their own. The routing
-snapshot cache checks staleness with SQLite's `data_version`, which is
-connection-local — a freshly opened handle over a different file can report the
-same number and serve a stale snapshot — so it is invalidated explicitly. Admin
-sessions live in a `Map` rather than in the database, but `setPassword` clears
-them, so a restore that writes a different password hash is that same "log
-everyone out" event arriving by another door. The hashes are compared across the
-swap and only a boolean leaves the operation, so restoring this installation's own
-snapshot leaves the operator signed in.
+Two pieces of derived state don't survive swap on own. Routing snapshot cache checks staleness with SQLite's `data_version`, which is connection-local — freshly opened handle over different file can report same number and serve stale snapshot — so invalidated explicitly. Admin sessions live in `Map` rather than database, but `setPassword` clears them, so restore writing different password hash is that same "log everyone out" event arriving by another door. Hashes compared across swap and only boolean leaves operation, so restoring this install's own snapshot leaves operator signed in.
 
-A restore ends by rebuilding `usage_rollup`, and the *ordering* is the point.
-Nothing may sit between the swap and the password comparison: by then the swap
-has already succeeded, so a step that throws in front of the comparison skips the
-session invalidation while the restored password is live. The rebuild therefore
-runs last, and guarded — a stale rollup is an `omni doctor` complaint, a restore
-that aborts after swapping is an outage. It is recomputed rather than trusted
-because nothing in a file an operator hands over says whether its counters agree
-with its rows. `bun:sqlite` is synchronous, so it blocks the loop — and so
-`/api/*` and `/health` — for ≈0.4 s per 500k `request_logs` rows, ≈1.6 s at 2M,
-≈6.5 s at 8M.
+Restore ends by rebuilding `usage_rollup`, and *ordering* is the point. Nothing may sit between swap and password comparison: by then swap already succeeded, so step that throws in front of comparison skips session invalidation while restored password is live. Rebuild therefore runs last, guarded — stale rollup is `omni doctor` complaint, restore aborting after swap is outage. Recomputed rather than trusted because nothing in file an operator hands over says whether its counters agree with its rows. `bun:sqlite` is synchronous, so it blocks loop — and so `/api/*` and `/health` — for ≈0.4 s per 500k `request_logs` rows, ≈1.6 s at 2M, ≈6.5 s at 8M.
 
-The CLI cannot do any of this, and refuses rather than trying: `omni db restore`
-stops if a gateway is running against that installation, with no override. A
-second process can reopen its own handle but cannot quiesce the gateway's, and
-renaming the file under a live SQLite connection corrupts the database being
-rescued.
+CLI cannot do any of this, and refuses rather than trying: `omni db restore` stops if gateway running against that installation, no override. Second process can reopen own handle but cannot quiesce gateway's, and renaming file under live SQLite connection corrupts the database being rescued.
 
 ## Background loops
 
-Three, started at boot and stopped on signal:
+Three timers, plus queue drain stopped alongside them:
 
 ```mermaid
 flowchart LR
@@ -499,77 +304,68 @@ flowchart LR
   boot --> oauth
   boot --> quota
   boot --> maint
+  boot --> bus
 
   oauth["<b>OAuth refresh</b><br/>every 60s"] --> oauthJob["renew inside lead window<br/>disable if expired, no refresh token"]
-  quota["<b>Quota poller</b><br/>every quotaPollIntervalMs"] --> quotaJob["ask providers what is left<br/><i>failed probe ⇒ unknown, never disabled</i>"]
+  quota["<b>Quota poller</b><br/>every quotaPollIntervalMs<br/><i>default 300s; 0 disables</i>"] --> quotaJob["ask providers what is left<br/><i>failed probe ⇒ unknown, never disabled</i>"]
   maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs and usage_rollup at retention<br/>prune quota_samples at retention<br/>prune usage_daily at 400d<br/>prune body rows at retention, cap at 100k<br/>sweep artifact files with no row<br/>prune snapshots at retention<br/>sweep staging files older than 1h"]
+  bus["<b>Plugin event bus</b><br/><i>no interval — setTimeout(…, 0) drain</i>"] --> busJob["deliver to handlers off the request path<br/><i>bounded queue; drops rather than grows</i>"]
 
   oauthJob -.-> oauth
   quotaJob -.-> quota
   maintJob -.-> maint
+  busJob -.-> bus
+
+  stop([SIGTERM / shutdown]) ==> oauth & quota & maint & bus
 ```
 
-Setting `quotaPollIntervalMs` to zero disables the poller entirely; it is read
-once at boot. Retiring the `pending` rows at startup is what stops a crash from
-double-counting usage.
+Event bus is fourth entry in same stopper list, and teardown treats it as loop like others even though it has no interval — it holds queued work, and work running after store closes reaches closed handle exactly the way late timer would.
 
-Body rows expire on the same sweep as the request logs they belong to, rather
-than on a schedule of their own, so an artifact can never outlive its log line.
-The row cap runs beside the window because the window bounds nothing: at
-sustained load a seven-day retention over full traffic is unbounded in practice.
-The orphan sweep exists because a crash between the file write and the row write
-leaves a file nothing will ever come back for.
+Setting `quotaPollIntervalMs` to zero disables poller entirely; read once at boot. Retiring `pending` rows at startup is what stops crash from double-counting usage.
+
+Body rows expire on same sweep as request logs they belong to, rather than own schedule, so artifact can never outlive its log line. Row cap runs beside window because window bounds nothing: at sustained load, seven-day retention over full traffic is unbounded in practice. Orphan sweep exists because crash between file write and row write leaves file nothing will ever come back for.
 
 ### Stopping and restarting
 
-A signal and `POST /api/lifecycle/shutdown` reach the same teardown. They used to
-be unable to: the server, the store, and the three loop stoppers are locals of the
-bootstrap, so a handler defined anywhere else had nothing to stop. `createShutdown`
-closes over them once, and both callers get the same shutdown — loops first,
-because a timer that fires while the socket drains reaches a store that is about
-to close, then the server, then the store, then exit. A second request while the
-first is draining escalates, on the theory that the first one is evidently stuck.
+Signal and `POST /api/lifecycle/shutdown` reach same teardown. They used to be unable to: server, store, and three loop stoppers are locals of bootstrap, so handler defined anywhere else had nothing to stop. `createShutdown` closes over them once, and both callers get same shutdown — loops first, because timer firing while socket drains reaches store about to close, then server, then store, then exit. Second request while first draining escalates, on theory first one evidently stuck.
 
-The drain is bounded at five seconds. Bun stops a server by letting its
-connections finish, and a shutdown asked for over HTTP arrives on one of them, so
-the request that asked for the shutdown is itself a reason the shutdown cannot
-complete — the gateway answered `ok` and then stayed alive until a second signal
-escalated. A signal never hits this, because a shell holds no socket. On timeout
-the process exits **0**: a nonzero code would read to `Restart=on-failure` as a
-crash and resurrect a gateway an operator just asked to stop.
+Drain bounded at five seconds. Bun stops server by letting connections finish, and shutdown asked for over HTTP arrives on one of them, so request asking for shutdown is itself reason shutdown cannot complete — gateway answered `ok` then stayed alive until second signal escalated. Signal never hits this, because shell holds no socket. On timeout process exits **0**: nonzero code would read to `Restart=on-failure` as crash and resurrect gateway operator just asked to stop.
 
-Restart is not shutdown, and what it takes depends on what is watching. The
-capability is detected rather than assumed. `JOURNAL_STREAM` is systemd's own
-statement that it is capturing this process, which beats looking for an installed
-unit file — that says a unit exists, not that this process is the one it started —
-and `MANAGERPID` distinguishes the user manager from the system one, because the
-uid is wrong in both directions. Failing that, `/.dockerenv` means a container.
-Failing both, nothing would respawn the process and restart is refused.
+Restart is not shutdown, and what it takes depends on what is watching. Capability detected rather than assumed:
 
-Under systemd the gateway asks the manager instead of signalling itself:
+```mermaid
+flowchart TD
+  q(["describeLifecycle()<br/><i>pure: environment + one path probe</i>"]) --> j{JOURNAL_STREAM set?}
+  j -- yes --> sd["<b>systemd</b><br/>canRestart · canShutdown"]
+  j -- no --> d{"/.dockerenv exists?"}
+  d -- yes --> ct["<b>container</b><br/>canRestart <i>(a hope, not a fact)</i>"]
+  d -- no --> nn["<b>none</b><br/>canRestart false, with the reason"]
+
+  sd --> scope{"MANAGERPID set?"}
+  scope -- yes --> user["systemctl <b>--user</b> --no-block restart"]
+  scope -- no --> sys["systemctl --no-block restart"]
+
+  ct --> exit["exit 0 — the policy decides,<br/>and cannot be read from in here"]
+  nn --> refuse["control disabled in the console;<br/><i>omni restart from a shell instead</i>"]
+```
+
+`JOURNAL_STREAM` is systemd's own statement it captures *this* process, which beats looking for installed unit file — that says unit exists, not that this process is one it started. `MANAGERPID` is separate question asked only once systemd established: picks user manager over system one, because uid wrong in both directions. Failing first, `/.dockerenv` means container. Failing both, nothing would respawn process and restart refused.
+
+Under systemd gateway asks manager instead of signalling itself:
 
 ```
 systemctl [--user] --no-block restart omnigateway.service
 ```
 
-The unit the CLI installs sets `Restart=on-failure`, and a handled `SIGTERM` exits
-zero, which systemd reads as success — a self-signalling gateway would stop and
-stay stopped. `--no-block` is load-bearing: restarting the unit tears down its
-whole cgroup, which contains the `systemctl` client just spawned, so a blocking
-call is killed mid-wait while the queued job survives. Asking also fails better.
-A refused `systemctl` is an ordinary error response from a gateway that is still
-running and still serving, rather than a process that killed itself and hoped.
+Unit the CLI installs sets `Restart=on-failure`, and handled `SIGTERM` exits zero, which systemd reads as success — self-signalling gateway would stop and stay stopped. `--no-block` load-bearing: restarting unit tears down its whole cgroup, containing `systemctl` client just spawned, so blocking call killed mid-wait while queued job survives. Asking also fails better. Refused `systemctl` is ordinary error response from gateway still running and still serving, rather than process that killed itself and hoped.
 
-A container's restart policy is the one capability here that is a hope rather than
-a fact — it is not readable from inside the container — so a restart is an exit
-with code 0 and the console reports the uncertainty instead of promising. With no
-supervisor at all `canRestart` is false, because `omni start` without a unit is a
-detached spawn with a pidfile and nothing watching it. Shutdown stays available in
-every shape; stopping is the point of it.
+Container's restart policy is one capability here that is hope rather than fact — not readable from inside container — so restart is exit code 0 and console reports uncertainty instead of promising. With no supervisor at all `canRestart` is false, because `omni start` without unit is detached spawn with pidfile and nothing watching it. Shutdown stays available in every shape; stopping is the point of it.
 
-`describeLifecycle` is a pure function of the environment and one path probe,
-which is what lets the console disable a control and print the reason rather than
-letting an operator press it and find out.
+`describeLifecycle` is pure function of environment and one path probe — what lets console disable control and print reason rather than letting operator press it and find out.
+
+Console renders both controls at foot of its sidebar rather than on one screen. Stopping gateway is not database operation; filed next to snapshots because that page had room, and cost was that reaching it meant navigating to unrelated screen first. Rail is 168px wide, so supervisor sentence above becomes section's `title` and confirm dialog repeats whichever half of it decides what click does — disabled-control *reason* stays inline, because that one explains why button in front of you will not work.
+
+Restart is watched rather than timed. Console polls `/health` — its one documented exception to reading `/api/*` only, for reason given under [the console and the CLI](#the-console-and-the-cli) — until gateway stops answering, then until it answers again, and only then reloads. Page reloading on fixed delay would land either before process went or while still starting, and operator reads both as failed restart. Shutdown has no second half to watch, so rail says so and stops.
 
 ## The console and the CLI
 
@@ -586,99 +382,143 @@ flowchart LR
   spa["dashboard SPA<br/><i>static files, same origin</i>"] -.- browser
   gw["apps/gateway serves both"] -.- spa
   gw -.- admin
+
+  browser -- "/health only, during a restart" --> gw
 ```
 
-The console is a React SPA the gateway serves as static files from its own
-origin; it may import types and the model catalog, never a provider adapter or
-the HTTP client. The CLI skips the server completely and opens the database
-itself — same operations, no running gateway required.
+Console is React SPA gateway serves as static files from own origin; may import types and model catalog, never provider adapter or HTTP client. Its one documented exception to "`/api/*` only" is that `/health` edge: restart is exactly window in which no authenticated surface exists to ask, so liveness is one question `/api/*` cannot answer. CLI skips server completely and opens database itself — same operations, no running gateway required.
 
-Reading a captured body is one of those operations, not a route's own logic:
-`readRequestBody` decides that a swept or undecryptable artifact is a state to
-report rather than an error to raise, and the handler adds no error mapping that
-could quote a path or a stack back. It carries no CLI command yet, which is the
-only asymmetry between the two front ends. `GET /api/settings` additionally
-reports `bodyLoggingAllowed` beside the settings, because the runtime toggle is
-meaningless without the boot-time key and a console that knew only the setting
-would render a switch that silently does nothing.
+Reading captured body is one of those operations, not route's own logic: `readRequestBody` decides swept or undecryptable artifact is state to report rather than error to raise, and handler adds no error mapping that could quote path or stack back. Carries no CLI command yet — only asymmetry between the two front ends. `GET /api/settings` additionally reports `bodyLoggingAllowed` beside settings, because runtime toggle meaningless without boot-time key and console knowing only setting would render switch that silently does nothing.
 
 ## Plugins
 
-A plugin adds routes, storage and console UI to one installation without being
-part of this repository. They are loaded from `<root>/plugins/` at boot, in
-lexicographic id order so two installs with the same plugins behave the same way.
-`docs/writing-a-plugin.md` is the procedure; this section is why the shape is
-what it is.
+Plugin adds routes, storage and console UI to one installation without being part of this repository. Loaded from `<root>/plugins/` at boot, in lexicographic id order so two installs with same plugins behave same way. `docs/writing-a-plugin.md` is procedure; this section is why shape is what it is.
+
+```mermaid
+flowchart LR
+  disk[("&lt;root&gt;/plugins/&lt;id&gt;/<br/><i>lexicographic id order</i>")] --> load["loader<br/><i>manifest · API major · import · setup · migrations</i>"]
+  load -- "any failure" --> skip["skip one plugin<br/>report to stdout + omni doctor"]
+  load -- ok --> ctx["PluginContext<br/><i>capability-scoped</i>"]
+
+  ctx --> routes["routes under /api/plugins/&lt;id&gt;/*"]
+  ctx --> store["storage → plugin_&lt;id&gt;_&lt;name&gt;"]
+  ctx --> files["files → &lt;root&gt;/plugins/&lt;id&gt;/data/"]
+  ctx --> net["net:outbound → declared origins only"]
+  ctx --> events["events:request · events:limit"]
+  ctx --> ui["UI bundle at /plugin-assets/&lt;id&gt;/…"]
+
+  skip -.-> serving(["gateway serves either way<br/><i>the proxy path depends on no plugin</i>"])
+  ctx -.-> serving
+```
 
 ### The trust boundary, which is not one
 
-A plugin is `import`ed into the gateway process, and that process holds the
-encryption key, decrypted provider credentials, admin session state and API-key
-hashes. Bun offers no in-process sandbox. The capability context is therefore a
-**guardrail rather than a sandbox**: it makes accidental overreach impossible and
-a plugin's intent auditable from its manifest, and it does not stop hostile code,
-which can reach past it by importing the store directly.
+Plugin is `import`ed into gateway process, and that process holds encryption key, decrypted provider credentials, admin session state and API-key hashes. Bun offers no in-process sandbox. Capability context is therefore **guardrail rather than sandbox**: makes accidental overreach impossible and plugin's intent auditable from its manifest, and does not stop hostile code, which reaches past it by importing store directly.
 
-A supervised subprocess with an IPC protocol would be a real boundary. It was
-considered and deferred on cost — process supervision, protocol versioning,
-restart semantics — and the decision is recorded rather than assumed. If this
-project ever accepts plugins it does not control, that is the point to revisit,
-before rather than after.
+```mermaid
+flowchart TB
+  subgraph proc["one Bun process — one memory space"]
+    gw["gateway"]
+    key["OMNI_ENCRYPTION_KEY<br/>decrypted credentials<br/>admin sessions · key hashes"]
+    plug["plugin code"]
+  end
+
+  plug -- "what the manifest declares" --> ctx["PluginContext<br/><i>storage · files · net · events</i>"]
+  ctx --> gw
+  plug -. "<b>what nothing prevents</b><br/>import @omni/store directly" .-> key
+
+  classDef bad stroke-dasharray: 5 5
+  class plug,key bad
+```
+
+Dashed edge is whole point of section. Not a gap to be closed by better context object; it is what "same process" means. Say it plainly wherever it comes up — reader believing context is sandbox makes worse installation decisions than one who knows it is not.
+
+Supervised subprocess with IPC protocol would be real boundary. Considered and deferred on cost — process supervision, protocol versioning, restart semantics — and decision recorded rather than assumed. If this project ever accepts plugins it does not control, that is point to revisit, before rather than after.
 
 ### Every failure is survivable
 
-A malformed manifest, an incompatible API major, an entry that will not import, a
-setup that throws, a migration that fails: each skips one plugin, is reported to
-stdout and to `omni doctor`, and leaves the gateway serving. The asymmetry is
-deliberate. The proxy path depends on no plugin and must not become able to, and
-a gateway that refuses to start because an optional cosmetic feature has a syntax
-error has converted a nuisance into an outage — while also removing the console
-an operator would use to find out which plugin to remove.
+```mermaid
+flowchart LR
+  s([boot]) --> m{manifest parses?}
+  m -- no --> x
+  m -- yes --> v{API major<br/>compatible?}
+  v -- no --> x
+  v -- yes --> i{entry imports?}
+  i -- no --> x
+  i -- yes --> u{"setup() returns?"}
+  u -- throws --> x
+  u -- yes --> g{migrations apply?<br/><i>one transaction each</i>}
+  g -- no --> x
+  g -- yes --> ok(["loaded"])
+
+  x(["skipped, with the reason<br/><i>stdout + omni doctor + a disabled nav entry</i>"]) --> serve
+  ok --> serve([" gateway serves "])
+```
+
+Malformed manifest, incompatible API major, entry that will not import, setup that throws, migration that fails: each skips one plugin, reported to stdout and `omni doctor`, leaves gateway serving. Asymmetry deliberate. Proxy path depends on no plugin and must not become able to, and gateway refusing to start because optional cosmetic feature has syntax error has converted nuisance into outage — while also removing console operator would use to find out which plugin to remove.
 
 ### Storage rides the database, on its own track
 
-Plugin tables live in the gateway's own SQLite file, so a plugin's data moves
-with a snapshot and a restore like everything else. They are named
-`plugin_<id>_<name>` by the host from a `{{name}}` placeholder the plugin writes,
-and tracked in `plugin_migrations` independently of core's numbering — core's
-next migration is unaffected by anything a plugin does.
+```mermaid
+flowchart TB
+  subgraph one["one omnigateway.db"]
+    core["core tables<br/><i>migrations: 001…011</i>"]
+    p1["plugin_pokemon_*<br/><i>plugin_migrations: pokemon 1…n</i>"]
+    p2["plugin_other_*<br/><i>plugin_migrations: other 1…m</i>"]
+  end
 
-Plugin migrations apply one transaction each rather than one for the batch. A
-single transaction reads tidier and is wrong: a plugin failing on migration 5
-would silently revert 1 through 4 on every subsequent boot, turning one bad
-migration into repeated data loss.
+  one --> snap["snapshot<br/><i>VACUUM INTO — takes plugin data with it</i>"]
+  snap --> rest{"restore onto an install<br/>without that plugin?"}
+  rest -- yes --> orph["tables stay as orphans<br/><i>omni doctor reports; nothing auto-drops</i>"]
+  rest -- no --> fine(["plugin resumes on its own track"])
 
-Restoring onto an install that lacks a plugin leaves orphan `plugin_*` tables.
-They stay, `omni doctor` reports them, and nothing drops them automatically — a
-restore is precisely when a plugin may not be installed yet, and the drop is
-irreversible.
+  rm["omni plugin remove"] -.-> keep["directory goes, tables stay"]
+  rmp["omni plugin remove --purge"] -.-> drop["tables dropped, after confirming"]
+```
+
+Plugin tables live in gateway's own SQLite file, so plugin data moves with snapshot and restore like everything else. Named `plugin_<id>_<name>` by host from `{{name}}` placeholder plugin writes, tracked in `plugin_migrations` independently of core's numbering — core's next migration unaffected by anything plugin does.
+
+Plugin migrations apply one transaction each rather than one for batch. Single transaction reads tidier and is wrong: plugin failing on migration 5 would silently revert 1 through 4 on every subsequent boot, turning one bad migration into repeated data loss.
+
+Restoring onto install lacking a plugin leaves orphan `plugin_*` tables. They stay, `omni doctor` reports them, nothing drops them automatically — restore is precisely when plugin may not be installed yet, and drop is irreversible.
 
 ### Events are at-most-once, and say so
 
-`RequestCompleted` is emitted from `finishLog`, which is already the one site
-running at most once per request id — the same guarantee, and the same reason,
-that put the rate-limiter's token debit there. Handlers run off the request path
-through a bounded queue: nothing runs on the caller's stack, a throwing handler
-costs that plugin its event and nothing else, and a full queue drops rather than
-grows, because an unbounded queue behind a slow handler is a memory leak that
-only appears under load.
+```mermaid
+flowchart LR
+  fin["finishLog()<br/><i>already at-most-once per request id</i>"] --> emit["emit RequestCompleted"]
+  emit --> q{"bounded queue"}
+  q -- full --> drop(["<b>dropped</b>, never grown"])
+  q -- room --> drain["drain off the request path<br/><i>setTimeout(…, 0)</i>"]
+  drain --> h1["handler A"]
+  drain --> h2["handler B — throws"]
+  h2 --> lost(["that plugin loses that event<br/><i>and nothing else does</i>"])
+  kill(["process dies with work queued"]) -.-> gone(["<b>gone</b> — delivery is not durable"])
+```
 
-Delivery is explicitly **not durable**. An event queued when the process dies is
-gone. That is fine for a counter and wrong for a ledger, and the distinction is
-documented rather than left for someone to assume the wrong half.
+`RequestCompleted` emitted from `finishLog`, already the one site running at most once per request id — same guarantee, same reason, that put rate-limiter's token debit there. Handlers run off request path through bounded queue: nothing runs on caller's stack, throwing handler costs that plugin its event and nothing else, and full queue drops rather than grows, because unbounded queue behind slow handler is memory leak appearing only under load.
+
+Delivery explicitly **not durable**. Event queued when process dies is gone, so anything needing exact accounting reconciles from its own storage instead. Fine for counter, wrong for ledger, and distinction documented rather than left for someone to assume wrong half.
 
 ### The console shares one React
 
-Plugins render inline in the console, which means both halves must hold the same
-React instance — two copies make every plugin hook throw. So the console
-externalises `react`, `react-dom`, `styled-components` and `@tanstack/react-query`
-rather than bundling them, and an import map in `index.html` resolves those bare
-specifiers to a shared runtime built beside it. The specifier list, the import
-map and the shared build's entry points are one object in
-`apps/dashboard/shared/manifest.ts`, because those three drifting apart fails in
-three different and equally unhelpful ways.
+```mermaid
+flowchart TB
+  man["apps/dashboard/shared/manifest.ts<br/><b>one list, three consumers</b>"]
+  man --> ext["build externals<br/><i>console does not bundle them</i>"]
+  man --> imap["import map in index.html"]
+  man --> shared["shared runtime build"]
 
-An `sdk` range that the shipped console does not satisfy disables only the UI, and
-the nav entry renders disabled carrying the reason. A plugin that collects data
-should not go dark because the console's React moved, and an operator should get
-a sentence rather than a blank page.
+  imap --> rt[("react · react-dom<br/>styled-components<br/>@tanstack/react-query")]
+  ext -.-> rt
+  shared -.-> rt
+  console["console bundle"] --> rt
+  plugbundle["plugin UI bundle<br/><i>/plugin-assets/&lt;id&gt;/…</i>"] --> rt
+
+  rt --> okk(["one instance — hooks work"])
+  two(["two copies"]) -.-> err(["<b>invalid hook call</b>"])
+```
+
+Plugins render inline in console, so both halves must hold same React instance — two copies make every plugin hook throw. So console externalises `react`, `react-dom`, `styled-components` and `@tanstack/react-query` rather than bundling them, and import map in `index.html` resolves those bare specifiers to shared runtime built beside it. Specifier list, import map and shared build's entry points are one object in `apps/dashboard/shared/manifest.ts`, because those three drifting apart fails in three different and equally unhelpful ways.
+
+`sdk` range shipped console does not satisfy disables only UI, and nav entry renders disabled carrying reason. Plugin collecting data should not go dark because console's React moved, and operator should get sentence rather than blank page.

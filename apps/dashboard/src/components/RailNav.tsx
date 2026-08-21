@@ -15,6 +15,7 @@ import type { ComponentType } from "react";
 import styled, { css } from "styled-components";
 import { usePlugins } from "../api/queries.ts";
 import { pluginNavEntries, pluginPath } from "../features/plugins/catalog.ts";
+import { LifecycleControls } from "./LifecycleControls.tsx";
 
 type Destination = {
   to: string;
@@ -52,7 +53,7 @@ const DESTINATIONS: Destination[] = [
   {
     to: "/database",
     label: "Database",
-    blurb: "Size, snapshots, restart and shutdown",
+    blurb: "Size, snapshots, and retention",
     Icon: Database,
   },
 ];
@@ -184,6 +185,7 @@ export function RailNav() {
           </Blocked>
         ),
       )}
+      <LifecycleControls />
     </Rail>
   );
 }

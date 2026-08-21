@@ -326,7 +326,10 @@ export function createApp(deps: AppDeps) {
         return error();
       }
 
-      const protectedPrefix = ["/api", "/v1", "/oauth"].some(
+      // The prefixes this catch-all must never answer for. `/oauth` was here
+      // until connect moved under `/api/connect/*`; nothing serves it now, so
+      // guarding it claimed a route that does not exist.
+      const protectedPrefix = ["/api", "/v1"].some(
         (prefix) => decodedPath === prefix || decodedPath.startsWith(`${prefix}/`),
       );
       if (protectedPrefix) return error();
