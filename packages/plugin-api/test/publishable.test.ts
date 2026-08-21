@@ -120,6 +120,28 @@ describe("the packages a plugin author installs", () => {
     expect(manifest("packages/plugin-api").version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
+  test("the API package is never published behind the SDK it announces", () => {
+    // `DASHBOARD_SDK_VERSION` is exported from `packages/plugin-api`, and the
+    // SDK's own package version is pinned equal to it by the test below. So
+    // raising the SDK always edits a source file in *this* package — and the
+    // release step skips a package whose version has not moved.
+    //
+    // That combination shipped exactly once. `v0.4.8` published
+    // `dashboard-sdk@0.1.1` while `plugin-api@0.1.0` was skipped and went on
+    // exporting `"0.1.0"` to every plugin author who installed it. The gateway
+    // was unaffected, because it reads the workspace source rather than the
+    // registry, so nothing here failed: the divergence was only visible from
+    // outside the repository, which is the one place no test was looking.
+    //
+    // Compared rather than pinned equal, because the two are genuinely
+    // independent — this package may bump alone for a manifest change, and
+    // often should. What may never happen is this package trailing, since the
+    // constant it carries would then describe an SDK newer than itself.
+    const api = manifest("packages/plugin-api").version;
+    const sdk = manifest("packages/dashboard-sdk").version;
+    expect(Bun.semver.order(api, sdk)).toBeGreaterThanOrEqual(0);
+  });
+
   test("the SDK package's version is the one manifest ranges are matched against", () => {
     // Exactly, not by major: `sdk` in a manifest is a range like "^1.2.0" and
     // the host compares it to DASHBOARD_SDK_VERSION. If npm ships 1.3.0 while
