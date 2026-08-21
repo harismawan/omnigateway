@@ -1,4 +1,4 @@
-import { type ConnectFlows, isProviderId } from "@omni/control";
+import { type ConnectFlows, OAUTH_PROVIDER_IDS } from "@omni/control";
 import { requirePositional, stringFlag, UsageError } from "../args.ts";
 import type { Command } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -13,8 +13,11 @@ export const connect: Command = {
   options: { label: { type: "string" } },
   async run(args, { ctx, writer, prompt, connect: connectFlows }) {
     const providerId = requirePositional(args, 0, "provider");
-    if (!isProviderId(providerId)) {
-      throw new UsageError("provider must be one of anthropic, openai, kimi, kilo, grok");
+    // The connectable set, not every provider that exists: `custom` is a
+    // provider and has no authorization to start, so accepting it here would
+    // only defer the refusal to `start` with a worse message.
+    if (!(OAUTH_PROVIDER_IDS as readonly string[]).includes(providerId)) {
+      throw new UsageError(`provider must be one of ${OAUTH_PROVIDER_IDS.join(", ")}`);
     }
 
     const flows = connectFlows(await ctx.store());

@@ -5,7 +5,7 @@ import { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
 import type { AuthorizeStart, DeviceOAuthProvider, OAuthProvider } from "./oauth/types.ts";
 import { isAuthorizationPending } from "./oauth/types.ts";
 
-const PROVIDER_IDS: readonly ProviderId[] = [
+export const PROVIDER_IDS: readonly ProviderId[] = [
   "anthropic",
   "openai",
   "kimi",
@@ -59,6 +59,13 @@ export type ConnectStart = {
 /** A poll either produced a credential or is still waiting on the operator. */
 export type ConnectPoll = { status: "complete"; id: string } | { status: "pending" };
 
+/**
+ * Whether this names a provider at all — not whether it can be connected.
+ *
+ * `custom` is a `ProviderId` and has no authorization to start, so this is the
+ * wrong question for the connect path and the right one for `add-key`. Callers
+ * that mean "can I begin an OAuth flow for this" ask the provider table.
+ */
 export function isProviderId(value: unknown): value is ProviderId {
   return typeof value === "string" && PROVIDER_IDS.includes(value as ProviderId);
 }
@@ -191,21 +198,27 @@ export function createConnectFlows(deps: ConnectDeps) {
     async start(providerInput: unknown, labelInput?: unknown): Promise<ConnectStart> {
       flows.sweep();
 
-      if (!isProviderId(providerInput)) {
-        throw new GatewayError(
+      // One answer, not two. A name this gateway has never heard of and a
+      // provider with no authorization to start are the same thing to the
+      // caller — there is nothing here to begin — and the useful half of the
+      // reply is which providers there *is* something to begin for. That list
+      // is read off the injected table, so it cannot drift from what `start`
+      // would actually accept the way a hand-written one did.
+      const unconnectable = () =>
+        new GatewayError(
           "BAD_REQUEST",
-          "provider must be one of anthropic, openai, kimi, kilo, grok",
+          `provider must be one of ${Object.keys(deps.providers).join(", ")}`,
         );
-      }
+
+      if (!isProviderId(providerInput)) throw unconnectable();
+      const provider = deps.providers[providerInput];
+      if (provider === undefined) throw unconnectable();
+
       const label =
         typeof labelInput === "string" && labelInput.trim().length > 0
           ? labelInput.trim()
           : providerInput;
 
-      const provider = deps.providers[providerInput];
-      if (provider === undefined) {
-        throw new GatewayError("BAD_REQUEST", "provider does not support OAuth");
-      }
       const redirectUri = callbackUri(providerInput);
       const oauthDeps = { http: deps.http, now: deps.now };
       const initial = await provider.start({ redirectUri }, oauthDeps);

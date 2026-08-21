@@ -314,7 +314,15 @@ test("a minted device identity reaches begin unchanged", async () => {
   expect(seen.deviceId).toBe("dev-1");
 });
 
-test("the provider list an operator is shown names kilo", async () => {
+/**
+ * The refusal names what this gateway would actually accept.
+ *
+ * Asserted whole rather than by substring: the message is built from the
+ * injected table, so equality is what catches a provider silently added to the
+ * list or dropped from it. It also still answers the question this test was
+ * written for — the provider is `kilo`, not `kilocode`.
+ */
+test("the provider list an operator is shown is the one that would be accepted", async () => {
   const flows = createConnectFlows({
     store: await memoryStore(),
     providers: { kilo: kiloOAuth },
@@ -324,5 +332,28 @@ test("the provider list an operator is shown names kilo", async () => {
 
   const error = await flows.start("kilocode").catch((e: unknown) => e);
 
-  expect((error as GatewayError).message).toContain("kilo,");
+  expect((error as GatewayError).message).toBe("provider must be one of kilo");
+});
+
+/**
+ * `custom` is a `ProviderId` with no authorization to start, and the guard in
+ * front of `start` used to be a plain "is this a provider" check that let it
+ * through. It reached the table, missed, and came back as "provider does not
+ * support OAuth" — a different sentence for the same situation, naming none of
+ * the providers that would have worked.
+ */
+test("a provider with no authorization to start is refused like an unknown one", async () => {
+  const flows = createConnectFlows({
+    store: await memoryStore(),
+    providers: { kilo: kiloOAuth },
+    http: noHttp,
+    now: () => 0,
+  });
+
+  const custom = await flows.start("custom").catch((e: unknown) => e);
+  const nonsense = await flows.start("not-a-provider").catch((e: unknown) => e);
+
+  expect((custom as GatewayError).message).toBe("provider must be one of kilo");
+  expect((custom as GatewayError).code).toBe("BAD_REQUEST");
+  expect((nonsense as GatewayError).message).toBe((custom as GatewayError).message);
 });

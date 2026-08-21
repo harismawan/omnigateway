@@ -88,7 +88,10 @@ export default defineConfig(({ command }) => ({
       // Dev-only. In production the gateway serves the bundle from the same
       // origin, so these paths resolve without a proxy.
       "/api": { target: "http://127.0.0.1:9000", changeOrigin: false },
-      "/oauth": { target: "http://127.0.0.1:9000", changeOrigin: false },
+      // The rail's restart watch is the one thing that reads outside /api, and
+      // without this it would poll Vite's own liveness and never see the
+      // gateway leave.
+      "/health": { target: "http://127.0.0.1:9000", changeOrigin: false },
     },
   },
 }));

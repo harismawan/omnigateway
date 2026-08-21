@@ -140,6 +140,32 @@ test("an unknown provider is refused before a flow is started", async () => {
   expect(started).toBe(false);
 });
 
+/**
+ * `custom` is a provider this gateway has, and not one there is anything to
+ * authorize for — it is reached by API key alone. The guard here used to be a
+ * plain `isProviderId`, which accepted it and left the refusal to `start`, so
+ * the list the operator was shown and the set the command took disagreed.
+ */
+test("connect refuses custom, which is a provider with no flow to start", async () => {
+  const root = await installation();
+  let started = false;
+  const stub = stubFlows({ start: {} });
+
+  const result = await cli(["connect", "custom"], {
+    root,
+    connect: () => {
+      started = true;
+      return stub.flows;
+    },
+  });
+
+  expect(result.code).toBe(2);
+  expect(result.err.split("\n")[0]).toBe(
+    "provider must be one of anthropic, openai, kimi, kilo, grok",
+  );
+  expect(started).toBe(false);
+});
+
 test("a provider that repudiates the code fails the command rather than half-connecting", async () => {
   const root = await installation();
   const stub = stubFlows({

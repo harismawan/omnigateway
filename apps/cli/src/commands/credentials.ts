@@ -6,6 +6,7 @@ import {
   isProviderId,
   listCredentials,
   OAUTH_PROVIDERS,
+  PROVIDER_IDS,
   patchCredential,
   refreshCredential,
   removeCredential,
@@ -220,8 +221,10 @@ export const credentialsAddKey: Command = {
   },
   async run(args, { ctx, writer, prompt }) {
     const providerId = requirePositional(args, 0, "provider");
+    // Every provider, unlike `connect`: a key is the one way in that `custom`
+    // has.
     if (!isProviderId(providerId)) {
-      throw new UsageError("provider must be one of anthropic, openai, kimi, kilo, grok, custom");
+      throw new UsageError(`provider must be one of ${PROVIDER_IDS.join(", ")}`);
     }
 
     const protocolFlag = stringFlag(args.values, "protocol");
