@@ -423,8 +423,9 @@ it is offered at all — depends on how this installation runs:
   of promising a restart it has no way to verify. Run with
   `--restart unless-stopped` if you want the control to mean what it says.
 - **With no supervisor** — `omni start` with no unit installed — the control is
-  disabled and shows the reason. Nothing is watching the process, so an exit is
-  simply the end of it. Use `omni restart` from a terminal on the machine.
+  disabled, and the section names the supervisor it found. Nothing is watching
+  the process, so an exit is simply the end of it. Use `omni restart` from a
+  terminal on the machine.
 
 Shutdown is offered in every shape, because stopping is the point of it. In a
 container it is a one-way door: stopping the only process takes the console that

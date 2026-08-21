@@ -31,20 +31,35 @@ describe("LifecycleControls", () => {
    * control on an installation with no supervisor would stop the gateway and
    * present that as a restart.
    */
-  test("restart is refused, with its reason, where nothing would respawn the gateway", async () => {
+  test("restart is refused where nothing would respawn the gateway", async () => {
     stubLifecycle({
-      "GET /api/lifecycle": () =>
-        lifecycle({
-          supervisor: "none",
-          canRestart: false,
-          note: "no supervisor is watching this process, so nothing would start it again",
-        }),
+      "GET /api/lifecycle": () => lifecycle({ supervisor: "none", canRestart: false }),
     });
     renderWithProviders(<LifecycleControls pollMs={5} />);
 
     const restart = await screen.findByRole("button", { name: "Restart gateway" });
     expect(restart.hasAttribute("disabled")).toBe(true);
-    expect(screen.getByText(/no supervisor is watching this process/)).toBeTruthy();
+  });
+
+  /**
+   * The note is for a capability that is a hope rather than a fact. A container
+   * cannot read its own restart policy, so the control is offered and the
+   * uncertainty is stated beside it — the one shape that still earns a sentence.
+   */
+  test("a capability the gateway cannot verify states itself beside the control", async () => {
+    stubLifecycle({
+      "GET /api/lifecycle": () =>
+        lifecycle({
+          supervisor: "container",
+          canRestart: true,
+          note: "restart exits the container and relies on its restart policy, which cannot be read from inside it",
+        }),
+    });
+    renderWithProviders(<LifecycleControls pollMs={5} />);
+
+    const restart = await screen.findByRole("button", { name: "Restart gateway" });
+    expect(restart.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText(/cannot be read from inside it/)).toBeTruthy();
   });
 
   /**

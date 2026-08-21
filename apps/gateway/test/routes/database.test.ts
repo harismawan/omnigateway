@@ -683,7 +683,6 @@ test("lifecycle reports what would restart this process", async () => {
     supervisor: "none",
     canRestart: false,
     canShutdown: true,
-    note: "no supervisor is watching this process, so nothing would start it again",
   });
 
   cleanup();
