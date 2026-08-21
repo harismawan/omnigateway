@@ -2,12 +2,17 @@ import { beforeEach, expect, test } from "bun:test";
 import { screen } from "@testing-library/react";
 import { Rack } from "../../src/components/Rack.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
+import { lifecycle } from "../helpers/fixtures.ts";
 import { renderWithRouter } from "../helpers/render.tsx";
 
-// The rail asks which plugins are installed. Stubbed to an empty answer so
-// these assertions stay about the chassis, and so nothing here reaches a socket.
+// The rail asks which plugins are installed and what is supervising the
+// process. Both are stubbed so these assertions stay about the chassis, and so
+// nothing here reaches a socket.
 beforeEach(() => {
-  createFetchStub({ "GET /api/plugins": () => ({ plugins: [] }) });
+  createFetchStub({
+    "GET /api/plugins": () => ({ plugins: [] }),
+    "GET /api/lifecycle": () => lifecycle(),
+  });
 });
 
 test("the rack owns viewport height and scrolls only its main content", async () => {

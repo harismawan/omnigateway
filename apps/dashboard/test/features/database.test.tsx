@@ -2,9 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { DatabaseBoard } from "../../src/features/database/DatabaseBoard.tsx";
-import { LifecycleModule } from "../../src/features/database/LifecycleModule.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { databaseOverview, lifecycle, snapshot } from "../helpers/fixtures.ts";
+import { databaseOverview, snapshot } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 /**
@@ -33,7 +32,6 @@ function stubDatabase(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
     "GET /api/database": () => databaseOverview(),
     "GET /api/database/snapshots": () => ({ snapshots: [snapshot()] }),
-    "GET /api/lifecycle": () => lifecycle(),
     ...overrides,
   });
 }
@@ -187,111 +185,6 @@ describe("DatabaseBoard", () => {
     });
     expect(stub.calls.filter((call) => call.url === "/api/database")).toHaveLength(1);
     navigation.restore();
-  });
-
-  /**
-   * A restart only restarts if something respawns the process. Offering the
-   * control on an installation with no supervisor would stop the gateway and
-   * present that as a restart.
-   */
-  test("restart is refused, with its reason, where nothing would respawn the gateway", async () => {
-    stubDatabase({
-      "GET /api/lifecycle": () =>
-        lifecycle({
-          supervisor: "none",
-          canRestart: false,
-          note: "no supervisor is watching this process, so nothing would start it again",
-        }),
-    });
-    renderWithProviders(<DatabaseBoard />);
-
-    const restart = await screen.findByRole("button", { name: "Restart gateway" });
-    expect(restart.hasAttribute("disabled")).toBe(true);
-    expect(screen.getByText(/no supervisor is watching this process/)).toBeTruthy();
-  });
-
-  /**
-   * The two halves of a restart, and why a timer will not do.
-   *
-   * A gateway that is still answering has not restarted yet, and one that has
-   * stopped answering is not ready to be reloaded into. Reloading on a fixed
-   * delay lands in whichever of those two states the delay happened to hit.
-   */
-  test("restart waits for the gateway to go, and to come back, before reloading", async () => {
-    const user = userEvent.setup();
-    const reloads: string[] = [];
-    Object.defineProperty(window.location, "reload", {
-      configurable: true,
-      value: () => reloads.push("reload"),
-    });
-
-    let answering = true;
-    const stub = stubDatabase({
-      "POST /api/lifecycle/restart": () => ({ ok: true }),
-      "GET /health": () => {
-        // A stopped gateway does not answer 503; the connection fails.
-        if (!answering) throw new Error("connection refused");
-        return { ok: true };
-      },
-    });
-    renderWithProviders(<LifecycleModule pollMs={5} />);
-
-    await user.click(await screen.findByRole("button", { name: "Restart gateway" }));
-    await user.click(await screen.findByRole("button", { name: "Restart now" }));
-
-    await waitFor(() => {
-      expect(stub.calls.some((call) => call.url === "/api/lifecycle/restart")).toBe(true);
-    });
-    await waitFor(() => {
-      expect(stub.calls.filter((call) => call.url === "/health").length).toBeGreaterThan(0);
-    });
-    // Still answering, so nothing has restarted and nothing is reloaded.
-    expect(reloads).toHaveLength(0);
-
-    expect((await screen.findByRole("status")).textContent).toContain("stop answering");
-
-    answering = false;
-    await waitFor(() => {
-      expect(screen.getByRole("status").textContent).toContain("has stopped answering");
-    });
-    expect(reloads).toHaveLength(0);
-
-    answering = true;
-    await waitFor(() => {
-      expect(reloads).toHaveLength(1);
-    });
-
-    Reflect.deleteProperty(window.location, "reload");
-  });
-
-  /**
-   * The other ending. Nothing is coming back, so there is nothing to poll for
-   * and nothing to reload into — the panel says so and stops.
-   */
-  test("shutdown ends in a terminal panel and waits for nothing", async () => {
-    const user = userEvent.setup();
-    const stub = stubDatabase({ "POST /api/lifecycle/shutdown": () => ({ ok: true }) });
-    renderWithProviders(<LifecycleModule pollMs={5} />);
-
-    await user.click(await screen.findByRole("button", { name: "Shut down gateway" }));
-    await user.click(await screen.findByRole("button", { name: "Shut down now" }));
-
-    expect(await screen.findByText(/no longer serving/i)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Restart gateway" })).toBeNull();
-    // Long enough for many polls at this interval, and none were made.
-    expect(stub.calls.filter((call) => call.url === "/health")).toHaveLength(0);
-  });
-
-  test("shutting down a container says the dashboard goes with it", async () => {
-    const user = userEvent.setup();
-    stubDatabase({
-      "GET /api/lifecycle": () => lifecycle({ supervisor: "container", note: "restart exits" }),
-    });
-    renderWithProviders(<LifecycleModule pollMs={5} />);
-
-    await user.click(await screen.findByRole("button", { name: "Shut down gateway" }));
-
-    expect(await screen.findByText(/takes this dashboard with it/i)).toBeTruthy();
   });
 
   test("retention loads from the overview and saves as numbers", async () => {

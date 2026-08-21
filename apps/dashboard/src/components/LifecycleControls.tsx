@@ -1,15 +1,20 @@
 import { Power, RotateCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import styled from "styled-components";
-import { useLifecycle, useRestart, useShutdown } from "../../api/queries.ts";
-import type { Supervisor } from "../../api/types.ts";
-import { Confirm } from "../../components/Confirm.tsx";
-import { Button } from "../../ui/Button.tsx";
-import { Module } from "../../ui/Panel.tsx";
-import { Legend, pulsing, Row, Stack } from "../../ui/primitives.ts";
-import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
+import { useLifecycle, useRestart, useShutdown } from "../api/queries.ts";
+import type { Supervisor } from "../api/types.ts";
+import { Button } from "../ui/Button.tsx";
+import { Legend, pulsing, Spacer, Stack } from "../ui/primitives.ts";
+import { describeError } from "../ui/States.tsx";
+import { Confirm } from "./Confirm.tsx";
 
-/** What is watching this process, in the operator's terms rather than a flag. */
+/**
+ * What is watching this process, in the operator's terms rather than a flag.
+ *
+ * The rail has no room to print any of these, so they are the section's title:
+ * the sentence is still one hover away from the control it qualifies, and the
+ * confirm dialog repeats whichever part of it decides what a click does.
+ */
 const SUPERVISOR_BLURB: Record<Supervisor, string> = {
   systemd:
     "systemd is capturing this process, so a restart asks the manager to bring the unit back rather than signalling the gateway itself.",
@@ -18,34 +23,81 @@ const SUPERVISOR_BLURB: Record<Supervisor, string> = {
   none: "Nothing is supervising this process. It was started directly, and whatever stops it leaves it stopped.",
 };
 
-const Blurb = styled.p`
-  font-size: 12px;
-  color: ${({ theme }) => theme.color.inkDim};
-  max-width: 72ch;
+const Rule = styled.hr`
+  flex: none;
+  border: 0;
+  margin: 0;
+  height: 1px;
+  align-self: stretch;
+  background: ${({ theme }) => theme.color.rule};
+
+  /* The rail turns on its side below 720px, and so does the rule that closes it. */
+  @media (max-width: 720px) {
+    height: auto;
+    width: 1px;
+    margin-left: ${({ theme }) => theme.space(2)};
+  }
 `;
 
 /**
- * A control that is present but cannot act, and why.
+ * The foot of the rail: two controls that act on the process rather than
+ * navigate within it, held apart from the links above by a spacer and a rule.
  *
- * Warn rather than down, as on the settings screen: nothing is broken and
- * nothing failed. The gateway is simply not installed in a shape where the
- * button beside this would do what it says.
+ * Across the shell rather than on one screen because stopping the gateway is
+ * not a database operation — it was only ever filed next to snapshots because
+ * that page had room for it.
  */
+const Foot = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: ${({ theme }) => theme.space(2)};
+
+  @media (max-width: 720px) {
+    padding-top: 0;
+    padding-left: ${({ theme }) => theme.space(2)};
+    flex-direction: row;
+    align-items: center;
+  }
+`;
+
+/**
+ * The rail is 168px wide, so these wrap rather than run past its edge. The
+ * accessible name stays the full "Restart gateway" — a button reading "Restart"
+ * alone is ambiguous to anyone who arrives at it without the rail's context.
+ */
+const RailButton = styled(Button)`
+  justify-content: flex-start;
+  width: 100%;
+
+  @media (max-width: 720px) {
+    width: auto;
+  }
+`;
+
 const Note = styled.p`
-  font-size: 12px;
+  font-size: 10.5px;
+  line-height: 1.3;
   color: ${({ theme }) => theme.color.warn};
-  max-width: 72ch;
 `;
 
 const Problem = styled.p`
-  font-size: 12px;
+  font-size: 10.5px;
+  line-height: 1.3;
   color: ${({ theme }) => theme.color.down};
 `;
 
 const Watching = styled.p`
-  font-size: 12px;
+  font-size: 10.5px;
+  line-height: 1.3;
   color: ${({ theme }) => theme.color.inkDim};
   ${pulsing}
+`;
+
+const Stopped = styled.p`
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: ${({ theme }) => theme.color.inkDim};
 `;
 
 /** How often the liveness probe is repeated while a restart is in progress. */
@@ -87,9 +139,9 @@ async function answering(): Promise<boolean> {
  *
  * The two controls are not variants of each other. A restart is expected back
  * and the console waits for it; a shutdown is not, and the console says so and
- * stops. That asymmetry is the whole of this module.
+ * stops. That asymmetry is the whole of this component.
  */
-export function LifecycleModule({ pollMs = RESTART_POLL_MS }: { pollMs?: number }) {
+export function LifecycleControls({ pollMs = RESTART_POLL_MS }: { pollMs?: number }) {
   const lifecycle = useLifecycle();
   const restart = useRestart();
   const shutdown = useShutdown();
@@ -160,83 +212,82 @@ export function LifecycleModule({ pollMs = RESTART_POLL_MS }: { pollMs?: number 
   };
 
   /**
-   * The end of the screen, not a state it recovers from.
+   * The end of the console, not a state it recovers from.
    *
    * A restart has a second half this console can watch; a shutdown does not.
-   * Leaving the controls on screen would offer an operator a restart button
+   * Leaving the controls in the rail would offer an operator a restart button
    * that has nothing left to talk to.
    */
   if (stopped) {
     return (
-      <Module legend="Lifecycle" meta="stopped">
-        <Stack $gap={2}>
-          <Legend>Gateway stopped</Legend>
-          <Blurb>
-            The gateway accepted the shutdown and is no longer serving. Nothing on this page will
-            update again, and nothing here can start it: that needs{" "}
-            {capability?.supervisor === "container"
-              ? "the host that runs this container"
-              : "a shell on the machine it runs on"}
-            .
-          </Blurb>
-        </Stack>
-      </Module>
+      <>
+        <Spacer />
+        <Rule />
+        <Foot>
+          <Stack $gap={1}>
+            <Legend>Gateway stopped</Legend>
+            <Stopped>
+              Nothing on this screen will update again, and nothing here can start it: that needs{" "}
+              {capability?.supervisor === "container"
+                ? "the host that runs this container"
+                : "a shell on the machine it runs on"}
+              .
+            </Stopped>
+          </Stack>
+        </Foot>
+      </>
     );
   }
 
   return (
-    <Module legend="Lifecycle" meta={capability?.supervisor}>
-      {lifecycle.isError ? (
-        <Failure error={lifecycle.error} onRetry={() => void lifecycle.refetch()} />
-      ) : capability === undefined ? (
-        <SkeletonRows rows={2} />
-      ) : (
-        <Stack $gap={3}>
-          <Blurb>{SUPERVISOR_BLURB[capability.supervisor]}</Blurb>
-          {capability.note === undefined ? null : <Note>{capability.note}</Note>}
+    <>
+      <Spacer />
+      <Rule />
+      <Foot title={capability === undefined ? undefined : SUPERVISOR_BLURB[capability.supervisor]}>
+        <RailButton
+          type="button"
+          $size="sm"
+          aria-label="Restart gateway"
+          disabled={
+            capability === undefined || !capability.canRestart || restart.isPending || watching
+          }
+          onClick={() => setAsking("restart")}
+        >
+          <RotateCw />
+          Restart
+        </RailButton>
+        <RailButton
+          type="button"
+          $size="sm"
+          $variant="danger"
+          aria-label="Shut down gateway"
+          disabled={
+            capability === undefined || !capability.canShutdown || shutdown.isPending || watching
+          }
+          onClick={() => setAsking("shutdown")}
+        >
+          <Power />
+          Shut down
+        </RailButton>
 
-          <Row $gap={2}>
-            <Button
-              type="button"
-              disabled={!capability.canRestart || restart.isPending || watching}
-              onClick={() => setAsking("restart")}
-            >
-              <RotateCw />
-              Restart gateway
-            </Button>
-            <Button
-              type="button"
-              $variant="danger"
-              disabled={!capability.canShutdown || shutdown.isPending || watching}
-              onClick={() => setAsking("shutdown")}
-            >
-              <Power />
-              Shut down gateway
-            </Button>
-          </Row>
+        {capability?.note === undefined ? null : <Note>{capability.note}</Note>}
 
-          {phase === "leaving" ? (
-            <Watching role="status">
-              Asked the gateway to restart. Waiting for it to stop answering.
-            </Watching>
-          ) : phase === "returning" ? (
-            <Watching role="status">
-              The gateway has stopped answering. Waiting for it to come back, then this page
-              reloads.
-            </Watching>
-          ) : phase === "lost" ? (
-            <Problem role="alert">
-              The gateway has not come back. Reload this page once it is running again, or check the
-              machine it runs on.
-            </Problem>
-          ) : null}
+        {phase === "leaving" ? (
+          <Watching role="status">Restarting. Waiting for the gateway to stop answering.</Watching>
+        ) : phase === "returning" ? (
+          <Watching role="status">
+            The gateway has stopped answering. Waiting for it to come back, then this page reloads.
+          </Watching>
+        ) : phase === "lost" ? (
+          <Problem role="alert">
+            The gateway has not come back. Reload this page once it is running again, or check the
+            machine it runs on.
+          </Problem>
+        ) : null}
 
-          {restart.isError ? <Problem role="alert">{describeError(restart.error)}</Problem> : null}
-          {shutdown.isError ? (
-            <Problem role="alert">{describeError(shutdown.error)}</Problem>
-          ) : null}
-        </Stack>
-      )}
+        {restart.isError ? <Problem role="alert">{describeError(restart.error)}</Problem> : null}
+        {shutdown.isError ? <Problem role="alert">{describeError(shutdown.error)}</Problem> : null}
+      </Foot>
 
       <Confirm
         open={asking === "restart"}
@@ -244,7 +295,7 @@ export function LifecycleModule({ pollMs = RESTART_POLL_MS }: { pollMs?: number 
           if (!next) setAsking(null);
         }}
         title="Restart gateway"
-        body="Requests in flight are dropped when the process goes. This console waits for the gateway to stop answering and to answer again, then reloads itself."
+        body={`${capability === undefined ? "" : `${SUPERVISOR_BLURB[capability.supervisor]} `}Requests in flight are dropped when the process goes. This console waits for the gateway to stop answering and to answer again, then reloads itself.`}
         confirmLabel="Restart now"
         busy={restart.isPending}
         onConfirm={() => {
@@ -271,6 +322,6 @@ export function LifecycleModule({ pollMs = RESTART_POLL_MS }: { pollMs?: number 
           shutdown.mutate(undefined, { onSuccess: () => setStopped(true) });
         }}
       />
-    </Module>
+    </>
   );
 }

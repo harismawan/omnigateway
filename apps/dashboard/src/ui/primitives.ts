@@ -47,12 +47,15 @@ export const Stack = styled.div<{ $gap?: number }>`
   min-width: 0;
 `;
 
-export const Grid = styled.div<{ $min?: string; $gap?: number }>`
+export const Grid = styled.div<{ $min?: string; $gap?: number; $stretch?: boolean }>`
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(${({ $min }) => $min ?? "220px"}, 1fr));
   gap: ${({ theme, $gap }) => theme.space($gap ?? 3)};
-  /* Panels size to their content; a short one does not stretch to match a tall one. */
-  align-items: start;
+  /* Panels size to their content; a short one does not stretch to match a tall one.
+     $stretch opts a grid out of that, for a row of tiles that read as one
+     instrument: there, one card carrying a meter leaves the rest looking cropped
+     rather than merely shorter. */
+  align-items: ${({ $stretch }) => ($stretch === true ? "stretch" : "start")};
 `;
 
 export const Divider = styled.hr`

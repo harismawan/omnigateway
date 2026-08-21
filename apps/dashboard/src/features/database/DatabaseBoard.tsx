@@ -11,7 +11,6 @@ import { Module } from "../../ui/Panel.tsx";
 import { Grid } from "../../ui/primitives.ts";
 import { Readout } from "../../ui/Readout.tsx";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
-import { LifecycleModule } from "./LifecycleModule.tsx";
 import { RetentionModule } from "./RetentionModule.tsx";
 import { SnapshotsModule } from "./SnapshotsModule.tsx";
 
@@ -30,7 +29,8 @@ const Problem = styled.p`
  *
  * One screen rather than a corner of Settings, because everything on it either
  * reads the file the whole gateway runs from or replaces it, and those belong
- * next to each other.
+ * next to each other. Stopping and starting the process is not one of those and
+ * lives in the rail, reachable from wherever the operator happens to be.
  */
 export function DatabaseBoard() {
   const overview = useDatabaseOverview();
@@ -47,11 +47,11 @@ export function DatabaseBoard() {
     <>
       <PageHead
         legend="Database"
-        title="Storage, snapshots, and lifecycle"
+        title="Storage, snapshots, and retention"
         summary={
           overview.isLoading
             ? "Measuring the database…"
-            : "The one SQLite file this gateway runs from, the copies taken of it, and the controls that stop and start the process."
+            : "The one SQLite file this gateway runs from, the copies taken of it, and how long they are kept."
         }
       />
 
@@ -84,7 +84,7 @@ export function DatabaseBoard() {
         ) : data === undefined ? (
           <SkeletonRows rows={3} />
         ) : (
-          <Grid $min="180px">
+          <Grid $min="180px" $stretch>
             <Readout
               legend="Database file"
               value={formatBytes(data.fileBytes)}
@@ -128,8 +128,6 @@ export function DatabaseBoard() {
       <SnapshotsModule />
 
       <RetentionModule retention={data?.retention} />
-
-      <LifecycleModule />
 
       <Confirm
         open={compacting}
