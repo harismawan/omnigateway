@@ -83,11 +83,21 @@ describe("the packages a plugin author installs", () => {
         // the published `.d.ts` — or here, in the published `.ts` — as a
         // specifier a consumer cannot resolve.
         const offenders: string[] = [];
-        for await (const file of new Glob("src/**/*.ts").scan(join(REPO, dir))) {
+        let scanned = 0;
+        // `*.{ts,tsx}` and not `*.ts`: these packages ship their sources, so a
+        // `.tsx` is as publishable as a `.ts` and `src/**/*.ts` does not match
+        // one. The SDK is the package likeliest to grow a `.tsx` now that it
+        // holds React code, and this is the guard standing between a
+        // `workspace:*` specifier and a stranger's `npm install`.
+        for await (const file of new Glob("src/**/*.{ts,tsx}").scan(join(REPO, dir))) {
+          scanned += 1;
           const source = readFileSync(join(REPO, dir, file), "utf8");
           if (/from\s+["']@omni\//.test(source)) offenders.push(file);
         }
         expect(offenders).toEqual([]);
+        // A glob that matches nothing reports no offenders, which is the same
+        // answer as a clean package.
+        expect(scanned).toBeGreaterThan(0);
       });
     });
   }

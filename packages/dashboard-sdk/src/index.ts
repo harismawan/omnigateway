@@ -1,9 +1,9 @@
 /**
  * `@omnigateway/dashboard-sdk` — what a plugin's UI bundle builds against.
  *
- * Four things and no more: a way to declare a UI, a way to call your own
- * backend, the palette names you may use, and the version the host will check
- * you against.
+ * Five things and no more: a way to declare a UI, a way to call your own
+ * backend, the palette names you may use, the console's LIVE switch, and the
+ * version the host will check you against.
  *
  * ## React, styled-components and react-query are peer dependencies
  *
@@ -14,7 +14,7 @@
  * hook call" — an error whose message points at the plugin's own code and never
  * at the duplicated dependency that caused it. `apps/dashboard/shared/manifest.ts`
  * documents the same trap from the host's side, where the console externalises
- * these four specifiers and serves them through an import map.
+ * these packages and serves them through an import map.
  *
  * The peer declarations here are a contract statement rather than a resolution
  * mechanism: installing this SDK is how a plugin author learns which four
@@ -23,9 +23,21 @@
  * because the mistake is one character in a JSON file and its symptom appears
  * nowhere near it.
  *
- * Nothing in this package imports React at runtime, only its types. That is
- * deliberate — the SDK is the one dependency every plugin has, so it is the
- * worst possible place to be wrong about which React instance is in use.
+ * ## This package is itself shared, and that is newer than the rest of this file
+ *
+ * It used to import React only as types, on the reasoning that the SDK is the
+ * one dependency every plugin has and therefore the worst possible place to be
+ * wrong about which React instance is in use. That reasoning was right and it
+ * is why `live.ts` — the one module here that imports React at runtime —
+ * arrived in the same change that added this package to the console's
+ * `SHARED_IMPORTS`.
+ *
+ * Shared, the argument inverts: there is one copy of this package on the page,
+ * served by the host, importing the host's one React. What that buys is not
+ * just instance identity but **context identity**, which a duplicated copy
+ * breaks in total silence — see `live.tsx`. So the list a plugin's bundler must
+ * mark external includes this package now, and it is the entry authors leave
+ * off, because it is the one that is obviously theirs.
  */
 
 /**
@@ -47,5 +59,6 @@ export {
   pluginApiPath,
   usePluginApi,
 } from "./api.ts";
+export { type Cadence, type LiveContextValue, LiveProvider, useLive } from "./live.ts";
 export { CSS_VARIABLES, type CssVariable } from "./theme.ts";
 export { definePluginUI, type PluginUiDefinition, type PluginUiProps } from "./ui.ts";

@@ -29,9 +29,16 @@ say the same thing in your own README.
 ## What to install
 
 ```bash
-bun add @omnigateway/plugin-api        # the server half
-bun add @omnigateway/dashboard-sdk     # only if you ship a console panel
+bun add @omnigateway/plugin-api                    # the server half
+bun add --peer @omnigateway/dashboard-sdk          # only if you ship a console panel
+bun add --dev  @omnigateway/dashboard-sdk          # …and again, to typecheck against it
 ```
+
+The SDK is a **peer** dependency, not a regular one. The console supplies it at
+runtime through its import map, the same way it supplies React — a copy in your
+own `dependencies` is a second copy on the page, and for this package that means
+a second `LiveContext` and a panel that silently stops polling. The dev entry is
+so `tsc` can see the types; it is not what gets loaded.
 
 Both publish TypeScript sources — Bun imports them directly, so there is no build
 step on their side and no dual-package hazard. If you typecheck with `tsc`, use
@@ -206,11 +213,43 @@ export default definePluginUI({
 });
 ```
 
-Build it as ESM with `react`, `react-dom`, `styled-components` and
-`@tanstack/react-query` as **externals and peer dependencies**. The console
-resolves them through an import map so that it and every plugin share one React
-instance. Bundling your own is the one mistake this whole design exists to
-prevent: two React instances make every hook throw "invalid hook call".
+Build it as ESM with `react`, `react-dom`, `styled-components`,
+`@tanstack/react-query` and `@omnigateway/dashboard-sdk` as **externals and peer
+dependencies**. The console resolves them through an import map so that it and
+every plugin share one React instance. Bundling your own is the one mistake this
+whole design exists to prevent: two React instances make every hook throw
+"invalid hook call".
+
+Externalising the SDK is the entry authors leave off, because it is the one
+package that is obviously *theirs* to bundle. It holds `useLive`, which is a
+React context, and a bundled copy is a second context object — the panel finds
+no provider, takes the "polling is off" default, and stops refreshing without
+throwing anything. Unlike the React case there is no error to search for.
+
+### Polling, and the switch that pauses it
+
+The console has one LIVE control in its chassis bar, and it governs every screen
+at once — there is no per-panel refresh setting, because polling is the
+gateway's only push mechanism and pausing it should be one deliberate act. A
+panel joins that by taking its interval from `cadence`:
+
+```tsx
+import { useLive } from "@omnigateway/dashboard-sdk";
+
+const { cadence } = useLive();
+const thing = useQuery({
+  queryKey: ["thing"],
+  queryFn: () => api.get("thing"),
+  refetchInterval: cadence(10_000),
+});
+```
+
+`cadence(ms)` returns `ms` while the console is live and `false` while it is
+paused, which is exactly what react-query's `refetchInterval` wants. Outside the
+console — your own test harness, a panel rendered bare — there is no provider
+and `cadence` returns `false`, so nothing polls. That is deliberate: a component
+that cannot find the switch should not decide the answer is "poll anyway". Wrap
+`LiveProvider` yourself in tests that need the polling path.
 
 Style with the console's CSS custom properties (`var(--accent)`, `var(--panel)`,
 `var(--ink)` …). `CSS_VARIABLES` in the SDK lists them. They are the real

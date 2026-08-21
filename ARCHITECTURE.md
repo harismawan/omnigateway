@@ -509,7 +509,7 @@ flowchart TB
   man --> imap["import map in index.html"]
   man --> shared["shared runtime build"]
 
-  imap --> rt[("react · react-dom<br/>styled-components<br/>@tanstack/react-query")]
+  imap --> rt[("react · react-dom<br/>styled-components<br/>@tanstack/react-query<br/>@omnigateway/dashboard-sdk")]
   ext -.-> rt
   shared -.-> rt
   console["console bundle"] --> rt
@@ -517,8 +517,11 @@ flowchart TB
 
   rt --> okk(["one instance — hooks work"])
   two(["two copies"]) -.-> err(["<b>invalid hook call</b>"])
+  twosdk(["two SDK copies"]) -.-> quiet(["<b>panel pauses, silently</b>"])
 ```
 
-Plugins render inline in console, so both halves must hold same React instance — two copies make every plugin hook throw. So console externalises `react`, `react-dom`, `styled-components` and `@tanstack/react-query` rather than bundling them, and import map in `index.html` resolves those bare specifiers to shared runtime built beside it. Specifier list, import map and shared build's entry points are one object in `apps/dashboard/shared/manifest.ts`, because those three drifting apart fails in three different and equally unhelpful ways.
+Plugins render inline in console, so both halves must hold same React instance — two copies make every plugin hook throw. So console externalises `react`, `react-dom`, `styled-components`, `@tanstack/react-query` and `@omnigateway/dashboard-sdk` rather than bundling them, and import map in `index.html` resolves those bare specifiers to shared runtime built beside it. Specifier list, import map and shared build's entry points are one object in `apps/dashboard/shared/manifest.ts`, because those three drifting apart fails in three different and equally unhelpful ways.
+
+`@omnigateway/dashboard-sdk` is on that list too, and it is worth separating from the other four rather than reading as one more of them. Those are shared for instance identity, and every breach announces itself — a thrown hook error, a component drawing from the wrong stylesheet. The SDK is shared for **context identity**: it holds the chassis LIVE switch, so a second copy is a second `createContext` result, and a panel reading it finds no provider above it, takes the "polling is off" default, and never polls again. Nothing throws and nothing is logged; the only symptom is a panel that stopped updating, which is indistinguishable from the pause working. A plugin bundle must mark the SDK external exactly as it marks React.
 
 `sdk` range shipped console does not satisfy disables only UI, and nav entry renders disabled carrying reason. Plugin collecting data should not go dark because console's React moved, and operator should get sentence rather than blank page.

@@ -34,5 +34,12 @@ export const PLUGIN_API_VERSION = 1;
  * against this. Separate from `PLUGIN_API_VERSION` on purpose: a backend-only
  * plugin should not stop loading because the console's React moved, and a UI
  * incompatibility should disable only the UI.
+ *
+ * `0.1.1` added `useLive` and made the SDK a shared module. A patch and not a
+ * minor, and the difference is not cosmetic while this package is pre-1.0:
+ * `^0.1.0` means `>=0.1.0 <0.2.0`, so `0.2.0` would disable the UI of every
+ * plugin already published against `^0.1.0` — each one reported as a version
+ * mismatch it did nothing to earn. The change is additive, so it does not get
+ * to cost that.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.0";
+export const DASHBOARD_SDK_VERSION = "0.1.1";

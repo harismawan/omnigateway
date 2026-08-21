@@ -25,19 +25,30 @@ export default definePluginUI({
 
 ## The one rule that matters
 
-Build your bundle with `react`, `react-dom`, `styled-components` and
-`@tanstack/react-query` as **externals and peer dependencies**:
+Build your bundle with `react`, `react-dom`, `styled-components`,
+`@tanstack/react-query` **and this package** as externals:
 
 ```bash
 bun build ui/index.tsx --outfile dist/ui/index.js --target browser --format esm \
   --external react --external react-dom --external 'react/jsx-runtime' \
-  --external styled-components --external '@tanstack/react-query'
+  --external styled-components --external '@tanstack/react-query' \
+  --external '@omnigateway/dashboard-sdk'
 ```
 
 The console resolves them through an import map so that it and every plugin share
 one React instance. Bundling your own is the single mistake this package exists
 to prevent: two React copies make every hook throw `invalid hook call`, and the
 error names none of this.
+
+Since `0.1.1` that list includes `@omnigateway/dashboard-sdk` itself, and it is
+the entry easiest to leave off — it is *your* SDK, so externalising it reads
+like a mistake. It is not. `useLive` is a React context held in this package, so
+a bundled copy is a second context object: your panel finds no provider above
+it, takes the "polling is off" default, and never refreshes again. Nothing
+throws. Nothing appears in the console. The panel simply stops updating, which
+looks exactly like the operator having paused it.
+
+Keep it in `peerDependencies` alongside the rest for the same reason.
 
 ## Styling
 
