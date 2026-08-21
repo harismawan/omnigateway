@@ -41,5 +41,17 @@ export const PLUGIN_API_VERSION = 1;
  * plugin already published against `^0.1.0` — each one reported as a version
  * mismatch it did nothing to earn. The change is additive, so it does not get
  * to cost that.
+ *
+ * **Changing this line means republishing _this_ package, not just the SDK.**
+ * It reads as an SDK fact and it lives here, so the obvious move — bump
+ * `packages/dashboard-sdk`, tag, done — leaves the registry with a
+ * `@omnigateway/plugin-api` that still reports the old number to every plugin
+ * author who installs it. That shipped: `v0.4.8` published
+ * `dashboard-sdk@0.1.1` while `plugin-api@0.1.0` went on exporting `"0.1.0"`,
+ * because the release step skips a package whose version has not moved. The
+ * gateway itself was unaffected — it reads this source — so nothing failed
+ * until a plugin tested its own manifest against the version the registry
+ * advertised. `publishable.test.ts` now refuses a state where this package
+ * trails the SDK.
  */
 export const DASHBOARD_SDK_VERSION = "0.1.1";
