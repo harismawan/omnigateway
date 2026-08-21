@@ -39,12 +39,10 @@ export function describeLifecycle(
       note: "restart exits the container and relies on its restart policy, which cannot be read from inside it",
     };
   }
-  return {
-    supervisor: "none",
-    canRestart: false,
-    canShutdown: true,
-    note: "no supervisor is watching this process, so nothing would start it again",
-  };
+  // No note: `supervisor: "none"` already says it, and the rail states the
+  // supervisor beside the disabled control. A sentence repeating it read as a
+  // warning about a shape that is an ordinary way to run.
+  return { supervisor: "none", canRestart: false, canShutdown: true };
 }
 
 /**

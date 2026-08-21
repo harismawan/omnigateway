@@ -67,13 +67,15 @@ describe("describeLifecycle", () => {
     expect(capability.note ?? "").not.toBe("");
   });
 
-  test("reports no restart when nothing is watching, and says why", () => {
+  test("reports no restart when nothing is watching, without a note repeating it", () => {
     const capability = describeLifecycle({}, noFiles);
     expect(capability.supervisor).toBe("none");
     expect(capability.canRestart).toBe(false);
     // Stopping is still available: stopping is the point of shutdown.
     expect(capability.canShutdown).toBe(true);
-    expect(capability.note ?? "").not.toBe("");
+    // The supervisor is the reason; a sentence restating it is the warning
+    // this shape does not warrant.
+    expect(capability.note).toBeUndefined();
   });
 
   test("prefers systemd over the container marker, since a unit is the stronger claim", () => {
