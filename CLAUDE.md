@@ -83,9 +83,13 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     across restart. During restart no session and no authenticated surface to probe, so liveness is
     the one question `/api/*` cannot answer. May import `@omni/store/types`, `@omni/ir`, catalog
     subpath, `@omnigateway/dashboard-sdk`, but not provider adapters, HTTP client, runtime store
-    code. SDK permitted because browser leaf with no imports at all, and because alternative was
-    second copy of rule about what may leave plugin's own API prefix — rule held in two places is
-    one that end up true in one.
+    code. SDK permitted because alternative was second copy of rule about what may leave plugin's
+    own API prefix — rule held in two places is one that end up true in one. Same argument later
+    moved LIVE switch there: which control pause polling is a rule too. SDK **no longer** leaf with
+    no imports — `live.ts` import React — so it now in `SHARED_IMPORTS`, one copy served to console
+    and every panel. Order load-bearing: SDK holding a context but bundled per plugin give each its
+    own `createContext`, and panel reading that one find no provider, take "polling off" default,
+    never poll again, silently. Never ship half.
 13. `packages/rtk` stay pure like `ir` and `router`: no I/O, clocks, randomness. Rewrite tool-result
     content only, preserve errors + non-tool-result blocks. `@omni/rtk/catalog` is leaf holding
     filter-id union; `@omni/store` import that subpath alone.
@@ -330,12 +334,16 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   queue drops rather than grows. Anything needing exact accounting must reconcile from own storage.
   `RequestCompleted` emitted from `finishLog` because that already the one site running at most once
   per request id — same reason usage debit there.
-- Console externalise `react`, `react-dom`, `styled-components`, `@tanstack/react-query` and resolve
-  them through import map, so console and every plugin share one instance; two React copies throw
-  "invalid hook call". `apps/dashboard/shared/manifest.ts` is single list feeding externals, import
-  map, shared build. **`export * from "react"` does not work and does not warn** — React is
-  CommonJS, so re-export compile to module exporting only `default`. Shims destructure the default
-  instead.
+- Console externalise `react`, `react-dom`, `styled-components`, `@tanstack/react-query`,
+  `@omnigateway/dashboard-sdk` and resolve them through import map, so console and every plugin
+  share one instance; two React copies throw "invalid hook call".
+  `apps/dashboard/shared/manifest.ts` is single list feeding externals, import map, shared build.
+  **`export * from "react"` does not work and does not warn** — React is CommonJS, so re-export
+  compile to module exporting only `default`. Shims destructure the default instead. SDK is ESM so
+  `export *` correct for it, and it on list for different reason than other four: they about
+  instance identity and each announce breach; SDK hold `LiveContext`, so duplicate is duplicate
+  *context object* — panel find no provider, pause forever, nothing thrown, nothing logged. Plugin
+  bundle must mark SDK external exactly like React.
 - Plugin UI assets served at `/plugin-assets/<id>/…`, not `/plugins/<id>/…`, which would collide
   with console's own client-side routes. Bundles unauthenticated like console's own JavaScript;
   catalog at `/api/plugins` admin-gated, because what is gated is data.

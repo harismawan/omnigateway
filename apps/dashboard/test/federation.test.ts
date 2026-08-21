@@ -119,7 +119,17 @@ test("the map covers exactly the packages a plugin may not bundle its own copy o
   // plugin or hooks throw "invalid hook call". styled-components must be one or
   // the two halves render with different stylesheets. Adding a package here is
   // a deliberate widening of the federation contract.
+  //
+  // `@omnigateway/dashboard-sdk` is here for a different reason than the rest,
+  // and the difference is why it is worth a sentence. The others are about
+  // instance identity, and every one of them announces a breach: a thrown hook
+  // error, a component rendered from the wrong stylesheet. The SDK holds
+  // `LiveContext`, so a duplicate is a duplicate *context object* — a panel
+  // reading it finds no provider, takes the "polling is off" default, and never
+  // polls again. Nothing throws. Nothing logs. The only symptom is a screen
+  // that quietly stops updating, which is also what a working pause looks like.
   expect(Object.keys(SHARED_IMPORTS).sort()).toEqual([
+    "@omnigateway/dashboard-sdk",
     "@tanstack/react-query",
     "react",
     "react-dom",

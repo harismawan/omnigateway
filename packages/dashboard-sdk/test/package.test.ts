@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -49,21 +49,73 @@ test("no host-owned package is a dependency or a devDependency", () => {
   }
 });
 
-test("nothing in the source imports React at runtime", () => {
-  // Types are free; a value import is not. The SDK is the one dependency every
-  // plugin bundle has, so it is the worst possible place to be wrong about
-  // which React instance is in use — a `import { useMemo } from "react"` here
-  // would defeat the peer declaration above from inside.
+/**
+ * The one module allowed to import React for its value, and why it is one.
+ *
+ * This package imported React only as types until `live.ts`, on the reasoning
+ * that the SDK is every plugin's one dependency and so the worst place to be
+ * wrong about which React instance is in use. Holding a context means holding a
+ * hook, so that had to give — and what makes it safe is not this list but
+ * `apps/dashboard/shared/manifest.ts`, which serves one copy of this package to
+ * the console and every panel alike.
+ *
+ * The list stays at one on purpose. A second module reaching for React is a
+ * second reason to be federated, and the moment there are two the first one
+ * stops being examined.
+ */
+const RUNTIME_REACT = new Set(["live.ts"]);
+
+/** Every `import … from "…"` in a source file, whether or not it spans lines. */
+function importsOf(source: string): { specifier: string; typeOnly: boolean }[] {
+  return [...source.matchAll(/^import\s+([\s\S]*?)\s*from\s+"([^"]+)"/gm)].map((match) => ({
+    specifier: match[2] ?? "",
+    typeOnly: (match[1] ?? "").startsWith("type "),
+  }));
+}
+
+test("only the live module imports a host-owned package for its value", () => {
+  // Read off disk rather than from a hard-coded file list, which is what this
+  // test used to do: a new module was simply not looked at, so the rule held
+  // for exactly the four files someone had thought of. The scan spans lines for
+  // the same reason — `live.ts` imports seven names from React across eight
+  // lines, and a check that only read the first would see `import {` and pass.
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
-  for (const file of ["index.ts", "api.ts", "theme.ts", "ui.ts"]) {
-    const source = readFileSync(join(dir, file), "utf8");
-    for (const line of source.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("import ")) continue;
-      if (!/from\s+"(react|react-dom|styled-components|@tanstack\/react-query)/.test(trimmed)) {
+  // `.tsx` as well as `.ts`, and that is not hypothetical tidiness: this rule
+  // was written the same afternoon a stray `live.tsx` sat beside `live.ts` for
+  // an hour. `"live.tsx".endsWith(".ts")` is false, so a scan for `.ts` alone
+  // looked straight past a second module holding a second `createContext` — the
+  // exact duplicate this package is federated to prevent — and `files: ["src"]`
+  // would have published it.
+  const sources = readdirSync(dir).filter((file) => /\.tsx?$/.test(file));
+  expect(sources.length).toBeGreaterThan(0);
+
+  const offenders: string[] = [];
+  for (const file of sources) {
+    for (const { specifier, typeOnly } of importsOf(readFileSync(join(dir, file), "utf8"))) {
+      if (!/^(react|react-dom|styled-components|@tanstack\/react-query)\b/.test(specifier))
         continue;
-      }
-      expect(trimmed.startsWith("import type ")).toBe(true);
+      if (typeOnly) continue;
+      if (RUNTIME_REACT.has(file)) continue;
+      offenders.push(`${file} imports ${specifier}`);
     }
+  }
+  expect(offenders).toEqual([]);
+});
+
+test("the module named as the exception actually is one", () => {
+  // The list rots in the other direction too. If `live.ts` stopped importing
+  // React — folded into another module, rewritten without a context — the entry
+  // would outlive the reason for it, and the next reader could not tell a live
+  // decision from a fossil. Same argument as the withheld-React-keys list in
+  // the console's federation test.
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+  // Asserted before the loop, because an empty set makes the loop vacuous and
+  // this test green — while the test above *also* goes green, since with no
+  // exceptions there is nothing to except. Emptying the set would otherwise
+  // remove both halves of the rule at once and look like a passing suite.
+  expect(RUNTIME_REACT.size).toBeGreaterThan(0);
+  for (const file of RUNTIME_REACT) {
+    const imports = importsOf(readFileSync(join(dir, file), "utf8"));
+    expect(imports.some((i) => i.specifier === "react" && !i.typeOnly)).toBe(true);
   }
 });

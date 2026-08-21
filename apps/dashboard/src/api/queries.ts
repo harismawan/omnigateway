@@ -1,3 +1,4 @@
+import type { Cadence } from "@omnigateway/dashboard-sdk";
 import {
   type UseMutationResult,
   type UseQueryResult,
@@ -85,8 +86,12 @@ export const queryKeys = {
 /**
  * Polling cadence. `false` pauses a query, which is what the chassis LIVE
  * switch does — an idle console should not keep a laptop awake.
+ *
+ * Defined beside the `cadence` that produces it, which is in the SDK now that a
+ * plugin panel reads the same switch. Re-exported here because every hook below
+ * takes one and this is where a reader of those signatures looks.
  */
-export type Cadence = number | false;
+export type { Cadence };
 
 export function useStatus(): UseQueryResult<StatusResponse> {
   return useQuery({

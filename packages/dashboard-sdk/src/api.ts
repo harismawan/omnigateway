@@ -203,10 +203,12 @@ export function createPluginApi(pluginId: string): PluginApi {
  * a module-level cache fixes it across every component in the plugin, and it
  * costs one entry per installed plugin.
  *
- * It is also why nothing in this package imports React at runtime. That is
- * worth more than it looks: the SDK is the one dependency every plugin bundle
- * has, and a package that imports React is a package that can accidentally ship
- * a second copy of it.
+ * It is also why *this* module imports no React, which is worth keeping even
+ * now that `live.ts` does: a cache that needs no hook is reachable from
+ * anywhere, including code that is not a component. The package-wide version of
+ * this rule ended when the SDK joined the console's shared imports — see
+ * `index.ts` — but "do not reach for a hook where a module-level value will do"
+ * outlived it.
  */
 const apiByPluginId = new Map<string, PluginApi>();
 

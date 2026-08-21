@@ -1,32 +1,19 @@
-import { createContext, type ReactNode, use, useCallback, useMemo, useState } from "react";
-import type { Cadence } from "../api/queries.ts";
-
-type LiveContextValue = {
-  live: boolean;
-  toggle: () => void;
-  /** Feed straight into a query's `refetchInterval`. */
-  cadence: (ms: number) => Cadence;
-};
-
-const LiveContext = createContext<LiveContextValue | null>(null);
-
 /**
- * The chassis LIVE switch. Polling is the gateway's only push mechanism — there
- * is no log socket — so pausing it has to be one deliberate control rather than
- * a setting hidden per screen.
+ * The chassis LIVE switch, which now lives in the plugin SDK.
+ *
+ * Kept as a module of its own rather than deleted, because fourteen boards
+ * import `useLive` from here and the switch is a console concept that happens
+ * to be *implemented* somewhere shared — a reader looking for it should land on
+ * this file and be told where it went, not grep the SDK on a hunch.
+ *
+ * It moved because a plugin panel has to be able to honour the same switch, and
+ * a panel may not import an app. `packages/dashboard-sdk/src/live.ts` carries
+ * the reasoning, including why one copy of that module rather than two is the
+ * whole point.
  */
-export function LiveProvider({ children }: { children: ReactNode }) {
-  const [live, setLive] = useState(true);
-  const toggle = useCallback(() => setLive((value) => !value), []);
-  const value = useMemo<LiveContextValue>(
-    () => ({ live, toggle, cadence: (ms: number) => (live ? ms : false) }),
-    [live, toggle],
-  );
-  return <LiveContext value={value}>{children}</LiveContext>;
-}
-
-export function useLive(): LiveContextValue {
-  const value = use(LiveContext);
-  // Outside the shell (login, tests of a bare feature) polling is simply off.
-  return value ?? { live: false, toggle: () => {}, cadence: () => false };
-}
+export {
+  type Cadence,
+  type LiveContextValue,
+  LiveProvider,
+  useLive,
+} from "@omnigateway/dashboard-sdk";
