@@ -2,7 +2,9 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as sdk from "@omnigateway/dashboard-sdk";
 import React from "react";
+import * as sdkShim from "../shared/dashboard-sdk.ts";
 import { SHARED_IMPORTS, sharedEntryName } from "../shared/manifest.ts";
 import * as reactShim from "../shared/react.ts";
 
@@ -99,6 +101,32 @@ test("the React shim re-exports every public React export", () => {
   // an extra name is the reverse — React removed or renamed an export and the
   // shim is now re-exporting `undefined` under a name plugins still import.
   expect([...exported].sort()).toEqual(expected.sort());
+});
+
+test("the SDK shim re-exports the whole SDK", () => {
+  // The React shim above is checked this way because a missing name is
+  // `undefined` at runtime with nothing failing at build time. The SDK shim has
+  // the same hole and a worse landing: the console imports `useLive` as a *bare
+  // specifier*, so a shim that stops exporting it is not `undefined` — it is a
+  // module that does not provide the requested binding, which is a load-time
+  // SyntaxError and a console that never boots.
+  //
+  // This is not hypothetical. Reducing `shared/dashboard-sdk.ts` to a single
+  // named re-export left the whole suite green, including the real-build test,
+  // while the emitted entry shipped `export{i as pluginApiPath}` and the
+  // console chunks went on importing `useLive` from it.
+  //
+  // A superset rather than an equality: the shim is `export *`, so it cannot
+  // add names, and pinning it to an exact list would make every new SDK export
+  // fail here instead of where it was added.
+  const exported = new Set(Object.keys(sdkShim));
+  for (const name of Object.keys(sdk)) {
+    expect(exported).toContain(name);
+  }
+  // Guards the loop: an SDK that exported nothing would satisfy it vacuously,
+  // and `export *` of an empty module is exactly what a bad refactor leaves.
+  expect(Object.keys(sdk).length).toBeGreaterThan(0);
+  expect(Object.keys(sdk)).toContain("useLive");
 });
 
 test("every deliberately withheld React key is still a React key", () => {

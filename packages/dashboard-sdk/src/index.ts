@@ -14,7 +14,7 @@
  * hook call" — an error whose message points at the plugin's own code and never
  * at the duplicated dependency that caused it. `apps/dashboard/shared/manifest.ts`
  * documents the same trap from the host's side, where the console externalises
- * these four specifiers and serves them through an import map.
+ * these packages and serves them through an import map.
  *
  * The peer declarations here are a contract statement rather than a resolution
  * mechanism: installing this SDK is how a plugin author learns which four
@@ -36,7 +36,8 @@
  * served by the host, importing the host's one React. What that buys is not
  * just instance identity but **context identity**, which a duplicated copy
  * breaks in total silence — see `live.tsx`. So the list a plugin's bundler must
- * mark external is five specifiers now, not four, and the fifth is this one.
+ * mark external includes this package now, and it is the entry authors leave
+ * off, because it is the one that is obviously theirs.
  */
 
 /**

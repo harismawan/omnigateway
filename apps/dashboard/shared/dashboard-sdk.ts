@@ -6,7 +6,7 @@
  * enumerate its exports statically and the CommonJS trap those files exist to
  * work around does not apply here.
  *
- * The other four entries are shared for *instance* identity — one React, one
+ * The other entries are shared for *instance* identity — one React, one
  * stylesheet, one query cache. This one is shared for **context** identity. The
  * SDK's `live.ts` calls `createContext` at module scope, and a second copy of
  * the module would produce a second context object: a panel reading it would

@@ -40,7 +40,7 @@ has two SDK imports instead of one, for the same stated reason.
 
 ### Why sharing is required rather than tidy
 
-The other five shared specifiers are about *instance* identity, and each breach
+The other shared specifiers are about *instance* identity, and each breach
 announces itself: two Reacts throw "invalid hook call", two styled-components
 render from different stylesheets. This one is about **context** identity, and
 its breach is silent. That asymmetry is the entire argument for putting the SDK
@@ -61,7 +61,8 @@ mode for "forgot to externalise" is silence in both directions.
 The mitigation is a test on the plugin side asserting the built bundle keeps the
 SDK external. This repository cannot run that test for plugins it does not own,
 so it is documented in `docs/writing-a-plugin.md` and in the SDK README, both of
-which now print the fifth `--external` flag.
+which now print the SDK's own `--external` flag and say why it is the one an
+author is most likely to leave off.
 
 ## What was ruled out
 
@@ -77,11 +78,21 @@ contradicts the principle the switch was built on.
 
 ## Consequences to keep in view
 
-- The host now supplies the SDK at runtime, so a plugin's `sdk` semver range
-  stops being advisory and starts describing what it will actually be handed.
+- The host now supplies the SDK at runtime **to plugins that externalise it**,
+  and for those the `sdk` semver range starts describing what will actually be
+  handed over. For a plugin that still bundles its own copy the range gets
+  *less* accurate, not more: the host reports 0.1.1, the gate says compatible,
+  and the panel runs the 0.1.0 code inside its own bundle. That is the price of
+  keeping old plugins loading, and it is worth naming rather than implying the
+  gate became precise for everyone.
 - `/shared/*.js` entry filenames are unhashed and served `no-cache`, so a bump
   needs no cache-busting — but an open tab keeps the resolved module for the
   document's lifetime, the same caveat `apps/gateway/src/plugins/ui.ts` records
   for plugin bundles.
-- The import map is injected at build only. Plugin panels under `vite dev`
-  resolve from `node_modules` as they always have.
+- The import map is injected at build only, so under `vite dev` the console's
+  own source resolves the SDK from `node_modules` — one copy, safe. Plugin
+  panels do not run under the dev server at all, and did not before this
+  change: `mount.tsx` loads a bundle with `import(/* @vite-ignore */ entry)`,
+  which Vite deliberately does not touch, so its bare specifiers have no import
+  map to resolve against — and the dev server proxies only `/api` and
+  `/health`, not `/plugin-assets`, so the bundle is never fetched either way.

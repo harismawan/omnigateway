@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import * as sdk from "@omnigateway/dashboard-sdk";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LiveProvider, useLive } from "../../src/session/live.tsx";
@@ -70,23 +71,36 @@ test("with no provider above it, nothing polls", () => {
 
 test("the console reaches the same context object a plugin would", async () => {
   // The failure this exists for is silent and is not about behaviour: two
-  // copies of the SDK module mean two `createContext` calls, and a panel
-  // reading the second finds no provider and pauses forever. Importing through
-  // the console's own `session/live.tsx` re-export and providing through it
-  // proves the identity survives the hop the console actually makes.
-  const sdk = await import("@omnigateway/dashboard-sdk");
+  // copies of the module mean two `createContext` calls, and whoever reads the
+  // second finds no provider and pauses forever.
+  //
+  // The nesting is the whole test, and the first version of it had the nesting
+  // backwards — console provider outside, SDK provider inside, console hook at
+  // the bottom. The outer provider satisfied the console's hook whether or not
+  // the two spellings named one context, so re-declaring `createContext` in
+  // `session/live.tsx` left all 400 tests green. Providing through the SDK and
+  // reading through the console, with no console provider anywhere, is what
+  // makes the identity load-bearing.
   const user = userEvent.setup();
 
   render(
-    <LiveProvider>
-      <sdk.LiveProvider>
-        <Readout />
-      </sdk.LiveProvider>
-    </LiveProvider>,
+    <sdk.LiveProvider>
+      <Readout />
+    </sdk.LiveProvider>,
   );
 
-  // The inner provider wins, so toggling reaches it — which can only be true if
-  // both spellings name one context.
+  // Live, not paused: the SDK's provider was found by the console's `useLive`.
+  // Two contexts would give the no-provider default and read "false" here.
+  expect(screen.getByTestId("cadence").textContent).toBe("10000");
   await user.click(screen.getByRole("button"));
   expect(screen.getByTestId("cadence").textContent).toBe("false");
+});
+
+test("the console's re-export is the SDK's own binding, not a copy of it", () => {
+  // The same property as the test above, asserted without a renderer — cheap
+  // enough to state directly, and it fails with a message that names the cause
+  // rather than a rendered string. Both are kept: this one localises the fault,
+  // and the render test proves the context actually flows.
+  expect(useLive).toBe(sdk.useLive);
+  expect(LiveProvider).toBe(sdk.LiveProvider);
 });

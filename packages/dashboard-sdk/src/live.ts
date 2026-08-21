@@ -60,7 +60,8 @@ const LiveContext = createContext<LiveContextValue | null>(null);
  * with neither `jsx` nor the DOM lib set. Turning JSX on for the whole core
  * typecheck to spell one provider more prettily is a worse trade than one
  * `createElement`, which needs nothing. React 19 takes the context object
- * itself as the provider, so there is no `.Provider` to reach through.
+ * itself as the provider — `LiveContext.Provider === LiveContext` — so
+ * reaching through `.Provider` would be spelling the same value longer.
  */
 export function LiveProvider({ children }: { children: ReactNode }) {
   const [live, setLive] = useState(true);

@@ -7,10 +7,16 @@ import { pluginApi } from "./api.ts";
  * What the host hands a plugin's UI when it mounts it.
  *
  * Mirrored from `packages/dashboard-sdk/src/ui.ts` for the reason given in
- * `api.ts`: the console does not depend on the SDK. It does not need to. The
- * bundle arrives at runtime as an opaque module and is checked structurally, so
- * the shared type is the shape, and the shape is what the manifest's `sdk`
- * semver range is a promise about.
+ * `api.ts`: the console mirrors a *shape* rather than importing it. The bundle
+ * arrives at runtime as an opaque module and is checked structurally, so the
+ * shared type is the shape, and the shape is what the manifest's `sdk` semver
+ * range is a promise about.
+ *
+ * Not "the console does not depend on the SDK", which is what this used to say
+ * and has not been true for a while: `api.ts` imports `pluginApiPath` and
+ * `session/live.tsx` re-exports `useLive`. Both are *rules* rather than shapes,
+ * and a rule held in two places ends up true in one. The line is what kind of
+ * thing is being shared, not whether anything is.
  */
 export type PluginUiProps = {
   /** The plugin's manifest id: its API prefix, its table prefix, its log value. */

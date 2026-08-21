@@ -24,6 +24,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SHARED_IMPORTS, sharedEntryName } from "../shared/manifest.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
@@ -131,5 +132,58 @@ describe("the built console", () => {
       ),
     );
     expect(shared).toBe(true);
+  });
+
+  test("provides every binding the console imports from a shared entry", () => {
+    // `imports nothing bare that the import map cannot resolve` above checks
+    // that each bare specifier is *mapped*. It never asks whether the module at
+    // the other end actually provides the names being imported, and the gap
+    // between those two is a console that does not boot: an ES import of a
+    // binding a module does not export is a load-time SyntaxError, not an
+    // `undefined`.
+    //
+    // Checked against the artifact rather than the shim source, because the
+    // failure this catches includes ones the source cannot show — dropping
+    // `preserveEntrySignatures` in `vite.shared.config.ts` tree-shakes these
+    // entries to nothing while every source file still reads correctly.
+    // Both sides are brace lists of `a as b`, and the halves mean opposite
+    // things: in `export { i as useLive }` the module provides `useLive`, and
+    // in `import { useLive as fe }` the module is asked for `useLive`. So both
+    // want the half facing the module boundary — last for exports, first for
+    // imports.
+    const names = (source: string, pattern: RegExp, half: "first" | "last"): Set<string> => {
+      const out = new Set<string>();
+      for (const match of source.matchAll(pattern)) {
+        for (const part of (match[1] ?? "").split(",")) {
+          const sides = part.trim().split(/\s+as\s+/);
+          const name = (half === "first" ? sides[0] : sides[sides.length - 1])?.trim();
+          if (name !== undefined && name !== "") out.add(name);
+        }
+      }
+      return out;
+    };
+
+    const chunks = bundles(join(dist, "assets")).map((file) => readFileSync(file, "utf8"));
+    let checked = 0;
+
+    for (const [specifier, url] of Object.entries(SHARED_IMPORTS)) {
+      const entry = join(dist, "shared", `${sharedEntryName(url)}.js`);
+      const provided = names(readFileSync(entry, "utf8"), /export\s*\{([^}]*)\}/g, "last");
+
+      const escaped = specifier.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+      const imported = new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*"${escaped}"`, "g");
+      const wanted = new Set<string>();
+      for (const source of chunks) {
+        for (const name of names(source, imported, "first")) wanted.add(name);
+      }
+
+      checked += wanted.size;
+      expect([...wanted].filter((name) => !provided.has(name)).sort()).toEqual([]);
+    }
+
+    // Without this the whole loop is vacuous the moment the regexes stop
+    // matching — a bundler that emits `import{a}from'react'` with single quotes
+    // would leave every `wanted` empty and every assertion trivially true.
+    expect(checked).toBeGreaterThan(0);
   });
 });

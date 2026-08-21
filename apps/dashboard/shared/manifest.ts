@@ -9,7 +9,7 @@
  * bundles its own copy while plugins import another — two React instances, and
  * every plugin hook throws "invalid hook call" with nothing pointing here.
  *
- * The SDK is here for a different reason than the other five, and a quieter
+ * The SDK is here for a different reason than the others, and a quieter
  * one. Those are about instance identity: two Reacts throw, two
  * styled-components render from different stylesheets, and both say so. The SDK
  * holds `LiveContext`, so a second copy is a second *context object* — a panel

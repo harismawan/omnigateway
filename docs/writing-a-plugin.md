@@ -29,9 +29,16 @@ say the same thing in your own README.
 ## What to install
 
 ```bash
-bun add @omnigateway/plugin-api        # the server half
-bun add @omnigateway/dashboard-sdk     # only if you ship a console panel
+bun add @omnigateway/plugin-api                    # the server half
+bun add --peer @omnigateway/dashboard-sdk          # only if you ship a console panel
+bun add --dev  @omnigateway/dashboard-sdk          # …and again, to typecheck against it
 ```
+
+The SDK is a **peer** dependency, not a regular one. The console supplies it at
+runtime through its import map, the same way it supplies React — a copy in your
+own `dependencies` is a second copy on the page, and for this package that means
+a second `LiveContext` and a panel that silently stops polling. The dev entry is
+so `tsc` can see the types; it is not what gets loaded.
 
 Both publish TypeScript sources — Bun imports them directly, so there is no build
 step on their side and no dual-package hazard. If you typecheck with `tsc`, use
