@@ -24,15 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Canary, deliberately: `bun.lock` is lockfileVersion 2, which only Bun
-      # 1.4 writes and reads, and 1.4 is unreleased. A released pin cannot
-      # install this lockfile, and asking for "1.4.0" 404s — both were tried on
-      # this tag. CI therefore tracks the same Bun the repository is developed
-      # on. If a canary ever breaks a release, pin the exact build here rather
-      # than rewriting the lockfile.
+      # Exact version. `bun.lock` is lockfileVersion 2, which needs Bun 1.4;
+      # this previously tracked `canary` because 1.4 was unreleased and a 1.3.x
+      # pin silently downgrades the lockfile instead of failing. 1.4.0 went
+      # stable 2026-08-20, so the reason for `canary` is gone: a release built
+      # by "whatever Bun existed at tag time" is not reproducible from the tag.
+      #
+      # Must stay on the same version as `ci.yml`. Bump both together, or
+      # releases ship from a toolchain the test suite never ran on.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: 1.4.0
 
       - name: Install
         run: bun install --frozen-lockfile
