@@ -38,7 +38,7 @@ look arbitrary in isolation.
 5. **Transcripts persist, encrypted with a plugin-held key.** See "Transcript storage".
 6. **One route set, two guards.** Operational routes accept an admin session *or* a machine token,
    so the future mobile app is client work only.
-7. **Long-poll now, WebSocket-ready framing.** See "Transport".
+7. **Built on the core WebSocket transport**, which lands first. See "Transport".
 
 ## Components
 
@@ -46,11 +46,11 @@ Four pieces, three trust zones.
 
 ### `omni rc agent` — `apps/cli`
 
-One daemon per dev box, holding a machine token. Outbound only. Two loops:
-
-- long-poll `GET /api/plugins/rc/m/commands`, returning on the first command or at 45s. 45s is under
-  Cloudflare's 100s header deadline; long-poll rather than SSE because a plugin route cannot stream.
-- `POST /api/plugins/rc/m/events` to push session output upward, batched (flush on ~150ms or ~4KB).
+One daemon per dev box, holding a machine token. Outbound only: it opens a WebSocket to
+`/api/stream`, authenticates the machine token at upgrade, and subscribes to its own topics —
+commands downward, session output upward on `plugin:rc:session:<id>`. Plain `POST` routes under
+`/api/plugins/rc/m/…` remain for request-shaped operations (register host, list sessions, mint
+nothing) where a stream would be the wrong shape.
 
 It owns the child processes: `claude --input-format stream-json --output-format stream-json
 --verbose`, one per driven session. Spawning lives here and never in the gateway — a plugin has no
@@ -141,27 +141,42 @@ a prompt corpus).
 
 ## Transport
 
-Chosen: **long-poll now, with the protocol framed as discrete typed messages over an abstract
-channel** — `{ seq, type, payload }` plus an ack cursor — so the transport is one implementation
-detail and a later swap changes neither the agent's logic nor the plugin's.
+**Depends on [the WebSocket transport design](2026-08-22-websocket-transport-design.md), which lands
+first.** RC is born on the socket; no long-poll transport is written and later deleted.
 
-WebSocket was considered and deferred. It is a genuinely larger host change: the gateway has no
-WebSocket anywhere today, so the host would have to own the socket
-(`wss://…/api/plugins/<id>/m/socket`, authenticated at upgrade, handing the plugin a
-`{ onMessage, send, onClose }` channel), which brings backpressure, connection caps, heartbeats,
-graceful shutdown, and an interaction with the quiesce latch and database swap. What long-poll
-genuinely does worse is watching tokens stream in the browser: batching makes that chunky at roughly
-150ms rather than smooth. Command delivery latency is unaffected, because the poll is already parked.
+Long-poll was the earlier plan, on the reasoning that a plugin route cannot stream and a 45s poll
+sits under Cloudflare's 100s header deadline. It was rejected on sequencing: RC needs
+keystroke-latency commands downward and token deltas upward, so long-poll would only have been a
+worse socket, written and tested twice.
 
-**A follow-up design covers migrating the gateway to WebSocket transport.** This document assumes
-long-poll and message framing that survives that migration.
+What RC consumes from that design:
+
+- `/api/stream`, one multiplexed connection, machine-token auth at upgrade for the agent and the
+  future mobile app, admin-session auth for the console panel.
+- The `channels` plugin capability: the plugin receives `{ onMessage, send, onClose }` for topics
+  namespaced `plugin:rc:*` and never touches a socket or a header.
+- The `stream:` delivery class — monotonic `seq` per topic, a bounded replay ring, and an explicit
+  `gap` frame when a reconnecting agent has fallen behind it. RC never claims a gapless transcript;
+  a `gap` sends the client to the REST transcript fetch.
+- Bounded per-subscriber queues that drop rather than grow.
+
+RC therefore needs no transport of its own, and the fallback question belongs to that design rather
+than this one: an operator whose proxy strips `Upgrade` gets a degraded console, and RC session
+driving is unavailable rather than silently slow.
+
+## Sequencing
+
+1. [WebSocket transport](2026-08-22-websocket-transport-design.md) — approved, lands first.
+2. `routes:machine` host capability and `plugin_machine_tokens` (described above). The WebSocket
+   design already assumes this table for machine-token upgrades, so the two are adjacent.
+3. This plugin, once both exist.
 
 ## Open — not yet designed
 
 - Session model: identity, lifecycle, tier transitions, what "interrupt" means per tier, cwd and
   repo association, multi-agent/multi-host listing.
-- Wire protocol: the message set, ack and replay semantics, resume after agent restart, ordering
-  guarantees, batching rules.
+- RC's own message set over `plugin:rc:*`: command vocabulary, resume after agent restart, how a
+  `gap` is surfaced in the panel.
 - Console panel: layout, live-switch integration, what a tier-2 session renders.
 - Notifications: the 2026-08-12 outbound webhook, and what mobile push would need later.
 - Failure modes table, testing plan, and the documentation changes listed above
@@ -170,6 +185,7 @@ long-poll and message framing that survives that migration.
 
 ## References
 
+- [2026-08-22 WebSocket transport design](2026-08-22-websocket-transport-design.md) — prerequisite
 - [2026-08-12 Remote Control design](2026-08-12-remote-control-design.md)
 - [2026-08-19 Plugin host design](2026-08-19-plugin-host-design.md)
 - [2026-08-21 Federating the SDK](2026-08-21-federating-the-sdk-design.md)
