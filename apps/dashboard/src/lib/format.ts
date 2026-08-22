@@ -64,6 +64,48 @@ export function formatClock(at: number): string {
   return new Date(at).toLocaleTimeString("en-GB", { hour12: false });
 }
 
+const DAY_MS = 86_400_000;
+
+/**
+ * A tick on a time axis, dated only when the span it sits in needs it.
+ *
+ * Whether a bare clock is enough is a property of the axis, not of what drew
+ * it: the same `14:30` names one instant on an axis that fits inside a day and
+ * several on one that does not. A quota panel charts its window plus the one
+ * before it, so the 5h window spans ten hours and the 7d window spans a
+ * fortnight — the first crosses midnight whenever it is read late enough, and
+ * the second always does.
+ *
+ * Seconds are dropped in both forms. Nothing plotted on these axes is sampled
+ * finely enough for them to distinguish two ticks, and they cost the width the
+ * date needs.
+ */
+export function formatChartTime(at: number, spanMs: number): string {
+  const date = new Date(at);
+  const clock = date.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  if (!isDatedSpan(spanMs)) return clock;
+  return `${date.toLocaleDateString("en-GB", { day: "2-digit", month: "short" })} ${clock}`;
+}
+
+/**
+ * Whether `formatChartTime` will date a tick on a span this wide.
+ *
+ * Exported because a caller has to leave room for the answer — a dated tick is
+ * near twice the width of a bare clock — and a caller deciding that by
+ * re-testing the span against its own copy of the threshold is a caller that
+ * will disagree with this one the first time either moves.
+ */
+export function isDatedSpan(spanMs: number): boolean {
+  // Written as one comparison rather than a finiteness guard and a comparison,
+  // because the comparison already answers both ends: a NaN span is false and
+  // an unbounded one is true, which is what each should be.
+  return spanMs >= DAY_MS;
+}
+
 export function formatDateTime(at: number | null | undefined): string {
   if (at == null || !Number.isFinite(at)) return "—";
   return new Date(at).toLocaleString("en-GB", {
