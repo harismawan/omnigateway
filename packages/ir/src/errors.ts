@@ -22,6 +22,7 @@ export type ErrorCode =
   | "CONTENT_FILTER"
   | "CAPABILITY_MISMATCH"
   | "MODEL_UNAVAILABLE"
+  | "FINGERPRINT_REFUSED"
   | "UPSTREAM"
   | "TIMEOUT"
   | "NETWORK"
@@ -50,6 +51,10 @@ export const RETRYABLE: Readonly<Record<ErrorCode, boolean>> = {
   BAD_REQUEST: false,
   CONFLICT: false,
   CONTENT_FILTER: false,
+  // Same reasoning as `BAD_REQUEST`: the refusal is a check on the request's
+  // own tool names, so every candidate refuses the identical body and walking
+  // the pool buys latency and nothing else.
+  FINGERPRINT_REFUSED: false,
   NO_CANDIDATES: false,
   ALL_CANDIDATES_FAILED: false,
   INTERNAL: false,
@@ -72,6 +77,10 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
   CONFLICT: 409,
   CONTENT_FILTER: 400,
   CAPABILITY_MISMATCH: 400,
+  // The upstream's own status, forwarded with its own message: the client sees
+  // exactly what it saw before this code existed. Only the gateway's record of
+  // why improves.
+  FINGERPRINT_REFUSED: 400,
   MODEL_UNAVAILABLE: 404,
   UPSTREAM: 502,
   TIMEOUT: 504,
@@ -112,6 +121,30 @@ export class GatewayError extends Error {
   readonly upstreamStatus: number | undefined;
   /** Milliseconds, when the upstream sent a Retry-After header. */
   readonly retryAfterMs: number | undefined;
+  /**
+   * Capability reductions the failed attempt had already applied.
+   *
+   * An adapter builds its wire body — and learns what the request lost doing
+   * it — before the upstream answers, so a request that is then refused has
+   * degradations that exist and are recorded nowhere: they ride out on
+   * `AdapterResult`, which a throw never produces. That matters most for a
+   * refusal the gateway blames on something it did to the request, where the
+   * first question is whether it did that thing at all.
+   *
+   * **Populated today by exactly one throw site**: the Anthropic tool-name
+   * fingerprint refusal, which is the one failure whose diagnosis depends on
+   * it. Every other throw — including Anthropic's own non-fingerprint errors,
+   * and every other adapter — still discards what it degraded. So an empty
+   * array means "nobody attached any here", never "nothing was degraded".
+   * Widening that is a change to make deliberately rather than to assume has
+   * already happened.
+   *
+   * Every value is an adapter-authored constant. Unlike `LogFields` this type
+   * enforces no vocabulary, and it feeds an operator-facing column, so a
+   * caller interpolating request data into an entry would be a privacy change
+   * on the same terms as widening `LogFields`.
+   */
+  readonly degradations: readonly string[];
 
   constructor(
     code: ErrorCode,
@@ -120,6 +153,7 @@ export class GatewayError extends Error {
       provider?: ProviderId;
       status?: number;
       retryAfterMs?: number;
+      degradations?: readonly string[];
       cause?: unknown;
     },
   ) {
@@ -130,5 +164,8 @@ export class GatewayError extends Error {
     this.provider = opts?.provider;
     this.upstreamStatus = opts?.status;
     this.retryAfterMs = opts?.retryAfterMs;
+    // Copied, not aliased: `readonly` is a compile-time claim, and the caller's
+    // array is a local it may still be pushing to.
+    this.degradations = [...(opts?.degradations ?? [])];
   }
 }

@@ -16,10 +16,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # `bun.lock` uses lockfileVersion 2, which currently requires Bun 1.4 canary.
+      # Exact version, not `canary` and not `latest`. `bun.lock` is
+      # lockfileVersion 2, which needs Bun 1.4 — 1.3.x silently *downgrades*
+      # the lockfile rather than failing, so a wrong pin corrupts rather than
+      # errors. 1.4.0 went stable 2026-08-20 and reads it: verified by running
+      # `bun install --frozen-lockfile` against this lockfile on 1.4.0 and
+      # confirming the file was byte-identical afterwards.
+      #
+      # `canary` was a moving target no commit recorded — a run could not be
+      # reproduced, and a canary regression surfaced as a test failure in
+      # whatever branch happened to run next.
+      #
+      # Bump deliberately, together with `release.yml`, which must stay on the
+      # same version as CI or releases are built by a toolchain nothing tested.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: 1.4.0
 
       - name: Install
         run: bun install --frozen-lockfile

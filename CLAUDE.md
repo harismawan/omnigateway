@@ -186,6 +186,14 @@ Preserve these translation invariants:
 - `AnthropicToolDef` or `anthropicNative` history block exclude every provider whose
   `ANTHROPIC_NATIVE_TOOLS` entry false at routing — currently everything except Anthropic.
 - `pauseTurn` is own stop reason; never fold into `endTurn` or `toolUse`.
+- Client tool names renamed to PascalCase on Anthropic **OAuth** leg only, restored in
+  `anthropic/decode.ts` — never at egress. Anthropic fingerprint some name sets and refuse them
+  through a billing placeholder; `FINGERPRINT_REFUSED` name that. Restore site load-bearing: RTK
+  normalize by case and separator alone, so `SessionSearch` never match `session_search` and an
+  egress-side restore silently degrade every shell classification. Cloak live in `send()` frame,
+  never on `dispatchRequest` — that object shared across attempt, so storing it leak alias into
+  next provider. Exempt name (already PascalCase, or `mcp__*`) reach wire unrenamed and therefore
+  **claim its spelling**, else derived alias land on live tool's real name.
 - Unknown Anthropic block types + SSE events fail visibly, not skipped.
 - Preserve cache-control breakpoint block, TTL, order when target can express them. Record
   degradations for requested features provider cannot express.

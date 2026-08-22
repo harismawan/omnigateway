@@ -1,5 +1,6 @@
 import type { CacheControl, ChatRequest, ContentBlock, ToolChoice, ToolDef } from "@omni/ir";
 import { cacheControlOf } from "@omni/ir";
+import { cloakName, type ToolCloak } from "./cloak.ts";
 import { anthropicReasoningForm } from "./models.ts";
 
 export const OAUTH_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -61,7 +62,7 @@ function isReplayableThinking(b: ContentBlock): boolean {
   return b.type !== "thinking" || (b.signature !== undefined && b.signature !== "");
 }
 
-function encodeBlock(b: ContentBlock): unknown {
+function encodeBlock(b: ContentBlock, cloak: ToolCloak | null): unknown {
   const cache = wireCacheControl(cacheControlOf(b));
   switch (b.type) {
     case "text":
@@ -80,7 +81,13 @@ function encodeBlock(b: ContentBlock): unknown {
     case "thinking":
       return { type: "thinking", thinking: b.text, signature: b.signature };
     case "toolUse":
-      return { type: "tool_use", id: b.id, name: b.name, input: b.input, ...cache };
+      return {
+        type: "tool_use",
+        id: b.id,
+        name: cloakName(cloak, b.name),
+        input: b.input,
+        ...cache,
+      };
     case "toolResult":
       return {
         type: "tool_result",
@@ -103,11 +110,11 @@ function encodeBlock(b: ContentBlock): unknown {
  * Tool changes share the system role but require block arrays, so any mixed or
  * native content is encoded block-for-block rather than silently discarded.
  */
-function encodeSystemTurn(content: ContentBlock[]): string | unknown[] {
+function encodeSystemTurn(content: ContentBlock[], cloak: ToolCloak | null): string | unknown[] {
   if (content.every((block) => block.type === "text")) {
     return content.map((block) => block.text).join("\n");
   }
-  return content.map(encodeBlock);
+  return content.map((block) => encodeBlock(block, cloak));
 }
 
 function systemCacheControl(req: ChatRequest): {
@@ -141,8 +148,12 @@ function systemCacheControl(req: ChatRequest): {
  * upgrades a date or supplies a default, because either would send Anthropic a
  * different tool than the one the client declared. `mcp_toolset` is the one
  * entry with no name, so an empty one is omitted rather than sent as `""`.
+ *
+ * That is also why the cloak reaches only the second branch. An Anthropic name
+ * is paired with its `type` by Anthropic and re-validated against that pairing
+ * at ingress, so renaming one breaks the request at both ends.
  */
-function encodeTool(t: ToolDef): Record<string, unknown> {
+function encodeTool(t: ToolDef, cloak: ToolCloak | null): Record<string, unknown> {
   if (t.provider === "anthropic") {
     return {
       type: t.type,
@@ -152,7 +163,7 @@ function encodeTool(t: ToolDef): Record<string, unknown> {
     };
   }
   return {
-    name: t.name,
+    name: cloakName(cloak, t.name),
     ...(t.description === undefined ? {} : { description: t.description }),
     input_schema: t.inputSchema,
     ...(t.options ?? {}),
@@ -160,7 +171,7 @@ function encodeTool(t: ToolDef): Record<string, unknown> {
   };
 }
 
-function encodeToolChoice(c: ToolChoice): unknown {
+function encodeToolChoice(c: ToolChoice, cloak: ToolCloak | null): unknown {
   switch (c.type) {
     case "auto":
       return { type: "auto" };
@@ -169,7 +180,7 @@ function encodeToolChoice(c: ToolChoice): unknown {
     case "none":
       return { type: "none" };
     case "tool":
-      return { type: "tool", name: c.name };
+      return { type: "tool", name: cloakName(cloak, c.name) };
   }
 }
 
@@ -268,8 +279,9 @@ function stripUnsupportedEdits(body: AnthropicBody, note: (d: string) => void): 
 export function toWire(
   req: ChatRequest,
   model: string,
-  opts: { oauth: boolean },
+  opts: { oauth: boolean; cloak?: ToolCloak | null },
 ): { body: AnthropicBody; degradations: string[] } {
+  const cloak = opts.cloak ?? null;
   const degradations: string[] = [];
   // A degradation names something the request lost, not how many times the
   // encoder noticed; the other two encoders dedupe the same way.
@@ -292,6 +304,11 @@ export function toWire(
     note("anthropic:oauth-system-prefix");
   }
 
+  // The request really does lose something on this leg: the client's chosen
+  // tool names. A cloak only exists when at least one name moved, so this is
+  // never a warning about nothing.
+  if (cloak !== null) note("anthropic:tool-names-cloaked");
+
   const systemCache = systemCacheControl(req);
   if (systemCache.lost) note("anthropic:system-turn-cache-control-dropped");
   const body: AnthropicBody = {
@@ -304,9 +321,9 @@ export function toWire(
         // to say. Anthropic rejects an empty content array, so the message goes
         // rather than being sent as one.
         if (replayable.length === 0) return [];
-        return [{ role: m.role, content: replayable.map(encodeBlock) }];
+        return [{ role: m.role, content: replayable.map((b) => encodeBlock(b, cloak)) }];
       }
-      return [{ role: m.role, content: encodeSystemTurn(m.content) }];
+      return [{ role: m.role, content: encodeSystemTurn(m.content, cloak) }];
     }),
     max_tokens: req.maxTokens ?? 4096,
     stream: req.stream,
@@ -325,8 +342,8 @@ export function toWire(
   if (req.stopSequences !== undefined) body.stop_sequences = req.stopSequences;
   // Order is preserved: Anthropic places cache breakpoints by position in this
   // array, so reordering the two kinds would move a breakpoint the caller set.
-  if (req.tools !== undefined) body.tools = req.tools.map(encodeTool);
-  if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
+  if (req.tools !== undefined) body.tools = req.tools.map((t) => encodeTool(t, cloak));
+  if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice, cloak);
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {
       case "adaptive":

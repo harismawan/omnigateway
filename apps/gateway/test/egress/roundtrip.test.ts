@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { type ChatRequest, collect, type StreamEvent } from "@omni/ir";
 import {
+  anthropicAdapter,
   decodeAnthropic,
   decodeChat,
   toAnthropicWire,
@@ -324,4 +325,125 @@ test("beta names the client opted into survive to the request", () => {
     new Headers({ "anthropic-beta": "web-fetch-2025-09-10, context-management-2025-06-27" }),
   );
   expect(req.betas).toEqual(["web-fetch-2025-09-10", "context-management-2025-06-27"]);
+});
+
+/**
+ * A request whose tool name the Anthropic OAuth leg renames, and the upstream
+ * answer that comes back naming the alias rather than the client's own name.
+ *
+ * `SessionSearch` is what `session_search` derives to, so this fixture is the
+ * upstream behaving exactly as it must: it only ever saw the alias, so that is
+ * the only name it can call back with.
+ */
+const CLOAKED_REQUEST: ChatRequest = {
+  model: "claude-opus-4",
+  stream: true,
+  messages: [{ role: "user", content: [{ type: "text", text: "find it" }] }],
+  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+};
+
+const ALIASED_UPSTREAM = [
+  {
+    event: "message_start",
+    data: { type: "message_start", message: { id: "msg_3", model: "claude-opus-4" } },
+  },
+  {
+    event: "content_block_start",
+    data: {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "tu_9", name: "SessionSearch" },
+    },
+  },
+  {
+    event: "content_block_delta",
+    data: {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: "{}" },
+    },
+  },
+  { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+  {
+    event: "message_delta",
+    data: {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use" },
+      usage: { input_tokens: 4, output_tokens: 5 },
+    },
+  },
+];
+
+/**
+ * Runs the whole Anthropic OAuth leg and hands back both halves of the trip:
+ * the tool names that went upstream, and the IR events that came back.
+ *
+ * Going through `anthropicAdapter.send` rather than through `toWire` and
+ * `decodeAnthropic` separately is the point — the cloak is derived inside
+ * `send`, so any test that builds one by hand proves nothing about whether the
+ * adapter builds the same one for both directions.
+ */
+async function cloakedRoundTrip(): Promise<{ wireNames: string[]; events: StreamEvent[] }> {
+  let wireNames: string[] = [];
+  const result = await anthropicAdapter.send({
+    request: CLOAKED_REQUEST,
+    model: "claude-opus-4",
+    credentials: { accessToken: "oauth-token", apiKey: null, providerData: {} },
+    signal: new AbortController().signal,
+    http: async (request) => {
+      const body = JSON.parse(request.body) as { tools?: { name: string }[] };
+      wireNames = (body.tools ?? []).map((t) => t.name);
+      const sse = ALIASED_UPSTREAM.map(
+        (f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n\n`,
+      ).join("");
+      return {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: new Response(sse).body as ReadableStream<Uint8Array>,
+        text: async () => sse,
+      };
+    },
+  });
+  return { wireNames, events: await drain(result.events) };
+}
+
+async function renderedFrames(
+  frames: AsyncGenerator<{ event: string; data: string }>,
+): Promise<{ event: string; data: unknown }[]> {
+  const out: { event: string; data: unknown }[] = [];
+  for await (const f of frames) out.push({ event: f.event, data: JSON.parse(f.data) as unknown });
+  return out;
+}
+
+test("the client sees its own tool name on the anthropic surface, never the alias", async () => {
+  const { wireNames, events } = await cloakedRoundTrip();
+  // The trip is only meaningful if the upstream really was told something else.
+  expect(wireNames).toEqual(["SessionSearch"]);
+
+  // Restored in the decoder, so the IR itself already holds the client's name.
+  // Asserting on the IR and not only on the rendered frames is what separates
+  // "restored at decode" from "restored at egress": the second would render
+  // identically here while leaving every other reader of these events — RTK's
+  // classification, the token estimate, the next turn's replayed history —
+  // looking at a name the client never sent.
+  const irStart = events.find((e) => e.type === "blockStart");
+  expect(irStart).toMatchObject({ block: { name: "session_search" } });
+
+  const frames = await renderedFrames(anthropicStream(source(events), "msg_3"));
+  const start = frames.find((f) => f.event === "content_block_start");
+  expect(start?.data).toMatchObject({ content_block: { name: "session_search" } });
+  expect(JSON.stringify(frames)).not.toContain("SessionSearch");
+});
+
+test("the client sees its own tool name on the openai surface, never the alias", async () => {
+  const { events } = await cloakedRoundTrip();
+  const frames = await renderedFrames(openaiStream(source(events), "msg_3", 0));
+  const names = frames.flatMap((f) => {
+    const calls = (
+      f.data as { choices?: { delta?: { tool_calls?: { function?: { name?: string } }[] } }[] }
+    ).choices?.[0]?.delta?.tool_calls;
+    return (calls ?? []).map((c) => c.function?.name).filter((n): n is string => n !== undefined);
+  });
+  expect(names).toContain("session_search");
+  expect(JSON.stringify(frames)).not.toContain("SessionSearch");
 });

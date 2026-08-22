@@ -1,5 +1,6 @@
 import { type ErrorCode, RETRYABLE, type StopReason, type StreamEvent } from "@omni/ir";
 import type { SseMessage } from "../sse.ts";
+import { type ToolCloak, uncloakName } from "./cloak.ts";
 import { ANTHROPIC_NATIVE_BLOCK_TYPES } from "./tools.ts";
 
 const STOP_REASON: Readonly<Record<string, StopReason>> = {
@@ -53,6 +54,58 @@ const ERROR_TYPE: Readonly<Record<string, ErrorCode>> = {
   api_error: "UPSTREAM",
 };
 
+/**
+ * The billing text Anthropic surfaces a tool-name fingerprint refusal through.
+ *
+ * The message is a placeholder, not a diagnosis: the account is not exhausted,
+ * and the same request succeeds with the tools renamed. Both phrasings are
+ * matched because two variants of the same refusal have been recorded.
+ *
+ * A genuine extra-usage exhaustion produces this identical text and is
+ * therefore classified the same way — there is nothing in the response that
+ * tells them apart. The cost is that a real exhaustion is not retried against
+ * another credential; the fingerprint case is the observed one, and it fails on
+ * every credential alike. An operator seeing this repeatedly should read
+ * `quota_windows` before assuming the account ran out.
+ *
+ * Substrings rather than a regex: the `i` flag was the only thing a pattern
+ * bought here, Anthropic's casing is fixed anyway, and lowercasing once is
+ * plainer than a alternation for a reader deciding whether a new phrasing
+ * belongs in the list.
+ */
+const FINGERPRINT_PHRASES = ["out of extra usage", "draw from extra usage"] as const;
+
+/**
+ * Whether a message carries the refusal's text.
+ *
+ * Exported on its own because the refusal arrives by two routes that know
+ * different things. As an SSE `error` event once a stream is open, the upstream
+ * `type` is right there — use `isFingerprintRefusal`. As an HTTP 400 answered
+ * before any stream exists, which is the shape actually measured, `httpError`
+ * has already reduced the body to a code and a message and discarded the type,
+ * so that caller pairs this with the response status instead.
+ *
+ * The two are deliberately not one predicate: an earlier version passed a
+ * hardcoded `"invalid_request_error"` on the HTTP route, which read as a shared
+ * check while testing only half of one.
+ */
+export function isFingerprintMessage(message: string): boolean {
+  const lowered = message.toLowerCase();
+  return FINGERPRINT_PHRASES.some((phrase) => lowered.includes(phrase));
+}
+
+/**
+ * Whether an upstream refusal is the tool-name fingerprint check.
+ *
+ * The `type` half is load-bearing, not decoration. A `rate_limit_error` can
+ * carry the same overage phrasing, and that one is a real limit: it must stay
+ * `RATE_LIMIT`, which is retryable, rather than becoming a non-retryable
+ * refusal that ends the request against a pool that would have served it.
+ */
+export function isFingerprintRefusal(type: string, message: string): boolean {
+  return type === "invalid_request_error" && isFingerprintMessage(message);
+}
+
 /** The subset of Anthropic's SSE payload shapes this decoder reads. */
 type AnthropicEvent = {
   message?: {
@@ -103,7 +156,9 @@ function json(data: string): AnthropicEvent | null {
 
 export async function* decodeAnthropic(
   messages: AsyncGenerator<SseMessage> | AsyncIterable<SseMessage>,
+  opts: { cloak?: ToolCloak | null } = {},
 ): AsyncGenerator<StreamEvent, void, undefined> {
+  const cloak = opts.cloak ?? null;
   let inputTokens = 0;
   let cacheReadTokens = 0;
   let cacheWriteTokens = 0;
@@ -154,11 +209,20 @@ export async function* decodeAnthropic(
         if (cb.type === "text") yield { type: "blockStart", index, block: { type: "text" } };
         else if (cb.type === "thinking")
           yield { type: "blockStart", index, block: { type: "thinking", signed: true } };
+        // The one site in this decoder carrying a client tool name, so the one
+        // place the cloak has to be undone. Restoring here rather than at
+        // egress keeps every downstream reader — the IR collector, both client
+        // surfaces, and RTK's classification — looking at the name the client
+        // actually sent.
         else if (cb.type === "tool_use")
           yield {
             type: "blockStart",
             index,
-            block: { type: "toolUse", id: String(cb.id), name: String(cb.name) },
+            block: {
+              type: "toolUse",
+              id: String(cb.id),
+              name: uncloakName(cloak, String(cb.name)),
+            },
           };
         else if (cb.type !== undefined && ANTHROPIC_NATIVE_BLOCK_TYPES.has(cb.type)) {
           nativeBlocks.add(index);
@@ -278,13 +342,15 @@ export async function* decodeAnthropic(
 
       case "error": {
         terminal = true;
-        const code = ERROR_TYPE[String(d.error?.type)] ?? "UPSTREAM";
-        yield {
-          type: "error",
-          code,
-          message: String(d.error?.message ?? "upstream error"),
-          retryable: RETRYABLE[code],
-        };
+        const type = String(d.error?.type);
+        const message = String(d.error?.message ?? "upstream error");
+        // Runs ahead of the table, which maps by `type` alone: this refusal
+        // arrives as an ordinary `invalid_request_error` and is only
+        // distinguishable by what it says.
+        const code = isFingerprintRefusal(type, message)
+          ? "FINGERPRINT_REFUSED"
+          : (ERROR_TYPE[type] ?? "UPSTREAM");
+        yield { type: "error", code, message, retryable: RETRYABLE[code] };
         break;
       }
 

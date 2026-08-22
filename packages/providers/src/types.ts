@@ -62,6 +62,15 @@ export type AdapterResult = {
   events: AsyncGenerator<StreamEvent, void, undefined>;
   /** Capability reductions applied while building the wire request. */
   degradations: string[];
+  /**
+   * How many client tool names an adapter renamed on the outbound leg.
+   *
+   * A count and never the names: a tool name is client free text, and the
+   * caller puts this straight into `LogFields`, which is the redaction
+   * boundary. Absent when nothing was renamed, which is every adapter but
+   * Anthropic's and, within it, every request on an API key.
+   */
+  cloakedTools?: number;
 };
 
 export interface ProviderAdapter {

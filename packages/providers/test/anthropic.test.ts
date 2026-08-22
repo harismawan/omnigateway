@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest, StreamEvent } from "@omni/ir";
+import { GatewayError } from "@omni/ir";
 import { decodeAnthropic } from "../src/anthropic/decode.ts";
+import { anthropicAdapter } from "../src/anthropic/index.ts";
 import { OAUTH_IDENTITY, toWire } from "../src/anthropic/wire.ts";
 import type { SseMessage } from "../src/sse.ts";
+import type { AdapterRequest, AdapterResult, HttpRequest } from "../src/types.ts";
 
 const base: ChatRequest = {
   model: "fast",
@@ -1010,4 +1013,194 @@ test("ignores a signature delta that carries no signature", async () => {
     ),
   );
   expect(events.filter((e) => e.type === "blockDelta")).toEqual([]);
+});
+
+/** Runs the adapter against a stub transport and hands back the exact bytes. */
+async function capture(over: Partial<AdapterRequest> = {}): Promise<HttpRequest> {
+  let sent: HttpRequest | null = null;
+  await anthropicAdapter.send({
+    request: base,
+    model: "claude-opus-4",
+    credentials: { accessToken: "oauth-token", apiKey: null, providerData: {} },
+    signal: new AbortController().signal,
+    ...over,
+    http: async (request) => {
+      sent = request;
+      return {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: new ReadableStream({ start: (controller) => controller.close() }),
+        text: async () => "",
+      };
+    },
+  });
+  if (sent === null) throw new Error("adapter did not send a request");
+  return sent;
+}
+
+/** The three signatures measured against the live API on 2026-08-22. */
+const MEASURED_SIGNATURES = [
+  "delegate_task",
+  "session_search",
+  "clarify",
+  "skill_manage",
+  "skill_view",
+  "skills_list",
+];
+
+const WITH_SIGNATURES: ChatRequest = {
+  ...base,
+  messages: [
+    { role: "user", content: [{ type: "text", text: "go" }] },
+    {
+      role: "assistant",
+      content: [{ type: "toolUse", id: "tu_1", name: "delegate_task", input: {} }],
+    },
+    { role: "user", content: [{ type: "toolResult", toolUseId: "tu_1", content: "ok" }] },
+  ],
+  tools: MEASURED_SIGNATURES.map((name) => ({
+    provider: "custom" as const,
+    name,
+    inputSchema: { type: "object" },
+  })),
+  toolChoice: { type: "tool", name: "clarify" },
+};
+
+test("no measured fingerprint signature reaches the wire on the oauth path", async () => {
+  const sent = await capture({ request: WITH_SIGNATURES });
+  for (const name of MEASURED_SIGNATURES) {
+    expect(sent.body).not.toContain(`"${name}"`);
+  }
+  // And the aliases really are there, so the assertion above cannot pass by the
+  // tools having been dropped entirely.
+  for (const alias of ["DelegateTask", "SessionSearch", "Clarify", "SkillManage", "SkillsList"]) {
+    expect(sent.body).toContain(`"${alias}"`);
+  }
+});
+
+test("the api-key path sends the client's own tool names untouched", async () => {
+  const sent = await capture({
+    request: WITH_SIGNATURES,
+    credentials: { accessToken: null, apiKey: "sk-ant-test", providerData: {} },
+  });
+  // That surface does not fingerprint, so mutating its bodies buys nothing.
+  for (const name of MEASURED_SIGNATURES) {
+    expect(sent.body).toContain(`"${name}"`);
+  }
+  expect(sent.body).not.toContain("DelegateTask");
+});
+
+/**
+ * The refusal as it was actually measured: an HTTP 400 with a JSON body, before
+ * any stream begins.
+ *
+ * The adapter asks for `text/event-stream`, but a request-validation refusal is
+ * answered before there is a stream to put an `error` event in, so this never
+ * reaches the SSE decoder. Classifying it in the decoder alone would leave the
+ * one shape the investigation actually recorded reading as `BAD_REQUEST`.
+ */
+async function sendRefused(body: string, status = 400): Promise<unknown> {
+  try {
+    await anthropicAdapter.send({
+      request: base,
+      model: "claude-opus-4",
+      credentials: { accessToken: "oauth-token", apiKey: null, providerData: {} },
+      signal: new AbortController().signal,
+      http: async () => ({
+        status,
+        headers: new Headers({ "content-type": "application/json" }),
+        body: null,
+        text: async () => body,
+      }),
+    });
+  } catch (error) {
+    return error;
+  }
+  throw new Error("adapter did not throw");
+}
+
+const REFUSAL_BODY = JSON.stringify({
+  type: "error",
+  error: {
+    type: "invalid_request_error",
+    message: "You're out of extra usage. Add more at claude.ai/settings/usage and keep going.",
+  },
+});
+
+test("a fingerprint refusal arriving as an http 400 is named, not read as a bad request", async () => {
+  const error = await sendRefused(REFUSAL_BODY);
+  expect(error).toBeInstanceOf(GatewayError);
+  expect((error as GatewayError).code).toBe("FINGERPRINT_REFUSED");
+  expect((error as GatewayError).retryable).toBe(false);
+  // The upstream's own words, forwarded.
+  expect((error as GatewayError).message).toContain("out of extra usage");
+  // The degradations ride the throw, because there is no result to carry them
+  // and this is the failure whose diagnosis needs them.
+  expect((error as GatewayError).degradations).toContain("anthropic:oauth-system-prefix");
+});
+
+test("only a 400 is read as a fingerprint refusal, whatever the message says", async () => {
+  // The status stands in for the `type` the SSE route checks, so it is the
+  // whole gate on this path. `codeForStatus` maps 413 and 422 to `BAD_REQUEST`
+  // as well, and a 429 is a real limit: widening this to `>= 400` would turn a
+  // rate limit carrying the same wording into a non-retryable refusal and end
+  // the request against a pool that would have served it.
+  for (const [status, expected] of [
+    [429, "RATE_LIMIT"],
+    [422, "BAD_REQUEST"],
+    [500, "UPSTREAM"],
+  ] as const) {
+    const error = await sendRefused(REFUSAL_BODY, status);
+    expect((error as GatewayError).code).toBe(expected);
+  }
+});
+
+test("a refusal forwards the upstream's own status and retry hint", async () => {
+  const error = await sendRefused(REFUSAL_BODY);
+  expect((error as GatewayError).upstreamStatus).toBe(400);
+});
+
+test("an ordinary anthropic 400 is still a bad request", async () => {
+  const error = await sendRefused(
+    JSON.stringify({
+      type: "error",
+      error: { type: "invalid_request_error", message: "max_tokens: must be >= 1" },
+    }),
+  );
+  expect((error as GatewayError).code).toBe("BAD_REQUEST");
+});
+
+/** Runs the adapter against an empty 200 and hands back the whole result. */
+async function sendResult(over: Partial<AdapterRequest> = {}): Promise<AdapterResult> {
+  return anthropicAdapter.send({
+    request: base,
+    model: "claude-opus-4",
+    credentials: { accessToken: "oauth-token", apiKey: null, providerData: {} },
+    signal: new AbortController().signal,
+    ...over,
+    http: async () => ({
+      status: 200,
+      headers: new Headers({ "content-type": "text/event-stream" }),
+      body: new ReadableStream({ start: (controller) => controller.close() }),
+      text: async () => "",
+    }),
+  });
+}
+
+test("a cloaked request reports how many names it renamed, and records the loss", async () => {
+  const result = await sendResult({ request: WITH_SIGNATURES });
+  // A count, never the names: tool names are client free text.
+  expect(result.cloakedTools).toBe(6);
+  expect(result.degradations).toContain("anthropic:tool-names-cloaked");
+});
+
+test("an uncloaked request reports no count at all", async () => {
+  const apiKey = await sendResult({
+    request: WITH_SIGNATURES,
+    credentials: { accessToken: null, apiKey: "sk-ant-test", providerData: {} },
+  });
+  expect(apiKey.cloakedTools).toBeUndefined();
+
+  const noTools = await sendResult();
+  expect(noTools.cloakedTools).toBeUndefined();
 });
