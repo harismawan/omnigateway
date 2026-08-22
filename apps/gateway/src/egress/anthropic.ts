@@ -23,6 +23,10 @@ const ERROR_TYPE: Readonly<Record<ErrorCode, string>> = {
   CONFLICT: "invalid_request_error",
   CONTENT_FILTER: "invalid_request_error",
   CAPABILITY_MISMATCH: "invalid_request_error",
+  // Rendered as the upstream rendered it. The gateway names the cause in its
+  // own log; rewriting the client's copy would break the rule that a client
+  // error mirrors the upstream one.
+  FINGERPRINT_REFUSED: "invalid_request_error",
   MODEL_UNAVAILABLE: "not_found_error",
   UPSTREAM: "api_error",
   TIMEOUT: "api_error",

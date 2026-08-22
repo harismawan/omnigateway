@@ -120,6 +120,26 @@ export async function dispatch(
   };
 
   /**
+   * Records what a request lost, once per distinct entry.
+   *
+   * Both sites that collect degradations go through here — the successful
+   * attempt's `AdapterResult` and the failed attempt's `GatewayError` — because
+   * a request can reach both across a failover, and `request_logs.degradations`
+   * means a set: "images were dropped" is one fact however many attempts
+   * dropped them. `note()` in an adapter's `toWire` dedupes within a single
+   * attempt; only this dedupes across them.
+   *
+   * Two attempts against the same provider already produced duplicate entries
+   * before this existed — a pre-commit stream error failing over to a second
+   * Anthropic credential doubled `anthropic:oauth-system-prefix`.
+   */
+  const noteDegradations = (entries: readonly string[]): void => {
+    for (const d of entries) {
+      if (!log.degradations.includes(d)) log.degradations.push(d);
+    }
+  };
+
+  /**
    * Whether this error *is* the client hanging up, rather than merely having
    * happened while one was in progress.
    *
@@ -405,7 +425,21 @@ export async function dispatch(
                 dispatchSignal,
               );
 
-              for (const d of result.degradations) log.degradations.push(d);
+              noteDegradations(result.degradations);
+
+              // Beside the degradation the adapter already recorded, and for the
+              // same reason: a cloak that silently misbehaves has no other signal.
+              // The count only — the names it renamed are client free text and
+              // `LogFields` is where that line is drawn.
+              if (result.cloakedTools !== undefined) {
+                logger.debug("tool names cloaked", {
+                  requestId,
+                  provider: candidate.target.provider,
+                  credentialId: candidate.credential.id,
+                  attempt: i + 1,
+                  cloakedTools: result.cloakedTools,
+                });
+              }
 
               let terminal = false;
               const pending: StreamEvent[] = [];
@@ -537,6 +571,11 @@ export async function dispatch(
               const { code } = classifiedError;
               const message = describeError(error, "attempt failed");
               lastError = rewrap(classifiedError, message);
+
+              // A failed attempt still built a wire body, and what the request
+              // lost building it is recorded on the error because there is no
+              // result to carry it.
+              if (error instanceof GatewayError) noteDegradations(error.degradations);
 
               if (
                 code === "AUTH" &&

@@ -483,6 +483,12 @@ async function handle(
        * on either side of it. That asymmetry is the point of the feature —
        * `request_logs` records which filters ran and not what they removed —
        * and nothing here should try to reconcile them.
+       *
+       * RTK is one of two reasons the halves differ. The other is the tool-name
+       * cloak on the Anthropic OAuth leg: `attempts[].request` holds the
+       * renamed tools it sent, while `client.request` holds the names the
+       * client chose. Neither is a leak — the originals were always in the
+       * client half — but a reader diffing the two should expect it.
        */
       writeBodies = async (completed) => {
         await captured.settle();

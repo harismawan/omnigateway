@@ -43,6 +43,10 @@ const ERROR_TYPE: Readonly<Record<ErrorCode, { type: string; code: string }>> = 
   CONFLICT: { type: "invalid_request_error", code: "conflict" },
   CONTENT_FILTER: { type: "invalid_request_error", code: "content_policy_violation" },
   CAPABILITY_MISMATCH: { type: "invalid_request_error", code: "invalid_request" },
+  // Same shape `BAD_REQUEST` renders: this surface has no vocabulary for an
+  // upstream fingerprint check, and inventing one would tell the client
+  // something no OpenAI client knows how to read.
+  FINGERPRINT_REFUSED: { type: "invalid_request_error", code: "invalid_request" },
   MODEL_UNAVAILABLE: { type: "invalid_request_error", code: "model_not_found" },
   UPSTREAM: { type: "server_error", code: "server_error" },
   TIMEOUT: { type: "server_error", code: "timeout" },

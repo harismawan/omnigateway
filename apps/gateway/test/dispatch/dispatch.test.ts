@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
-import type { HttpClient, ProviderAdapter } from "@omni/providers";
+import { anthropicAdapter, type HttpClient, type ProviderAdapter } from "@omni/providers";
 import { buildSnapshot, healthKey } from "@omni/router";
 import type { CredentialSecrets, Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
@@ -846,6 +846,231 @@ test("the log records the excluded candidates and their reasons", async () => {
 
   expect(outcome.log().degradations).toContain("excluded:c1:disabled");
   store.close();
+});
+
+test("failover hands the second provider the client's own tool names, not Anthropic's aliases", async () => {
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "c-openai",
+    provider: "openai",
+    label: "openai",
+    authType: "apiKey",
+    enabled: true,
+    tier: 2,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "synthetic-key",
+    idToken: null,
+  });
+  await store.config.putModel({
+    id: "mixed",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      {
+        provider: "openai",
+        model: "gpt-5",
+        tier: 2,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  // The real Anthropic adapter, because a stub would not build a cloak and the
+  // whole question here is what the cloak leaves behind. It fails on a 503 so
+  // dispatch moves to the next candidate.
+  let anthropicWire = "";
+  const http: HttpClient = async (request) => {
+    anthropicWire = request.body;
+    return {
+      status: 503,
+      headers: new Headers(),
+      body: null,
+      text: async () => '{"type":"error","error":{"type":"overloaded_error","message":"busy"}}',
+    };
+  };
+
+  const second: string[] = [];
+  const openai: ProviderAdapter = {
+    id: "openai",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send(r) {
+      for (const t of r.request.tools ?? []) if (t.provider === "custom") second.push(t.name);
+      for (const m of r.request.messages) {
+        for (const b of m.content) if (b.type === "toolUse") second.push(b.name);
+      }
+      return { events: textStream("ok"), degradations: [] };
+    },
+  };
+
+  const input: ChatRequest = {
+    model: "mixed",
+    stream: true,
+    messages: [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      {
+        role: "assistant",
+        content: [{ type: "toolUse", id: "tu_1", name: "delegate_task", input: {} }],
+      },
+      { role: "user", content: [{ type: "toolResult", toolUseId: "tu_1", content: "done" }] },
+    ],
+    tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+  };
+
+  const outcome = await dispatch(
+    input,
+    {
+      ...deps(store, openai),
+      adapters: { anthropic: anthropicAdapter, openai, kimi: openai },
+      http,
+    },
+    new AbortController().signal,
+    "req_failover",
+  );
+  await drain(outcome.events);
+
+  // The first leg really did rename, so the second leg seeing the originals is
+  // a fact about the cloak's scope rather than about it never having run.
+  expect(anthropicWire).toContain("SessionSearch");
+  expect(anthropicWire).toContain("DelegateTask");
+  expect(second).toEqual(["session_search", "delegate_task"]);
+  // And the shared IR the two attempts share is untouched.
+  expect(input.tools?.[0]).toMatchObject({ name: "session_search" });
+  store.close();
+});
+
+/** A request carrying one custom tool the Anthropic OAuth leg will rename. */
+const CLOAKED: ChatRequest = {
+  model: "fast",
+  stream: true,
+  messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+};
+
+/** Answers the Anthropic leg with one canned HTTP response. */
+function anthropicHttp(status: number, body: string): HttpClient {
+  return async () => ({
+    status,
+    headers: new Headers(),
+    body: null,
+    text: async () => body,
+  });
+}
+
+test("a cloaked request reports how many names it renamed, once, on its own log line", async () => {
+  const store = await seeded(1);
+  const logger = captureLogger();
+  const outcome = await dispatch(
+    CLOAKED,
+    {
+      ...deps(
+        store,
+        stubAdapter(() => textStream("hi")),
+      ),
+      adapters: { anthropic: anthropicAdapter, openai: anthropicAdapter, kimi: anthropicAdapter },
+      // A 200 with an empty SSE body: the adapter returns a result, which is
+      // the path that carries the count.
+      http: async () => ({
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: new Response("").body as ReadableStream<Uint8Array>,
+        text: async () => "",
+      }),
+      logger,
+    },
+    new AbortController().signal,
+    "req_count",
+  );
+  await drain(outcome.events);
+
+  const cloaked = logger.records.filter((r) => r.fields.cloakedTools !== undefined);
+  expect(cloaked).toHaveLength(1);
+  expect(cloaked[0]?.fields.cloakedTools).toBe(1);
+  // A count and never the names — the field is the redaction boundary.
+  expect(JSON.stringify(cloaked[0]?.fields)).not.toContain("session_search");
+});
+
+test("a degradation both attempts report is recorded once, not once per attempt", async () => {
+  // `request_logs.degradations` means a set: "images were dropped" is one fact
+  // however many attempts dropped it. `note()` inside a single `toWire` cannot
+  // see across attempts, so this is the only thing deduping a failover — and
+  // both collection sites have to agree, or one of them reintroduces the
+  // duplicate the other prevents.
+  const store = await seeded(2);
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("UPSTREAM", "retry") : textStream("ok"),
+  );
+  const originalSend = adapter.send.bind(adapter);
+  adapter.send = async (input) => {
+    if (adapter.calls.length === 0) {
+      // The failing attempt reports through the error, the succeeding one
+      // through its result: the two paths this dedupe spans.
+      await originalSend(input).catch(() => undefined);
+      throw new GatewayError("UPSTREAM", "retry", { degradations: ["kimi:images-dropped"] });
+    }
+    const result = await originalSend(input);
+    return { ...result, degradations: ["kimi:images-dropped"] };
+  };
+
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_dup",
+  );
+  await drain(outcome.events);
+
+  expect(outcome.log().degradations).toEqual(["kimi:images-dropped"]);
+  store.close();
+});
+
+test("a fingerprint refusal still records that the cloak was running", async () => {
+  const store = await seeded(1);
+  const outcome = await dispatch(
+    CLOAKED,
+    {
+      ...deps(
+        store,
+        stubAdapter(() => textStream("hi")),
+      ),
+      adapters: { anthropic: anthropicAdapter, openai: anthropicAdapter, kimi: anthropicAdapter },
+      http: anthropicHttp(
+        400,
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: "You're out of extra usage. Add more at claude.ai/settings/usage.",
+          },
+        }),
+      ),
+    },
+    new AbortController().signal,
+    "req_refused",
+  );
+  await drain(outcome.events).catch(() => undefined);
+
+  // The whole point of the record: an operator looking at a refusal blamed on
+  // tool names must be able to tell whether the rename actually happened. The
+  // adapter throws here, so there is no result to carry it.
+  expect(outcome.log().errorCode).toBe("FINGERPRINT_REFUSED");
+  expect(outcome.log().degradations).toContain("anthropic:tool-names-cloaked");
 });
 
 test("injected clock enforces deadline without waiting for the timer", async () => {

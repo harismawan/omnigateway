@@ -301,6 +301,7 @@ describe("the field allowlist and the render order stay in step", () => {
     rawCount: 10,
     dailyCount: 11,
     quotaSampleCount: 12,
+    cloakedTools: 22,
     sizeBytes: 13,
     host: "h",
     port: 9000,

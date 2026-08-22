@@ -6,6 +6,8 @@ import type { CredentialSecrets, CredentialView } from "@omni/store";
 export type AttemptResult = {
   events: AsyncGenerator<StreamEvent, void, undefined>;
   degradations: string[];
+  /** Client tool names the adapter renamed on this attempt. A count, never the names. */
+  cloakedTools?: number;
 };
 
 /**
