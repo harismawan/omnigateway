@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  formatChartTime,
   formatCount,
   formatDuration,
   formatMs,
   formatPercent,
   formatRelative,
   formatUsd,
+  isDatedSpan,
   shortId,
 } from "../../src/lib/format.ts";
 
@@ -62,6 +64,40 @@ describe("formatDuration and formatRelative", () => {
 test("formatPercent renders a fraction as a percentage", () => {
   expect(formatPercent(0.0912)).toBe("9.1%");
   expect(formatPercent(0, 0)).toBe("0%");
+});
+
+describe("formatChartTime", () => {
+  const HOUR = 3_600_000;
+  const DAY = 24 * HOUR;
+  const at = 1_800_000_000_000;
+
+  // Asserted by shape rather than by literal: the output is local time, and a
+  // suite pinned to one zone would pass in CI and lie to whoever ran it from
+  // anywhere else.
+  test("a span inside a day is a bare clock", () => {
+    expect(formatChartTime(at, 10 * HOUR)).toMatch(/^\d{2}:\d{2}$/);
+    expect(isDatedSpan(10 * HOUR)).toBe(false);
+  });
+
+  test("a span of a day or wider carries the date", () => {
+    expect(formatChartTime(at, DAY)).toMatch(/^\d{2} \w{3} \d{2}:\d{2}$/);
+    expect(formatChartTime(at, 14 * DAY)).toMatch(/^\d{2} \w{3} \d{2}:\d{2}$/);
+    expect(isDatedSpan(DAY)).toBe(true);
+  });
+
+  // The reason the date is there at all: on a fortnight-wide axis the same
+  // clock is reached fourteen times, and undated ticks name them identically.
+  test("the same clock on two days reads differently once dated", () => {
+    const nextDay = at + DAY;
+    expect(formatChartTime(nextDay, 10 * HOUR)).toBe(formatChartTime(at, 10 * HOUR));
+    expect(formatChartTime(nextDay, 14 * DAY)).not.toBe(formatChartTime(at, 14 * DAY));
+  });
+
+  test("a span that is not a number is not dated", () => {
+    expect(formatChartTime(at, Number.NaN)).toMatch(/^\d{2}:\d{2}$/);
+    expect(isDatedSpan(Number.NaN)).toBe(false);
+    expect(isDatedSpan(Number.POSITIVE_INFINITY)).toBe(true);
+  });
 });
 
 test("shortId truncates only when it must", () => {

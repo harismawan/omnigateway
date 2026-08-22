@@ -11,7 +11,13 @@ import {
 import styled from "styled-components";
 import { useQuotaHistory } from "../../api/queries.ts";
 import type { BurnEstimate, GatewayRate, QuotaSample, QuotaWindow } from "../../api/types.ts";
-import { formatClock, formatCount, formatDuration } from "../../lib/format.ts";
+import {
+  formatChartTime,
+  formatCount,
+  formatDateTime,
+  formatDuration,
+  isDatedSpan,
+} from "../../lib/format.ts";
 import {
   budgetPace,
   burnOf,
@@ -266,6 +272,11 @@ function WindowPanel({
       ? []
       : [projection.from.percent, projection.to.percent].map((percent) => Math.ceil(percent))),
   );
+  // Computed once, because the axis is labelled by how much time it covers as
+  // well as bounded by it: a span wider than a day gets dated ticks, and dated
+  // ticks are wide enough to need a wider gap kept between them.
+  const domain =
+    since === null || window.resetsAt === null ? null : paceDomain(since, window.resetsAt, budgets);
 
   return (
     <Stack $gap={2}>
@@ -308,7 +319,7 @@ function WindowPanel({
 
       {window.limit === null ? (
         <Absent>no ceiling reported</Absent>
-      ) : window.resetsAt === null || since === null ? (
+      ) : domain === null ? (
         <Absent>no reset reported</Absent>
       ) : segments.length === 0 ? (
         <Absent>not yet observed</Absent>
@@ -331,11 +342,11 @@ function WindowPanel({
                   dataKey="at"
                   type="number"
                   scale="time"
-                  domain={paceDomain(since, window.resetsAt, budgets)}
-                  tickFormatter={(at: number) => formatClock(at)}
+                  domain={domain}
+                  tickFormatter={(at: number) => formatChartTime(at, domain[1] - domain[0])}
                   tick={{ fill: "var(--ink-faint)", fontSize: 10 }}
                   stroke="var(--rule-strong)"
-                  minTickGap={40}
+                  minTickGap={isDatedSpan(domain[1] - domain[0]) ? 80 : 40}
                 />
                 {/* The scale is stated, not inferred. Left to itself recharts
                     stretches a numeric domain to whatever the data reached, so
@@ -361,7 +372,11 @@ function WindowPanel({
                     const at = (point.payload as { at: number }).at;
                     return (
                       <TipCard>
-                        <div>{formatClock(at)}</div>
+                        {/* Dated unconditionally, unlike the ticks: a tooltip
+                            is asked for one point at a time and has the room,
+                            so there is nothing to buy by leaving it ambiguous
+                            on the panels whose axis happens to fit in a day. */}
+                        <div>{formatDateTime(at)}</div>
                         <div>{point.value.toFixed(1)}% used</div>
                       </TipCard>
                     );
