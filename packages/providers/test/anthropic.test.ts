@@ -1204,3 +1204,184 @@ test("an uncloaked request reports no count at all", async () => {
   const noTools = await sendResult();
   expect(noTools.cloakedTools).toBeUndefined();
 });
+
+/**
+ * A prompt over the minimum cacheable size, built from repeated text.
+ *
+ * The gate is a token estimate, and the estimator counts roughly four
+ * characters to the token, so this has to be big in characters to be big in
+ * tokens. Anything shorter would be skipped for a reason the test is not about.
+ */
+const BIG_SYSTEM = "You are a careful assistant. ".repeat(400);
+
+/** A request with a cacheable prefix and no breakpoint anywhere — hermes' shape. */
+const UNMARKED: ChatRequest = {
+  ...base,
+  system: [{ type: "text", text: BIG_SYSTEM }],
+  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+};
+
+test("adds a breakpoint to the last system block when the client sent none", () => {
+  const { body, degradations } = toWire(UNMARKED, "m", { oauth: false, autoCache: true });
+  expect(body.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  // The stable prefix only. A breakpoint on the volatile turn would be
+  // rewritten every request and cache nothing.
+  expect(JSON.stringify(body.messages)).not.toContain("cache_control");
+  expect(degradations).toContain("anthropic:cache-breakpoint-added");
+});
+
+test("leaves the body untouched when the feature is off", () => {
+  const off = toWire(UNMARKED, "m", { oauth: false });
+  const on = toWire(UNMARKED, "m", { oauth: false, autoCache: false });
+  expect(JSON.stringify(off.body)).not.toContain("cache_control");
+  expect(JSON.stringify(on.body)).toBe(JSON.stringify(off.body));
+});
+
+test("never touches a request that already marks a breakpoint of its own", () => {
+  // Anthropic caps breakpoints at four, and a client that placed its own knows
+  // where its prefix ends better than this does. Byte-identical is the
+  // assertion, not merely "still has one".
+  const marked: ChatRequest = {
+    ...UNMARKED,
+    system: [{ type: "text", text: BIG_SYSTEM, cacheControl: { type: "ephemeral", ttl: "1h" } }],
+  };
+  const on = toWire(marked, "m", { oauth: false, autoCache: true });
+  const off = toWire(marked, "m", { oauth: false });
+  expect(JSON.stringify(on.body)).toBe(JSON.stringify(off.body));
+  expect(on.degradations).not.toContain("anthropic:cache-breakpoint-added");
+});
+
+test("a marker anywhere at all counts, including on a tool", () => {
+  const marked: ChatRequest = {
+    ...UNMARKED,
+    tools: [
+      {
+        provider: "custom",
+        name: "session_search",
+        inputSchema: { type: "object" },
+        cacheControl: { type: "ephemeral" },
+      },
+    ],
+  };
+  const { body, degradations } = toWire(marked, "m", { oauth: false, autoCache: true });
+  expect(body.system?.at(-1)?.cache_control).toBeUndefined();
+  expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+});
+
+test("skips a prompt too small for Anthropic to cache", () => {
+  // Below the minimum nothing caches however it is marked, so marking it would
+  // record a change that bought nothing.
+  const { body, degradations } = toWire(
+    { ...base, system: [{ type: "text", text: "be terse" }] },
+    "m",
+    { oauth: false, autoCache: true },
+  );
+  expect(JSON.stringify(body)).not.toContain("cache_control");
+  expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+});
+
+test("falls back to the last tool when the request carries no system prompt", () => {
+  const toolsOnly: ChatRequest = {
+    ...base,
+    tools: [
+      { provider: "custom", name: "a", description: BIG_SYSTEM, inputSchema: { type: "object" } },
+      { provider: "custom", name: "b", inputSchema: { type: "object" } },
+    ],
+  };
+  const { body } = toWire(toolsOnly, "m", { oauth: false, autoCache: true });
+  expect(body.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(body.tools?.[0]?.cache_control).toBeUndefined();
+});
+
+test("the breakpoint goes on the wire body and never back onto the request", () => {
+  // `dispatchRequest` is one shared object across every attempt, so a marker
+  // written onto the IR would follow a failover into another provider and into
+  // what RTK and the token estimate believe the client sent.
+  const request: ChatRequest = structuredClone(UNMARKED);
+  const before = JSON.stringify(request);
+  toWire(request, "m", { oauth: false, autoCache: true });
+  expect(JSON.stringify(request)).toBe(before);
+  // And a second encode of the same IR still sees an unmarked request.
+  const second = toWire(request, "m", { oauth: false, autoCache: true });
+  expect(second.degradations).toContain("anthropic:cache-breakpoint-added");
+});
+
+test("marks the client's own last system block, not the oauth prefix", () => {
+  const { body } = toWire(UNMARKED, "m", { oauth: true, autoCache: true });
+  expect(body.system?.[0]?.text).toBe(OAUTH_IDENTITY);
+  expect(body.system?.[0]?.cache_control).toBeUndefined();
+  // Last block, so the breakpoint covers the injected prefix and the client's
+  // own system prompt together.
+  expect(body.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+});
+
+test("the adapter honours the operator's auto-cache flag end to end", async () => {
+  // The unit tests above drive `toWire` directly, so none of them notices if
+  // the adapter stops passing the flag through. This is the only assertion
+  // standing between the setting and a feature that silently does nothing.
+  const on = await capture({ request: UNMARKED, autoCache: true });
+  expect(on.body).toContain("cache_control");
+
+  const off = await capture({ request: UNMARKED });
+  expect(off.body).not.toContain("cache_control");
+});
+
+test("a marker anywhere counts, including inside message history", () => {
+  // The third shape of "anywhere", and the one an ordinary client hits: a
+  // breakpoint on the last tool result rather than on system or tools.
+  const marked: ChatRequest = {
+    ...UNMARKED,
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "hi", cacheControl: { type: "ephemeral" } }],
+      },
+    ],
+  };
+  const on = toWire(marked, "m", { oauth: false, autoCache: true });
+  const off = toWire(marked, "m", { oauth: false });
+  expect(JSON.stringify(on.body)).toBe(JSON.stringify(off.body));
+  expect(on.degradations).not.toContain("anthropic:cache-breakpoint-added");
+});
+
+test("a top-level marker in the vendor bag counts too", () => {
+  // Request-level auto-caching never reaches the IR — ingress forwards it
+  // through `vendor` — so the estimate cannot see it and the body would end up
+  // with two breakpoints, one of which the client never asked for.
+  const marked: ChatRequest = {
+    ...UNMARKED,
+    vendor: { anthropic: { cache_control: { type: "ephemeral" } } },
+  };
+  const { body, degradations } = toWire(marked, "m", { oauth: false, autoCache: true });
+  expect((JSON.stringify(body).match(/cache_control/g) ?? []).length).toBe(1);
+  expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+});
+
+test("the size gate measures the prefix it caches, not the whole request", () => {
+  // A long conversation under a two-line system prompt: an ordinary agent
+  // session. Counting the messages would wave this through and mark a prefix
+  // far too small for Anthropic to cache.
+  const longChat: ChatRequest = {
+    ...base,
+    system: [{ type: "text", text: "be terse" }],
+    messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(200_000) }] }],
+  };
+  const { body, degradations } = toWire(longChat, "m", { oauth: false, autoCache: true });
+  expect(JSON.stringify(body)).not.toContain("cache_control");
+  expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+});
+
+test("a system prompt of only non-text blocks falls through to the tools", () => {
+  const odd: ChatRequest = {
+    ...base,
+    system: [{ type: "image", mediaType: "image/png", data: "aGk=" }],
+    tools: [
+      { provider: "custom", name: "a", description: BIG_SYSTEM, inputSchema: { type: "object" } },
+    ],
+  };
+  const { body } = toWire(odd, "m", { oauth: false, autoCache: true });
+  // `toWire` drops non-text system blocks entirely, so there is no system array
+  // left to mark and the last tool takes it.
+  expect(body.system).toBeUndefined();
+  expect(body.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+});

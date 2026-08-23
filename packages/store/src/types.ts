@@ -423,6 +423,27 @@ export type Settings = {
   quotaPollIntervalMs: number;
   rtkEnabled: boolean;
   /**
+   * Whether the gateway adds a cache breakpoint to Anthropic requests that
+   * arrive without one.
+   *
+   * Prompt caching is opt-in at Anthropic: a request carrying no
+   * `cache_control` is billed as fresh input every time, however stable its
+   * prefix. A client that never marks a breakpoint therefore pays full price
+   * for a prompt it resends verbatim, which is what this repairs.
+   *
+   * **Defaults on**, unlike the other request-modifying flags here. It only
+   * ever touches requests that carry no breakpoint at all, so it cannot
+   * overwrite a placement a client chose, and cannot push one past Anthropic's
+   * four-breakpoint ceiling. A malformed stored value still reads as off, like
+   * every other flag that rewrites a request.
+   *
+   * It is still a billing change: a cache write costs more than plain input,
+   * and a prefix never re-read inside the TTL is a small net loss. That is why
+   * the injection is also gated on the prompt being large enough to be
+   * cacheable at all.
+   */
+  autoCacheEnabled: boolean;
+  /**
    * Whether request and response bodies are captured at all.
    *
    * One of two independent keys: the gateway also requires
@@ -1048,6 +1069,7 @@ export const DEFAULT_SETTINGS: Settings = {
   logRetentionDays: 30,
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,
+  autoCacheEnabled: true,
   bodyLoggingEnabled: false,
   bodyLoggingCaptureStreamChunks: false,
   snapshotKeepLatest: 5,

@@ -221,6 +221,7 @@ export const settings: Settings = {
   logRetentionDays: 30,
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,
+  autoCacheEnabled: true,
   bodyLoggingEnabled: false,
   bodyLoggingCaptureStreamChunks: false,
   snapshotKeepLatest: 5,

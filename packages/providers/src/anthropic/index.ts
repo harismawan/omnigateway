@@ -33,7 +33,11 @@ export const anthropicAdapter: ProviderAdapter = {
     // which key on the real names. Rebuilding it per attempt from pristine IR
     // is what makes retries and failover idempotent.
     const cloak = oauth ? buildToolCloak(req.request) : null;
-    const { body, degradations } = toWire(req.request, req.model, { oauth, cloak });
+    const { body, degradations } = toWire(req.request, req.model, {
+      oauth,
+      cloak,
+      autoCache: req.autoCache === true,
+    });
 
     // The billing block and the agent preamble go in as system blocks, and
     // the cch token is computed over the finished bytes, so this has to run

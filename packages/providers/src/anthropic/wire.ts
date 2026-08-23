@@ -1,5 +1,5 @@
 import type { CacheControl, ChatRequest, ContentBlock, ToolChoice, ToolDef } from "@omni/ir";
-import { cacheControlOf } from "@omni/ir";
+import { cacheControlOf, estimateCachedInputTokens, estimateInputTokens } from "@omni/ir";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { anthropicReasoningForm } from "./models.ts";
 
@@ -276,10 +276,88 @@ function stripUnsupportedEdits(body: AnthropicBody, note: (d: string) => void): 
   body.context_management = { ...config, edits: kept };
 }
 
+/**
+ * Below this, Anthropic caches nothing however the request is marked.
+ *
+ * One constant rather than a table per model: the real minimum is larger for
+ * Haiku than for Opus and Sonnet, but the estimator is nowhere near accurate
+ * enough for that difference to be meaningful, so this takes the smaller of the
+ * published values. Rounding down is the right direction — the cost of being
+ * wrong is a marker Anthropic ignores, not a request that fails.
+ *
+ * The estimator over-counts (a flat 1600 per image, four tokens of overhead per
+ * block, the full schema text of every tool), so the error runs the same way:
+ * a prompt that squeaks past this gate and turns out to be too small is simply
+ * ignored upstream. The opposite error — skipping a prompt that would have
+ * cached — needs an *under*-count, which this estimator does not produce.
+ */
+const AUTO_CACHE_MIN_TOKENS = 1024;
+
+/**
+ * Whether a top-level `cache_control` is riding along in the vendor bag.
+ *
+ * `cache_control` is not one of the fields ingress names, so a client that sets
+ * the request-level auto-caching form gets it forwarded verbatim through
+ * `vendor` — where it is invisible to `estimateCachedInputTokens`, which only
+ * walks the IR. Without this check such a request reads as unmarked and would
+ * be given a second breakpoint it never asked for.
+ */
+function hasVendorCacheControl(req: ChatRequest): boolean {
+  const anthropic = req.vendor?.anthropic;
+  return typeof anthropic === "object" && anthropic !== null && "cache_control" in anthropic;
+}
+
+/**
+ * Adds the breakpoint a client omitted, when the operator asked us to.
+ *
+ * Caching at Anthropic is opt-in: an unmarked request is billed as fresh input
+ * every time, however stable its prefix. A client that never marks one pays
+ * full price to resend a prompt verbatim.
+ *
+ * Three things make this safe to do on the caller's behalf:
+ *
+ * - It runs **only** when the request carries no breakpoint anywhere.
+ *   `estimateCachedInputTokens` returns zero in exactly that case — every
+ *   marked block adds a strictly positive count before it records one — and
+ *   `hasVendorCacheControl` covers the one marker that never reaches the IR.
+ *   So a client that placed its own is never second-guessed, and nothing can be
+ *   pushed past Anthropic's four-breakpoint ceiling into a 400.
+ * - It writes to the **wire body**, whose arrays this function just built, and
+ *   never to `req`. The IR is one shared object across every attempt, so a
+ *   breakpoint written there would follow a failover into another provider and
+ *   into what RTK and the token estimate believe the caller sent.
+ * - It marks the last *system* block, or failing that the last tool — never
+ *   message content, which would reach `systemCacheControl`'s promotion path
+ *   and either move the marker to the top level or report a client marker as
+ *   dropped. Render order is tools, then system, then messages, so a breakpoint
+ *   after system covers the whole stable prefix and excludes the volatile turn.
+ */
+function addAutoCacheBreakpoint(
+  body: AnthropicBody,
+  req: ChatRequest,
+  note: (d: string) => void,
+): void {
+  if (estimateCachedInputTokens(req) !== 0 || hasVendorCacheControl(req)) return;
+  // Measured over the prefix this breakpoint would actually cache — tools and
+  // system — and deliberately not over the whole request. A long conversation
+  // under a two-line system prompt is an ordinary agent session, and counting
+  // its messages here would wave through a prefix far too small to cache,
+  // recording a change that bought nothing.
+  if (estimateInputTokens({ ...req, messages: [] }) < AUTO_CACHE_MIN_TOKENS) return;
+
+  const target = body.system?.at(-1) ?? body.tools?.at(-1);
+  if (target === undefined) return;
+
+  // The default TTL, left implicit: it is the cheapest write, and naming it
+  // would send a field the client never asked for.
+  target.cache_control = { type: "ephemeral" };
+  note("anthropic:cache-breakpoint-added");
+}
+
 export function toWire(
   req: ChatRequest,
   model: string,
-  opts: { oauth: boolean; cloak?: ToolCloak | null },
+  opts: { oauth: boolean; cloak?: ToolCloak | null; autoCache?: boolean },
 ): { body: AnthropicBody; degradations: string[] } {
   const cloak = opts.cloak ?? null;
   const degradations: string[] = [];
@@ -344,6 +422,8 @@ export function toWire(
   // array, so reordering the two kinds would move a breakpoint the caller set.
   if (req.tools !== undefined) body.tools = req.tools.map((t) => encodeTool(t, cloak));
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice, cloak);
+  // After both arrays exist, because it marks the last entry of one of them.
+  if (opts.autoCache === true) addAutoCacheBreakpoint(body, req, note);
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {
       case "adaptive":

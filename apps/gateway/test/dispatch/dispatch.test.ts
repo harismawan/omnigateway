@@ -1989,3 +1989,55 @@ test("prints a refresh failure this gateway wrote, without waiting for debug", a
   expect(failed[0]?.fields.reason).toBe(ownMessage);
   store.close();
 });
+
+/** A request with a cacheable prefix and no breakpoint of its own. */
+const UNMARKED_PREFIX: ChatRequest = {
+  model: "fast",
+  stream: true,
+  system: [{ type: "text", text: "You are a careful assistant. ".repeat(400) }],
+  messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+};
+
+/** Runs the real Anthropic adapter and returns the bytes it put on the wire. */
+async function wireBodyFor(store: Store): Promise<string> {
+  let sent = "";
+  const outcome = await dispatch(
+    UNMARKED_PREFIX,
+    {
+      ...deps(
+        store,
+        stubAdapter(() => textStream("hi")),
+      ),
+      adapters: { anthropic: anthropicAdapter, openai: anthropicAdapter, kimi: anthropicAdapter },
+      http: async (request) => {
+        sent = request.body;
+        return {
+          status: 200,
+          headers: new Headers({ "content-type": "text/event-stream" }),
+          body: new Response("").body as ReadableStream<Uint8Array>,
+          text: async () => "",
+        };
+      },
+    },
+    new AbortController().signal,
+    "req_autocache",
+  );
+  await drain(outcome.events);
+  return sent;
+}
+
+test("the auto-cache setting reaches the wire, on and off", async () => {
+  // The setting travels store -> snapshot -> dispatch -> attempt -> adapter ->
+  // toWire, and every hop but the last was assertable only by reading the code.
+  // `attempt` forwards it through a spread that fails silently open, so a typo
+  // there produces a feature that is simply never on.
+  const on = await seeded(1);
+  expect(await wireBodyFor(on)).toContain("cache_control");
+  on.close();
+
+  const off = await seeded(1);
+  await off.config.putSettings({ autoCacheEnabled: false });
+  expect(await wireBodyFor(off)).not.toContain("cache_control");
+  off.close();
+});

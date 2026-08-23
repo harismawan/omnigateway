@@ -421,6 +421,7 @@ export async function dispatch(
                   ...(retrySecrets === undefined ? {} : { secrets: retrySecrets }),
                   logger,
                   requestId,
+                  autoCache: snapshot.settings.autoCacheEnabled,
                 }),
                 dispatchSignal,
               );

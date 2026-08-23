@@ -53,6 +53,27 @@ describe("SettingsBoard", () => {
     });
   });
 
+  test("turns the added cache breakpoint off and sends the setting", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });
+    renderWithProviders(<SettingsBoard />);
+
+    // The one toggle here that starts on, so the meaningful action is turning
+    // it off — and the direction the operator most needs to work.
+    const toggle = await screen.findByRole("switch", {
+      name: "Add a cache breakpoint when a client sends none",
+    });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const body = JSON.parse(String(put?.init?.body)) as { autoCacheEnabled: boolean };
+      expect(body.autoCacheEnabled).toBe(false);
+    });
+  });
+
   test("the request deadline can be disabled with zero", async () => {
     const user = userEvent.setup();
     const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });

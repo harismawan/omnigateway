@@ -112,6 +112,30 @@ test("settings safely normalize malformed persisted RTK values to disabled", asy
   s.close();
 });
 
+test("auto cache defaults on, and a malformed value reads as off", async () => {
+  const s = await store();
+  // A row written before this setting existed has no key for it, and must keep
+  // caching enabled rather than silently multiplying an operator's input bill.
+  expect((await s.config.getSettings()).autoCacheEnabled).toBe(true);
+
+  await s.config.putSettings({ autoCacheEnabled: false });
+  expect((await s.config.getSettings()).autoCacheEnabled).toBe(false);
+
+  await s.config.putSettings({ autoCacheEnabled: true });
+  expect((await s.config.getSettings()).autoCacheEnabled).toBe(true);
+
+  // Truthy but not `true`, and falsy but not `false`. Both are values nobody
+  // typed with that meaning, and this rewrites outbound requests, so both read
+  // as off — the same answer the flags around it give.
+  for (const malformed of ["yes", 1, 0, null]) {
+    await s.config.putSettings({ autoCacheEnabled: malformed } as unknown as {
+      autoCacheEnabled: boolean;
+    });
+    expect((await s.config.getSettings()).autoCacheEnabled).toBe(false);
+  }
+  s.close();
+});
+
 test("body logging settings default off and only literal true enables them", async () => {
   const s = await store();
   const defaults = await s.config.getSettings();

@@ -41,7 +41,11 @@ const WEIGHTS: ReadonlyArray<{ id: WeightKey; label: string; blurb: string }> = 
  */
 type LimitKey = Exclude<
   keyof Settings,
-  "weights" | "rtkEnabled" | "bodyLoggingEnabled" | "bodyLoggingCaptureStreamChunks"
+  | "weights"
+  | "rtkEnabled"
+  | "autoCacheEnabled"
+  | "bodyLoggingEnabled"
+  | "bodyLoggingCaptureStreamChunks"
 >;
 
 const LIMITS: ReadonlyArray<{
@@ -146,6 +150,7 @@ const Blocked = styled.p`
 /** Every field is held as the string the input carries, booleans included. */
 type Draft = Record<string, string> & {
   rtkEnabled?: string;
+  autoCacheEnabled?: string;
   bodyLoggingEnabled?: string;
   bodyLoggingCaptureStreamChunks?: string;
 };
@@ -155,6 +160,7 @@ function toDraft(settings: Settings): Draft {
   for (const weight of WEIGHTS) draft[`w.${weight.id}`] = String(settings.weights[weight.id]);
   for (const limit of LIMITS) draft[limit.id] = String(settings[limit.id]);
   draft.rtkEnabled = String(settings.rtkEnabled);
+  draft.autoCacheEnabled = String(settings.autoCacheEnabled);
   draft.bodyLoggingEnabled = String(settings.bodyLoggingEnabled);
   draft.bodyLoggingCaptureStreamChunks = String(settings.bodyLoggingCaptureStreamChunks);
   return draft;
@@ -197,6 +203,7 @@ function parseDraft(
       weights,
       ...limits,
       rtkEnabled: draft.rtkEnabled === "true",
+      autoCacheEnabled: draft.autoCacheEnabled === "true",
       bodyLoggingEnabled: draft.bodyLoggingEnabled === "true",
       bodyLoggingCaptureStreamChunks: draft.bodyLoggingCaptureStreamChunks === "true",
     },
@@ -354,6 +361,25 @@ export function SettingsBoard() {
                 Confirmed non-shell tools are excluded; unknown-origin results may be compressed
                 only when a built-in detector recognizes a high-confidence shell-output format.
                 Compression is deterministic and lossy. Disabled by default.
+              </Blurb>
+            </Row>
+          </Module>
+
+          <Module legend="Prompt caching">
+            <Row $gap={3} $align="start">
+              <Toggle
+                checked={draft.autoCacheEnabled === "true"}
+                onCheckedChange={(checked) =>
+                  setDraft({ ...draft, autoCacheEnabled: String(checked) })
+                }
+                label="Add a cache breakpoint when a client sends none"
+              />
+              <Blurb>
+                Anthropic only caches a prompt the request marks, so a client that marks nothing
+                pays full price to resend the same prefix every turn. This marks the end of the
+                system prompt on Anthropic requests that carry no breakpoint of their own. Requests
+                that already mark one are left exactly as they arrived, and prompts too short to be
+                cacheable are skipped. Enabled by default.
               </Blurb>
             </Row>
           </Module>
