@@ -279,17 +279,15 @@ function stripUnsupportedEdits(body: AnthropicBody, note: (d: string) => void): 
 /**
  * Below this, Anthropic caches nothing however the request is marked.
  *
- * One constant rather than a table per model: the real minimum is larger for
- * Haiku than for Opus and Sonnet, but the estimator is nowhere near accurate
- * enough for that difference to be meaningful, so this takes the smaller of the
- * published values. Rounding down is the right direction — the cost of being
- * wrong is a marker Anthropic ignores, not a request that fails.
- *
- * The estimator over-counts (a flat 1600 per image, four tokens of overhead per
- * block, the full schema text of every tool), so the error runs the same way:
- * a prompt that squeaks past this gate and turns out to be too small is simply
- * ignored upstream. The opposite error — skipping a prompt that would have
- * cached — needs an *under*-count, which this estimator does not produce.
+ * One constant rather than a table per model, and it is not the floor. The real
+ * minimum is model-dependent and not monotonic across generations — 512 on
+ * Opus 5, 1024 on Opus 4.8 and Sonnet 5 and 4.6, 2048 on Opus 4.7, 4096 on
+ * Opus 4.6 and Haiku 4.5 — so 1024 over-gates the first and under-gates the
+ * last two. The estimator is nowhere near accurate enough for a table to mean
+ * anything, and the error runs safe in both directions at no charge: a prompt
+ * that squeaks past this gate and turns out too small is ignored upstream, and
+ * one held back below it is billed exactly as it was before this feature
+ * existed.
  */
 const AUTO_CACHE_MIN_TOKENS = 1024;
 
@@ -308,11 +306,68 @@ function hasVendorCacheControl(req: ChatRequest): boolean {
 }
 
 /**
- * Adds the breakpoint a client omitted, when the operator asked us to.
+ * The block types Anthropic accepts a `cache_control` on.
+ *
+ * Everything else in a content array — `thinking` and `redacted_thinking` most
+ * of all, but equally a server tool result the decoder kept verbatim — is
+ * walked past rather than marked. A marker on one of those does not degrade the
+ * request, it fails it.
+ */
+const CACHEABLE_WIRE_BLOCKS = new Set(["text", "image", "tool_use", "tool_result", "document"]);
+
+/**
+ * The last content block in the wire history that can carry a breakpoint.
+ *
+ * Walked from the end of `body.messages` backwards, and within each message
+ * from the end of its content backwards, because a breakpoint caches everything
+ * before it and the whole point of this one is to cover the conversation. Two
+ * shapes are stepped over rather than assumed away: a message whose content is
+ * a plain string, which `encodeSystemTurn` produces for an all-text
+ * mid-conversation system turn and which has nowhere to put a `cache_control`,
+ * and a block whose type takes none.
+ *
+ * What actually skips the string turn is the per-block `isRecord`: indexing a
+ * string yields one-character strings, none of which is a record, so the walk
+ * would find nothing there and move on with or without the `Array.isArray`
+ * above it. That check earns its place for a different reason — `content` is
+ * `unknown`, and narrowing it to an array is what makes indexing it and reading
+ * its `length` mean anything at all. Deleting it changes no behaviour and stops
+ * the file compiling, which is the order those two facts belong in.
+ *
+ * This reads `body.messages`, never `req.messages`. `toWire`'s flatMap drops
+ * any turn whose content was entirely unsignable reasoning, so the two arrays
+ * have different lengths, and a position taken from the IR would land on the
+ * wrong turn as history grows — silently, and further off with every turn.
+ * `AnthropicBody.messages` is `unknown[]` because it holds whatever the
+ * encoders produced, so the walk narrows before it writes.
+ */
+function lastCacheableHistoryBlock(messages: unknown[]): Record<string, unknown> | undefined {
+  for (let m = messages.length - 1; m >= 0; m--) {
+    const message: unknown = messages[m];
+    if (!isRecord(message) || !Array.isArray(message.content)) continue;
+    for (let b = message.content.length - 1; b >= 0; b--) {
+      const block: unknown = message.content[b];
+      if (!isRecord(block)) continue;
+      if (typeof block.type === "string" && CACHEABLE_WIRE_BLOCKS.has(block.type)) return block;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Adds the breakpoints a client omitted, when the operator asked us to.
  *
  * Caching at Anthropic is opt-in: an unmarked request is billed as fresh input
  * every time, however stable its prefix. A client that never marks one pays
  * full price to resend a prompt verbatim.
+ *
+ * Three markers, in render order — last tool, last system block, last cacheable
+ * block of the history — because they cache three different prefixes. Tools and
+ * system are separate invalidation tiers upstream: editing the system prompt
+ * drops the system and message entries and leaves the tools entry standing. One
+ * marker at end-of-system would take the tools down with it for nothing. And a
+ * marker on the history is the only one that covers the part of a conversation
+ * that grows, which past the first few turns is most of it.
  *
  * Three things make this safe to do on the caller's behalf:
  *
@@ -320,38 +375,94 @@ function hasVendorCacheControl(req: ChatRequest): boolean {
  *   `estimateCachedInputTokens` returns zero in exactly that case — every
  *   marked block adds a strictly positive count before it records one — and
  *   `hasVendorCacheControl` covers the one marker that never reaches the IR.
- *   So a client that placed its own is never second-guessed, and nothing can be
- *   pushed past Anthropic's four-breakpoint ceiling into a 400.
- * - It writes to the **wire body**, whose arrays this function just built, and
- *   never to `req`. The IR is one shared object across every attempt, so a
- *   breakpoint written there would follow a failover into another provider and
- *   into what RTK and the token estimate believe the caller sent.
- * - It marks the last *system* block, or failing that the last tool — never
- *   message content, which would reach `systemCacheControl`'s promotion path
- *   and either move the marker to the top level or report a client marker as
- *   dropped. Render order is tools, then system, then messages, so a breakpoint
- *   after system covers the whole stable prefix and excludes the volatile turn.
+ *   So a client that placed its own is never second-guessed, and three markers
+ *   of Anthropic's four cannot reach the ceiling that turns into a 400.
+ * - It writes to the **wire body**, whose arrays `toWire` just built from fresh
+ *   object literals, and never to `req`. The IR is one shared object across
+ *   every attempt, so a breakpoint written there would follow a failover into
+ *   another provider and into what RTK and the token estimate believe the
+ *   caller sent. The history marker is no exception and needs no exemption:
+ *   `systemCacheControl`'s promotion path walks the IR, so it cannot observe a
+ *   wire-side marker at all.
+ * - A marker goes down only where it *adds* a cached prefix. The three tiers
+ *   are not three independent questions: `estimateInputTokens` sums
+ *   non-negative terms, so tools ≤ tools+system ≤ whole request always, and a
+ *   gate per tier on the prefix that tier caches passes all three whenever it
+ *   passes the first. That is how a big tool set under a one-line system prompt
+ *   earned three markers over three prefixes a token apart — three of
+ *   Anthropic's four slots, and two cache writes, to store the same bytes
+ *   again. So each tier is measured against what the last marker already
+ *   covers, and has to beat it by the same minimum a prefix needs to cache at
+ *   all.
  */
-function addAutoCacheBreakpoint(
+function addAutoCacheBreakpoints(
   body: AnthropicBody,
   req: ChatRequest,
   note: (d: string) => void,
 ): void {
   if (estimateCachedInputTokens(req) !== 0 || hasVendorCacheControl(req)) return;
-  // Measured over the prefix this breakpoint would actually cache — tools and
-  // system — and deliberately not over the whole request. A long conversation
-  // under a two-line system prompt is an ordinary agent session, and counting
-  // its messages here would wave through a prefix far too small to cache,
-  // recording a change that bought nothing.
-  if (estimateInputTokens({ ...req, messages: [] }) < AUTO_CACHE_MIN_TOKENS) return;
 
-  const target = body.system?.at(-1) ?? body.tools?.at(-1);
-  if (target === undefined) return;
+  /**
+   * The prefix, in tokens, that the last marker *placed* already caches.
+   *
+   * Deliberately not "the previous tier's prefix". A tier can clear the
+   * minimum and still be skipped — an empty `body.system` on a request whose IR
+   * system blocks were all dropped, say — and a tier that never wrote anything
+   * is not a boundary later tiers have to clear. Comparing against it would
+   * measure an increment from a marker that does not exist and suppress the one
+   * that would have paid.
+   *
+   * Starting at zero is what makes the first marker's test the ordinary one:
+   * with nothing cached below it, "extends the prefix below by 1,024" and
+   * "caches at least 1,024" are the same sentence. That also makes Anthropic's
+   * own minimum implicit rather than a second comparison — this number is
+   * either zero or already at least `AUTO_CACHE_MIN_TOKENS`, so anything that
+   * clears it by that much clears the minimum outright. A separate cumulative
+   * check would be a condition no input can fail.
+   */
+  let markedPrefix = 0;
 
-  // The default TTL, left implicit: it is the cheapest write, and naming it
-  // would send a field the client never asked for.
-  target.cache_control = { type: "ephemeral" };
-  note("anthropic:cache-breakpoint-added");
+  const worthAMarker = (prefix: number): boolean => prefix - markedPrefix >= AUTO_CACHE_MIN_TOKENS;
+
+  // Whether either marker on the stable prefix landed. The two share one
+  // degradation id, because they are one statement about the request.
+  let stablePrefixMarked = false;
+
+  // The default TTL is left implicit on all three: it is the cheapest write,
+  // and naming it would send a field the client never asked for.
+  const toolsPrefix = estimateInputTokens({ ...req, messages: [], system: [] });
+  const lastTool = body.tools?.at(-1);
+  if (lastTool !== undefined && worthAMarker(toolsPrefix)) {
+    lastTool.cache_control = { type: "ephemeral" };
+    markedPrefix = toolsPrefix;
+    stablePrefixMarked = true;
+  }
+
+  // Measured over the IR's system blocks, which is also why the identity line
+  // `toWire` injects on the OAuth leg needs no special case: it is not in the
+  // IR, so a request whose client sent no system prompt measures this tier at
+  // exactly the tools prefix, adds nothing, and takes no marker. A check
+  // naming `OAUTH_IDENTITY` would defend against that one string and nothing
+  // else shaped like it.
+  const systemPrefix = estimateInputTokens({ ...req, messages: [] });
+  const lastSystem = body.system?.at(-1);
+  if (lastSystem !== undefined && worthAMarker(systemPrefix)) {
+    lastSystem.cache_control = { type: "ephemeral" };
+    markedPrefix = systemPrefix;
+    stablePrefixMarked = true;
+  }
+  if (stablePrefixMarked) note("anthropic:cache-breakpoint-added");
+
+  if (!worthAMarker(estimateInputTokens(req))) return;
+  const lastHistory = lastCacheableHistoryBlock(body.messages);
+  // A history of nothing but string-content system turns has nowhere to put
+  // one. No marker, and nothing recorded: the column says what happened to the
+  // request, and here nothing did.
+  if (lastHistory === undefined) return;
+  lastHistory.cache_control = { type: "ephemeral" };
+  // Its own id, because "we cached your tools" and "we cached your entire
+  // conversation" are not the same statement to whoever reads the column.
+  note("anthropic:history-cache-breakpoint-added");
 }
 
 export function toWire(
@@ -422,8 +533,9 @@ export function toWire(
   // array, so reordering the two kinds would move a breakpoint the caller set.
   if (req.tools !== undefined) body.tools = req.tools.map((t) => encodeTool(t, cloak));
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice, cloak);
-  // After both arrays exist, because it marks the last entry of one of them.
-  if (opts.autoCache === true) addAutoCacheBreakpoint(body, req, note);
+  // After both arrays exist, because it marks the last entry of each of them —
+  // and of `body.messages`, which was built above.
+  if (opts.autoCache === true) addAutoCacheBreakpoints(body, req, note);
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {
       case "adaptive":

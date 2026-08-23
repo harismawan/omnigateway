@@ -50,13 +50,31 @@ every request, from any client, without guessing.
 
 ## Decision
 
-Three markers, each independently gated.
+Up to three markers, placed by one rule.
 
-| # | Position | Caches | Gate |
-| --- | --- | --- | --- |
-| 1 | last tool | tools | tools alone ≥ 1024 |
-| 2 | last system block | tools + system | tools + system ≥ 1024 *(the 2026-08-22 gate, unchanged)* |
-| 3 | last cache-eligible block of the last message | the whole request | whole request ≥ 1024 |
+> Walk the tiers in render order — tools, then system, then history. Place a marker at a tier
+> boundary when that tier's prefix exceeds the last *placed* marker's prefix by ≥ 1024. Start the
+> running comparison at zero, and advance it only when a marker actually lands.
+
+| # | Position | Caches |
+| --- | --- | --- |
+| 1 | last tool | tools |
+| 2 | last system block | tools + system |
+| 3 | last cache-eligible block of the history | the whole request |
+
+**One condition, not two.** The obvious reading wants a second test — cumulative ≥ 1024, Anthropic's
+own minimum, below which a prefix silently does not cache. It is subsumed. The running comparison
+starts at 0 and only ever advances to a prefix that already cleared the increment, so it is 0 or
+≥ 1024; either way `prefix − marked ≥ 1024` implies `prefix ≥ 1024`. Writing both would add a branch
+no input can fail, which is an equivalent mutation and precisely what the tests below exist to catch.
+
+**The gate measures the IR, and the wire body can be smaller.** `estimateInputTokens` walks
+`req.system` whole, while `toWire` (`wire.ts:370`) drops every non-text system block. An image-only
+system prompt therefore contributes ~1,600 tokens to the system and whole-request prefixes that are
+never sent, which can carry the history tier over the increment on a body that really grew by six
+tokens. Left as is: the prefix clears Anthropic's minimum either way, the cost is one slot of four,
+and filtering here would put a second copy of `toWire`'s own rendering rule in the gate — where it
+would drift. Recorded so the next reader does not take the formulas as measuring the wire.
 
 | Decision | Chosen | Rejected because |
 | --- | --- | --- |
@@ -64,16 +82,43 @@ Three markers, each independently gated.
 | Marker 1 vs the old `??` | Both, not either | The `??` existed only because the old design had one slot to spend. Tools and system are different invalidation tiers; collapsing them wastes the cheaper one |
 | Marker 3 placement | Last message, moving each turn | A fixed anchor needs to know where the last request put one, and the gateway holds no per-conversation state. Moving is also what the reference implementation does |
 | Marker 3 stride partner | Not built | It guards one real failure mode (below). Cost is a third write per turn on every request. Measure before paying |
-| Gates | Three, independent | Each marker caches a different prefix. One gate over all three would either suppress a marker that would have paid or wave through one that cannot cache |
+| Gating | One rule, on the **increment** | Three cumulative gates were specified first and were wrong — see below. A single gate over the whole request would suppress markers that would have paid |
 | TTL | Unchanged: `5m`, left implicit | As before — cheapest write, and naming it sends a field the client never asked for |
 
-### Why the gates must be separate
+### What the gate rule recovers
 
 The prior spec rejected a case it described precisely: "a long conversation under a two-line system
 prompt is an ordinary agent session, and it measured 50,014 tokens against a 6-token prefix." Under
-one shared gate that request is excluded entirely. Under three, it fails gates 1 and 2 — correctly,
-there is nothing there to cache — and passes gate 3, which is the marker that actually serves it.
-The separation is not bookkeeping; it is the case the old design had to throw away.
+one gate over the stable prefix that request is excluded entirely. Under this rule the tools and
+system tiers place nothing — correctly, there is nothing there to cache — and the history tier
+places marker 3, which is the marker that actually serves it.
+
+### Why the increment, and not three cumulative gates
+
+The first draft of this document gated each marker on the cumulative prefix it caches and called the
+three gates independent. They are not independent, and the error is arithmetic:
+`estimateInputTokens` sums non-negative terms, so tools ≤ tools+system ≤ whole request. Gate 1
+passing *implies* gate 2 passing, which implies gate 3. Three reproductions off the built code:
+
+```
+big tools + 1-token system + 2-token history   → 3 markers
+big system + 2-token history                    → 2 markers
+big tools + no system, OAuth leg                → identity line marked
+```
+
+The first two spend two extra slots, and two extra cache writes, to re-cache a prefix the marker
+below already covers. The third is the same failure in a costume worth naming separately.
+
+### The OAuth identity line
+
+When a client sends no system prompt on the OAuth leg, `toWire` (`wire.ts:380`) injects
+`OAUTH_IDENTITY` as the only system block. A cumulative gate measures the **IR**, which has no
+system, so it passes on the tools alone and marks a ~15-token extension of the tools prefix.
+
+Under the increment rule this needs no special case: 15 < 1024, so the tier places nothing and the
+injected line is never the marked block. That the same rule closes both is the reason to prefer it
+over a targeted `OAUTH_IDENTITY` check — a check that names one string protects against that string
+and nothing else.
 
 ## Why a message-block marker is safe after all
 
@@ -138,6 +183,10 @@ recurs, pays 1.25× on the message portion for an entry nobody reads. Break-even
 reuse. This is the same bet the operator already took when `autoCacheEnabled` defaulted on for tools
 and system; marker 3 extends it to the part of the request that grows.
 
+The increment rule bounds the exposure below. A marker only exists when it extends the one under it
+by at least 1024 tokens, so the worst case is three markers over three genuinely different prefixes
+rather than three over the same one.
+
 **One claim here is unverified.** Nested markers over the same prefix are expected to bill
 `cache_creation_input_tokens` once for the union rather than once per marker, because each entry
 extends the previous rather than duplicating it. If that is wrong, marker 1 costs a second full write
@@ -169,19 +218,38 @@ smaller published value", is now false and is corrected in that document rather 
 In `packages/providers/test/anthropic.test.ts` unless noted.
 
 - Each marker lands where it should, individually and with all three present.
-- Marker count is exactly 3 when tools, system, and messages are all present and all gates pass —
-  the four-slot ceiling is never approached.
+- Marker count is exactly 3 when all three tiers are present and each clears the increment — the
+  four-slot ceiling is never approached.
 - Marker 1 absent when the request has no tools; marker 2 absent when it has no system. No `??`
   fallback survives: absent tools plus present system yields marker 2 alone, not marker 2 standing in
   for marker 1.
-- Each gate independently: a request passing only gate 3 receives only marker 3, which is the
-  50,014-token / 6-token-prefix case the prior design excluded.
+- The three reproductions above, as regression tests: a big tool set under a 1-token system prompt
+  yields **one** marker, a big system prompt over a 2-token history yields **one**, and the OAuth leg
+  with no client system prompt leaves `OAUTH_IDENTITY` unmarked. Each asserts the marker count *and*
+  which block carries the marker.
+- A tier skipped for a small increment does not stop a later tier: big tools, 1-token system,
+  50,000-token history places markers on tools and history and nothing on system.
+- The history-only case — the 50,014-token / 6-token-prefix request the prior design excluded.
 - Marker 3 skips a string-content system turn, skips `thinking` blocks, and selects by wire index
   after a turn was dropped for unsignable reasoning.
+- On that last one, note what is *not* reachable. An IR-index bug manifests as **no marker at all**,
+  never as the wrong turn marked, and no fixture changes that: dropping only shortens, so the IR
+  index of the last markable turn is at or past its body index — either out of range, or pointing at
+  a turn the backwards walk already rejected. The test is still worth building with several
+  surviving turns, because that is what makes first-versus-last read as `messages[0]` vs
+  `messages[2]`; a single-turn fixture cannot distinguish them. Say so in the test rather than
+  letting a later reader think the wrong-turn case is covered.
 - All four already-marked shapes (system, tools, message history, vendor bag) still suppress **all
   three** markers.
-- The IR is unchanged after encoding, asserted by encoding twice and checking the second pass still
-  sees an unmarked request.
+- Marker 3 lands on each cache-eligible block type — `text`, `image`, `tool_use`, `tool_result`,
+  `document` — one fixture per type, each ending a turn. Reviewing the first implementation found
+  four of the five pinned by nothing: the allowlist could lose `tool_result`, the shape that ends
+  almost every agentic turn, and the suite stayed green.
+- The IR is unchanged after encoding. **Not** by cloning a shared fixture and diffing: module-level
+  fixtures are handed to `toWire` unclone by earlier tests in the same file, so a leaked marker is
+  already inside the clone and the assertion compares polluted to polluted. That test passed with a
+  marker written to the IR. Deep-freeze the module fixtures instead — ESM is strict mode, so an IR
+  write throws a `TypeError` in every test in the file rather than being missed in one.
 - Flag off leaves the body byte-identical.
 - The OAuth identity prefix never takes a marker.
 - Both degradation ids recorded, each once, only when its marker was placed.
@@ -189,11 +257,27 @@ In `packages/providers/test/anthropic.test.ts` unless noted.
 ### Mutation checks
 
 Each must turn the suite red: drop any one of the three markers; restore the `??` so markers 1 and 2
-become mutually exclusive; collapse the three gates into one; mark the first system block or first
-tool instead of the last; mark the first message instead of the last; drop the string-content guard;
-drop the `thinking` guard; index `req.messages` instead of `body.messages`; drop the already-marked
-guard; write the marker to the IR instead of the body; rename either degradation id; record a
-degradation unconditionally; send an explicit TTL.
+become mutually exclusive; gate on the cumulative prefix instead of the increment; compare the
+increment against the previous *tier* rather than the last *placed* marker; mark the first system
+block or first tool instead of the last; mark the first message instead of the last; drop the
+`thinking` guard; **remove any single entry from the eligible-block allowlist**; index
+`req.messages` instead of `body.messages`; drop the already-marked guard; write a
+marker to the IR *in addition to* the body — not only instead of it; rename either degradation id;
+record a degradation unconditionally; send an explicit TTL on any of the three markers.
+
+Run the sweep against the **whole file**, not the single test named after the behaviour. Both
+mutations that survived the first review — an IR write and a missing allowlist entry — are invisible
+to a full-file run and caught instantly in isolation, which is the opposite of the usual failure and
+the reason to check both ways.
+
+Two mutations are **equivalent** and must not be listed as checks; a checklist item that cannot go
+red teaches the next reader to ignore a green result:
+
+- **Dropping the string-content guard** (`Array.isArray` on a message's content). A string's indexed
+  characters fail `isRecord`, so the walk skips them anyway. The guard stays — it is what narrows
+  `unknown` to an array so indexing typechecks at all — but it is not what skips string turns, and
+  the comment beside it must not claim otherwise.
+- **Adding the redundant cumulative gate** described above.
 
 Two mutations survived a green suite during the 2026-08-22 review — dispatch reading the setting, and
 `attempt` forwarding it through a spread that fails silently open. Nothing in this change touches
