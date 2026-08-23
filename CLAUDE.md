@@ -197,6 +197,16 @@ Preserve these translation invariants:
 - Unknown Anthropic block types + SSE events fail visibly, not skipped.
 - Preserve cache-control breakpoint block, TTL, order when target can express them. Record
   degradations for requested features provider cannot express.
+- **One exception, and only one**: `autoCacheEnabled` (default **on**) let Anthropic adapter add a
+  single breakpoint to request carrying **none**. Anthropic caching opt-in, so unmarked request pay
+  full input price forever however stable its prefix. Guard narrow and each load-bearing — fire only
+  when `estimateCachedInputTokens` is 0 *and* no `cache_control` in vendor bag, so client's own
+  placement never second-guessed and 4-breakpoint ceiling never crossed; skip prefix under
+  ~1024 token, measured over tools+system alone, never whole request. Mark last system block (else
+  last tool), never message block — that reach `systemCacheControl` promotion path. Write to wire
+  body only, never IR: IR shared across attempt, so marker there follow failover into other
+  provider. Recorded per request as `anthropic:cache-breakpoint-added`. Design:
+  `docs/superpowers/specs/2026-08-22-anthropic-auto-cache-breakpoint-design.md`.
 - `Usage.inputTokens` is uncached input. Cache reads and 5m/1h writes are disjoint classes priced
   once. Use `promptTokens()` when client surface need total prompt tokens.
 - Adapters stream upstream. OpenAI chat usage need `stream_options.include_usage`; Responses API

@@ -191,6 +191,8 @@ export const settingsSchema = z.object({
   /** Zero disables quota polling. Takes effect at the next restart. */
   quotaPollIntervalMs: z.number().int().min(0),
   rtkEnabled: z.boolean(),
+  /** Adds a cache breakpoint to Anthropic requests that arrive carrying none. */
+  autoCacheEnabled: z.boolean(),
   /**
    * One half of the capture contract. `OMNI_BODY_LOGGING_ALLOWED` is the other,
    * and it is read at boot, so nothing this schema accepts can start recording

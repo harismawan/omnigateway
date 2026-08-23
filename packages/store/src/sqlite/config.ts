@@ -99,6 +99,16 @@ export function createConfigRepo(
           ...DEFAULT_SETTINGS,
           ...stored,
           rtkEnabled: stored.rtkEnabled === true,
+          // Two different questions, kept apart. *Absence* means on, and that
+          // is decided by `DEFAULT_SETTINGS` above, not here. What this line
+          // decides is what a *malformed* value means, and it answers the same
+          // way as its neighbours: off. This feature rewrites outbound
+          // requests, so a value nobody typed with that meaning must not switch
+          // it on — while a garbled row merely returning the installation to
+          // its pre-feature behaviour costs an operator nothing they did not
+          // already have.
+          autoCacheEnabled:
+            stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
           bodyLoggingEnabled: stored.bodyLoggingEnabled === true,
           bodyLoggingCaptureStreamChunks: stored.bodyLoggingCaptureStreamChunks === true,
           weights: knownWeights(stored.weights),

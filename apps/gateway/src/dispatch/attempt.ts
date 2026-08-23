@@ -32,6 +32,8 @@ export async function attempt(opts: {
   secrets?: CredentialSecrets;
   logger?: Logger;
   requestId?: string;
+  /** Operator policy: may an adapter add a cache breakpoint the client omitted. */
+  autoCache?: boolean;
 }): Promise<AttemptResult> {
   const { candidate, adapter, http, now, signal, refresh, refreshLeadMs } = opts;
   const logger = opts.logger ?? noopLogger;
@@ -70,5 +72,6 @@ export async function attempt(opts: {
     http,
     signal,
     ...(opts.requestId === undefined ? {} : { requestId: opts.requestId }),
+    ...(opts.autoCache === undefined ? {} : { autoCache: opts.autoCache }),
   });
 }

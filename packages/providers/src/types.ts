@@ -55,6 +55,15 @@ export type AdapterRequest = {
    * unrelated identifier. Optional because callers outside dispatch have none.
    */
   requestId?: string;
+  /**
+   * Whether the adapter may add a cache breakpoint the client did not send.
+   *
+   * A policy the operator set, not a property of the request, so it arrives
+   * beside it rather than inside it: writing it onto the `ChatRequest` would
+   * put a gateway decision into the object RTK, routing and the token estimate
+   * all read as the caller's own. Only the Anthropic adapter reads it.
+   */
+  autoCache?: boolean;
 };
 
 export type AdapterResult = {
