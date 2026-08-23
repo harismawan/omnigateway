@@ -197,16 +197,34 @@ Preserve these translation invariants:
 - Unknown Anthropic block types + SSE events fail visibly, not skipped.
 - Preserve cache-control breakpoint block, TTL, order when target can express them. Record
   degradations for requested features provider cannot express.
-- **One exception, and only one**: `autoCacheEnabled` (default **on**) let Anthropic adapter add a
-  single breakpoint to request carrying **none**. Anthropic caching opt-in, so unmarked request pay
-  full input price forever however stable its prefix. Guard narrow and each load-bearing — fire only
-  when `estimateCachedInputTokens` is 0 *and* no `cache_control` in vendor bag, so client's own
-  placement never second-guessed and 4-breakpoint ceiling never crossed; skip prefix under
-  ~1024 token, measured over tools+system alone, never whole request. Mark last system block (else
-  last tool), never message block — that reach `systemCacheControl` promotion path. Write to wire
-  body only, never IR: IR shared across attempt, so marker there follow failover into other
-  provider. Recorded per request as `anthropic:cache-breakpoint-added`. Design:
-  `docs/superpowers/specs/2026-08-22-anthropic-auto-cache-breakpoint-design.md`.
+- **One exception, and only one**: `autoCacheEnabled` (default **on**) let Anthropic adapter add
+  breakpoints to request carrying **none**. Anthropic caching opt-in, so unmarked request pay full
+  input price forever however stable its prefix. Trigger narrow and load-bearing — fire only when
+  `estimateCachedInputTokens` is 0 *and* no `cache_control` in vendor bag, so client's own placement
+  never second-guessed. Up to **three** markers, one rule: walk tier in render order — last tool
+  (prefix = tools), last system block (tools+system), last cache-eligible block of wire history
+  (whole request) — and place marker when that prefix beat **last placed marker's** prefix by ≥1024.
+  Running comparison start at 0, so first marker's test is Anthropic's own ≥1024 minimum and no
+  separate cumulative check exist; one that did would be condition no input can fail. Three of four
+  slot, so ceiling never crossed. **Last *placed*, not previous tier** — tier skipped for small
+  increment leave comparison where it was, else marker that would have paid get suppressed. Gating
+  each marker on prefix it cache instead is what shipped first and was wrong: `estimateInputTokens`
+  sum non-negative term, so tools ≤ tools+system ≤ whole and gate 1 passing *imply* other two — big
+  tool set under 1-token system prompt took 3 slot and 2 cache write to re-store same byte. Same
+  rule remove need for `OAUTH_IDENTITY` special case: injected line ~15 token, not in IR, so system
+  tier add nothing and never get marked. **Never add a check naming that string** — it defend
+  against one string and nothing shaped like it. Marker 3 walk `body.messages` **backwards, never
+  `req.messages`** — flatMap drop turn of entirely unsignable reasoning, so index differ and wrong
+  turn get marked silently; skip string content (`encodeSystemTurn`) and any block type outside
+  text/image/tool_use/tool_result/document. Write to wire body only, never IR: IR shared across
+  attempt, so marker there follow failover into other provider. `systemCacheControl` promotion path
+  walk IR, so it cannot see wire-side marker — earlier claim it could was wrong. IR rule pinned by
+  **deep-freezing module fixture** in `packages/providers/test/anthropic.test.ts`, not by cloning
+  and diffing: fixture handed to `toWire` unclone by earlier test, so leaked marker already inside
+  clone and assertion compare polluted to polluted. Recorded as `anthropic:cache-breakpoint-added`
+  (marker 1 or 2) and `anthropic:history-cache-breakpoint-added` (marker 3), each only when its
+  marker placed. Design:
+  `docs/superpowers/specs/2026-08-23-anthropic-auto-cache-full-prefix-design.md`.
 - `Usage.inputTokens` is uncached input. Cache reads and 5m/1h writes are disjoint classes priced
   once. Use `promptTokens()` when client surface need total prompt tokens.
 - Adapters stream upstream. OpenAI chat usage need `stream_options.include_usage`; Responses API

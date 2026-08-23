@@ -1,17 +1,43 @@
 import { expect, test } from "bun:test";
-import type { ChatRequest, StreamEvent } from "@omni/ir";
+import type { ChatRequest, ContentBlock, StreamEvent, ToolDef } from "@omni/ir";
 import { GatewayError } from "@omni/ir";
 import { decodeAnthropic } from "../src/anthropic/decode.ts";
 import { anthropicAdapter } from "../src/anthropic/index.ts";
-import { OAUTH_IDENTITY, toWire } from "../src/anthropic/wire.ts";
+import { type AnthropicBody, OAUTH_IDENTITY, toWire } from "../src/anthropic/wire.ts";
 import type { SseMessage } from "../src/sse.ts";
 import type { AdapterRequest, AdapterResult, HttpRequest } from "../src/types.ts";
 
-const base: ChatRequest = {
+/**
+ * Freezes a fixture and everything reachable from it, in place.
+ *
+ * The rule this defends is the load-bearing one in the encoder: the IR is one
+ * object shared across every dispatch attempt, so anything written onto it
+ * follows a failover into another provider. Cloning a fixture and diffing it
+ * around one `toWire` call does not defend it. These fixtures are module-level
+ * and handed to `toWire` unclone by a dozen earlier tests, so an encoder that
+ * writes to the IR has already written to the fixture by the time the diffing
+ * test clones it — and the clone then compares polluted to polluted and passes.
+ * Freezing moves the failure to the write itself: ESM is strict mode, so the
+ * assignment throws a `TypeError` in whichever test reaches it first, and every
+ * test in the file is a detector rather than one.
+ *
+ * Written out rather than pulled in: it is six lines, and a dependency in a
+ * test file is a dependency in the package.
+ */
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+  // Frozen before the recursion, not after, so a fixture that ever holds a
+  // cycle terminates rather than overflowing the stack.
+  Object.freeze(value);
+  for (const key of Object.keys(value)) deepFreeze((value as Record<string, unknown>)[key]);
+  return value;
+}
+
+const base: ChatRequest = deepFreeze({
   model: "fast",
   messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
   stream: true,
-};
+});
 
 async function* msgs(...m: SseMessage[]): AsyncGenerator<SseMessage> {
   for (const x of m) yield x;
@@ -1048,7 +1074,7 @@ const MEASURED_SIGNATURES = [
   "skills_list",
 ];
 
-const WITH_SIGNATURES: ChatRequest = {
+const WITH_SIGNATURES: ChatRequest = deepFreeze({
   ...base,
   messages: [
     { role: "user", content: [{ type: "text", text: "go" }] },
@@ -1064,7 +1090,7 @@ const WITH_SIGNATURES: ChatRequest = {
     inputSchema: { type: "object" },
   })),
   toolChoice: { type: "tool", name: "clarify" },
-};
+});
 
 test("no measured fingerprint signature reaches the wire on the oauth path", async () => {
   const sent = await capture({ request: WITH_SIGNATURES });
@@ -1212,22 +1238,285 @@ test("an uncloaked request reports no count at all", async () => {
  * characters to the token, so this has to be big in characters to be big in
  * tokens. Anything shorter would be skipped for a reason the test is not about.
  */
+/** Roughly 2,900 tokens of system prose. */
 const BIG_SYSTEM = "You are a careful assistant. ".repeat(400);
 
-/** A request with a cacheable prefix and no breakpoint anywhere — hermes' shape. */
-const UNMARKED: ChatRequest = {
+/**
+ * Roughly 2,900 tokens of conversation.
+ *
+ * A different string from `BIG_SYSTEM` on purpose: every fixture here is about
+ * which tier a marker landed on, and two tiers holding the same text make a
+ * body in which that question has no answer.
+ */
+const BIG_HISTORY = "Then the tool came back with a number. ".repeat(300);
+
+/**
+ * A string `estimateInputTokens` counts as exactly `tokens` tokens.
+ *
+ * Only the increment fixtures need this. They turn on prefix *differences*
+ * landing either side of the 1,024 minimum, which cannot be built out of "big"
+ * and "small" — so they depend on the estimator's four-characters-to-the-token
+ * ratio. If that constant ever moves these fixtures need new sizes, and they
+ * will say so by failing rather than by quietly measuring something else.
+ */
+function textOfTokens(tokens: number): string {
+  return "x".repeat(tokens * 4);
+}
+
+/** A tool whose description alone clears the gate. */
+const BIG_TOOL: ToolDef = deepFreeze({
+  provider: "custom",
+  name: "session_search",
+  description: BIG_SYSTEM,
+  inputSchema: { type: "object" },
+});
+
+/**
+ * A request with a cacheable system prompt and no breakpoint anywhere —
+ * hermes' shape. The single small tool and the two-token history are both far
+ * below the minimum, so the system marker is the only one this earns.
+ */
+const UNMARKED: ChatRequest = deepFreeze({
   ...base,
   system: [{ type: "text", text: BIG_SYSTEM }],
   tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
-};
+});
 
-test("adds a breakpoint to the last system block when the client sent none", () => {
-  const { body, degradations } = toWire(UNMARKED, "m", { oauth: false, autoCache: true });
+/** Tools, system and history all present, and each clearing the increment. */
+const EVERYTHING: ChatRequest = deepFreeze({
+  ...base,
+  system: [
+    { type: "text", text: "first" },
+    { type: "text", text: BIG_SYSTEM },
+  ],
+  tools: [BIG_TOOL, { provider: "custom", name: "b", inputSchema: { type: "object" } }],
+  messages: [{ role: "user", content: [{ type: "text", text: BIG_HISTORY }] }],
+});
+
+function isWireRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Every wire block carrying a breakpoint, as `(message, block, wire type)`. */
+function markedHistoryEntries(body: AnthropicBody): { at: string; type: string }[] {
+  const found: { at: string; type: string }[] = [];
+  body.messages.forEach((message, m) => {
+    if (!isWireRecord(message) || !Array.isArray(message.content)) return;
+    message.content.forEach((entry: unknown, b) => {
+      if (isWireRecord(entry) && entry.cache_control !== undefined) {
+        found.push({ at: `messages[${m}].content[${b}]`, type: String(entry.type) });
+      }
+    });
+  });
+  return found;
+}
+
+/**
+ * Every `messages[i].content[j]` in a wire body that carries a breakpoint.
+ *
+ * Positions rather than a count, because a test that only counts markers passes
+ * just as happily when they land on the wrong blocks.
+ */
+function markedHistoryBlocks(body: AnthropicBody): string[] {
+  return markedHistoryEntries(body).map((e) => e.at);
+}
+
+/**
+ * The wire `type` of every marked history block.
+ *
+ * A position alone does not say which block type the allowlist admitted, and
+ * the allowlist is where four of five entries were pinned by nothing.
+ */
+function markedHistoryTypes(body: AnthropicBody): string[] {
+  return markedHistoryEntries(body).map((e) => e.type);
+}
+
+/** How many breakpoints the whole body carries. Anthropic's ceiling is four. */
+function markerCount(body: AnthropicBody): number {
+  return (JSON.stringify(body).match(/cache_control/g) ?? []).length;
+}
+
+/**
+ * A request whose history alone clears the minimum and ends with `last`.
+ *
+ * No tools and no system prompt, so the first two tiers place nothing and the
+ * only breakpoint in the body is the history one. That makes the marked
+ * position the whole assertion rather than one of several markers to sort out.
+ */
+function historyEndingWith(role: "user" | "assistant", last: ContentBlock): ChatRequest {
+  return {
+    ...base,
+    messages: [
+      { role: "user", content: [{ type: "text", text: BIG_HISTORY }] },
+      { role, content: [last] },
+    ],
+  };
+}
+
+test("the shared IR fixtures are frozen, so an encoder writing to one throws", () => {
+  // The harness for every other test in this file, asserted directly: "no write
+  // was detected" and "writes are not detectable" look identical from the
+  // outside, and only one of them is the guarantee this file relies on.
+  expect(Object.isFrozen(EVERYTHING)).toBe(true);
+  const lastTurn = EVERYTHING.messages.at(-1);
+  const lastBlock = lastTurn?.content.at(-1);
+  expect(Object.isFrozen(lastBlock)).toBe(true);
+  // The exact write the encoder must never make, and what it does now instead
+  // of being absorbed by whichever test ran first.
+  expect(() => {
+    if (lastBlock?.type === "text") lastBlock.cacheControl = { type: "ephemeral" };
+  }).toThrow(TypeError);
+});
+
+test("adds three breakpoints — last tool, last system block, last message block", () => {
+  const { body, degradations } = toWire(EVERYTHING, "m", { oauth: false, autoCache: true });
+  // Tools and system are separate invalidation tiers, so both are marked. The
+  // old `??` between them spent one slot where two were free.
+  expect(body.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(body.tools?.[0]?.cache_control).toBeUndefined();
   expect(body.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
-  // The stable prefix only. A breakpoint on the volatile turn would be
-  // rewritten every request and cache nothing.
-  expect(JSON.stringify(body.messages)).not.toContain("cache_control");
+  expect(body.system?.[0]?.cache_control).toBeUndefined();
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[0]"]);
+  // The marked block whole, so the TTL stays implicit: `5m` is the default and
+  // the cheapest write, and naming it sends a field the client never asked for.
+  expect(body.messages[0]).toEqual({
+    role: "user",
+    content: [{ type: "text", text: BIG_HISTORY, cache_control: { type: "ephemeral" } }],
+  });
+  // Three of Anthropic's four slots, so topping up can never provoke a 400.
+  expect(markerCount(body)).toBe(3);
   expect(degradations).toContain("anthropic:cache-breakpoint-added");
+  expect(degradations).toContain("anthropic:history-cache-breakpoint-added");
+});
+
+test("each tier is measured against the last marker placed, not against the tier below", () => {
+  // Three prefixes 600 tokens apart above a 2,000-token tool set: the system
+  // tier adds too little to earn a slot, and the history tier adds too little
+  // to earn one over *system* — but 1,200 over the tool marker, which is the
+  // only marker actually in the body and so the only prefix a new one has to
+  // beat. Comparing against the previous tier instead suppresses marker 3 and
+  // bills the conversation fresh.
+  const steps: ChatRequest = {
+    ...base,
+    tools: [
+      {
+        provider: "custom",
+        name: "t",
+        description: textOfTokens(1990),
+        inputSchema: { type: "object" },
+      },
+    ],
+    system: [{ type: "text", text: textOfTokens(596) }],
+    messages: [{ role: "user", content: [{ type: "text", text: textOfTokens(592) }] }],
+  };
+  const { body, degradations } = toWire(steps, "m", { oauth: false, autoCache: true });
+  expect(body.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(body.system?.at(-1)?.cache_control).toBeUndefined();
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[0]"]);
+  expect(markerCount(body)).toBe(2);
+  expect(degradations).toContain("anthropic:history-cache-breakpoint-added");
+});
+
+test("a tier skipped for a small increment does not stop the tier above it", () => {
+  // The same shape at the sizes it turns up at in the wild: a big tool set, a
+  // one-line system prompt, and a conversation that has run long. Two markers,
+  // and the middle tier is the one left out.
+  const skipMiddle: ChatRequest = {
+    ...base,
+    system: [{ type: "text", text: "be terse" }],
+    tools: [BIG_TOOL],
+    messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(200_000) }] }],
+  };
+  const { body } = toWire(skipMiddle, "m", { oauth: false, autoCache: true });
+  expect(body.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(body.system?.at(-1)?.cache_control).toBeUndefined();
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[0]"]);
+  expect(markerCount(body)).toBe(2);
+});
+
+test("a big tool set under a one-token system prompt takes one marker, not three", () => {
+  // Reproduction, from the review of the first implementation. Gating each
+  // marker on the cumulative prefix it caches reads as three independent tests
+  // and is not: `estimateInputTokens` sums non-negative terms, so tools ≤
+  // tools+system ≤ whole request and gate 1 passing implies the other two.
+  // This request earned three markers over three prefixes a token apart.
+  const tinyAbove: ChatRequest = {
+    ...base,
+    system: [{ type: "text", text: "a" }],
+    tools: [BIG_TOOL],
+    messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+  };
+  const { body, degradations } = toWire(tinyAbove, "m", { oauth: false, autoCache: true });
+  expect(body.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(body.system?.at(-1)?.cache_control).toBeUndefined();
+  expect(markedHistoryBlocks(body)).toEqual([]);
+  expect(markerCount(body)).toBe(1);
+  expect(degradations).toContain("anthropic:cache-breakpoint-added");
+  expect(degradations).not.toContain("anthropic:history-cache-breakpoint-added");
+});
+
+test("a big system prompt over a two-token history takes one marker, not two", () => {
+  // The second reproduction. The history marker here would extend the system
+  // marker by the length of the word "go" and spend a cache write doing it.
+  const tinyHistory: ChatRequest = {
+    ...base,
+    system: [{ type: "text", text: BIG_SYSTEM }],
+    messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+  };
+  const { body, degradations } = toWire(tinyHistory, "m", { oauth: false, autoCache: true });
+  expect(body.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(markedHistoryBlocks(body)).toEqual([]);
+  expect(markerCount(body)).toBe(1);
+  expect(degradations).toContain("anthropic:cache-breakpoint-added");
+  expect(degradations).not.toContain("anthropic:history-cache-breakpoint-added");
+});
+
+test("the oauth identity line is never the block a marker lands on", () => {
+  // The third reproduction, and the reason there is no `OAUTH_IDENTITY` check
+  // anywhere in the encoder. `toWire` injects that line as the only system
+  // block when the client sent none, while the gate measures the IR — which
+  // has no system at all. A cumulative gate therefore passed on the tools and
+  // marked a fifteen-token extension of the prefix it had just marked. The
+  // increment closes it as an ordinary case: fifteen is not a thousand.
+  const toolsOnly: ChatRequest = {
+    ...base,
+    tools: [BIG_TOOL, { provider: "custom", name: "b", inputSchema: { type: "object" } }],
+  };
+  const { body } = toWire(toolsOnly, "m", { oauth: true, autoCache: true });
+  expect(body.system).toEqual([{ type: "text", text: OAUTH_IDENTITY }]);
+  expect(body.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(markerCount(body)).toBe(1);
+});
+
+test("records each degradation id exactly once", () => {
+  // The column is how an operator sees what the gateway did to a request, and
+  // two markers on the stable prefix are still one statement about it.
+  const { degradations } = toWire(EVERYTHING, "m", { oauth: false, autoCache: true });
+  const count = (id: string): number => degradations.filter((d) => d === id).length;
+  expect(count("anthropic:cache-breakpoint-added")).toBe(1);
+  expect(count("anthropic:history-cache-breakpoint-added")).toBe(1);
+});
+
+test("marks the last system block even when the tools are too small to cache", () => {
+  // The tools tier is measured alone; one small schema is nowhere near the
+  // minimum, so a marker there would buy nothing and is not written. The system
+  // tier adds the whole system prompt and earns one. The history tier adds two
+  // tokens on top of that and does not.
+  const { body, degradations } = toWire(UNMARKED, "m", { oauth: false, autoCache: true });
+  expect(body.tools?.at(-1)?.cache_control).toBeUndefined();
+  expect(body.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(markedHistoryBlocks(body)).toEqual([]);
+  expect(markerCount(body)).toBe(1);
+  expect(degradations).toContain("anthropic:cache-breakpoint-added");
+});
+
+test("no tools leaves the system marker alone rather than standing in for one", () => {
+  const noTools: ChatRequest = { ...base, system: [{ type: "text", text: BIG_SYSTEM }] };
+  const { body } = toWire(noTools, "m", { oauth: false, autoCache: true });
+  expect(body.tools).toBeUndefined();
+  expect(body.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(markedHistoryBlocks(body)).toEqual([]);
+  expect(markerCount(body)).toBe(1);
 });
 
 test("leaves the body untouched when the feature is off", () => {
@@ -1242,35 +1531,32 @@ test("never touches a request that already marks a breakpoint of its own", () =>
   // where its prefix ends better than this does. Byte-identical is the
   // assertion, not merely "still has one".
   const marked: ChatRequest = {
-    ...UNMARKED,
+    ...EVERYTHING,
     system: [{ type: "text", text: BIG_SYSTEM, cacheControl: { type: "ephemeral", ttl: "1h" } }],
   };
   const on = toWire(marked, "m", { oauth: false, autoCache: true });
   const off = toWire(marked, "m", { oauth: false });
   expect(JSON.stringify(on.body)).toBe(JSON.stringify(off.body));
   expect(on.degradations).not.toContain("anthropic:cache-breakpoint-added");
+  expect(on.degradations).not.toContain("anthropic:history-cache-breakpoint-added");
 });
 
 test("a marker anywhere at all counts, including on a tool", () => {
   const marked: ChatRequest = {
-    ...UNMARKED,
-    tools: [
-      {
-        provider: "custom",
-        name: "session_search",
-        inputSchema: { type: "object" },
-        cacheControl: { type: "ephemeral" },
-      },
-    ],
+    ...EVERYTHING,
+    tools: [{ ...BIG_TOOL, cacheControl: { type: "ephemeral" } }],
   };
-  const { body, degradations } = toWire(marked, "m", { oauth: false, autoCache: true });
-  expect(body.system?.at(-1)?.cache_control).toBeUndefined();
-  expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+  const on = toWire(marked, "m", { oauth: false, autoCache: true });
+  const off = toWire(marked, "m", { oauth: false });
+  expect(JSON.stringify(on.body)).toBe(JSON.stringify(off.body));
+  expect(on.degradations).not.toContain("anthropic:cache-breakpoint-added");
+  expect(on.degradations).not.toContain("anthropic:history-cache-breakpoint-added");
 });
 
 test("skips a prompt too small for Anthropic to cache", () => {
   // Below the minimum nothing caches however it is marked, so marking it would
-  // record a change that bought nothing.
+  // record a change that bought nothing. All three gates measure a prefix of
+  // this request, and all three fail.
   const { body, degradations } = toWire(
     { ...base, system: [{ type: "text", text: "be terse" }] },
     "m",
@@ -1278,36 +1564,41 @@ test("skips a prompt too small for Anthropic to cache", () => {
   );
   expect(JSON.stringify(body)).not.toContain("cache_control");
   expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+  expect(degradations).not.toContain("anthropic:history-cache-breakpoint-added");
 });
 
-test("falls back to the last tool when the request carries no system prompt", () => {
+test("marks the last tool when the request carries no system prompt", () => {
   const toolsOnly: ChatRequest = {
     ...base,
-    tools: [
-      { provider: "custom", name: "a", description: BIG_SYSTEM, inputSchema: { type: "object" } },
-      { provider: "custom", name: "b", inputSchema: { type: "object" } },
-    ],
+    tools: [BIG_TOOL, { provider: "custom", name: "b", inputSchema: { type: "object" } }],
   };
   const { body } = toWire(toolsOnly, "m", { oauth: false, autoCache: true });
+  expect(body.system).toBeUndefined();
   expect(body.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
   expect(body.tools?.[0]?.cache_control).toBeUndefined();
+  expect(markedHistoryBlocks(body)).toEqual([]);
+  expect(markerCount(body)).toBe(1);
 });
 
 test("the breakpoint goes on the wire body and never back onto the request", () => {
   // `dispatchRequest` is one shared object across every attempt, so a marker
   // written onto the IR would follow a failover into another provider and into
   // what RTK and the token estimate believe the client sent.
-  const request: ChatRequest = structuredClone(UNMARKED);
+  const request: ChatRequest = structuredClone(EVERYTHING);
   const before = JSON.stringify(request);
   toWire(request, "m", { oauth: false, autoCache: true });
   expect(JSON.stringify(request)).toBe(before);
-  // And a second encode of the same IR still sees an unmarked request.
+  // And a second encode of the same IR still sees an unmarked request — the
+  // history marker included, which is the one written into a `messages` array
+  // whose blocks the encoder rebuilt from the same IR.
   const second = toWire(request, "m", { oauth: false, autoCache: true });
   expect(second.degradations).toContain("anthropic:cache-breakpoint-added");
+  expect(second.degradations).toContain("anthropic:history-cache-breakpoint-added");
+  expect(markerCount(second.body)).toBe(3);
 });
 
 test("marks the client's own last system block, not the oauth prefix", () => {
-  const { body } = toWire(UNMARKED, "m", { oauth: true, autoCache: true });
+  const { body } = toWire(EVERYTHING, "m", { oauth: true, autoCache: true });
   expect(body.system?.[0]?.text).toBe(OAUTH_IDENTITY);
   expect(body.system?.[0]?.cache_control).toBeUndefined();
   // Last block, so the breakpoint covers the injected prefix and the client's
@@ -1330,7 +1621,7 @@ test("a marker anywhere counts, including inside message history", () => {
   // The third shape of "anywhere", and the one an ordinary client hits: a
   // breakpoint on the last tool result rather than on system or tools.
   const marked: ChatRequest = {
-    ...UNMARKED,
+    ...EVERYTHING,
     messages: [
       {
         role: "user",
@@ -1342,6 +1633,7 @@ test("a marker anywhere counts, including inside message history", () => {
   const off = toWire(marked, "m", { oauth: false });
   expect(JSON.stringify(on.body)).toBe(JSON.stringify(off.body));
   expect(on.degradations).not.toContain("anthropic:cache-breakpoint-added");
+  expect(on.degradations).not.toContain("anthropic:history-cache-breakpoint-added");
 });
 
 test("a top-level marker in the vendor bag counts too", () => {
@@ -1349,39 +1641,246 @@ test("a top-level marker in the vendor bag counts too", () => {
   // through `vendor` — so the estimate cannot see it and the body would end up
   // with two breakpoints, one of which the client never asked for.
   const marked: ChatRequest = {
-    ...UNMARKED,
+    ...EVERYTHING,
     vendor: { anthropic: { cache_control: { type: "ephemeral" } } },
   };
   const { body, degradations } = toWire(marked, "m", { oauth: false, autoCache: true });
-  expect((JSON.stringify(body).match(/cache_control/g) ?? []).length).toBe(1);
+  expect(markerCount(body)).toBe(1);
   expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+  expect(degradations).not.toContain("anthropic:history-cache-breakpoint-added");
 });
 
-test("the size gate measures the prefix it caches, not the whole request", () => {
-  // A long conversation under a two-line system prompt: an ordinary agent
-  // session. Counting the messages would wave this through and mark a prefix
-  // far too small for Anthropic to cache.
+test("a long conversation under a tiny prefix gets the history marker and nothing else", () => {
+  // The case the one-marker design had to throw away: an ordinary agent session
+  // measuring 50k tokens against a six-token prefix. Gates 1 and 2 fail, since
+  // there is nothing in the prefix worth caching; gate 3 passes, and marker 3
+  // is the one that actually serves this request.
   const longChat: ChatRequest = {
     ...base,
     system: [{ type: "text", text: "be terse" }],
     messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(200_000) }] }],
   };
   const { body, degradations } = toWire(longChat, "m", { oauth: false, autoCache: true });
-  expect(JSON.stringify(body)).not.toContain("cache_control");
+  expect(body.system?.at(-1)?.cache_control).toBeUndefined();
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[0]"]);
+  expect(markerCount(body)).toBe(1);
   expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+  expect(degradations).toContain("anthropic:history-cache-breakpoint-added");
 });
 
-test("a system prompt of only non-text blocks falls through to the tools", () => {
+test("a system prompt of only non-text blocks leaves the tool marker to stand alone", () => {
   const odd: ChatRequest = {
     ...base,
     system: [{ type: "image", mediaType: "image/png", data: "aGk=" }],
-    tools: [
-      { provider: "custom", name: "a", description: BIG_SYSTEM, inputSchema: { type: "object" } },
-    ],
+    tools: [BIG_TOOL],
   };
   const { body } = toWire(odd, "m", { oauth: false, autoCache: true });
   // `toWire` drops non-text system blocks entirely, so there is no system array
-  // left to mark and the last tool takes it.
+  // left to mark. The tool marker is measured over the tools alone and is
+  // unaffected.
   expect(body.system).toBeUndefined();
   expect(body.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  // The history marker is here on an increment the wire body does not actually
+  // carry: the gate measures the IR, where that image counts 1,600 tokens, and
+  // the encoder then drops it. Recorded as the behaviour rather than asserted
+  // as the intent — the error runs in the safe direction, since the prefix is
+  // over the minimum either way and a marker on a prefix already cached below
+  // it costs one slot of four, not a failed request.
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[0]"]);
+  expect(markerCount(body)).toBe(2);
+});
+
+test("the history marker walks back past a system turn whose content is a string", () => {
+  // `encodeSystemTurn` joins an all-text mid-conversation system turn into a
+  // plain string, and a string carries no `cache_control` at all.
+  const trailingSystemTurn: ChatRequest = {
+    ...base,
+    messages: [
+      { role: "user", content: [{ type: "text", text: BIG_SYSTEM }] },
+      { role: "system", content: [{ type: "text", text: "answer in French" }] },
+    ],
+  };
+  const { body, degradations } = toWire(trailingSystemTurn, "m", { oauth: false, autoCache: true });
+  expect(body.messages[1]).toEqual({ role: "system", content: "answer in French" });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[0]"]);
+  expect(degradations).toContain("anthropic:history-cache-breakpoint-added");
+});
+
+test("the history marker takes the last eligible block of a turn, not the first", () => {
+  // A breakpoint caches everything up to and including the block it sits on, so
+  // marking the first block of the final turn would leave the rest of that turn
+  // outside the entry for no reason.
+  const twoBlocks: ChatRequest = {
+    ...base,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: BIG_SYSTEM },
+          { type: "text", text: "and finally" },
+        ],
+      },
+    ],
+  };
+  const { body } = toWire(twoBlocks, "m", { oauth: false, autoCache: true });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[1]"]);
+});
+
+test("the history marker walks back past a thinking block", () => {
+  // Anthropic accepts `cache_control` on text, image, tool_use, tool_result and
+  // document. A marker on a thinking block fails the request outright.
+  const trailingThought: ChatRequest = {
+    ...base,
+    messages: [
+      { role: "user", content: [{ type: "text", text: BIG_SYSTEM }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "here" },
+          { type: "thinking", text: "hmm", signature: "sig" },
+        ],
+      },
+    ],
+  };
+  const { body } = toWire(trailingThought, "m", { oauth: false, autoCache: true });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[0]"]);
+  expect(markerCount(body)).toBe(1);
+});
+
+test("the history marker selects by wire index, not by the index in the IR", () => {
+  // A turn whose content was entirely unsignable reasoning is dropped by
+  // `toWire`'s flatMap, so the two arrays differ in length from that turn on.
+  //
+  // Four turns survive, the dropped one is in the middle, and the last survivor
+  // is a signed thinking turn nothing may be marked on — so the answer is a
+  // turn in the middle of the body and the assertion can tell a wrong turn from
+  // no turn. The single-turn fixture this replaced could not: every way of
+  // getting the index wrong showed up there as an empty result.
+  //
+  // It is still an empty result that an IR-index mutation produces, and that is
+  // a property of the drop rather than of the fixture: dropping only ever
+  // shortens, so the IR index of the last markable turn is at or past the body
+  // index of that turn, which means it is either out of range or points at a
+  // later turn — and every later turn is one the walk already rejected. What
+  // the four turns buy is the other half, first-versus-last across turns, which
+  // now reads as `messages[0]` against `messages[2]`.
+  const droppedMiddle: ChatRequest = {
+    ...base,
+    messages: [
+      { role: "user", content: [{ type: "text", text: BIG_HISTORY }] },
+      { role: "assistant", content: [{ type: "thinking", text: "unsigned" }] },
+      { role: "user", content: [{ type: "text", text: "second" }] },
+      { role: "assistant", content: [{ type: "text", text: "third" }] },
+      { role: "assistant", content: [{ type: "thinking", text: "kept", signature: "sig" }] },
+    ],
+  };
+  const { body, degradations } = toWire(droppedMiddle, "m", { oauth: false, autoCache: true });
+  expect(droppedMiddle.messages.length).toBe(5);
+  expect(body.messages.length).toBe(4);
+  expect(degradations).toContain("anthropic:unsigned-thinking-dropped");
+  // Wire index 2 is IR index 3. Reading the IR marks wire index 3, the signed
+  // thinking turn.
+  expect(markedHistoryBlocks(body)).toEqual(["messages[2].content[0]"]);
+  expect(markedHistoryTypes(body)).toEqual(["text"]);
+  expect(markerCount(body)).toBe(1);
+});
+
+test("no markable message block means no history marker and no record of one", () => {
+  // Every turn is an all-text system turn, so the whole history is strings. The
+  // history is deliberately large: the gate has to pass, or this asserts the
+  // size check rather than the block walk.
+  const stringsOnly: ChatRequest = {
+    ...base,
+    system: [{ type: "text", text: BIG_SYSTEM }],
+    messages: [{ role: "system", content: [{ type: "text", text: BIG_HISTORY }] }],
+  };
+  const { body, degradations } = toWire(stringsOnly, "m", { oauth: false, autoCache: true });
+  expect(body.messages[0]).toEqual({ role: "system", content: BIG_HISTORY });
+  expect(markedHistoryBlocks(body)).toEqual([]);
+  expect(JSON.stringify(body.messages)).not.toContain("cache_control");
+  expect(body.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+  expect(degradations).toContain("anthropic:cache-breakpoint-added");
+  expect(degradations).not.toContain("anthropic:history-cache-breakpoint-added");
+});
+
+// One fixture per entry in the encoder's eligible-block allowlist, each ending
+// a turn, each asserting the position *and* the wire type the marker landed on.
+// Reviewing the first implementation found four of the five pinned by nothing:
+// `image`, `tool_use`, `tool_result` and `document` could each be deleted from
+// the allowlist with the suite still green, and `tool_result` is the block that
+// ends almost every agentic turn this gateway sees.
+
+test("the history marker lands on a trailing text block", () => {
+  const req = historyEndingWith("assistant", { type: "text", text: "done" });
+  const { body } = toWire(req, "m", { oauth: false, autoCache: true });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[0]"]);
+  expect(markedHistoryTypes(body)).toEqual(["text"]);
+});
+
+test("the history marker lands on a trailing image block", () => {
+  const req = historyEndingWith("user", { type: "image", mediaType: "image/png", data: "aGk=" });
+  const { body } = toWire(req, "m", { oauth: false, autoCache: true });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[0]"]);
+  expect(markedHistoryTypes(body)).toEqual(["image"]);
+});
+
+test("the history marker lands on a trailing tool_use block", () => {
+  const req = historyEndingWith("assistant", {
+    type: "toolUse",
+    id: "tu_1",
+    name: "session_search",
+    input: { q: "x" },
+  });
+  const { body } = toWire(req, "m", { oauth: false, autoCache: true });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[0]"]);
+  expect(markedHistoryTypes(body)).toEqual(["tool_use"]);
+});
+
+test("the history marker lands on a trailing tool_result block", () => {
+  // The shape that ends almost every agentic turn: an assistant calls a tool,
+  // the client replays the result, and the next request begins there.
+  const req = historyEndingWith("user", {
+    type: "toolResult",
+    toolUseId: "tu_1",
+    content: "ok",
+  });
+  const { body } = toWire(req, "m", { oauth: false, autoCache: true });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[0]"]);
+  expect(markedHistoryTypes(body)).toEqual(["tool_result"]);
+});
+
+test("the history marker lands on a trailing document block", () => {
+  // `document` reaches the wire only as an `anthropicNative` block — the IR has
+  // no document variant, and the encoder re-emits the payload under the
+  // `blockType` the decoder recorded.
+  const req = historyEndingWith("user", {
+    type: "anthropicNative",
+    blockType: "document",
+    data: { source: { type: "text", media_type: "text/plain", data: "notes" } },
+  });
+  const { body } = toWire(req, "m", { oauth: false, autoCache: true });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[0]"]);
+  expect(markedHistoryTypes(body)).toEqual(["document"]);
+});
+
+test("a native block outside the allowlist is walked past, not marked", () => {
+  // The other half of the guard. A `web_search_result` is `anthropicNative`
+  // like the document above, and Anthropic takes no `cache_control` on it, so
+  // the walk has to keep going rather than mark the last block it finds.
+  const req: ChatRequest = {
+    ...base,
+    messages: [
+      { role: "user", content: [{ type: "text", text: BIG_HISTORY }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "found it" },
+          { type: "anthropicNative", blockType: "web_search_result", data: { url: "https://x" } },
+        ],
+      },
+    ],
+  };
+  const { body } = toWire(req, "m", { oauth: false, autoCache: true });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[0]"]);
+  expect(markedHistoryTypes(body)).toEqual(["text"]);
 });
