@@ -187,12 +187,21 @@ The increment rule bounds the exposure below. A marker only exists when it exten
 by at least 1024 tokens, so the worst case is three markers over three genuinely different prefixes
 rather than three over the same one.
 
-**One claim here is unverified.** Nested markers over the same prefix are expected to bill
-`cache_creation_input_tokens` once for the union rather than once per marker, because each entry
-extends the previous rather than duplicating it. If that is wrong, marker 1 costs a second full write
-and stops being nearly free. It is directly readable from `usage` on the first live request after
-deploy. Keeping marker 1 is contingent on that measurement — the code is written so removing it is
-deleting one branch, not unpicking a design.
+**Nested markers bill once for the union — measured, 2026-08-24.** Each entry extends the previous
+rather than duplicating it, so marker 1 costs a slot and not a second write. Measured over 27,279
+consecutive warm turn-pairs in `request_logs`, all of them claude-code traffic carrying three nested
+markers:
+
+```
+read(N+1) / [write(N) + read(N)]   p25=1.000  p50=1.000  p75=1.000
+79% within [0.85, 1.15];  2% near the 0.33 that per-marker billing would produce
+```
+
+The ratio is estimate-free — both terms come from the provider's own `usage` — which matters,
+because the obvious test does not work. Comparing `cache_write` against a token estimate of the
+captured body reads 14-19× on long sessions, and that is `slice(-24)` in the body capture
+understating the prompt, not a billing anomaly. Any check of this that leans on a captured body is
+measuring the truncator.
 
 ## Record
 
