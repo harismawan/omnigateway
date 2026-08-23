@@ -23,6 +23,19 @@ export const PENALTY: Readonly<Record<ErrorCode, Penalty>> = {
   CONFLICT: "none",
   CONTENT_FILTER: "none",
   CAPABILITY_MISMATCH: "none",
+  // Blames the request's tool names, not the credential — the same credential
+  // serves the next request with different tools perfectly well.
+  //
+  // Unless the message was truthful. A genuine extra-usage exhaustion sends
+  // identical text and is indistinguishable from the response, so it lands here
+  // too and forfeits both halves of `QUOTA_EXHAUSTED`: the retry against another
+  // credential, and the one-hour park below that would have taken it out of the
+  // pool. `"soft"` is still the wrong trade — it would park a healthy credential
+  // for an hour on every fingerprint refusal, which is the case actually
+  // observed — but the cost is real and is not zero. See `isFingerprintRefusal`
+  // in `providers/src/anthropic/decode.ts`; repeated refusals on one credential
+  // should be read against `quota_windows` before believing the tool-name story.
+  FINGERPRINT_REFUSED: "none",
   NO_CANDIDATES: "none",
   ALL_CANDIDATES_FAILED: "none",
   INTERNAL: "none",

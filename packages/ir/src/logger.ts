@@ -74,6 +74,17 @@ export type LogFields = {
   dailyCount?: number | undefined;
   /** Retained quota readings swept. A row count, and nothing about whose. */
   quotaSampleCount?: number | undefined;
+  /**
+   * How many client tool names an adapter renamed on the outbound leg.
+   *
+   * A count, and it must stay a count. Tool names are client-supplied free
+   * text — they can hold anything a caller decided to name a tool — so putting
+   * them here would breach the redaction boundary this type exists to be, in
+   * the same way a `reason` carrying a body would. The number is enough to see
+   * that a cloak fired and how widely; the names it fired on are never a thing
+   * stdout needs.
+   */
+  cloakedTools?: number | undefined;
   /** Bytes of a file this gateway wrote, read, or reclaimed. Never of a body. */
   sizeBytes?: number | undefined;
   host?: string | undefined;
@@ -119,6 +130,7 @@ const FIELD_ORDER = [
   "rawCount",
   "dailyCount",
   "quotaSampleCount",
+  "cloakedTools",
   "sizeBytes",
   "host",
   "port",
