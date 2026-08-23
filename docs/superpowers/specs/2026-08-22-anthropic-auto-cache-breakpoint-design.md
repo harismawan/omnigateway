@@ -1,7 +1,10 @@
 # Gateway-added Anthropic cache breakpoint
 
-Status: implemented.
+Status: implemented, superseded in part.
 Date: 2026-08-22.
+Amended by: `2026-08-23-anthropic-auto-cache-full-prefix-design.md`, which adds a marker at
+end-of-tools and one on the message history. Two sections below no longer hold and say so inline:
+"Why never a message block" and the one-constant argument under "The gate measures the prefix".
 
 ## The problem, measured
 
@@ -60,6 +63,12 @@ top-level `body.cache_control`, which is different semantics from an inline brea
 anywhere else flips its `lost` flag and emits `anthropic:system-turn-cache-control-dropped` for a
 marker the client never set. Restricting injection to `system` and `tools` avoids that path entirely.
 
+> **Correction (2026-08-23).** This section is wrong, and restricting injection was never what
+> avoided the path. `systemCacheControl()` walks `req.messages` — the IR. Injection writes
+> `body.messages` — the wire body. The promotion path cannot observe a wire-side marker at all. The
+> rule that actually protects it is the one in the next section, which is unaffected: the IR is never
+> written. See `2026-08-23-anthropic-auto-cache-full-prefix-design.md`.
+
 ## Why the IR is never touched
 
 `dispatchRequest` is one shared object across every attempt. A breakpoint written onto it would
@@ -81,6 +90,12 @@ One constant rather than a per-model table: the real minimum is larger for Haiku
 Sonnet, but the estimator is nowhere near accurate enough for that difference to mean anything, so it
 takes the smaller published value. The estimator over-counts, so the error runs safely — a prompt
 that squeaks past and turns out too small is ignored upstream at no cost.
+
+> **Correction (2026-08-23).** "The smaller published value" is false, and the minimum is not
+> monotonic across generations: 512 on Opus 5, 1024 on Opus 4.8 and Sonnet 5/4.6, 2048 on Opus 4.7,
+> 4096 on Opus 4.6 and Haiku 4.5. 1024 is neither the floor nor the ceiling — it over-gates Opus 5
+> and under-gates Opus 4.6 and Haiku 4.5. The conclusion survives (the error still runs safe in both
+> directions, at no charge) but the reasoning given for it does not.
 
 ## The vendor blind spot
 
