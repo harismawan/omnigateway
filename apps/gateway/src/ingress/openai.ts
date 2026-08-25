@@ -132,7 +132,10 @@ const schema = z.object({
       z.object({ type: z.literal("function"), function: z.object({ name: z.string() }) }),
     ])
     .optional(),
-  reasoning_effort: z.enum(["low", "medium", "high"]).optional(),
+  // The full IR set, not the three levels api.openai.com historically took:
+  // this surface feeds every provider, and a custom server decides its own
+  // vocabulary. Deeper values cross unclamped.
+  reasoning_effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 });
 
 const KNOWN = [
