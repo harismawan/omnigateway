@@ -314,7 +314,7 @@ test("maps reasoning_effort onto the reasoning config", () => {
 });
 
 test("deep efforts cross unclamped, matching what the egress forwards", () => {
-  for (const effort of ["xhigh", "max"] as const) {
+  for (const effort of ["none", "minimal", "xhigh", "max"] as const) {
     expect(parseOpenAIRequest({ ...minimal, reasoning_effort: effort }).reasoning).toEqual({
       mode: "adaptive",
       effort,

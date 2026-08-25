@@ -161,15 +161,12 @@ export function toResponsesWire(
     if (req.reasoning.mode === "budget") {
       degradations.push("openai:reasoning-budget-dropped");
     } else {
-      // This API tops out at `high`; the deeper Anthropic levels clamp onto it.
+      // The official ladder now runs `none` through `max`; model support
+      // varies, and per the gateway's no-request-shape-validation rule an
+      // unsupported value surfaces as the upstream error it is rather than
+      // being pre-clamped into a different depth.
       const effort = req.reasoning.effort ?? "medium";
-      if (effort === "xhigh" || effort === "max") {
-        degradations.push("openai:reasoning-effort-clamped");
-      }
-      body.reasoning = {
-        effort: effort === "xhigh" || effort === "max" ? "high" : effort,
-        summary: "auto",
-      };
+      body.reasoning = { effort, summary: "auto" };
     }
   }
 

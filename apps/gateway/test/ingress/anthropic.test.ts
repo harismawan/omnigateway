@@ -176,6 +176,14 @@ test("effort alone implies adaptive thinking", () => {
   expect(req.reasoning).toEqual({ mode: "adaptive", effort: "high" });
 });
 
+test("the full published ladder is recognised, including none and minimal", () => {
+  for (const effort of ["none", "minimal"] as const) {
+    const req = parseAnthropicRequest({ ...minimal, output_config: { effort } });
+    expect(req.reasoning).toEqual({ mode: "adaptive", effort });
+    expect(req.vendor?.anthropic?.output_config).toEqual({ effort });
+  }
+});
+
 test("ignores an effort level it does not recognise", () => {
   const req = parseAnthropicRequest({ ...minimal, output_config: { effort: "turbo" } });
   expect(req.reasoning).toBeUndefined();

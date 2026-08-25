@@ -106,13 +106,17 @@ test("records a lost budget instead of inventing an effort", () => {
   expect(degradations).toContain("openai:reasoning-budget-dropped");
 });
 
-test("clamps the deeper effort levels this API does not have", () => {
-  const { body, degradations } = toResponsesWire(
-    { ...base, reasoning: { mode: "adaptive", effort: "max" } },
-    "gpt-5",
-  );
-  expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
-  expect(degradations).toContain("openai:reasoning-effort-clamped");
+test("forwards the full official effort ladder unclamped", () => {
+  // The API's own union now runs none..max; model support varies and an
+  // unsupported value is the upstream's error to raise, not ours to pre-clamp.
+  for (const effort of ["none", "minimal", "xhigh", "max"] as const) {
+    const { body, degradations } = toResponsesWire(
+      { ...base, reasoning: { mode: "adaptive", effort } },
+      "gpt-5",
+    );
+    expect(body.reasoning).toEqual({ effort, summary: "auto" });
+    expect(degradations).toEqual([]);
+  }
 });
 
 test("sends no reasoning at all when the client turned it off", () => {

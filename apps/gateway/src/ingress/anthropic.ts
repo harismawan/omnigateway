@@ -456,7 +456,15 @@ function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): 
   return c.type === "tool" ? { type: "tool", name: c.name } : { type: c.type };
 }
 
-const EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+const EFFORTS: readonly ReasoningEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
 
 /** Reads `output_config.effort` without consuming the field. */
 function readEffort(body: unknown): ReasoningEffort | undefined {
