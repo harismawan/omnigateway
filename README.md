@@ -81,7 +81,7 @@ graph TD
   dashboard -. "types only" .-> store
   control --> router
   control --> ratelimit
-  router --> store
+  router -. "types + 2 pure helpers,<br/>via /types subpath" .-> store
   router --> providers
   store --> rtk
   store --> ratelimit
@@ -106,6 +106,12 @@ arithmetic be tested without a gateway, a store, or a clock.
 The dashboard's edges are dotted because they are type-level only.
 `@omni/providers/catalog` is deliberately kept import-free so model lists can be
 bundled into the browser without dragging in the HTTP client.
+
+The router's dotted edge into `@omni/store` is nearly the same story: its
+package-root imports are all `import type`. Two pure arithmetic helpers,
+`durationFor` and `cacheReadRate`, do run at runtime — imported through the
+`@omni/store/types` leaf subpath, so neither SQLite nor crypto enters the
+router's module graph and the no-I/O rule holds.
 
 The gateway and the CLI are two front ends over the same `@omni/control`
 functions. The CLI does not call the running server's API — it opens the same
