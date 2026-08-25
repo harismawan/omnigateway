@@ -23,10 +23,13 @@ shape and why the HTTP client is built on `node:http`.
    stable client fingerprint. Mint fingerprints synthetically at connect time and freeze them onto
    the credential; never read the real hostname or machine id.
 4. Fork `wire.ts` and `decode.ts` per provider. Never import another provider's directory: vendors
-   look alike on paper and diverge in practice, and a shared encoder collects a branch per quirk.
-   `custom/` predates this rule and shows the cost — it imports `../kimi/` and `../openai/` and pays
-   with a regex rewriting degradation prefixes afterwards. Shared infrastructure stays shared
-   (`usageFromPromptTotal`, `parseSse`, `httpError`, `orderHeaders`).
+   look alike on paper and diverge in practice, a shared encoder collects a branch per quirk, and a
+   cross-provider import is exactly what stops an adapter becoming a standalone plugin later.
+   Shared infrastructure stays shared (`usageFromPromptTotal`, `parseSse`, `httpError`,
+   `orderHeaders`). `custom/` is the worked example: it shipped importing kimi's encoder, kilo's
+   decoder and openai's responses codec, and paid with a regex rewriting degradation prefixes
+   afterwards; it now forks both codecs into its own directory, emits `custom:*` degradations
+   natively, and needs no other provider to build.
 5. Add `PROFILES.<id>` and `BODY_ORDER.<id>`. State in a comment whether the header set was captured
    from real traffic or constructed, as the kimi profile does. Put any version string the upstream
    gates on behind `env()` so a stale value is an operator fix, not a release.
