@@ -322,6 +322,10 @@ test("deep efforts cross unclamped, matching what the egress forwards", () => {
   }
 });
 
+test("rejects an effort level outside the published ladder", () => {
+  expect(() => parseOpenAIRequest({ ...minimal, reasoning_effort: "turbo" })).toThrow(GatewayError);
+});
+
 test("accepts both max_tokens and max_completion_tokens", () => {
   expect(parseOpenAIRequest({ ...minimal, max_tokens: 100 }).maxTokens).toBe(100);
   expect(parseOpenAIRequest({ ...minimal, max_completion_tokens: 200 }).maxTokens).toBe(200);

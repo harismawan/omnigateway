@@ -219,14 +219,24 @@ describe("custom adapter forwards the thinking level as asked", () => {
     }
   });
 
-  test("a raw vendor field keeps precedence over the derived one", async () => {
+  test("a raw vendor field keeps precedence over the derived one, on both legs", async () => {
+    // The responses bag replaces the whole `reasoning` object — summary
+    // included — which is what Object.assign-last means.
     const { body, degradations } = await sendReasoning(
+      "responses",
+      { mode: "adaptive", effort: "high" },
+      { reasoning: { effort: "low" } },
+    );
+    expect(body.reasoning).toEqual({ effort: "low" });
+    expect(degradations).toEqual([]);
+
+    const chat = await sendReasoning(
       "chat_completions",
       { mode: "adaptive", effort: "high" },
       { reasoning_effort: "low" },
     );
-    expect(body.reasoning_effort).toBe("low");
-    expect(degradations).toEqual([]);
+    expect(chat.body.reasoning_effort).toBe("low");
+    expect(chat.degradations).toEqual([]);
   });
 });
 
@@ -296,6 +306,18 @@ describe("custom chat decodes upstream reasoning as unsigned thinking", () => {
 
     expect(events.some((e) => e.type === "blockStart" && e.block.type === "thinking")).toBe(false);
     expect(events.at(-1)?.type).toBe("end");
+  });
+
+  test("readable reasoning_details entries contribute their text in order", async () => {
+    const events = await decodedEvents([
+      '{"id":"c1","choices":[{"delta":{"reasoning_details":[{"text":"de"},{"summary":"tailed"}]}}]}',
+      '{"choices":[{"delta":{"content":"x"}}]}',
+    ]);
+
+    expect(events.filter((e) => e.type === "blockDelta")).toEqual([
+      { type: "blockDelta", index: 0, delta: { type: "thinking", text: "detailed" } },
+      { type: "blockDelta", index: 1, delta: { type: "text", text: "x" } },
+    ]);
   });
 
   // The responses fork is wired through the adapter too, not just the chat

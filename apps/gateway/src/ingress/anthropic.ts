@@ -6,7 +6,7 @@ import type {
   ReasoningEffort,
   ToolChoice,
 } from "@omni/ir";
-import { GatewayError, validateRequest } from "@omni/ir";
+import { GatewayError, REASONING_EFFORTS, validateRequest } from "@omni/ir";
 import { ANTHROPIC_NATIVE_BLOCK_TYPES } from "@omni/providers";
 import { z } from "zod";
 import { mcpServerNames, parseTools } from "./anthropicTools.ts";
@@ -456,15 +456,7 @@ function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): 
   return c.type === "tool" ? { type: "tool", name: c.name } : { type: c.type };
 }
 
-const EFFORTS: readonly ReasoningEffort[] = [
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
+const EFFORTS = REASONING_EFFORTS;
 
 /** Reads `output_config.effort` without consuming the field. */
 function readEffort(body: unknown): ReasoningEffort | undefined {

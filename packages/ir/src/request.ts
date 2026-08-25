@@ -192,8 +192,21 @@ export type ToolChoice =
  * as an upstream error rather than having the gateway pre-clamp the client's
  * choice. `none` tunes adaptive thinking to zero depth on models that support
  * it — distinct from `{mode:"off"}`, which asks every destination to not think.
+ *
+ * Ingresses validate against this constant rather than hand-listing values,
+ * so the next ladder widening cannot desync a copy of it.
  */
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const REASONING_EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 /**
  * How much the model should think, in the three shapes providers actually
