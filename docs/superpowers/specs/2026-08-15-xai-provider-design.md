@@ -83,9 +83,9 @@ shape of every other provider.
 `wire.ts` and `decode.ts` are **forked**, not shared with `openai/`. Sharing would be tempting —
 xAI's Responses surface is close to OpenAI's today — but the two diverge already and will diverge
 further, and a shared file means every future xAI quirk lands as another branch inside OpenAI's
-encoder. The existing `custom` adapter is the counter-example: it reaches into `../kimi/` and
-`../openai/` and pays for it with a regex that rewrites degradation prefixes after the fact
-(`custom/index.ts:57-59`).
+encoder. The `custom` adapter began as the counter-example — it reached into `../kimi/` and
+`../openai/` and paid for it with a regex rewriting degradation prefixes after the fact — before
+being forked into its own codecs, which is the shape every provider now follows.
 
 Forking costs real duplication, and the mitigation is that neither file is a blind copy. The
 differences from `openai/wire.ts` are load-bearing:

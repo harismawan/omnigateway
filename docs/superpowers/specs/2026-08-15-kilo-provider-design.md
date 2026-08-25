@@ -108,9 +108,10 @@ machine fingerprint, so there is no synthetic device identity to mint or freeze.
 `wire.ts` and `decode.ts` are **forked from `kimi/`, not imported from it**. Both providers speak
 OpenAI chat completions today and the two files will start out nearly identical, which is precisely
 the situation `CLAUDE.md` rule 4 warns about: vendors look alike on paper and diverge in practice,
-and a shared encoder collects a branch per quirk. `custom/` is the standing counterexample — it
-imports `../kimi/` and `../openai/` and pays for it with a regex that rewrites degradation prefixes
-afterwards. Shared infrastructure stays shared: `usageFromPromptTotal`, `parseSse`, `httpError`,
+and a shared encoder collects a branch per quirk. `custom/` began as the counterexample — it
+imported `../kimi/` and `../openai/` and paid for it with a regex rewriting degradation prefixes —
+and has since been forked into its own codecs, making it the worked example of this rule. Shared
+infrastructure stays shared: `usageFromPromptTotal`, `parseSse`, `httpError`,
 `orderHeaders`, `mergeHeaders`, `orderFields`.
 
 Cache control has no expression on the OpenAI chat wire. A request carrying cache-control

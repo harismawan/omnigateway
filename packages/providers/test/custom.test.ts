@@ -368,6 +368,24 @@ describe("custom chat decodes upstream reasoning as unsigned thinking", () => {
       },
     ]);
   });
+
+  test("responses failure events surface as canonical errors through the adapter", async () => {
+    const events = await decodedEvents(
+      [
+        { event: "response.created", payload: '{"response":{"id":"resp-1","model":"m"}}' },
+        {
+          event: "error",
+          payload: '{"error":{"code":"rate_limit_exceeded","message":"slow down"}}',
+        },
+      ],
+      "responses",
+    );
+
+    expect(events).toEqual([
+      { type: "start", id: "resp-1", model: "m" },
+      { type: "error", code: "RATE_LIMIT", message: "slow down", retryable: true },
+    ]);
+  });
 });
 
 // Base paths exist so reverse-proxied servers (`https://host/api`) are

@@ -456,6 +456,11 @@ function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): 
   return c.type === "tool" ? { type: "tool", name: c.name } : { type: c.type };
 }
 
+// Anthropic's field *filters* rather than rejects: an unknown effort is read
+// as absent while `output_config` itself still rides the vendor bag to the
+// one provider whose field it is. The OpenAI surface rejects instead — its
+// clients have no vendor passthrough to fall back on. Both draw from the
+// same ladder; only the unknown-value policy differs.
 const EFFORTS = REASONING_EFFORTS;
 
 /** Reads `output_config.effort` without consuming the field. */
