@@ -301,13 +301,38 @@ If you would rather not publish, a tarball at a URL or handed over directly work
 the same way:
 
 ```bash
-tar -czf your-plugin.tgz -C dist your-plugin
-omni plugin install ./your-plugin.tgz
+# wherever you build — a workstation, CI
+bun run build                                      # your plugin's own build
+tar -czf my-plugin.tgz -C dist my-plugin
+
+# on the host
+scp my-plugin.tgz gateway-host:/tmp/
+ssh gateway-host 'omni plugin install /tmp/my-plugin.tgz && omni plugin verify my-plugin && omni restart'
 ```
 
 Ship the built bundles and the manifest, nothing else. Your sources, tests and
 `node_modules` are not needed at runtime and every one of them is another file an
 operator has to trust.
+
+Whatever you pack, the manifest must sit at the **root** of the archive once one
+wrapping directory is stripped. A build that nests it — `dist/my-plugin/
+omni-plugin.json` inside a tarball made from the repository root — is refused
+with "has no omni-plugin.json at its root", and that is the most common way a
+plugin that builds fine turns out not to install.
+
+A URL over plaintext `http://` is refused outright and always will be: what
+arrives over that fetch is code the gateway process will `import`, so anyone
+between you and the host would be choosing what the gateway runs. Silently
+upgrading to `https://` would be worse — it would install *something* from a URL
+the operator did not type.
+
+**In Docker**, mount the plugin at `<root>/plugins/<id>` — the same layout
+`install` writes — read-write, and restart the container. Read-write is not a
+stylistic choice if your plugin declares `files`: its cache lives inside its own
+directory at `<root>/plugins/<id>/data/`, the capability creates that directory
+on every call, so a read-only mount fails *reads* as well as writes, with an
+`EACCES` on `mkdir` rather than anything that names the mount. Keeping code
+immutable while its cache stays writable is not expressible today.
 
 To remove:
 

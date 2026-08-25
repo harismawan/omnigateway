@@ -192,22 +192,12 @@ omni models catalog                                  # what is available
 omni models put fast --from-catalog anthropic:claude-sonnet-5
 ```
 
-**A note on grok pricing.** xAI charges by request size: at or above 200K
-context the rate roughly doubles, and the higher rate applies to *every token
-in the request*, not just the tokens past the mark. A target holds one flat
-price, so the catalog carries xAI's sub-200K figures and long-context traffic
-is reported cheaper than it was billed. Catalog pricing is only the default a
-new target starts from — if you run grok at long context, edit the saved
-target's price to match the tier you are actually paying.
-
-**A note on `kilo-auto/*` pricing.** Kilo's `frontier`, `balanced`, and
-`efficient` routers choose an upstream model per request, and Kilo states no
-rate for them. The catalog records zero, which the router reads as *unpriced*
-and leaves out of its cost ranking — the same stored figure `kilo-auto/free`
-carries because it genuinely is free. So a `kilo-auto` target seeded from the
-catalog is not free, it is unranked: cost never counts for or against it. If you
-want one ranked against your other accounts, set a real `costPerMTok` on the
-saved target for the tier you expect it to land in.
+Two catalog pricing caveats: xAI doubles its rate at or above 200K context —
+the higher rate applies to every token, but a target holds one flat price, so
+edit the saved target if you run grok long-context; and Kilo's `kilo-auto/*`
+routers carry no published rate, so the router treats them as unpriced rather
+than free — set a real `costPerMTok` on the saved target to have one ranked.
+Details in [docs/adding-a-provider.md](docs/adding-a-provider.md).
 
 Mint a key for your client. **It is printed once and stored only as a hash:**
 
@@ -308,23 +298,13 @@ anthropic-ratelimit-requests-remaining: 1841    x-ratelimit-remaining-requests: 
 anthropic-ratelimit-requests-reset: 2026-08-19T14:32:07Z   x-ratelimit-reset-requests: 4h51m22s
 ```
 
-`requests-remaining` counts the request you are being answered, as both vendors
-define it. `tokens-remaining` does not, and cannot: the response is still being
-written when the header goes out, so its token cost is not yet known and
-subtracting anything would be an invented number rather than a measured one.
-
+`requests-remaining` counts the request being answered; `tokens-remaining` does
+not and cannot — the response is still being written when the header goes out.
 Where a key has several windows on one dimension, the headers report the one
-**nearest exhaustion** — a key comfortable per-minute but one request from its
-weekly ceiling shows you the weekly figures, not the reassuring ones.
-
-`spend` and `concurrency` are rendered on neither dialect, because no vendor
-defines a header for them and a number no client parses is noise in every
-response.
-
-A refusal is `429` with `Retry-After` in seconds, alongside the usual error body.
-The wait is computed from the oldest request still inside the window that
-refused you, so a weekly ceiling tells you when a slot actually frees rather than
-parking you for seven days.
+**nearest exhaustion**, not the reassuring ones. `spend` and `concurrency`
+render on neither dialect, because no vendor defines a header for them. A
+refusal is `429` with `Retry-After` in seconds, computed from the oldest request
+still inside the window that refused you.
 
 ### Tools and routing
 
@@ -407,29 +387,14 @@ start` supervises the process itself with a pidfile under
 
 ### Restarting and stopping from the console
 
-The console can restart and shut down the gateway, from the foot of its sidebar
-— reachable from every screen, because a gateway you need to restart is rarely
-one you were looking at the Database screen of. A restart only restarts if
-something would start the process again, so what the control does — and whether
-it is offered at all — depends on how this installation runs:
-
-- **Under systemd**, it works. The gateway asks the manager rather than
-  signalling itself — `systemctl [--user] --no-block restart
-  omnigateway.service` — because the unit `omni service install` writes sets
-  `Restart=on-failure`, and a handled `SIGTERM` exits cleanly, which systemd
-  reads as success. A gateway that killed itself would stop and stay stopped.
-- **In a container**, it depends on the container's restart policy, and that
-  policy cannot be read from inside the container. The console says so instead
-  of promising a restart it has no way to verify. Run with
-  `--restart unless-stopped` if you want the control to mean what it says.
-- **With no supervisor** — `omni start` with no unit installed — the control is
-  disabled, and the section names the supervisor it found. Nothing is watching
-  the process, so an exit is simply the end of it. Use `omni restart` from a
-  terminal on the machine.
-
-Shutdown is offered in every shape, because stopping is the point of it. In a
-container it is a one-way door: stopping the only process takes the console that
-would have restarted it, so bringing the gateway back needs access to the host.
+The console can restart and shut down the gateway from the foot of its sidebar.
+Restart works under systemd — the gateway asks the manager rather than
+signalling itself, because a handled SIGTERM exits cleanly, which systemd's
+`Restart=on-failure` reads as success — reports uncertainty in a container,
+whose restart policy cannot be read from inside, and disables itself with no
+supervisor; use `omni restart` from a terminal there. Shutdown is offered in
+every shape. In a container it is a one-way door: bring the process back from
+the host.
 
 ## Configuration
 
@@ -488,39 +453,24 @@ deliberately edited on the Database screen instead; see
 
 ## Recording bodies
 
-By default the gateway records no prompts and no responses. If you need them for
-an incident — to see what a client actually sent, or what a provider actually
-returned — capture is opt-in and takes **two independent keys, both required**:
+By default the gateway records no prompts and no responses. For incident
+forensics, capture is opt-in and needs **two independent keys, both required**:
+`OMNI_BODY_LOGGING_ALLOWED=1` read at boot, plus the **Capture request and
+response bodies** setting (console Settings, or `omni settings set
+bodyLoggingEnabled true`). An admin session alone cannot start recording your
+users' prompts; with the variable unset the console says the switch does
+nothing rather than letting you flip it. Capture can be toggled mid-incident;
+turning it off stops new capture and does not delete what was written.
 
-1. `OMNI_BODY_LOGGING_ALLOWED=1` in the installation's `.env`, read at boot.
-2. The **Capture request and response bodies** setting, in the console's
-   Settings screen or `omni settings set bodyLoggingEnabled true`. Off by
-   default. Raw SSE frames are the separate, far larger
-   `bodyLoggingCaptureStreamChunks`.
+A gateway key created with `--no-bodies` is never captured whatever the setting
+says — made at issue time, not reversible afterwards; reissue instead. Raw SSE
+frames are captured separately, under `bodyLoggingCaptureStreamChunks`, and are
+far the larger store.
 
-Two keys, because an admin session on its own must not be able to start
-recording your users' prompts. With the environment variable unset the setting
-does nothing at all, and the console says so rather than letting you flip a
-switch that silently no-ops. With the environment variable set you can turn
-capture on and off mid-incident without restarting.
-
-Turning capture off stops new capture. It does not delete what was already
-written.
-
-**Per-key opt-out.** A gateway key can be created with *Never record this key's
-bodies* — `omni keys create --no-bodies` — and it is then never captured whatever
-the setting says. Use it for a client whose payloads must not be retained. The
-choice is made when the key is issued and cannot be reversed afterwards; reissue
-the key instead. `omni keys list` and the console's Keys screen both show which
-keys are exempt, so an audit does not have to go through the database.
-
-**What is captured.** What arrived at `/v1/*` and what was returned, plus the
-request and response of every provider attempt, in dispatch order. The client
-request is the conversation *before* RTK compression and each attempt request is
-the one *after* it, so an artifact is the only place you can read what a filter
-actually removed. The console labels which side is which, and so does the CLI.
-
-**Reading them.** Expand a row on the console's Logs screen, or from a terminal:
+What is captured: what arrived at `/v1/*` and what was returned, plus every
+provider attempt in dispatch order — the client side pre-RTK, attempts post-RTK,
+labelled as such in console and CLI. Headers are never captured, at any layer.
+Read them from the console's Logs screen or:
 
 ```bash
 omni bodies req_550e8400-…          # the frame: state, size, one line per attempt
@@ -528,79 +478,24 @@ omni bodies req_550e8400-… --full   # the payloads themselves
 omni bodies req_550e8400-… --json   # the artifact, for a script
 ```
 
-**The bare command withholds the bodies and prints only the frame.** Every other
-CLI read prints everything it has; this one prints conversations, and whoever
-runs it during an incident is usually sharing that screen. Asking costs one
-flag; printing by default costs a prompt corpus in someone's scrollback,
-silently. The frame still gives you the state, capture time, size on disk, any
-truncation, and each attempt's provider and byte counts — labelled `pre-RTK` for
-the client request and `post-RTK` for attempts, because they are not the same
-payload.
+The bare command prints only the frame, never conversations — asking costs one
+flag. A missing artifact answers rather than errors: `not captured`, `captured,
+then lost` (retention or the row cap), or `captured, but unreadable` (usually a
+changed `OMNI_ENCRYPTION_KEY`). There is no command to delete a captured body;
+a second path that erases forensic evidence on request loses incident records.
 
-A request with no artifact is an answer rather than an error, and the three
-answers are different: `not captured` means capture was not running, `captured,
-then lost` means retention or the row cap has been through, and `captured, but
-unreadable` means the file is there but will not decrypt — usually a changed
-`OMNI_ENCRYPTION_KEY`.
+Artifacts live at `request_bodies/YYYY/MM/DD/<requestId>.json.enc` beside the
+database, AES-256-GCM under `OMNI_ENCRYPTION_KEY`; changing that key invalidates
+every artifact. Bounds: log-retention expiry plus a hard **100,000-row cap**, so
+capture is forensics, not an archive — size a volume against roughly 100 GB
+worst case, though most artifacts are kilobytes.
 
-There is no CLI command to delete a captured body. Retention, the row cap, and
-the orphan sweep are the gateway's; a second path that erases forensic evidence
-on request is a way to lose an incident record.
-
-**What is never captured.** Headers, at any layer — every provider authenticates
-through headers, so that is where the tokens are. That one is a guarantee: the
-capture layer is never handed a header list, so no provider, present or future,
-can opt its own in.
-
-**Masking is best-effort, and a body corpus is sensitive even after it.** Bodies
-are masked before they are written, replacing bearer tokens, `sk-`/`ak-`/`pk-`
-prefixed keys, the well-known vendor prefixes (`ghp_` and the rest of GitHub's,
-`github_pat_`, `AIza`, `GOCSPX-`, `xai-`), and any long opaque token with elided
-forms. Two things follow, and both matter before you turn capture on:
-
-- It costs fidelity. The length rule has no idea what it is looking at, so it
-  also elides base64 image data, content hashes, and minified source. That is
-  deliberate: a corpus that leaks a live credential is the worse failure.
-- It does not catch everything. The length rule is tuned to base64url, so a
-  standard-base64 secret or an AWS secret access key can slip through it on a
-  `+` or a `/`, and a credential shorter than forty-one characters or exactly
-  forty characters long — an Azure OpenAI key, for instance — is out of its reach
-  entirely. The prefix rules exist precisely because the length rule cannot be
-  the whole answer, and between them they are a reduction in exposure, not a
-  guarantee of none.
-
-Treat the artifact tree as you would treat the prompts themselves: it is
-encrypted at rest, it belongs on a volume you control, and it is not something to
-copy into a ticket.
-
-Nothing changes about stdout. Prompts and responses never reach the log, the
-journal, or the Console screen; capture is a separate encrypted store.
-
-**Where it goes.** `request_bodies/YYYY/MM/DD/<requestId>.json.enc` beside the
-database file, encrypted with AES-256-GCM under `OMNI_ENCRYPTION_KEY`, the same
-key as your provider credentials. Copies taken without the key yield nothing.
-Changing the key invalidates every artifact already written.
-
-**Bounds.** Two limits, because either alone fails:
-
-- Bodies expire on the same **log retention** window as request rows, swept
-  hourly, file and row deleted together.
-- A hard cap of **100,000 body rows**, oldest pruned first. The window is what
-  you reason about; the row cap is what actually bounds disk, because a week's
-  window over sustained traffic bounds nothing.
-
-Individual payloads are bounded structurally rather than by byte offset — strings
-past 64 KB, arrays to their last 24 items, nesting past 6 levels, objects to 80
-keys — so a stored artifact is always valid JSON. An artifact still over 512 KB
-after that has its bodies replaced by a marker recording why.
-
-**Sizing.** 512 KB is a *plaintext* cap and encryption emits hex, so one artifact
-can reach ~1 MB on disk: with the 100,000-row cap the corpus worst case is about
-**100 GB**, not 50. Most artifacts are a few kilobytes, but that is the number to
-size a volume against. The same cap applies per body held in memory while a
-request is in flight, one per side per attempt — so ~512 KB × (attempts + 1) per
-captured request. Multiply by your concurrency before enabling this on a small
-box.
+Masking is best-effort — bearer tokens, vendor-prefixed keys, long opaque
+tokens are elided before write — a reduction in exposure, not a guarantee, and
+it costs fidelity. Treat the tree as you would the prompts themselves: encrypted
+at rest, on a volume you control, never pasted into a ticket.
+[ARCHITECTURE.md](ARCHITECTURE.md#body-capture-forensics) documents the storage
+format, structural bounds, and masking rules.
 
 ## Snapshots and restore
 
@@ -621,12 +516,10 @@ captured-body tree out of step with the table: files the restored database has n
 row for are collected by the hourly sweep, and a row whose file is gone reads back
 as `captured, then lost`.
 
-**A snapshot does carry secrets.** Your provider credentials are in it, encrypted,
-along with your gateway key hashes. They are inert only because
-`OMNI_ENCRYPTION_KEY` is not in the file — it lives in the installation's `.env`.
-So treat a downloaded snapshot exactly as you treat the database itself: anyone
-holding both the file and the key holds your provider accounts. Downloads are
-never cached, and each one is recorded in the gateway's log.
+**A snapshot does carry secrets** — encrypted provider credentials and gateway
+key hashes — inert only because `OMNI_ENCRYPTION_KEY` is not in the file.
+Anyone holding both the file and the key holds your provider accounts; treat a
+downloaded snapshot as the database itself.
 
 **Retention** bounds the directory: at most `keepLatest` snapshots are kept, and
 nothing older than `maxAgeDays` — 5 and 30 by default. Both bounds have to pass,
@@ -642,23 +535,14 @@ It is the undo.
 
 **Restoring from the console** happens inside the running gateway. Client traffic
 on `/v1/*` is refused with a retryable 503 while the file is replaced; `/api/*`
-and `/health` keep answering, so you can watch the restore and hear how it ended.
-Restoring a database that carries a different console password signs every session
-out; restoring this installation's own snapshot does not. The screen also uploads
-a database file from elsewhere, up to 2 GiB, which is how you move an installation
-to another machine — bring `OMNI_ENCRYPTION_KEY` with it, or the credentials in it
-are unreadable. Either way the file is integrity-checked before anything is
-touched, and a copy of what was there is taken first.
-
-**A restore ends by rebuilding the hourly usage rollup, and that step blocks.**
-The rollup is what rate limits count their 5h and 1w windows from, and no file an
-operator hands over says whether its counters agree with its rows — so it is
-recomputed rather than trusted. `bun:sqlite` is synchronous, so the grouped scan
-holds the event loop: roughly 0.4 s per 500k request-log rows, 1.6 s per 2M, and
-about 6.5 s at 8M. `/api/*` and `/health` do not answer during it. It is the last
-thing a restore does, after the swap has already succeeded, and a failure is
-logged rather than raised — the database is live either way, and `omni doctor`
-reports a rollup that disagrees with its rows.
+and `/health` keep answering. The screen also uploads a database file from
+elsewhere, up to 2 GiB — bring `OMNI_ENCRYPTION_KEY` with it, or the credentials
+in it are unreadable. The file is integrity-checked before anything is touched,
+and a copy of what was there is taken first. A restore ends by rebuilding the
+usage rollup, which briefly blocks even `/api/*`: roughly 0.4 s per 500k
+request-log rows, 1.6 s at 2M, 6.5 s at 8M. A failure is logged rather than
+raised — the database is live either way, and `omni doctor` reports a rollup
+that disagrees with its rows.
 
 **`omni db restore <id>` refuses while a gateway is running** against that
 installation, and there is no override flag. A second process can open its own
@@ -743,12 +627,9 @@ Worth knowing before you deploy it:
   fonts, no third-party origins. A plugin may declare outbound origins of its
   own, and `omni plugin verify <id>` shows exactly which ones it asked for — as
   does its manifest, which is a plain file you can read before installing.
-- **Plugins run inside the gateway process, with its privileges.** The
-  capability context they are handed is a guardrail against mistakes, not a
-  sandbox against malice: a plugin shares the process holding your encryption
-  key and decrypted provider credentials, and can reach past the context if it
-  wants to. Install plugins you wrote or audited, and read a plugin's manifest —
-  it lists every capability and outbound origin it asked for.
+- **Plugins run inside the gateway process, with its privileges** — the
+  capability context is a guardrail, not a sandbox. Read the
+  [security note](#plugins) before installing one you did not write.
 
 ## Plugins
 
@@ -837,60 +718,21 @@ the plugin.
 
 ### Installing on a machine with no checkout
 
-A published plugin installs by name, and the host needs no checkout and no build
-toolchain:
+A published plugin installs by name — no checkout, no build toolchain:
 
 ```bash
 omni plugin install omnigateway-plugin-example
 omni plugin verify example && omni restart
 ```
 
-An `npm pack` tarball is rooted at `package/` rather than at the plugin's name,
-and that is fine: the manifest's `id` names the installed directory when the
-archive root does not.
+Building and shipping your own plugin — tarball layout, the manifest-at-root
+rule, why plaintext `http://` stays refused, Docker mounting — is covered in
+[docs/writing-a-plugin.md](docs/writing-a-plugin.md).
 
-For a plugin you build yourself and do not publish, ship the tarball and install
-from the path:
-
-```bash
-# wherever you build — a workstation, CI
-bun run build                                      # your plugin's own build
-tar -czf my-plugin.tgz -C dist my-plugin
-
-# on the host
-scp my-plugin.tgz gateway-host:/tmp/
-ssh gateway-host 'omni plugin install /tmp/my-plugin.tgz && omni plugin verify my-plugin && omni restart'
-```
-
-Whatever you pack, the manifest must sit at the **root** of the archive once one
-wrapping directory is stripped. A build that nests it — `dist/my-plugin/omni-plugin.json`
-inside a tarball made from the repository root — is refused with "has no
-omni-plugin.json at its root", and that is the most common way a plugin that
-builds fine turns out not to install.
-
-Plaintext `http://` is refused outright and always will be: what arrives over
-that fetch is code the gateway process will `import`, so anyone between you and
-the host would be choosing what the gateway runs. Silently upgrading to `https://`
-would be worse — it would install *something* from a URL you did not type.
-
-**In Docker**, the image carries the gateway only, so a plugin arrives on a
-volume rather than through the CLI. Mount it at `<root>/plugins/<id>` — the same
-layout `install` writes — and restart the container:
-
-```bash
-docker run --rm -p 9000:9000 \
-  -e OMNI_ENCRYPTION_KEY="$OMNI_ENCRYPTION_KEY" \
-  -v omnigateway-data:/data \
-  -v "$PWD/pokemon:/data/plugins/pokemon" \
-  omnigateway
-```
-
-**Do not mount it `:ro`** if the plugin declares the `files` capability. A
-plugin's cache lives at `<root>/plugins/<id>/data/`, inside its own directory, and
-the capability creates that directory on every call — so a read-only mount fails
-*reads* as well as writes, with an `EACCES` on `mkdir` rather than anything that
-names the mount. Keeping a plugin's code immutable while its cache stays
-writable is not expressible today; mount the directory read-write.
+**In Docker**, mount the plugin at `<root>/plugins/<id>` on a volume — the same
+layout `install` writes — and restart the container; read-write, not `:ro`,
+because a plugin declaring `files` writes its cache inside its own directory.
+See [docs/writing-a-plugin.md](docs/writing-a-plugin.md).
 
 Removing one keeps its data:
 
