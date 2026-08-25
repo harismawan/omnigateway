@@ -94,12 +94,15 @@ test("flattens tool definitions and maps tool choice", () => {
   expect(body.tool_choice).toEqual({ type: "function", name: "f" });
 });
 
-test("maps reasoning effort and drops the budget with a degradation", () => {
+test("records a lost budget instead of inventing an effort", () => {
   const { body, degradations } = toResponsesWire(
     { ...base, reasoning: { mode: "budget", budgetTokens: 8000 } },
     "gpt-5",
   );
-  expect(body.reasoning).toEqual({ effort: "medium", summary: "auto" });
+  // A budget is not expressible here, and mapping it onto an effort would
+  // tune thinking to a depth no client asked for. These models think by
+  // default, so nothing is sent and the loss is recorded.
+  expect(body.reasoning).toBeUndefined();
   expect(degradations).toContain("openai:reasoning-budget-dropped");
 });
 

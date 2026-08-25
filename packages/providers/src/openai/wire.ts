@@ -153,19 +153,23 @@ export function toResponsesWire(
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
   if (req.reasoning !== undefined && req.reasoning.mode !== "off") {
-    // This API tops out at `high`; the deeper Anthropic levels clamp onto it.
-    const effort =
-      req.reasoning.mode === "adaptive" ? (req.reasoning.effort ?? "medium") : "medium";
-    if (effort === "xhigh" || effort === "max") {
-      degradations.push("openai:reasoning-effort-clamped");
-    }
-    body.reasoning = {
-      effort: effort === "xhigh" || effort === "max" ? "high" : effort,
-      summary: "auto",
-    };
-    // This API takes a coarse effort level, not a token budget.
+    // This API takes a coarse effort level, not a token budget. A budget
+    // request is therefore recorded as lost rather than mapped onto an
+    // invented medium nobody chose — these models think by default, so
+    // sending nothing leaves them at their own depth instead of fabricating
+    // one.
     if (req.reasoning.mode === "budget") {
       degradations.push("openai:reasoning-budget-dropped");
+    } else {
+      // This API tops out at `high`; the deeper Anthropic levels clamp onto it.
+      const effort = req.reasoning.effort ?? "medium";
+      if (effort === "xhigh" || effort === "max") {
+        degradations.push("openai:reasoning-effort-clamped");
+      }
+      body.reasoning = {
+        effort: effort === "xhigh" || effort === "max" ? "high" : effort,
+        summary: "auto",
+      };
     }
   }
 
