@@ -1,6 +1,6 @@
 import { GatewayError, PROVIDER_CAPABILITIES, type ReasoningConfig } from "@omni/ir";
 import { httpError } from "../http.ts";
-import { decodeChat } from "../kimi/decode.ts";
+import { decodeKiloChat } from "../kilo/decode.ts";
 import { toChatWire } from "../kimi/wire.ts";
 import { decodeResponses } from "../openai/decode.ts";
 import { toResponsesWire } from "../openai/wire.ts";
@@ -110,9 +110,14 @@ export const customAdapter: ProviderAdapter = {
     }
 
     return {
+      // Kilo's chat decoder, not Kimi's: a custom server may reason in any of
+      // the spellings OpenRouter normalizes (`reasoning`, `reasoning_content`,
+      // `reasoning_details`), and those deltas must reach the client as
+      // unsigned thinking rather than vanish. Everything else the two decoders
+      // read is identical.
       events:
         protocol === "chat_completions"
-          ? decodeChat(parseSse(res.body))
+          ? decodeKiloChat(parseSse(res.body))
           : decodeResponses(parseSse(res.body)),
       degradations: [
         ...encoded.degradations.map((value) =>

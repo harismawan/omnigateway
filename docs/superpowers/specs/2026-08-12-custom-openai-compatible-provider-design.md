@@ -178,7 +178,10 @@ The adapter selects one codec from credential protocol metadata:
 
 Use a generic OpenAI Chat Completions encoder and SSE decoder. Reusable wire logic may be extracted
 from the current Kimi implementation, but the custom path must not send Kimi device headers,
-fingerprint data, or Kimi-specific authentication behavior.
+fingerprint data, or Kimi-specific authentication behavior. Upstream reasoning deltas — whichever
+of `reasoning`, `reasoning_content`, or `reasoning_details` the server emits — decode into unsigned
+canonical thinking events, mirroring what the Responses decoder reports for summaries; a signature
+is never claimed over a request this server did not sign.
 
 ### Responses
 

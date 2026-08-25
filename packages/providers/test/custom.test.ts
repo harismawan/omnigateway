@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ChatRequest } from "@omni/ir";
+import type { ChatRequest, StreamEvent } from "@omni/ir";
 import { customAdapter } from "../src/custom/index.ts";
 import type { HttpRequest } from "../src/index.ts";
 import { ADAPTERS } from "../src/registry.ts";
@@ -17,6 +17,46 @@ const response = () => ({
   body: new ReadableStream<Uint8Array>({ start: (controller) => controller.close() }),
   text: async () => "",
 });
+
+/** A 200 whose SSE body streams the given JSON payloads, then `[DONE]`. */
+function sseResponse(payloads: string[]) {
+  const text = payloads.map((payload) => `data: ${payload}\n\n`).join("") + "data: [DONE]\n\n";
+  const bytes = new TextEncoder().encode(text);
+  return {
+    status: 200,
+    headers: new Headers({ "content-type": "text/event-stream" }),
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    }),
+    text: async () => "",
+  };
+}
+
+/** Sends one chat_completions request through the adapter and folds its events. */
+async function decodedEvents(payloads: string[]): Promise<StreamEvent[]> {
+  const result = await customAdapter.send({
+    request,
+    model: "upstream-model",
+    credentials: {
+      accessToken: null,
+      apiKey: "test-provider-key",
+      providerData: {
+        endpointId: "local",
+        endpointLabel: "Local",
+        origin: "http://localhost:8000",
+        protocol: "chat_completions",
+      },
+    },
+    http: async () => sseResponse(payloads),
+    signal: new AbortController().signal,
+  });
+  const events: StreamEvent[] = [];
+  for await (const event of result.events) events.push(event);
+  return events;
+}
 
 async function sentFor(
   protocol: "chat_completions" | "responses",
@@ -185,6 +225,64 @@ test("custom responses uses endpoint origin without Codex behavior", async () =>
     ["Authorization", "Bearer test-provider-key"],
   ]);
   expect(sent.body).not.toContain("chatgpt");
+});
+
+// The chat_completions leg must report upstream reasoning back to the client,
+// mirroring what the responses leg already does with summaries. All three
+// spellings the OpenRouter family ships are read; the thinking is always
+// unsigned, because a signature minted over this server's request would
+// poison an Anthropic-shaped client that replays it.
+describe("custom chat decodes upstream reasoning as unsigned thinking", () => {
+  test("reasoning_content deltas become a thinking block ahead of the text", async () => {
+    const events = await decodedEvents([
+      '{"id":"chatcmpl-1","choices":[{"delta":{"role":"assistant"}}]}',
+      '{"choices":[{"delta":{"reasoning_content":"think "}}]}',
+      '{"choices":[{"delta":{"reasoning_content":"hard"}}]}',
+      '{"choices":[{"delta":{"content":"answer"}}]}',
+      '{"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    ]);
+
+    expect(events).toEqual([
+      { type: "start", id: "chatcmpl-1", model: "" },
+      { type: "blockStart", index: 0, block: { type: "thinking" } },
+      { type: "blockDelta", index: 0, delta: { type: "thinking", text: "think " } },
+      { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hard" } },
+      { type: "blockEnd", index: 0 },
+      { type: "blockStart", index: 1, block: { type: "text" } },
+      { type: "blockDelta", index: 1, delta: { type: "text", text: "answer" } },
+      { type: "blockEnd", index: 1 },
+      {
+        type: "end",
+        stopReason: "endTurn",
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    ]);
+    expect(
+      events.some((e) => e.type === "blockDelta" && e.delta.type === "thinkingSignature"),
+    ).toBe(false);
+  });
+
+  test("OpenRouter's normalized reasoning spelling decodes too", async () => {
+    const events = await decodedEvents([
+      '{"id":"c1","choices":[{"delta":{"reasoning":"why"}}]}',
+      '{"choices":[{"delta":{"content":"so"}}]}',
+    ]);
+
+    expect(events.filter((e) => e.type === "blockDelta")).toEqual([
+      { type: "blockDelta", index: 0, delta: { type: "thinking", text: "why" } },
+      { type: "blockDelta", index: 1, delta: { type: "text", text: "so" } },
+    ]);
+  });
+
+  test("unreadable reasoning_details entries are display-loss only, not errors", async () => {
+    const events = await decodedEvents([
+      '{"id":"c1","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.encrypted","data":"blob"}]}}]}',
+      '{"choices":[{"delta":{"content":"answer"}}]}',
+    ]);
+
+    expect(events.some((e) => e.type === "blockStart" && e.block.type === "thinking")).toBe(false);
+    expect(events.at(-1)?.type).toBe("end");
+  });
 });
 
 // Base paths exist so reverse-proxied servers (`https://host/api`) are
