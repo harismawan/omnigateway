@@ -188,6 +188,15 @@ custom path must not use OpenAI OAuth, the Codex endpoint, or OAuth-specific enc
 Protocol selection is explicit and stable per endpoint ID. A malformed or unsupported response
 fails visibly. The gateway does not retry the same request with the other protocol.
 
+The client's thinking level crosses verbatim on both protocols: an explicit adaptive effort lands
+on the wire unchanged (`reasoning_effort` for Chat Completions, `reasoning.effort` for Responses),
+including levels the big-two surfaces would clamp, because a custom server answers for its own
+model vocabulary. Nothing is fabricated: an absent config and an explicit opt-out stay off the
+body, and a token budget, which neither surface can express, is recorded as
+`custom:reasoning-budget-dropped` rather than mapped onto an invented effort. An adaptive request
+without an effort asks for `medium`. A `vendor.openai` field the client set explicitly keeps
+precedence over the derived one.
+
 Anthropic-native tool definitions and `anthropicNative` history blocks continue to exclude
 OpenAI-style providers, including `custom`, during routing. Custom target capabilities are
 operator-entered claims; the gateway does not validate request-shape support against the selected

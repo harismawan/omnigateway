@@ -1,4 +1,4 @@
-import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
+import { GatewayError, PROVIDER_CAPABILITIES, type ReasoningConfig } from "@omni/ir";
 import { httpError } from "../http.ts";
 import { decodeChat } from "../kimi/decode.ts";
 import { toChatWire } from "../kimi/wire.ts";
@@ -39,6 +39,36 @@ function endpointUrl(origin: string, basePath: string, protocol: Protocol): stri
   return base.endsWith("/v1") ? `${base}/${suffix}` : `${base}/v1/${suffix}`;
 }
 
+/**
+ * Forwards the client's thinking level onto the wire, verbatim.
+ *
+ * Both OpenAI-compatible surfaces carry a coarse effort string, and a custom
+ * server answers for its own model vocabulary, so the value crosses unclamped
+ * and unmapped — including levels the big two would refuse. Nothing is
+ * fabricated either: an absent config and an explicit `off` stay off the body,
+ * and a token budget, which neither surface can express, is recorded rather
+ * than mapped onto an invented effort.
+ *
+ * Runs after the codec so an explicitly set `vendor.openai` field keeps
+ * precedence: a client that supplied that raw field asked for it, not for a
+ * derived one.
+ */
+function applyReasoning(
+  body: Record<string, unknown>,
+  reasoning: ReasoningConfig | undefined,
+  protocol: Protocol,
+): string[] {
+  if (reasoning === undefined || reasoning.mode === "off") return [];
+  if (reasoning.mode === "budget") return ["custom:reasoning-budget-dropped"];
+  const effort = reasoning.effort ?? "medium";
+  if (protocol === "chat_completions") {
+    if (body.reasoning_effort === undefined) body.reasoning_effort = effort;
+  } else if (body.reasoning === undefined) {
+    body.reasoning = { effort, summary: "auto" };
+  }
+  return [];
+}
+
 export const customAdapter: ProviderAdapter = {
   id: "custom",
   capabilities: PROVIDER_CAPABILITIES.custom,
@@ -49,10 +79,18 @@ export const customAdapter: ProviderAdapter = {
       throw new GatewayError("AUTH", "custom credential has no API key", { provider: "custom" });
     }
     const { origin, basePath, protocol } = metadata(req.credentials.providerData);
+    // The shared codecs serve providers whose surfaces mangle or drop the
+    // thinking level, and would note that themselves; custom owns the field,
+    // so hand them a request without it and forward it directly below. The
+    // copy is shallow — `req.request` is shared across attempts and is never
+    // written to.
+    const request = { ...req.request };
+    delete request.reasoning;
     const encoded =
       protocol === "chat_completions"
-        ? toChatWire(req.request, req.model, "openai")
-        : toResponsesWire(req.request, req.model);
+        ? toChatWire(request, req.model, "openai")
+        : toResponsesWire(request, req.model);
+    const reasoningDegradations = applyReasoning(encoded.body, req.request.reasoning, protocol);
     const headers: HeaderPair[] = [
       ["Content-Type", "application/json"],
       ["Authorization", `Bearer ${apiKey}`],
@@ -76,9 +114,12 @@ export const customAdapter: ProviderAdapter = {
         protocol === "chat_completions"
           ? decodeChat(parseSse(res.body))
           : decodeResponses(parseSse(res.body)),
-      degradations: encoded.degradations.map((value) =>
-        value.replace(protocol === "chat_completions" ? /^kimi:/ : /^openai:/, "custom:"),
-      ),
+      degradations: [
+        ...encoded.degradations.map((value) =>
+          value.replace(protocol === "chat_completions" ? /^kimi:/ : /^openai:/, "custom:"),
+        ),
+        ...reasoningDegradations,
+      ],
     };
   },
 };

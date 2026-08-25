@@ -56,21 +56,124 @@ test("custom chat completions uses endpoint origin without Kimi headers", async 
   expect(JSON.parse(sent.body)).toMatchObject({ model: "upstream-model", stream: true });
 });
 
-test("custom chat degradations do not identify Kimi", async () => {
-  const result = await customAdapter.send({
-    request: { ...request, reasoning: { mode: "adaptive", effort: "high" } },
-    model: "upstream-model",
-    credentials: {
-      accessToken: null,
-      apiKey: "test-provider-key",
-      providerData: { origin: "https://example.com", protocol: "chat_completions" },
-    },
-    http: async () => response(),
-    signal: new AbortController().signal,
+// The thinking level crosses verbatim on both protocols: the effort string is
+// forwarded unclamped (a custom server answers for its own vocabulary), an
+// explicit opt-out stays off the body, and a token budget — inexpressible on
+// either surface — is recorded rather than mapped onto an invented effort.
+describe("custom adapter forwards the thinking level as asked", () => {
+  async function sendReasoning(
+    protocol: "chat_completions" | "responses",
+    reasoning?: ChatRequest["reasoning"],
+    vendorOpenai?: Record<string, unknown>,
+  ): Promise<{ body: Record<string, unknown>; degradations: string[] }> {
+    let sent: HttpRequest | null = null;
+    const result = await customAdapter.send({
+      request: {
+        ...request,
+        ...(reasoning !== undefined ? { reasoning } : {}),
+        ...(vendorOpenai !== undefined ? { vendor: { openai: vendorOpenai } } : {}),
+      },
+      model: "upstream-model",
+      credentials: {
+        accessToken: null,
+        apiKey: "test-provider-key",
+        providerData: {
+          endpointId: "local",
+          endpointLabel: "Local",
+          origin: "http://localhost:8000",
+          protocol,
+        },
+      },
+      http: async (value) => {
+        sent = value;
+        return response();
+      },
+      signal: new AbortController().signal,
+    });
+    if (sent === null) throw new Error("adapter did not send request");
+    return {
+      body: JSON.parse((sent as HttpRequest).body) as Record<string, unknown>,
+      degradations: result.degradations,
+    };
+  }
+
+  test("chat_completions forwards an explicit effort verbatim", async () => {
+    const { body, degradations } = await sendReasoning("chat_completions", {
+      mode: "adaptive",
+      effort: "high",
+    });
+    expect(body.reasoning_effort).toBe("high");
+    expect(degradations.some((value) => value.startsWith("kimi:"))).toBe(false);
+    expect(degradations.some((value) => value.includes("reasoning"))).toBe(false);
   });
 
-  expect(result.degradations).toContain("custom:reasoning-dropped");
-  expect(result.degradations.some((value) => value.startsWith("kimi:"))).toBe(false);
+  test("chat_completions does not clamp deep levels", async () => {
+    const { body, degradations } = await sendReasoning("chat_completions", {
+      mode: "adaptive",
+      effort: "xhigh",
+    });
+    expect(body.reasoning_effort).toBe("xhigh");
+    expect(degradations).toEqual([]);
+  });
+
+  test("responses forwards deep levels without clamping", async () => {
+    const { body, degradations } = await sendReasoning("responses", {
+      mode: "adaptive",
+      effort: "max",
+    });
+    expect(body.reasoning).toEqual({ effort: "max", summary: "auto" });
+    expect(degradations).toEqual([]);
+  });
+
+  test("an adaptive request without an effort still asks for medium", async () => {
+    for (const protocol of ["chat_completions", "responses"] as const) {
+      const { body } = await sendReasoning(protocol, { mode: "adaptive" });
+      expect(
+        protocol === "chat_completions"
+          ? body.reasoning_effort
+          : (body.reasoning as { effort: string }).effort,
+      ).toBe("medium");
+    }
+  });
+
+  test("an explicit opt-out sends no reasoning field on either protocol", async () => {
+    for (const protocol of ["chat_completions", "responses"] as const) {
+      const { body, degradations } = await sendReasoning(protocol, { mode: "off" });
+      expect(body.reasoning_effort).toBeUndefined();
+      expect(body.reasoning).toBeUndefined();
+      expect(degradations).toEqual([]);
+    }
+  });
+
+  test("no reasoning config at all sends no reasoning field", async () => {
+    for (const protocol of ["chat_completions", "responses"] as const) {
+      const { body } = await sendReasoning(protocol);
+      expect(body.reasoning_effort).toBeUndefined();
+      expect(body.reasoning).toBeUndefined();
+    }
+  });
+
+  test("a token budget is recorded, never mapped to an invented effort", async () => {
+    for (const protocol of ["chat_completions", "responses"] as const) {
+      const { body, degradations } = await sendReasoning(protocol, {
+        mode: "budget",
+        budgetTokens: 4096,
+      });
+      expect(body.reasoning_effort).toBeUndefined();
+      expect(body.reasoning).toBeUndefined();
+      expect(degradations).toContain("custom:reasoning-budget-dropped");
+    }
+  });
+
+  test("a raw vendor field keeps precedence over the derived one", async () => {
+    const { body, degradations } = await sendReasoning(
+      "chat_completions",
+      { mode: "adaptive", effort: "high" },
+      { reasoning_effort: "low" },
+    );
+    expect(body.reasoning_effort).toBe("low");
+    expect(degradations).toEqual([]);
+  });
 });
 
 test("custom responses uses endpoint origin without Codex behavior", async () => {
