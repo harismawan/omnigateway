@@ -185,8 +185,9 @@ is never claimed over a request this server did not sign.
 
 ### Responses
 
-Reuse the OpenAI Responses request encoder and stream decoder where wire behavior is compatible. The
-custom path must not use OpenAI OAuth, the Codex endpoint, or OAuth-specific encoding behavior.
+Own a trimmed fork of the OpenAI Responses request encoder and stream decoder, as the boundary rule
+requires — no adapter imports another provider's directory. The fork drops everything
+OpenAI-specific: no OAuth, no Codex endpoint, no OAuth-specific parameter behavior.
 
 Protocol selection is explicit and stable per endpoint ID. A malformed or unsupported response
 fails visibly. The gateway does not retry the same request with the other protocol.

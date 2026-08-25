@@ -117,8 +117,9 @@ Cache control has no expression on the OpenAI chat wire. A request carrying cach
 breakpoints routed to kilo records a degradation, exactly as kimi does today.
 
 Reasoning crosses the wire in both directions. The encoder forwards IR reasoning as OpenRouter's
-`reasoning` field — `{max_tokens}` for a budget, `{effort}` for adaptive, clamped at `high` with a
-`kilo:reasoning-effort-clamped` note. The decoder reads it back under the three spellings the
+`reasoning` field — `{max_tokens}` for a budget, `{effort}` for adaptive, forwarded unclamped:
+OpenRouter's published ladder runs `none` through `max`, and an unsupported value is the
+upstream's error to raise rather than one the gateway pre-clamps into a different depth. The decoder reads it back under the three spellings the
 OpenRouter family has used, in precedence order, first non-empty winning: `reasoning`,
 `reasoning_content`, then `reasoning_details[].text`/`.summary`. **The precedence is load-bearing,
 not tidiness**: OpenRouter sends `reasoning` and `reasoning_details` in the same delta describing

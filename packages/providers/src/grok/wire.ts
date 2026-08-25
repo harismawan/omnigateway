@@ -182,11 +182,15 @@ export function toGrokWire(
     // Forwarded unclamped: xAI clamps server-side — `xhigh` is treated as `high`
     // on models that lack it — so a second clamp here could only get it wrong as
     // the model line moves.
-    const effort =
-      req.reasoning.mode === "adaptive" ? (req.reasoning.effort ?? "medium") : "medium";
-    body.reasoning = { effort, summary: "concise" };
-    // This API takes a coarse effort level, not a token budget.
-    if (req.reasoning.mode === "budget") note("grok:reasoning-budget-dropped");
+    // A budget has no expression here. These models think by default, so
+    // sending nothing leaves them at their own depth instead of fabricating
+    // an effort nobody chose; the loss is recorded.
+    if (req.reasoning.mode === "budget") {
+      note("grok:reasoning-budget-dropped");
+    } else {
+      const effort = req.reasoning.effort ?? "medium";
+      body.reasoning = { effort, summary: "concise" };
+    }
   }
 
   // Last, so an operator can override anything above. Deliberately unfiltered:

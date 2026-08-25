@@ -18,9 +18,20 @@ const response = () => ({
   text: async () => "",
 });
 
-/** A 200 whose SSE body streams the given JSON payloads, then `[DONE]`. */
-function sseResponse(payloads: string[]) {
-  const text = payloads.map((payload) => `data: ${payload}\n\n`).join("") + "data: [DONE]\n\n";
+/**
+ * A 200 whose SSE body streams the given payloads, then `[DONE]`.
+ *
+ * A frame may name its SSE event — the Responses wire routes on the `event:`
+ * line, while Chat Completions streams typeless `data:` chunks.
+ */
+function sseResponse(payloads: (string | { event: string; payload: string })[]) {
+  const text = `${payloads
+    .map((frame) => {
+      const [event, payload] =
+        typeof frame === "string" ? [undefined, frame] : [frame.event, frame.payload];
+      return `${event === undefined ? "" : `event: ${event}\n`}data: ${payload}\n\n`;
+    })
+    .join("")}data: [DONE]\n\n`;
   const bytes = new TextEncoder().encode(text);
   return {
     status: 200,
@@ -35,8 +46,11 @@ function sseResponse(payloads: string[]) {
   };
 }
 
-/** Sends one chat_completions request through the adapter and folds its events. */
-async function decodedEvents(payloads: string[]): Promise<StreamEvent[]> {
+/** Sends one request through the adapter and folds its events. */
+async function decodedEvents(
+  payloads: (string | { event: string; payload: string })[],
+  protocol: "chat_completions" | "responses" = "chat_completions",
+): Promise<StreamEvent[]> {
   const result = await customAdapter.send({
     request,
     model: "upstream-model",
@@ -47,7 +61,7 @@ async function decodedEvents(payloads: string[]): Promise<StreamEvent[]> {
         endpointId: "local",
         endpointLabel: "Local",
         origin: "http://localhost:8000",
-        protocol: "chat_completions",
+        protocol,
       },
     },
     http: async () => sseResponse(payloads),
@@ -282,6 +296,55 @@ describe("custom chat decodes upstream reasoning as unsigned thinking", () => {
 
     expect(events.some((e) => e.type === "blockStart" && e.block.type === "thinking")).toBe(false);
     expect(events.at(-1)?.type).toBe("end");
+  });
+
+  // The responses fork is wired through the adapter too, not just the chat
+  // one: a summary delta must reach the client as thinking on this protocol.
+  test("responses reasoning summaries stream through as unsigned thinking", async () => {
+    const events = await decodedEvents(
+      [
+        { event: "response.created", payload: '{"response":{"id":"resp-1","model":"m"}}' },
+        {
+          event: "response.output_item.added",
+          payload: '{"output_index":0,"item":{"type":"reasoning"}}',
+        },
+        {
+          event: "response.reasoning_summary_text.delta",
+          payload: '{"output_index":0,"delta":"why"}',
+        },
+        { event: "response.output_item.done", payload: '{"output_index":0}' },
+        {
+          event: "response.output_item.added",
+          payload: '{"output_index":1,"item":{"type":"message"}}',
+        },
+        {
+          event: "response.content_part.added",
+          payload: '{"output_index":1,"part":{"type":"output_text"}}',
+        },
+        { event: "response.output_text.delta", payload: '{"output_index":1,"delta":"so"}' },
+        { event: "response.content_part.done", payload: '{"output_index":1}' },
+        {
+          event: "response.completed",
+          payload: '{"response":{"id":"resp-1","usage":{"input_tokens":3,"output_tokens":5}}}',
+        },
+      ],
+      "responses",
+    );
+
+    expect(events).toEqual([
+      { type: "start", id: "resp-1", model: "m" },
+      { type: "blockStart", index: 0, block: { type: "thinking" } },
+      { type: "blockDelta", index: 0, delta: { type: "thinking", text: "why" } },
+      { type: "blockEnd", index: 0 },
+      { type: "blockStart", index: 1, block: { type: "text" } },
+      { type: "blockDelta", index: 1, delta: { type: "text", text: "so" } },
+      { type: "blockEnd", index: 1 },
+      {
+        type: "end",
+        stopReason: "endTurn",
+        usage: { inputTokens: 3, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    ]);
   });
 });
 
