@@ -421,6 +421,7 @@ test("credentials add-key stores custom endpoint metadata from flags", async () 
     endpointId: "local-vllm",
     endpointLabel: "Local vLLM",
     origin: "http://localhost:8000",
+    basePath: "",
     protocol: "chat_completions",
   });
 });

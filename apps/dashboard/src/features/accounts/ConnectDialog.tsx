@@ -359,7 +359,12 @@ export function ConnectDialog({
                           }
                           setEndpointId(String(selected.providerData.endpointId));
                           setEndpointLabel(String(selected.providerData.endpointLabel));
-                          setOrigin(String(selected.providerData.origin));
+                          // Base path rejoins the origin so the field round-trips
+                          // exactly what the operator entered.
+                          setOrigin(
+                            String(selected.providerData.origin) +
+                              String(selected.providerData.basePath ?? ""),
+                          );
                           setProtocol(
                             selected.providerData.protocol === "responses"
                               ? "responses"
@@ -398,12 +403,12 @@ export function ConnectDialog({
                     />
                   )}
                 </Field>
-                <Field label="Server origin">
+                <Field label="Server URL">
                   {(props) => (
                     <Input
                       {...props}
                       value={origin}
-                      placeholder="https://server.example"
+                      placeholder="https://server.example/api"
                       onChange={(event) => setOrigin(event.target.value)}
                     />
                   )}

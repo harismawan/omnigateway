@@ -47,7 +47,15 @@ export async function getCredential(store: Store, id: string): Promise<Credentia
 export type CustomProviderData = {
   endpointId: string;
   endpointLabel: string;
+  /** URL origin alone; any base path lives beside it so this stays an origin. */
   origin: string;
+  /**
+   * Base path under which the server is reachable, e.g. `/api` for
+   * `https://example.com/api/v1/chat/completions`. Empty for a bare origin.
+   * Absent (not empty) on rows written before base paths were accepted, so
+   * readers must default it to "".
+   */
+  basePath: string;
   protocol: "chat_completions" | "responses";
 };
 
@@ -87,21 +95,29 @@ function customProviderData(input: ApiKeyCredentialInput): CustomProviderData {
     url.hostname.length === 0 ||
     url.username.length > 0 ||
     url.password.length > 0 ||
-    (url.pathname !== "" && url.pathname !== "/") ||
     url.search.length > 0 ||
     url.hash.length > 0
   ) {
     throw new GatewayError("BAD_REQUEST", "origin: must be an HTTP(S) server origin");
   }
 
-  return { endpointId, endpointLabel, origin: url.origin, protocol: input.protocol };
+  // A base path is allowed because reverse-proxied servers routinely live at a
+  // subpath (`https://example.com/api`). Trailing slashes collapse away — a
+  // bare `/` is no path at all. The WHATWG parser has already resolved dot
+  // segments and kept percent-escapes intact, so nothing else needs guarding.
+  const basePath = url.pathname.replace(/\/+$/, "");
+
+  return { endpointId, endpointLabel, origin: url.origin, basePath, protocol: input.protocol };
 }
 
 function sameCustomEndpoint(a: Record<string, unknown>, b: CustomProviderData): boolean {
+  // Legacy rows carry no basePath; absent means bare origin, same as "".
+  const basePath = typeof a.basePath === "string" ? a.basePath : "";
   return (
     a.endpointId === b.endpointId &&
     a.endpointLabel === b.endpointLabel &&
     a.origin === b.origin &&
+    basePath === b.basePath &&
     a.protocol === b.protocol
   );
 }

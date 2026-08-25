@@ -247,6 +247,17 @@ export const credentialsAddKey: Command = {
               credential.providerData.endpointId === endpointId.trim(),
           )
         : undefined;
+    // Reusing an endpoint resolves its metadata from an existing projection.
+    // The origin rejoins any stored base path so the resolved value is exactly
+    // what the operator first entered, not the origin alone.
+    const existingOrigin =
+      existingEndpoint === undefined
+        ? undefined
+        : `${String(existingEndpoint.providerData.origin)}${
+            typeof existingEndpoint.providerData.basePath === "string"
+              ? existingEndpoint.providerData.basePath
+              : ""
+          }`;
     const created = await createApiKeyCredential(store, {
       provider: providerId,
       apiKey: key,
@@ -254,7 +265,7 @@ export const credentialsAddKey: Command = {
       endpointId,
       endpointLabel:
         stringFlag(args.values, "endpoint-label") ?? existingEndpoint?.providerData.endpointLabel,
-      origin: stringFlag(args.values, "origin") ?? existingEndpoint?.providerData.origin,
+      origin: stringFlag(args.values, "origin") ?? existingOrigin,
       protocol: protocol ?? existingEndpoint?.providerData.protocol,
     });
 

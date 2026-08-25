@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
 import { customAdapter } from "../src/custom/index.ts";
 import type { HttpRequest } from "../src/index.ts";
@@ -18,7 +18,10 @@ const response = () => ({
   text: async () => "",
 });
 
-async function sentFor(protocol: "chat_completions" | "responses"): Promise<HttpRequest> {
+async function sentFor(
+  protocol: "chat_completions" | "responses",
+  extraData: Record<string, unknown> = {},
+): Promise<HttpRequest> {
   let sent: HttpRequest | null = null;
   await customAdapter.send({
     request,
@@ -31,6 +34,7 @@ async function sentFor(protocol: "chat_completions" | "responses"): Promise<Http
         endpointLabel: "Local",
         origin: "http://localhost:8000",
         protocol,
+        ...extraData,
       },
     },
     http: async (value) => {
@@ -78,6 +82,42 @@ test("custom responses uses endpoint origin without Codex behavior", async () =>
     ["Authorization", "Bearer test-provider-key"],
   ]);
   expect(sent.body).not.toContain("chatgpt");
+});
+
+// Base paths exist so reverse-proxied servers (`https://host/api`) are
+// expressible. A base ending in `/v1` already says where the API lives, and a
+// blind append would double it; bare-origin rows predate basePath entirely.
+describe("custom adapter joins stored base paths", () => {
+  const cases = [
+    {
+      name: "path sits between origin and /v1",
+      basePath: "/api",
+      url: "http://localhost:8000/api/v1/chat/completions",
+    },
+    {
+      name: "a /v1-ending path is not doubled",
+      basePath: "/v1",
+      url: "http://localhost:8000/v1/chat/completions",
+    },
+    {
+      name: "deep paths join verbatim",
+      basePath: "/llm/prod",
+      url: "http://localhost:8000/llm/prod/v1/chat/completions",
+    },
+    {
+      name: "responses swaps only the suffix",
+      basePath: "/api",
+      protocol: "responses" as const,
+      url: "http://localhost:8000/api/v1/responses",
+    },
+  ];
+
+  for (const c of cases) {
+    test(c.name, async () => {
+      const sent = await sentFor(c.protocol ?? "chat_completions", { basePath: c.basePath });
+      expect(sent.url).toBe(c.url);
+    });
+  }
 });
 
 test("registry includes custom provider", () => {

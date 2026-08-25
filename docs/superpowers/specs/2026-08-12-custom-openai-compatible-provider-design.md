@@ -17,7 +17,7 @@ server.
 Included:
 
 - API-key credentials for custom OpenAI-compatible servers
-- HTTP and HTTPS server origins
+- HTTP and HTTPS server URLs, optionally carrying a base path
 - Per-endpoint selection of Chat Completions or Responses protocol
 - Dashboard and CLI credential creation
 - Custom endpoint selection in virtual-model targets
@@ -47,6 +47,7 @@ interface CustomProviderData {
   endpointId: string;
   endpointLabel: string;
   origin: string;
+  basePath: string; // "" for a bare origin
   protocol: "chat_completions" | "responses";
 }
 ```
@@ -55,7 +56,7 @@ The API key remains in the existing encrypted credential secret field. Credentia
 include endpoint metadata, but never include the API key.
 
 Multiple custom credentials may share an endpoint ID. All credentials sharing an endpoint ID must
-have identical normalized endpoint label, origin, and protocol. Credential creation rejects a
+have identical normalized endpoint label, origin, base path, and protocol. Credential creation rejects a
 conflict rather than allowing configuration drift.
 
 Custom targets add a required endpoint ID:
@@ -73,30 +74,37 @@ Built-in Anthropic, OpenAI, and Kimi targets do not gain endpoint binding fields
 
 ## Origin Validation and Request URLs
 
-Operators provide a server origin, not an API prefix or full inference endpoint. Accepted values:
+Operators provide a server URL — an origin, optionally carrying a base path. The base path exists so
+reverse-proxied servers routinely served at a subpath (`https://example.com/api`) are expressible; it
+is still not an API prefix or full inference endpoint. Accepted values:
 
-- `http://host[:port]`
-- `https://host[:port]`
+- `http://host[:port][/base-path]`
+- `https://host[:port][/base-path]`
 
 Validation parses the value as a URL and requires:
 
 - scheme is `http:` or `https:`
 - hostname is present
 - username and password are absent
-- path is empty or `/`
 - query and fragment are absent
 
-Normalization serializes the URL origin and removes any trailing slash. HTTP remains supported for
-localhost, LAN, and self-hosted inference servers. This setting can send prompts and API keys over
-plaintext transport, so dashboard and CLI must visibly distinguish HTTP from HTTPS without blocking
-it.
+Normalization splits the value into the serialized URL origin and a base path with trailing slashes
+removed (`/` collapses to empty). The WHATWG parser has already resolved dot segments, so no further
+path rewriting happens; paths stay case-sensitive as given. HTTP remains supported for localhost,
+LAN, and self-hosted inference servers. This setting can send prompts and API keys over plaintext
+transport, so dashboard and CLI must visibly distinguish HTTP from HTTPS without blocking it.
 
-The selected protocol determines the fixed request URL:
+Rows written before base paths were accepted carry no `basePath` key; readers default it to empty.
 
-- Chat Completions: `${origin}/v1/chat/completions`
-- Responses: `${origin}/v1/responses`
+The selected protocol determines the request URL. The adapter joins the stored base onto `/v1/<suffix>`
+unless the stored base already ends in `/v1` (the OpenAI-SDK habit), which would otherwise double:
 
-The gateway does not preserve user-supplied URL paths and does not probe alternate paths.
+- Chat Completions: `<base>/chat/completions`, where `<base>` is `${origin}${basePath}` plus `/v1`
+  unless already `/v1`-suffixed
+- Responses: same join with `/responses`
+
+A bare-origin row therefore targets `${origin}/v1/chat/completions` exactly as before this rule.
+The gateway never probes alternate paths beyond this single deterministic join.
 
 ## Control and Store Boundaries
 
@@ -191,7 +199,7 @@ The account connection dialog gains an **OpenAI Compatible** path with fields fo
 
 - endpoint ID
 - endpoint label
-- server origin
+- server URL (origin with optional base path)
 - protocol: Chat Completions or Responses
 - API key
 
@@ -247,7 +255,7 @@ Expected client errors include:
 - unsupported protocol
 - malformed origin
 - non-HTTP origin
-- origin containing credentials, path, query, or fragment
+- origin containing credentials, query, or fragment
 - endpoint ID conflict with existing normalized metadata
 - custom target missing endpoint ID
 - custom target referencing an endpoint ID not represented by current custom credentials at editing
@@ -283,7 +291,8 @@ unknown, not unlimited, consistent with existing runtime rules.
 
 - Create custom credentials with normalized endpoint metadata.
 - Reject blank secrets and malformed endpoint fields.
-- Accept HTTP and HTTPS origins; reject other schemes and forbidden URL components.
+- Accept HTTP and HTTPS origins with and without a base path; reject other schemes and forbidden URL
+  components.
 - Reject duplicate endpoint IDs with conflicting label, origin, or protocol.
 - Permit multiple credentials with identical endpoint metadata.
 - Encrypt and recover API keys through purpose-specific secret loading.

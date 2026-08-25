@@ -241,7 +241,7 @@ describe("AccountsBoard", () => {
     expect(endpoint.value).toBe("");
     expect((screen.getByLabelText("Endpoint ID") as HTMLInputElement).value).toBe("");
     expect((screen.getByLabelText("Endpoint label") as HTMLInputElement).value).toBe("");
-    expect((screen.getByLabelText("Server origin") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Server URL") as HTMLInputElement).value).toBe("");
   });
 
   test("names the upstream path each protocol calls", async () => {
@@ -274,7 +274,9 @@ describe("AccountsBoard", () => {
     await user.selectOptions(screen.getByLabelText("Provider"), "custom");
     await user.type(screen.getByLabelText("Endpoint ID"), "local-vllm");
     await user.type(screen.getByLabelText("Endpoint label"), "Local vLLM");
-    await user.type(screen.getByLabelText("Server origin"), "http://localhost:8000");
+    // A base path must survive the form verbatim; servers behind a reverse
+    // proxy live at a subpath.
+    await user.type(screen.getByLabelText("Server URL"), "http://localhost:8000/api");
     await user.selectOptions(screen.getByLabelText("Protocol"), "chat_completions");
     await user.type(screen.getByLabelText("API key"), "test-provider-key");
 
@@ -285,6 +287,7 @@ describe("AccountsBoard", () => {
         (entry) => entry.url === "/api/credentials" && entry.init?.method === "POST",
       );
       expect(call?.init?.body as string).toContain('"endpointId":"local-vllm"');
+      expect(call?.init?.body as string).toContain('"origin":"http://localhost:8000/api"');
     });
   });
 

@@ -135,8 +135,28 @@ test("createApiKeyCredential normalizes custom endpoint metadata", async () => {
       endpointId: "local-vllm",
       endpointLabel: "Local vLLM",
       origin: "http://localhost:8000",
+      basePath: "",
       protocol: "chat_completions",
     },
+  });
+});
+
+test("createApiKeyCredential normalizes a custom base path", async () => {
+  const store = await memoryStore();
+
+  const created = await createApiKeyCredential(store, {
+    provider: "custom",
+    apiKey: "test-provider-key",
+    endpointId: "proxied-vllm",
+    endpointLabel: "Proxied vLLM",
+    // Reverse-proxied servers live at a subpath; trailing slashes collapse.
+    origin: "https://example.com/api/",
+    protocol: "chat_completions",
+  });
+
+  expect(created.providerData).toMatchObject({
+    origin: "https://example.com",
+    basePath: "/api",
   });
 });
 
@@ -153,7 +173,6 @@ test("createApiKeyCredential rejects forbidden origins and endpoint conflicts", 
   for (const origin of [
     "ftp://localhost",
     "https://user:pass@example.com",
-    "https://example.com/v1",
     "https://example.com?x=1",
     "https://example.com#x",
   ]) {
@@ -168,6 +187,15 @@ test("createApiKeyCredential rejects forbidden origins and endpoint conflicts", 
       ...base,
       apiKey: "second-test-key",
       origin: "https://other.example.com",
+    }),
+  ).rejects.toMatchObject({ code: "CONFLICT" });
+
+  // A differing base path under the same endpoint id is configuration drift too.
+  await expect(
+    createApiKeyCredential(store, {
+      ...base,
+      apiKey: "second-test-key",
+      origin: "https://example.com/api",
     }),
   ).rejects.toMatchObject({ code: "CONFLICT" });
 });
