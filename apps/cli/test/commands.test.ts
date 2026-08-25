@@ -459,6 +459,48 @@ test("credentials add-key reuses metadata for an existing custom endpoint", asyn
   expect(listed.credentials[1]?.providerData).toEqual(listed.credentials[0]?.providerData);
 });
 
+test("credentials add-key rejoins base paths when reusing metadata", async () => {
+  const root = await installation();
+  const prompt = { isTty: false, secret: async () => "test-key", confirm: async () => true };
+  await cli(
+    [
+      "credentials",
+      "add-key",
+      "custom",
+      "--endpoint-id",
+      "proxied-vllm",
+      "--endpoint-label",
+      "Proxied vLLM",
+      "--origin",
+      "http://localhost:8000/api",
+      "--protocol",
+      "chat-completions",
+    ],
+    { root, prompt },
+  );
+
+  // Reuse must resolve origin together with its stored base path, not the
+  // origin alone, or the second key silently targets a different server.
+  const result = await cli(["credentials", "add-key", "custom", "--endpoint-id", "proxied-vllm"], {
+    root,
+    prompt,
+  });
+  expect(result.code).toBe(0);
+
+  const listed = JSON.parse((await cli(["credentials", "list", "--json"], { root })).out) as {
+    credentials: Array<{ providerData: Record<string, unknown> }>;
+  };
+  const rows = listed.credentials.filter(
+    (c) => String(c.providerData.endpointId) === "proxied-vllm",
+  );
+  expect(rows).toHaveLength(2);
+  expect(rows[0]?.providerData).toEqual(rows[1]?.providerData);
+  expect(rows[0]?.providerData).toMatchObject({
+    origin: "http://localhost:8000",
+    basePath: "/api",
+  });
+});
+
 test("credentials add-key names custom among the providers connect does not", async () => {
   const root = await installation();
 

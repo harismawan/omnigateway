@@ -208,6 +208,45 @@ describe("AccountsBoard", () => {
 
     expect(endpoint.value).toBe("local-vllm");
     expect(endpoint.selectedOptions[0]?.textContent).toBe("Local vLLM");
+    // Legacy rows carry no basePath, so the origin alone prefills.
+    expect((screen.getByLabelText("Server URL") as HTMLInputElement).value).toBe(
+      "http://localhost:8000",
+    );
+  });
+
+  test("prefills the server URL including the stored base path", async () => {
+    const user = userEvent.setup();
+    stubAccounts({
+      "GET /api/credentials": () => ({
+        credentials: [
+          credential({
+            id: "custom-1",
+            provider: "custom",
+            providerData: {
+              endpointId: "proxied-vllm",
+              endpointLabel: "Proxied vLLM",
+              origin: "http://localhost:8000",
+              basePath: "/api",
+              protocol: "chat_completions",
+            },
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(
+      (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
+    );
+    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+    const endpoint = screen.getByLabelText("Existing endpoint") as HTMLSelectElement;
+    await user.selectOptions(endpoint, "proxied-vllm");
+
+    // The prefill rejoins the base path so resubmitting addresses the same
+    // server instead of silently dropping onto the bare origin.
+    expect((screen.getByLabelText("Server URL") as HTMLInputElement).value).toBe(
+      "http://localhost:8000/api",
+    );
   });
 
   test("returns to a blank endpoint form after reselecting create new endpoint", async () => {

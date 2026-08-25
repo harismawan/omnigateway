@@ -216,6 +216,50 @@ test("createApiKeyCredential permits matching metadata for multiple keys", async
   expect(await store.credentials.list()).toHaveLength(2);
 });
 
+test("createApiKeyCredential treats a legacy endpoint row as a bare origin", async () => {
+  const store = await memoryStore();
+
+  // Rows written before base paths existed carry no basePath key at all.
+  await seedCredential(store, {
+    id: "legacy-1",
+    provider: "custom",
+    label: "Legacy vLLM",
+    authType: "apiKey",
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "first-test-key",
+    providerData: {
+      endpointId: "local-vllm",
+      endpointLabel: "Local vLLM",
+      origin: "https://example.com",
+      protocol: "chat_completions",
+    },
+  });
+
+  // Re-entering the bare origin is the same endpoint; another key may join it.
+  const same = await createApiKeyCredential(store, {
+    provider: "custom",
+    apiKey: "second-test-key",
+    endpointId: "local-vllm",
+    endpointLabel: "Local vLLM",
+    origin: "https://example.com",
+    protocol: "chat_completions",
+  });
+  expect(same.providerData).toMatchObject({ origin: "https://example.com", basePath: "" });
+
+  // A base path under that endpoint ID is configuration drift.
+  await expect(
+    createApiKeyCredential(store, {
+      provider: "custom",
+      apiKey: "third-test-key",
+      endpointId: "local-vllm",
+      endpointLabel: "Local vLLM",
+      origin: "https://example.com/api",
+      protocol: "chat_completions",
+    }),
+  ).rejects.toMatchObject({ code: "CONFLICT" });
+});
+
 test("refreshCredential refreshes OAuth metadata and returns current expiry", async () => {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", expiresAt: NOW - 1 });
