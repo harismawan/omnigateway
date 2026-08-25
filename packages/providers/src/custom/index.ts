@@ -1,11 +1,9 @@
 import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
 import { httpError } from "../http.ts";
-import { decodeChat } from "../kimi/decode.ts";
-import { toChatWire } from "../kimi/wire.ts";
-import { decodeResponses } from "../openai/decode.ts";
-import { toResponsesWire } from "../openai/wire.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
+import { decodeCustomChat, decodeCustomResponses } from "./decode.ts";
+import { toCustomChatWire, toCustomResponsesWire } from "./wire.ts";
 
 type Protocol = "chat_completions" | "responses";
 
@@ -51,8 +49,8 @@ export const customAdapter: ProviderAdapter = {
     const { origin, basePath, protocol } = metadata(req.credentials.providerData);
     const encoded =
       protocol === "chat_completions"
-        ? toChatWire(req.request, req.model, "openai")
-        : toResponsesWire(req.request, req.model);
+        ? toCustomChatWire(req.request, req.model)
+        : toCustomResponsesWire(req.request, req.model);
     const headers: HeaderPair[] = [
       ["Content-Type", "application/json"],
       ["Authorization", `Bearer ${apiKey}`],
@@ -74,11 +72,9 @@ export const customAdapter: ProviderAdapter = {
     return {
       events:
         protocol === "chat_completions"
-          ? decodeChat(parseSse(res.body))
-          : decodeResponses(parseSse(res.body)),
-      degradations: encoded.degradations.map((value) =>
-        value.replace(protocol === "chat_completions" ? /^kimi:/ : /^openai:/, "custom:"),
-      ),
+          ? decodeCustomChat(parseSse(res.body))
+          : decodeCustomResponses(parseSse(res.body)),
+      degradations: encoded.degradations,
     };
   },
 };

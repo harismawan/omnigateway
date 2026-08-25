@@ -65,7 +65,11 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
 1. `packages/ir` stay provider-independent + side-effect-free. Inject clocks + logger sinks; never
    import `process`, `console`, or transport.
 2. Provider wire formats, headers, signing, stream decoding, model catalogs stay in
-   `packages/providers`.
+   `packages/providers`. Within it, an adapter never import from another provider's directory —
+   shared helpers live at the package root (`http.ts`, `sse.ts`, `types.ts`), and codecs a provider
+   needs are forked into its own directory even when near-identical. This is what lets each
+   provider become a standalone plugin later without dragging the others along; `custom/` is the
+   worked example (own chat + responses codecs, forked from kimi/kilo/openai).
 3. `packages/router` stay pure: no network, database, token refresh, timers.
 4. Dispatch own side effects, retries, refresh, deadlines, failover, stream commit semantics.
 5. Gateway routes authenticate, parse, apply key policy, call dispatch or `@omni/control`, render

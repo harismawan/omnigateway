@@ -6,7 +6,7 @@ import type {
   ReasoningEffort,
   ToolChoice,
 } from "@omni/ir";
-import { GatewayError, validateRequest } from "@omni/ir";
+import { GatewayError, REASONING_EFFORTS, validateRequest } from "@omni/ir";
 import { ANTHROPIC_NATIVE_BLOCK_TYPES } from "@omni/providers";
 import { z } from "zod";
 import { mcpServerNames, parseTools } from "./anthropicTools.ts";
@@ -456,7 +456,12 @@ function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): 
   return c.type === "tool" ? { type: "tool", name: c.name } : { type: c.type };
 }
 
-const EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+// Anthropic's field *filters* rather than rejects: an unknown effort is read
+// as absent while `output_config` itself still rides the vendor bag to the
+// one provider whose field it is. The OpenAI surface rejects instead — its
+// clients have no vendor passthrough to fall back on. Both draw from the
+// same ladder; only the unknown-value policy differs.
+const EFFORTS = REASONING_EFFORTS;
 
 /** Reads `output_config.effort` without consuming the field. */
 function readEffort(body: unknown): ReasoningEffort | undefined {

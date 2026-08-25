@@ -122,12 +122,14 @@ test("forwards max effort unclamped", () => {
   expect(degradations).toEqual([]);
 });
 
-test("drops a token budget this API cannot express", () => {
+test("records a lost budget instead of inventing an effort", () => {
   const { body, degradations } = toGrokWire(
     { ...base, reasoning: { mode: "budget", budgetTokens: 8000 } },
     "grok-4.6",
   );
-  expect(body.reasoning).toEqual({ effort: "medium", summary: "concise" });
+  // These models think by default; mapping a budget onto an effort would
+  // tune thinking to a depth no client asked for. Recorded, not mapped.
+  expect(body.reasoning).toBeUndefined();
   expect(degradations).toContain("grok:reasoning-budget-dropped");
 });
 

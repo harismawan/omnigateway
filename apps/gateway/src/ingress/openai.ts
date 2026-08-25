@@ -1,5 +1,5 @@
 import type { CacheControl, ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
-import { GatewayError, validateRequest } from "@omni/ir";
+import { GatewayError, REASONING_EFFORTS, validateRequest } from "@omni/ir";
 import { z } from "zod";
 import { normalizeClientModel } from "./model.ts";
 import {
@@ -132,7 +132,11 @@ const schema = z.object({
       z.object({ type: z.literal("function"), function: z.object({ name: z.string() }) }),
     ])
     .optional(),
-  reasoning_effort: z.enum(["low", "medium", "high"]).optional(),
+  // The full IR ladder — `none` and `minimal` included, matching what
+  // OpenAI's own models now publish. This surface feeds every provider, so a
+  // value one upstream rejects surfaces as that upstream's error rather than
+  // being refused here.
+  reasoning_effort: z.enum(REASONING_EFFORTS).optional(),
 });
 
 const KNOWN = [

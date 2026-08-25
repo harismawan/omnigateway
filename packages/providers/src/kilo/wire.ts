@@ -181,11 +181,11 @@ export function toKiloWire(
     if (req.reasoning.mode === "budget") {
       body.reasoning = { max_tokens: req.reasoning.budgetTokens };
     } else {
-      // OpenRouter's field tops out at `high`; the deeper Anthropic levels
-      // clamp onto it rather than being forwarded as a value it rejects.
-      const effort = req.reasoning.effort ?? "medium";
-      if (effort === "xhigh" || effort === "max") note("kilo:reasoning-effort-clamped");
-      body.reasoning = { effort: effort === "xhigh" || effort === "max" ? "high" : effort };
+      // OpenRouter's published ladder runs `none` through `max` — the same
+      // union OpenAI now takes. Model support varies, and an unsupported
+      // value is the upstream's error to raise, not ours to pre-clamp into a
+      // different depth.
+      body.reasoning = { effort: req.reasoning.effort ?? "medium" };
     }
   }
 

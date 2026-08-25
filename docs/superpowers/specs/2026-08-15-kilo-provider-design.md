@@ -108,17 +108,19 @@ machine fingerprint, so there is no synthetic device identity to mint or freeze.
 `wire.ts` and `decode.ts` are **forked from `kimi/`, not imported from it**. Both providers speak
 OpenAI chat completions today and the two files will start out nearly identical, which is precisely
 the situation `CLAUDE.md` rule 4 warns about: vendors look alike on paper and diverge in practice,
-and a shared encoder collects a branch per quirk. `custom/` is the standing counterexample — it
-imports `../kimi/` and `../openai/` and pays for it with a regex that rewrites degradation prefixes
-afterwards. Shared infrastructure stays shared: `usageFromPromptTotal`, `parseSse`, `httpError`,
+and a shared encoder collects a branch per quirk. `custom/` began as the counterexample — it
+imported `../kimi/` and `../openai/` and paid for it with a regex rewriting degradation prefixes —
+and has since been forked into its own codecs, making it the worked example of this rule. Shared
+infrastructure stays shared: `usageFromPromptTotal`, `parseSse`, `httpError`,
 `orderHeaders`, `mergeHeaders`, `orderFields`.
 
 Cache control has no expression on the OpenAI chat wire. A request carrying cache-control
 breakpoints routed to kilo records a degradation, exactly as kimi does today.
 
 Reasoning crosses the wire in both directions. The encoder forwards IR reasoning as OpenRouter's
-`reasoning` field — `{max_tokens}` for a budget, `{effort}` for adaptive, clamped at `high` with a
-`kilo:reasoning-effort-clamped` note. The decoder reads it back under the three spellings the
+`reasoning` field — `{max_tokens}` for a budget, `{effort}` for adaptive, forwarded unclamped:
+OpenRouter's published ladder runs `none` through `max`, and an unsupported value is the
+upstream's error to raise rather than one the gateway pre-clamps into a different depth. The decoder reads it back under the three spellings the
 OpenRouter family has used, in precedence order, first non-empty winning: `reasoning`,
 `reasoning_content`, then `reasoning_details[].text`/`.summary`. **The precedence is load-bearing,
 not tidiness**: OpenRouter sends `reasoning` and `reasoning_details` in the same delta describing

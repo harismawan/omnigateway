@@ -178,15 +178,28 @@ The adapter selects one codec from credential protocol metadata:
 
 Use a generic OpenAI Chat Completions encoder and SSE decoder. Reusable wire logic may be extracted
 from the current Kimi implementation, but the custom path must not send Kimi device headers,
-fingerprint data, or Kimi-specific authentication behavior.
+fingerprint data, or Kimi-specific authentication behavior. Upstream reasoning deltas — whichever
+of `reasoning`, `reasoning_content`, or `reasoning_details` the server emits — decode into unsigned
+canonical thinking events, mirroring what the Responses decoder reports for summaries; a signature
+is never claimed over a request this server did not sign.
 
 ### Responses
 
-Reuse the OpenAI Responses request encoder and stream decoder where wire behavior is compatible. The
-custom path must not use OpenAI OAuth, the Codex endpoint, or OAuth-specific encoding behavior.
+Own a trimmed fork of the OpenAI Responses request encoder and stream decoder, as the boundary rule
+requires — no adapter imports another provider's directory. The fork drops everything
+OpenAI-specific: no OAuth, no Codex endpoint, no OAuth-specific parameter behavior.
 
 Protocol selection is explicit and stable per endpoint ID. A malformed or unsupported response
 fails visibly. The gateway does not retry the same request with the other protocol.
+
+The client's thinking level crosses verbatim on both protocols: an explicit adaptive effort lands
+on the wire unchanged (`reasoning_effort` for Chat Completions, `reasoning.effort` for Responses),
+including levels the big-two surfaces would clamp, because a custom server answers for its own
+model vocabulary. Nothing is fabricated: an absent config and an explicit opt-out stay off the
+body, and a token budget, which neither surface can express, is recorded as
+`custom:reasoning-budget-dropped` rather than mapped onto an invented effort. An adaptive request
+without an effort asks for `medium`. A `vendor.openai` field the client set explicitly keeps
+precedence over the derived one.
 
 Anthropic-native tool definitions and `anthropicNative` history blocks continue to exclude
 OpenAI-style providers, including `custom`, during routing. Custom target capabilities are

@@ -414,8 +414,17 @@ test("records no cache degradation when the caller placed no breakpoint", () => 
 });
 
 test("degradations name kilo rather than the provider this encoder was forked from", () => {
+  // A thinking block is something this wire genuinely cannot replay, so the
+  // fixture records a real loss; effort levels now cross verbatim and record
+  // nothing at all.
   const { degradations } = toKiloWire(
-    { ...base, reasoning: { mode: "adaptive", effort: "max" } },
+    {
+      ...base,
+      messages: [
+        ...base.messages,
+        { role: "assistant", content: [{ type: "thinking", text: "prior turn" }] },
+      ],
+    },
     "anthropic/claude-sonnet-5",
   );
 
@@ -566,15 +575,15 @@ test("defaults an adaptive request with no effort to medium", () => {
   expect(body.reasoning).toEqual({ effort: "medium" });
 });
 
-test("clamps the efforts OpenRouter's field cannot express, and says so", () => {
-  for (const effort of ["xhigh", "max"] as const) {
+test("forwards the full official effort ladder unclamped", () => {
+  for (const effort of ["none", "minimal", "xhigh", "max"] as const) {
     const { body, degradations } = toKiloWire(
       { ...base, reasoning: { mode: "adaptive", effort } },
       "anthropic/claude-sonnet-5",
     );
 
-    expect(body.reasoning).toEqual({ effort: "high" });
-    expect(degradations).toContain("kilo:reasoning-effort-clamped");
+    expect(body.reasoning).toEqual({ effort });
+    expect(degradations).toEqual([]);
   }
 });
 
