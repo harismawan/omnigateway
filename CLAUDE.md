@@ -181,6 +181,10 @@ Preserve these translation invariants:
 - Keep mid-conversation system messages in place; never fold into request-level `system`.
 - Forward `thinking` forms exactly. Never derive budgets from effort. Drop unsigned thinking before
   Anthropic replay; preserve + accumulate Anthropic signatures.
+- On the way back out, the OpenAI surface renders canonical thinking as `reasoning_content`
+  (stream deltas and non-streaming message field — the DeepSeek/OpenRouter spelling); the
+  Anthropic surface keeps its full dialect, with unsigned blocks suppressed from stream and
+  buffered content alike.
 - Carry `anthropic-beta` as both header and body passthrough. Never synthesize missing beta.
 - `ToolDef` is union. `CustomToolDef` stay portable; `AnthropicToolDef` carry exact versioned `type`
   never normalized or upgraded. Versions in `packages/providers/src/anthropic/tools.ts`; unknown

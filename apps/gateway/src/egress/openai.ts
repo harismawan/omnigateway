@@ -96,6 +96,21 @@ export async function* openaiStream(
               }),
             );
           }
+        } else if (event.block.type === "thinking") {
+          // Reasoning streams ahead of content as `reasoning_content` deltas —
+          // the spelling DeepSeek and OpenRouter clients already render. The
+          // role delta deliberately omits `content`: no answer has started.
+          // (The text path sends `content: ""`; either is schema-valid.)
+          if (!roleSent) {
+            roleSent = true;
+            yield emit(
+              chunk(requestId, created, model, {
+                index: 0,
+                delta: { role: "assistant" },
+                finish_reason: null,
+              }),
+            );
+          }
         } else if (event.block.type === "toolUse") {
           const index = toolIndex.size;
           toolIndex.set(event.index, index);
@@ -119,7 +134,6 @@ export async function* openaiStream(
             }),
           );
         }
-        // Thinking blocks have no representation on this surface.
         break;
       }
 
@@ -130,6 +144,14 @@ export async function* openaiStream(
             chunk(requestId, created, model, {
               index: 0,
               delta: { content: d.text },
+              finish_reason: null,
+            }),
+          );
+        } else if (d.type === "thinking") {
+          yield emit(
+            chunk(requestId, created, model, {
+              index: 0,
+              delta: { reasoning_content: d.text },
               finish_reason: null,
             }),
           );
@@ -179,6 +201,11 @@ export function openaiResponse(
   created: number,
 ): unknown {
   const text = collected.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+  // Reasoning rides beside the answer under the DeepSeek/OpenRouter spelling
+  // clients of this surface already render.
+  const reasoning = collected.content
+    .flatMap((b) => (b.type === "thinking" ? [b.text] : []))
+    .join("");
   const toolCalls = collected.content.flatMap((b) =>
     b.type === "toolUse"
       ? [
@@ -202,6 +229,7 @@ export function openaiResponse(
         message: {
           role: "assistant",
           content: toolCalls.length > 0 && text.length === 0 ? null : text,
+          ...(reasoning.length > 0 ? { reasoning_content: reasoning } : {}),
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         },
         finish_reason: FINISH[collected.stopReason],

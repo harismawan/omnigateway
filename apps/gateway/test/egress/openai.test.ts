@@ -75,6 +75,90 @@ test("streams tool calls with index and argument deltas", async () => {
   });
 });
 
+test("streams upstream reasoning as reasoning_content chunks ahead of content", async () => {
+  const f = await frames(
+    openaiStream(
+      src(
+        { type: "start", id: "msg_1", model: "deepseek-r1" },
+        { type: "blockStart", index: 0, block: { type: "thinking" } },
+        { type: "blockDelta", index: 0, delta: { type: "thinking", text: "why " } },
+        { type: "blockDelta", index: 0, delta: { type: "thinking", text: "so" } },
+        { type: "blockEnd", index: 0 },
+        { type: "blockStart", index: 1, block: { type: "text" } },
+        { type: "blockDelta", index: 1, delta: { type: "text", text: "answer" } },
+        { type: "blockEnd", index: 1 },
+        {
+          type: "end",
+          stopReason: "endTurn",
+          usage: { inputTokens: 10, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      ),
+      "chatcmpl-2",
+      1000,
+    ),
+  );
+
+  // Role leads, then one chunk per reasoning delta under the DeepSeek/
+  // OpenRouter spelling, then the content — [DONE] still terminates.
+  const deltas = f
+    .filter((x) => x.data !== "[DONE]")
+    .map((x) => JSON.parse(x.data).choices[0].delta);
+  expect(deltas).toEqual([
+    { role: "assistant" },
+    { reasoning_content: "why " },
+    { reasoning_content: "so" },
+    { content: "answer" },
+    {},
+  ]);
+});
+
+test("non-streaming responses carry reasoning_content beside the answer", () => {
+  const body = openaiResponse(
+    {
+      id: "resp_1",
+      model: "deepseek-r1",
+      stopReason: "endTurn",
+      usage: { inputTokens: 4, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      content: [
+        { type: "thinking", text: "because" },
+        { type: "text", text: "answer" },
+      ],
+    },
+    "chatcmpl-3",
+    1000,
+  ) as NonStreamingBody;
+
+  expect(body.choices[0]?.message).toEqual({
+    role: "assistant",
+    content: "answer",
+    reasoning_content: "because",
+  });
+});
+
+test("reasoning rides beside null content when only tools answer", () => {
+  const body = openaiResponse(
+    {
+      id: "resp_2",
+      model: "deepseek-r1",
+      stopReason: "toolUse",
+      usage: { inputTokens: 4, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      content: [
+        { type: "thinking", text: "plan" },
+        { type: "toolUse", id: "c1", name: "f", input: { a: 1 } },
+      ],
+    },
+    "chatcmpl-4",
+    1000,
+  ) as NonStreamingBody;
+
+  expect(body.choices[0]?.message).toEqual({
+    role: "assistant",
+    content: null,
+    reasoning_content: "plan",
+    tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: '{"a":1}' } }],
+  });
+});
+
 test("sends role: assistant on the first frame of a tool-only response", async () => {
   const f = await frames(
     openaiStream(
@@ -115,20 +199,6 @@ test("maps a tool-use stop reason onto tool_calls", async () => {
   expect(JSON.parse(f[0]?.data as string).choices[0].finish_reason).toBe("tool_calls");
 });
 
-test("thinking content is not emitted on the chat completions surface", async () => {
-  const f = await frames(
-    openaiStream(
-      src(
-        { type: "blockStart", index: 0, block: { type: "thinking" } },
-        { type: "blockDelta", index: 0, delta: { type: "thinking", text: "hm" } },
-      ),
-      "chatcmpl-1",
-      1000,
-    ),
-  );
-  expect(f.filter((x) => x.data !== "[DONE]")).toHaveLength(0);
-});
-
 test("renders an error event without a successful [DONE] marker", async () => {
   const f = await frames(
     openaiStream(
@@ -150,7 +220,12 @@ type NonStreamingBody = {
   object: string;
   usage: { total_tokens: number };
   choices: {
-    message: { role: string; content: string | null; tool_calls?: unknown[] };
+    message: {
+      role: string;
+      content: string | null;
+      reasoning_content?: string;
+      tool_calls?: unknown[];
+    };
     finish_reason: string;
   }[];
 };
