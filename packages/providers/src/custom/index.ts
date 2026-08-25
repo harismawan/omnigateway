@@ -9,12 +9,34 @@ import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from 
 
 type Protocol = "chat_completions" | "responses";
 
-function metadata(data: Record<string, unknown>): { origin: string; protocol: Protocol } {
+function metadata(data: Record<string, unknown>): {
+  origin: string;
+  basePath: string;
+  protocol: Protocol;
+} {
   const { origin, protocol } = data;
   if (typeof origin !== "string" || (protocol !== "chat_completions" && protocol !== "responses")) {
     throw new GatewayError("BAD_REQUEST", "custom credential has invalid endpoint metadata");
   }
-  return { origin, protocol };
+  // Rows written before custom endpoints carried a base path have none.
+  const basePath = typeof data.basePath === "string" ? data.basePath : "";
+  return { origin, basePath, protocol };
+}
+
+/**
+ * Joins stored endpoint metadata into the inference URL.
+ *
+ * The stored value may carry a base path (`https://host/api`), and operators
+ * habitually enter OpenAI-SDK-style bases that already end in `/v1`, which a
+ * blind `/v1` append would double. A bare-origin row therefore targets
+ * `${origin}/v1/<suffix>` exactly as it always did, while a path-bearing row
+ * targets `${origin}${basePath}/v1/<suffix>` unless its path already ends in
+ * `/v1`.
+ */
+function endpointUrl(origin: string, basePath: string, protocol: Protocol): string {
+  const suffix = protocol === "chat_completions" ? "chat/completions" : "responses";
+  const base = `${origin}${basePath}`.replace(/\/+$/, "");
+  return base.endsWith("/v1") ? `${base}/${suffix}` : `${base}/v1/${suffix}`;
 }
 
 export const customAdapter: ProviderAdapter = {
@@ -26,7 +48,7 @@ export const customAdapter: ProviderAdapter = {
     if (apiKey === null) {
       throw new GatewayError("AUTH", "custom credential has no API key", { provider: "custom" });
     }
-    const { origin, protocol } = metadata(req.credentials.providerData);
+    const { origin, basePath, protocol } = metadata(req.credentials.providerData);
     const encoded =
       protocol === "chat_completions"
         ? toChatWire(req.request, req.model, "openai")
@@ -37,7 +59,7 @@ export const customAdapter: ProviderAdapter = {
     ];
     const res = await req.http({
       provider: "custom",
-      url: `${origin}/v1/${protocol === "chat_completions" ? "chat/completions" : "responses"}`,
+      url: endpointUrl(origin, basePath, protocol),
       method: "POST",
       headers,
       body: JSON.stringify({ ...encoded.body, stream: true }),

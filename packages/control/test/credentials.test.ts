@@ -135,8 +135,28 @@ test("createApiKeyCredential normalizes custom endpoint metadata", async () => {
       endpointId: "local-vllm",
       endpointLabel: "Local vLLM",
       origin: "http://localhost:8000",
+      basePath: "",
       protocol: "chat_completions",
     },
+  });
+});
+
+test("createApiKeyCredential normalizes a custom base path", async () => {
+  const store = await memoryStore();
+
+  const created = await createApiKeyCredential(store, {
+    provider: "custom",
+    apiKey: "test-provider-key",
+    endpointId: "proxied-vllm",
+    endpointLabel: "Proxied vLLM",
+    // Reverse-proxied servers live at a subpath; trailing slashes collapse.
+    origin: "https://example.com/api/",
+    protocol: "chat_completions",
+  });
+
+  expect(created.providerData).toMatchObject({
+    origin: "https://example.com",
+    basePath: "/api",
   });
 });
 
@@ -153,7 +173,6 @@ test("createApiKeyCredential rejects forbidden origins and endpoint conflicts", 
   for (const origin of [
     "ftp://localhost",
     "https://user:pass@example.com",
-    "https://example.com/v1",
     "https://example.com?x=1",
     "https://example.com#x",
   ]) {
@@ -168,6 +187,15 @@ test("createApiKeyCredential rejects forbidden origins and endpoint conflicts", 
       ...base,
       apiKey: "second-test-key",
       origin: "https://other.example.com",
+    }),
+  ).rejects.toMatchObject({ code: "CONFLICT" });
+
+  // A differing base path under the same endpoint id is configuration drift too.
+  await expect(
+    createApiKeyCredential(store, {
+      ...base,
+      apiKey: "second-test-key",
+      origin: "https://example.com/api",
     }),
   ).rejects.toMatchObject({ code: "CONFLICT" });
 });
@@ -186,6 +214,50 @@ test("createApiKeyCredential permits matching metadata for multiple keys", async
   await createApiKeyCredential(store, { ...endpoint, apiKey: "second-test-key" });
 
   expect(await store.credentials.list()).toHaveLength(2);
+});
+
+test("createApiKeyCredential treats a legacy endpoint row as a bare origin", async () => {
+  const store = await memoryStore();
+
+  // Rows written before base paths existed carry no basePath key at all.
+  await seedCredential(store, {
+    id: "legacy-1",
+    provider: "custom",
+    label: "Legacy vLLM",
+    authType: "apiKey",
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "first-test-key",
+    providerData: {
+      endpointId: "local-vllm",
+      endpointLabel: "Local vLLM",
+      origin: "https://example.com",
+      protocol: "chat_completions",
+    },
+  });
+
+  // Re-entering the bare origin is the same endpoint; another key may join it.
+  const same = await createApiKeyCredential(store, {
+    provider: "custom",
+    apiKey: "second-test-key",
+    endpointId: "local-vllm",
+    endpointLabel: "Local vLLM",
+    origin: "https://example.com",
+    protocol: "chat_completions",
+  });
+  expect(same.providerData).toMatchObject({ origin: "https://example.com", basePath: "" });
+
+  // A base path under that endpoint ID is configuration drift.
+  await expect(
+    createApiKeyCredential(store, {
+      provider: "custom",
+      apiKey: "third-test-key",
+      endpointId: "local-vllm",
+      endpointLabel: "Local vLLM",
+      origin: "https://example.com/api",
+      protocol: "chat_completions",
+    }),
+  ).rejects.toMatchObject({ code: "CONFLICT" });
 });
 
 test("refreshCredential refreshes OAuth metadata and returns current expiry", async () => {

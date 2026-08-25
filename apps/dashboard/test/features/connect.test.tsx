@@ -202,14 +202,14 @@ describe("ConnectDialog", () => {
     open();
 
     await user.selectOptions(screen.getByLabelText("Provider"), "custom");
-    expect(screen.getByLabelText("Server origin")).toBeTruthy();
+    expect(screen.getByLabelText("Server URL")).toBeTruthy();
 
     // A custom endpoint is reached by a URL the operator supplies. That is
     // custom's own metadata, not something every key-bearing provider grew.
     await user.selectOptions(screen.getByLabelText("Provider"), "kimi");
     await user.selectOptions(screen.getByLabelText("How to connect"), "apiKey");
     expect(await screen.findByLabelText("API key")).toBeTruthy();
-    expect(screen.queryByLabelText("Server origin")).toBeNull();
+    expect(screen.queryByLabelText("Server URL")).toBeNull();
     expect(screen.queryByLabelText("Endpoint ID")).toBeNull();
   });
 
