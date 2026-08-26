@@ -59,6 +59,12 @@ export {
   pluginApiPath,
   usePluginApi,
 } from "./api.ts";
-export { type Cadence, type LiveContextValue, LiveProvider, useLive } from "./live.ts";
+export {
+  type Cadence,
+  type LiveConnection,
+  type LiveContextValue,
+  LiveProvider,
+  useLive,
+} from "./live.ts";
 export { CSS_VARIABLES, type CssVariable } from "./theme.ts";
 export { definePluginUI, type PluginUiDefinition, type PluginUiProps } from "./ui.ts";

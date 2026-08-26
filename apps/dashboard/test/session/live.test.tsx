@@ -104,3 +104,109 @@ test("the console's re-export is the SDK's own binding, not a copy of it", () =>
   expect(useLive).toBe(sdk.useLive);
   expect(LiveProvider).toBe(sdk.LiveProvider);
 });
+
+/**
+ * A readout for the topic-aware arm.
+ *
+ * Two cadences side by side, because the interesting property is the
+ * *difference* between them: one topic pushed and one not, under a single
+ * provider, is what proves the decision is per topic rather than per tab.
+ */
+function TopicReadout({ topic = "res:usage" }: { topic?: string }) {
+  const { cadence, connection, toggle, live } = useLive();
+  return (
+    <div>
+      <span data-testid="topic">{String(cadence(10_000, topic))}</span>
+      <span data-testid="bare">{String(cadence(10_000))}</span>
+      <span data-testid="status">{connection.status}</span>
+      <button onClick={toggle} type="button">
+        {live ? "LIVE" : "PAUSED"}
+      </button>
+    </div>
+  );
+}
+
+const pushing = (...topics: string[]): sdk.LiveConnection => ({
+  status: "push",
+  pushed: (topic) => topics.includes(topic),
+});
+
+test("a pushed topic stops polling while an unpushed one keeps its interval", () => {
+  // The whole point of the topic argument, in one render: the socket pushes
+  // `res:usage` and not `res:logs`, and the two disagree under a single
+  // provider. A per-tab boolean could not produce this.
+  function Pair() {
+    const { cadence } = useLive();
+    return (
+      <div>
+        <span data-testid="pushed">{String(cadence(10_000, "res:usage"))}</span>
+        <span data-testid="unpushed">{String(cadence(10_000, "res:logs"))}</span>
+      </div>
+    );
+  }
+
+  render(
+    <LiveProvider connection={pushing("res:usage")}>
+      <Pair />
+    </LiveProvider>,
+  );
+
+  expect(screen.getByTestId("pushed").textContent).toBe("false");
+  expect(screen.getByTestId("unpushed").textContent).toBe("10000");
+});
+
+test("cadence with no topic keeps its interval even while the socket is pushing", () => {
+  // The back-compat clause, and the reason this ships as a patch rather than a
+  // minor. A panel built against 0.1.1 calls `cadence(ms)` and behaves exactly
+  // as it did, instead of going dark until its author republishes.
+  render(
+    <LiveProvider connection={pushing("res:usage")}>
+      <TopicReadout />
+    </LiveProvider>,
+  );
+
+  expect(screen.getByTestId("bare").textContent).toBe("10000");
+});
+
+test("an unpushed topic returns its interval and never 0", () => {
+  // `0` would be worse than having no fallback at all: react-query reads it as
+  // "as fast as possible", so a socket that failed to cover a topic would turn
+  // into a client hammering the gateway.
+  render(
+    <LiveProvider connection={{ status: "poll", pushed: () => false }}>
+      <TopicReadout />
+    </LiveProvider>,
+  );
+
+  expect(screen.getByTestId("topic").textContent).toBe("10000");
+});
+
+test("the LIVE switch outranks the transport", async () => {
+  // Paused is paused however the data would have arrived. A pushed topic that
+  // kept reporting `false` while paused would be indistinguishable from a
+  // working one, which is the whole reason the switch reads "am I refreshing"
+  // rather than "am I polling".
+  const user = userEvent.setup();
+  render(
+    <LiveProvider connection={pushing("res:usage")}>
+      <TopicReadout />
+    </LiveProvider>,
+  );
+
+  await user.click(screen.getByRole("button"));
+
+  expect(screen.getByRole("button").textContent).toBe("PAUSED");
+  expect(screen.getByTestId("topic").textContent).toBe("false");
+  expect(screen.getByTestId("bare").textContent).toBe("false");
+});
+
+test("a provider with no connection reports polling, which is what a plugin panel sees", () => {
+  render(
+    <LiveProvider>
+      <TopicReadout />
+    </LiveProvider>,
+  );
+
+  expect(screen.getByTestId("status").textContent).toBe("poll");
+  expect(screen.getByTestId("topic").textContent).toBe("10000");
+});

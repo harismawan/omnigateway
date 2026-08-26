@@ -16,6 +16,7 @@
  */
 export {
   type Cadence,
+  type LiveConnection,
   type LiveContextValue,
   LiveProvider,
   useLive,
