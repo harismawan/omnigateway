@@ -809,6 +809,115 @@ test("doctor reports a target pinned to an account that is gone", async () => {
   expect(checks.danglingPins).toEqual(["billed/claude-opus-5 → removed-account"]);
 });
 
+test("doctor reports a pin the router cannot resolve, model by model", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  await seedCredential(store, { id: "anthropic-live", provider: "anthropic" });
+  await seedCredential(store, { id: "kimi-live", provider: "kimi" });
+  await seedCredential(store, {
+    id: "custom-local",
+    provider: "custom",
+    providerData: { endpointId: "local" },
+  });
+  await seedCredential(store, {
+    id: "custom-remote",
+    provider: "custom",
+    providerData: { endpointId: "remote" },
+  });
+  // A pin at another provider's account. It exists, so a check that looked the
+  // id up would call it healthy; the router checks provider before pin and
+  // reports `pin:missing`, and doctor is the only compensating control for the
+  // deliberate absence of write-time validation.
+  await store.config.putModel({
+    id: "alpha",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        credentialId: "kimi-live",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  // And a custom account on another endpoint, which fails the same way one step
+  // further in.
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "custom",
+        endpointId: "local",
+        model: "llama",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 0, output: 0 },
+        credentialId: "custom-remote",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const checks = JSON.parse(result.out) as { danglingPins: string[] };
+  // Both models, not just the first: a check that stopped at one would print a
+  // clean-looking report for an installation with two broken targets in it.
+  expect(checks.danglingPins).toEqual([
+    "alpha/claude-opus-5 → kimi-live",
+    "billed/llama → custom-remote",
+  ]);
+});
+
+test("doctor prints the dangling pins in its own table, not only under --json", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        credentialId: "removed-account",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  // `--json` is read by scripts; the table is what the operator running the
+  // command actually sees, and a row that is absent there is a finding nobody
+  // is told about.
+  const broken = await cli(["doctor"], { root, service });
+  const row = (out: string): string | undefined =>
+    out
+      .split("\n")
+      .find((line) => line.startsWith("dangling pins"))
+      ?.trim()
+      .split(/\s{2,}/)[1];
+
+  expect(row(broken.out)).toBe("1: billed/claude-opus-5 → removed-account");
+
+  // And the row is still there when there is nothing to say, so "none" means
+  // checked rather than a heading that only appears once it is too late.
+  const clean = await installation();
+  const healthy = await cli(["doctor"], { root: clean, service: fakeService({ root: clean }) });
+  expect(row(healthy.out)).toBe("none");
+});
+
 test("doctor says none rather than nothing when every pin resolves", async () => {
   const root = await installation();
   const service = fakeService({ root });

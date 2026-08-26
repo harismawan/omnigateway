@@ -1197,6 +1197,52 @@ test("reports the Codex window for an OpenAI model an OAuth credential serves", 
   expect(body.data.find((m) => m.id === "gpt")?.max_input_tokens).toBe(272_000);
 });
 
+test("advertises the window of the account a target is pinned to, not the pool's narrowest", async () => {
+  const { app, store, raw } = await harness();
+  await seedCredential(store, { id: "openai-key", provider: "openai", authType: "apiKey" });
+  await seedCredential(store, { id: "openai-oauth", provider: "openai", authType: "oauth" });
+  await store.config.putModel(
+    virtualModel({
+      id: "gpt",
+      targets: [target({ provider: "openai", model: "gpt-5.6", credentialId: "openai-key" })],
+    }),
+  );
+
+  const res = await app.handle(
+    new Request("http://localhost/v1/models", { headers: { authorization: `Bearer ${raw}` } }),
+  );
+
+  // Narrowing across every way in is justified by failover landing anywhere in
+  // the provider, and a hard pin forbids that. Told 272K, a client sizes its
+  // context to a third of what this target actually takes — and `omni setup`
+  // writes the same figure into an agent's config file, where it persists.
+  const body = (await res.json()) as { data: Array<{ id: string; max_input_tokens?: number }> };
+  expect(body.data.find((m) => m.id === "gpt")?.max_input_tokens).toBe(922_000);
+});
+
+test("falls back to the provider-wide window when a pin resolves to nothing", async () => {
+  const { app, store, raw } = await harness();
+  await seedCredential(store, { id: "openai-key", provider: "openai", authType: "apiKey" });
+  await seedCredential(store, { id: "openai-oauth", provider: "openai", authType: "oauth" });
+  await store.config.putModel(
+    virtualModel({
+      id: "gpt",
+      targets: [target({ provider: "openai", model: "gpt-5.6", credentialId: "removed-account" })],
+    }),
+  );
+
+  const res = await app.handle(
+    new Request("http://localhost/v1/models", { headers: { authorization: `Bearer ${raw}` } }),
+  );
+
+  // The request fails at the router either way, so the direction of the
+  // fallback is all that is left to get right: the provider-wide narrowing is
+  // by construction no wider than any single way in, and the opposite reading
+  // would state a window for an account that does not exist.
+  const body = (await res.json()) as { data: Array<{ id: string; max_input_tokens?: number }> };
+  expect(body.data.find((m) => m.id === "gpt")?.max_input_tokens).toBe(272_000);
+});
+
 test("never echoes the request body into the log", async () => {
   const { call, store } = await harness();
   await call("/v1/messages", {

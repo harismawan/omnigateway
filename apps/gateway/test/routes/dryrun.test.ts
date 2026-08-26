@@ -100,6 +100,55 @@ test("dry-run names disabled and capability exclusions", async () => {
   });
 });
 
+test("dry-run ranks only the account a pinned target names", async () => {
+  const { store, post } = await harness();
+  await seedCredential(store, { id: "billing", provider: "anthropic", tier: 1 });
+  await seedCredential(store, { id: "general", provider: "anthropic", tier: 1 });
+  await store.config.putModel(
+    virtualModel({
+      id: "fast",
+      targets: [target({ provider: "anthropic", model: "claude-opus-4", credentialId: "billing" })],
+    }),
+  );
+
+  const body = (await (await post("/api/models/fast/dry-run", {})).json()) as {
+    candidates: Array<{ credentialId: string }>;
+    excluded: Array<{ credentialId: string; model: string; reason: string }>;
+  };
+
+  // Dry-run is where an operator checks a pin before traffic depends on it, so
+  // it has to answer the same way the router will.
+  expect(body.candidates.map((candidate) => candidate.credentialId)).toEqual(["billing"]);
+  // The sibling the pin excluded was never a candidate, so it is not a rejected
+  // one either — a row for it would bury the reasons about the pinned account.
+  expect(body.excluded).toEqual([]);
+});
+
+test("dry-run names a pin no account can serve", async () => {
+  const { store, post } = await harness();
+  await seedCredential(store, { id: "general", provider: "anthropic" });
+  await store.config.putModel(
+    virtualModel({
+      id: "fast",
+      targets: [
+        target({ provider: "anthropic", model: "claude-opus-4", credentialId: "removed-account" }),
+      ],
+    }),
+  );
+
+  const body = (await (await post("/api/models/fast/dry-run", {})).json()) as {
+    candidates: Array<{ credentialId: string }>;
+    excluded: Array<{ credentialId: string; model: string; reason: string }>;
+  };
+
+  expect(body.candidates).toEqual([]);
+  // Without this the panel would show a model that routes nowhere and nothing
+  // at all about why.
+  expect(body.excluded).toEqual([
+    { credentialId: "removed-account", model: "claude-opus-4", reason: "pin:missing" },
+  ]);
+});
+
 test("dry-run rejects unknown models and unauthenticated callers", async () => {
   const { post } = await harness();
   expect((await post("/api/models/nope/dry-run", {})).status).toBe(404);

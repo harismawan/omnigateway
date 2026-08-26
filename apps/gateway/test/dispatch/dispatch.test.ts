@@ -848,6 +848,72 @@ test("the log records the excluded candidates and their reasons", async () => {
   store.close();
 });
 
+/** Repoints the seeded pool's only target at one account. */
+async function pinFastTo(store: Store, credentialId: string): Promise<void> {
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        credentialId,
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+}
+
+test("a pinned target that cannot serve fails the request rather than reaching a sibling", async () => {
+  const store = await seeded(2);
+  await pinFastTo(store, "c1");
+  await store.credentials.update("c1", { enabled: false });
+  const adapter = stubAdapter(() => textStream("hi"));
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
+  const events = await drain(outcome.events);
+
+  // The whole point of a pin, and the one thing no test above dispatch has ever
+  // checked: c2 is enabled, healthy and of the right provider, and it must not
+  // be called. An operator pins for billing separation or a per-account
+  // agreement, and silent spillover defeats both.
+  expect(adapter.calls).toEqual([]);
+  expect(events[0]).toMatchObject({ type: "error", code: "NO_CANDIDATES" });
+  // The pinned account's own reason, and nothing about the sibling it excluded.
+  expect(outcome.log().degradations).toEqual(["excluded:c1:disabled"]);
+  store.close();
+});
+
+test("a pin naming an account that is gone is written into the request log", async () => {
+  const store = await seeded(1);
+  await pinFastTo(store, "removed-account");
+  const adapter = stubAdapter(() => textStream("hi"));
+  const outcome = await dispatch(
+    req,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(adapter.calls).toEqual([]);
+  // This row is the whole justification for bounding `credentialId` at 64
+  // characters of `[A-Za-z0-9_-]` in the model schema: the id an operator typed
+  // lands in `request_logs.degradations` and in `LogFields.credentialId`, which
+  // is a closed allowlist documenting the field as a bounded identifier.
+  expect(outcome.log().degradations).toEqual(["excluded:removed-account:pin:missing"]);
+  expect(outcome.log().errorCode).toBe("NO_CANDIDATES");
+  store.close();
+});
+
 test("failover hands the second provider the client's own tool names, not Anthropic's aliases", async () => {
   const store = await seeded(1);
   await store.credentials.create({

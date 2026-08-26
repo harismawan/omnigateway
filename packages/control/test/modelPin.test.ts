@@ -87,6 +87,27 @@ test("custom targets can be pinned too", () => {
   );
 });
 
+test("bounds a custom target's pin the same way, not by looking like it does", () => {
+  // The two arms of the union carry their own copy of the field, so every rule
+  // the anthropic arm is tested for is untested here — and a custom pin reaches
+  // `LogFields.credentialId` and `request_logs.degradations` by exactly the same
+  // route. The bound is what makes that field the bounded identifier its own
+  // allowlist documents.
+  expect(() => modelSchema.parse(customModel({ credentialId: "x".repeat(65) }))).toThrow();
+  expect(
+    modelSchema.parse(customModel({ credentialId: "x".repeat(64) })).targets[0]?.credentialId,
+  ).toBe("x".repeat(64));
+  expect(() => modelSchema.parse(customModel({ credentialId: "cred 2" }))).toThrow();
+  expect(() =>
+    modelSchema.parse(customModel({ credentialId: "cred:2\nreason=spoofed" })),
+  ).toThrow();
+  expect(() => modelSchema.parse(customModel({ credentialId: "" }))).toThrow();
+  expect(() => modelSchema.parse(customModel({ credentialId: "   " }))).toThrow();
+  expect(
+    modelSchema.parse(customModel({ credentialId: "  cred-2  " })).targets[0]?.credentialId,
+  ).toBe("cred-2");
+});
+
 test("accepts a pin naming an account this installation does not hold", () => {
   // Deliberate: validating the id here would make removing an account block
   // every later edit of a model that mentioned it, and the router already

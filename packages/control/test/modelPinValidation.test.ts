@@ -44,12 +44,13 @@ async function credential(
   id: string,
   authType: "oauth" | "apiKey",
   provider: ProviderId = "kilo",
+  enabled = true,
 ): Promise<void> {
   await seedCredential(store, {
     id,
     provider,
     authType,
-    enabled: true,
+    enabled,
     // Deliberately not the id: the refusal below names the account the way the
     // console does, and an id-shaped label would let either one satisfy it.
     label: `${id} account`,
@@ -78,6 +79,66 @@ test("putModel refuses a target pinned to an account that cannot reach the model
   // they already have.
   expect(message).toContain('pinned to "kilo-oauth account"');
   expect(message).not.toContain("every kilo credential here is");
+  expect(await store.config.listModels()).toEqual([]);
+});
+
+test("a pinned refusal names the repair a pin needs, not the one an unpinned target needs", async () => {
+  const store = await memoryStore();
+  await credential(store, "kilo-key", "apiKey");
+  await credential(store, "kilo-oauth", "oauth");
+
+  const error: unknown = await putModel(store, "m", kiloModel(GATEWAY_ONLY, "kilo-oauth")).then(
+    () => null,
+    (reason: unknown) => reason,
+  );
+
+  // The whole sentence, not a fragment of it. Both halves are pin-specific and
+  // both are wrong in the same way if they revert to the provider-wide wording:
+  // "connect the other kind" tells an operator holding an API key to connect an
+  // account they already have, when the repair is to move the pin onto it.
+  expect(String((error as Error).message)).toBe(
+    `kilo serves "${GATEWAY_ONLY}" to API key credentials only, and this target is pinned to ` +
+      `"kilo-oauth account", which is OAuth — pin it to the other kind, or pick a model this ` +
+      "account can reach",
+  );
+});
+
+test("putModel reads a pin at a disabled account rather than treating it as unpinned", async () => {
+  const store = await memoryStore();
+  // Provider-wide this installation reaches the model, so only a check that
+  // still resolves the pin can see that this target does not.
+  await credential(store, "kilo-key", "apiKey");
+  await credential(store, "kilo-oauth", "oauth", "kilo", false);
+
+  // Existence, not `enabled` — the same reading `heldAuths` takes one function
+  // up. A credential the gateway disabled after one rejected token is still the
+  // account this target names, and letting the pin stop resolving would fall
+  // back to the provider-wide answer and save a target that hard-fails every
+  // request the moment the account is re-enabled.
+  await expect(putModel(store, "m", kiloModel(GATEWAY_ONLY, "kilo-oauth"))).rejects.toMatchObject({
+    code: "BAD_REQUEST",
+  });
+  expect(await store.config.listModels()).toEqual([]);
+});
+
+test("putModel judges every target's pin, not just the first target's", async () => {
+  const store = await memoryStore();
+  await credential(store, "kilo-key", "apiKey");
+  await credential(store, "kilo-oauth", "oauth");
+
+  // The first target is fine — kilo serves this model either way in — so a
+  // check that stopped after it would save the second, which reaches nothing.
+  await expect(
+    putModel(store, "m", {
+      id: "m",
+      strategy: "score" as const,
+      isAlias: false,
+      targets: [
+        ...kiloModel("anthropic/claude-opus-5", "kilo-oauth").targets,
+        ...kiloModel(GATEWAY_ONLY, "kilo-oauth").targets,
+      ],
+    }),
+  ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   expect(await store.config.listModels()).toEqual([]);
 });
 

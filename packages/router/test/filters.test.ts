@@ -293,6 +293,31 @@ test("a pin on an installation with no credentials at all still reports itself",
   ]);
 });
 
+test("a dangling pin reports itself once, not once per account it skipped", () => {
+  // Every other dangling-pin case here holds nought or one credential of the
+  // target's provider, so a row emitted per skipped sibling reads identically.
+  // The row is about the pin, not about the accounts it excluded — one per
+  // sibling is the noise this reason exists to replace.
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ credentialId: "gone" })]),
+    snapshot: snapshot({
+      credentials: [
+        credential({ id: "a", provider: "anthropic" }),
+        credential({ id: "b", provider: "anthropic" }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs).toEqual([]);
+  expect(excluded).toEqual([
+    { credentialId: "gone", model: "claude-opus-4", reason: "pin:missing" },
+  ]);
+});
+
 test("excludes disabled credentials", () => {
   const { pairs, excluded } = eligible({
     request: req,

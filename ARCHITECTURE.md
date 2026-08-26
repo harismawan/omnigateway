@@ -115,7 +115,7 @@ flowchart LR
   vm["virtual model<br/><b>fast</b>"] --> targets["targets<br/>credential × model"]
 
   targets --> filter{eligible?}
-  filter -- no --> excl["<b>excluded</b>, with reason<br/>capability mismatch · disabled<br/>expired, no refresh token<br/>provider said 429 · breaker open<br/>pin names no live account"]
+  filter -- no --> excl["<b>excluded</b>, with reason<br/>capability mismatch · disabled<br/>expired, no refresh token<br/>provider said 429 · breaker open<br/>pin resolves to no account"]
   filter -- yes --> score
 
   subgraph score["score — six normalized terms"]
@@ -138,7 +138,13 @@ Exclusion reading *provider said 429* is `credential_health.rate_limited_until` 
 
 Weights shown are defaults, configurable. Request carrying Anthropic-defined tool excluded from every non-Anthropic target at filter stage — why it fails at routing with requirement named, rather than quietly losing tool. Breaker cooldown scales with consecutive failures.
 
-Target may name one account in `credentialId`, and then only that account serve it. Pin is hard and lives at filter stage, not in ranking: account that is disabled, breakered, rate-limited or out of quota fail the request rather than spill to sibling. Operator pin for billing separation or per-account agreement, and silent spillover defeat both — so no strategy exist for it, because strategy decide order and pin decide membership. Accounts pin exclude are skipped silently, same as accounts of wrong provider; pin naming no live account of that provider is reported once, as `pin:missing`, because otherwise request fail with nothing in exclusion list to explain it. Nothing validate the id at write time: removing account must not make unrelated edit of model that mention it unsavable, same rule `putModel` already follow for auth.
+Target may name one account in `credentialId`, and then only that account serve it. Pin is hard and lives at filter stage, not in ranking: account that is disabled, breakered, rate-limited or out of quota fail the request rather than spill to sibling. Operator pin for billing separation or per-account agreement, and silent spillover defeat both — so no strategy exist for it, because strategy decide order and pin decide membership.
+
+Whether an account can serve a target is one question — provider, custom endpoint, pin — answered in one place, `servesTarget` in `@omni/store/types`. Router, `putModel`, model-limit resolution, `omni doctor` and console's account picker all ask it there. They did not always, and three of them asked less than router did, so target pinned to another provider's account saved clean, failed every request, and read as healthy in `doctor`.
+
+Accounts pin exclude are skipped silently, same as accounts of wrong provider. Pin resolving to no account is reported once per target, as `pin:missing`, because otherwise request fail with nothing in exclusion list to explain it. Four ways a pin resolve to nothing — deleted, disabled, wrong provider, wrong custom endpoint — and all four read alike.
+
+Nothing validate the id at write time: removing account must not make unrelated edit of model that mention it unsavable, same rule `putModel` already follow for auth. `omni doctor` carry that weight instead and report every unresolvable pin. Both surfaces that delete an account name the models pinned to it first, because those targets stop serving rather than losing one of several.
 
 Nothing here thrown away: exclusion list with reasons is exactly what `omni models dry-run` prints.
 

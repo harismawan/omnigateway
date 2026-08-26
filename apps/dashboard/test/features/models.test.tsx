@@ -358,6 +358,27 @@ describe("pinning a target to one account", () => {
     expect(reEndpointDraft(pinned, "remote").credentialId).toBe("");
     expect(reEndpointDraft(pinned, "local").credentialId).toBe("here");
   });
+
+  test("no accounts at all is unknown, not a pin that has died", () => {
+    // `ModelEditor` passes `credentials.data ?? []`, so an empty list is what a
+    // request still in flight looks like and what a failed one looks like
+    // permanently. Rendering a live pin as `(removed)`, in red, accuses working
+    // configuration on the screen the operator came to for the truth.
+    expect(pinNote("cred-1", { provider: "anthropic", endpointId: "" }, [])).toBeNull();
+  });
+
+  test("a pasted pin is trimmed rather than saved with the whitespace around it", () => {
+    // Pasting is the common way an id arrives. Stored untrimmed it matches no
+    // credential and reports `pin:missing`, which reads as a deleted account —
+    // and the control schema would refuse the save outright on charset.
+    const parsed = parseDraft({
+      ...blankModel(),
+      id: "fast",
+      targets: [{ ...blankTarget("anthropic"), credentialId: "  cred-1  " }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.model.targets[0]?.credentialId).toBe("cred-1");
+  });
 });
 
 function stubModels(overrides: Parameters<typeof createFetchStub>[0] = {}) {
@@ -580,6 +601,72 @@ describe("ModelsBoard", () => {
       // Un-pinning has to reach the wire as an absent field. Anything that
       // preserved the old id — or sent "" — would make the pin unremovable
       // from the only UI that can set it.
+      expect("credentialId" in target).toBe(false);
+    });
+  });
+
+  test("changing a custom target's endpoint clears the pin the move invalidates", async () => {
+    const user = userEvent.setup();
+    const customAccount = (id: string, endpointId: string, label: string) =>
+      credential({
+        id,
+        provider: "custom",
+        label,
+        accountEmail: null,
+        providerData: {
+          endpointId,
+          endpointLabel: label,
+          origin: `http://${endpointId}:8000`,
+          protocol: "chat_completions",
+        },
+      });
+    const stub = stubModels({
+      "GET /api/models": () => ({
+        models: [
+          model({
+            targets: [
+              {
+                provider: "custom",
+                endpointId: "local-vllm",
+                model: "local-model",
+                tier: 1,
+                weight: 1,
+                costPerMTok: { input: 0, output: 0 },
+                credentialId: "cred-local",
+                capabilities: { tools: true, images: true, reasoning: false },
+              },
+            ],
+          }),
+        ],
+      }),
+      "GET /api/credentials": () => ({
+        credentials: [
+          customAccount("cred-local", "local-vllm", "Local vLLM"),
+          customAccount("cred-remote", "remote-vllm", "Remote vLLM"),
+        ],
+      }),
+      "PUT /api/models/fast": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    expect(((await screen.findByLabelText("Account")) as HTMLSelectElement).value).toBe(
+      "cred-local",
+    );
+
+    await user.selectOptions(screen.getByLabelText("Endpoint"), "remote-vllm");
+
+    // Re-queried: the select is rebuilt from the new draft, and the element
+    // found above belongs to the render that has since been replaced. Carried
+    // across, the pin would name an account on the endpoint the target just
+    // left — one the router can only ever report as `pin:missing`.
+    expect((screen.getByLabelText("Account") as HTMLSelectElement).value).toBe("");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const target = JSON.parse(String(put?.init?.body)).targets[0];
+      expect(target.endpointId).toBe("remote-vllm");
       expect("credentialId" in target).toBe(false);
     });
   });
