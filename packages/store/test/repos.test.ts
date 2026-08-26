@@ -504,3 +504,36 @@ test("a limits shape the schema refuses is never written by an edit either", asy
   expect((await s.keys.findByHash(hash))?.limits).toEqual({ requests: { "1m": 60 } });
   s.close();
 });
+
+/**
+ * The allowlist is editable after creation, like the matrix: an allowlist that
+ * cannot be adjusted without minting a new key and redeploying every client is
+ * one that gets set to unrestricted instead. Unlike `limits` there is no
+ * write-side parser guard — any JSON array of names round-trips, and a junk
+ * entry simply never matches a request, which fails closed per request.
+ */
+test("setModelAllowlist replaces the column whole and keeps null and [] distinct", async () => {
+  const s = await store();
+  const hash = await hashApiKey(generateApiKey());
+  await s.keys.create({
+    id: "k1",
+    label: "bounded",
+    prefix: "sk-omni-aaaa",
+    hash,
+    modelAllowlist: ["fast"],
+    limits: {},
+    bodyLoggingOptOut: false,
+  });
+
+  await s.keys.setModelAllowlist("k1", ["fast", "smart"]);
+  expect((await s.keys.findByHash(hash))?.modelAllowlist).toEqual(["fast", "smart"]);
+
+  // [] is a key allowed nothing; null is a key allowed everything. Neither
+  // may collapse into the other on the way through storage.
+  await s.keys.setModelAllowlist("k1", []);
+  expect((await s.keys.findByHash(hash))?.modelAllowlist).toEqual([]);
+
+  await s.keys.setModelAllowlist("k1", null);
+  expect((await s.keys.findByHash(hash))?.modelAllowlist).toBeNull();
+  s.close();
+});

@@ -300,10 +300,12 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   `authenticateApiKey` turn it into `INTERNAL` — not `AUTH`, which would blame credential that is
   fine. `keys.list()` must never throw over such a row: `toKey` serve the listing too, and listing
   is how operator find the row to fix. Nothing may collapse that `null` into `{}`.
-- `limits` is only field editable after minting (`setKeyLimits`, `PUT /api/keys/:id/limits`);
-  `bodyLoggingOptOut` deliberately not — opt-out is promise to whoever hold the key, limit is
-  operator's own ceiling. Matrix written whole: `{}` is how last limit go away, never husk like
-  `{"requests":{}}`.
+- Two fields editable after minting: `limits` (`setKeyLimits`, `PUT /api/keys/:id/limits`) and
+  `modelAllowlist` (`setKeyModels`, `PUT /api/keys/:id/models`). Both written whole, never patched —
+  matrix `{}` is how last limit go away, never husk like `{"requests":{}}`; allowlist `null` (every
+  model) and `[]` (none) are opposite facts, so schema refuse default and absent never pick one.
+  `bodyLoggingOptOut` deliberately not editable — opt-out is promise to whoever hold the key; limit
+  and allowlist are operator's own ceiling on own installation.
 - Windows *slide*. `1m` is exact ring in `apps/gateway`; longer windows are `usage.sumSince` — which
   must filter `state = 'done'` — plus in-memory delta, cached 30s. Composition may over-count and
   must **never** under-count, so delta keep everything at or after read instant; other direction

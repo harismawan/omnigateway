@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { GatewayError } from "@omni/ir";
 import { createStore, deriveKey } from "@omni/store";
 import { memoryStore, requestLog, seedApiKey } from "@omni/testkit";
-import { listKeys, setKeyLimits } from "../src/keys.ts";
+import { listKeys, setKeyLimits, setKeyModels } from "../src/keys.ts";
 
 /**
  * Limits are editable after creation; `bodyLoggingOptOut` is not.
@@ -92,6 +92,71 @@ test("an unknown key id is refused rather than becoming an update that matches n
   const store = await memoryStore();
   await seedApiKey(store);
   await expect(setKeyLimits(store, "not-a-key", { limits: {} })).rejects.toThrow("no such api key");
+  store.close();
+});
+
+/**
+ * Models are editable after creation for the same reason limits are: an
+ * allowlist that cannot be adjusted without minting a new key and redeploying
+ * every client is an allowlist that gets set to unrestricted instead. Sent
+ * whole, like the matrix — `null` and `[]` are different facts and a partial
+ * body would have to invent a third meaning for "absent".
+ */
+test("setting models on an existing key round-trips through the store", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store, { modelAllowlist: ["fast"] });
+
+  const updated = await setKeyModels(store, key.id, { modelAllowlist: ["fast", "smart"] });
+
+  expect(updated.modelAllowlist).toEqual(["fast", "smart"]);
+  const [stored] = await store.keys.list();
+  expect(stored?.modelAllowlist).toEqual(["fast", "smart"]);
+  store.close();
+});
+
+test("an empty allowlist denies every model and null restores unrestricted, as distinct writes", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store, { modelAllowlist: ["fast"] });
+
+  const denied = await setKeyModels(store, key.id, { modelAllowlist: [] });
+  expect(denied.modelAllowlist).toEqual([]);
+  let [stored] = await store.keys.list();
+  // [] must not collapse into null: the first is a key allowed nothing, the
+  // second is a key allowed everything.
+  expect(stored?.modelAllowlist).toEqual([]);
+
+  const restored = await setKeyModels(store, key.id, { modelAllowlist: null });
+  expect(restored.modelAllowlist).toBeNull();
+  [stored] = await store.keys.list();
+  expect(stored?.modelAllowlist).toBeNull();
+  store.close();
+});
+
+test("a malformed models body is refused rather than stored", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store);
+
+  for (const bad of [
+    {},
+    { modelAllowlist: "fast" },
+    { modelAllowlist: [""] },
+    { modelAllowlist: ["fast"], label: "sneaking a second field past" },
+  ]) {
+    await expect(setKeyModels(store, key.id, bad)).rejects.toThrow(GatewayError);
+  }
+
+  // Nothing was written on the way past the refusals.
+  const [stored] = await store.keys.list();
+  expect(stored?.modelAllowlist).toBeNull();
+  store.close();
+});
+
+test("setting models on an unknown key id is refused rather than matching no row", async () => {
+  const store = await memoryStore();
+  await seedApiKey(store);
+  await expect(setKeyModels(store, "not-a-key", { modelAllowlist: null })).rejects.toThrow(
+    "no such api key",
+  );
   store.close();
 });
 

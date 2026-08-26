@@ -174,6 +174,12 @@ export type KeysResponse = { keys: ApiKeySummary[] };
 /** The whole matrix, sent whole. `{}` leaves the key unlimited. */
 export type KeyLimitsInput = { limits: LimitConfig };
 
+/**
+ * The whole allowlist, sent whole. `null` is every model and `[]` is none;
+ * the two are opposite facts, so an edit must say which it means.
+ */
+export type KeyModelsInput = { modelAllowlist: string[] | null };
+
 export type KeyCreateInput = {
   label: string;
   /** Null means every configured model; an empty array means none. */

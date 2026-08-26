@@ -24,6 +24,7 @@ import type {
   DryRunResult,
   KeyCreateInput,
   KeyLimitsInput,
+  KeyModelsInput,
   KeysResponse,
   LifecycleCapability,
   LogsResponse,
@@ -575,9 +576,10 @@ export function useCreateKey(): UseMutationResult<MintedKey, Error, KeyCreateInp
 /**
  * Replaces one key's limits.
  *
- * The only field on a key that is editable after minting. `bodyLoggingOptOut`
- * has no mutation like this on purpose: it is a promise to whoever holds the
- * key, while a limit is the operator's own ceiling on their own installation.
+ * One of two fields editable after minting — the allowlist via
+ * `useSetKeyModels` is the other. `bodyLoggingOptOut` has no mutation like
+ * this on purpose: it is a promise to whoever holds the key, while a limit is
+ * the operator's own ceiling on their own installation.
  */
 export function useSetKeyLimits(): UseMutationResult<
   ApiKeySummary,
@@ -587,6 +589,26 @@ export function useSetKeyLimits(): UseMutationResult<
   const client = useQueryClient();
   return useMutation({
     mutationFn: ({ id, limits }) => put<ApiKeySummary>(`/api/keys/${id}/limits`, { limits }),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
+  });
+}
+
+/**
+ * Replaces one key's model allowlist.
+ *
+ * The other field on a key that is editable after minting, for the same reason
+ * as the matrix: an allowlist that cannot be adjusted without minting a new key
+ * and redeploying every client is one that gets set to unrestricted instead.
+ */
+export function useSetKeyModels(): UseMutationResult<
+  ApiKeySummary,
+  Error,
+  { id: string } & KeyModelsInput
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, modelAllowlist }) =>
+      put<ApiKeySummary>(`/api/keys/${id}/models`, { modelAllowlist }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
   });
 }

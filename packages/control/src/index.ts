@@ -83,6 +83,7 @@ export {
   listKeys,
   revokeKey,
   setKeyLimits,
+  setKeyModels,
 } from "./keys.ts";
 export {
   DOCKERENV_PATH,

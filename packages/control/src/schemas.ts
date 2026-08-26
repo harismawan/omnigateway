@@ -144,7 +144,8 @@ export const keyCreateSchema = z
   .strict();
 
 /**
- * The one part of a key that may be edited after it is minted.
+ * One of the two parts of a key that may be edited after it is minted — the
+ * matrix here, the model allowlist in `keyModelsSchema` below.
  *
  * Sent whole rather than as a patch: `limits` is one JSON document, `{}` is a
  * meaningful value, and a partial body would have to distinguish "leave this
@@ -157,6 +158,25 @@ export const keyCreateSchema = z
  * the operator's own ceiling on their own installation.
  */
 export const keyLimitsSchema = z.object({ limits: limitConfigSchema }).strict();
+
+/**
+ * The other part of a key that may be edited after it is minted.
+ *
+ * Sent whole rather than as a patch, for the same reason the matrix is:
+ * `null` (every model) and `[]` (none) are both meaningful values, so a
+ * partial body would have to distinguish "leave this alone" from each of them
+ * in a shape where absent already means something. A caller that wants to add
+ * one model reads the summary and sends the array back.
+ *
+ * Deliberately not defaulted, unlike at creation: an edit that forgot the field
+ * must fail loudly rather than pick one of the two opposite facts for itself.
+ */
+export const keyModelsSchema = z
+  .object({
+    /** Null means every configured model; an empty array denies all of them. */
+    modelAllowlist: z.array(z.string().min(1)).nullable(),
+  })
+  .strict();
 
 /**
  * How many database snapshots to keep, and for how long.

@@ -437,6 +437,58 @@ test("a malformed limit matrix is refused rather than stored", async () => {
   expect((await store.keys.list())[0]?.limits).toEqual({ requests: { "1m": 60 } });
 });
 
+/**
+ * Models are the other part of a key that is editable after minting, for the
+ * same reason the matrix is: an allowlist that cannot be adjusted without
+ * minting a new key and redeploying every client is one that gets set to
+ * unrestricted instead. `null` (every model) and `[]` (none) are distinct
+ * facts and both must survive the write.
+ */
+test("a key's allowed models are editable behind admin auth, and the list is replaced whole", async () => {
+  const { call, store } = await harness();
+  const created = (await (
+    await call("POST", "/api/keys", { label: "cli", modelAllowlist: ["fast"] })
+  ).json()) as { id: string };
+
+  expect((await call("PUT", `/api/keys/${created.id}/models`, {}, false)).status).toBe(401);
+
+  const saved = await call("PUT", `/api/keys/${created.id}/models`, {
+    modelAllowlist: ["fast", "smart"],
+  });
+  expect(saved.status).toBe(200);
+  expect(((await saved.json()) as { modelAllowlist: string[] }).modelAllowlist).toEqual([
+    "fast",
+    "smart",
+  ]);
+  expect((await store.keys.list())[0]?.modelAllowlist).toEqual(["fast", "smart"]);
+
+  // [] denies every model; null restores unrestricted. Neither may silently
+  // become the other.
+  await call("PUT", `/api/keys/${created.id}/models`, { modelAllowlist: [] });
+  expect((await store.keys.list())[0]?.modelAllowlist).toEqual([]);
+
+  await call("PUT", `/api/keys/${created.id}/models`, { modelAllowlist: null });
+  expect((await store.keys.list())[0]?.modelAllowlist).toBeNull();
+});
+
+test("a malformed models body is refused rather than stored", async () => {
+  const { call, store } = await harness();
+  const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as {
+    id: string;
+  };
+
+  for (const body of [
+    // Absent is not "unrestricted": an edit must say which fact it means.
+    {},
+    { modelAllowlist: "fast" },
+    { modelAllowlist: [""] },
+    { modelAllowlist: ["fast"], label: "sneaking a second field past" },
+  ]) {
+    expect((await call("PUT", `/api/keys/${created.id}/models`, body)).status).toBe(400);
+  }
+  expect((await store.keys.list())[0]?.modelAllowlist).toBeNull();
+});
+
 test("an api key is revoked rather than deleted, so usage keeps its attribution", async () => {
   const { call, store } = await harness();
   const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as {

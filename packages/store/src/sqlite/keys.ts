@@ -128,6 +128,17 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       ]);
     },
 
+    async setModelAllowlist(id: string, modelAllowlist: string[] | null) {
+      db.run("UPDATE api_keys SET model_allowlist = ? WHERE id = ?", [
+        // Same encoding as `create`. No parse guard here, unlike `limits`: any
+        // JSON array of names reads back fine, and an entry no configured model
+        // matches simply denies those requests — per-request fail closed, not
+        // the whole-key lockout the limits guard exists to prevent.
+        modelAllowlist === null ? null : JSON.stringify(modelAllowlist),
+        id,
+      ]);
+    },
+
     async revoke(id: string) {
       db.run("UPDATE api_keys SET revoked_at = ? WHERE id = ?", [Date.now(), id]);
     },
