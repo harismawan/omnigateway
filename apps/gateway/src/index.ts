@@ -271,7 +271,6 @@ async function main(): Promise<void> {
     broadcaster,
     ring: streamRing,
     channels: pluginChannels,
-    discoveryMirrors: config.exposeClaudeCodeAliases,
     bodyLoggingAllowed: config.bodyLoggingAllowed,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
     pluginUi: loadedPlugins.plugins,

@@ -464,7 +464,6 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
 | `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](#recording-bodies) |
-| `OMNI_EXPOSE_CLAUDE_CODE_ALIASES` | No | off | Advertises the reserved `claude/*` aliases on `/v1/models`. Read at boot |
 | `OMNI_ROOT` | No | the installation in the current directory, else `~/.config/omnigateway` | Which installation the CLI acts on, when `--root` is not passed |
 | `OMNI_PLUGIN_REGISTRY` | No | the public npm registry | Registry `omni plugin install <name>` resolves through; must be `https://` |
 

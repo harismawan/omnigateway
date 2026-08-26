@@ -114,7 +114,6 @@ export const setupClaude: Command = {
       models,
       {
         baseUrl: baseUrl(ctx),
-        discoveryMirrors: ctx.config().exposeClaudeCodeAliases,
         ...(key === undefined ? {} : { apiKey: key }),
       },
       mapping,

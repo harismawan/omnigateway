@@ -17,15 +17,6 @@ export type Config = {
    */
   staticDir: string | null;
   /**
-   * Whether `GET /v1/models` also advertises `claude/<id>` discovery mirrors.
-   *
-   * Claude Code's model picker lists only ids beginning with `claude` or
-   * `anthropic`, so without this a pool named `opus` or `gpt-5.6-sol` never
-   * appears there however well it routes. Off by default: an installation whose
-   * clients are not Claude Code should not have its catalog doubled.
-   */
-  exposeClaudeCodeAliases: boolean;
-  /**
    * Whether this installation is permitted to capture request and response
    * bodies at all.
    *
@@ -97,10 +88,6 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const staticDir = env.OMNI_STATIC_DIR?.trim();
   const logFile = env.OMNI_LOG_FILE?.trim();
 
-  const exposeClaudeCodeAliases = TRUTHY.has(
-    (env.OMNI_EXPOSE_CLAUDE_CODE_ALIASES ?? "").trim().toLowerCase(),
-  );
-
   const bodyLoggingAllowed = TRUTHY.has((env.OMNI_BODY_LOGGING_ALLOWED ?? "").trim().toLowerCase());
 
   // Deliberately not fatal, unlike OMNI_PORT: a typo in a log level is not a
@@ -118,7 +105,6 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     encryptionKey,
     baseUrl,
     staticDir: staticDir === undefined || staticDir.length === 0 ? null : staticDir,
-    exposeClaudeCodeAliases,
     bodyLoggingAllowed,
     logFile: logFile === undefined || logFile.length === 0 ? null : logFile,
   };

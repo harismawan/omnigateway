@@ -36,8 +36,6 @@ export const KEY_PLACEHOLDER = "<your OmniGateway key>";
 
 export type SetupInput = {
   baseUrl: string;
-  /** Whether Claude Code discovery mirrors are exposed by `/v1/models`. */
-  discoveryMirrors?: boolean;
   /** Defaults to a placeholder: a generated file with a live key in it ends up in a screenshot. */
   apiKey?: string;
 };
@@ -100,8 +98,7 @@ export function claudeSettings(
   const ids = new Set(described.map(({ model }) => model.id));
   const visibleId = (slot: keyof AgentModelMapping, id: string): string => {
     if (!ids.has(id)) throw new Error(`${slot} names unknown virtual model "${id}"`);
-    const useMirror = input.discoveryMirrors === true && !/^(?:claude|anthropic)/i.test(id);
-    return useMirror ? `claude/${id}` : id;
+    return id;
   };
 
   const settings = settingsObject(existing);

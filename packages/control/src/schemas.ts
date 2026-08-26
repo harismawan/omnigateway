@@ -146,18 +146,7 @@ const targetSchema = z.discriminatedUnion("provider", [
 ]);
 
 export const modelSchema = z.object({
-  // `claude/` is reserved: `GET /v1/models` advertises a mirror of every pool
-  // under that prefix for Claude Code's picker, and ingress unwinds it again on
-  // the way in. A pool that took the namespace would be shadowed by its own
-  // mirror rule and become unaddressable, which is worth refusing at the point
-  // it is named rather than discovering as a routing failure.
-  id: z
-    .string()
-    .min(1)
-    .refine((value) => !value.toLowerCase().startsWith("claude/"), {
-      message:
-        'model id must not start with "claude/": that prefix is reserved for discovery mirrors',
-    }),
+  id: z.string().min(1),
   strategy: z.enum(["score", "priority", "roundRobin", "weighted"]),
   isAlias: z.boolean(),
   targets: z.array(targetSchema).min(1, "a virtual model needs at least one target"),
