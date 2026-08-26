@@ -69,6 +69,12 @@ const targetSchema = z.discriminatedUnion("provider", [
       }),
       contextWindow: z.number().int().positive().optional(),
       maxOutputTokens: z.number().int().positive().optional(),
+      // Pins this target to one account. Absent means any credential of the
+      // provider; there is deliberately no check that the id names a live
+      // credential, matching the rule that removing an account must not make an
+      // unrelated edit unsavable. An empty string is refused because it is not
+      // a third state — it is an id nothing can ever match.
+      credentialId: z.string().trim().min(1).optional(),
       capabilities: z.object({
         tools: z.boolean(),
         images: z.boolean(),
@@ -92,6 +98,12 @@ const targetSchema = z.discriminatedUnion("provider", [
       }),
       contextWindow: z.number().int().positive().optional(),
       maxOutputTokens: z.number().int().positive().optional(),
+      // Pins this target to one account. Absent means any credential of the
+      // provider; there is deliberately no check that the id names a live
+      // credential, matching the rule that removing an account must not make an
+      // unrelated edit unsavable. An empty string is refused because it is not
+      // a third state — it is an id nothing can ever match.
+      credentialId: z.string().trim().min(1).optional(),
       capabilities: z.object({
         tools: z.boolean(),
         images: z.boolean(),

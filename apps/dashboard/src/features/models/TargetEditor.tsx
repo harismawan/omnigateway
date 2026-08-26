@@ -2,7 +2,7 @@ import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { RotateCcw, Trash2 } from "lucide-react";
 import { useId } from "react";
 import styled from "styled-components";
-import type { ProviderId } from "../../api/types.ts";
+import type { Credential, ProviderId } from "../../api/types.ts";
 import { PROVIDER_LABEL } from "../../theme/tokens.ts";
 import { Button, IconButton } from "../../ui/Button.tsx";
 import { Input, NumberInput, Select } from "../../ui/Field.tsx";
@@ -12,6 +12,8 @@ import {
   catalogPrices,
   catalogTokenLimits,
   type HeldAuths,
+  pinChoices,
+  pinNote,
   reachableChoices,
   retargetDraft,
   type TargetDraft,
@@ -91,6 +93,8 @@ export type TargetEditorProps = {
    * accounts are connected, not on the catalog alone.
    */
   held: HeldAuths;
+  /** Every connected account, filtered here to the ones this target could pin. */
+  credentials: readonly Credential[];
 };
 
 /**
@@ -106,11 +110,14 @@ export function TargetEditor({
   removable,
   endpoints,
   held,
+  credentials,
 }: TargetEditorProps) {
   const listId = useId();
   const catalog = PROVIDER_MODEL_CATALOG[target.provider];
   const choices = reachableChoices(target.provider, held);
   const unreachable = unreachableNote(target.provider, target.model, held);
+  const accounts = pinChoices(target.provider, credentials);
+  const danglingPin = pinNote(target.credentialId, target.provider, credentials);
 
   const set = <K extends keyof TargetDraft>(key: K, value: TargetDraft[K]) => {
     onChange({ ...target, [key]: value });
@@ -237,6 +244,35 @@ export function TargetEditor({
           />
         </Cell>
       </Cells>
+
+      <Stack $gap={1}>
+        <Cell>
+          <Legend as="label" htmlFor={`${listId}-account`}>
+            Account
+          </Legend>
+          <Select
+            id={`${listId}-account`}
+            value={target.credentialId}
+            onChange={(event) => set("credentialId", event.target.value)}
+          >
+            <option value="">Any account</option>
+            {accounts.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.label}
+              </option>
+            ))}
+            {/*
+              A pin outlives the account it names. Without this the select would
+              fall back to showing nothing selected, which reads as "any
+              account" — the opposite of what the target actually does.
+            */}
+            {danglingPin === null ? null : (
+              <option value={target.credentialId}>{target.credentialId} (removed)</option>
+            )}
+          </Select>
+          {danglingPin === null ? null : <Unreachable role="note">{danglingPin}</Unreachable>}
+        </Cell>
+      </Stack>
 
       <Stack $gap={1}>
         <Row $gap={2}>

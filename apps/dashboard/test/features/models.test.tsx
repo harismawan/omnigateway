@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { Target } from "../../src/api/types.ts";
 import {
   blankModel,
   blankTarget,
@@ -9,6 +10,7 @@ import {
   catalogTokenLimits,
   heldAuths,
   parseDraft,
+  pinNote,
   reachableChoices,
   retargetDraft,
   toDraft,
@@ -274,6 +276,57 @@ describe("per-model auth", () => {
   });
 });
 
+describe("pinning a target to one account", () => {
+  test("a new target is unpinned", () => {
+    // The normal state. Any account of the provider may serve it, which is what
+    // every model saved before pinning existed already means.
+    expect(blankTarget("anthropic").credentialId).toBe("");
+  });
+
+  test("an empty pin parses to no field rather than to an unmatchable id", () => {
+    const parsed = parseDraft({ ...blankModel(), id: "fast" });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect("credentialId" in (parsed.model.targets[0] ?? {})).toBe(false);
+  });
+
+  test("a pin survives the round trip", () => {
+    const pinned = model({
+      targets: [{ ...(model().targets[0] as Target), credentialId: "cred-2" }],
+    });
+    const parsed = parseDraft(toDraft(pinned));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.model).toEqual(pinned);
+  });
+
+  test("changing the provider drops the pin", () => {
+    // An Anthropic account cannot serve an OpenAI target, so carrying the id
+    // across would leave a pin the router can only report as `pin:missing`.
+    const pinned = { ...blankTarget("anthropic"), credentialId: "cred-1" };
+    expect(retargetDraft(pinned, { provider: "openai", model: "gpt-5.6-sol" }).credentialId).toBe(
+      "",
+    );
+  });
+
+  test("changing only the model keeps the pin", () => {
+    // Same provider, same account. Clearing here would silently undo the
+    // operator's choice on every keystroke in the model field.
+    const pinned = { ...blankTarget("anthropic"), credentialId: "cred-1" };
+    expect(
+      retargetDraft(pinned, { provider: "anthropic", model: "claude-haiku-4-5" }).credentialId,
+    ).toBe("cred-1");
+  });
+
+  test("the note names a pin no connected account can serve", () => {
+    const held = [credential({ id: "cred-1", provider: "anthropic", label: "claude-main" })];
+    expect(pinNote("cred-1", "anthropic", held)).toBeNull();
+    expect(pinNote("", "anthropic", held)).toBeNull();
+    expect(pinNote("cred-gone", "anthropic", held)).toBe(
+      "No connected account has this id. Requests routed here will fail rather than " +
+        "falling back to another account.",
+    );
+  });
+});
+
 function stubModels(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
     "GET /api/models": () => ({ models: [model(), model({ id: "deep", strategy: "priority" })] }),
@@ -379,6 +432,83 @@ describe("ModelsBoard", () => {
         model: "local-model",
       });
     });
+  });
+
+  test("a target can be pinned to one connected account", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({
+      "GET /api/credentials": () => ({
+        credentials: [
+          credential({ id: "cred-a", provider: "anthropic", accountEmail: "ops@example.com" }),
+          credential({ id: "cred-b", provider: "anthropic", accountEmail: "billing@example.com" }),
+          credential({ id: "cred-k", provider: "kimi", accountEmail: "kimi@example.com" }),
+        ],
+      }),
+      "PUT /api/models/fast": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    const account = (await screen.findByLabelText("Account")) as HTMLSelectElement;
+    // Only this provider's accounts. Pinning an Anthropic target to a Kimi
+    // account would be a pin the router can only report as missing.
+    expect(within(account).getByRole("option", { name: "billing@example.com" })).toBeTruthy();
+    expect(within(account).queryByRole("option", { name: "kimi@example.com" })).toBeNull();
+
+    await user.selectOptions(account, "cred-b");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body)).targets[0]).toMatchObject({
+        credentialId: "cred-b",
+      });
+    });
+  });
+
+  test("an unpinned target sends no account at all", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({
+      "GET /api/credentials": () => ({
+        credentials: [credential({ id: "cred-a", provider: "anthropic" })],
+      }),
+      "PUT /api/models/fast": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const target = JSON.parse(String(put?.init?.body)).targets[0];
+      // Absent, not "": the control schema refuses the empty string, so sending
+      // one would turn the default state of every target into a failed save.
+      expect("credentialId" in target).toBe(false);
+    });
+  });
+
+  test("a pin at a since-removed account is shown rather than silently dropped", async () => {
+    stubModels({
+      "GET /api/models": () => ({
+        models: [
+          model({
+            targets: [{ ...(model().targets[0] as Target), credentialId: "cred-gone" }],
+          }),
+        ],
+      }),
+      "GET /api/credentials": () => ({
+        credentials: [credential({ id: "cred-a", provider: "anthropic" })],
+      }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    expect(
+      await screen.findByText(
+        /No connected account has this id\. Requests routed here will fail rather than/,
+      ),
+    ).toBeTruthy();
   });
 
   test("adding a target and saving includes it", async () => {

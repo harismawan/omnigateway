@@ -154,6 +154,57 @@ test("models show prices every token class, not just input and output", async ()
   expect(shown.out).toContain("10.00");
 });
 
+test("models show names the account a target is pinned to", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        credentialId: "cred-finance",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      {
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tier: 2,
+        weight: 1,
+        costPerMTok: { input: 3, output: 15 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const shown = await cli(["models", "show", "billed"], { root });
+  expect(shown.code).toBe(0);
+  // A pin sends every request for that target to one account and fails rather
+  // than falling back, so "why is one account serving everything" has to be
+  // answerable from here.
+  expect(shown.out).toContain("ACCOUNT");
+  expect(shown.out).toContain("cred-finance");
+  // The unpinned sibling says so rather than leaving a blank cell that reads
+  // like a rendering fault.
+  expect(shown.out).toContain("any");
+});
+
+test("models show leaves out the account column when nothing is pinned", async () => {
+  const root = await installation();
+  await cli(["models", "put", "fast", "--from-catalog", "anthropic:claude-opus-5"], { root });
+
+  const shown = await cli(["models", "show", "fast"], { root });
+  expect(shown.code).toBe(0);
+  // The common case. A column of "any" on every row would widen an already
+  // wide table to say nothing.
+  expect(shown.out).not.toContain("ACCOUNT");
+});
+
 test("models show marks a price the target does not name", async () => {
   const root = await installation();
   const store = await openStore(root);

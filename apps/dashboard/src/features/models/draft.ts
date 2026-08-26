@@ -42,6 +42,16 @@ export type TargetDraft = {
    */
   contextWindow: string;
   maxOutputTokens: string;
+  /**
+   * The one account allowed to serve this target, or empty for any account of
+   * the provider.
+   *
+   * Empty is the normal state. A pin is hard at routing — an account that is
+   * disabled, breakered or out of quota fails the request instead of spilling
+   * to a sibling — so this is the operator saying which account, not which
+   * account first.
+   */
+  credentialId: string;
   tools: boolean;
   images: boolean;
   reasoning: boolean;
@@ -203,6 +213,43 @@ export function unreachableNote(
   );
 }
 
+/** The accounts that could serve a target on this provider, for the pin picker. */
+export function pinChoices(
+  provider: ProviderId,
+  credentials: readonly Credential[],
+): ReadonlyArray<{ id: string; label: string }> {
+  return credentials
+    .filter((credential) => credential.provider === provider)
+    .map((credential) => ({
+      id: credential.id,
+      label: credential.accountEmail ?? credential.label,
+    }));
+}
+
+/**
+ * Why a pin cannot be served, or null when it can.
+ *
+ * A saved pin outlives the account it names — removing a credential is not
+ * refused, and neither is saving a model that still mentions it — so the editor
+ * has to say what the router will do rather than hide the id or drop it.
+ *
+ * States the consequence, like `unreachableNote`, and states it in full: the
+ * failure is the point of a pin, and an operator who reads "will fail" without
+ * "rather than falling back" may reasonably assume the gateway covers for it.
+ */
+export function pinNote(
+  credentialId: string,
+  provider: ProviderId,
+  credentials: readonly Credential[],
+): string | null {
+  if (credentialId.length === 0) return null;
+  if (pinChoices(provider, credentials).some((choice) => choice.id === credentialId)) return null;
+  return (
+    "No connected account has this id. Requests routed here will fail rather than " +
+    "falling back to another account."
+  );
+}
+
 /**
  * Points a target at a different model, and settles what carries across.
  *
@@ -216,6 +263,11 @@ export function unreachableNote(
  *
  * A model the catalog does not list keeps whatever prices are in the fields:
  * there is nothing better to put there.
+ *
+ * A pin is cleared on a provider change and kept otherwise. An account belongs
+ * to one provider, so carrying it across leaves a pin that can only ever report
+ * `pin:missing`; clearing it on a model change instead would undo the
+ * operator's choice on every keystroke in the model field.
  */
 export function retargetDraft(
   target: TargetDraft,
@@ -225,6 +277,7 @@ export function retargetDraft(
     ...target,
     ...next,
     ...(catalogPrices(next.provider, next.model) ?? {}),
+    ...(next.provider === target.provider ? {} : { credentialId: "" }),
     contextWindow: "",
     maxOutputTokens: "",
   };
@@ -253,6 +306,9 @@ export function blankTarget(provider: ProviderId = "anthropic"): TargetDraft {
     // serves it. Filling these in would freeze one of those two answers.
     contextWindow: "",
     maxOutputTokens: "",
+    // Any account of the provider, which is what every model saved before
+    // pinning existed already means.
+    credentialId: "",
     tools: true,
     images: true,
     reasoning: true,
@@ -289,6 +345,7 @@ export function toDraft(model: VirtualModel): ModelDraft {
           : String(target.costPerMTok.cacheWrite1h),
       contextWindow: target.contextWindow === undefined ? "" : String(target.contextWindow),
       maxOutputTokens: target.maxOutputTokens === undefined ? "" : String(target.maxOutputTokens),
+      credentialId: target.credentialId ?? "",
       tools: target.capabilities.tools,
       images: target.capabilities.images,
       reasoning: target.capabilities.reasoning,
@@ -310,6 +367,7 @@ export function parseDraft(draft: ModelDraft): Parsed {
   for (const [index, target] of draft.targets.entries()) {
     const position = `Target ${index + 1}`;
     const endpointId = target.endpointId.trim();
+    const credentialId = target.credentialId.trim();
     if (target.provider === "custom" && endpointId.length === 0) {
       return { ok: false, problem: `${position} needs a custom endpoint.` };
     }
@@ -390,6 +448,9 @@ export function parseDraft(draft: ModelDraft): Parsed {
       },
       ...(hasContext ? { contextWindow } : {}),
       ...(hasMaxOutput ? { maxOutputTokens } : {}),
+      // Omitted rather than sent empty: the control schema refuses "" because
+      // it is an id nothing matches, not a third state between pinned and not.
+      ...(credentialId.length > 0 ? { credentialId } : {}),
       capabilities: { tools: target.tools, images: target.images, reasoning: target.reasoning },
     });
   }

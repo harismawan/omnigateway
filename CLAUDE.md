@@ -319,6 +319,21 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   a gauge — leak lock the key out until restart, silently.
 - `ApiKeySummary.limitUsage` count committed rows only: floor on what limiter see, never its number.
   `concurrency.used` is `null`, not `0`, because gauge not stored.
+- `Target.credentialId` pin one account to one target, and it is **filter state, not strategy**. Set
+  mean that account alone serve the target; unset mean any account of the provider. No `"pinned"`
+  strategy exist and none should be added — strategy decide order, pin decide membership, and two
+  places deciding the same thing is how they come to disagree. Pin is **hard**: disabled, breakered,
+  rate-limited or quota-spent pinned account fail the request, never spill to sibling. Pin check sit
+  **after** the provider and `endpointId` checks, so it narrow membership and never widen it; a pin
+  naming another provider's account is unseen, not a way around those checks. Non-matching accounts
+  skipped silently — one `excluded` row per sibling would bury the reasons describing the pinned
+  account itself — but a pin matching nothing emit exactly one `pin:missing`, else the request fail
+  with an empty exclusion list. Nothing validate the id at write time, same exemption `putModel`
+  give stored targets: removing an account must not make unrelated edit unsavable. Control schema
+  refuse `""` because it is an id nothing match, not a third state, so dashboard **omit** the field
+  rather than send empty. `retargetDraft` clear the pin on provider change only — clearing on model
+  change undo the operator's choice on every keystroke, keeping it across providers leave a pin only
+  ever reportable as missing.
 - `ProviderModelChoice.auth` enforced at write time in `putModel`, never at routing. Which ways in
   exist is installation state, so catalog export the fact (`catalogModelAuths`) and control own the
   rule. Provider with no credential is unknown rather than blocked, unlisted model unknown rather

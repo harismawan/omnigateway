@@ -75,6 +75,101 @@ test("pairs custom targets only with credentials for the same endpoint", () => {
   expect(pairs.map((pair) => pair.credential.id)).toEqual(["matching"]);
 });
 
+test("a pinned target pairs only with the credential it names", () => {
+  const pinned = credential({ id: "pinned", provider: "anthropic" });
+  const other = credential({ id: "other", provider: "anthropic" });
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ credentialId: "pinned" })]),
+    snapshot: snapshot({ credentials: [pinned, other] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs.map((pair) => pair.credential.id)).toEqual(["pinned"]);
+  // An account the pin excludes is not a rejected candidate — it was never one,
+  // the same as a credential for another provider. Recording it would bury the
+  // reasons that describe the pinned account itself.
+  expect(excluded).toHaveLength(0);
+});
+
+test("a pin is hard: an ineligible pinned account does not spill to another", () => {
+  const pinned = credential({ id: "pinned", provider: "anthropic", enabled: false });
+  const other = credential({ id: "other", provider: "anthropic" });
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ credentialId: "pinned" })]),
+    snapshot: snapshot({ credentials: [pinned, other] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs).toHaveLength(0);
+  // The pinned account's own reason survives, so the operator learns why rather
+  // than only that nothing was left.
+  expect(excluded).toEqual([
+    { credentialId: "pinned", model: "claude-opus-4", reason: "disabled" },
+  ]);
+});
+
+test("a pin naming no existing credential reports itself", () => {
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ credentialId: "deleted" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "other", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs).toHaveLength(0);
+  // Without this row the request fails with nothing in `excluded` explaining
+  // why, which is the one case where the silent skip above costs the answer.
+  expect(excluded).toEqual([
+    { credentialId: "deleted", model: "claude-opus-4", reason: "pin:missing" },
+  ]);
+});
+
+test("an unpinned target in the same model is unaffected by a sibling's pin", () => {
+  const pinned = credential({ id: "pinned", provider: "anthropic" });
+  const other = credential({ id: "other", provider: "anthropic" });
+  const { pairs } = eligible({
+    request: req,
+    model: model([
+      target({ model: "claude-opus-4", credentialId: "pinned" }),
+      target({ model: "claude-sonnet-4" }),
+    ]),
+    snapshot: snapshot({ credentials: [pinned, other] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs.map((pair) => `${pair.target.model}:${pair.credential.id}`).sort()).toEqual([
+    "claude-opus-4:pinned",
+    "claude-sonnet-4:other",
+    "claude-sonnet-4:pinned",
+  ]);
+});
+
+test("a pin does not rescue a credential the provider filter already rejects", () => {
+  // The pin names a credential of the wrong provider. It must not become a way
+  // to route an Anthropic target through a Kimi account.
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ credentialId: "k" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "k", provider: "kimi" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs).toHaveLength(0);
+  expect(excluded).toEqual([{ credentialId: "k", model: "claude-opus-4", reason: "pin:missing" }]);
+});
+
 test("excludes disabled credentials", () => {
   const { pairs, excluded } = eligible({
     request: req,

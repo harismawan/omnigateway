@@ -63,6 +63,12 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
             (cap) => need[cap] && !target.capabilities[cap],
           );
 
+    // Whether the account a pinned target names was reachable at all. Set once
+    // the pin matches a credential that already cleared the provider and
+    // endpoint checks, so a pin at another provider's account counts as unseen
+    // rather than as a way around those checks.
+    let pinSeen = false;
+
     for (const credential of snapshot.credentials) {
       if (credential.provider !== target.provider) continue;
       if (
@@ -71,6 +77,11 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
       ) {
         continue;
       }
+      // Silent, like the two checks above: an account the pin excludes was
+      // never a candidate for this target, and recording one row per sibling
+      // would bury the reasons that describe the pinned account itself.
+      if (target.credentialId !== undefined && credential.id !== target.credentialId) continue;
+      pinSeen = target.credentialId !== undefined;
 
       const drop = (reason: string): void => {
         excluded.push({ credentialId: credential.id, model: target.model, reason });
@@ -126,6 +137,17 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
       }
 
       pairs.push({ credential, target });
+    }
+
+    // A pin at an account that was deleted, or that belongs to another
+    // provider, drops every credential silently and would otherwise fail the
+    // request with nothing in `excluded` to explain it.
+    if (target.credentialId !== undefined && !pinSeen) {
+      excluded.push({
+        credentialId: target.credentialId,
+        model: target.model,
+        reason: "pin:missing",
+      });
     }
   }
 

@@ -115,7 +115,7 @@ flowchart LR
   vm["virtual model<br/><b>fast</b>"] --> targets["targets<br/>credential × model"]
 
   targets --> filter{eligible?}
-  filter -- no --> excl["<b>excluded</b>, with reason<br/>capability mismatch · disabled<br/>expired, no refresh token<br/>provider said 429 · breaker open"]
+  filter -- no --> excl["<b>excluded</b>, with reason<br/>capability mismatch · disabled<br/>expired, no refresh token<br/>provider said 429 · breaker open<br/>pin names no live account"]
   filter -- yes --> score
 
   subgraph score["score — six normalized terms"]
@@ -137,6 +137,8 @@ flowchart LR
 Exclusion reading *provider said 429* is `credential_health.rate_limited_until` — upstream account this gateway routing around, set from provider's own `Retry-After`. Not the key limit above, not the quota-probe cooldown either. Three unrelated things in this codebase called rate limit, sitting at three scopes — gateway key, provider credential, probe loop — and only first is policy an operator authors.
 
 Weights shown are defaults, configurable. Request carrying Anthropic-defined tool excluded from every non-Anthropic target at filter stage — why it fails at routing with requirement named, rather than quietly losing tool. Breaker cooldown scales with consecutive failures.
+
+Target may name one account in `credentialId`, and then only that account serve it. Pin is hard and lives at filter stage, not in ranking: account that is disabled, breakered, rate-limited or out of quota fail the request rather than spill to sibling. Operator pin for billing separation or per-account agreement, and silent spillover defeat both — so no strategy exist for it, because strategy decide order and pin decide membership. Accounts pin exclude are skipped silently, same as accounts of wrong provider; pin naming no live account of that provider is reported once, as `pin:missing`, because otherwise request fail with nothing in exclusion list to explain it. Nothing validate the id at write time: removing account must not make unrelated edit of model that mention it unsavable, same rule `putModel` already follow for auth.
 
 Nothing here thrown away: exclusion list with reasons is exactly what `omni models dry-run` prints.
 

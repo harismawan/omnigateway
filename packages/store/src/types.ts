@@ -314,6 +314,22 @@ type TargetBase = {
   contextWindow?: number | undefined;
   maxOutputTokens?: number | undefined;
   capabilities: { tools: boolean; images: boolean; reasoning: boolean };
+  /**
+   * Serve this target from one named account only.
+   *
+   * Absent is the normal state and means any credential of the target's
+   * provider. Set narrows the router's filter to that credential alone, and the
+   * pin is hard: an account that is disabled, breakered, rate-limited or out of
+   * quota fails the request rather than spilling to a sibling. An operator pins
+   * for billing separation or a per-account agreement, and silent spillover is
+   * the one outcome that defeats both.
+   *
+   * A pin naming a credential that no longer exists is left alone rather than
+   * refused at write time, for the same reason `putModel` exempts a stored
+   * target from the auth rule: removing an account must not make an unrelated
+   * edit unsavable. It surfaces at routing as `pin:missing`.
+   */
+  credentialId?: string | undefined;
 };
 
 export type Target = TargetBase & {
