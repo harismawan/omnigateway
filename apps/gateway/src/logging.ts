@@ -142,25 +142,79 @@ export async function beginLog(
   log: Omit<RequestLog, "state">,
   keyId: string | null,
   logger: Logger = noopLogger,
+  broadcast?: Invalidator,
 ): Promise<void> {
+  let began = false;
   try {
     await store.usage.begin({ ...log, state: "pending", apiKeyId: keyId });
+    began = true;
   } catch (error) {
     report(logger, "failed to record request start", log.id, error);
   }
+
+  /**
+   * The other half of `res:logs`, and the reason a request is visible while it
+   * is still running.
+   *
+   * A pushed topic replaces polling rather than supplementing it: once the
+   * socket declares `res:logs` pushed, `cadence` returns `false` and the logs
+   * page refetches on nothing else. So every transition that changes the list
+   * has to emit, not just the one that finishes it — the console used to see
+   * pending rows because polling did not care *why* the list changed, and an
+   * emitter only on completion silently traded that away. A row first appearing
+   * when it completes is a row that was never shown running.
+   *
+   * `res:logs` alone, deliberately. `finishLog` pairs it with `res:usage`
+   * because tokens and cost have just been counted; nothing has been counted
+   * here, and the row carries placeholder zeros, so a usage refetch would
+   * re-read numbers that have not moved.
+   *
+   * Gated on the write landing, and wrapped, for the same two reasons
+   * `finishLog` is: an invalidation claims a refetch will show something new,
+   * and a request must never fail because a frame could not be queued.
+   */
+  if (began && broadcast !== undefined) {
+    try {
+      broadcast.invalidate("res:logs");
+    } catch (error) {
+      report(logger, "failed to publish a resource invalidation", log.id, error);
+    }
+  }
 }
 
-/** Records the target once routing picks one, without completing the request. */
+/**
+ * Records the target once routing picks one, without completing the request.
+ *
+ * Reached on **failover**: the first target is written by `beginLog`, and this
+ * rewrites the row when dispatch moves to another candidate. That is a change
+ * to the list the console is showing, so it invalidates for the same reason
+ * `beginLog` does — on a pushed topic nothing polls, and a row that keeps
+ * naming the account which already failed is one an operator reads as the cause
+ * of a request that is in fact being retried elsewhere.
+ */
 export async function routeLog(
   store: Store,
   requestId: string,
   target: { provider: ProviderId; model: string; credentialId: string },
   logger: Logger = noopLogger,
+  broadcast?: Invalidator,
 ): Promise<void> {
+  let routed = false;
   try {
     await store.usage.route(requestId, target);
+    routed = true;
   } catch (error) {
     report(logger, "failed to record request route", requestId, error);
+  }
+
+  // Same gate and same wrapping as `beginLog`: only when the row actually
+  // changed, and never able to fail the request it describes.
+  if (routed && broadcast !== undefined) {
+    try {
+      broadcast.invalidate("res:logs");
+    } catch (error) {
+      report(logger, "failed to publish a resource invalidation", requestId, error);
+    }
   }
 }
 

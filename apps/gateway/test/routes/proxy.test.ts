@@ -1750,10 +1750,17 @@ function invalidations(): Invalidator & { topics: string[] } {
   return { topics, invalidate: (topic) => void topics.push(topic) };
 }
 
-test("a completed request invalidates usage and logs once, streaming and not", async () => {
-  // The success path's `finishLog`, reached from the `log()` closure. Both
-  // shapes of request end there, and a streaming one ends there from
-  // `sseResponse`'s run-once completion rather than from the handler body.
+test("a request invalidates logs when it starts and again when it finishes", async () => {
+  // Two `finishLog` shapes end here — a streaming one from `sseResponse`'s
+  // run-once completion rather than from the handler body — and both are
+  // preceded by `beginLog`.
+  //
+  // The leading `res:logs` is what makes an in-flight request visible. The
+  // console stops polling a pushed topic, so a request that emitted only on
+  // completion appeared for the first time already finished, and the logs
+  // page's count of what is running sat at zero on a busy gateway. Order is
+  // asserted, not just membership: the start frame arriving after the finish
+  // one would describe the row as pending when it is not.
   const stream = invalidations();
   const { call } = await harness(EVENTS, { broadcaster: stream });
 
@@ -1762,7 +1769,7 @@ test("a completed request invalidates usage and logs once, streaming and not", a
     max_tokens: 100,
     messages: [{ role: "user", content: "hi" }],
   });
-  expect(stream.topics).toEqual(["res:usage", "res:logs"]);
+  expect(stream.topics).toEqual(["res:logs", "res:usage", "res:logs"]);
 
   const streamed = await call("/v1/messages", {
     model: "fast",
@@ -1772,7 +1779,14 @@ test("a completed request invalidates usage and logs once, streaming and not", a
   });
   await streamed.text();
 
-  expect(stream.topics).toEqual(["res:usage", "res:logs", "res:usage", "res:logs"]);
+  expect(stream.topics).toEqual([
+    "res:logs",
+    "res:usage",
+    "res:logs",
+    "res:logs",
+    "res:usage",
+    "res:logs",
+  ]);
 });
 
 test("a request that failed before dispatch invalidates from the terminal catch", async () => {

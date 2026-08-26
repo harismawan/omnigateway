@@ -423,8 +423,15 @@ is the one operator watch for; trailing alone put floor of latency on idle gatew
 the case socket was added for. Floor 1s for `res:usage` and `res:logs`, 5s for `res:quota` and
 `res:credentials`, all in one place so they readable against each other.
 
-Emitters sit where state change, each already at-most-once: `finishLog` for `res:usage` and
-`res:logs` (same reason usage debit and `RequestCompleted` live there), admin mutation handlers,
+Emitters sit where state change, and must cover **every** change to what a topic name, because push
+replace polling rather than supplement it: panel refetch a pushed topic on nothing else, so a
+transition emitting nothing is one nobody see. Request log change three times — `beginLog` when row
+appear, `routeLog` when failover rewrite its target, `finishLog` when it complete — and all three
+emit `res:logs`. Only `finishLog` also emit `res:usage`, because only there has anything been
+counted. Shipping with the completion emitter alone made in-flight request invisible until it was no
+longer in flight.
+
+Other emitters, each already at-most-once: admin mutation handlers,
 quota poller at pass completion, OAuth sweep when it touched a row, database swap for global
 invalidate. Swap emit only on success — telling every console to refetch against store that did not
 come back is worse than telling it nothing.
