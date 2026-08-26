@@ -1,8 +1,9 @@
-import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
+import { GatewayError } from "@omni/ir";
 import { httpError } from "../http.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeCustomChat, decodeCustomResponses } from "./decode.ts";
+import { customDescriptor } from "./descriptor.ts";
 import { toCustomChatWire, toCustomResponsesWire } from "./wire.ts";
 
 type Protocol = "chat_completions" | "responses";
@@ -39,7 +40,7 @@ function endpointUrl(origin: string, basePath: string, protocol: Protocol): stri
 
 export const customAdapter: ProviderAdapter = {
   id: "custom",
-  capabilities: PROVIDER_CAPABILITIES.custom,
+  capabilities: customDescriptor.capabilities,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const apiKey = req.credentials.apiKey;

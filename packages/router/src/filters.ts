@@ -1,5 +1,5 @@
 import type { ChatRequest, ProviderCapabilities } from "@omni/ir";
-import { ANTHROPIC_NATIVE_TOOLS } from "@omni/ir";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type CredentialView, servesTarget, type Target } from "@omni/store/types";
 import { healthKey } from "./snapshot.ts";
 import type { Excluded, RankInput } from "./types.ts";
@@ -57,7 +57,7 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
     // it, not by a setting an operator could switch on for a provider that
     // cannot honour it.
     const missing =
-      needNative && !ANTHROPIC_NATIVE_TOOLS[target.provider]
+      needNative && !PROVIDER_DESCRIPTORS[target.provider].anthropicNativeTools
         ? "anthropicTools"
         : (["tools", "images", "reasoning"] as const).find(
             (cap) => need[cap] && !target.capabilities[cap],

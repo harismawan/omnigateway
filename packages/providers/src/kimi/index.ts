@@ -1,10 +1,11 @@
-import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
+import { GatewayError } from "@omni/ir";
 import { BODY_ORDER, orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
 import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeChat } from "./decode.ts";
+import { kimiDescriptor } from "./descriptor.ts";
 import { kimiDeviceHeaders } from "./device.ts";
 import { toChatWire } from "./wire.ts";
 
@@ -12,7 +13,7 @@ const BASE_URL = "https://api.kimi.com/coding/v1/chat/completions";
 
 export const kimiAdapter: ProviderAdapter = {
   id: "kimi",
-  capabilities: PROVIDER_CAPABILITIES.kimi,
+  capabilities: kimiDescriptor.capabilities,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const { body, degradations } = toChatWire(req.request, req.model);
