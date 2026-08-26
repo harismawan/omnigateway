@@ -4,6 +4,7 @@ import {
   type ReactNode,
   use,
   useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -21,10 +22,21 @@ import { type LiveConnection, LiveProvider } from "./live.tsx";
  * The console's one push socket, and the only place this app opens one.
  *
  * One connection per tab, multiplexed over topics — see
- * `apps/gateway/src/stream/protocol.ts` for the frames. Two things hang off it:
- * `res:*` frames become `invalidateQueries` calls, and the connection's own
- * state becomes the `LiveConnection` that `cadence(ms, topic)` reads to decide
+ * `apps/gateway/src/stream/protocol.ts` for the frames. Three things hang off
+ * it: `res:*` frames become `invalidateQueries` calls, `stream:*` frames are
+ * handed to whoever is rendering that topic, and the connection's own state
+ * becomes the `LiveConnection` that `cadence(ms, topic)` reads to decide
  * whether a topic still needs polling.
+ *
+ * ## Two payload classes, and the split is deliberate
+ *
+ * A `res:*` frame says a resource changed and carries nothing, so both push and
+ * poll end in the same fetch and cannot disagree. A `stream:*` frame carries
+ * the thing itself, because a log has no resource to re-read — a delta is not
+ * addressable and refetching a whole window per line is the cost the ring
+ * exists to avoid. That second class is only safe because it is sequenced: the
+ * ring answers `gap` rather than handing back a partial replay, and a `gap`
+ * drops the subscriber back onto the REST read. Nothing here ever stitches.
  *
  * ## Polling is not turned off; it is out-voted, per topic, per render
  *
@@ -89,7 +101,22 @@ function streamUrl(): string {
 /** The subset of `ClientFrame` this console sends. It never publishes. */
 type ClientFrame = { type: "subscribe"; topic: string; sinceSeq?: number };
 
-type ServerFrame = { type: string; topic?: string; seq?: number };
+type ServerFrame = { type: string; topic?: string; seq?: number; payload?: unknown };
+
+/**
+ * What a `stream:*` subscriber is handed.
+ *
+ * The two answers the ring gives, and there is no third: either the frames that
+ * were missed, or an explicit admission that they are gone. A subscriber that
+ * was handed `gap` must drop whatever it accumulated rather than append past
+ * it — `apps/gateway/src/stream/ring.ts` carries the same sentence from the
+ * other end.
+ *
+ * `payload` stays `unknown` here. This module multiplexes topics and knows what
+ * none of them mean; the panel that subscribed is the one place that can say
+ * what a well-formed frame on its own topic looks like.
+ */
+export type TopicMessage = { kind: "frame"; payload: unknown } | { kind: "gap" };
 
 /**
  * Reads one server frame, or `null` when it is not one.
@@ -98,6 +125,11 @@ type ServerFrame = { type: string; topic?: string; seq?: number };
  * gives on the other side: a `seq` that arrived as a string and was coerced
  * would replay from a point nobody asked for, and a wrong replay point is
  * indistinguishable at this end from the gap the protocol promises to report.
+ *
+ * `payload` is the exception and is passed through untouched, because its shape
+ * is per-topic. Presence is what is recorded — `"payload" in record` rather
+ * than `payload !== undefined` — so a topic whose frame legitimately carries
+ * `null` stays distinguishable from a `res:*` frame that carries nothing.
  */
 function readFrame(data: unknown): ServerFrame | null {
   if (typeof data !== "string") return null;
@@ -117,14 +149,22 @@ function readFrame(data: unknown): ServerFrame | null {
     type,
     ...(typeof topic === "string" ? { topic } : {}),
     ...(typeof seq === "number" ? { seq } : {}),
+    ...("payload" in record ? { payload: record.payload } : {}),
   };
 }
+
+/** Hands one topic's frames to a mounted component. Returns an unsubscribe. */
+export type TopicSubscribe = (
+  topic: string,
+  listener: (message: TopicMessage) => void,
+) => () => void;
 
 type StreamClient = {
   subscribe: (listener: () => void) => () => void;
   snapshot: () => LiveConnection;
   /** Opens the socket. The returned function closes it and cancels any retry. */
   start: () => () => void;
+  onStream: TopicSubscribe;
 };
 
 type StreamClientDeps = {
@@ -140,6 +180,8 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
   const acked = new Set<string>();
   /** Highest `seq` seen per `stream:*` topic, which is what replay resumes from. */
   const seen = new Map<string, number>();
+  /** Who is rendering which `stream:*` topic. Empty for a topic nobody has mounted. */
+  const readers = new Map<string, Set<(message: TopicMessage) => void>>();
 
   let drops: number[] = [];
   let socket: WebSocket | null = null;
@@ -171,6 +213,18 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
 
   function send(frame: ClientFrame): void {
     socket?.send(JSON.stringify(frame));
+  }
+
+  /**
+   * Hands a message to whoever is rendering the topic, and says whether anyone
+   * was. The copy is not defensive tidiness: a listener may unsubscribe from
+   * inside its own handler when a panel unmounts on the frame it just received.
+   */
+  function deliver(topic: string, message: TopicMessage): boolean {
+    const listeners = readers.get(topic);
+    if (listeners === undefined || listeners.size === 0) return false;
+    for (const listener of [...listeners]) listener(message);
+    return true;
   }
 
   function subscribeAll(): void {
@@ -231,7 +285,13 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
     if (frame.type === "gap") {
       // Never stitch a hole. The ring told us what it no longer has, so the
       // panel re-reads the resource whole, which is the same fetch a poll does.
+      //
+      // Both halves run, and neither is the other's fallback: the reader is
+      // told to drop what it accumulated, *and* the cache is marked stale so
+      // the read that replaces it actually happens. A reader that only dropped
+      // its lines would show a shorter console and call it current.
       if (frame.seq !== undefined) seen.set(topic, frame.seq);
+      deliver(topic, { kind: "gap" });
       invalidateTopic(deps.client, topic);
       return;
     }
@@ -242,6 +302,19 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
       return;
     }
     if (frame.seq !== undefined) seen.set(topic, frame.seq);
+
+    // A frame that carries its own content goes to whoever is rendering it, and
+    // that is the whole point of the `stream:*` class: no refetch, and the ring
+    // rather than the interval decides what was missed.
+    //
+    // With nobody mounted there is no one to hand it to, and the lines in it are
+    // gone for good — so the cache is marked stale instead and the board that
+    // mounts next re-reads the window rather than resuming inside one it never
+    // saw. That costs nothing until then: react-query's default `refetchType`
+    // is `"active"`, and an unmounted query has no observer to refetch.
+    if (frame.payload !== undefined && deliver(topic, { kind: "frame", payload: frame.payload })) {
+      return;
+    }
     invalidateTopic(deps.client, topic);
   }
 
@@ -304,6 +377,18 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
       };
     },
     snapshot: () => current,
+    onStream(topic, listener) {
+      const listeners = readers.get(topic) ?? new Set<(message: TopicMessage) => void>();
+      readers.set(topic, listeners);
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+        // Dropped rather than left empty, because `deliver` reads emptiness as
+        // "nobody is rendering this" and an empty set left behind would answer
+        // the same — but a leaked set per topic per remount would not.
+        if (listeners.size === 0) readers.delete(topic);
+      };
+    },
     start() {
       running = true;
       connect();
@@ -321,6 +406,16 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
 }
 
 const StreamContext = createContext<LiveConnection | null>(null);
+
+/**
+ * How a panel reaches its topic's frames.
+ *
+ * A second context rather than a field on `LiveConnection`, because that object
+ * is rebuilt on every transition to defeat `useSyncExternalStore`'s identity
+ * bail-out — a subscribe function carried on it would change identity per
+ * transition and re-subscribe every reader on every drop.
+ */
+const TopicContext = createContext<TopicSubscribe | null>(null);
 
 /**
  * What a component sees with no socket above it: polling, which is exactly what
@@ -361,11 +456,43 @@ export function StreamProvider({
   }, [client, enabled]);
 
   const connection = useSyncExternalStore(client.subscribe, client.snapshot, client.snapshot);
-  return <StreamContext value={connection}>{children}</StreamContext>;
+  return (
+    <StreamContext value={connection}>
+      <TopicContext value={client.onStream}>{children}</TopicContext>
+    </StreamContext>
+  );
 }
 
 export function useStreamConnection(): LiveConnection {
   return use(StreamContext) ?? NO_SOCKET;
+}
+
+/**
+ * Receives one `stream:*` topic's frames for as long as the caller is mounted.
+ *
+ * With no socket above it this subscribes to nothing and the caller sees no
+ * frames — which is the state every board test in this suite runs in, and the
+ * state a degraded tab runs in. A panel is therefore only ever allowed to treat
+ * push as an *addition* to what it reads over REST; one that rendered frames
+ * alone would show an empty screen there, and `test/helpers/render.tsx` says
+ * why that default is worth keeping.
+ *
+ * `onMessage` is read through a ref rather than depended on, so a panel may pass
+ * a fresh closure per render — which it must, since the filter and page size a
+ * frame has to be judged against are ordinary component state.
+ */
+export function useStreamTopic(topic: string, onMessage: (message: TopicMessage) => void): void {
+  const subscribe = use(TopicContext);
+  const latest = useRef(onMessage);
+
+  useEffect(() => {
+    latest.current = onMessage;
+  });
+
+  useEffect(() => {
+    if (subscribe === null) return undefined;
+    return subscribe(topic, (message) => latest.current(message));
+  }, [subscribe, topic]);
 }
 
 /**

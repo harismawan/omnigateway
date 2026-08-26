@@ -1,14 +1,18 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import styled from "styled-components";
 import { CONSOLE_CADENCE_MS, useConsole } from "../../api/queries.ts";
 import type { ConsoleLine, ConsoleResponse } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount } from "../../lib/format.ts";
+import { CONSOLE_TOPIC, invalidateTopic } from "../../session/invalidation.ts";
 import { useLive } from "../../session/live.tsx";
+import { useStreamTopic } from "../../session/stream.tsx";
 import { Select } from "../../ui/Field.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Muted, Row } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
+import { keepLevel, readConsoleFrame } from "./pushedLines.ts";
 
 const LIMITS = [100, 200, 500] as const;
 const LEVELS = [
@@ -121,24 +125,100 @@ function SourceHint({ read }: { read: ConsoleResponse }) {
   return null;
 }
 
-/** The gateway's own output: what the process is doing, not what clients asked for. */
+/**
+ * Deltas received over `stream:console`, tagged with the REST read they sit on
+ * top of. Tagged rather than bare, because the tag is what makes "this read has
+ * been replaced" a comparison during render instead of a clearing effect.
+ */
+type Pushed = { read: ConsoleResponse | undefined; lines: ConsoleLine[] };
+
+/** Stable identities, so a render with nothing appended is not a new array. */
+const NO_LINES: ConsoleLine[] = [];
+const NOTHING_PUSHED: Pushed = { read: undefined, lines: NO_LINES };
+
+/**
+ * The gateway's own output: what the process is doing, not what clients asked
+ * for.
+ *
+ * ## What is on screen is a REST window plus the deltas pushed since
+ *
+ * `useConsole` is the whole truth up to the instant it was served, and the only
+ * truth when the socket is degraded, refused, or absent. `stream:console`
+ * frames are appended to it, never rendered instead of it — a panel fed by
+ * frames alone is blank on every installation whose log capture is `none`, and
+ * blank on the third drop of any other.
+ *
+ * The accumulated deltas therefore belong to the read they were appended to,
+ * and are held beside it rather than beside nothing: that read is a window
+ * ending at its own moment, so anything pushed before it is already inside it
+ * and keeping both would print those lines twice. Comparing during render
+ * rather than clearing in an effect means the superseded deltas are never
+ * rendered even once — React's own "adjusting state when a prop changes", which
+ * is exactly this shape. react-query's structural sharing means an identical
+ * answer keeps its identity and supersedes nothing, so a poll that found no new
+ * output is not a flicker.
+ *
+ * ## Push and poll must not be able to disagree
+ *
+ * The gateway publishes deltas through the same `parseConsoleLines` the REST
+ * read uses, which settles parsing and selection. What it cannot settle is the
+ * *level filter*, because a frame is written once for every subscriber and this
+ * panel's filter is local state — so the gateway sends everything and the
+ * filtering happens here, against the ordering imported from `@omni/ir`. See
+ * `pushedLines.ts` for why that one comparison is restated rather than
+ * imported from `@omni/control`, which this app may not reach.
+ */
 export function ConsoleBoard() {
   const { cadence } = useLive();
+  const queryClient = useQueryClient();
   const [lines, setLines] = useState<number>(200);
   const [level, setLevel] = useState<string>("");
 
-  const consoleLog = useConsole(lines, level, cadence(CONSOLE_CADENCE_MS, "stream:console"));
+  const consoleLog = useConsole(lines, level, cadence(CONSOLE_CADENCE_MS, CONSOLE_TOPIC));
   const read = consoleLog.data;
-  const rows = read?.lines ?? [];
+  const [pushed, setPushed] = useState<Pushed>(NOTHING_PUSHED);
+  const appended = pushed.read === read ? pushed.lines : NO_LINES;
+  // Capped at the page size the operator chose, from the end — the number this
+  // panel already promises to show. The REST read arrives capped by the
+  // gateway; the appended half is what would otherwise grow without bound in a
+  // tab left open on a busy log overnight, so it is capped twice: once as it
+  // accumulates, and again here against the read it sits on top of.
+  const rows = useMemo(
+    () => [...(read?.lines ?? []), ...appended].slice(-lines),
+    [read, appended, lines],
+  );
   const terminalRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
 
+  useStreamTopic(CONSOLE_TOPIC, (message) => {
+    const incoming = message.kind === "frame" ? readConsoleFrame(message.payload) : null;
+    if (incoming === null) {
+      // A `gap`, or a frame that could not be read whole. Both mean the same
+      // thing — there is no honest way to append past this — and both are
+      // answered the same way: drop what was accumulated and let a full REST
+      // read supply the window. The socket already invalidated on a `gap`; a
+      // malformed frame is this end's own discovery, so it asks here.
+      setPushed({ read, lines: NO_LINES });
+      if (message.kind === "frame") invalidateTopic(queryClient, CONSOLE_TOPIC);
+      return;
+    }
+    const kept = incoming.filter((line) => keepLevel(line, level));
+    if (kept.length === 0) return;
+    // Through the updater rather than off `appended`, because two frames can
+    // land in one batch: the second would otherwise read a value from before
+    // the first and silently drop it.
+    setPushed((current) => ({
+      read,
+      lines: [...(current.read === read ? current.lines : []), ...kept].slice(-lines),
+    }));
+  });
+
   useLayoutEffect(() => {
     const terminal = terminalRef.current;
-    if (terminal !== null && followLatest.current && read !== undefined) {
+    if (terminal !== null && followLatest.current && rows.length > 0) {
       terminal.scrollTop = terminal.scrollHeight;
     }
-  }, [read]);
+  }, [rows]);
 
   return (
     <Board>

@@ -1,14 +1,17 @@
 import type { InvalidateQueryFilters, QueryClient } from "@tanstack/react-query";
 import { queryKeys } from "../api/queries.ts";
 
+/** The one `stream:*` topic this console holds. Named because three files spell it. */
+export const CONSOLE_TOPIC = "stream:console";
+
 /**
  * Which queries a pushed topic makes stale.
  *
  * The whole client half of the `res:*` contract is here: a frame says a
  * resource changed, this table says which cached queries that touches, and the
- * ordinary REST hooks fetch it again. Nothing renders a payload, which is what
- * keeps push and poll from ever disagreeing — both paths end in the same fetch
- * and the same serializer.
+ * ordinary REST hooks fetch it again. No `res:*` frame renders a payload, which
+ * is what keeps push and poll from ever disagreeing on those topics — both
+ * paths end in the same fetch and the same serializer.
  *
  * ## Prefixes, never enumerated keys
  *
@@ -45,17 +48,18 @@ export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
   // `["quota-history", credentialId, since, until]` — prefix again.
   "res:quota": { queryKey: ["quota-history"] },
   /**
-   * The one `stream:*` topic the console holds, and it is read as a change
-   * signal rather than as a payload: the frame says there is new output, the
-   * panel re-reads `/api/console` over REST exactly as it does when polling.
+   * The one `stream:*` topic the console holds, and the one entry here that is
+   * *not* what happens on an ordinary frame.
    *
-   * That is only affordable because of an invariant this repository already
-   * holds elsewhere — stdout carries operational events, and per-request access
-   * lines are deliberately not restored to it. A topic that emitted once per
-   * proxied request would need a client-side floor before it could be read this
-   * way; this one does not.
+   * A log has no resource to re-read — the frame carries the lines themselves,
+   * and `ConsoleBoard` appends them. This entry is the other half of that
+   * contract: the answer for when the ring says it can no longer supply what
+   * this client missed. `gap` means there is a hole, a hole must never be
+   * stitched over silently, and the only honest repair is the whole-window read
+   * a poll would have done. It is also what a frame nobody is mounted to
+   * receive falls back to; `src/session/stream.tsx` decides between the two.
    */
-  "stream:console": { queryKey: ["console"] },
+  [CONSOLE_TOPIC]: { queryKey: ["console"] },
 };
 
 /** Sent on every connection when the database underneath was replaced. */
