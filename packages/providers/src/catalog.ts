@@ -6,6 +6,7 @@ import type {
   ProviderModelLimits,
   ProviderModelPricing,
 } from "./catalog-types.ts";
+import { CUSTOM_MODELS } from "./custom/models.ts";
 import { GROK_MODELS } from "./grok/models.ts";
 import { KILO_MODELS } from "./kilo/models.ts";
 import { KIMI_MODELS } from "./kimi/models.ts";
@@ -37,10 +38,7 @@ export const PROVIDER_MODEL_CATALOG = {
   kimi: KIMI_MODELS,
   kilo: KILO_MODELS,
   grok: GROK_MODELS,
-  // No catalog: the models an operator's own endpoint serves are not knowable
-  // from here. It is still the one provider with no way in but a key, which is
-  // exactly why `authTypes` is stated per provider and not read off `models`.
-  custom: { defaultModel: "", authTypes: ["apiKey"], models: [] },
+  custom: CUSTOM_MODELS,
 } as const satisfies Readonly<Record<ProviderId, ProviderModelCatalogEntry>>;
 
 /** The catalog's price for one provider model, or null if it is not listed. */
