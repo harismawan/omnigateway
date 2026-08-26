@@ -36,6 +36,7 @@ import {
   DEFAULT_FLOOR_MS,
   INVALIDATION_FLOORS,
 } from "./stream/broadcaster.ts";
+import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
 import { createCoalescer } from "./stream/coalescer.ts";
 import { createSocketRegistry, type SocketRegistry } from "./stream/registry.ts";
 import { createRing, type Ring } from "./stream/ring.ts";
@@ -139,6 +140,15 @@ export type AppDeps = {
   broadcaster?: Broadcaster;
   /** Replay buffer behind `stream:*`. Shares its lifetime with `broadcaster`. */
   ring?: Ring;
+  /**
+   * The `plugin:<id>:<name>` topics plugins have opened.
+   *
+   * Supplied by boot, because a plugin opens its channels inside `setup` and
+   * `loadPlugins` runs before this. An app built without one gets an empty
+   * registry, which is exactly what every test that mounts no plugins wants:
+   * every plugin topic is then a topic nobody opened, and refused.
+   */
+  channels?: ChannelRegistry;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -233,6 +243,7 @@ export function createApp(deps: AppDeps) {
   const latch = deps.latch ?? createQuiesceLatch();
 
   const registry = deps.registry ?? createSocketRegistry({ logger, now });
+  const channels = deps.channels ?? createChannelRegistry({ sockets: registry, logger });
   const ring = deps.ring ?? createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
   const broadcaster =
     deps.broadcaster ??
@@ -363,6 +374,7 @@ export function createApp(deps: AppDeps) {
         registry,
         broadcaster,
         ring,
+        channels,
         logger,
       }),
     )

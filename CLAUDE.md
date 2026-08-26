@@ -111,9 +111,15 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     not a sandbox** — plugin share gateway's process and can import past all of it. What it buy:
     accidental overreach impossible, plugin's intent auditable from manifest. Say that plainly
     wherever it come up; reader who believe otherwise make worse decisions than one who know.
-    `packages/plugin-api` stay pure like `ir`; loader, context, event bus live in `apps/gateway`.
-    Every load failure skipped and reported, never fatal: proxy path depend on no plugin and must
-    not become able to.
+    `packages/plugin-api` stay pure like `ir`; loader, context, event bus, channel registry live in
+    `apps/gateway`. Every load failure skipped and reported, never fatal: proxy path depend on no
+    plugin and must not become able to. `channels` capability give plugin `open(name)` and nothing
+    else — never a socket, upgrade request, header or `Principal`. Topic is `plugin:<id>:<name>`
+    with `<id>` from validated manifest, so plugin cannot name another plugin's topic, same rule
+    `{{name}}` follow for its tables. Registry answer what **exist**; `authorised` in
+    `routes/stream.ts` decide who may hold it, so opening channel never widen plugin's own reach.
+    Outbound frame reuse socket registry's own bounded per-connection queue — no second queue, and
+    nothing here touch `Store`.
 
 ## Adding a provider
 
@@ -401,6 +407,17 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   queue drops rather than grows. Anything needing exact accounting must reconcile from own storage.
   `RequestCompleted` emitted from `finishLog` because that already the one site running at most once
   per request id — same reason usage debit there.
+- Plugin channels carry same promise and one more. Client must **subscribe before it send**: plugin's
+  only way to answer is `send(connectionId, …)` on that topic, so frame from unsubscribed connection
+  is question whose answer have nowhere to land, and it refused rather than handed over. Plugin topic
+  nothing opened refused like `stream:*` topic nothing `declareStream`d, same reason — topic with no
+  owner must not read as topic that merely quiet. Channel registry build **before** `loadPlugins` in
+  `apps/gateway/src/index.ts`, because plugin open its channel inside `setup`; one built after leave
+  every plugin holding live-looking handle onto nothing. Route's `close` read `registry.topics(id)`
+  **before** `registry.remove(id)` — reverse it and every `onClose` handler go unfired, silently.
+  Throwing handler caught, counted per plugin, reported one batched line per plugin, never one per
+  failure, and never with error body: `LogFields` closed allowlist and that code authored outside
+  this repository.
 - Console externalise `react`, `react-dom`, `styled-components`, `@tanstack/react-query`,
   `@omnigateway/dashboard-sdk` and resolve them through import map, so console and every plugin
   share one instance; two React copies throw "invalid hook call".

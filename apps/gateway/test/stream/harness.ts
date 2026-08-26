@@ -1,5 +1,5 @@
 import { createAdminAuth } from "@omni/control";
-import { memoryStore } from "@omni/testkit";
+import { captureLogger, memoryStore } from "@omni/testkit";
 import { createApp } from "../../src/app.ts";
 import type { Broadcaster } from "../../src/stream/broadcaster.ts";
 import {
@@ -7,6 +7,7 @@ import {
   DEFAULT_FLOOR_MS,
   INVALIDATION_FLOORS,
 } from "../../src/stream/broadcaster.ts";
+import { type ChannelRegistry, createChannelRegistry } from "../../src/stream/channels.ts";
 import { createCoalescer, type Schedule } from "../../src/stream/coalescer.ts";
 import { createSocketRegistry, type SocketRegistry } from "../../src/stream/registry.ts";
 import { createRing, type Ring } from "../../src/stream/ring.ts";
@@ -27,6 +28,12 @@ export type StreamHarness = {
   registry: SocketRegistry;
   broadcaster: Broadcaster;
   ring: Ring;
+  /** The plugin channels this gateway knows about. Empty until a test opens one. */
+  channels: ChannelRegistry;
+  /** Everything the gateway logged, for the lines that are batched rather than per-event. */
+  logger: ReturnType<typeof captureLogger>;
+  /** Runs whatever is already due without advancing the clock. */
+  settle(): void;
   /** Advances the injected heartbeat clock and fires whatever is due. */
   beat(): Promise<void>;
   connect(headers?: Record<string, string>): Promise<TestSocket>;
@@ -72,11 +79,20 @@ export async function streamHarness(
     };
   };
 
+  const logger = captureLogger();
   const registry = createSocketRegistry({
+    logger,
     now: () => clock,
     schedule,
     heartbeatMs: over.heartbeatMs ?? 20_000,
     ...(over.pongDeadlineMs === undefined ? {} : { pongDeadlineMs: over.pongDeadlineMs }),
+  });
+  // The error report is drained by the same injected scheduler the heartbeat
+  // uses, so a test can assert one batched line rather than sleeping for it.
+  const channels = createChannelRegistry({
+    sockets: registry,
+    logger,
+    scheduler: (run) => schedule(run, 0),
   });
   const ring = createRing({ frames: 100, bytes: 1024 * 1024 });
   const broadcaster = createBroadcaster({
@@ -101,7 +117,15 @@ export async function streamHarness(
   const admin = createAdminAuth(store, { now: () => Date.now(), sessionTtlMs: 12 * 3_600_000 });
   await admin.setInitialPassword(PASSWORD);
 
-  const app = createApp({ store, baseUrl: "http://localhost", registry, broadcaster, ring });
+  const app = createApp({
+    store,
+    baseUrl: "http://localhost",
+    registry,
+    broadcaster,
+    ring,
+    channels,
+    logger,
+  });
   app.listen({ port: 0, hostname: "127.0.0.1", idleTimeout: 255 });
   const server = app.server;
   if (server === null) throw new Error("app did not start listening");
@@ -131,6 +155,20 @@ export async function streamHarness(
     registry,
     broadcaster,
     ring,
+    channels,
+    logger,
+
+    settle() {
+      // Fires what is already due without moving the clock. The batched channel
+      // error report is scheduled at zero delay, so a test asserting one line
+      // per plugin would otherwise have to buy a whole heartbeat to see it.
+      for (const timer of timers) {
+        if (!timer.cancelled && timer.at <= clock) {
+          timer.cancelled = true;
+          timer.run();
+        }
+      }
+    },
 
     async beat() {
       clock += over.heartbeatMs ?? 20_000;
@@ -198,6 +236,7 @@ export async function streamHarness(
       for (const item of open) item.socket.close();
       registry.stop();
       broadcaster.stop();
+      channels.stop();
       await app.stop(true);
       store.close();
     },

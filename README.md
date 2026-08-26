@@ -727,6 +727,11 @@ ID       NAME               VERSION  API  SDK     CAPABILITIES                  
 pokemon  Pokémon Companion  1.0.0    1    ^1.0.0  storage,files,net:outbound,…    ok
 ```
 
+The capabilities a manifest may declare are `storage`, `files`, `net:outbound`,
+`events:request`, `events:limit` and `channels` — the last being namespaced
+topics on the gateway's push socket, which a plugin owns without ever touching a
+connection. Anything a plugin did not declare is absent from what it is handed.
+
 A plugin that would *not* load is listed with the reason rather than hidden,
 because a plugin missing from the console is exactly what you are trying to
 explain. For one plugin's full detail — its entry points and the outbound

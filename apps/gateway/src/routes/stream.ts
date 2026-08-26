@@ -3,6 +3,7 @@ import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import { Elysia } from "elysia";
 import type { Broadcaster } from "../stream/broadcaster.ts";
 import { GLOBAL_INVALIDATE } from "../stream/broadcaster.ts";
+import type { ChannelRegistry } from "../stream/channels.ts";
 import { parseClientFrame, type ServerFrame, topicClass } from "../stream/protocol.ts";
 import type { Credential, Principal, SocketRegistry } from "../stream/registry.ts";
 import type { Ring } from "../stream/ring.ts";
@@ -13,6 +14,7 @@ export type StreamDeps = {
   registry: SocketRegistry;
   broadcaster: Broadcaster;
   ring: Ring;
+  channels: ChannelRegistry;
   logger?: Logger;
   connectionId?: () => string;
 };
@@ -20,18 +22,30 @@ export type StreamDeps = {
 /**
  * Whether a principal may hold a topic.
  *
- * An admin sees the whole console, which is every `res:*` and every `stream:*`
- * the host declared. Plugin topics are refused here and granted by the plugin
- * channel registry instead, which is the only thing that knows what a given
- * plugin is allowed to hand out.
+ * An admin sees the whole console, which is every `res:*`, every `stream:*` the
+ * host declared, and every plugin channel that has been opened — the console
+ * renders plugin panels, and a panel that could not subscribe to its own
+ * plugin's channel would be a capability granted to nobody.
+ *
+ * A plugin topic nothing has opened is refused whoever asks. That is the same
+ * rule `stream:*` follows through `declared`, and for the same reason: a topic
+ * with no owner behind it must not look to a client like one that is merely
+ * quiet. Note the direction — the channel registry says what *exists*, and this
+ * function says who may hold it. A plugin therefore cannot widen its own reach
+ * by opening a channel.
  */
-function authorised(principal: Principal, topic: string): boolean {
+function authorised(channels: ChannelRegistry, principal: Principal, topic: string): boolean {
   const kind = topicClass(topic);
   if (kind === null) return false;
-  if (principal.kind === "admin") return kind === "res" || kind === "stream";
-  // The machine arm is unreachable until `plugin_machine_tokens` exists. When
-  // it does, a machine token reaches its own plugin's topics and nothing else.
-  return kind === "plugin" && topic.startsWith(`plugin:${principal.pluginId}:`);
+  if (kind === "plugin") {
+    if (!channels.opened(topic)) return false;
+    if (principal.kind === "admin") return true;
+    // The machine arm is unreachable until `plugin_machine_tokens` exists. When
+    // it does, a machine token reaches its own plugin's topics and nothing else.
+    return topic.startsWith(`plugin:${principal.pluginId}:`);
+  }
+  // Everything that is not a plugin channel belongs to the console alone.
+  return principal.kind === "admin";
 }
 
 /**
@@ -135,7 +149,7 @@ export function streamRoutes(deps: StreamDeps) {
 
         const head = frame.id === undefined ? {} : { id: frame.id };
 
-        if (!authorised(principal, frame.topic)) {
+        if (!authorised(deps.channels, principal, frame.topic)) {
           send(ws, { ...head, type: "error", topic: frame.topic, message: "not permitted" });
           return;
         }
@@ -147,10 +161,29 @@ export function streamRoutes(deps: StreamDeps) {
         }
 
         if (frame.type === "send") {
-          // Client-to-server payloads belong to plugin channels, which are not
-          // wired yet. Refusing is the honest answer; silently accepting would
-          // let a client believe it had sent something.
-          send(ws, { ...head, type: "error", topic: frame.topic, message: "topic is read-only" });
+          // Client-to-server payloads exist for plugin channels and nowhere
+          // else. `res:*` and `stream:*` are host-owned and one-directional, and
+          // silently accepting a payload on one would let a client believe it
+          // had sent something.
+          if (topicClass(frame.topic) !== "plugin") {
+            send(ws, { ...head, type: "error", topic: frame.topic, message: "topic is read-only" });
+            return;
+          }
+          if (!deps.channels.deliver(frame.topic, id, frame.payload)) {
+            // Authorised above, so the channel exists: what is missing is the
+            // subscription. Refused rather than accepted because the plugin's
+            // only way to answer publishes on this topic, so a frame from an
+            // unsubscribed connection is a question whose answer has nowhere to
+            // land.
+            send(ws, {
+              ...head,
+              type: "error",
+              topic: frame.topic,
+              message: "subscribe before sending",
+            });
+            return;
+          }
+          send(ws, { ...head, type: "ack", topic: frame.topic });
           return;
         }
 
@@ -191,6 +224,10 @@ export function streamRoutes(deps: StreamDeps) {
       close(ws) {
         const id = ids.get(ws.raw);
         if (id === undefined) return;
+        // Read before `remove`, which is what detaches the topic set. Reversing
+        // these two leaves every `onClose` handler unfired and nothing to say
+        // so — the plugin simply never learns the connection ended.
+        deps.channels.closed(id, deps.registry.topics(id));
         deps.registry.remove(id);
         ids.delete(ws.raw);
         logger.debug("stream closed", {});

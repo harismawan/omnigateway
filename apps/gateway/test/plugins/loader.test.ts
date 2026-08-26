@@ -8,6 +8,18 @@ import { captureLogger } from "@omni/testkit";
 import { PLUGIN_API_VERSION } from "@omnigateway/plugin-api";
 import { createPluginEventBus } from "../../src/plugins/events.ts";
 import { loadPlugins } from "../../src/plugins/loader.ts";
+import { createChannelRegistry } from "../../src/stream/channels.ts";
+
+/**
+ * A channel registry over no sockets.
+ *
+ * These tests are about what the loader hands over, not about what reaches a
+ * client, so the socket slice answers "nobody holds anything" — which is what a
+ * gateway with no connections answers too.
+ */
+function channelRegistry() {
+  return createChannelRegistry({ sockets: { topics: () => [], sendTo: () => {} } });
+}
 
 let dir = "";
 let root = "";
@@ -59,7 +71,11 @@ async function plugin(fixture: Fixture): Promise<void> {
 
 function load() {
   const bus = createPluginEventBus({});
-  return loadPlugins({ root, store, events: bus, sdkVersion: "1.0.0" }).finally(() => bus.stop());
+  const channels = channelRegistry();
+  return loadPlugins({ root, store, events: bus, channels, sdkVersion: "1.0.0" }).finally(() => {
+    bus.stop();
+    channels.stop();
+  });
 }
 
 test("a well-formed plugin loads and reports its routes", async () => {
@@ -189,6 +205,7 @@ test("a plugin receives exactly the capabilities it declared, and no others", as
             files: ctx.files !== undefined,
             net: ctx.net !== undefined,
             events: ctx.events !== undefined,
+            channels: ctx.channels !== undefined,
           } }),
         }] };
       },
@@ -200,7 +217,51 @@ test("a plugin receives exactly the capabilities it declared, and no others", as
   expect(handler).toBeDefined();
   if (handler === undefined) return;
   const response = await handler({ params: {}, query: {}, body: null });
-  expect(response.json).toEqual({ storage: true, files: false, net: false, events: false });
+  expect(response.json).toEqual({
+    storage: true,
+    files: false,
+    net: false,
+    events: false,
+    channels: false,
+  });
+});
+
+test("a plugin channel is namespaced with the host's plugin id, not the plugin's claim", async () => {
+  // The plugin supplies the second half of a topic and never the first. Keying
+  // the namespace off anything the plugin controls — a name from the manifest,
+  // an argument to `open` — is how one plugin claims another's topic, which is
+  // the socket-side shape of the storage-prefix rule.
+  const registry = createChannelRegistry({ sockets: { topics: () => [], sendTo: () => {} } });
+  await plugin({
+    id: "chatty",
+    manifest: { capabilities: ["channels"] },
+    // The plugin tries to reach out of its namespace two ways: by naming
+    // another plugin outright, and by prefixing a colon-separated segment.
+    server: `export default {
+      setup(ctx) {
+        ctx.channels.open("session");
+        ctx.channels.open("other:session");
+        return {};
+      },
+    };`,
+  });
+
+  const bus = createPluginEventBus({});
+  const result = await loadPlugins({
+    root,
+    store,
+    events: bus,
+    channels: registry,
+    sdkVersion: "1.0.0",
+  }).finally(() => bus.stop());
+
+  expect(result.failures).toEqual([]);
+  expect(registry.opened("plugin:chatty:session")).toBe(true);
+  expect(registry.opened("plugin:chatty:other:session")).toBe(true);
+  // Neither call reached anyone else's namespace, and the topic the second one
+  // was reaching for does not exist.
+  expect(registry.opened("plugin:other:session")).toBe(false);
+  registry.stop();
 });
 
 test("declaring one event capability does not hand over the other", async () => {
@@ -301,8 +362,12 @@ async function logFrom(body: string): Promise<ReturnType<typeof captureLogger>> 
   await plugin({ id: "talker", server: body });
   const logger = captureLogger();
   const bus = createPluginEventBus({});
-  await loadPlugins({ root, store, events: bus, sdkVersion: "1.0.0", logger }).finally(() =>
-    bus.stop(),
+  const channels = channelRegistry();
+  await loadPlugins({ root, store, events: bus, channels, sdkVersion: "1.0.0", logger }).finally(
+    () => {
+      bus.stop();
+      channels.stop();
+    },
   );
   return logger;
 }
@@ -386,13 +451,18 @@ test("a relative plugin root still loads, because that is what the gateway passe
   process.chdir(dirname(root));
   try {
     const bus = createPluginEventBus({});
+    const channels = channelRegistry();
     const loaded = await loadPlugins({
       // Relative, exactly as the gateway builds it.
       root: basename(root),
       store,
       events: bus,
+      channels,
       sdkVersion: "1.0.0",
-    }).finally(() => bus.stop());
+    }).finally(() => {
+      bus.stop();
+      channels.stop();
+    });
 
     expect(loaded.failures).toEqual([]);
     expect(loaded.plugins.map((p) => p.id)).toEqual(["relative"]);

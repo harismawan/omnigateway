@@ -22,6 +22,7 @@ import { createPluginEventBus } from "./plugins/events.ts";
 import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
 import { createBroadcaster, DEFAULT_FLOOR_MS, INVALIDATION_FLOORS } from "./stream/broadcaster.ts";
+import { createChannelRegistry } from "./stream/channels.ts";
 import { createCoalescer } from "./stream/coalescer.ts";
 import { startConsoleStream } from "./stream/console.ts";
 import { createSocketRegistry } from "./stream/registry.ts";
@@ -195,10 +196,27 @@ async function main(): Promise<void> {
   // log line reading `path=plugins` is what made this take an hour to find.
   const pluginRoot = resolve(installRoot, "plugins");
   const pluginEvents = createPluginEventBus({ logger });
+
+  /**
+   * Built here rather than inside `createApp` so teardown can reach it.
+   *
+   * The registry has to close every socket *before* `app.stop()`: that call is
+   * not forceful, so an open connection otherwise holds the drain for the whole
+   * `STOP_DEADLINE_MS`.
+   *
+   * It is built *before* the loader rather than beside the ring and the
+   * broadcaster below, because a plugin opens its channels inside `setup` — and
+   * a channel registry constructed afterwards would hold none of them while
+   * every plugin held a live-looking handle onto nothing.
+   */
+  const streamRegistry = createSocketRegistry({ logger, now });
+  const pluginChannels = createChannelRegistry({ sockets: streamRegistry, logger });
+
   const loadedPlugins = await loadPlugins({
     root: pluginRoot,
     store,
     events: pluginEvents,
+    channels: pluginChannels,
     sdkVersion: DASHBOARD_SDK_VERSION,
     logger,
     now,
@@ -210,14 +228,6 @@ async function main(): Promise<void> {
   }
   logger.info("plugins resolved", { count: loadedPlugins.plugins.length, path: pluginRoot });
 
-  /**
-   * Built here rather than inside `createApp` so teardown can reach it.
-   *
-   * The registry has to close every socket *before* `app.stop()`: that call is
-   * not forceful, so an open connection otherwise holds the drain for the whole
-   * `STOP_DEADLINE_MS`.
-   */
-  const streamRegistry = createSocketRegistry({ logger, now });
   const streamRing = createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
   const broadcaster = createBroadcaster({
     registry: streamRegistry,
@@ -247,6 +257,7 @@ async function main(): Promise<void> {
     registry: streamRegistry,
     broadcaster,
     ring: streamRing,
+    channels: pluginChannels,
     discoveryMirrors: config.exposeClaudeCodeAliases,
     bodyLoggingAllowed: config.bodyLoggingAllowed,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
@@ -327,6 +338,10 @@ async function main(): Promise<void> {
         streamRegistry.closeAll(1001, "restart");
         streamRegistry.stop();
         broadcaster.stop();
+        // After the registry, because it holds a pending error report and
+        // nothing else: a plugin handler running against a closed socket is the
+        // failure this ordering avoids, not one it would create.
+        pluginChannels.stop();
       },
     ],
     stopServer: async () => {

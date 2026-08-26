@@ -54,6 +54,52 @@ export type PluginFiles = {
 export type PluginFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 /**
+ * One message a client sent on a channel.
+ *
+ * `connectionId` is an opaque handle the host assigned, and deliberately the
+ * only thing a plugin ever learns about the far end: no socket, no upgrade
+ * request, no header, no principal — the same posture as `PluginRequest`, and
+ * for the same reason. It is meaningful until `onClose` reports it and
+ * meaningless afterwards; it is not an identity and two connections from the
+ * same operator share nothing.
+ */
+export type PluginChannelMessage = { connectionId: string; payload: unknown };
+
+/**
+ * One named channel on the gateway's push socket, owned by the plugin that
+ * opened it.
+ *
+ * The wire topic is `plugin:<id>:<name>` and the `<id>` half is supplied by the
+ * host from the manifest, never by the plugin — so a name cannot be chosen that
+ * reaches into another plugin's namespace, and a plugin never writes a prefix,
+ * exactly as it never writes its own table prefix.
+ *
+ * Delivery is best-effort in both directions and bounded: a subscriber that
+ * cannot keep up drops frames rather than growing a queue. Nothing here is
+ * durable and nothing is replayed, which is the same promise the event bus
+ * makes.
+ */
+export type PluginChannel = {
+  /** Called for each client frame on this channel. A handler that throws costs it that message. */
+  onMessage(handler: (message: PluginChannelMessage) => void): void;
+  /** Pushes a payload to one connection. A connection that is gone is a no-op, never an error. */
+  send(connectionId: string, payload: unknown): void;
+  /** Called when a connection holding this channel goes away. */
+  onClose(handler: (connectionId: string) => void): void;
+};
+
+export type PluginChannels = {
+  /**
+   * Opens — or re-opens — the channel named `name`.
+   *
+   * Called from `setup`. A name outside `^[a-z0-9][a-z0-9:._-]{0,63}$` throws,
+   * which skips the plugin and is reported like any other setup failure: a
+   * channel a client can never name is a channel that would look merely quiet.
+   */
+  open(name: string): PluginChannel;
+};
+
+/**
  * A request as a plugin route handler sees it.
  *
  * Deliberately not Elysia's context, and deliberately not a raw `Request`. The
@@ -117,6 +163,7 @@ export type PluginContext = {
   files?: PluginFiles;
   net?: PluginFetch;
   events?: PluginEvents;
+  channels?: PluginChannels;
   /** The plugin's own settings, seeded from the manifest's `defaults`. */
   config: Readonly<Record<string, unknown>>;
 };

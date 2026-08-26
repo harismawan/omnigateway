@@ -437,6 +437,19 @@ ones behind it, because on `stream:*` sequence is the contract. Past queue capac
 — on transport whose point is currency, newest is one worth keeping — counted, and reported once per
 tick rather than once per drop.
 
+Third class `plugin:<id>:<name>` sit in either of the two, owned by plugin through `channels`
+capability. Plugin receive `open(name)` and nothing more — no socket, no upgrade request, no header,
+no `Principal` — and `<id>` come from manifest host validated against directory name, so plugin
+supply tail of topic and never head. Split load-bearing: channel registry answer what **exist**,
+`authorised` decide who may hold it, so opening channel never widen plugin's own reach. Admin
+principal may hold any opened plugin topic, because console render plugin panel; machine arm reach
+its own plugin's prefix alone. Topic nothing opened refused exactly like `stream:*` topic nothing
+declared. Outbound frame go through same per-connection queue as everything else, so bound and drop
+behaviour below is the only one that exist. Client must subscribe before it send: plugin's only way
+to answer publish on that topic, so frame from unsubscribed connection is question whose answer have
+nowhere to land. Handler that throw caught, counted per plugin, reported one batched line — same
+shape plugin event bus use, same reason.
+
 Latch not gate `/api/stream`, same rule keeping `/api/*` and `/health` live through restore. Socket
 stay open across database swap: repo methods forward per call, so no connection hold handle a swap
 invalidate, and global invalidate emit after `reopen()`.
@@ -482,6 +495,7 @@ flowchart LR
   ctx --> files["files → &lt;root&gt;/plugins/&lt;id&gt;/data/"]
   ctx --> net["net:outbound → declared origins only"]
   ctx --> events["events:request · events:limit"]
+  ctx --> channels["channels → plugin:&lt;id&gt;:&lt;name&gt; topics on /api/stream"]
   ctx --> ui["UI bundle at /plugin-assets/&lt;id&gt;/…"]
 
   skip -.-> serving(["gateway serves either way<br/><i>the proxy path depends on no plugin</i>"])
