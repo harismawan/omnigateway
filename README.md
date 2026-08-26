@@ -402,6 +402,53 @@ supervisor; use `omni restart` from a terminal there. Shutdown is offered in
 every shape. In a container it is a one-way door: bring the process back from
 the host.
 
+### Behind a reverse proxy
+
+Set `OMNI_BASE_URL` to the public HTTPS origin, or OAuth callbacks come back to
+the wrong host.
+
+Beyond that, two things travel badly through a proxy, and both are streams.
+Client responses on `/v1/*` are server-sent events, and the console keeps one
+WebSocket open on `/api/stream`. Neither is optional: buffer the first and every
+token of an agent's reply arrives at once at the end, and drop the second and
+the console silently falls back to polling.
+
+Caddy and Cloudflare pass WebSockets and unbuffered responses by default and
+need nothing. nginx needs telling:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:9000;
+    proxy_http_version 1.1;
+
+    # Without these two the Upgrade handshake never reaches the gateway and the
+    # console shows LIVE·POLL instead of LIVE·PUSH. It keeps working — the
+    # fallback exists for exactly this — but you paid for a socket you are not
+    # getting.
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # The socket's heartbeat is 20s and it gives up on a missed pong at 60s.
+    # A read timeout below that closes a healthy connection from the outside,
+    # and the console reconnects in a loop that looks like an unstable gateway.
+    proxy_read_timeout 300s;
+
+    # SSE must not be buffered. The gateway already sends
+    # `x-accel-buffering: no` on streaming responses, which nginx honours on its
+    # own, so this line is belt and braces for a proxy chain where something
+    # else strips that header before nginx sees it.
+    proxy_buffering off;
+}
+```
+
+The gateway sends downstream `: keepalive` comments on streaming responses
+because provider heartbeats are decoded away, so an idle stream still looks
+alive to whatever sits in between. Keep any idle timeout in the proxy above
+your longest expected request.
+
 ## Configuration
 
 Configuration is environment variables, read from the installation's `.env`:

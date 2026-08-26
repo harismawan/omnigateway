@@ -1,7 +1,41 @@
 # WebSocket Transport — Design
 
 Date: 2026-08-22
-Status: Approved
+Status: Approved — implemented, with two recorded deviations
+
+## Deviations taken during implementation
+
+Both were decided deliberately and are recorded here rather than in a commit message, because the
+next reader of this file will otherwise find code that does not match it and assume the code is
+wrong.
+
+**1. Upgrade auth is admin-session only.** The endpoint section below offers a second arm — a bearer
+machine token from `plugin_machine_tokens` — but that table and its `routes:machine` capability come
+from [the remote control plugin design](2026-08-22-remote-control-plugin-design.md), which is marked
+*Draft — incomplete. Do not implement from this file.* Building it here would have front-run a design
+still being written. The connection principal is nevertheless the full discriminated union this
+document specifies, so the machine arm lands later as a different `revalidate` thunk with no change
+to the registry. Presenting both a bearer token and an admin cookie is already refused.
+
+**2. The SDK shipped as `0.1.2`, a patch, not the `0.2.0` minor named below.** The claim here that a
+pre-1.0 minor is the honest signal is wrong in a way `packages/plugin-api/src/version.ts:38-44`
+already recorded: `^0.1.0` desugars to `>=0.1.0 <0.2.0`, so `0.2.0` does not *ask* plugin authors to
+move their range — it disables the UI of every plugin already published, immediately, each reported
+as a mismatch it did nothing to earn. Both halves of the change are additive: `cadence` gained an
+optional argument, and `connection` landed on a type plugins consume and cannot construct, because
+`LiveContext` is not exported. What a patch costs is the mechanical signal, and that is the cheaper
+of the two costs.
+
+Two smaller notes, for anyone diffing this document against the code:
+
+- The **testing** section's last bullet asks for the assertion at
+  `docs/superpowers/plans/2026-07-31-omnigateway-dashboard.md:6231` to be inverted. It was not. That
+  line is a completion checklist inside a finished plan — a record of what was true in July, not a
+  live test — so it carries a superseded-by note pointing here instead of being rewritten.
+- `subscribe` on a `stream:*` topic with no source behind it answers `error` through one generic
+  rule (the broadcaster only serves topics a source has `declareStream`d), rather than through a
+  console-specific check. That covers the `none` console source this document names and every future
+  plugin stream whose source failed to start.
 
 ## Problem
 

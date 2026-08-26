@@ -83,7 +83,8 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     only.
 11. CLI administer local installs through `@omni/control`, never `/api/*`. Inject every side effect
     so tests never start processes or write outside temp dirs.
-12. Dashboard call `/api/*` only, one exception: `/health`, polled to watch gateway leave and return
+12. Dashboard call `/api/*` only — which now include the one WebSocket, `/api/stream`. One
+    exception: `/health`, polled to watch gateway leave and return
     across restart. During restart no session and no authenticated surface to probe, so liveness is
     the one question `/api/*` cannot answer. May import `@omni/store/types`, `@omni/ir`, catalog
     subpath, `@omnigateway/dashboard-sdk`, but not provider adapters, HTTP client, runtime store
@@ -341,6 +342,26 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   connects completing at 1007–1061ms. Failure read as provider outage and is not one.
 - Streaming responses need downstream `: keepalive` comments because provider heartbeats decoded
   away. Keep server idle timeout above request deadline.
+- Socket registry close every connection **before** `app.stop()`, and its `stopLoops` position is
+  what make that true. `stop()` called without `true`, so it drain rather than sever, and open
+  WebSocket never end by itself — one connected console otherwise hold teardown for the full
+  `STOP_DEADLINE_MS` every restart. Close with `1001`; `4401` mean "do not reconnect" and is for
+  expired session alone.
+- `/health` watcher stay a plain `fetch` poll and must never move onto the socket. The one check
+  proving gateway came back cannot depend on subsystem being restarted.
+- Elysia call a `.ws()` route's `beforeHandle` **twice** — once through composed hooks, once by hand
+  in the Bun adapter, guarded by `typeof === "function"`. So it must be a single function, never an
+  array (an array is silently skipped by the second call, and guard appear to work while running
+  half the time), and it must be idempotent or every upgrade cost two `verify` round-trips.
+  Throwing from it is fine and reach `apiErrorHandler`. Also register a companion plain `GET` on the
+  same path: a ws route match only when `upgrade: websocket` present, so without one a browser hit
+  fall through to static catch-all and 404 an endpoint that exists.
+- `res:*` frame carry at most `{ keys }` and client map **topic to query-key prefix**, never an
+  enumerated key list. `["logs", limit]` and `["usage", …6]` are parameterised, so an enumerated
+  table go stale silently. One exception is real: `res:logs` must exclude `["logs","body",…]`, a
+  prefix collision on immutable data.
+- Coalescing on `res:*` is load-bearing, not tuning. Uncoalesced push at 100 req/s is 100 refetch
+  per second against a surface polling at 60s — strictly worse than what it replace.
 - Stdout hold operational events; `request_logs` hold completed requests. Do not restore duplicate
   per-request access lines. `requestId` join both.
 - Console can read only captured stdout: `OMNI_LOG_FILE`, journald, or none. `OMNI_LOG_FILE` name
