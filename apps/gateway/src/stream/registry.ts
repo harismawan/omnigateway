@@ -119,6 +119,11 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
     deps.schedule ??
     ((run: () => void, ms: number) => {
       const timer = setTimeout(run, ms);
+      // Unref'd like every other background timer here. `createApp` builds a
+      // registry whether or not anything ever connects, so a referenced
+      // heartbeat would hold the process open in every test that builds an app
+      // and never opens a socket — and hold a shutdown open besides.
+      timer.unref?.();
       return () => clearTimeout(timer);
     });
   const capacity = deps.queueCapacity ?? DEFAULT_QUEUE_CAPACITY;

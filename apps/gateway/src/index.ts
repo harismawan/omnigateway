@@ -21,6 +21,10 @@ import { startRefreshScheduler } from "./oauth/scheduler.ts";
 import { createPluginEventBus } from "./plugins/events.ts";
 import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
+import { createBroadcaster, DEFAULT_FLOOR_MS, INVALIDATION_FLOORS } from "./stream/broadcaster.ts";
+import { createCoalescer } from "./stream/coalescer.ts";
+import { createSocketRegistry } from "./stream/registry.ts";
+import { createRing } from "./stream/ring.ts";
 
 function stdoutLogger(level: "debug" | "info" | "warn" | "error"): Logger {
   return createLogger({
@@ -205,6 +209,31 @@ async function main(): Promise<void> {
   }
   logger.info("plugins resolved", { count: loadedPlugins.plugins.length, path: pluginRoot });
 
+  /**
+   * Built here rather than inside `createApp` so teardown can reach it.
+   *
+   * The registry has to close every socket *before* `app.stop()`: that call is
+   * not forceful, so an open connection otherwise holds the drain for the whole
+   * `STOP_DEADLINE_MS`.
+   */
+  const streamRegistry = createSocketRegistry({ logger, now });
+  const streamRing = createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
+  const broadcaster = createBroadcaster({
+    registry: streamRegistry,
+    ring: streamRing,
+    coalescer: createCoalescer({
+      floors: INVALIDATION_FLOORS,
+      defaultFloorMs: DEFAULT_FLOOR_MS,
+      now,
+      sink: (topic, payload) =>
+        streamRegistry.publish(topic, {
+          type: "event",
+          topic,
+          ...(payload === undefined ? {} : { payload }),
+        }),
+    }),
+  });
+
   const app = createApp({
     store,
     baseUrl: config.baseUrl,
@@ -214,6 +243,9 @@ async function main(): Promise<void> {
     staticDir,
     logger,
     console,
+    registry: streamRegistry,
+    broadcaster,
+    ring: streamRing,
     discoveryMirrors: config.exposeClaudeCodeAliases,
     bodyLoggingAllowed: config.bodyLoggingAllowed,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
@@ -272,7 +304,23 @@ async function main(): Promise<void> {
     // The event bus is a loop like the others: it holds a pending drain and
     // must stop before the process does, or a queued handler runs against a
     // store that is already closed.
-    stopLoops: [stopMaintenance, stopRefreshScheduler, stopQuotaPoller, () => pluginEvents.stop()],
+    stopLoops: [
+      stopMaintenance,
+      stopRefreshScheduler,
+      stopQuotaPoller,
+      () => pluginEvents.stop(),
+      // Before `stopServer`, and that ordering is the point rather than tidiness.
+      // `app.stop()` is called without `true`, so it drains rather than severs:
+      // an open socket never ends on its own and would hold teardown for the
+      // full five-second deadline. 1001 is "going away", which is what the
+      // console's own reconnect path expects — unlike 4401, which tells it to
+      // stop trying.
+      () => {
+        streamRegistry.closeAll(1001, "restart");
+        streamRegistry.stop();
+        broadcaster.stop();
+      },
+    ],
     stopServer: async () => {
       await app.stop();
     },
