@@ -230,7 +230,7 @@ export function streamRoutes(deps: StreamDeps) {
         deps.channels.closed(id, deps.registry.topics(id));
         deps.registry.remove(id);
         ids.delete(ws.raw);
-        logger.debug("stream closed", {});
+        logger.debug("stream closed");
       },
     })
     .get("/api/stream", ({ set }) => {

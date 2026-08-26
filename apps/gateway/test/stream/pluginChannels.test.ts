@@ -414,3 +414,45 @@ function isAck(frame: unknown, id: string): boolean {
 function isError(frame: unknown, id: string): boolean {
   return isRecord(frame) && frame.type === "error" && frame.id === id;
 }
+
+test("a real socket closing fires the plugin's onClose handler", async () => {
+  // The route reads the connection's topics and *then* removes it from the
+  // registry, and that order is the only thing making this work: `remove`
+  // detaches the topic set, so reversing the two lines hands `closed` an empty
+  // list and every `onClose` handler goes unfired — with nothing thrown and
+  // nothing logged, so a plugin simply never learns the connection ended.
+  //
+  // The unit test above drives `registry.closed(...)` directly and cannot see
+  // that ordering at all. This one goes through the real route and a real
+  // socket, which is the only path where the mistake is reachable.
+  const h = await streamHarness();
+  try {
+    const closed: string[] = [];
+    const seen: string[] = [];
+    const channel = h.channels.for("alpha").open("s");
+    channel.onMessage((message) => seen.push(message.connectionId));
+    channel.onClose((connectionId) => closed.push(connectionId));
+
+    const socket = await h.connect({ cookie: h.cookie });
+    socket.send({ id: "1", type: "subscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "1"), "the subscribe ack");
+
+    // One round trip, purely to learn the connection id the host assigned and
+    // to prove the subscription is real before the close is asked to notice it.
+    // Without this the test could pass against a connection that never held the
+    // topic — which is precisely the state the bug produces.
+    socket.send({ id: "2", type: "send", topic: "plugin:alpha:s", payload: null });
+    await socket.waitFor((f) => isAck(f, "2"), "the send ack");
+    const connectionId = seen[0] ?? "";
+    expect(h.registry.topics(connectionId)).toContain("plugin:alpha:s");
+
+    socket.close();
+
+    const deadline = Date.now() + 2_000;
+    while (closed.length === 0 && Date.now() < deadline) await Bun.sleep(5);
+
+    expect(closed).toEqual([connectionId]);
+  } finally {
+    await h.close();
+  }
+});
