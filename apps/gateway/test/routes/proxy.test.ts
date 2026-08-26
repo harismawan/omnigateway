@@ -1683,9 +1683,10 @@ test("token counting rejects a malformed body in the anthropic error shape", asy
   expect(body.error.type).toBe("invalid_request_error");
 });
 
-// The mirror exists so Claude Code can see the pool. It must not also be a way
-// around the policy that governs the pool.
-test("a key denied a model is denied its discovery mirror too", async () => {
+// Ingress rewrites a model name before the key allowlist reads it. That order is
+// what stops a spelling of a pool's name from being a way around the policy
+// governing the pool.
+test("a key denied a model is denied its suffixed spelling too", async () => {
   const { store, app } = await harness();
   const { raw } = await seedApiKey(store, { label: "limited", modelAllowlist: ["slow"] });
   const res = await app.handle(
@@ -1693,7 +1694,7 @@ test("a key denied a model is denied its discovery mirror too", async () => {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
       body: JSON.stringify({
-        model: "claude/fast",
+        model: "fast[1m]",
         max_tokens: 16,
         messages: [{ role: "user", content: "hi" }],
       }),
@@ -1702,10 +1703,10 @@ test("a key denied a model is denied its discovery mirror too", async () => {
   expect(res.status).toBe(401);
 });
 
-test("a mirrored id routes to the pool it stands for", async () => {
+test("a suffixed id routes to the pool it names", async () => {
   const { call } = await harness();
   const res = await call("/v1/messages", {
-    model: "claude/fast",
+    model: "fast[1m]",
     max_tokens: 16,
     messages: [{ role: "user", content: "hi" }],
   });

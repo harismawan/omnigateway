@@ -65,60 +65,11 @@ export function describeModel(
   };
 }
 
-/**
- * An id Claude Code's picker already accepts, and which must not be mirrored.
- *
- * A plain prefix match, because the picker's own filter is one: `claude-opus-5`
- * is already visible there, so a `claude/claude-opus-5` beside it would be
- * clutter with a second name for the same pool.
- */
-const ALREADY_CLAUDE = /^(?:claude|anthropic)/i;
-
-/**
- * The prefix a mirror carries. A slash, not a hyphen: the client ignores
- * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` for an id beginning `claude-`, so a mirror
- * spelled that way would be visible in the picker and permanently pinned to the
- * 200K default it assumes.
- */
-const MIRROR_PREFIX = "claude/";
-
-/**
- * Mirror entries for the models Claude Code would otherwise not show.
- *
- * Its picker lists only ids beginning with `claude` or `anthropic`, so a pool
- * named `opus` or `gpt-5.6-sol` is invisible however well it routes. A mirror
- * is a second name for the same entry, limits included, unwound again by
- * ingress before the key allowlist is applied.
- *
- * Derived per request, never stored: the catalog has one set of names, and this
- * is a rendering of it for one client.
- */
-function discoveryMirrors(data: readonly ModelDescription[]): ModelDescription[] {
-  const taken = new Set(data.map((entry) => entry.id));
-  const mirrors: ModelDescription[] = [];
-  for (const entry of data) {
-    if (ALREADY_CLAUDE.test(entry.id)) continue;
-    const id = `${MIRROR_PREFIX}${entry.id}`;
-    // A real pool of this name owns it. A synthetic entry must never shadow one.
-    if (taken.has(id)) continue;
-    mirrors.push({
-      ...entry,
-      id,
-      root: entry.id,
-      display_name: `${entry.display_name} (OmniGateway)`,
-    });
-  }
-  return mirrors;
-}
-
 export function modelListBody(
   models: readonly VirtualModel[],
   credentials: readonly ServingCredential[],
-  options: { discoveryMirrors?: boolean } = {},
 ): ModelListBody {
-  const described = models.map((model) => describeModel(model, credentials));
-  const data =
-    options.discoveryMirrors === true ? [...described, ...discoveryMirrors(described)] : described;
+  const data = models.map((model) => describeModel(model, credentials));
   return {
     object: "list",
     data,

@@ -33,17 +33,15 @@ test("Claude setup writes one settings file with explicit class mappings", () =>
   expect(config.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
 });
 
-test("Claude setup omits optional mappings and uses discovery mirrors", () => {
-  const file = claudeSettings(
-    described("model"),
-    { ...input, discoveryMirrors: true },
-    {
-      defaultModel: "model",
-    },
-  );
+test("Claude setup omits optional mappings and writes the pool's own id", () => {
+  const file = claudeSettings(described("model"), input, {
+    defaultModel: "model",
+  });
   const config = JSON.parse(file.contents) as { env: Record<string, string> };
 
-  expect(config.env.ANTHROPIC_MODEL).toBe("claude/model");
+  // Never a `claude/`-prefixed mirror: the generated config names the pool the
+  // operator created, which is the only id `/v1/models` advertises.
+  expect(config.env.ANTHROPIC_MODEL).toBe("model");
   expect(config.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBeUndefined();
 });
 

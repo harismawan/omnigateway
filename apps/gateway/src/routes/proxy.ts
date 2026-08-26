@@ -58,13 +58,6 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
   rateLimiter?: ApiKeyRateLimiter;
   keepaliveMs?: number;
   /**
-   * Whether `GET /v1/models` also advertises `claude/<id>` mirrors.
-   *
-   * Off unless an operator asks for it: an installation whose clients are not
-   * Claude Code should not have its catalog doubled.
-   */
-  discoveryMirrors?: boolean;
-  /**
    * Whether `OMNI_BODY_LOGGING_ALLOWED` was set at boot.
    *
    * The outer of the two keys body capture needs, and the cheapest to ask: a
@@ -814,11 +807,7 @@ export function proxyRoutes(deps: ProxyDeps) {
               : models.filter((model) => key.modelAllowlist?.includes(model.id));
           // Credentials decide the answer: an OAuth OpenAI credential is served
           // by Codex, whose window is under a third of the API's.
-          return Response.json(
-            modelListBody(visibleModels, snapshot.credentials, {
-              discoveryMirrors: deps.discoveryMirrors === true,
-            }),
-          );
+          return Response.json(modelListBody(visibleModels, snapshot.credentials));
         } catch (error) {
           const gatewayError = asGatewayError(error);
           logger.error("model listing failed", {
