@@ -48,6 +48,7 @@ import {
   routeLog,
   type UsageDebit,
 } from "../logging.ts";
+import type { Invalidator } from "../stream/broadcaster.ts";
 import { modelListBody } from "./models.ts";
 
 export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
@@ -81,10 +82,19 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
    * lives there too.
    */
   emit?: PluginEmit;
+  /**
+   * Tells the console that a finished request changed usage and the log list.
+   *
+   * Threaded to `finishLog` for the reason `emit` is, and the two call sites
+   * there — the success path and the terminal catch — are mutually exclusive
+   * per request, so one finished request is one pair of invalidations however
+   * it ended.
+   */
+  broadcaster?: Invalidator;
 };
 
 type ResolvedProxyDeps = DispatchDeps &
-  Pick<ProxyDeps, "requestId" | "rateLimiter" | "bodyLoggingAllowed" | "emit"> & {
+  Pick<ProxyDeps, "requestId" | "rateLimiter" | "bodyLoggingAllowed" | "emit" | "broadcaster"> & {
     keepaliveMs: number;
     logger: Logger;
   };
@@ -602,7 +612,16 @@ async function handle(
       // lines about the process itself. The console reads those rows; stdout
       // carries what never becomes one. `requestId` is on both, and joins them.
       logged = true;
-      await finishLog(deps.store, completed, keyId, deps.logger, writeBodies, debit, deps.emit);
+      await finishLog(
+        deps.store,
+        completed,
+        keyId,
+        deps.logger,
+        writeBodies,
+        debit,
+        deps.emit,
+        deps.broadcaster,
+      );
     };
 
     if (chatRequest.stream) {
@@ -718,7 +737,16 @@ async function handle(
     // duplicate write the `logged` flag exists to prevent.
     if (collector !== null && !logged) collector.client.response = rejection;
     if (!logged)
-      await finishLog(deps.store, completed, keyId, deps.logger, writeBodies, debit, deps.emit);
+      await finishLog(
+        deps.store,
+        completed,
+        keyId,
+        deps.logger,
+        writeBodies,
+        debit,
+        deps.emit,
+        deps.broadcaster,
+      );
     // Not an access line: this fires only when a request failed outright, which
     // a busy gateway does rarely. It exists because the row cannot hold the
     // reason — `request_logs` has a status and an error code and no room for

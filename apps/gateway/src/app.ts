@@ -300,6 +300,7 @@ export function createApp(deps: AppDeps) {
         discoveryMirrors: deps.discoveryMirrors === true,
         bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
         ...(deps.emit === undefined ? {} : { emit: deps.emit }),
+        broadcaster,
       }),
     )
     .use(
@@ -312,6 +313,7 @@ export function createApp(deps: AppDeps) {
         now,
         sessionTtlMs: ADMIN_SESSION_TTL_MS,
         logger,
+        broadcaster,
         ...(deps.console === undefined ? {} : { console: deps.console }),
       }),
     )
@@ -324,6 +326,7 @@ export function createApp(deps: AppDeps) {
         admin,
         latch,
         snapshots,
+        broadcaster,
         fs: deps.databaseFs ?? nodeDatabaseFs(),
         now,
         logger,

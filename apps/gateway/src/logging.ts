@@ -2,6 +2,7 @@ import type { GatewayError, LogFields } from "@omni/ir";
 import { describeError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { RequestLog, Store } from "@omni/store";
 import type { RequestCompleted } from "@omnigateway/plugin-api";
+import type { Invalidator } from "./stream/broadcaster.ts";
 
 type CompletedOverrides = Pick<RequestLog, "status"> &
   Partial<Omit<RequestLog, "id" | "state" | "at" | "status">>;
@@ -220,10 +221,14 @@ export async function finishLog(
   bodies?: BodyWriter,
   debit?: UsageDebit,
   emit?: PluginEmit,
+  broadcast?: Invalidator,
 ): Promise<void> {
+  /** Whether there is a new row for a console to go and read. See the emit below. */
+  let appended = true;
   try {
     await store.usage.append({ ...log, apiKeyId: keyId });
   } catch (error) {
+    appended = false;
     report(logger, "failed to persist request log", log.id, error);
   }
   // Whether or not the row landed: a key that spent the tokens spent them, and
@@ -284,6 +289,32 @@ export async function finishLog(
       // never throws: a logging failure must not turn a proxied request the
       // client already received into an error.
       report(logger, "failed to emit plugin event", log.id, error);
+    }
+  }
+  /**
+   * The two console surfaces this row changed.
+   *
+   * Here for the third time for the same reason the debit and the plugin event
+   * are: one site, at most once per request id. A `res:usage` frame per request
+   * would be one client refetch per request, so both topics are floored at a
+   * second in `INVALIDATION_FLOORS` and the coalescer — not this function —
+   * decides what actually goes out. Nothing here asks whether anyone is
+   * subscribed: a check on the path that runs once per request is a check that
+   * can be wrong there.
+   *
+   * Gated on the append landing, unlike the debit above, because the two claim
+   * different things. A debit says tokens were spent, which they were whether
+   * or not the write survived. An invalidation says a refetch will show
+   * something new, and against a row that never landed it will not.
+   */
+  if (appended && broadcast !== undefined) {
+    try {
+      broadcast.invalidate("res:usage");
+      broadcast.invalidate("res:logs");
+    } catch (error) {
+      // Same contract as the plugin emit above: a request the client already
+      // received must not become an error because a frame could not be queued.
+      report(logger, "failed to publish a resource invalidation", log.id, error);
     }
   }
   if (bodies === undefined) return;

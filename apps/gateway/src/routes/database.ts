@@ -25,6 +25,7 @@ import {
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import { Elysia } from "elysia";
 import type { QuiesceLatch } from "../quiesce.ts";
+import type { Broadcaster } from "../stream/broadcaster.ts";
 import { apiErrorHandler, readJson, requireAdmin } from "./http.ts";
 
 export type DatabaseRouteDeps = {
@@ -49,6 +50,14 @@ export type DatabaseRouteDeps = {
    * handle restarts, so a restore is exactly the change it cannot notice.
    */
   snapshots?: { invalidate(): void };
+  /**
+   * Every open console, told that the database underneath it was replaced.
+   *
+   * Narrowed to `invalidateAll` because that is the only thing a swap has to
+   * say: it is the one event for which "everything you hold is stale" is
+   * literally true, and it is the only caller of that method anywhere.
+   */
+  broadcaster?: Pick<Broadcaster, "invalidateAll">;
 };
 
 /**
@@ -143,13 +152,32 @@ async function swap(
         reason: label,
       });
     }
+    /**
+     * Every console holding anything read out of the file that just moved.
+     *
+     * *After* the password comparison above, and that ordering is the invariant
+     * rather than a preference. The swap has already succeeded by this point,
+     * so anything that throws between it and `invalidateSessions` skips the
+     * logout while the restored password is live — which is why this is the
+     * last thing the success path does and why nothing may be inserted in front
+     * of that block.
+     *
+     * Not coalesced, unlike every `res:*` emitter: a floor here would leave
+     * every open console rendering the previous database for a second after the
+     * new one is serving.
+     */
+    deps.broadcaster?.invalidateAll();
     return result;
   } catch (error) {
     if (error instanceof SwapFailedError) {
-      // Deliberately not reopened. The file this gateway would serve from is
-      // half-swapped, and answering client traffic out of it is worse than
-      // answering none. `/api/*` is still up, which is how an operator reaches
-      // the snapshot named here.
+      // Deliberately not reopened, and for the same reason deliberately not
+      // broadcast. The file this gateway would serve from is half-swapped, and
+      // answering client traffic out of it is worse than answering none.
+      // `/api/*` is still up, which is how an operator reaches the snapshot
+      // named here — so telling every console that everything it holds is stale
+      // would empty the one panel that shows them which snapshot to restore
+      // from, and refill it with whatever a half-swapped store answers. The
+      // console keeps what it had and this line says why it failed.
       logger.error(
         error.reopened
           ? "database swap failed; client requests stay refused"

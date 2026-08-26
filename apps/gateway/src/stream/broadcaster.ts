@@ -45,6 +45,18 @@ export type Broadcaster = {
 };
 
 /**
+ * The one method an emitter needs.
+ *
+ * Every `res:*` site takes this rather than the whole `Broadcaster`: a
+ * `finishLog` or a poll loop that could reach `stream`, `resetStream` or `stop`
+ * is a path that could be made to do any of them, and none of the three is
+ * anything an emitter of a resource change has business doing. `Broadcaster`
+ * satisfies it structurally, so `createApp` hands its own over without an
+ * adapter and there is nothing to keep in step.
+ */
+export type Invalidator = Pick<Broadcaster, "invalidate">;
+
+/**
  * Topics whose invalidations are floored, and at what.
  *
  * One place on purpose. A floor that lived beside its emitter would be a floor

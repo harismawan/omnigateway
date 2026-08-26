@@ -280,7 +280,7 @@ async function main(): Promise<void> {
   });
 
   const stopMaintenance = startMaintenance({ store, now, logger });
-  const stopRefreshScheduler = startRefreshScheduler({ store, refresh, now, logger });
+  const stopRefreshScheduler = startRefreshScheduler({ store, refresh, now, logger, broadcaster });
   const stopQuotaPoller = await startQuotaPoller({
     store,
     providers: OAUTH_PROVIDERS,
@@ -288,6 +288,7 @@ async function main(): Promise<void> {
     refresh,
     now,
     logger,
+    broadcaster,
   });
 
   // Elysia defaults Bun's socket `idleTimeout` to 30 seconds, which is shorter
