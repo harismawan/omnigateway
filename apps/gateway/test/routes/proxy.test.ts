@@ -18,6 +18,7 @@ import {
 import { authenticateApiKey } from "../../src/auth/apiKey.ts";
 import { createLoadRegistry } from "../../src/dispatch/loadRegistry.ts";
 import { type ProxyDeps, proxyRoutes } from "../../src/routes/proxy.ts";
+import type { Invalidator } from "../../src/stream/broadcaster.ts";
 
 const EVENTS: StreamEvent[] = [
   { type: "start", id: "upstream_1", model: "claude-opus-4" },
@@ -1695,4 +1696,61 @@ test("a plugin sees exactly one event per request id, streaming and not", async 
 
   expect(seen).toEqual(["req_1", "req_2"]);
   expect(new Set(seen).size).toBe(seen.length);
+});
+
+/** Records the topics a broadcaster is asked to invalidate, in order. */
+function invalidations(): Invalidator & { topics: string[] } {
+  const topics: string[] = [];
+  return { topics, invalidate: (topic) => void topics.push(topic) };
+}
+
+test("a completed request invalidates usage and logs once, streaming and not", async () => {
+  // The success path's `finishLog`, reached from the `log()` closure. Both
+  // shapes of request end there, and a streaming one ends there from
+  // `sseResponse`'s run-once completion rather than from the handler body.
+  const stream = invalidations();
+  const { call } = await harness(EVENTS, { broadcaster: stream });
+
+  await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(stream.topics).toEqual(["res:usage", "res:logs"]);
+
+  const streamed = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  await streamed.text();
+
+  expect(stream.topics).toEqual(["res:usage", "res:logs", "res:usage", "res:logs"]);
+});
+
+test("a request that failed before dispatch invalidates from the terminal catch", async () => {
+  // The other of the two `finishLog` call sites, and the one an emitter placed
+  // in the handler body would miss entirely. The two are mutually exclusive per
+  // request — the `logged` flag is what makes them so — which is why one
+  // finished request is one pair of invalidations whichever way it ended.
+  const stream = invalidations();
+  const { call, store } = await harness(EVENTS, { broadcaster: stream });
+
+  const res = await call("/v1/messages", {
+    model: "no-such-pool",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  // 503 rather than 404: an unknown pool has no target that could serve it,
+  // which is the same refusal as a pool whose every target is cooling down.
+  expect(res.status).toBe(503);
+
+  // Proof this is the terminal catch rather than the success path: no attempt
+  // was made and no target was resolved, so nothing reached the `log()` closure.
+  const [row] = await store.usage.recent(10);
+  expect(row).toEqual(
+    expect.objectContaining({ state: "done", attempts: 0, resolvedProvider: null }),
+  );
+  expect(stream.topics).toEqual(["res:usage", "res:logs"]);
 });

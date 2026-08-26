@@ -21,6 +21,12 @@ import { startRefreshScheduler } from "./oauth/scheduler.ts";
 import { createPluginEventBus } from "./plugins/events.ts";
 import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
+import { createBroadcaster, DEFAULT_FLOOR_MS, INVALIDATION_FLOORS } from "./stream/broadcaster.ts";
+import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
+import { createCoalescer } from "./stream/coalescer.ts";
+import { startConsoleStream } from "./stream/console.ts";
+import { createSocketRegistry } from "./stream/registry.ts";
+import { createRing } from "./stream/ring.ts";
 
 function stdoutLogger(level: "debug" | "info" | "warn" | "error"): Logger {
   return createLogger({
@@ -190,10 +196,40 @@ async function main(): Promise<void> {
   // log line reading `path=plugins` is what made this take an hour to find.
   const pluginRoot = resolve(installRoot, "plugins");
   const pluginEvents = createPluginEventBus({ logger });
+
+  /**
+   * Built here rather than inside `createApp` so teardown can reach it.
+   *
+   * The registry has to close every socket *before* `app.stop()`: that call is
+   * not forceful, so an open connection otherwise holds the drain for the whole
+   * `STOP_DEADLINE_MS`.
+   *
+   * It is built *before* the loader rather than beside the ring and the
+   * broadcaster below, because a plugin opens its channels inside `setup` — and
+   * a channel registry constructed afterwards would hold none of them while
+   * every plugin held a live-looking handle onto nothing.
+   */
+  /**
+   * Late-bound because the two point at each other: channels read the socket
+   * registry to find who holds a topic, and the registry has to tell channels
+   * about a connection it is closing on its own initiative. Assigned on the very
+   * next line, so the only window where it is undefined is one with no
+   * connections in it.
+   */
+  let pluginChannelsRef: ChannelRegistry | undefined;
+  const streamRegistry = createSocketRegistry({
+    logger,
+    now,
+    onDetach: (id, topics) => pluginChannelsRef?.closed(id, topics),
+  });
+  const pluginChannels = createChannelRegistry({ sockets: streamRegistry, logger });
+  pluginChannelsRef = pluginChannels;
+
   const loadedPlugins = await loadPlugins({
     root: pluginRoot,
     store,
     events: pluginEvents,
+    channels: pluginChannels,
     sdkVersion: DASHBOARD_SDK_VERSION,
     logger,
     now,
@@ -205,6 +241,23 @@ async function main(): Promise<void> {
   }
   logger.info("plugins resolved", { count: loadedPlugins.plugins.length, path: pluginRoot });
 
+  const streamRing = createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
+  const broadcaster = createBroadcaster({
+    registry: streamRegistry,
+    ring: streamRing,
+    coalescer: createCoalescer({
+      floors: INVALIDATION_FLOORS,
+      defaultFloorMs: DEFAULT_FLOOR_MS,
+      now,
+      sink: (topic, payload) =>
+        streamRegistry.publish(topic, {
+          type: "event",
+          topic,
+          ...(payload === undefined ? {} : { payload }),
+        }),
+    }),
+  });
+
   const app = createApp({
     store,
     baseUrl: config.baseUrl,
@@ -214,6 +267,10 @@ async function main(): Promise<void> {
     staticDir,
     logger,
     console,
+    registry: streamRegistry,
+    broadcaster,
+    ring: streamRing,
+    channels: pluginChannels,
     discoveryMirrors: config.exposeClaudeCodeAliases,
     bodyLoggingAllowed: config.bodyLoggingAllowed,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
@@ -248,7 +305,7 @@ async function main(): Promise<void> {
   });
 
   const stopMaintenance = startMaintenance({ store, now, logger });
-  const stopRefreshScheduler = startRefreshScheduler({ store, refresh, now, logger });
+  const stopRefreshScheduler = startRefreshScheduler({ store, refresh, now, logger, broadcaster });
   const stopQuotaPoller = await startQuotaPoller({
     store,
     providers: OAUTH_PROVIDERS,
@@ -256,7 +313,13 @@ async function main(): Promise<void> {
     refresh,
     now,
     logger,
+    broadcaster,
   });
+  // After the others because it is the one loop that publishes payloads rather
+  // than invalidations, and because a source that cannot start declares no
+  // topic: whether `stream:console` exists at all is decided here, and nothing
+  // downstream should be able to observe it half-decided.
+  const stopConsoleStream = startConsoleStream({ console, broadcaster, logger, now });
 
   // Elysia defaults Bun's socket `idleTimeout` to 30 seconds, which is shorter
   // than a request is allowed to take: `requestDeadlineMs` is 120s by default,
@@ -272,7 +335,28 @@ async function main(): Promise<void> {
     // The event bus is a loop like the others: it holds a pending drain and
     // must stop before the process does, or a queued handler runs against a
     // store that is already closed.
-    stopLoops: [stopMaintenance, stopRefreshScheduler, stopQuotaPoller, () => pluginEvents.stop()],
+    stopLoops: [
+      stopMaintenance,
+      stopRefreshScheduler,
+      stopQuotaPoller,
+      stopConsoleStream,
+      () => pluginEvents.stop(),
+      // Before `stopServer`, and that ordering is the point rather than tidiness.
+      // `app.stop()` is called without `true`, so it drains rather than severs:
+      // an open socket never ends on its own and would hold teardown for the
+      // full five-second deadline. 1001 is "going away", which is what the
+      // console's own reconnect path expects — unlike 4401, which tells it to
+      // stop trying.
+      () => {
+        streamRegistry.closeAll(1001, "restart");
+        streamRegistry.stop();
+        broadcaster.stop();
+        // After the registry, because it holds a pending error report and
+        // nothing else: a plugin handler running against a closed socket is the
+        // failure this ordering avoids, not one it would create.
+        pluginChannels.stop();
+      },
+    ],
     stopServer: async () => {
       await app.stop();
     },

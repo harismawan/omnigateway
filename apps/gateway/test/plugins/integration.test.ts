@@ -13,6 +13,7 @@ import { createApp } from "../../src/app.ts";
 import { createPluginEventBus, type PluginEventBus } from "../../src/plugins/events.ts";
 import { loadPlugins, type PluginLoadResult } from "../../src/plugins/loader.ts";
 import type { MountedPlugin } from "../../src/plugins/routes.ts";
+import { createChannelRegistry } from "../../src/stream/channels.ts";
 
 /**
  * The plugin host driven as the gateway drives it: a real `Store`, the host's
@@ -159,6 +160,9 @@ function boot(logger?: Logger): Promise<{ bus: PluginEventBus; result: PluginLoa
     root,
     store,
     events: bus,
+    // No sockets behind it: these tests exercise routes and storage, so every
+    // connection lookup honestly answers "nobody is connected".
+    channels: createChannelRegistry({ sockets: { has: () => false, sendTo: () => {} } }),
     sdkVersion: "1.0.0",
     ...(logger === undefined ? {} : { logger }),
   }).then((result) => ({ bus, result }));

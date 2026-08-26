@@ -15,6 +15,7 @@ Conventions governing changes — architectural boundaries, testing expectations
   - [Replacing the database while it is open](#replacing-the-database-while-it-is-open)
 - [Background loops](#background-loops)
   - [Stopping and restarting](#stopping-and-restarting)
+- [Push transport](#push-transport)
 - [The console and the CLI](#the-console-and-the-cli)
 - [Plugins](#plugins)
 
@@ -329,7 +330,7 @@ flowchart LR
   stop([SIGTERM / shutdown]) ==> oauth & quota & maint & bus
 ```
 
-Event bus is fourth entry in same stopper list, and teardown treats it as loop like others even though it has no interval — it holds queued work, and work running after store closes reaches closed handle exactly the way late timer would.
+Event bus is fourth entry in same stopper list, and teardown treats it as loop like others even though it has no interval — it holds queued work, and work running after store closes reaches closed handle exactly the way late timer would. Socket registry is fifth, for a related but distinct reason covered under [stopping and restarting](#stopping-and-restarting): its heartbeat is a timer like the others, but closing the connections is what keep drain from taking the full deadline.
 
 Setting `quotaPollIntervalMs` to zero disables poller entirely; read once at boot. Retiring `pending` rows at startup is what stops crash from double-counting usage.
 
@@ -338,6 +339,12 @@ Body rows expire on same sweep as request logs they belong to, rather than own s
 ### Stopping and restarting
 
 Signal and `POST /api/lifecycle/shutdown` reach same teardown. They used to be unable to: server, store, and three loop stoppers are locals of bootstrap, so handler defined anywhere else had nothing to stop. `createShutdown` closes over them once, and both callers get same shutdown — loops first, because timer firing while socket drains reaches store about to close, then server, then store, then exit. Second request while first draining escalates, on theory first one evidently stuck.
+
+Socket registry is fifth entry in that stopper list, and its position matter rather than being tidy.
+`app.stop()` called without `true`, so it drain rather than sever — and open WebSocket never end on
+its own, so one still connected hold teardown for whole five-second deadline every time. Registry
+therefore close every socket **before** server stop, with `1001` and a restart reason, which is what
+console's own reconnect path expect. 4401 would be wrong here: that one tell client to stop trying.
 
 Drain bounded at five seconds. Bun stops server by letting connections finish, and shutdown asked for over HTTP arrives on one of them, so request asking for shutdown is itself reason shutdown cannot complete — gateway answered `ok` then stayed alive until second signal escalated. Signal never hits this, because shell holds no socket. On timeout process exits **0**: nonzero code would read to `Restart=on-failure` as crash and resurrect gateway operator just asked to stop.
 
@@ -377,6 +384,79 @@ Console renders both controls at foot of its sidebar rather than on one screen. 
 
 Restart is watched rather than timed. Console polls `/health` — its one documented exception to reading `/api/*` only, for reason given under [the console and the CLI](#the-console-and-the-cli) — until gateway stops answering, then until it answers again, and only then reloads. Page reloading on fixed delay would land either before process went or while still starting, and operator reads both as failed restart. Shutdown has no second half to watch, so rail says so and stops.
 
+## Push transport
+
+One multiplexed socket, `/api/stream`, admin-gated at upgrade. Polling stay beside it permanently,
+not as migration aid: proxy that eat `Upgrade` is ordinary deployment, and console behind one must
+keep working rather than degrade to nothing.
+
+Two topic classes, and class **is** delivery contract rather than hint about one:
+
+| Class | Carries | Guarantee |
+| --- | --- | --- |
+| `res:<name>` | at most `{ keys }` | none. Dropped frame self-heal — next change re-invalidate, and reconnecting client invalidate everything before resubscribing |
+| `stream:<name>` | payload | monotonic `seq` over bounded ring; past ring server answer `gap` |
+
+`res:*` exist so push and poll cannot disagree. Both path end in same REST fetch through same
+serializer, so no second rendering of any resource exist and no bug where socket show one number and
+reload show another. Client map topic to query key by **prefix**, because `["logs", limit]` and
+`["usage", …6]` are parameterised — enumerated table go stale silently, which is the failure mode
+this whole design keep avoiding.
+
+`stream:*` **never claim gapless**. Bounded ring plus explicit `gap` is entire contract; silent skip
+is the failure the class exist to prevent. Subscribe to `stream:*` topic no source declared answer
+`error`, one generic rule covering console whose capture is `none` and every plugin stream whose
+source failed to start — neither may look like topic merely quiet.
+
+Coalescing mandatory, not optimisation. At 100 requests per second, per-request `res:usage` frame is
+100 client refetch per second against surface polling at 60s today: uncoalesced push strictly worse
+than polling it replace. Leading **and** trailing — leading alone lose last change of burst, which
+is the one operator watch for; trailing alone put floor of latency on idle gateway's first event,
+the case socket was added for. Floor 1s for `res:usage` and `res:logs`, 5s for `res:quota` and
+`res:credentials`, all in one place so they readable against each other.
+
+Emitters sit where state change, each already at-most-once: `finishLog` for `res:usage` and
+`res:logs` (same reason usage debit and `RequestCompleted` live there), admin mutation handlers,
+quota poller at pass completion, OAuth sweep when it touched a row, database swap for global
+invalidate. Swap emit only on success — telling every console to refetch against store that did not
+come back is worse than telling it nothing.
+
+Socket must not outlive its session. Admin TTL is 12h, so connection authenticated once at upgrade
+would otherwise survive expiry indefinitely — privilege bug, not inconvenience. Heartbeat
+re-verify every 20s and close **4401**. That code load-bearing on client: 4401 alone mean
+"authenticate again, do not reconnect", any other code drop client into ordinary backoff loop
+against gateway that refuse it every time. Revalidation that *throw* close nothing, because verify
+that threw is not verify that failed.
+
+Registry hold `revalidate` thunk rather than token or `Request`, so it never learn what cookie is.
+Same seam let machine-token arm land later without registry growing second shape.
+
+Backpressure real rather than notional. Bun's `send` report status instead of blocking, so slow
+consumer is socket returning non-positive status; drain stop at first such frame rather than sending
+ones behind it, because on `stream:*` sequence is the contract. Past queue capacity oldest frame go
+— on transport whose point is currency, newest is one worth keeping — counted, and reported once per
+tick rather than once per drop.
+
+Third class `plugin:<id>:<name>` sit in either of the two, owned by plugin through `channels`
+capability. Plugin receive `open(name)` and nothing more — no socket, no upgrade request, no header,
+no `Principal` — and `<id>` come from manifest host validated against directory name, so plugin
+supply tail of topic and never head. Split load-bearing: channel registry answer what **exist**,
+`authorised` decide who may hold it, so opening channel never widen plugin's own reach. Admin
+principal may hold any opened plugin topic, because console render plugin panel; machine arm reach
+its own plugin's prefix alone. Topic nothing opened refused exactly like `stream:*` topic nothing
+declared. Outbound frame go through same per-connection queue as everything else, so bound and drop
+behaviour below is the only one that exist. Client must subscribe before it send: plugin's only way
+to answer publish on that topic, so frame from unsubscribed connection is question whose answer have
+nowhere to land. Handler that throw caught, counted per plugin, reported one batched line — same
+shape plugin event bus use, same reason.
+
+Latch not gate `/api/stream`, same rule keeping `/api/*` and `/health` live through restore. Socket
+stay open across database swap: repo methods forward per call, so no connection hold handle a swap
+invalidate, and global invalidate emit after `reopen()`.
+
+`/health` watcher deliberately **not** on socket. One check proving gateway came back must not
+depend on subsystem being restarted.
+
 ## The console and the CLI
 
 Two front ends, one set of operations, two very different paths to it:
@@ -415,6 +495,7 @@ flowchart LR
   ctx --> files["files → &lt;root&gt;/plugins/&lt;id&gt;/data/"]
   ctx --> net["net:outbound → declared origins only"]
   ctx --> events["events:request · events:limit"]
+  ctx --> channels["channels → plugin:&lt;id&gt;:&lt;name&gt; topics on /api/stream"]
   ctx --> ui["UI bundle at /plugin-assets/&lt;id&gt;/…"]
 
   skip -.-> serving(["gateway serves either way<br/><i>the proxy path depends on no plugin</i>"])

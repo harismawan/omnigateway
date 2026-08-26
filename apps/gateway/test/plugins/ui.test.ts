@@ -8,6 +8,7 @@ import { createPluginEventBus } from "../../src/plugins/events.ts";
 import type { LoadedPlugin } from "../../src/plugins/loader.ts";
 import { loadPlugins } from "../../src/plugins/loader.ts";
 import { PLUGIN_ASSET_PREFIX, pluginCatalog, pluginUiRoutes } from "../../src/plugins/ui.ts";
+import { createChannelRegistry } from "../../src/stream/channels.ts";
 
 let dir = "";
 
@@ -328,7 +329,13 @@ test("a spec-shaped plugin's advertised ui url actually serves", async () => {
   });
   const bus = createPluginEventBus({});
   try {
-    const loaded = await loadPlugins({ root: dir, store, events: bus, sdkVersion: "1.0.0" });
+    const loaded = await loadPlugins({
+      root: dir,
+      store,
+      events: bus,
+      channels: createChannelRegistry({ sockets: { has: () => false, sendTo: () => {} } }),
+      sdkVersion: "1.0.0",
+    });
     expect(loaded.failures).toEqual([]);
 
     const entry = pluginCatalog(loaded.plugins)[0]?.ui?.entry;

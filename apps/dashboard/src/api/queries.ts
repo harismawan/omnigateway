@@ -85,8 +85,15 @@ export const queryKeys = {
 };
 
 /**
- * Polling cadence. `false` pauses a query, which is what the chassis LIVE
- * switch does — an idle console should not keep a laptop awake.
+ * Refresh cadence. `false` means this query does not refetch on its own, which
+ * two different things now ask for: the chassis LIVE switch, because an idle
+ * console should not keep a laptop awake, and a topic the push socket is
+ * carrying, because an interval on top of a live feed is duplicated work.
+ *
+ * Every hook below still just receives a number or `false`. Which of the two
+ * reasons produced it is decided in `cadence`, and none of these hooks knows a
+ * socket exists — that is what lets `src/session/stream.tsx` fall back to
+ * polling by re-rendering rather than by reaching into any of them.
  *
  * Defined beside the `cadence` that produces it, which is in the SDK now that a
  * plugin panel reads the same switch. Re-exported here because every hook below
@@ -262,13 +269,17 @@ export function useUsage(
 }
 
 /**
- * How often the request log is re-read.
+ * How often the request log is re-read when nothing is pushing it.
  *
  * Faster than the rest of the console because the log now carries requests that
  * are still running. At ten seconds a spinner lies in both directions: a short
  * request is over before it is ever fetched, and a finished one keeps turning
  * until the next poll. Each read is a session check and one indexed SELECT
  * against local SQLite, and the LIVE switch still stops it dead.
+ *
+ * With a healthy socket `res:logs` replaces this interval rather than shortening
+ * it: the gateway coalesces that topic to at most one frame per second, so push
+ * is strictly fewer reads than the two-second timer and never more.
  */
 export const LOG_CADENCE_MS = 2_000;
 

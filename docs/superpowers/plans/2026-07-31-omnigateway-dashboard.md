@@ -6229,5 +6229,11 @@ After Task 14:
 - `grep -rn "any" apps/dashboard/src apps/dashboard/test` finds no bare `any`.
 - `grep -rn "/admin/" apps/dashboard/src` finds nothing — the control surface is `/api/*`.
 - `grep -rni "websocket\|new WebSocket" apps/dashboard/src` finds nothing.
+  <br>**Superseded on 2026-08-26.** True when this plan shipped, and deliberately so — polling was
+  the right answer for surfaces that change occasionally and can be re-read whole. The console now
+  opens `/api/stream`; see
+  [the WebSocket transport design](../specs/2026-08-22-websocket-transport-design.md). Polling was
+  kept as a permanent, tested fallback rather than removed, so the reasoning recorded here is still
+  live — it is no longer the *only* mechanism.
 - `grep -rn "Authorization" apps/dashboard/src` finds nothing — auth is the cookie.
 - A manual pass against a running gateway: first run forces a password, login lands on Credentials, each of the five screens loads, the dry-run panel explains a routing decision, and the log tail advances on its own.

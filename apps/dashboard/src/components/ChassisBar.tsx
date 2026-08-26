@@ -73,6 +73,64 @@ const LiveButton = styled(Button)`
   letter-spacing: 0.08em;
 `;
 
+/** Decoration between the two halves of the live label, and nothing more. */
+const Separator = styled.span`
+  color: ${({ theme }) => theme.color.inkFaint};
+`;
+
+/**
+ * The four things the refresh switch can be, and what each is called.
+ *
+ * ## Why an explicit `aria-label` when there was none before
+ *
+ * The accessible name used to be the button's own text, which was fine while
+ * that text was one word. Four labels containing a middle dot would freeze
+ * `LIVE·PUSH` — punctuation and all — into every assertion that names this
+ * button, so the visual label could not be reworded without editing tests that
+ * are not about wording. The name is stated separately, the separator is hidden
+ * from assistive tech, and the two are free to move independently.
+ *
+ * `aria-pressed` stays bound to the LIVE switch alone. It answers "am I
+ * refreshing", which is the only thing pressing this button changes; whether
+ * the refresh arrives on a socket or on an interval is not something the
+ * operator toggled and must not be reported as though it were.
+ *
+ * `offline` is about this transport, not about the gateway. The mark lamp at
+ * the far left already says "gateway unreachable" and it is reading a different
+ * signal — one of them being wrong is useful information, and two indicators
+ * that always agree hide that.
+ */
+const LIVE_STATES = {
+  push: {
+    name: "live, pushing",
+    lamp: "live",
+    head: "LIVE",
+    tail: "PUSH",
+    title: "Refreshing on gateway push — pause refreshing",
+  },
+  poll: {
+    name: "live, polling",
+    lamp: "ok",
+    head: "LIVE",
+    tail: "POLL",
+    title: "Refreshing on a timer — pause refreshing",
+  },
+  paused: {
+    name: "paused",
+    lamp: "idle",
+    head: "PAUSED",
+    tail: null,
+    title: "Resume refreshing",
+  },
+  offline: {
+    name: "offline",
+    lamp: "down",
+    head: "OFFLINE",
+    tail: null,
+    title: "Not refreshing — the admin session ended, sign in again",
+  },
+} as const;
+
 const MODE_ORDER: ThemeMode[] = ["system", "light", "dark"];
 const MODE_LABEL: Record<ThemeMode, string> = {
   system: "Match system theme",
@@ -89,10 +147,10 @@ const WINDOW_MS = 600_000;
  */
 export function ChassisBar() {
   const navigate = useNavigate();
-  const { live, toggle, cadence } = useLive();
+  const { live, toggle, cadence, connection } = useLive();
   const { mode, setMode } = useTheme();
   const logout = useLogout();
-  const logs = useLogs(200, cadence(10_000));
+  const logs = useLogs(200, cadence(10_000, "res:logs"));
 
   const now = Date.now();
   const rows = useMemo(
@@ -104,6 +162,17 @@ export function ChassisBar() {
 
   const nextMode = MODE_ORDER[(MODE_ORDER.indexOf(mode) + 1) % MODE_ORDER.length] ?? "system";
   const ThemeIcon = mode === "light" ? Sun : mode === "dark" ? Moon : MonitorCog;
+
+  // Paused outranks the transport, exactly as `cadence` does: an operator who
+  // switched refreshing off is not interested in how it would have arrived.
+  const refresh = !live
+    ? "paused"
+    : connection.status === "offline"
+      ? "offline"
+      : connection.status === "push"
+        ? "push"
+        : "poll";
+  const chip = LIVE_STATES[refresh];
 
   const health =
     logs.isError || vitals.errorRate >= 0.25
@@ -166,10 +235,17 @@ export function ChassisBar() {
         $size="sm"
         onClick={toggle}
         aria-pressed={live}
-        title={live ? "Pause polling" : "Resume polling"}
+        aria-label={chip.name}
+        title={chip.title}
       >
-        <Lamp state={live ? "ok" : "idle"} label={live ? "polling" : "paused"} />
-        {live ? "LIVE" : "PAUSED"}
+        <Lamp state={chip.lamp} label={chip.name} />
+        {chip.head}
+        {chip.tail === null ? null : (
+          <>
+            <Separator aria-hidden="true">·</Separator>
+            {chip.tail}
+          </>
+        )}
       </LiveButton>
 
       <IconButton

@@ -66,6 +66,40 @@ test("a pass runs at startup, not only after the first interval", async () => {
   expect(await store.credentials.listQuota()).toHaveLength(1);
 });
 
+test("a pass announces its readings when it finishes, not when it starts", async () => {
+  // The distinction is the whole point of the placement. A `res:quota` sent at
+  // the top of a pass has the console refetch readings the probes have not
+  // written yet — it would render the previous pass's numbers and then go quiet
+  // until the next interval, leaving every chart a full poll interval behind.
+  resetQuotaCooldowns();
+  const store = await memoryStore();
+  await seedCredential(store, { id: "completion-poll" });
+
+  const topics: string[] = [];
+  /** What had been announced at the instant of each probe. Each must be nothing. */
+  const atProbe: string[][] = [];
+
+  const stop = await startQuotaPoller({
+    store,
+    providers: probingProviders(() => {
+      atProbe.push([...topics]);
+      return { windows: [{ windowType: "weekly", used: 10, limit: 100, resetsAt: null }] };
+    }),
+    http: nodeHttpClient(),
+    refresh: async (): Promise<CredentialSecrets> => {
+      throw new Error("refresh not expected");
+    },
+    now: () => 1_000_000,
+    broadcaster: { invalidate: (topic) => void topics.push(topic) },
+  });
+
+  await Bun.sleep(20);
+  stop();
+
+  expect(atProbe).toEqual([[]]);
+  expect(topics).toEqual(["res:quota"]);
+});
+
 test("an interval of zero arms no timer at all", async () => {
   const store = await memoryStore();
   await store.config.putSettings({ quotaPollIntervalMs: 0 });

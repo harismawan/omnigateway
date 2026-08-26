@@ -74,3 +74,98 @@ export function fileExists(path: string): boolean {
     return false;
   }
 }
+
+/**
+ * The size of a regular file, or null when there is no such file.
+ *
+ * What a forward reader starts from when it must not replay what is already
+ * there: a gateway that begins streaming its own log at offset 0 pushes the
+ * whole existing file at the first subscriber, which is precisely the
+ * allocation `tailFile` exists to avoid.
+ */
+export function fileSize(path: string): number | null {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() ? stat.size : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a forward read found, and where the next one resumes.
+ *
+ * `offset` is always where this read stopped, so a caller stores it and hands
+ * it straight back; it never computes one itself.
+ */
+export type ForwardRead = {
+  /** The bytes between the offset asked for and where the read stopped. */
+  text: string;
+  /** Where to resume. What the next call passes as `offset`. */
+  offset: number;
+  /**
+   * True when the reader lost its place, so `text` is not continuous with what
+   * the previous call returned.
+   *
+   * Two causes, one meaning. The file shrank below the offset held — truncated
+   * in place, or rotated away and replaced — so the bytes at that offset are
+   * not the bytes that were there. Or the delta was larger than `MAX_BYTES` and
+   * its head was skipped rather than allocated. A caller that reacted to one
+   * and not the other would present a rotated file's contents as if they simply
+   * continued the old one, which is the silent skip this codebase forbids
+   * everywhere else it appears.
+   */
+  gap: boolean;
+};
+
+/**
+ * Reads from a byte offset to the end of a file, and reports the new offset.
+ *
+ * `tailFile` cannot serve this. It seeks *backward* from EOF to satisfy a line
+ * count, which is the right primitive for a page and the wrong one for a delta:
+ * a caller holding an offset wants exactly the bytes after it, and asking for
+ * "the last N lines" instead either repeats lines it already has or drops ones
+ * it does not, depending on how fast the file grew.
+ *
+ * Pure in the sense this package requires: one open, one read, one close, no
+ * timer and no watcher. Whatever notices that the file changed lives in the
+ * gateway, which is the only part of this system with a process to hold one.
+ */
+export function readFrom(path: string, offset: number): ForwardRead | null {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    // Absent or unreadable, same as `tailFile`: nothing to show, not an error
+    // for a console reader to raise.
+    return null;
+  }
+
+  try {
+    const size = fstatSync(fd).size;
+    const shrank = size < offset;
+    const from = shrank ? 0 : offset;
+    const available = size - from;
+    // Nothing new. Reported with the current size rather than the offset asked
+    // for, so a reader that started past EOF settles onto the real end.
+    if (available <= 0) return { text: "", offset: size, gap: shrank };
+
+    const span = Math.min(available, MAX_BYTES);
+    const start = from + (available - span);
+    const buffer = Buffer.allocUnsafe(span);
+    // The count returned, not `span`: the file is being written to while this
+    // runs, and an offset advanced past bytes that were never read would skip
+    // them permanently on the next call.
+    const read = readSync(fd, buffer, 0, span, start);
+
+    return {
+      text: buffer.subarray(0, read).toString("utf8"),
+      offset: start + read,
+      gap: shrank || span < available,
+    };
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}

@@ -144,6 +144,85 @@ test("a credential inside the lead but not yet expired keeps its refresh token r
   expect(after?.disabledReason).toBeNull();
 });
 
+/** Records the topics a sweep announces, in order. */
+function invalidations(): { topics: string[]; invalidate: (topic: string) => void } {
+  const topics: string[] = [];
+  return { topics, invalidate: (topic) => void topics.push(topic) };
+}
+
+test("a sweep that refreshed something announces it once", async () => {
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW + 60_000 });
+  await seedCredential(store, { id: "c2", expiresAt: NOW + 60_000 });
+  const broadcaster = invalidations();
+  const refresh = refresherFor(store, async () => result("test-token-6"));
+
+  expect(await sweep({ store, refresh, now: () => NOW, broadcaster })).toBe(2);
+
+  // Once for the sweep, not once per credential. Two rows moved and the console
+  // refetches the list either way, so a frame each is a frame wasted.
+  expect(broadcaster.topics).toEqual(["res:credentials"]);
+});
+
+test("a sweep that changed nothing announces nothing", async () => {
+  // This runs every minute for the life of the process and most minutes have
+  // nothing due. An unconditional frame would be a console refetch a minute on
+  // every install holding an OAuth credential — no better than the poll it is
+  // replacing, and paid for whether or not a tab is open.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW + SCHEDULER_REFRESH_LEAD_MS + 60_000 });
+  const broadcaster = invalidations();
+
+  expect(
+    await sweep({
+      store,
+      refresh: async () => ({}) as CredentialSecrets,
+      now: () => NOW,
+      broadcaster,
+    }),
+  ).toBe(0);
+
+  expect(broadcaster.topics).toEqual([]);
+});
+
+test("a credential the sweep retired is announced even though nothing refreshed", async () => {
+  // `sweep` returns the refresh count, which is zero here — so an emitter keyed
+  // off the return value would leave the accounts board showing a credential as
+  // enabled after this sweep switched it off. A credential going dark is
+  // arguably the change an operator most needs to see arrive.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW - 1, refreshToken: null });
+  const broadcaster = invalidations();
+
+  expect(
+    await sweep({
+      store,
+      refresh: async () => ({}) as CredentialSecrets,
+      now: () => NOW,
+      broadcaster,
+    }),
+  ).toBe(0);
+
+  expect((await store.credentials.get("c1"))?.enabled).toBe(false);
+  expect(broadcaster.topics).toEqual(["res:credentials"]);
+});
+
+test("a transient refresh failure changed no row and announces nothing", async () => {
+  // The other side of the line above. A NETWORK failure leaves the credential
+  // exactly as it was and will be retried next sweep, so there is nothing for a
+  // console to go and read.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW + 60_000 });
+  const broadcaster = invalidations();
+  const refresh = refresherFor(store, async () => {
+    throw new GatewayError("NETWORK", "connection reset");
+  });
+
+  await sweep({ store, refresh, now: () => NOW, broadcaster });
+
+  expect(broadcaster.topics).toEqual([]);
+});
+
 test("a sweep and a concurrent request refresh share one token exchange", async () => {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", expiresAt: NOW + 60_000 });

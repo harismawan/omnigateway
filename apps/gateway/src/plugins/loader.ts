@@ -16,6 +16,7 @@ import {
   type PluginStorage,
   safeParseManifest,
 } from "@omnigateway/plugin-api";
+import type { ChannelRegistry } from "../stream/channels.ts";
 import { createPluginFetch, createPluginFiles } from "./capabilities.ts";
 import type { PluginEventBus } from "./events.ts";
 
@@ -122,6 +123,7 @@ function buildContext(deps: {
   home: string;
   store: Store;
   events: PluginEventBus;
+  channels: ChannelRegistry;
   logger: Logger;
   now: () => number;
 }): PluginContext {
@@ -142,6 +144,10 @@ function buildContext(deps: {
       const events = createPluginEvents(manifest, deps.events);
       return events === undefined ? {} : { events };
     })(),
+    // `for` binds the id the host validated against the directory name, so the
+    // `plugin:<id>:` half of every topic this plugin opens is the host's word
+    // and not the plugin's — the same guarantee the storage prefix carries.
+    ...(declared.includes("channels") ? { channels: deps.channels.for(manifest.id) } : {}),
     config: manifest.defaults ?? {},
   };
 }
@@ -167,6 +173,15 @@ export async function loadPlugins(deps: {
   root: string;
   store: Store;
   events: PluginEventBus;
+  /**
+   * Where a plugin's `setup` opens its push-socket topics.
+   *
+   * Required rather than optional, and deliberately so: an absent registry
+   * would hand a plugin declaring `channels` a context missing the surface it
+   * declared, which is the exact failure the capability list fails closed to
+   * prevent.
+   */
+  channels: ChannelRegistry;
   sdkVersion: string;
   logger?: Logger;
   now?: () => number;
@@ -279,6 +294,7 @@ export async function loadPlugins(deps: {
           home,
           store: deps.store,
           events: deps.events,
+          channels: deps.channels,
           logger,
           now,
         });

@@ -28,6 +28,7 @@ test("the capability vocabulary is the full set the host can construct", () => {
     "net:outbound",
     "events:request",
     "events:limit",
+    "channels",
   ]);
 });
 
@@ -36,7 +37,14 @@ test("a full manifest round-trips", () => {
     ui: "ui/index.js",
     sdk: "^1.0.0",
     nav: { label: "Companion" },
-    capabilities: ["storage", "files", "net:outbound", "events:request", "events:limit"],
+    capabilities: [
+      "storage",
+      "files",
+      "net:outbound",
+      "events:request",
+      "events:limit",
+      "channels",
+    ],
     origins: ["https://pokeapi.co", "https://raw.githubusercontent.com"],
   });
   expect(parseManifest(manifest)).toMatchObject({

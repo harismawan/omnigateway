@@ -49,12 +49,22 @@ async function harness({
     cookie = `${ADMIN_COOKIE}=${token}`;
   }
 
+  /**
+   * The topics this surface announced, in order.
+   *
+   * Attached to every harness rather than to the one test that reads it: the
+   * routes take the broadcaster as an option, so a harness that omitted it
+   * would make "emits nothing" indistinguishable from "was never wired up".
+   */
+  const topics: string[] = [];
+
   const app = adminRoutes({
     store,
     admin,
     baseUrl: "http://localhost:9000",
     now: () => now,
     sessionTtlMs: SESSION_TTL_MS,
+    broadcaster: { invalidate: (topic) => void topics.push(topic) },
     ...(consoleDeps === undefined ? {} : { console: consoleDeps }),
     ...(bodyLoggingAllowed === undefined ? {} : { bodyLoggingAllowed }),
   });
@@ -77,7 +87,7 @@ async function harness({
       }),
     );
 
-  return { store, app, admin, call };
+  return { store, app, admin, call, topics };
 }
 
 test("status reports an unconfigured gateway without a session", async () => {
@@ -1263,4 +1273,190 @@ test("agent setup never renders a key", async () => {
   const contents = body.files.map((file) => file.contents).join("");
   expect(contents).toContain("<your OmniGateway key>");
   expect(contents).not.toContain(raw);
+});
+
+/**
+ * Every mutating route on this surface and the topic it announces.
+ *
+ * A table rather than a test each, because the property is about the set. A
+ * fifteenth handler added without an emit is a console that silently keeps
+ * polling one resource while pushing the rest, and nothing about the change
+ * that broke it would look wrong — so it is caught by the completeness check
+ * below rather than by whoever happens to remember this file exists.
+ *
+ * `topics: []` is a decision and not a gap; the reasoning for each is beside
+ * `changed` in `adminRoutes`, and the point of listing them here is that they
+ * are listed rather than absent.
+ */
+const MUTATIONS: ReadonlyArray<{
+  /** The pattern Elysia registered, which is what the completeness check reads. */
+  route: string;
+  method: string;
+  /** The same route with this harness's fixtures in it. `:key` is the seeded key's id. */
+  path: string;
+  body?: unknown;
+  topics: readonly string[];
+}> = [
+  // Before any admin session can exist, so no socket is subscribed to be told.
+  {
+    route: "/api/setup",
+    method: "POST",
+    path: "/api/setup",
+    body: { password: "hunter2hunter2" },
+    topics: [],
+  },
+  {
+    route: "/api/login",
+    method: "POST",
+    path: "/api/login",
+    body: { password: "hunter2hunter2" },
+    topics: [],
+  },
+  { route: "/api/logout", method: "POST", path: "/api/logout", topics: [] },
+  {
+    route: "/api/credentials",
+    method: "POST",
+    path: "/api/credentials",
+    body: {
+      provider: "custom",
+      apiKey: "test-provider-key",
+      endpointId: "local",
+      endpointLabel: "Local",
+      origin: "http://localhost:8000",
+      protocol: "chat_completions",
+    },
+    topics: ["res:credentials"],
+  },
+  {
+    route: "/api/credentials/:id",
+    method: "PATCH",
+    path: "/api/credentials/c1",
+    body: { tier: 2 },
+    topics: ["res:credentials"],
+  },
+  {
+    route: "/api/credentials/:id",
+    method: "DELETE",
+    path: "/api/credentials/c1",
+    topics: ["res:credentials"],
+  },
+  {
+    route: "/api/models/:id",
+    method: "PUT",
+    path: "/api/models/fast",
+    body: "model",
+    topics: ["res:models"],
+  },
+  {
+    route: "/api/models/:id",
+    method: "DELETE",
+    path: "/api/models/fast",
+    topics: ["res:models"],
+  },
+  {
+    route: "/api/keys",
+    method: "POST",
+    path: "/api/keys",
+    body: { label: "cli" },
+    topics: ["res:keys"],
+  },
+  {
+    route: "/api/keys/:id/limits",
+    method: "PUT",
+    path: "/api/keys/:key/limits",
+    body: { limits: { requests: { "1m": 60 } } },
+    topics: ["res:keys"],
+  },
+  {
+    route: "/api/keys/:id/models",
+    method: "PUT",
+    path: "/api/keys/:key/models",
+    body: { modelAllowlist: ["fast"] },
+    topics: ["res:keys"],
+  },
+  { route: "/api/keys/:id", method: "DELETE", path: "/api/keys/:key", topics: ["res:keys"] },
+  {
+    route: "/api/settings",
+    method: "PUT",
+    path: "/api/settings",
+    body: "settings",
+    topics: ["res:settings"],
+  },
+  // A POST that writes nothing: it ranks the targets a model already has.
+  {
+    route: "/api/models/:id/dry-run",
+    method: "POST",
+    path: "/api/models/fast/dry-run",
+    body: {},
+    topics: [],
+  },
+];
+
+test("every admin mutation announces its own resource, and only its own", async () => {
+  for (const mutation of MUTATIONS) {
+    const { call, store, topics } = await harness({
+      configured: mutation.path !== "/api/setup",
+    });
+    await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
+    const model = virtualModel({
+      id: "fast",
+      targets: [target({ provider: "anthropic", model: "claude-opus-5" })],
+    });
+    await store.config.putModel(model);
+    const { key } = await seedApiKey(store, { label: "table" });
+
+    // Settings are read back rather than invented: `putSettings` refuses a
+    // partial document, and a 400 would make this row prove nothing.
+    const settings = (await (await call("GET", "/api/settings")).json()) as {
+      settings: Record<string, unknown>;
+    };
+    const body =
+      mutation.body === "model"
+        ? model
+        : mutation.body === "settings"
+          ? settings.settings
+          : mutation.body;
+
+    // `/api/setup` is the one row that runs unauthenticated, because it is the
+    // one route that exists to create the session everything else needs.
+    const authenticated = mutation.path !== "/api/setup";
+    const before = topics.length;
+    const response = await call(
+      mutation.method,
+      mutation.path.replace(":key", key.id),
+      body,
+      authenticated,
+    );
+
+    // The emit sits after the write, so a row whose request was refused would
+    // pass an "emitted nothing" assertion for the wrong reason.
+    expect({ path: mutation.path, status: response.status }).toEqual({
+      path: mutation.path,
+      status: 200,
+    });
+    expect({ path: mutation.path, topics: topics.slice(before) }).toEqual({
+      path: mutation.path,
+      topics: [...mutation.topics],
+    });
+  }
+});
+
+/**
+ * The guard that makes the table above worth having.
+ *
+ * Without it the table is a list someone has to remember to extend, which is
+ * exactly the kind of list that stops being complete. Elysia already holds the
+ * routing table this surface registered, so the set of mutating routes is a
+ * fact to be read rather than one to be restated.
+ */
+test("the mutation table covers every mutating route this surface registers", async () => {
+  const { app } = await harness();
+  const registered = (app as unknown as { routes: { method: string; path: string }[] }).routes
+    .filter((route) => route.method !== "GET")
+    .map((route) => `${route.method} ${route.path}`)
+    .sort();
+
+  const covered = MUTATIONS.map((mutation) => `${mutation.method} ${mutation.route}`).sort();
+
+  expect(covered).toEqual(registered);
 });

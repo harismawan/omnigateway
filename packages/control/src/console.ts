@@ -151,16 +151,38 @@ async function readSource(
 }
 
 /**
+ * Turns raw captured output into the lines a query asked for.
+ *
+ * Extracted rather than inlined because two callers must agree: the REST read
+ * below, and the `stream:console` source in the gateway that publishes deltas.
+ * This is the same property the `res:*` topics get for free by ending in the
+ * same REST fetch — push and poll cannot disagree — applied to the one topic
+ * that carries a payload of its own. A stream that filtered levels its own way
+ * would show an operator a different console depending on whether a line
+ * arrived over the socket or over a reload, and neither rendering would be
+ * identifiably the wrong one.
+ *
+ * `lines` is clamped here rather than by each caller, because every caller has
+ * to agree: an unclamped 0 reaches `slice(-0)`, which returns the whole array
+ * instead of nothing.
+ */
+export function parseConsoleLines(text: string, query: ConsoleQuery): ConsoleLine[] {
+  const lines = consoleLimit(query.lines);
+  return text
+    .split("\n")
+    .filter((raw) => raw.trim().length > 0)
+    .map(parseLine)
+    .filter((line) => keep(line, query))
+    .slice(-lines);
+}
+
+/**
  * Reads the tail of whatever captured this gateway's stdout.
  *
  * The tail is taken *after* filtering, over a window wider than the page, so a
  * page asked to show errors is filled with errors rather than with whatever
  * happened to fall in the last N lines. `scanWidth` bounds how far back that
  * search goes.
- *
- * `lines` is clamped here rather than by each caller, because every caller has
- * to agree: an unclamped 0 reaches `slice(-0)`, which returns the whole array
- * instead of nothing.
  */
 export async function readConsole(
   deps: ConsoleDeps,
@@ -169,12 +191,7 @@ export async function readConsole(
 ): Promise<ConsoleRead> {
   const limited: ConsoleQuery = { ...query, lines: consoleLimit(query.lines) };
   const text = await readSource(deps, source, scanWidth(limited));
-  const lines = text
-    .split("\n")
-    .filter((raw) => raw.trim().length > 0)
-    .map(parseLine)
-    .filter((line) => keep(line, limited))
-    .slice(-limited.lines);
+  const lines = parseConsoleLines(text, limited);
 
   return source.kind === "file"
     ? { source: "file", path: source.path, lines }

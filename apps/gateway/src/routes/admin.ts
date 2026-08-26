@@ -30,6 +30,7 @@ import {
 import { describeError, GatewayError, type Logger, noopLogger, parseLogLevel } from "@omni/ir";
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
+import type { Invalidator } from "../stream/broadcaster.ts";
 import {
   apiErrorHandler,
   readCookie,
@@ -67,6 +68,14 @@ export type AdminDeps = {
    * captured stdout — the ordinary state under `bun run dev`.
    */
   console?: { source: ConsoleSource; deps: ConsoleDeps };
+  /**
+   * Tells every open console that one of these routes changed a resource.
+   *
+   * Optional so a test can mount this surface without a socket layer behind it,
+   * which is what almost all of them want. Absent, the routes behave exactly as
+   * they did before push existed and the console falls back to its poll.
+   */
+  broadcaster?: Invalidator;
 };
 
 /**
@@ -79,6 +88,18 @@ export type AdminDeps = {
  */
 export function adminRoutes(deps: AdminDeps) {
   const logger = deps.logger ?? noopLogger;
+  /**
+   * What a mutation announces, called after the write and never before it.
+   *
+   * Four of this file's fourteen mutating routes deliberately call nothing, and
+   * that is a decision rather than four oversights. `/api/setup` runs before an
+   * admin session can exist, so there is no subscribed socket to tell and no
+   * resource with a topic that it changes. Login and logout change a cookie,
+   * not a row, and nothing a console renders moves when either happens.
+   * `/api/models/:id/dry-run` is a POST that writes nothing at all — it probes
+   * a target and reports what came back.
+   */
+  const changed = (topic: string): void => deps.broadcaster?.invalidate(topic);
   return (
     new Elysia()
       .onError(apiErrorHandler)
@@ -161,13 +182,13 @@ export function adminRoutes(deps: AdminDeps) {
         await requireAdmin(request, deps.admin);
         const body = await readJsonRecord(request);
         if (body === null) throw new GatewayError("BAD_REQUEST", "credential body is required");
-        return {
-          credential: await createApiKeyCredential(
-            deps.store,
-            { provider: body.provider, apiKey: body.apiKey, ...body },
-            logger,
-          ),
-        };
+        const credential = await createApiKeyCredential(
+          deps.store,
+          { provider: body.provider, apiKey: body.apiKey, ...body },
+          logger,
+        );
+        changed("res:credentials");
+        return { credential };
       })
 
       .get("/api/credentials/health", async ({ request }) => {
@@ -199,12 +220,14 @@ export function adminRoutes(deps: AdminDeps) {
       .patch("/api/credentials/:id", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         await patchCredential(deps, params.id, await readJson(request));
+        changed("res:credentials");
         return { ok: true };
       })
 
       .delete("/api/credentials/:id", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         await removeCredential(deps.store, params.id);
+        changed("res:credentials");
         return { ok: true };
       })
 
@@ -216,12 +239,14 @@ export function adminRoutes(deps: AdminDeps) {
       .put("/api/models/:id", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         await putModel(deps.store, params.id, await readJson(request));
+        changed("res:models");
         return { ok: true };
       })
 
       .delete("/api/models/:id", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         await removeModel(deps.store, params.id);
+        changed("res:models");
         return { ok: true };
       })
 
@@ -279,7 +304,9 @@ export function adminRoutes(deps: AdminDeps) {
         await requireAdmin(request, deps.admin);
         // The only response that ever contains a key. It exists in plaintext
         // nowhere else, so an operator who loses it must issue a new one.
-        return createKey(deps.store, await readJson(request));
+        const created = await createKey(deps.store, await readJson(request));
+        changed("res:keys");
+        return created;
       })
 
       /**
@@ -294,7 +321,9 @@ export function adminRoutes(deps: AdminDeps) {
        */
       .put("/api/keys/:id/limits", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
-        return setKeyLimits(deps.store, params.id, await readJson(request));
+        const key = await setKeyLimits(deps.store, params.id, await readJson(request));
+        changed("res:keys");
+        return key;
       })
 
       /**
@@ -307,12 +336,15 @@ export function adminRoutes(deps: AdminDeps) {
        */
       .put("/api/keys/:id/models", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
-        return setKeyModels(deps.store, params.id, await readJson(request));
+        const key = await setKeyModels(deps.store, params.id, await readJson(request));
+        changed("res:keys");
+        return key;
       })
 
       .delete("/api/keys/:id", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         await revokeKey(deps.store, params.id);
+        changed("res:keys");
         return { ok: true };
       })
 
@@ -338,6 +370,7 @@ export function adminRoutes(deps: AdminDeps) {
       .put("/api/settings", async ({ request }) => {
         await requireAdmin(request, deps.admin);
         await putSettings(deps.store, await readJson(request));
+        changed("res:settings");
         return { ok: true };
       })
 

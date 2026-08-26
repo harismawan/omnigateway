@@ -97,10 +97,24 @@ async function harness(options: HarnessOptions = {}) {
     },
   };
 
+  /**
+   * How many times every console was told its whole database moved.
+   *
+   * Counted on every harness rather than only where a test reads it: these
+   * routes take the broadcaster as an option, so a harness that omitted it
+   * would make "did not invalidate" indistinguishable from "was never wired".
+   */
+  let invalidatedAll = 0;
+
   const app = databaseRoutes({
     store: routeStore,
     admin,
     latch,
+    broadcaster: {
+      invalidateAll: () => {
+        invalidatedAll += 1;
+      },
+    },
     now: () => clock.now,
     fs: { ...nodeDatabaseFs(), ...options.fs },
     quiesceDeadlineMs: 50,
@@ -173,6 +187,7 @@ async function harness(options: HarnessOptions = {}) {
     latch,
     clock,
     holdSnapshots,
+    invalidations: () => invalidatedAll,
     call,
     login,
     upload,
@@ -380,6 +395,83 @@ test("a swap that failed keeps the latch closed", async () => {
 
   expect(restored.status).toBe(500);
   expect(latch.isClosed()).toBe(true);
+
+  cleanup();
+});
+
+test("a completed swap tells every console that everything it holds is stale", async () => {
+  // The one event for which a global invalidate is literally true: every query
+  // key the console is holding was read out of a file that is no longer there.
+  const { call, snapshot, invalidations, cleanup } = await harness();
+
+  const created = await snapshot();
+  expect(invalidations()).toBe(0);
+
+  expect((await call("POST", `/api/database/snapshots/${created.id}/restore`)).status).toBe(200);
+
+  expect(invalidations()).toBe(1);
+
+  cleanup();
+});
+
+/**
+ * The invalidation that must not happen, and the reason it is a test of its own.
+ *
+ * A `SwapFailedError` is the one failure that leaves the file on disk in an
+ * unknown state, which is why the latch stays shut and the store is deliberately
+ * not reopened. Telling every console to throw away what it holds and refetch is
+ * strictly worse than telling it nothing: the reads fail against a store that
+ * did not come back, and the panel that goes blank is the database panel — the
+ * one naming the pre-restore snapshot the operator is supposed to recover from.
+ *
+ * `invalidateAll` is also uncoalesced by design, so there is no floor between
+ * this mistake and every open tab.
+ */
+test("a swap that failed does not tell any console to refetch", async () => {
+  const { call, latch, snapshot, invalidations, cleanup } = await harness({
+    fs: {
+      rename: () => {
+        throw new Error("EXDEV");
+      },
+    },
+  });
+
+  const created = await snapshot();
+  const restored = await call("POST", `/api/database/snapshots/${created.id}/restore`);
+
+  // The failure the emit must not ride along with, asserted rather than assumed:
+  // a restore that failed before the swap would prove nothing here.
+  expect(restored.status).toBe(500);
+  expect(latch.isClosed()).toBe(true);
+  expect(invalidations()).toBe(0);
+
+  cleanup();
+});
+
+/**
+ * Ordering, pinned where it has already been broken once.
+ *
+ * Nothing may sit between the swap and the admin-password comparison: the swap
+ * has succeeded by then, so anything that throws in front of that block skips
+ * the logout while the restored password is live. The emit therefore goes last.
+ * A restore whose rollup rebuild fails is the case that found this the first
+ * time, and it exercises both halves at once.
+ */
+test("a restore that ended a session still announced the swap that ended it", async () => {
+  const { call, login, admin, snapshot, invalidations, cleanup } = await harness({
+    rebuildRollupFails: true,
+  });
+
+  const created = await snapshot();
+  await admin.setPassword("correct-horse-battery");
+  await login("correct-horse-battery");
+
+  const restored = await call("POST", `/api/database/snapshots/${created.id}/restore`);
+  expect(restored.status).toBe(200);
+
+  // The session is gone, which is the invariant, and the frame still went out.
+  expect((await call("GET", "/api/database")).status).toBe(401);
+  expect(invalidations()).toBe(1);
 
   cleanup();
 });

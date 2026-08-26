@@ -42,6 +42,18 @@ export const PLUGIN_API_VERSION = 1;
  * mismatch it did nothing to earn. The change is additive, so it does not get
  * to cost that.
  *
+ * `0.1.2` added the push transport: `cadence` gained an optional `topic` and
+ * `LiveContextValue` gained `connection`. A patch for the same reason, and the
+ * WebSocket design's own text calling it a minor is the thing being overruled
+ * here rather than an oversight. Both halves are additive — `cadence(ms)` still
+ * means what it meant, and `connection` is on a type plugins consume and cannot
+ * construct, since `LiveContext` is not exported. A 0.1.1 panel keeps polling
+ * on its interval, which is not a degradation but the fallback path this design
+ * keeps permanently. What a patch costs is the mechanical signal: a plugin
+ * author learns the topic argument exists from release notes rather than from a
+ * version mismatch. That is the cheaper of the two costs. Reserve the minor for
+ * the first genuine narrowing, with a deprecation window.
+ *
  * **Changing this line means republishing _this_ package, not just the SDK.**
  * It reads as an SDK fact and it lives here, so the obvious move — bump
  * `packages/dashboard-sdk`, tag, done — leaves the registry with a
@@ -54,4 +66,4 @@ export const PLUGIN_API_VERSION = 1;
  * advertised. `publishable.test.ts` now refuses a state where this package
  * trails the SDK.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.1";
+export const DASHBOARD_SDK_VERSION = "0.1.2";

@@ -1,4 +1,7 @@
 export type {
+  PluginChannel,
+  PluginChannelMessage,
+  PluginChannels,
   PluginContext,
   PluginDefinition,
   PluginFetch,

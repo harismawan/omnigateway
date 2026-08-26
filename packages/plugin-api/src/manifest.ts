@@ -27,6 +27,7 @@ export const CAPABILITIES = [
   "net:outbound",
   "events:request",
   "events:limit",
+  "channels",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

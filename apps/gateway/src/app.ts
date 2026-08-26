@@ -29,6 +29,17 @@ import { adminRoutes } from "./routes/admin.ts";
 import { connectRoutes } from "./routes/connect.ts";
 import { databaseRoutes } from "./routes/database.ts";
 import { proxyRoutes } from "./routes/proxy.ts";
+import { streamRoutes } from "./routes/stream.ts";
+import {
+  type Broadcaster,
+  createBroadcaster,
+  DEFAULT_FLOOR_MS,
+  INVALIDATION_FLOORS,
+} from "./stream/broadcaster.ts";
+import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
+import { createCoalescer } from "./stream/coalescer.ts";
+import { createSocketRegistry, type SocketRegistry } from "./stream/registry.ts";
+import { createRing, type Ring } from "./stream/ring.ts";
 
 export type AppDeps = {
   store: Store;
@@ -116,6 +127,28 @@ export type AppDeps = {
   pluginUi?: readonly LoadedPlugin[];
   /** Re-applies loaded plugins' schema after a database swap. See `swapIn`. */
   reapplyPluginSchema?: () => Promise<void>;
+  /**
+   * The push transport's connection set.
+   *
+   * Supplied by boot so the same registry can join `stopLoops` and be closed
+   * before `app.stop()`. An app built without one gets its own, which is what
+   * every test that does not care about sockets wants — but nothing will close
+   * it for them, so a test that opens one closes it itself.
+   */
+  registry?: SocketRegistry;
+  /** Emits `res:*` and `stream:*` frames. Built here when boot passes none. */
+  broadcaster?: Broadcaster;
+  /** Replay buffer behind `stream:*`. Shares its lifetime with `broadcaster`. */
+  ring?: Ring;
+  /**
+   * The `plugin:<id>:<name>` topics plugins have opened.
+   *
+   * Supplied by boot, because a plugin opens its channels inside `setup` and
+   * `loadPlugins` runs before this. An app built without one gets an empty
+   * registry, which is exactly what every test that mounts no plugins wants:
+   * every plugin topic is then a topic nobody opened, and refused.
+   */
+  channels?: ChannelRegistry;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -208,6 +241,38 @@ export function createApp(deps: AppDeps) {
   }
 
   const latch = deps.latch ?? createQuiesceLatch();
+
+  // Late-bound for the reason the bootstrap's copy is: channels read the socket
+  // registry, and the registry must tell channels about a connection it closes
+  // on its own initiative, so neither can be fully built before the other.
+  let channelsRef: ChannelRegistry | undefined;
+  const registry =
+    deps.registry ??
+    createSocketRegistry({
+      logger,
+      now,
+      onDetach: (id, topics) => channelsRef?.closed(id, topics),
+    });
+  const channels = deps.channels ?? createChannelRegistry({ sockets: registry, logger });
+  channelsRef = channels;
+  const ring = deps.ring ?? createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
+  const broadcaster =
+    deps.broadcaster ??
+    createBroadcaster({
+      registry,
+      ring,
+      coalescer: createCoalescer({
+        floors: INVALIDATION_FLOORS,
+        defaultFloorMs: DEFAULT_FLOOR_MS,
+        now,
+        sink: (topic, payload) =>
+          registry.publish(topic, {
+            type: "event",
+            topic,
+            ...(payload === undefined ? {} : { payload }),
+          }),
+      }),
+    });
   /**
    * The release for each admitted request, keyed by the request itself.
    *
@@ -257,6 +322,7 @@ export function createApp(deps: AppDeps) {
         discoveryMirrors: deps.discoveryMirrors === true,
         bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
         ...(deps.emit === undefined ? {} : { emit: deps.emit }),
+        broadcaster,
       }),
     )
     .use(
@@ -269,6 +335,7 @@ export function createApp(deps: AppDeps) {
         now,
         sessionTtlMs: ADMIN_SESSION_TTL_MS,
         logger,
+        broadcaster,
         ...(deps.console === undefined ? {} : { console: deps.console }),
       }),
     )
@@ -281,6 +348,7 @@ export function createApp(deps: AppDeps) {
         admin,
         latch,
         snapshots,
+        broadcaster,
         fs: deps.databaseFs ?? nodeDatabaseFs(),
         now,
         logger,
@@ -308,6 +376,16 @@ export function createApp(deps: AppDeps) {
       pluginUiRoutes({
         admin,
         plugins: deps.pluginUi ?? [],
+        logger,
+      }),
+    )
+    .use(
+      streamRoutes({
+        admin,
+        registry,
+        broadcaster,
+        ring,
+        channels,
         logger,
       }),
     )

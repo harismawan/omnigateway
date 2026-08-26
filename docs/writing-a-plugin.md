@@ -74,7 +74,7 @@ your plugin.
   "server": "server/index.js",
   "ui": "ui/index.js",
   "nav": { "label": "Companion" },
-  "capabilities": ["storage", "files", "net:outbound", "events:request"],
+  "capabilities": ["storage", "files", "net:outbound", "events:request", "channels"],
   "origins": ["https://pokeapi.co"]
 }
 ```
@@ -101,7 +101,7 @@ promise for a contract that has not settled.
 `capabilities` is the whole list of what you get. Anything you did not declare
 is absent from the context, so reaching for it is a type error rather than a
 runtime surprise. `origins` is required with `net:outbound` and forbidden
-without it.
+without it. `channels` is the push socket, covered in §4.
 
 `server` and `ui` are both optional; declare at least one.
 
@@ -182,7 +182,53 @@ is in the payload on purpose: a window's reset instant is recomputed on every
 evaluation, so keying on one turns "tell me when this fills" into "tell me
 forever once it has".
 
-## 4. Logging
+## 4. Channels
+
+```js
+const session = ctx.channels.open("session");
+
+session.onMessage(({ connectionId, payload }) => {
+  session.send(connectionId, { echo: payload });
+});
+session.onClose((connectionId) => {
+  // The connection is gone. Anything you were holding for it can go too.
+});
+```
+
+Four things to design around:
+
+- **The host owns the namespace.** `open("session")` becomes the wire topic
+  `plugin:<your-id>:session`, with the `<your-id>` half taken from the manifest
+  the host validated against your directory name. You never write the prefix and
+  you cannot name another plugin's topic — the same rule `{{name}}` follows for
+  your tables. Interior colons are fine, so `open("session:" + id)` is the way to
+  run a topic per thing rather than one topic with a discriminator inside it.
+- **Delivery is best-effort and bounded.** Each subscriber has a queue that
+  **drops rather than grows**: a client that cannot keep up loses its oldest
+  frames, and the drop is counted rather than reported to you. There is no retry
+  and no replay. Design for a stream of current state, not a stream of
+  instructions that must each arrive.
+- **A throwing handler costs you your message and nothing else.** It is caught,
+  counted against your plugin, and reported as one batched line — not one per
+  failure. The connection stays open, the other handlers on that channel still
+  run, and no other plugin notices.
+- **There is no storage and no durability here.** Nothing survives a restart:
+  not a channel, not a subscription, not a frame in flight. A `connectionId` is
+  an opaque handle valid until `onClose` names it, and it is not an identity —
+  two tabs belonging to the same operator share nothing. Anything that must
+  outlive the conversation goes in your own tables.
+
+You never touch a socket, an upgrade request, a header or the connection's
+principal. Who is allowed to hold your topic is the host's decision, made
+against the credential it verified at upgrade, and opening a channel does not
+widen your own reach — it makes a topic available to be authorised.
+
+One caveat with teeth: a client must **subscribe** before it sends. Your only
+way to answer is `send(connectionId, …)`, which publishes on that same topic, so
+a frame from an unsubscribed connection is a question whose answer has nowhere
+to land — the host refuses it rather than handing you one you cannot reply to.
+
+## 5. Logging
 
 ```js
 ctx.logger.info("hatched", { event: "egg.hatched", count: 1 });
@@ -197,7 +243,7 @@ redaction boundary — it is what makes "prompts never reach stdout" enforced by
 the compiler rather than by review. Handing plugins a wider one would give that
 away.
 
-## 5. The UI half
+## 6. The UI half
 
 ```js
 import { definePluginUI } from "@omnigateway/dashboard-sdk";
@@ -259,7 +305,7 @@ re-rendering.
 Your mount sits inside an error boundary. A render failure shows an inline panel
 naming your plugin and leaves the rest of the console working.
 
-## 6. Install and verify
+## 7. Install and verify
 
 ```bash
 omni plugin install ./my-plugin           # or a tarball; runs nothing from it
@@ -275,7 +321,7 @@ entry.
 Plugins load once at boot. There is no hot reload: `install` writes files and
 tells you to restart.
 
-## 7. Shipping it
+## 8. Shipping it
 
 `omni plugin install` takes a directory, a `.tgz`, an `https://` URL, or an npm
 package name. Publishing to npm is the least work for whoever installs it:

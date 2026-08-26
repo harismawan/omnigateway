@@ -83,7 +83,8 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     only.
 11. CLI administer local installs through `@omni/control`, never `/api/*`. Inject every side effect
     so tests never start processes or write outside temp dirs.
-12. Dashboard call `/api/*` only, one exception: `/health`, polled to watch gateway leave and return
+12. Dashboard call `/api/*` only — which now include the one WebSocket, `/api/stream`. One
+    exception: `/health`, polled to watch gateway leave and return
     across restart. During restart no session and no authenticated surface to probe, so liveness is
     the one question `/api/*` cannot answer. May import `@omni/store/types`, `@omni/ir`, catalog
     subpath, `@omnigateway/dashboard-sdk`, but not provider adapters, HTTP client, runtime store
@@ -110,9 +111,15 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     not a sandbox** — plugin share gateway's process and can import past all of it. What it buy:
     accidental overreach impossible, plugin's intent auditable from manifest. Say that plainly
     wherever it come up; reader who believe otherwise make worse decisions than one who know.
-    `packages/plugin-api` stay pure like `ir`; loader, context, event bus live in `apps/gateway`.
-    Every load failure skipped and reported, never fatal: proxy path depend on no plugin and must
-    not become able to.
+    `packages/plugin-api` stay pure like `ir`; loader, context, event bus, channel registry live in
+    `apps/gateway`. Every load failure skipped and reported, never fatal: proxy path depend on no
+    plugin and must not become able to. `channels` capability give plugin `open(name)` and nothing
+    else — never a socket, upgrade request, header or `Principal`. Topic is `plugin:<id>:<name>`
+    with `<id>` from validated manifest, so plugin cannot name another plugin's topic, same rule
+    `{{name}}` follow for its tables. Registry answer what **exist**; `authorised` in
+    `routes/stream.ts` decide who may hold it, so opening channel never widen plugin's own reach.
+    Outbound frame reuse socket registry's own bounded per-connection queue — no second queue, and
+    nothing here touch `Store`.
 
 ## Adding a provider
 
@@ -341,6 +348,26 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   connects completing at 1007–1061ms. Failure read as provider outage and is not one.
 - Streaming responses need downstream `: keepalive` comments because provider heartbeats decoded
   away. Keep server idle timeout above request deadline.
+- Socket registry close every connection **before** `app.stop()`, and its `stopLoops` position is
+  what make that true. `stop()` called without `true`, so it drain rather than sever, and open
+  WebSocket never end by itself — one connected console otherwise hold teardown for the full
+  `STOP_DEADLINE_MS` every restart. Close with `1001`; `4401` mean "do not reconnect" and is for
+  expired session alone.
+- `/health` watcher stay a plain `fetch` poll and must never move onto the socket. The one check
+  proving gateway came back cannot depend on subsystem being restarted.
+- Elysia call a `.ws()` route's `beforeHandle` **twice** — once through composed hooks, once by hand
+  in the Bun adapter, guarded by `typeof === "function"`. So it must be a single function, never an
+  array (an array is silently skipped by the second call, and guard appear to work while running
+  half the time), and it must be idempotent or every upgrade cost two `verify` round-trips.
+  Throwing from it is fine and reach `apiErrorHandler`. Also register a companion plain `GET` on the
+  same path: a ws route match only when `upgrade: websocket` present, so without one a browser hit
+  fall through to static catch-all and 404 an endpoint that exists.
+- `res:*` frame carry at most `{ keys }` and client map **topic to query-key prefix**, never an
+  enumerated key list. `["logs", limit]` and `["usage", …6]` are parameterised, so an enumerated
+  table go stale silently. One exception is real: `res:logs` must exclude `["logs","body",…]`, a
+  prefix collision on immutable data.
+- Coalescing on `res:*` is load-bearing, not tuning. Uncoalesced push at 100 req/s is 100 refetch
+  per second against a surface polling at 60s — strictly worse than what it replace.
 - Stdout hold operational events; `request_logs` hold completed requests. Do not restore duplicate
   per-request access lines. `requestId` join both.
 - Console can read only captured stdout: `OMNI_LOG_FILE`, journald, or none. `OMNI_LOG_FILE` name
@@ -380,6 +407,17 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   queue drops rather than grows. Anything needing exact accounting must reconcile from own storage.
   `RequestCompleted` emitted from `finishLog` because that already the one site running at most once
   per request id — same reason usage debit there.
+- Plugin channels carry same promise and one more. Client must **subscribe before it send**: plugin's
+  only way to answer is `send(connectionId, …)` on that topic, so frame from unsubscribed connection
+  is question whose answer have nowhere to land, and it refused rather than handed over. Plugin topic
+  nothing opened refused like `stream:*` topic nothing `declareStream`d, same reason — topic with no
+  owner must not read as topic that merely quiet. Channel registry build **before** `loadPlugins` in
+  `apps/gateway/src/index.ts`, because plugin open its channel inside `setup`; one built after leave
+  every plugin holding live-looking handle onto nothing. Route's `close` read `registry.topics(id)`
+  **before** `registry.remove(id)` — reverse it and every `onClose` handler go unfired, silently.
+  Throwing handler caught, counted per plugin, reported one batched line per plugin, never one per
+  failure, and never with error body: `LogFields` closed allowlist and that code authored outside
+  this repository.
 - Console externalise `react`, `react-dom`, `styled-components`, `@tanstack/react-query`,
   `@omnigateway/dashboard-sdk` and resolve them through import map, so console and every plugin
   share one instance; two React copies throw "invalid hook call".
