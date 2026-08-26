@@ -26,6 +26,22 @@ export type LogFields = {
   provider?: ProviderId | undefined;
   model?: string | undefined;
   requestedModel?: string | undefined;
+  /**
+   * Which provider account a line is about.
+   *
+   * Almost always a `crypto.randomUUID()` the gateway minted. The exception is
+   * a `pin:missing` exclusion, where the value is the id an operator saved on a
+   * target and no account matches — so this field is not purely gateway-issued,
+   * and it is bounded at the only place operator text can enter it:
+   * `credentialId` in `modelSchema` caps it at 64 characters of
+   * `[A-Za-z0-9_-]`. That is one of two ways in. The other is a hand-edited or
+   * restored database, which `sqlite/config.ts` reads back with `JSON.parse`
+   * and no validation; nothing here re-checks it.
+   *
+   * Unlike `reason`, this is not truncated on the way out, so the bound is what
+   * keeps it the short identifier every consumer assumes. Widening the schema
+   * is a logging change, not just a validation one.
+   */
   credentialId?: string | undefined;
   apiKeyId?: string | undefined;
   /**

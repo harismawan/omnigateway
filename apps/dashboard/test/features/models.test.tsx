@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { Target } from "../../src/api/types.ts";
 import {
   blankModel,
   blankTarget,
@@ -9,7 +10,10 @@ import {
   catalogTokenLimits,
   heldAuths,
   parseDraft,
+  pinChoices,
+  pinNote,
   reachableChoices,
+  reEndpointDraft,
   retargetDraft,
   toDraft,
   unreachableNote,
@@ -274,6 +278,109 @@ describe("per-model auth", () => {
   });
 });
 
+describe("pinning a target to one account", () => {
+  test("a new target is unpinned", () => {
+    // The normal state. Any account of the provider may serve it, which is what
+    // every model saved before pinning existed already means.
+    expect(blankTarget("anthropic").credentialId).toBe("");
+  });
+
+  test("an empty pin parses to no field rather than to an unmatchable id", () => {
+    const parsed = parseDraft({ ...blankModel(), id: "fast" });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect("credentialId" in (parsed.model.targets[0] ?? {})).toBe(false);
+  });
+
+  test("a pin survives the round trip", () => {
+    const pinned = model({
+      targets: [{ ...(model().targets[0] as Target), credentialId: "cred-2" }],
+    });
+    const parsed = parseDraft(toDraft(pinned));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.model).toEqual(pinned);
+  });
+
+  test("changing the provider drops the pin", () => {
+    // An Anthropic account cannot serve an OpenAI target, so carrying the id
+    // across would leave a pin the router can only report as `pin:missing`.
+    const pinned = { ...blankTarget("anthropic"), credentialId: "cred-1" };
+    expect(retargetDraft(pinned, { provider: "openai", model: "gpt-5.6-sol" }).credentialId).toBe(
+      "",
+    );
+  });
+
+  test("changing only the model keeps the pin", () => {
+    // Same provider, same account. Clearing here would silently undo the
+    // operator's choice on every keystroke in the model field.
+    const pinned = { ...blankTarget("anthropic"), credentialId: "cred-1" };
+    expect(
+      retargetDraft(pinned, { provider: "anthropic", model: "claude-haiku-4-5" }).credentialId,
+    ).toBe("cred-1");
+  });
+
+  test("the note names a pin no connected account can serve", () => {
+    const scope = { provider: "anthropic" as const, endpointId: "" };
+    const held = [credential({ id: "cred-1", provider: "anthropic", label: "claude-main" })];
+    expect(pinNote("cred-1", scope, held)).toBeNull();
+    expect(pinNote("", scope, held)).toBeNull();
+    expect(pinNote("cred-gone", scope, held)).toBe(
+      "No connected account has this id. Requests routed here will fail rather than " +
+        "falling back to another account.",
+    );
+  });
+
+  test("the picker offers custom accounts on the target's own endpoint only", () => {
+    // The router checks endpoint before pin, so an account on another endpoint
+    // is one the editor could otherwise pin to and make the target permanently
+    // unroutable — it saves clean and then reports pin:missing forever.
+    const credentials = [
+      credential({ id: "here", provider: "custom", providerData: { endpointId: "local" } }),
+      credential({ id: "there", provider: "custom", providerData: { endpointId: "remote" } }),
+    ];
+    const scope = { provider: "custom" as const, endpointId: "local" };
+
+    expect(pinChoices(scope, credentials).map((choice) => choice.id)).toEqual(["here"]);
+    expect(pinNote("there", scope, credentials)).not.toBeNull();
+  });
+
+  test("the picker falls back to the label when an account has no email", () => {
+    const credentials = [
+      credential({ id: "c1", provider: "anthropic", accountEmail: null, label: "billing-key" }),
+    ];
+    expect(pinChoices({ provider: "anthropic", endpointId: "" }, credentials)).toEqual([
+      { id: "c1", label: "billing-key" },
+    ]);
+  });
+
+  test("changing the endpoint drops the pin", () => {
+    // An account belongs to one endpoint as firmly as to one provider.
+    const pinned = { ...blankTarget("custom"), endpointId: "local", credentialId: "here" };
+    expect(reEndpointDraft(pinned, "remote").credentialId).toBe("");
+    expect(reEndpointDraft(pinned, "local").credentialId).toBe("here");
+  });
+
+  test("no accounts at all is unknown, not a pin that has died", () => {
+    // `ModelEditor` passes `credentials.data ?? []`, so an empty list is what a
+    // request still in flight looks like and what a failed one looks like
+    // permanently. Rendering a live pin as `(removed)`, in red, accuses working
+    // configuration on the screen the operator came to for the truth.
+    expect(pinNote("cred-1", { provider: "anthropic", endpointId: "" }, [])).toBeNull();
+  });
+
+  test("a pasted pin is trimmed rather than saved with the whitespace around it", () => {
+    // Pasting is the common way an id arrives. Stored untrimmed it matches no
+    // credential and reports `pin:missing`, which reads as a deleted account —
+    // and the control schema would refuse the save outright on charset.
+    const parsed = parseDraft({
+      ...blankModel(),
+      id: "fast",
+      targets: [{ ...blankTarget("anthropic"), credentialId: "  cred-1  " }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.model.targets[0]?.credentialId).toBe("cred-1");
+  });
+});
+
 function stubModels(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
     "GET /api/models": () => ({ models: [model(), model({ id: "deep", strategy: "priority" })] }),
@@ -378,6 +485,189 @@ describe("ModelsBoard", () => {
         endpointId: "local-vllm",
         model: "local-model",
       });
+    });
+  });
+
+  test("a target can be pinned to one connected account", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({
+      "GET /api/credentials": () => ({
+        credentials: [
+          credential({ id: "cred-a", provider: "anthropic", accountEmail: "ops@example.com" }),
+          credential({ id: "cred-b", provider: "anthropic", accountEmail: "billing@example.com" }),
+          credential({ id: "cred-k", provider: "kimi", accountEmail: "kimi@example.com" }),
+        ],
+      }),
+      "PUT /api/models/fast": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    const account = (await screen.findByLabelText("Account")) as HTMLSelectElement;
+    // Only this provider's accounts. Pinning an Anthropic target to a Kimi
+    // account would be a pin the router can only report as missing.
+    expect(within(account).getByRole("option", { name: "billing@example.com" })).toBeTruthy();
+    expect(within(account).queryByRole("option", { name: "kimi@example.com" })).toBeNull();
+
+    await user.selectOptions(account, "cred-b");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body)).targets[0]).toMatchObject({
+        credentialId: "cred-b",
+      });
+    });
+  });
+
+  test("an unpinned target sends no account at all", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({
+      "GET /api/credentials": () => ({
+        credentials: [credential({ id: "cred-a", provider: "anthropic" })],
+      }),
+      "PUT /api/models/fast": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const target = JSON.parse(String(put?.init?.body)).targets[0];
+      // Absent, not "": the control schema refuses the empty string, so sending
+      // one would turn the default state of every target into a failed save.
+      expect("credentialId" in target).toBe(false);
+    });
+  });
+
+  test("a pin at a since-removed account is shown rather than silently dropped", async () => {
+    stubModels({
+      "GET /api/models": () => ({
+        models: [
+          model({
+            targets: [{ ...(model().targets[0] as Target), credentialId: "cred-gone" }],
+          }),
+        ],
+      }),
+      "GET /api/credentials": () => ({
+        credentials: [credential({ id: "cred-a", provider: "anthropic" })],
+      }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    expect(
+      await screen.findByText(
+        /No connected account has this id\. Requests routed here will fail rather than/,
+      ),
+    ).toBeTruthy();
+
+    // The select must still show the dangling id as the selected option. Left
+    // to fall back to the first option it would read "Any account" — the
+    // opposite of what the target does — and the note beside it would look
+    // like it was describing something else.
+    const account = screen.getByLabelText("Account") as HTMLSelectElement;
+    expect(account.value).toBe("cred-gone");
+    expect(account.selectedOptions[0]?.textContent).toBe("cred-gone (removed)");
+  });
+
+  test("a pin can be removed again through the picker", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({
+      "GET /api/models": () => ({
+        models: [
+          model({ targets: [{ ...(model().targets[0] as Target), credentialId: "cred-a" }] }),
+        ],
+      }),
+      "GET /api/credentials": () => ({
+        credentials: [credential({ id: "cred-a", provider: "anthropic" })],
+      }),
+      "PUT /api/models/fast": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    const account = (await screen.findByLabelText("Account")) as HTMLSelectElement;
+    expect(account.value).toBe("cred-a");
+
+    await user.selectOptions(account, "");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const target = JSON.parse(String(put?.init?.body)).targets[0];
+      // Un-pinning has to reach the wire as an absent field. Anything that
+      // preserved the old id — or sent "" — would make the pin unremovable
+      // from the only UI that can set it.
+      expect("credentialId" in target).toBe(false);
+    });
+  });
+
+  test("changing a custom target's endpoint clears the pin the move invalidates", async () => {
+    const user = userEvent.setup();
+    const customAccount = (id: string, endpointId: string, label: string) =>
+      credential({
+        id,
+        provider: "custom",
+        label,
+        accountEmail: null,
+        providerData: {
+          endpointId,
+          endpointLabel: label,
+          origin: `http://${endpointId}:8000`,
+          protocol: "chat_completions",
+        },
+      });
+    const stub = stubModels({
+      "GET /api/models": () => ({
+        models: [
+          model({
+            targets: [
+              {
+                provider: "custom",
+                endpointId: "local-vllm",
+                model: "local-model",
+                tier: 1,
+                weight: 1,
+                costPerMTok: { input: 0, output: 0 },
+                credentialId: "cred-local",
+                capabilities: { tools: true, images: true, reasoning: false },
+              },
+            ],
+          }),
+        ],
+      }),
+      "GET /api/credentials": () => ({
+        credentials: [
+          customAccount("cred-local", "local-vllm", "Local vLLM"),
+          customAccount("cred-remote", "remote-vllm", "Remote vLLM"),
+        ],
+      }),
+      "PUT /api/models/fast": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    expect(((await screen.findByLabelText("Account")) as HTMLSelectElement).value).toBe(
+      "cred-local",
+    );
+
+    await user.selectOptions(screen.getByLabelText("Endpoint"), "remote-vllm");
+
+    // Re-queried: the select is rebuilt from the new draft, and the element
+    // found above belongs to the render that has since been replaced. Carried
+    // across, the pin would name an account on the endpoint the target just
+    // left — one the router can only ever report as `pin:missing`.
+    expect((screen.getByLabelText("Account") as HTMLSelectElement).value).toBe("");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const target = JSON.parse(String(put?.init?.body)).targets[0];
+      expect(target.endpointId).toBe("remote-vllm");
+      expect("credentialId" in target).toBe(false);
     });
   });
 

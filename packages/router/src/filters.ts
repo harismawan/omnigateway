@@ -1,6 +1,6 @@
 import type { ChatRequest, ProviderCapabilities } from "@omni/ir";
 import { ANTHROPIC_NATIVE_TOOLS } from "@omni/ir";
-import type { CredentialView, Target } from "@omni/store";
+import { type CredentialView, servesTarget, type Target } from "@omni/store/types";
 import { healthKey } from "./snapshot.ts";
 import type { Excluded, RankInput } from "./types.ts";
 
@@ -63,14 +63,19 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
             (cap) => need[cap] && !target.capabilities[cap],
           );
 
+    // Whether the account a pinned target names was reachable at all. Set once
+    // the pin matches a credential that already cleared the provider and
+    // endpoint checks, so a pin at another provider's account counts as unseen
+    // rather than as a way around those checks.
+    let pinSeen = false;
+
     for (const credential of snapshot.credentials) {
-      if (credential.provider !== target.provider) continue;
-      if (
-        target.provider === "custom" &&
-        credential.providerData.endpointId !== target.endpointId
-      ) {
-        continue;
-      }
+      // Provider, custom endpoint and pin in one question, from the single copy
+      // of that rule in `@omni/store/types`. Silent: an account this excludes
+      // was never a candidate for the target, and one `excluded` row per
+      // sibling would bury the reasons describing the pinned account itself.
+      if (!servesTarget(target, credential)) continue;
+      pinSeen = target.credentialId !== undefined;
 
       const drop = (reason: string): void => {
         excluded.push({ credentialId: credential.id, model: target.model, reason });
@@ -126,6 +131,17 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
       }
 
       pairs.push({ credential, target });
+    }
+
+    // A pin at an account that was deleted, or that belongs to another
+    // provider, drops every credential silently and would otherwise fail the
+    // request with nothing in `excluded` to explain it.
+    if (target.credentialId !== undefined && !pinSeen) {
+      excluded.push({
+        credentialId: target.credentialId,
+        model: target.model,
+        reason: "pin:missing",
+      });
     }
   }
 

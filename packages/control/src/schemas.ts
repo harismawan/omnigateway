@@ -69,6 +69,28 @@ const targetSchema = z.discriminatedUnion("provider", [
       }),
       contextWindow: z.number().int().positive().optional(),
       maxOutputTokens: z.number().int().positive().optional(),
+      // Pins this target to one account. Absent means any credential of the
+      // provider; there is deliberately no check that the id names a live
+      // credential, matching the rule that removing an account must not make an
+      // unrelated edit unsavable. An empty string is refused because it is not
+      // a third state — it is an id nothing can ever match.
+      //
+      // Bounded and charset-limited because a pin that matches nothing is
+      // reported as `pin:missing` carrying this string, and that row reaches
+      // `LogFields.credentialId` and `request_logs.degradations`. Unvalidated,
+      // it would be the one operator free-text field on a closed allowlist
+      // whose own documentation calls it a bounded identifier. Credential ids
+      // are `crypto.randomUUID()`, so nothing legitimate comes close to either
+      // bound; the format itself is deliberately not enforced, since pinning
+      // the schema to today's id generator would make every stored pin
+      // unreadable if it ever changed.
+      credentialId: z
+        .string()
+        .trim()
+        .min(1)
+        .max(64)
+        .regex(/^[A-Za-z0-9_-]+$/, "credentialId must be an account id")
+        .optional(),
       capabilities: z.object({
         tools: z.boolean(),
         images: z.boolean(),
@@ -92,6 +114,28 @@ const targetSchema = z.discriminatedUnion("provider", [
       }),
       contextWindow: z.number().int().positive().optional(),
       maxOutputTokens: z.number().int().positive().optional(),
+      // Pins this target to one account. Absent means any credential of the
+      // provider; there is deliberately no check that the id names a live
+      // credential, matching the rule that removing an account must not make an
+      // unrelated edit unsavable. An empty string is refused because it is not
+      // a third state — it is an id nothing can ever match.
+      //
+      // Bounded and charset-limited because a pin that matches nothing is
+      // reported as `pin:missing` carrying this string, and that row reaches
+      // `LogFields.credentialId` and `request_logs.degradations`. Unvalidated,
+      // it would be the one operator free-text field on a closed allowlist
+      // whose own documentation calls it a bounded identifier. Credential ids
+      // are `crypto.randomUUID()`, so nothing legitimate comes close to either
+      // bound; the format itself is deliberately not enforced, since pinning
+      // the schema to today's id generator would make every stored pin
+      // unreadable if it ever changed.
+      credentialId: z
+        .string()
+        .trim()
+        .min(1)
+        .max(64)
+        .regex(/^[A-Za-z0-9_-]+$/, "credentialId must be an account id")
+        .optional(),
       capabilities: z.object({
         tools: z.boolean(),
         images: z.boolean(),

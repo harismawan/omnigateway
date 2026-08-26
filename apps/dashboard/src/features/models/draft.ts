@@ -6,6 +6,11 @@ import {
   PROVIDER_MODEL_CATALOG,
   type ProviderModelChoice,
 } from "@omni/providers/catalog";
+// The one place the console asks a routing question, imported rather than
+// reimplemented for the same reason `vitals.ts` imports `sameWindow`: a second
+// copy of "which account can serve this target" is what put the picker and the
+// router out of step in the first place.
+import { servesTarget } from "@omni/store/types";
 import type { Credential, ProviderId, Strategy, Target, VirtualModel } from "../../api/types.ts";
 
 /**
@@ -42,6 +47,16 @@ export type TargetDraft = {
    */
   contextWindow: string;
   maxOutputTokens: string;
+  /**
+   * The one account allowed to serve this target, or empty for any account of
+   * the provider.
+   *
+   * Empty is the normal state. A pin is hard at routing — an account that is
+   * disabled, breakered or out of quota fails the request instead of spilling
+   * to a sibling — so this is the operator saying which account, not which
+   * account first.
+   */
+  credentialId: string;
   tools: boolean;
   images: boolean;
   reasoning: boolean;
@@ -203,6 +218,82 @@ export function unreachableNote(
   );
 }
 
+/** Which target a pin belongs to, as far as deciding what may serve it goes. */
+export type PinScope = Pick<TargetDraft, "provider" | "endpointId">;
+
+/**
+ * The accounts that could actually serve a target, for the pin picker.
+ *
+ * Endpoint is part of the question, not just provider. The router pairs a
+ * custom target only with credentials on the same `endpointId`, and it applies
+ * that check *before* the pin — so offering an account on another endpoint
+ * would let the editor mint a target that saves cleanly and then reports
+ * `pin:missing` on every request for the rest of its life. Same reason the
+ * picker is scoped to one provider.
+ */
+export function pinChoices(
+  scope: PinScope,
+  credentials: readonly Credential[],
+): ReadonlyArray<{ id: string; label: string }> {
+  // The shared rule with the pin deliberately left off, so this reads "which
+  // accounts could this target reach" rather than "which does it reach now".
+  // Same function the router filters with, so the picker cannot offer an
+  // account the router would then refuse.
+  const address = { provider: scope.provider, endpointId: scope.endpointId };
+  return credentials
+    .filter((credential) => servesTarget(address, credential))
+    .map((credential) => ({
+      id: credential.id,
+      label: credential.accountEmail ?? credential.label,
+    }));
+}
+
+/**
+ * Why a pin cannot be served, or null when it can.
+ *
+ * A saved pin outlives the account it names — removing a credential is not
+ * refused, and neither is saving a model that still mentions it — so the editor
+ * has to say what the router will do rather than hide the id or drop it.
+ *
+ * States the consequence, like `unreachableNote`, and states it in full: the
+ * failure is the point of a pin, and an operator who reads "will fail" without
+ * "rather than falling back" may reasonably assume the gateway covers for it.
+ */
+export function pinNote(
+  credentialId: string,
+  scope: PinScope,
+  credentials: readonly Credential[],
+): string | null {
+  if (credentialId.length === 0) return null;
+  // No accounts at all is unknown, not broken — the same reading `reachable`
+  // takes two functions up. `ModelEditor` passes `credentials.data ?? []`, so
+  // an empty list is also what a request still in flight looks like, and what a
+  // failed one looks like permanently. Calling a live pin dead because a
+  // listing has not arrived is the worse error of the two: it accuses working
+  // configuration, in red, on a screen the operator came to for the truth.
+  if (credentials.length === 0) return null;
+  if (pinChoices(scope, credentials).some((choice) => choice.id === credentialId)) return null;
+  return (
+    "No connected account has this id. Requests routed here will fail rather than " +
+    "falling back to another account."
+  );
+}
+
+/**
+ * Points a target at a different endpoint, dropping a pin the move invalidates.
+ *
+ * An account belongs to one endpoint as firmly as it belongs to one provider,
+ * and the router checks endpoint before pin, so a pin carried across is one it
+ * can only ever report as missing.
+ */
+export function reEndpointDraft(target: TargetDraft, endpointId: string): TargetDraft {
+  return {
+    ...target,
+    endpointId,
+    ...(endpointId === target.endpointId ? {} : { credentialId: "" }),
+  };
+}
+
 /**
  * Points a target at a different model, and settles what carries across.
  *
@@ -216,6 +307,11 @@ export function unreachableNote(
  *
  * A model the catalog does not list keeps whatever prices are in the fields:
  * there is nothing better to put there.
+ *
+ * A pin is cleared on a provider change and kept otherwise. An account belongs
+ * to one provider, so carrying it across leaves a pin that can only ever report
+ * `pin:missing`; clearing it on a model change instead would undo the
+ * operator's choice on every keystroke in the model field.
  */
 export function retargetDraft(
   target: TargetDraft,
@@ -225,6 +321,7 @@ export function retargetDraft(
     ...target,
     ...next,
     ...(catalogPrices(next.provider, next.model) ?? {}),
+    ...(next.provider === target.provider ? {} : { credentialId: "" }),
     contextWindow: "",
     maxOutputTokens: "",
   };
@@ -253,6 +350,9 @@ export function blankTarget(provider: ProviderId = "anthropic"): TargetDraft {
     // serves it. Filling these in would freeze one of those two answers.
     contextWindow: "",
     maxOutputTokens: "",
+    // Any account of the provider, which is what every model saved before
+    // pinning existed already means.
+    credentialId: "",
     tools: true,
     images: true,
     reasoning: true,
@@ -289,6 +389,7 @@ export function toDraft(model: VirtualModel): ModelDraft {
           : String(target.costPerMTok.cacheWrite1h),
       contextWindow: target.contextWindow === undefined ? "" : String(target.contextWindow),
       maxOutputTokens: target.maxOutputTokens === undefined ? "" : String(target.maxOutputTokens),
+      credentialId: target.credentialId ?? "",
       tools: target.capabilities.tools,
       images: target.capabilities.images,
       reasoning: target.capabilities.reasoning,
@@ -310,6 +411,7 @@ export function parseDraft(draft: ModelDraft): Parsed {
   for (const [index, target] of draft.targets.entries()) {
     const position = `Target ${index + 1}`;
     const endpointId = target.endpointId.trim();
+    const credentialId = target.credentialId.trim();
     if (target.provider === "custom" && endpointId.length === 0) {
       return { ok: false, problem: `${position} needs a custom endpoint.` };
     }
@@ -390,6 +492,9 @@ export function parseDraft(draft: ModelDraft): Parsed {
       },
       ...(hasContext ? { contextWindow } : {}),
       ...(hasMaxOutput ? { maxOutputTokens } : {}),
+      // Omitted rather than sent empty: the control schema refuses "" because
+      // it is an id nothing matches, not a third state between pinned and not.
+      ...(credentialId.length > 0 ? { credentialId } : {}),
       capabilities: { tools: target.tools, images: target.images, reasoning: target.reasoning },
     });
   }

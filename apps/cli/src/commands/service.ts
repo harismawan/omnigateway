@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { listPlugins, orphanPluginTables, type PluginSummary, pluginsDir } from "@omni/control";
+import { resolvePin } from "@omni/store";
 import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError, type Context } from "../context.ts";
@@ -198,6 +199,41 @@ async function orphanTables(ctx: Context): Promise<string[] | null> {
   }
 }
 
+/**
+ * Targets pinned to an account this installation no longer holds.
+ *
+ * The pin is deliberately not validated when a model is saved — removing a
+ * credential must not make an unrelated edit of a model that mentions it
+ * unsavable — so the dangling state is allowed to exist by design, and nothing
+ * cleans it up. That makes it exactly the class of thing `doctor` is for: the
+ * target hard-fails every request rather than falling back, and there is no
+ * other command that would tell an operator so before a client does.
+ *
+ * Same null-versus-empty rule as the orphan tables above.
+ */
+async function danglingPins(ctx: Context): Promise<string[] | null> {
+  if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
+  try {
+    const store = await ctx.store();
+    const accounts = await store.credentials.list();
+    return (await store.config.listModels()).flatMap((model) =>
+      model.targets
+        // The shared rule, not an id lookup. A pin is equally dead when it names
+        // another provider's account or a custom account on another endpoint,
+        // and the router reports all three the same way — a check that saw only
+        // deletions would print "none" for two of the three.
+        .filter(
+          (target) =>
+            target.credentialId !== undefined && resolvePin(target, accounts) === undefined,
+        )
+        .map((target) => `${model.id}/${target.model} → ${target.credentialId}`),
+    );
+  } catch {
+    // Already reported by `config` or `database` above.
+    return null;
+  }
+}
+
 export const doctor: Command = {
   usage: "doctor",
   summary: "Check what this CLI resolved, and whether it can do anything with it",
@@ -212,6 +248,7 @@ export const doctor: Command = {
     // installation whose operator is running `doctor`.
     const plugins: PluginSummary[] = listPlugins(doctorPluginDeps(), deps.root);
     const orphans = await orphanTables(ctx);
+    const pins = await danglingPins(ctx);
 
     const checks = {
       root: deps.root,
@@ -232,6 +269,7 @@ export const doctor: Command = {
       pluginsDir: pluginsDir(deps.root),
       plugins,
       orphanPluginTables: orphans,
+      danglingPins: pins,
       // Repeated from stderr on purpose: `doctor` is the command an operator
       // runs to find out why the paths above are what they are, and `--json`
       // is read by scripts that never see stderr.
@@ -276,6 +314,16 @@ export const doctor: Command = {
                 // prints them; removing one is `omni plugin remove --purge`,
                 // which asks first.
                 paint(ctx, "yellow", `${orphans.length}: ${orphans.join(", ")}`),
+        ],
+        [
+          "dangling pins",
+          pins === null
+            ? paint(ctx, "dim", "not checked")
+            : pins.length === 0
+              ? ok(true, "none")
+              : // Named, like the orphans above: the fix is to repoint or clear
+                // the target in the model editor, and that needs to know which.
+                paint(ctx, "yellow", `${pins.length}: ${pins.join(", ")}`),
         ],
         ...checks.warnings.map(
           (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],

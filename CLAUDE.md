@@ -326,6 +326,69 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   a gauge — leak lock the key out until restart, silently.
 - `ApiKeySummary.limitUsage` count committed rows only: floor on what limiter see, never its number.
   `concurrency.used` is `null`, not `0`, because gauge not stored.
+- `Target.credentialId` pin one account to one target, and it is **filter state, not strategy**. Set
+  mean that account alone serve the target; unset mean any account of the provider. No `"pinned"`
+  strategy exist and none should be added — strategy decide order, pin decide membership, and two
+  places deciding the same thing is how they come to disagree. Pin is **hard**: disabled, breakered,
+  rate-limited or quota-spent pinned account fail the request, never spill to sibling.
+- **`servesTarget` and `resolvePin` in `@omni/store/types` are the only copy of "can this account
+  serve this target".** Provider, custom `endpointId` and pin are one question; five sites asked it
+  separately and three asked less than the router did, so a target pinned to another provider's
+  account saved clean, hard-failed every request, and `doctor` called it healthy. Router, `putModel`,
+  `resolveModelLimits`, `omni doctor` and the console picker all route through it — console import it
+  direct from the subpath, precedent `vitals.ts` already set with `sameWindow`. Never reimplement it
+  locally, however small the local question look. `ServingCredential` carry `providerData` for it,
+  else the rule cannot see custom endpoints at all.
+- `pin:missing` is emitted **once per target**, not per credential skipped, and only when no account
+  resolve — else the request fail with an empty exclusion list. Accounts the pin exclude are skipped
+  silently: one row per sibling would bury the reasons describing the pinned account itself.
+  `pinSeen` is declared **per target, inside the target loop**; hoisting it make a model whose first
+  pinned target resolve suppress the row for every later dangling one. It is set **before** any
+  `drop()`, so a pinned target that also fail an earlier check report that check alone rather than
+  two rows. Guard *order* cannot change membership — all three are `continue` guards, so reordering
+  admit the same pairs; what order decide is whether `pin:missing` fire. The mutation that **does**
+  widen membership is making an earlier guard conditional on the pin. An early version of this bullet
+  named the wrong property, which is exactly the trap: a rule stated wrong is one a contributor
+  preserve while breaking the real thing.
+- Nothing validate the pin at write time, same exemption `putModel` give stored targets: removing an
+  account must not make unrelated edit unsavable. `omni doctor` carry that weight instead, and it
+  must resolve through `resolvePin` — an existence check report "none" for the cross-provider and
+  wrong-endpoint pins, which are two of the four ways a pin die. Control schema refuse `""` because
+  it is an id nothing match, not a third state, so dashboard **omit** the field rather than send
+  empty, and bound it to 64 chars of `[A-Za-z0-9_-]` **on both arms of the union** — the block is
+  duplicated and the custom arm went untested once. Bound exist because `pin:missing` carry this
+  string into `LogFields.credentialId` and `request_logs.degradations`, and unlike `reason` that
+  field is not truncated on the way out. Schema is **one of two ways in**: `sqlite/config.ts` read
+  targets back with `JSON.parse` and no validation, so a restored or hand-edited database bypass it.
+  Format deliberately not pinned to `crypto.randomUUID()`, else changing id generation make every
+  stored pin unreadable.
+- Pin cleared on provider **and** endpoint change in the console draft (`retargetDraft`,
+  `reEndpointDraft`) — account belong to one endpoint as firmly as to one provider — but never on
+  model change, which would undo the operator's choice on every keystroke. **This is draft
+  behaviour only**: `PUT /api/models/:id` and `omni models put -f` accept a provider change carrying
+  the old pin and save it. The durable property is not "the draft clears it" but that a pin
+  outliving its provider or endpoint is unroutable and `doctor` is what reports it.
+- Two places outside the router must read the pin, and each get it wrong in its own direction if it
+  not. `resolveModelLimits` narrow across every way in a provider hold, justified by failover
+  landing anywhere in it — pin mean it cannot, so pinned target described by its own account's auth
+  alone. Unresolvable pin fall back to provider-wide narrowing, **never** to catalog figures:
+  narrowing across every way is by construction no wider than any one of them, so fallback can never
+  advertise more than unpinned would. Matter because `setup.ts` persist that number into
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, where wrong figure outlive the request that would expose it.
+  `unreachable` in `putModel` likewise check pinned account's auth alone, and the pin check is
+  **deliberately not grandfatherable** — `pairOf` stay keyed on provider+model. Keying it on the pin
+  would judge pin-only edit fresh and re-run *provider-wide* check on it, which is exactly the check
+  a vanished credential fail, so clearing a dangling pin — the repair operator make after removing
+  account — could be refused while broken shape it replace still saved. Pin check firing only when
+  named account exist right now keep "removing account never make unrelated edit unsavable" true by
+  construction. `modelLimits` resolve pin from **enabled** credentials, `models.ts` from existence:
+  first ask what serve now, second ask what operator hold, same split `heldAuths` already make.
+- Both surfaces that remove an account name the models pinned to it **before** the confirm, because a
+  pinned target has no fallback and stop serving outright. Console read `useModels()` and say so when
+  that query has not answered rather than implying nothing is pinned; `pinNote` likewise treat an
+  empty credential list as unknown, not as a dead pin, since that is also what a failed
+  `/api/credentials` look like. Fail-open on either read accuse working configuration in red, or hide
+  an irreversible consequence — both worse than saying the question is unanswered.
 - `ProviderModelChoice.auth` enforced at write time in `putModel`, never at routing. Which ways in
   exist is installation state, so catalog export the fact (`catalogModelAuths`) and control own the
   rule. Provider with no credential is unknown rather than blocked, unlisted model unknown rather

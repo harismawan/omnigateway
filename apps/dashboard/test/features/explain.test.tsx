@@ -67,7 +67,35 @@ describe("ExplainPanel", () => {
 
     expect(await screen.findByText("Filtered out")).toBeTruthy();
     expect(screen.getByText("breaker:open")).toBeTruthy();
+    // Which account, not just which model. Without it the row cannot say which
+    // of a provider's accounts was dropped.
+    expect(screen.getByText("cred-2")).toBeTruthy();
     expect(screen.getByText("1 eligible · 1 filtered out")).toBeTruthy();
+  });
+
+  test("a dangling pin names the account the target points at", async () => {
+    const user = userEvent.setup();
+    stubExplain({
+      "POST /api/models/fast/dry-run": () => ({
+        ...dryRunResult,
+        candidates: [],
+        excluded: [
+          { credentialId: "cred-gone", model: "claude-opus-4", reason: "pin:missing" },
+          // Same model and reason as the row above, one per target. Keyed on
+          // content alone these collide and React drops one.
+          { credentialId: "also-gone", model: "claude-opus-4", reason: "pin:missing" },
+        ],
+      }),
+    });
+    renderWithProviders(<ExplainPanel modelId="fast" />);
+
+    await user.click(screen.getByRole("button", { name: /Rank candidates/ }));
+
+    await waitFor(() => expect(screen.getByText("cred-gone")).toBeTruthy());
+    expect(screen.getByText("also-gone")).toBeTruthy();
+    // `pin:missing` alone sends the operator back to the model editor to work
+    // out which pin; the id is the whole finding.
+    expect(screen.getAllByText("pin:missing")).toHaveLength(2);
   });
 
   test("warns that a weighted model does not rank the same way twice", async () => {

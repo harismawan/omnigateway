@@ -314,6 +314,22 @@ type TargetBase = {
   contextWindow?: number | undefined;
   maxOutputTokens?: number | undefined;
   capabilities: { tools: boolean; images: boolean; reasoning: boolean };
+  /**
+   * Serve this target from one named account only.
+   *
+   * Absent is the normal state and means any credential of the target's
+   * provider. Set narrows the router's filter to that credential alone, and the
+   * pin is hard: an account that is disabled, breakered, rate-limited or out of
+   * quota fails the request rather than spilling to a sibling. An operator pins
+   * for billing separation or a per-account agreement, and silent spillover is
+   * the one outcome that defeats both.
+   *
+   * A pin naming a credential that no longer exists is left alone rather than
+   * refused at write time, for the same reason `putModel` exempts a stored
+   * target from the auth rule: removing an account must not make an unrelated
+   * edit unsavable. It surfaces at routing as `pin:missing`.
+   */
+  credentialId?: string | undefined;
 };
 
 export type Target = TargetBase & {
@@ -321,6 +337,76 @@ export type Target = TargetBase & {
   /** Required for custom targets by the control schema; absent on built-in targets. */
   endpointId?: string | undefined;
 };
+
+/**
+ * The credential facts that decide whether an account can serve a target.
+ *
+ * Structural rather than `CredentialView`, so the console — which may not
+ * import runtime store code — and the CLI and control both satisfy it with what
+ * they already hold.
+ */
+export type ServingAccount = {
+  id: string;
+  provider: ProviderId;
+  providerData: Record<string, unknown>;
+};
+
+/**
+ * The three fields of a target that decide which accounts can reach it.
+ *
+ * Narrower than `Target` so the console can ask the question about a half-built
+ * draft — a picker needs to know which accounts a target *could* use, before
+ * the model name or the prices exist — without inventing the rest of a target
+ * to satisfy a signature. A `Target` satisfies it structurally.
+ */
+export type TargetAddress = {
+  provider: ProviderId;
+  endpointId?: string | undefined;
+  credentialId?: string | undefined;
+};
+
+/**
+ * Whether this account is one the target could be dispatched to.
+ *
+ * The single copy of a rule that was written five times and got three of them
+ * wrong. Provider, custom endpoint and pin are one question, not three, and a
+ * site that asks only part of it reaches a different answer than the router —
+ * which is how a target pinned to another provider's account came to save
+ * cleanly, hard-fail every request, and be reported as healthy by `doctor`.
+ *
+ * Deliberately says nothing about `enabled`, capabilities, breakers or quota.
+ * Those are *states* an account passes through; this is whether the account is
+ * addressable by the target at all. Callers that care about health add it: the
+ * router drops a disabled account with its own reason, and `putModel` counts
+ * one because a rejected token is still the operator's way in.
+ */
+export function servesTarget(target: TargetAddress, account: ServingAccount): boolean {
+  if (account.provider !== target.provider) return false;
+  // Read from the account rather than trusting a saved string: a custom
+  // endpoint is the credential's own property, and the router compares it the
+  // same way.
+  if (target.provider === "custom" && account.providerData.endpointId !== target.endpointId) {
+    return false;
+  }
+  return target.credentialId === undefined || account.id === target.credentialId;
+}
+
+/**
+ * The account a pinned target names, or undefined when the pin resolves to none.
+ *
+ * Undefined covers every way a pin fails — deleted, another provider, another
+ * custom endpoint — because the router reports them identically as
+ * `pin:missing` and no caller has ever needed to tell them apart. An unpinned
+ * target also returns undefined: it names no account, which is a different fact
+ * with the same consequence for every caller here.
+ */
+export function resolvePin<T extends ServingAccount>(
+  target: TargetAddress,
+  accounts: readonly T[],
+): T | undefined {
+  if (target.credentialId === undefined) return undefined;
+  return accounts.find((account) => servesTarget(target, account));
+}
 
 export type Strategy = "score" | "priority" | "roundRobin" | "weighted";
 

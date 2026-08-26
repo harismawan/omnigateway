@@ -48,6 +48,12 @@ export const modelsShow: Command = {
   async run(args, { ctx, writer }) {
     const id = requirePositional(args, 0, "model id");
     const model = await getModel(await ctx.store(), id);
+    // Only where one exists. A pin routes every request for that target to a
+    // single account and fails rather than falling back, which is the first
+    // thing to check when an operator asks why one account is serving
+    // everything — but a column of dashes on the common unpinned case would
+    // push an already wide table wider for nothing.
+    const pinned = model.targets.some((target) => target.credentialId !== undefined);
 
     emit(ctx, writer, { model }, () =>
       [
@@ -61,6 +67,7 @@ export const modelsShow: Command = {
           [
             { header: "PROVIDER" },
             { header: "MODEL" },
+            ...(pinned ? [{ header: "ACCOUNT" }] : []),
             { header: "TIER", align: "right" },
             { header: "WEIGHT", align: "right" },
             { header: "IN $/MTOK", align: "right" },
@@ -75,6 +82,7 @@ export const modelsShow: Command = {
           model.targets.map((target) => [
             provider(ctx, target.provider),
             target.model,
+            ...(pinned ? [target.credentialId ?? "any"] : []),
             String(target.tier),
             String(target.weight),
             target.costPerMTok.input.toFixed(2),

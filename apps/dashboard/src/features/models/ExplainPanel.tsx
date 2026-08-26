@@ -268,9 +268,27 @@ export function ExplainPanel({ modelId }: ExplainPanelProps) {
               <Stack $gap={1}>
                 <Legend>Filtered out</Legend>
                 <ul>
+                  {/*
+                    Content, not position. Two rows can be byte-identical — a
+                    `pin:missing` row is pushed once per target, so a model with
+                    two targets on the same provider model and the same dead pin
+                    produces two — and React renders both either way, warning
+                    rather than dropping one. An earlier version of this claimed
+                    the duplicate was dropped and keyed on the index to prevent
+                    it; that was wrong, and it bought a lint suppression for a
+                    problem that does not exist.
+                  */}
                   {result.excluded.map((row) => (
                     <Excluded key={`${row.credentialId}:${row.model}:${row.reason}`}>
                       <Mono $dim>{row.model}</Mono>
+                      {/*
+                        Which account, not just which model. For `pin:missing`
+                        the id *is* the finding — it names the account the
+                        target is pinned to and this installation does not have
+                        — and a row reading only "pin:missing" sends the
+                        operator back to the model editor to work out which.
+                      */}
+                      <Mono $dim>{row.credentialId}</Mono>
                       <Spacer />
                       <Chip $tone={row.reason.startsWith("capability") ? "warn" : "down"}>
                         {row.reason}

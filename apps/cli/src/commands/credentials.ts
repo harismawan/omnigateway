@@ -5,6 +5,7 @@ import {
   getCredential,
   isProviderId,
   listCredentials,
+  listModels,
   OAUTH_PROVIDERS,
   PROVIDER_IDS,
   patchCredential,
@@ -172,8 +173,24 @@ export const credentialsRemove: Command = {
     const id = requirePositional(args, 0, "credential id");
     const credential = await findCredential(ctx, id);
 
+    // Named before the prompt, not after the deletion. A pinned target has no
+    // fallback, so removing the account it names stops that target serving
+    // outright — a different fact from an unpinned target losing one of
+    // several, and the operator can only weigh it beforehand. The console says
+    // the same thing at the same moment; a headless install would otherwise
+    // learn it from a client.
+    const pinned = (await listModels(await ctx.store()))
+      .filter((model) => model.targets.some((target) => target.credentialId === id))
+      .map((model) => model.id);
+
     const confirmed = await prompt.confirm(
-      `delete ${credential.provider} credential "${credential.label}" (${id})?`,
+      `delete ${credential.provider} credential "${credential.label}" (${id})?` +
+        (pinned.length === 0
+          ? ""
+          : ` ${pinned.length === 1 ? "model" : "models"} ${pinned.join(", ")} ` +
+            `${pinned.length === 1 ? "pins a target" : "pin targets"} to it, and ` +
+            `${pinned.length === 1 ? "that target" : "those targets"} will fail rather than ` +
+            "fall back to another account."),
     );
     if (!confirmed) throw new CliError("cancelled");
 

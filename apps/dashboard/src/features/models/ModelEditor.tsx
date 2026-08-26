@@ -217,6 +217,7 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
                 removable={draft.targets.length > 1}
                 endpoints={endpoints}
                 held={held}
+                credentials={credentials.data ?? []}
                 onChange={(next) =>
                   setDraft({
                     ...draft,

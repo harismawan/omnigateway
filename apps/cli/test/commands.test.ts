@@ -154,6 +154,77 @@ test("models show prices every token class, not just input and output", async ()
   expect(shown.out).toContain("10.00");
 });
 
+test("models show names the account a target is pinned to", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        credentialId: "cred-finance",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      {
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tier: 2,
+        weight: 1,
+        costPerMTok: { input: 3, output: 15 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const shown = await cli(["models", "show", "billed"], { root });
+  expect(shown.code).toBe(0);
+
+  // Asserted by column position, not by `toContain`. A cell that renders under
+  // the wrong heading satisfies "the output contains cred-finance" while
+  // telling the operator something false, and "any" is a common enough word to
+  // match elsewhere in the output by accident.
+  const lines = shown.out.split("\n");
+  const header = lines.find((line) => line.includes("PROVIDER") && line.includes("MODEL"));
+  if (header === undefined) throw new Error("no target table in output");
+  const column = (line: string, name: string): string | undefined =>
+    line.trim().split(/\s{2,}/)[
+      header
+        .trim()
+        .split(/\s{2,}/)
+        .indexOf(name)
+    ];
+
+  expect(header).toContain("ACCOUNT");
+  const pinned = lines.find((line) => line.includes("claude-opus-5"));
+  const unpinned = lines.find((line) => line.includes("claude-sonnet-5"));
+  if (pinned === undefined || unpinned === undefined) throw new Error("target rows missing");
+
+  // A pin sends every request for that target to one account and fails rather
+  // than falling back, so "why is one account serving everything" has to be
+  // answerable from here.
+  expect(column(pinned, "ACCOUNT")).toBe("cred-finance");
+  // The unpinned sibling says so rather than leaving a blank cell that reads
+  // like a rendering fault.
+  expect(column(unpinned, "ACCOUNT")).toBe("any");
+});
+
+test("models show leaves out the account column when nothing is pinned", async () => {
+  const root = await installation();
+  await cli(["models", "put", "fast", "--from-catalog", "anthropic:claude-opus-5"], { root });
+
+  const shown = await cli(["models", "show", "fast"], { root });
+  expect(shown.code).toBe(0);
+  // The common case. A column of "any" on every row would widen an already
+  // wide table to say nothing.
+  expect(shown.out).not.toContain("ACCOUNT");
+});
+
 test("models show marks a price the target does not name", async () => {
   const root = await installation();
   const store = await openStore(root);
@@ -695,6 +766,167 @@ test("a command run under --root says so when it refuses an ambient OMNI_DB_PATH
  * but only by someone who knows about it, and nothing else on the installation
  * would ever say. Long-window rate limits are enforced from these buckets.
  */
+test("doctor reports a target pinned to an account that is gone", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  await seedCredential(store, { id: "live-account", provider: "anthropic" });
+  const live = (await store.credentials.list())[0];
+  if (live === undefined) throw new Error("the seeded credential is not there");
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        credentialId: "removed-account",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      {
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tier: 2,
+        weight: 1,
+        costPerMTok: { input: 3, output: 15 },
+        credentialId: live.id,
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const checks = JSON.parse(result.out) as { danglingPins: string[] };
+  // A pin is deliberately not validated at save time, so nothing else in the
+  // system would tell an operator this target hard-fails every request. The
+  // resolvable pin beside it must not be reported — a check that flags healthy
+  // configuration is one operators learn to ignore.
+  expect(checks.danglingPins).toEqual(["billed/claude-opus-5 → removed-account"]);
+});
+
+test("doctor reports a pin the router cannot resolve, model by model", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  await seedCredential(store, { id: "anthropic-live", provider: "anthropic" });
+  await seedCredential(store, { id: "kimi-live", provider: "kimi" });
+  await seedCredential(store, {
+    id: "custom-local",
+    provider: "custom",
+    providerData: { endpointId: "local" },
+  });
+  await seedCredential(store, {
+    id: "custom-remote",
+    provider: "custom",
+    providerData: { endpointId: "remote" },
+  });
+  // A pin at another provider's account. It exists, so a check that looked the
+  // id up would call it healthy; the router checks provider before pin and
+  // reports `pin:missing`, and doctor is the only compensating control for the
+  // deliberate absence of write-time validation.
+  await store.config.putModel({
+    id: "alpha",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        credentialId: "kimi-live",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  // And a custom account on another endpoint, which fails the same way one step
+  // further in.
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "custom",
+        endpointId: "local",
+        model: "llama",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 0, output: 0 },
+        credentialId: "custom-remote",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const checks = JSON.parse(result.out) as { danglingPins: string[] };
+  // Both models, not just the first: a check that stopped at one would print a
+  // clean-looking report for an installation with two broken targets in it.
+  expect(checks.danglingPins).toEqual([
+    "alpha/claude-opus-5 → kimi-live",
+    "billed/llama → custom-remote",
+  ]);
+});
+
+test("doctor prints the dangling pins in its own table, not only under --json", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        credentialId: "removed-account",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  // `--json` is read by scripts; the table is what the operator running the
+  // command actually sees, and a row that is absent there is a finding nobody
+  // is told about.
+  const broken = await cli(["doctor"], { root, service });
+  const row = (out: string): string | undefined =>
+    out
+      .split("\n")
+      .find((line) => line.startsWith("dangling pins"))
+      ?.trim()
+      .split(/\s{2,}/)[1];
+
+  expect(row(broken.out)).toBe("1: billed/claude-opus-5 → removed-account");
+
+  // And the row is still there when there is nothing to say, so "none" means
+  // checked rather than a heading that only appears once it is too late.
+  const clean = await installation();
+  const healthy = await cli(["doctor"], { root: clean, service: fakeService({ root: clean }) });
+  expect(row(healthy.out)).toBe("none");
+});
+
+test("doctor says none rather than nothing when every pin resolves", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const result = await cli(["doctor", "--json"], { root, service });
+  // `[]` is "checked, nothing wrong". Null would mean the question could not be
+  // asked, and the two must not read alike.
+  expect((JSON.parse(result.out) as { danglingPins: string[] | null }).danglingPins).toEqual([]);
+});
+
 test("doctor checks the usage rollup against the rows it summarizes", async () => {
   const root = await installation();
   const service = fakeService({ root });
