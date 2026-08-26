@@ -83,12 +83,20 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
    */
   emit?: PluginEmit;
   /**
-   * Tells the console that a finished request changed usage and the log list.
+   * Tells the console the log list changed, at each of the three points it does.
    *
-   * Threaded to `finishLog` for the reason `emit` is, and the two call sites
-   * there — the success path and the terminal catch — are mutually exclusive
-   * per request, so one finished request is one pair of invalidations however
-   * it ended.
+   * `beginLog` when the row appears, `routeLog` when failover rewrites its
+   * target, `finishLog` when it completes — and only the last of those pairs
+   * `res:logs` with `res:usage`, because only then has anything been counted.
+   *
+   * All three, not just the last, because a pushed topic *replaces* polling: the
+   * console refetches `res:logs` on nothing else once the socket is up. An
+   * emitter only on completion is what made in-flight requests invisible, and
+   * the symptom was silence rather than an error.
+   *
+   * `finishLog`'s two call sites — the success path and the terminal catch —
+   * are mutually exclusive per request, so a finished request still emits one
+   * completion pair however it ended.
    */
   broadcaster?: Invalidator;
 };
@@ -551,7 +559,7 @@ async function handle(
         ...(captured === null ? {} : { http: captured.wrap(deps.http) }),
         async onRoute(target) {
           if (began) {
-            await routeLog(deps.store, requestId, target, deps.logger);
+            await routeLog(deps.store, requestId, target, deps.logger, deps.broadcaster);
             return;
           }
           began = true;
@@ -563,7 +571,7 @@ async function handle(
             resolvedModel: target.model,
             credentialId: target.credentialId,
           });
-          await beginLog(deps.store, log, keyId, deps.logger);
+          await beginLog(deps.store, log, keyId, deps.logger, deps.broadcaster);
         },
       },
       request.signal,

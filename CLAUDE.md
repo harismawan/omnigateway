@@ -429,6 +429,16 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   enumerated key list. `["logs", limit]` and `["usage", …6]` are parameterised, so an enumerated
   table go stale silently. One exception is real: `res:logs` must exclude `["logs","body",…]`, a
   prefix collision on immutable data.
+- **A pushed topic replaces polling, so it must emit on *every* transition of what it covers, not
+  only the interesting one.** `cadence(ms, topic)` return `false` once the socket declare that topic
+  pushed, so the panel refetch on nothing else — an emitter set that miss a transition make that
+  transition invisible, and the symptom is silence, never an error. `res:logs` shipped emitting from
+  `finishLog` alone, so an in-flight request first appeared already finished and the logs page
+  counted zero running on a busy gateway; failover rewrote a row's target with nothing emitted at
+  all. Three sites now: `beginLog`, `routeLog`, `finishLog`. Polling hid this because it never asked
+  *why* the list changed. When adding a topic, enumerate the writes to the resource and check each
+  one emits — the count of emitters should match the count of writers, and `res:usage` pairing only
+  with `finishLog` is correct precisely because nothing else count tokens.
 - Coalescing on `res:*` is load-bearing, not tuning. Uncoalesced push at 100 req/s is 100 refetch
   per second against a surface polling at 60s — strictly worse than what it replace.
 - Stdout hold operational events; `request_logs` hold completed requests. Do not restore duplicate

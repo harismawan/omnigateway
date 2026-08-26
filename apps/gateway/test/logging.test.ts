@@ -1,20 +1,45 @@
 import { expect, test } from "bun:test";
 import type { RequestLog, Store } from "@omni/store";
-import { finishLog, newCompletedRequestLog, newPendingRequestLog } from "../src/logging.ts";
+import {
+  beginLog,
+  finishLog,
+  newCompletedRequestLog,
+  newPendingRequestLog,
+  routeLog,
+} from "../src/logging.ts";
 import type { Invalidator } from "../src/stream/broadcaster.ts";
 
 /** A store that records appends, and can be told to fail one. */
-function stubStore(opts: { failAppend?: boolean } = {}): { store: Store; appends: RequestLog[] } {
+function stubStore(opts: { failAppend?: boolean; failBegin?: boolean; failRoute?: boolean } = {}): {
+  store: Store;
+  appends: RequestLog[];
+  begins: RequestLog[];
+} {
   const appends: RequestLog[] = [];
+  const begins: RequestLog[] = [];
   const store = {
     usage: {
       async append(log: RequestLog) {
         if (opts.failAppend === true) throw new Error("disk full");
         appends.push(log);
       },
+      async begin(log: RequestLog) {
+        if (opts.failBegin === true) throw new Error("disk full");
+        begins.push(log);
+      },
+      async route() {
+        if (opts.failRoute === true) throw new Error("disk full");
+      },
     },
   } as unknown as Store;
-  return { store, appends };
+  return { store, appends, begins };
+}
+
+function pending(over: Partial<RequestLog> = {}): Omit<RequestLog, "state"> {
+  return {
+    ...newCompletedRequestLog("req_1", 1_000, { requestedModel: "fast", status: 0 }),
+    ...over,
+  };
 }
 
 /** Records the topics an emitter names, in order. */
@@ -122,6 +147,69 @@ test("completed request logs require an explicit status", () => {
   const log = newCompletedRequestLog("req_1", 1_000, { requestedModel: "fast" });
 
   expect(log.status).toBe(0);
+});
+
+test("a request that has only started invalidates logs, so it is visible while it runs", async () => {
+  // The console stops polling `res:logs` the moment the socket declares it
+  // pushed, so a transition that emits nothing is a transition nobody sees.
+  // Beginning a request is one: the row exists, it is `pending`, and the logs
+  // page counts it as running. Without this the row first appears when it
+  // completes — by which time it is not running any more, and the only view of
+  // in-flight work is empty on a busy gateway.
+  const { store } = stubStore();
+  const stream = recorder();
+
+  await beginLog(store, pending(), "key_1", undefined, stream);
+
+  // Not `res:usage`: nothing has been counted yet. The row carries placeholder
+  // zeros, and a usage refetch would re-read numbers that have not moved.
+  expect(stream.topics).toEqual(["res:logs"]);
+});
+
+test("a request that could not be recorded invalidates nothing", async () => {
+  // Same rule `finishLog` follows: the invalidation says "re-read the list",
+  // and there is nothing new in the list to read.
+  const { store } = stubStore({ failBegin: true });
+  const stream = recorder();
+
+  await beginLog(store, pending(), "key_1", undefined, stream);
+
+  expect(stream.topics).toEqual([]);
+});
+
+test("failing over to another target invalidates logs, because the row just changed", async () => {
+  // `routeLog` is the failover path: the row already exists and its resolved
+  // provider and model are being rewritten to whatever dispatch moved to. That
+  // is a change to the list the console is showing, and on a pushed topic a
+  // change that emits nothing is a change nobody sees — the row keeps naming
+  // the account that already failed until the request ends.
+  const { store } = stubStore();
+  const stream = recorder();
+
+  await routeLog(
+    store,
+    "req_1",
+    { provider: "anthropic", model: "claude-opus-4", credentialId: "c2" },
+    undefined,
+    stream,
+  );
+
+  expect(stream.topics).toEqual(["res:logs"]);
+});
+
+test("a failover that could not be recorded invalidates nothing", async () => {
+  const { store } = stubStore({ failRoute: true });
+  const stream = recorder();
+
+  await routeLog(
+    store,
+    "req_1",
+    { provider: "anthropic", model: "claude-opus-4", credentialId: "c2" },
+    undefined,
+    stream,
+  );
+
+  expect(stream.topics).toEqual([]);
 });
 
 test("a finished request invalidates usage and logs, once each", async () => {
