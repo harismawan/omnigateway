@@ -48,6 +48,11 @@ type Described = { model: VirtualModel; limits: ModelLimits; label: string };
 export async function describeModelsForSetup(store: Store): Promise<Described[]> {
   const models = await listModels(store);
   const credentials = (await listCredentials(store)).map((credential) => ({
+    // `id` carries the pin: a target pinned to one account is described by that
+    // account's way in, and these figures are written into an agent's own
+    // configuration file, where a wrong one outlives the request that would
+    // have exposed it.
+    id: credential.id,
     provider: credential.provider,
     authType: credential.authType,
     enabled: credential.enabled,

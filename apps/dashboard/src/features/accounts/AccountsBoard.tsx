@@ -5,10 +5,11 @@ import {
   useCredentialHealth,
   useCredentials,
   useDeleteCredential,
+  useModels,
   useSettings,
   useUpdateCredential,
 } from "../../api/queries.ts";
-import type { Credential, ProviderId } from "../../api/types.ts";
+import type { Credential, ProviderId, VirtualModel } from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatMs, formatRelative } from "../../lib/format.ts";
@@ -108,12 +109,37 @@ function useCommit() {
   };
 }
 
+/**
+ * What removing an account does to the targets pinned to it, or "" for none.
+ *
+ * The sentence above this one says a target "loses this account", which is true
+ * of an unpinned target and wrong about a pinned one: a pin has no fallback, so
+ * every request for that target starts failing the moment the account is gone.
+ * Naming the models is the difference between a warning an operator can act on
+ * and one they can only agree to.
+ */
+function pinnedWarning(doomed: Credential, models: readonly VirtualModel[]): string {
+  const pinned = models
+    .filter((model) => model.targets.some((target) => target.credentialId === doomed.id))
+    .map((model) => model.id);
+  if (pinned.length === 0) return "";
+  return (
+    ` ${pinned.length === 1 ? "The model" : "The models"} ${pinned.join(", ")} ` +
+    `${pinned.length === 1 ? "pins a target" : "pin targets"} to this account. ` +
+    "Those targets will fail rather than fall back to another account."
+  );
+}
+
 export function AccountsBoard() {
   const { cadence } = useLive();
   const credentials = useCredentials();
   const health = useCredentialHealth(cadence(10_000));
   // Only for reading how old a snapshot may be before it stops being current.
   const settings = useSettings();
+  // Only to name the models that pin a target to the account being removed.
+  // Those targets do not fall back to a sibling — they hard-fail — so removal
+  // is destructive to them in a way it is not to an unpinned target.
+  const models = useModels();
   const remove = useDeleteCredential();
   const { commit } = useCommit();
 
@@ -424,7 +450,8 @@ export function AccountsBoard() {
         body={
           doomed === null
             ? ""
-            : `Removing "${doomed.label}" deletes its stored token. Any model target pointing at ${PROVIDER_LABEL[doomed.provider]} loses this account, and reconnecting means authorizing again.`
+            : `Removing "${doomed.label}" deletes its stored token. Any model target pointing at ${PROVIDER_LABEL[doomed.provider]} loses this account, and reconnecting means authorizing again.` +
+              pinnedWarning(doomed, models.data ?? [])
         }
         confirmLabel="Remove account"
         busy={remove.isPending}

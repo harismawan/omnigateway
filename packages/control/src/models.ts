@@ -50,6 +50,29 @@ function pairOf(target: Target): string {
 }
 
 /**
+ * The account a pinned target names, when this installation still holds one of
+ * the target's own provider.
+ *
+ * Undefined covers three states the router reads alike as `pin:missing`: no
+ * pin, a pin at an account that is gone, and a pin at another provider's
+ * account — its pin check sits after the provider check, so a foreign account
+ * is not a way in and must not launder the provider-wide refusal. Each falls
+ * back to the provider-wide rule, which is what this returning nothing means to
+ * the caller.
+ *
+ * Existence, not `enabled`, for the same reason `heldAuths` counts a disabled
+ * credential: a rejected token is still the operator's way into that account.
+ */
+function pinnedCredential(
+  target: Target,
+  byId: ReadonlyMap<string, Credential>,
+): Credential | undefined {
+  if (target.credentialId === undefined) return undefined;
+  const credential = byId.get(target.credentialId);
+  return credential?.provider === target.provider ? credential : undefined;
+}
+
+/**
  * Refuses a target no credential this installation holds could ever reach.
  *
  * Kilo splits its catalog by backend: the `:free` tier and the `kilo-auto/*`
@@ -74,6 +97,24 @@ function pairOf(target: Target): string {
  * tier without first deleting a target they may be about to restore access to.
  * A target whose model or provider is *edited* is judged fresh, because that is
  * the operator asserting something new rather than carrying something forward.
+ *
+ * A **pinned** target replaces the provider's whole set with the pinned
+ * account's one way in, because the pin is hard: a sibling of the other kind is
+ * no longer evidence that anything can serve this target, and saving it anyway
+ * strands every request with nothing to fail over to — a worse outcome than the
+ * unpinned case this check was written for.
+ *
+ * The exemption does not cover that. It is deliberately *not* expressed by
+ * keying `pairOf` on the pin, which would judge an edit of the pin alone fresh
+ * and re-run the provider-wide check on it — and that check is exactly the one
+ * a vanished credential can fail, so clearing a dangling pin, the repair an
+ * operator makes after removing an account, could be refused while the broken
+ * shape it replaces still saved. Instead the pin check simply is not
+ * grandfatherable: it only fires when the named account exists *right now*, so
+ * removing a credential can only ever silence it, never make it refuse. That
+ * keeps "removing an account must not make an unrelated edit unsavable" true by
+ * construction, and a target the operator repoints at an account that cannot
+ * reach the model is still refused.
  */
 function unreachable(
   model: VirtualModel,
@@ -81,18 +122,32 @@ function unreachable(
   stored: VirtualModel | undefined,
 ): GatewayError | null {
   const held = heldAuths(credentials);
+  const byId = new Map(credentials.map((credential) => [credential.id, credential]));
   const grandfathered = new Set((stored?.targets ?? []).map(pairOf));
   for (const target of model.targets) {
-    if (grandfathered.has(pairOf(target))) continue;
-    const have = held.get(target.provider);
+    const pinned = pinnedCredential(target, byId);
+    // Only the provider-wide reading is grandfathered; see the note above on
+    // why the pin check is not.
+    if (pinned === undefined && grandfathered.has(pairOf(target))) continue;
+    const have = pinned === undefined ? held.get(target.provider) : new Set([pinned.authType]);
     if (have === undefined) continue;
     const reach = catalogModelAuths(target.provider, target.model);
     if (reach.some((auth) => have.has(auth))) continue;
+    // The pinned case names the account rather than the provider's whole set:
+    // told "every kilo credential here is OAuth" while holding an API key, an
+    // operator would go looking for an account they already have.
+    const holds =
+      pinned === undefined
+        ? `every ${target.provider} credential here is ${phrase([...have])}`
+        : `this target is pinned to "${pinned.label}", which is ${phrase([...have])}`;
+    const fix =
+      pinned === undefined
+        ? "connect the other kind, or pick a model this one can reach"
+        : "pin it to the other kind, or pick a model this account can reach";
     return new GatewayError(
       "BAD_REQUEST",
       `${target.provider} serves "${target.model}" to ${phrase(reach)} credentials only, ` +
-        `and every ${target.provider} credential here is ${phrase([...have])} — ` +
-        `connect the other kind, or pick a model this one can reach`,
+        `and ${holds} — ${fix}`,
     );
   }
   return null;

@@ -15,6 +15,7 @@ import {
   pinChoices,
   pinNote,
   reachableChoices,
+  reEndpointDraft,
   retargetDraft,
   type TargetDraft,
   unreachableNote,
@@ -116,8 +117,8 @@ export function TargetEditor({
   const catalog = PROVIDER_MODEL_CATALOG[target.provider];
   const choices = reachableChoices(target.provider, held);
   const unreachable = unreachableNote(target.provider, target.model, held);
-  const accounts = pinChoices(target.provider, credentials);
-  const danglingPin = pinNote(target.credentialId, target.provider, credentials);
+  const accounts = pinChoices(target, credentials);
+  const danglingPin = pinNote(target.credentialId, target, credentials);
 
   const set = <K extends keyof TargetDraft>(key: K, value: TargetDraft[K]) => {
     onChange({ ...target, [key]: value });
@@ -185,7 +186,7 @@ export function TargetEditor({
             <Select
               id={`${listId}-endpoint`}
               value={target.endpointId}
-              onChange={(event) => set("endpointId", event.target.value)}
+              onChange={(event) => onChange(reEndpointDraft(target, event.target.value))}
             >
               <option value="">Choose endpoint</option>
               {endpoints.map((endpoint) => (

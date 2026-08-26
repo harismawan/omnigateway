@@ -10,8 +10,10 @@ import {
   catalogTokenLimits,
   heldAuths,
   parseDraft,
+  pinChoices,
   pinNote,
   reachableChoices,
+  reEndpointDraft,
   retargetDraft,
   toDraft,
   unreachableNote,
@@ -317,13 +319,44 @@ describe("pinning a target to one account", () => {
   });
 
   test("the note names a pin no connected account can serve", () => {
+    const scope = { provider: "anthropic" as const, endpointId: "" };
     const held = [credential({ id: "cred-1", provider: "anthropic", label: "claude-main" })];
-    expect(pinNote("cred-1", "anthropic", held)).toBeNull();
-    expect(pinNote("", "anthropic", held)).toBeNull();
-    expect(pinNote("cred-gone", "anthropic", held)).toBe(
+    expect(pinNote("cred-1", scope, held)).toBeNull();
+    expect(pinNote("", scope, held)).toBeNull();
+    expect(pinNote("cred-gone", scope, held)).toBe(
       "No connected account has this id. Requests routed here will fail rather than " +
         "falling back to another account.",
     );
+  });
+
+  test("the picker offers custom accounts on the target's own endpoint only", () => {
+    // The router checks endpoint before pin, so an account on another endpoint
+    // is one the editor could otherwise pin to and make the target permanently
+    // unroutable — it saves clean and then reports pin:missing forever.
+    const credentials = [
+      credential({ id: "here", provider: "custom", providerData: { endpointId: "local" } }),
+      credential({ id: "there", provider: "custom", providerData: { endpointId: "remote" } }),
+    ];
+    const scope = { provider: "custom" as const, endpointId: "local" };
+
+    expect(pinChoices(scope, credentials).map((choice) => choice.id)).toEqual(["here"]);
+    expect(pinNote("there", scope, credentials)).not.toBeNull();
+  });
+
+  test("the picker falls back to the label when an account has no email", () => {
+    const credentials = [
+      credential({ id: "c1", provider: "anthropic", accountEmail: null, label: "billing-key" }),
+    ];
+    expect(pinChoices({ provider: "anthropic", endpointId: "" }, credentials)).toEqual([
+      { id: "c1", label: "billing-key" },
+    ]);
+  });
+
+  test("changing the endpoint drops the pin", () => {
+    // An account belongs to one endpoint as firmly as to one provider.
+    const pinned = { ...blankTarget("custom"), endpointId: "local", credentialId: "here" };
+    expect(reEndpointDraft(pinned, "remote").credentialId).toBe("");
+    expect(reEndpointDraft(pinned, "local").credentialId).toBe("here");
   });
 });
 
@@ -509,6 +542,46 @@ describe("ModelsBoard", () => {
         /No connected account has this id\. Requests routed here will fail rather than/,
       ),
     ).toBeTruthy();
+
+    // The select must still show the dangling id as the selected option. Left
+    // to fall back to the first option it would read "Any account" — the
+    // opposite of what the target does — and the note beside it would look
+    // like it was describing something else.
+    const account = screen.getByLabelText("Account") as HTMLSelectElement;
+    expect(account.value).toBe("cred-gone");
+    expect(account.selectedOptions[0]?.textContent).toBe("cred-gone (removed)");
+  });
+
+  test("a pin can be removed again through the picker", async () => {
+    const user = userEvent.setup();
+    const stub = stubModels({
+      "GET /api/models": () => ({
+        models: [
+          model({ targets: [{ ...(model().targets[0] as Target), credentialId: "cred-a" }] }),
+        ],
+      }),
+      "GET /api/credentials": () => ({
+        credentials: [credential({ id: "cred-a", provider: "anthropic" })],
+      }),
+      "PUT /api/models/fast": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    const account = (await screen.findByLabelText("Account")) as HTMLSelectElement;
+    expect(account.value).toBe("cred-a");
+
+    await user.selectOptions(account, "");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const target = JSON.parse(String(put?.init?.body)).targets[0];
+      // Un-pinning has to reach the wire as an absent field. Anything that
+      // preserved the old id — or sent "" — would make the pin unremovable
+      // from the only UI that can set it.
+      expect("credentialId" in target).toBe(false);
+    });
   });
 
   test("adding a target and saving includes it", async () => {

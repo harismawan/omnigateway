@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { BurnEstimate, QuotaSample, QuotaWindow } from "../../src/api/types.ts";
+import type { BurnEstimate, QuotaSample, QuotaWindow, Target } from "../../src/api/types.ts";
 import { AccountsBoard } from "../../src/features/accounts/AccountsBoard.tsx";
 import { PACE_DASH } from "../../src/features/accounts/QuotaHistory.tsx";
 import {
@@ -17,6 +17,7 @@ import {
   burn,
   credential,
   health,
+  model,
   NOW,
   quota,
   quotaSample,
@@ -177,6 +178,52 @@ describe("AccountsBoard", () => {
     await waitFor(() => {
       expect(stub.calls.some((call) => call.init?.method === "DELETE")).toBe(true);
     });
+  });
+
+  test("removing an account names the models whose pinned targets will hard-fail", async () => {
+    const user = userEvent.setup();
+    stubAccounts({
+      "GET /api/models": () => ({
+        models: [
+          model({
+            id: "billed",
+            targets: [{ ...(model().targets[0] as Target), credentialId: "cred-1" }],
+          }),
+          model({ id: "general" }),
+        ],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(await screen.findByLabelText("Remove claude-main"));
+    const dialog = await screen.findByRole("dialog");
+
+    // "loses this account" is true of an unpinned target and wrong about a
+    // pinned one: a pin has no fallback, so those requests start failing the
+    // moment the account is gone. Naming the model is the difference between a
+    // warning an operator can act on and one they can only agree to.
+    await waitFor(() =>
+      expect(
+        within(dialog).getByText(
+          /The model billed pins a target to this account\. Those targets will fail rather than fall back/,
+        ),
+      ).toBeTruthy(),
+    );
+    // The unpinned model is not named — it genuinely does just lose an account.
+    expect(within(dialog).queryByText(/general/)).toBeNull();
+  });
+
+  test("removing an account nothing pins says nothing about pins", async () => {
+    const user = userEvent.setup();
+    stubAccounts({ "GET /api/models": () => ({ models: [model({ id: "general" })] }) });
+    renderWithProviders(<AccountsBoard />);
+
+    await user.click(await screen.findByLabelText("Remove claude-main"));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/deletes its stored token/i)).toBeTruthy();
+    // A pin warning on every deletion would be noise that teaches operators to
+    // click through the one that matters.
+    expect(within(dialog).queryByText(/pins a target/)).toBeNull();
   });
 
   test("keeps the selected existing custom endpoint visible", async () => {

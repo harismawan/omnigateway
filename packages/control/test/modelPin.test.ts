@@ -52,6 +52,33 @@ test("rejects an empty pin", () => {
   expect(() => modelSchema.parse(model({ credentialId: "   " }))).toThrow();
 });
 
+test("normalizes surrounding whitespace rather than storing it", () => {
+  // A pasted id is the common way one arrives. Stored untrimmed it matches no
+  // credential and reports `pin:missing`, which reads as a deleted account.
+  expect(modelSchema.parse(model({ credentialId: "  cred-1  " })).targets[0]?.credentialId).toBe(
+    "cred-1",
+  );
+});
+
+test("bounds the pin in length and charset", () => {
+  // Not cosmetic. A `pin:missing` row carries this string into
+  // `LogFields.credentialId` and `request_logs.degradations`, and that
+  // allowlist documents the field as a bounded identifier — `reason` is the
+  // free-text one, and only `reason` is truncated.
+  expect(() => modelSchema.parse(model({ credentialId: "x".repeat(65) }))).toThrow();
+  expect(modelSchema.parse(model({ credentialId: "x".repeat(64) })).targets[0]?.credentialId).toBe(
+    "x".repeat(64),
+  );
+  expect(() => modelSchema.parse(model({ credentialId: "cred 1" }))).toThrow();
+  expect(() => modelSchema.parse(model({ credentialId: "cred:1\nreason=spoofed" }))).toThrow();
+  // A real id: `crypto.randomUUID()`. The format is deliberately not enforced,
+  // so this passes on charset alone, not because the schema knows about UUIDs.
+  expect(
+    modelSchema.parse(model({ credentialId: "3f2a1b4c-5d6e-4f70-8a91-b2c3d4e5f607" })).targets[0]
+      ?.credentialId,
+  ).toBe("3f2a1b4c-5d6e-4f70-8a91-b2c3d4e5f607");
+});
+
 test("custom targets can be pinned too", () => {
   // The field is on both arms of the union. A custom endpoint may hold several
   // accounts, so it is exactly a case where pinning has something to say.

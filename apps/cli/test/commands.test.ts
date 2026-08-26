@@ -184,14 +184,34 @@ test("models show names the account a target is pinned to", async () => {
 
   const shown = await cli(["models", "show", "billed"], { root });
   expect(shown.code).toBe(0);
+
+  // Asserted by column position, not by `toContain`. A cell that renders under
+  // the wrong heading satisfies "the output contains cred-finance" while
+  // telling the operator something false, and "any" is a common enough word to
+  // match elsewhere in the output by accident.
+  const lines = shown.out.split("\n");
+  const header = lines.find((line) => line.includes("PROVIDER") && line.includes("MODEL"));
+  if (header === undefined) throw new Error("no target table in output");
+  const column = (line: string, name: string): string | undefined =>
+    line.trim().split(/\s{2,}/)[
+      header
+        .trim()
+        .split(/\s{2,}/)
+        .indexOf(name)
+    ];
+
+  expect(header).toContain("ACCOUNT");
+  const pinned = lines.find((line) => line.includes("claude-opus-5"));
+  const unpinned = lines.find((line) => line.includes("claude-sonnet-5"));
+  if (pinned === undefined || unpinned === undefined) throw new Error("target rows missing");
+
   // A pin sends every request for that target to one account and fails rather
   // than falling back, so "why is one account serving everything" has to be
   // answerable from here.
-  expect(shown.out).toContain("ACCOUNT");
-  expect(shown.out).toContain("cred-finance");
+  expect(column(pinned, "ACCOUNT")).toBe("cred-finance");
   // The unpinned sibling says so rather than leaving a blank cell that reads
   // like a rendering fault.
-  expect(shown.out).toContain("any");
+  expect(column(unpinned, "ACCOUNT")).toBe("any");
 });
 
 test("models show leaves out the account column when nothing is pinned", async () => {
@@ -746,6 +766,58 @@ test("a command run under --root says so when it refuses an ambient OMNI_DB_PATH
  * but only by someone who knows about it, and nothing else on the installation
  * would ever say. Long-window rate limits are enforced from these buckets.
  */
+test("doctor reports a target pinned to an account that is gone", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  await seedCredential(store, { id: "live-account", provider: "anthropic" });
+  const live = (await store.credentials.list())[0];
+  if (live === undefined) throw new Error("the seeded credential is not there");
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        credentialId: "removed-account",
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      {
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tier: 2,
+        weight: 1,
+        costPerMTok: { input: 3, output: 15 },
+        credentialId: live.id,
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const checks = JSON.parse(result.out) as { danglingPins: string[] };
+  // A pin is deliberately not validated at save time, so nothing else in the
+  // system would tell an operator this target hard-fails every request. The
+  // resolvable pin beside it must not be reported — a check that flags healthy
+  // configuration is one operators learn to ignore.
+  expect(checks.danglingPins).toEqual(["billed/claude-opus-5 → removed-account"]);
+});
+
+test("doctor says none rather than nothing when every pin resolves", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const result = await cli(["doctor", "--json"], { root, service });
+  // `[]` is "checked, nothing wrong". Null would mean the question could not be
+  // asked, and the two must not read alike.
+  expect((JSON.parse(result.out) as { danglingPins: string[] | null }).danglingPins).toEqual([]);
+});
+
 test("doctor checks the usage rollup against the rows it summarizes", async () => {
   const root = await installation();
   const service = fakeService({ root });

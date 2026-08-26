@@ -323,17 +323,43 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   mean that account alone serve the target; unset mean any account of the provider. No `"pinned"`
   strategy exist and none should be added — strategy decide order, pin decide membership, and two
   places deciding the same thing is how they come to disagree. Pin is **hard**: disabled, breakered,
-  rate-limited or quota-spent pinned account fail the request, never spill to sibling. Pin check sit
-  **after** the provider and `endpointId` checks, so it narrow membership and never widen it; a pin
-  naming another provider's account is unseen, not a way around those checks. Non-matching accounts
-  skipped silently — one `excluded` row per sibling would bury the reasons describing the pinned
-  account itself — but a pin matching nothing emit exactly one `pin:missing`, else the request fail
-  with an empty exclusion list. Nothing validate the id at write time, same exemption `putModel`
-  give stored targets: removing an account must not make unrelated edit unsavable. Control schema
-  refuse `""` because it is an id nothing match, not a third state, so dashboard **omit** the field
-  rather than send empty. `retargetDraft` clear the pin on provider change only — clearing on model
-  change undo the operator's choice on every keystroke, keeping it across providers leave a pin only
-  ever reportable as missing.
+  rate-limited or quota-spent pinned account fail the request, never spill to sibling. Pin is a
+  `continue` guard beside the provider and `endpointId` guards, so **its position cannot change
+  membership** — reordering the three admit exactly the same pairs. What order decide is where
+  `pinSeen` get set, and therefore whether `pin:missing` fire: pin check sit last so an account the
+  provider or endpoint guard already rejected count as *unseen*, and a pin at such an account is
+  reported rather than silently producing nothing. The mutation that **does** widen membership is
+  making either earlier guard conditional on the pin; that is the one to guard against, and an
+  earlier version of this bullet named the wrong property. Non-matching accounts skipped silently —
+  one `excluded` row per sibling would bury the reasons describing the pinned account itself — but a
+  pin matching nothing emit exactly one `pin:missing`, else the request fail with an empty exclusion
+  list. `pinSeen` is declared **per target, inside the target loop**; hoisting it make a model whose
+  first pinned target resolve suppress the row for every later dangling one. Nothing validate the id
+  at write time, same exemption `putModel` give stored targets: removing an account must not make
+  unrelated edit unsavable — so `omni doctor` report dangling pins instead. Control schema refuse
+  `""` because it is an id nothing match, not a third state, so dashboard **omit** the field rather
+  than send empty, and bound it to 64 chars of `[A-Za-z0-9_-]`: `pin:missing` carry this string into
+  `LogFields.credentialId` and `request_logs.degradations`, and that allowlist call the field a
+  bounded identifier. Format itself deliberately not pinned to `crypto.randomUUID()`, else changing
+  id generation make every stored pin unreadable. Pin cleared on provider **and** endpoint change —
+  account belong to one endpoint as firmly as to one provider — but never on model change, which
+  would undo the operator's choice on every keystroke.
+- Two places outside the router must read the pin, and each get it wrong in its own direction if it
+  not. `resolveModelLimits` narrow across every way in a provider hold, justified by failover
+  landing anywhere in it — pin mean it cannot, so pinned target described by its own account's auth
+  alone. Unresolvable pin (deleted, disabled, other provider) fall back to provider-wide narrowing,
+  **never** to catalog figures: narrowing across every way is by construction no wider than any one
+  of them, so fallback can never advertise more than unpinned would. Matter because `setup.ts`
+  persist that number into `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, where wrong figure outlive the request
+  that would expose it. `unreachable` in `putModel` likewise check pinned account's auth alone, and
+  the pin check is **deliberately not grandfatherable** — `pairOf` stay keyed on provider+model.
+  Keying it on the pin would judge pin-only edit fresh and re-run *provider-wide* check on it, which
+  is exactly the check a vanished credential fail, so clearing a dangling pin — the repair operator
+  make after removing account — could be refused while broken shape it replace still saved. Pin
+  check firing only when named account exist right now keep "removing account never make unrelated
+  edit unsavable" true by construction. `modelLimits` resolve pin from **enabled** credentials,
+  `models.ts` from existence: first ask what serve now, second ask what operator hold, same split
+  `heldAuths` already make.
 - `ProviderModelChoice.auth` enforced at write time in `putModel`, never at routing. Which ways in
   exist is installation state, so catalog export the fact (`catalogModelAuths`) and control own the
   rule. Provider with no credential is unknown rather than blocked, unlisted model unknown rather

@@ -268,9 +268,31 @@ export function ExplainPanel({ modelId }: ExplainPanelProps) {
               <Stack $gap={1}>
                 <Legend>Filtered out</Legend>
                 <ul>
-                  {result.excluded.map((row) => (
-                    <Excluded key={`${row.credentialId}:${row.model}:${row.reason}`}>
+                  {/*
+                    Keyed by position as well as content, because content is not
+                    unique: the same model can be filtered out for the same
+                    reason more than once — two targets at different tiers, or
+                    two custom endpoints — and a `pin:missing` row is pushed once
+                    per target. Keyed on content alone React drops the duplicate,
+                    so a dry run would under-report what it filtered.
+
+                    Position is safe here in the way the lint rule assumes it is
+                    not: this list is one server response rendered whole, never
+                    appended to, reordered, or edited in place. A new dry run
+                    replaces the array outright.
+                  */}
+                  {result.excluded.map((row, index) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: rows are not unique by content, and this list is replaced wholesale rather than mutated.
+                    <Excluded key={`${index}:${row.credentialId}:${row.model}:${row.reason}`}>
                       <Mono $dim>{row.model}</Mono>
+                      {/*
+                        Which account, not just which model. For `pin:missing`
+                        the id *is* the finding — it names the account the
+                        target is pinned to and this installation does not have
+                        — and a row reading only "pin:missing" sends the
+                        operator back to the model editor to work out which.
+                      */}
+                      <Mono $dim>{row.credentialId}</Mono>
                       <Spacer />
                       <Chip $tone={row.reason.startsWith("capability") ? "warn" : "down"}>
                         {row.reason}

@@ -14,11 +14,22 @@ import type { Target, VirtualModel } from "@omni/store";
  */
 
 /**
- * The credential facts this needs: which ways in a provider actually has. Only
- * `provider` and `authType` are read, so a `CredentialView` from the store
- * satisfies it without anything here touching a secret.
+ * The credential facts this needs: which ways in a provider actually has, and
+ * which account each one is. Only `id`, `provider` and `authType` are read, so
+ * a `CredentialView` from the store satisfies it without anything here touching
+ * a secret.
+ *
+ * `id` is required rather than optional because a target can be pinned to one
+ * account, and a caller that omitted it would silently make every pin
+ * unresolvable — the listing would keep answering, just with the wrong figures,
+ * which is the failure mode this whole module exists to prevent.
  */
-export type ServingCredential = { provider: ProviderId; authType: CatalogAuth; enabled: boolean };
+export type ServingCredential = {
+  id: string;
+  provider: ProviderId;
+  authType: CatalogAuth;
+  enabled: boolean;
+};
 
 export type ModelLimits = { contextWindow?: number; maxOutputTokens?: number };
 
@@ -42,12 +53,23 @@ function narrower(a: ModelLimits, b: ModelLimits): ModelLimits {
  * the API's. A provider offering both ways in is described by the narrower,
  * for the same reason a pool is described by its smallest member: the router
  * decides per request, and the client sizes its context once.
+ *
+ * A pinned target is the exception, and it is the same reasoning read the other
+ * way: the narrowing is justified by failover landing anywhere in the provider,
+ * and a pin means it cannot. Such a target is described by its own account's
+ * way in alone, so an installation holding an OpenAI key beside a Codex
+ * subscription stops advertising 272K for the target that reaches 922K.
  */
-function targetLimits(target: Target, auths: ReadonlySet<CatalogAuth>): ModelLimits {
+function targetLimits(
+  target: Target,
+  auths: ReadonlySet<CatalogAuth>,
+  pinned: ServingCredential | undefined,
+): ModelLimits {
   // No credential for this provider: nothing can serve the target, so there is
   // no serving path to narrow to and the published figures are the honest
   // answer.
-  const ways: CatalogAuth[] = auths.size === 0 ? ["apiKey"] : [...auths];
+  const ways: CatalogAuth[] =
+    pinned !== undefined ? [pinned.authType] : auths.size === 0 ? ["apiKey"] : [...auths];
   let listed: ModelLimits = {};
   for (const auth of ways) {
     const entry = catalogLimits(target.provider, target.model, auth);
@@ -66,18 +88,52 @@ function targetLimits(target: Target, auths: ReadonlySet<CatalogAuth>): ModelLim
   };
 }
 
-/** Which ways in each provider has, from the credentials that can route. */
-function servingAuths(
-  credentials: readonly ServingCredential[],
-): Map<ProviderId, Set<CatalogAuth>> {
+/**
+ * Which ways in each provider has, and which account each id names, from the
+ * credentials that can route. Both indexes are built from the same filtered
+ * pass so a pin can never resolve to an account the provider-wide answer left
+ * out.
+ */
+function servingAuths(credentials: readonly ServingCredential[]): {
+  byProvider: Map<ProviderId, Set<CatalogAuth>>;
+  byId: Map<string, ServingCredential>;
+} {
   const byProvider = new Map<ProviderId, Set<CatalogAuth>>();
+  const byId = new Map<string, ServingCredential>();
   for (const credential of credentials) {
     if (!credential.enabled) continue;
     const ways = byProvider.get(credential.provider) ?? new Set<CatalogAuth>();
     ways.add(credential.authType);
     byProvider.set(credential.provider, ways);
+    byId.set(credential.id, credential);
   }
-  return byProvider;
+  return { byProvider, byId };
+}
+
+/**
+ * The account a pinned target is served by, or undefined when the pin does not
+ * resolve to one that can serve it right now.
+ *
+ * Three ways it fails to resolve, all read the same: the account was deleted,
+ * it is disabled, or it belongs to another provider. The router treats each as
+ * `pin:missing` — its pin check sits after the provider check, so a foreign
+ * account is not a way around it — and none of them leaves a serving path to
+ * describe.
+ *
+ * Unresolvable falls back to the provider-wide narrowing rather than to the
+ * catalog's published figures, and the direction matters: narrowing across
+ * every way in is by construction no wider than any single one of them, so a
+ * pin that cannot be resolved never advertises more than the same target would
+ * unpinned. The opposite reading would state a window for an account that does
+ * not exist, and the request fails anyway.
+ */
+function pinnedCredential(
+  target: Target,
+  byId: ReadonlyMap<string, ServingCredential>,
+): ServingCredential | undefined {
+  if (target.credentialId === undefined) return undefined;
+  const credential = byId.get(target.credentialId);
+  return credential?.provider === target.provider ? credential : undefined;
 }
 
 /**
@@ -90,6 +146,9 @@ function servingAuths(
  * reports nothing at all, which leaves the client on its own default exactly as
  * before.
  *
+ * A pin narrows which accounts serve one target; it says nothing about the
+ * other targets, so the pool is still described by its narrowest member.
+ *
  * `credentials` is required rather than defaulted: an empty list is not
  * "unknown", it is "nothing serves this provider", which resolves to the widest
  * published figures. A caller that forgot the argument would get that answer
@@ -99,12 +158,16 @@ export function resolveModelLimits(
   model: VirtualModel,
   credentials: readonly ServingCredential[],
 ): ModelLimits {
-  const auths = servingAuths(credentials);
+  const { byProvider, byId } = servingAuths(credentials);
   let limits: ModelLimits = {};
   for (const target of model.targets) {
     limits = narrower(
       limits,
-      targetLimits(target, auths.get(target.provider) ?? new Set<CatalogAuth>()),
+      targetLimits(
+        target,
+        byProvider.get(target.provider) ?? new Set<CatalogAuth>(),
+        pinnedCredential(target, byId),
+      ),
     );
   }
   return limits;

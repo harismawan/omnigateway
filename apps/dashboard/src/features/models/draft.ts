@@ -213,13 +213,30 @@ export function unreachableNote(
   );
 }
 
-/** The accounts that could serve a target on this provider, for the pin picker. */
+/** Which target a pin belongs to, as far as deciding what may serve it goes. */
+export type PinScope = Pick<TargetDraft, "provider" | "endpointId">;
+
+/**
+ * The accounts that could actually serve a target, for the pin picker.
+ *
+ * Endpoint is part of the question, not just provider. The router pairs a
+ * custom target only with credentials on the same `endpointId`, and it applies
+ * that check *before* the pin — so offering an account on another endpoint
+ * would let the editor mint a target that saves cleanly and then reports
+ * `pin:missing` on every request for the rest of its life. Same reason the
+ * picker is scoped to one provider.
+ */
 export function pinChoices(
-  provider: ProviderId,
+  scope: PinScope,
   credentials: readonly Credential[],
 ): ReadonlyArray<{ id: string; label: string }> {
   return credentials
-    .filter((credential) => credential.provider === provider)
+    .filter((credential) => credential.provider === scope.provider)
+    .filter(
+      (credential) =>
+        scope.provider !== "custom" ||
+        String(credential.providerData.endpointId ?? "") === scope.endpointId,
+    )
     .map((credential) => ({
       id: credential.id,
       label: credential.accountEmail ?? credential.label,
@@ -239,15 +256,30 @@ export function pinChoices(
  */
 export function pinNote(
   credentialId: string,
-  provider: ProviderId,
+  scope: PinScope,
   credentials: readonly Credential[],
 ): string | null {
   if (credentialId.length === 0) return null;
-  if (pinChoices(provider, credentials).some((choice) => choice.id === credentialId)) return null;
+  if (pinChoices(scope, credentials).some((choice) => choice.id === credentialId)) return null;
   return (
     "No connected account has this id. Requests routed here will fail rather than " +
     "falling back to another account."
   );
+}
+
+/**
+ * Points a target at a different endpoint, dropping a pin the move invalidates.
+ *
+ * An account belongs to one endpoint as firmly as it belongs to one provider,
+ * and the router checks endpoint before pin, so a pin carried across is one it
+ * can only ever report as missing.
+ */
+export function reEndpointDraft(target: TargetDraft, endpointId: string): TargetDraft {
+  return {
+    ...target,
+    endpointId,
+    ...(endpointId === target.endpointId ? {} : { credentialId: "" }),
+  };
 }
 
 /**
