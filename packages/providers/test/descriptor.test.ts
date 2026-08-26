@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { ANTHROPIC_NATIVE_TOOLS, PROVIDER_CAPABILITIES, type ProviderId } from "@omni/ir";
+import type { ProviderId } from "@omni/ir";
 import { PROVIDER_MODEL_CATALOG } from "../src/catalog.ts";
 import type { ProviderDescriptor } from "../src/descriptor.ts";
-import { ADAPTERS, PROVIDER_DESCRIPTORS, PROVIDERS } from "../src/registry.ts";
+import { PROVIDER_DESCRIPTORS } from "../src/descriptors.ts";
+import { ADAPTERS, PROVIDERS } from "../src/registry.ts";
 
 /**
  * The six ids, written out once here and nowhere else in this file.
@@ -131,12 +132,12 @@ describe("descriptors carry the values the old tables held", () => {
 });
 
 describe("the registry agrees with what it replaced", () => {
-  test("the live ir tables still match the descriptors", () => {
-    // These two tables have not been deleted yet; while both exist they must
-    // agree, or the migration has silently changed routing.
+  test("every adapter reports the capabilities its descriptor states", () => {
+    // The adapters used to read `PROVIDER_CAPABILITIES` from `@omni/ir`. They
+    // now read their own descriptor, so this is what stops the two from
+    // drifting — an adapter restating a literal would pass every other test here.
     for (const id of IDS) {
-      expect(PROVIDER_DESCRIPTORS[id].capabilities).toEqual(PROVIDER_CAPABILITIES[id]);
-      expect(PROVIDER_DESCRIPTORS[id].anthropicNativeTools).toBe(ANTHROPIC_NATIVE_TOOLS[id]);
+      expect(PROVIDERS[id].adapter.capabilities).toEqual(PROVIDER_DESCRIPTORS[id].capabilities);
     }
   });
 

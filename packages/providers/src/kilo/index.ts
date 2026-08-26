@@ -1,10 +1,11 @@
-import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
+import { GatewayError } from "@omni/ir";
 import { BODY_ORDER, orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
 import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeKiloChat } from "./decode.ts";
+import { kiloDescriptor } from "./descriptor.ts";
 import { toKiloWire } from "./wire.ts";
 
 /**
@@ -31,7 +32,7 @@ function organizationHeaders(providerData: Record<string, unknown>): HeaderPair[
 
 export const kiloAdapter: ProviderAdapter = {
   id: "kilo",
-  capabilities: PROVIDER_CAPABILITIES.kilo,
+  capabilities: kiloDescriptor.capabilities,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const oauth = req.credentials.accessToken !== null;

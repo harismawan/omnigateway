@@ -1,9 +1,13 @@
-import { GatewayError, PROVIDER_CAPABILITIES, type ProviderId } from "@omni/ir";
+import { GatewayError, type ProviderId } from "@omni/ir";
 import { catalogLimits, catalogPricing } from "@omni/providers/catalog";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import type { Target, VirtualModel } from "@omni/store";
 import type { Snapshot } from "./types.ts";
 
-const PROVIDERS = new Set<string>(Object.keys(PROVIDER_CAPABILITIES));
+// Both provider imports are leaf subpaths carrying model lists and per-provider
+// data — no adapters, no HTTP client, no I/O. The router stays pure by reading
+// records it is handed, and these are handed to it at module scope.
+const PROVIDERS = new Set<string>(Object.keys(PROVIDER_DESCRIPTORS));
 
 /**
  * Prefixes for bare model names, so a client can pass a concrete upstream model
@@ -50,7 +54,7 @@ function synthesize(provider: ProviderId, model: string): VirtualModel {
     ...(limits === null
       ? {}
       : { contextWindow: limits.contextWindow, maxOutputTokens: limits.maxOutputTokens }),
-    capabilities: PROVIDER_CAPABILITIES[provider],
+    capabilities: PROVIDER_DESCRIPTORS[provider].capabilities,
   };
   return { id: `${provider}/${model}`, targets: [target], strategy: "score", isAlias: true };
 }

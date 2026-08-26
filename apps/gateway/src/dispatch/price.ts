@@ -1,31 +1,6 @@
 import type { ProviderId, Usage } from "@omni/ir";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { cacheReadRate, type TargetPricing } from "@omni/store/types";
-
-/**
- * What a provider charges to create a cache entry, as a multiple of its base
- * input price, for a target that names no price of its own.
- *
- * Only used as a fallback: a target saved before write pricing existed carries
- * `input`, `output` and `cacheRead` and nothing else, and the catalog now
- * gives every new target an explicit figure. The default has to be per
- * provider rather than a single constant, because the two answers are
- * opposite — Anthropic bills a write at more than fresh input, while OpenAI
- * and Kimi cache automatically and bill no premium at all. Guessing
- * Anthropic's rate for a Kimi target overcharges exactly the tokens its
- * decoder now reports.
- */
-const WRITE_OVER_INPUT: Readonly<Record<ProviderId, { fiveMinute: number; oneHour: number }>> = {
-  anthropic: { fiveMinute: 1.25, oneHour: 2 },
-  openai: { fiveMinute: 0, oneHour: 0 },
-  kimi: { fiveMinute: 0, oneHour: 0 },
-  // Kilo fronts several vendors at once, so no single multiple is right for it.
-  // Zero is the safe fallback rather than the accurate one: the chat wire it
-  // speaks cannot express a cache breakpoint at all, so a Kilo request never
-  // buys a cache entry to be charged for.
-  kilo: { fiveMinute: 0, oneHour: 0 },
-  grok: { fiveMinute: 0, oneHour: 0 },
-  custom: { fiveMinute: 0, oneHour: 0 },
-};
 
 /**
  * Splits cache-creation tokens by the TTL each write bought.
@@ -58,7 +33,15 @@ function splitWrites(usage: Usage): { fiveMinute: number; oneHour: number } {
  * and each is priced once.
  */
 export function priceOf(prices: TargetPricing, usage: Usage, provider: ProviderId): number {
-  const fallback = WRITE_OVER_INPUT[provider];
+  // What this provider charges to create a cache entry, as a multiple of its
+  // base input price. Only a fallback: a target saved before write pricing
+  // existed carries `input`, `output` and `cacheRead` and nothing else, and the
+  // catalog now gives every new target an explicit figure. Per provider rather
+  // than one constant because the answers are opposite — Anthropic bills a write
+  // at more than fresh input, while OpenAI and Kimi cache automatically and bill
+  // no premium. Guessing Anthropic's rate for a Kimi target overcharges exactly
+  // the tokens its decoder now reports.
+  const fallback = PROVIDER_DESCRIPTORS[provider].writeOverInput;
   const readRate = cacheReadRate(prices);
   const write5mRate = prices.cacheWrite5m ?? prices.input * fallback.fiveMinute;
   const write1hRate = prices.cacheWrite1h ?? prices.input * fallback.oneHour;

@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
+import { GatewayError } from "@omni/ir";
 import { BODY_ORDER, orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
 import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeGrokResponses } from "./decode.ts";
+import { grokDescriptor } from "./descriptor.ts";
 import { grokDeviceHeaders } from "./device.ts";
 import { toGrokWire } from "./wire.ts";
 
@@ -65,7 +66,7 @@ function requestIdentityHeaders(model: string, requestId: string | undefined): H
 
 export const grokAdapter: ProviderAdapter = {
   id: "grok",
-  capabilities: PROVIDER_CAPABILITIES.grok,
+  capabilities: grokDescriptor.capabilities,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const oauth = req.credentials.accessToken !== null;

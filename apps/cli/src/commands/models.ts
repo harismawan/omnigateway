@@ -1,11 +1,12 @@
 import { dryRun, getModel, listModels, putModel, removeModel } from "@omni/control";
-import { PROVIDER_CAPABILITIES, type ProviderId } from "@omni/ir";
+import type { ProviderId } from "@omni/ir";
 import {
   catalogLimits,
   catalogPricing,
   PROVIDER_MODEL_CATALOG,
   type ProviderModelChoice,
 } from "@omni/providers/catalog";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import type { Target, VirtualModel } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
@@ -163,7 +164,7 @@ function targetFromCatalog(spec: string): Target {
     // target an OAuth credential serves through a narrower backend.
     // Capabilities are a property of the provider, not of the catalog entry;
     // the operator narrows them afterwards if a particular model is narrower.
-    capabilities: PROVIDER_CAPABILITIES[providerId],
+    capabilities: PROVIDER_DESCRIPTORS[providerId].capabilities,
   };
 }
 

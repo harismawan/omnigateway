@@ -5,7 +5,8 @@
   "private": true,
   "exports": {
     ".": "./src/index.ts",
-    "./catalog": "./src/catalog.ts"
+    "./catalog": "./src/catalog.ts",
+    "./descriptors": "./src/descriptors.ts"
   },
   "dependencies": {
     "@omni/ir": "workspace:*"
