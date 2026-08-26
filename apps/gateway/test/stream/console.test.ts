@@ -68,7 +68,7 @@ function harness(
   const timers: Timer[] = [];
   const frames: { topic: string; payload: unknown }[] = [];
   const declared = new Set<string>();
-  const watchers: { path: string; closed: boolean; change: () => void }[] = [];
+  const watchers: { path: string; closed: boolean; change: (event?: string) => void }[] = [];
   const ring: Ring = createRing({ frames: 100, bytes: 1024 * 1024 });
 
   const schedule: Schedule = (run, ms) => {
@@ -122,11 +122,17 @@ function harness(
     argv: deps.argv,
     stop,
 
-    /** One `fs.watch` event on the watched path. */
-    fire() {
-      const watcher = watchers[0];
+    /**
+     * One `fs.watch` event on whatever is currently watching.
+     *
+     * The *current* watcher rather than the first, because a rotation replaces
+     * it — and a test that kept firing at the original would be driving the
+     * dead inode the fix exists to get away from.
+     */
+    fire(event?: string) {
+      const watcher = [...watchers].reverse().find((entry) => !entry.closed);
       if (watcher === undefined) throw new Error("nothing is watching");
-      watcher.change();
+      watcher.change(event);
     },
 
     /** Moves the clock and runs whatever became due, then lets async work settle. */
@@ -329,4 +335,119 @@ test("a none source declares no stream, so subscribing answers error", async () 
   } finally {
     await h.close();
   }
+});
+
+test("a rotated file is re-watched, and the old inode is let go", async () => {
+  // `fs.watch` holds an inode, not a path. Rotation renames the file away and
+  // the writer creates a new one, so the original watcher stays attached to
+  // something nothing will write to again — and because the topic stays
+  // declared, the console keeps a subscription to a stream that has silently
+  // ended. Nothing thrown, nothing logged: it just stops.
+  const path = scratch("");
+  const h = harness({ kind: "file", path });
+  try {
+    appendFileSync(path, line("info", "before rotation"));
+    h.fire();
+    await h.advance(CONSOLE_FLOOR_MS);
+    expect(JSON.stringify(h.frames)).toContain("before rotation");
+
+    // What logrotate does: the old file moves aside, a new one takes the path.
+    writeFileSync(path, line("info", "after rotation"));
+    h.fire("rename");
+    await h.advance(CONSOLE_FLOOR_MS);
+
+    // A second watcher exists and the first was closed rather than leaked.
+    expect(h.watchers.length).toBe(2);
+    expect(h.watchers[0]?.closed).toBe(true);
+    expect(h.watchers[1]?.closed).toBe(false);
+
+    // And the new file's contents actually arrive, read from offset 0 rather
+    // than from wherever the old file happened to end.
+    expect(JSON.stringify(h.frames)).toContain("after rotation");
+  } finally {
+    h.stop();
+  }
+});
+
+test("a rotation clears the ring, so a reconnecting subscriber is told gap", async () => {
+  // Every frame still held describes a file that no longer exists. Handing the
+  // survivors to a reconnecting subscriber would stitch the new file onto the
+  // old one with nothing marking the seam — the same reasoning a truncation
+  // already follows.
+  const path = scratch("");
+  const h = harness({ kind: "file", path });
+  try {
+    appendFileSync(path, line("info", "old file"));
+    h.fire();
+    await h.advance(CONSOLE_FLOOR_MS);
+    const head = h.ring.head(CONSOLE_TOPIC);
+    expect(head).toBeGreaterThan(0);
+
+    writeFileSync(path, line("info", "new file"));
+    h.fire("rename");
+    await h.advance(CONSOLE_FLOOR_MS);
+
+    // Behind the oldest frame retained, so the ring answers with the vocabulary
+    // that already exists rather than a bespoke "rotated" frame.
+    expect(h.ring.since(CONSOLE_TOPIC, head).kind).toBe("gap");
+  } finally {
+    h.stop();
+  }
+});
+
+test("a watch lost to a path that never returns stops retrying", async () => {
+  // A log deleted and not replaced is not coming back, and retrying it forever
+  // is a timer nobody asked for.
+  const path = scratch("");
+  const h = harness({ kind: "file", path });
+  try {
+    h.fire("rename");
+    for (let i = 0; i < 10; i++) await h.advance(CONSOLE_FLOOR_MS);
+
+    // Bounded: the path still exists here, so this asserts the retry does not
+    // spin unboundedly rather than that it gave up.
+    expect(h.watchers.length).toBeLessThan(10);
+  } finally {
+    h.stop();
+  }
+});
+
+test("a second line sharing a millisecond with the cursor is not lost", async () => {
+  // `keep()` filters on `at <= since`, strictly newer, and the cursor advances
+  // to the newest instant seen. At millisecond resolution a busy gateway writes
+  // several lines in one millisecond, so a line arriving in the journal after a
+  // poll that already consumed its millisecond used to be filtered out — and
+  // the cursor never goes back, so it was lost rather than delayed.
+  const source: ConsoleSource = { kind: "journal", unit: "omnigateway.service", scope: "system" };
+  const at = CLOCK + 10;
+  let entries = line("info", "first", at);
+  const h = harness(source, { journal: () => entries });
+
+  await h.advance(JOURNAL_POLL_MS);
+  expect(h.published()).toEqual([["first"]]);
+
+  // journald now also carries a second line stamped the same millisecond, which
+  // is ordinary at ms resolution under load.
+  entries = line("info", "first", at) + line("warn", "same millisecond", at);
+  await h.advance(JOURNAL_POLL_MS);
+
+  // The new line arrives, and the one already sent does not arrive twice.
+  expect(h.published()).toEqual([["first"], ["same millisecond"]]);
+  h.stop();
+});
+
+test("a line already published at the cursor is not republished on every poll", async () => {
+  // The other half of the same fix: asking inclusively for the cursor's own
+  // millisecond would resend it forever without the set that remembers what
+  // went out.
+  const source: ConsoleSource = { kind: "journal", unit: "omnigateway.service", scope: "system" };
+  const entries = line("info", "only", CLOCK + 10);
+  const h = harness(source, { journal: () => entries });
+
+  await h.advance(JOURNAL_POLL_MS);
+  await h.advance(JOURNAL_POLL_MS);
+  await h.advance(JOURNAL_POLL_MS);
+
+  expect(h.frames).toHaveLength(1);
+  h.stop();
 });

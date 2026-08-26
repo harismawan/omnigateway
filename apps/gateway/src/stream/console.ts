@@ -50,6 +50,16 @@ export const CONSOLE_FLOOR_MS = 250;
  */
 export const JOURNAL_POLL_MS = 1_000;
 
+/**
+ * How many times a lost watch is re-established before the stream gives up.
+ *
+ * Rotation leaves a window between the rename and the replacement being
+ * created, so one attempt is not enough. Bounded rather than endless because a
+ * log that was deleted and not replaced is a log that is not coming back, and
+ * retrying it forever is a timer nobody asked for.
+ */
+const REWATCH_ATTEMPTS = 5;
+
 /** Something that can be closed. `FSWatcher` satisfies it structurally. */
 export type ConsoleWatcher = { close(): void };
 
@@ -58,7 +68,7 @@ export type ConsoleWatcher = { close(): void };
  * scheduler is: a test that waited on a real inotify event would be asserting
  * the kernel's delivery latency, not this file's behaviour.
  */
-export type WatchFile = (path: string, onChange: () => void) => ConsoleWatcher;
+export type WatchFile = (path: string, onChange: (event?: string) => void) => ConsoleWatcher;
 
 export type ConsoleStreamDeps = {
   /** Where stdout ended up, and how to read it back. Built once, in `index.ts`. */
@@ -122,13 +132,24 @@ function startFileWatch(
   // is both the wrong content and, on a log documented as growing without
   // bound, the allocation `tailFile` was written to avoid.
   let offset = size(source.path) ?? 0;
+  let stopped = false;
+  let watcher: ConsoleWatcher | null = null;
+  /** Set by a rotation, so the next published frame also clears the ring. */
+  let rotated = false;
+  let rewatchAttempts = 0;
+  let cancelRewatch: (() => void) | null = null;
+  // The same injected seam the rest of this module uses, so a test drives the
+  // retry rather than waiting out a real timer.
+  const rewatchSchedule = deps.schedule ?? defaultSchedule;
 
   const pump = (): void => {
     const delta = read(source.path, offset);
     if (delta === null) {
-      // Gone or unreadable — rotated away a moment ago, most likely. The offset
-      // is kept: if the same path comes back shorter, the next read reports the
-      // gap, and if it comes back longer the bytes in between were never ours.
+      // The path is gone. A rotation that has moved the old file aside but not
+      // yet created the new one lands here, so this is a rotation signal in its
+      // own right — waiting for a `rename` event that may already have fired is
+      // how the stream ends up watching an inode nothing writes to.
+      rotate();
       return;
     }
 
@@ -136,7 +157,8 @@ function startFileWatch(
     const lines = parseConsoleLines(delta.text, { lines: MAX_CONSOLE_LINES });
     if (lines.length > 0) broadcaster.stream(CONSOLE_TOPIC, { lines } satisfies ConsoleFrame);
 
-    if (delta.gap) {
+    if (delta.gap || rotated) {
+      rotated = false;
       // After the frame, not before, and everything goes — including the frame
       // just published. Every retained frame describes a file that no longer
       // exists, so a reconnecting subscriber that was handed the survivors
@@ -162,7 +184,60 @@ function startFileWatch(
     sink: () => pump(),
   });
 
-  const watcher = startWatcher(deps, source.path, () => coalescer.emit(CONSOLE_TOPIC), logger);
+  /**
+   * Re-establishes the watch after the file underneath it was replaced.
+   *
+   * `fs.watch` holds an inode, not a path. Log rotation renames the file away
+   * and creates a new one, so the old watcher stays attached to something
+   * nothing will ever write to again — and because the topic stays declared, the
+   * console keeps a subscription to a stream that has silently ended. Nothing is
+   * thrown and nothing is logged; it simply stops.
+   *
+   * The new file starts at offset 0, and the ring is cleared on the next frame
+   * for the reason a truncation clears it: every frame still held describes a
+   * file that no longer exists.
+   */
+  function rotate(): void {
+    if (stopped) return;
+    offset = 0;
+    rotated = true;
+
+    watcher?.close();
+    watcher = startWatcher(deps, source.path, onWatchEvent, logger);
+
+    if (watcher === null) {
+      // The replacement may not exist yet — `mv` and the writer's `open` are two
+      // syscalls with a window between them. Retried a bounded number of times
+      // rather than forever, so a genuinely deleted log stops costing anything.
+      if (rewatchAttempts >= REWATCH_ATTEMPTS) {
+        logger.warn("console stream ended", { path: source.path });
+        return;
+      }
+      rewatchAttempts += 1;
+      cancelRewatch?.();
+      cancelRewatch = rewatchSchedule(() => rotate(), floorMs);
+      return;
+    }
+    rewatchAttempts = 0;
+    // The replacement may already have content — the writer reopened the path
+    // before this ran. Without a pump nothing would be read until the *next*
+    // write, so the first lines of the new file would arrive late or, on a quiet
+    // gateway, not at all. Safe against recursion: this only runs when the path
+    // opened, so the read below cannot return `null` and call back here.
+    coalescer.emit(CONSOLE_TOPIC);
+  }
+
+  function onWatchEvent(event?: string): void {
+    // `rename` is what fs.watch reports when the watched path is moved or
+    // removed — which is a rotation, whatever else it might be.
+    if (event === "rename") {
+      rotate();
+      return;
+    }
+    coalescer.emit(CONSOLE_TOPIC);
+  }
+
+  watcher = startWatcher(deps, source.path, onWatchEvent, logger);
   if (watcher === null) {
     coalescer.stop();
     // Undeclared, like `none`. A topic nobody can feed must not look to a
@@ -174,7 +249,9 @@ function startFileWatch(
   logger.info("console stream watching", { path: source.path });
 
   return () => {
-    watcher.close();
+    stopped = true;
+    cancelRewatch?.();
+    watcher?.close();
     // Both, and in this order. Closing the watcher stops new emits; stopping
     // the coalescer cancels the trailing timer that a final emit already armed,
     // which would otherwise read a file the process is done with.
@@ -185,13 +262,13 @@ function startFileWatch(
 function startWatcher(
   deps: ConsoleStreamDeps,
   path: string,
-  onChange: () => void,
+  onChange: (event?: string) => void,
   logger: Logger,
 ): ConsoleWatcher | null {
   const create =
     deps.watch ??
-    ((target: string, changed: () => void) => {
-      const watcher = watch(target, () => changed());
+    ((target: string, changed: (event?: string) => void) => {
+      const watcher = watch(target, (event) => changed(event));
       watcher.on("error", (error: unknown) => {
         // A watch that dies takes the stream with it, and the topic stays
         // declared: the console keeps its subscription and sees nothing. Said
@@ -233,6 +310,23 @@ function startJournalPoll(
   let stopped = false;
   let cancel: (() => void) | null = null;
 
+  /**
+   * The raw text of every line already published at exactly `cursor`.
+   *
+   * `keep()` filters on `at <= since`, which is strictly-newer, and the cursor
+   * advances to the newest instant seen. At millisecond resolution a busy
+   * gateway writes several lines in one millisecond, so a line sharing the
+   * cursor's instant with one already published was filtered out and lost — not
+   * delayed, lost, because the cursor never goes back.
+   *
+   * So the query asks *inclusively* for the cursor's own millisecond and this
+   * set removes what was already sent. Keyed on the raw line rather than on the
+   * message, because two genuinely identical lines in the same millisecond are
+   * indistinguishable to anything downstream and re-sending one is the lesser
+   * failure of the two.
+   */
+  let publishedAtCursor = new Set<string>();
+
   const arm = (): void => {
     if (stopped) return;
     cancel = schedule(() => void tick(), pollMs);
@@ -247,14 +341,30 @@ function startJournalPoll(
       // `journalctl` per tick.
       const read = await readConsole(deps.console.deps, source, {
         lines: MAX_CONSOLE_LINES,
-        since: cursor,
+        // One millisecond back, so the cursor's own instant is included rather
+        // than excluded. `publishedAtCursor` is what stops that re-sending the
+        // lines from it that already went out.
+        since: cursor - 1,
       });
 
-      if (read.lines.length > 0) {
-        for (const line of read.lines) {
-          if (line.at !== null && line.at > cursor) cursor = line.at;
+      const fresh = read.lines.filter(
+        (line) => line.at !== cursor || !publishedAtCursor.has(line.raw),
+      );
+
+      if (fresh.length > 0) {
+        let newest = cursor;
+        for (const line of fresh) {
+          if (line.at !== null && line.at > newest) newest = line.at;
         }
-        broadcaster.stream(CONSOLE_TOPIC, { lines: read.lines } satisfies ConsoleFrame);
+        // A later millisecond starts the set over; the same one adds to it.
+        if (newest > cursor) {
+          cursor = newest;
+          publishedAtCursor = new Set();
+        }
+        for (const line of fresh) {
+          if (line.at === cursor) publishedAtCursor.add(line.raw);
+        }
+        broadcaster.stream(CONSOLE_TOPIC, { lines: fresh } satisfies ConsoleFrame);
       }
     } catch (error) {
       logger.error("console poll failed", { reason: describeError(error, "unknown") });
