@@ -118,7 +118,15 @@ function useCommit() {
  * Naming the models is the difference between a warning an operator can act on
  * and one they can only agree to.
  */
-function pinnedWarning(doomed: Credential, models: readonly VirtualModel[]): string {
+function pinnedWarning(doomed: Credential, models: readonly VirtualModel[] | undefined): string {
+  // Undefined is "the model list has not arrived", which is not the same as
+  // "nothing is pinned" and must not render as it. The removal is irreversible
+  // and the pinned targets it breaks have no fallback, so an unanswered
+  // question is said out loud rather than silently resolved to the reassuring
+  // answer.
+  if (models === undefined) {
+    return " The list of models could not be read, so whether any target is pinned to this account is unknown.";
+  }
   const pinned = models
     .filter((model) => model.targets.some((target) => target.credentialId === doomed.id))
     .map((model) => model.id);
@@ -451,7 +459,7 @@ export function AccountsBoard() {
           doomed === null
             ? ""
             : `Removing "${doomed.label}" deletes its stored token. Any model target pointing at ${PROVIDER_LABEL[doomed.provider]} loses this account, and reconnecting means authorizing again.` +
-              pinnedWarning(doomed, models.data ?? [])
+              pinnedWarning(doomed, models.data)
         }
         confirmLabel="Remove account"
         busy={remove.isPending}

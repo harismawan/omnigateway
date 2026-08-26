@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { listPlugins, orphanPluginTables, type PluginSummary, pluginsDir } from "@omni/control";
+import { resolvePin } from "@omni/store";
 import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError, type Context } from "../context.ts";
@@ -214,10 +215,17 @@ async function danglingPins(ctx: Context): Promise<string[] | null> {
   if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
   try {
     const store = await ctx.store();
-    const held = new Set((await store.credentials.list()).map((credential) => credential.id));
+    const accounts = await store.credentials.list();
     return (await store.config.listModels()).flatMap((model) =>
       model.targets
-        .filter((target) => target.credentialId !== undefined && !held.has(target.credentialId))
+        // The shared rule, not an id lookup. A pin is equally dead when it names
+        // another provider's account or a custom account on another endpoint,
+        // and the router reports all three the same way — a check that saw only
+        // deletions would print "none" for two of the three.
+        .filter(
+          (target) =>
+            target.credentialId !== undefined && resolvePin(target, accounts) === undefined,
+        )
         .map((target) => `${model.id}/${target.model} → ${target.credentialId}`),
     );
   } catch {

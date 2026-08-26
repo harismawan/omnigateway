@@ -269,21 +269,17 @@ export function ExplainPanel({ modelId }: ExplainPanelProps) {
                 <Legend>Filtered out</Legend>
                 <ul>
                   {/*
-                    Keyed by position as well as content, because content is not
-                    unique: the same model can be filtered out for the same
-                    reason more than once — two targets at different tiers, or
-                    two custom endpoints — and a `pin:missing` row is pushed once
-                    per target. Keyed on content alone React drops the duplicate,
-                    so a dry run would under-report what it filtered.
-
-                    Position is safe here in the way the lint rule assumes it is
-                    not: this list is one server response rendered whole, never
-                    appended to, reordered, or edited in place. A new dry run
-                    replaces the array outright.
+                    Content, not position. Two rows can be byte-identical — a
+                    `pin:missing` row is pushed once per target, so a model with
+                    two targets on the same provider model and the same dead pin
+                    produces two — and React renders both either way, warning
+                    rather than dropping one. An earlier version of this claimed
+                    the duplicate was dropped and keyed on the index to prevent
+                    it; that was wrong, and it bought a lint suppression for a
+                    problem that does not exist.
                   */}
-                  {result.excluded.map((row, index) => (
-                    // biome-ignore lint/suspicious/noArrayIndexKey: rows are not unique by content, and this list is replaced wholesale rather than mutated.
-                    <Excluded key={`${index}:${row.credentialId}:${row.model}:${row.reason}`}>
+                  {result.excluded.map((row) => (
+                    <Excluded key={`${row.credentialId}:${row.model}:${row.reason}`}>
                       <Mono $dim>{row.model}</Mono>
                       {/*
                         Which account, not just which model. For `pin:missing`

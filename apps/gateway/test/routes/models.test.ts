@@ -8,7 +8,15 @@ test("reports the catalog's window for a target the catalog lists", () => {
       id: "opus",
       targets: [target({ provider: "anthropic", model: "claude-opus-5" })],
     }),
-    [{ id: "anthropic-oauth", provider: "anthropic", authType: "oauth", enabled: true }],
+    [
+      {
+        id: "anthropic-oauth",
+        provider: "anthropic",
+        authType: "oauth",
+        enabled: true,
+        providerData: {},
+      },
+    ],
   );
 
   expect(described.max_input_tokens).toBe(1_000_000);
@@ -29,7 +37,15 @@ test("a target's own figures outrank the catalog's", () => {
         }),
       ],
     }),
-    [{ id: "anthropic-oauth", provider: "anthropic", authType: "oauth", enabled: true }],
+    [
+      {
+        id: "anthropic-oauth",
+        provider: "anthropic",
+        authType: "oauth",
+        enabled: true,
+        providerData: {},
+      },
+    ],
   );
 
   expect(described.max_input_tokens).toBe(200_000);
@@ -44,20 +60,44 @@ test("an OpenAI target served by OAuth reports the Codex window, not the API's",
 
   expect(
     describeModel(model, [
-      { id: "openai-apiKey", provider: "openai", authType: "apiKey", enabled: true },
+      {
+        id: "openai-apiKey",
+        provider: "openai",
+        authType: "apiKey",
+        enabled: true,
+        providerData: {},
+      },
     ]).max_input_tokens,
   ).toBe(922_000);
   // An OAuth credential is routed to Codex, which caps the window at 272K.
   expect(
     describeModel(model, [
-      { id: "openai-oauth", provider: "openai", authType: "oauth", enabled: true },
+      {
+        id: "openai-oauth",
+        provider: "openai",
+        authType: "oauth",
+        enabled: true,
+        providerData: {},
+      },
     ]).max_input_tokens,
   ).toBe(272_000);
   // Either could serve the request, so the client is told what both can take.
   expect(
     describeModel(model, [
-      { id: "openai-apiKey", provider: "openai", authType: "apiKey", enabled: true },
-      { id: "openai-oauth", provider: "openai", authType: "oauth", enabled: true },
+      {
+        id: "openai-apiKey",
+        provider: "openai",
+        authType: "apiKey",
+        enabled: true,
+        providerData: {},
+      },
+      {
+        id: "openai-oauth",
+        provider: "openai",
+        authType: "oauth",
+        enabled: true,
+        providerData: {},
+      },
     ]).max_input_tokens,
   ).toBe(272_000);
 });
@@ -66,8 +106,20 @@ test("a disabled credential does not narrow the window it can no longer serve", 
   const described = describeModel(
     virtualModel({ id: "gpt", targets: [target({ provider: "openai", model: "gpt-5.6" })] }),
     [
-      { id: "openai-apiKey", provider: "openai", authType: "apiKey", enabled: true },
-      { id: "openai-oauth", provider: "openai", authType: "oauth", enabled: false },
+      {
+        id: "openai-apiKey",
+        provider: "openai",
+        authType: "apiKey",
+        enabled: true,
+        providerData: {},
+      },
+      {
+        id: "openai-oauth",
+        provider: "openai",
+        authType: "oauth",
+        enabled: false,
+        providerData: {},
+      },
     ],
   );
 
@@ -77,7 +129,15 @@ test("a disabled credential does not narrow the window it can no longer serve", 
 test("another provider's credentials say nothing about this one", () => {
   const described = describeModel(
     virtualModel({ id: "gpt", targets: [target({ provider: "openai", model: "gpt-5.6" })] }),
-    [{ id: "anthropic-oauth", provider: "anthropic", authType: "oauth", enabled: true }],
+    [
+      {
+        id: "anthropic-oauth",
+        provider: "anthropic",
+        authType: "oauth",
+        enabled: true,
+        providerData: {},
+      },
+    ],
   );
 
   expect(described.max_input_tokens).toBe(922_000);
@@ -94,7 +154,15 @@ test("a pool advertises the smallest window any of its targets can hold", () => 
         target({ provider: "anthropic", model: "claude-haiku-4-5" }),
       ],
     }),
-    [{ id: "anthropic-apiKey", provider: "anthropic", authType: "apiKey", enabled: true }],
+    [
+      {
+        id: "anthropic-apiKey",
+        provider: "anthropic",
+        authType: "apiKey",
+        enabled: true,
+        providerData: {},
+      },
+    ],
   );
 
   expect(described.max_input_tokens).toBe(200_000);
@@ -166,7 +234,15 @@ test("an empty listing has no cursors to follow", () => {
 test("does not advertise discovery mirrors unless asked", () => {
   const body = modelListBody(
     [virtualModel({ id: "opus", targets: [target({ provider: "anthropic" })] })],
-    [{ id: "anthropic-oauth", provider: "anthropic", authType: "oauth", enabled: true }],
+    [
+      {
+        id: "anthropic-oauth",
+        provider: "anthropic",
+        authType: "oauth",
+        enabled: true,
+        providerData: {},
+      },
+    ],
   );
   expect(body.data.map((entry) => entry.id)).toEqual(["opus"]);
 });
@@ -182,7 +258,15 @@ test("mirrors a pool under a claude-prefixed id when asked", () => {
         targets: [target({ provider: "openai", model: "gpt-5.6" })],
       }),
     ],
-    [{ id: "openai-apiKey", provider: "openai", authType: "apiKey", enabled: true }],
+    [
+      {
+        id: "openai-apiKey",
+        provider: "openai",
+        authType: "apiKey",
+        enabled: true,
+        providerData: {},
+      },
+    ],
     { discoveryMirrors: true },
   );
 
@@ -203,7 +287,15 @@ test("does not mirror an id the picker already accepts", () => {
       virtualModel({ id: "claude-opus-5", targets: [target({ provider: "anthropic" })] }),
       virtualModel({ id: "anthropic/opus", targets: [target({ provider: "anthropic" })] }),
     ],
-    [{ id: "anthropic-oauth", provider: "anthropic", authType: "oauth", enabled: true }],
+    [
+      {
+        id: "anthropic-oauth",
+        provider: "anthropic",
+        authType: "oauth",
+        enabled: true,
+        providerData: {},
+      },
+    ],
     { discoveryMirrors: true },
   );
   expect(body.data.map((entry) => entry.id)).toEqual(["claude-opus-5", "anthropic/opus"]);
@@ -215,7 +307,15 @@ test("a real pool is never shadowed by a mirror of the same name", () => {
       virtualModel({ id: "opus", targets: [target({ provider: "anthropic" })] }),
       virtualModel({ id: "claude/opus", targets: [target({ provider: "anthropic" })] }),
     ],
-    [{ id: "anthropic-oauth", provider: "anthropic", authType: "oauth", enabled: true }],
+    [
+      {
+        id: "anthropic-oauth",
+        provider: "anthropic",
+        authType: "oauth",
+        enabled: true,
+        providerData: {},
+      },
+    ],
     { discoveryMirrors: true },
   );
   const ids = body.data.map((entry) => entry.id);

@@ -1,6 +1,6 @@
 import type { ProviderId } from "@omni/ir";
 import { type CatalogAuth, catalogLimits, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
-import type { Target, VirtualModel } from "@omni/store";
+import { resolvePin, type Target, type VirtualModel } from "@omni/store";
 
 /**
  * How much a virtual model holds, and what to call it.
@@ -15,9 +15,8 @@ import type { Target, VirtualModel } from "@omni/store";
 
 /**
  * The credential facts this needs: which ways in a provider actually has, and
- * which account each one is. Only `id`, `provider` and `authType` are read, so
- * a `CredentialView` from the store satisfies it without anything here touching
- * a secret.
+ * which account each one is. Nothing here is a secret, so a `CredentialView`
+ * from the store satisfies it as it stands.
  *
  * `id` is required rather than optional because a target can be pinned to one
  * account, and a caller that omitted it would silently make every pin
@@ -29,6 +28,13 @@ export type ServingCredential = {
   provider: ProviderId;
   authType: CatalogAuth;
   enabled: boolean;
+  /**
+   * Carried because a custom endpoint is part of whether an account can serve a
+   * target at all, and the shared rule reads it. Without it a pin at a custom
+   * account on another endpoint would resolve here and be described by that
+   * account's way in, while the router refuses it as `pin:missing`.
+   */
+  providerData: Record<string, unknown>;
 };
 
 export type ModelLimits = { contextWindow?: number; maxOutputTokens?: number };
@@ -89,51 +95,35 @@ function targetLimits(
 }
 
 /**
- * Which ways in each provider has, and which account each id names, from the
- * credentials that can route. Both indexes are built from the same filtered
- * pass so a pin can never resolve to an account the provider-wide answer left
- * out.
+ * Which ways in each provider has, and the accounts a pin may resolve against,
+ * from the credentials that can route.
+ *
+ * One filtered pass feeds both, so a pin can never resolve to an account the
+ * provider-wide answer left out.
+ *
+ * A pin that does not resolve — deleted, disabled, another provider, another
+ * custom endpoint, all of which the router reports alike as `pin:missing` —
+ * falls back to the provider-wide narrowing rather than to the catalog's
+ * published figures, and the direction matters: narrowing across every way in
+ * is by construction no wider than any single one of them, so an unresolvable
+ * pin never advertises more than the same target would unpinned. The opposite
+ * reading would state a window for an account that does not exist, and the
+ * request fails anyway.
  */
 function servingAuths(credentials: readonly ServingCredential[]): {
   byProvider: Map<ProviderId, Set<CatalogAuth>>;
-  byId: Map<string, ServingCredential>;
+  routable: ServingCredential[];
 } {
   const byProvider = new Map<ProviderId, Set<CatalogAuth>>();
-  const byId = new Map<string, ServingCredential>();
+  const routable: ServingCredential[] = [];
   for (const credential of credentials) {
     if (!credential.enabled) continue;
     const ways = byProvider.get(credential.provider) ?? new Set<CatalogAuth>();
     ways.add(credential.authType);
     byProvider.set(credential.provider, ways);
-    byId.set(credential.id, credential);
+    routable.push(credential);
   }
-  return { byProvider, byId };
-}
-
-/**
- * The account a pinned target is served by, or undefined when the pin does not
- * resolve to one that can serve it right now.
- *
- * Three ways it fails to resolve, all read the same: the account was deleted,
- * it is disabled, or it belongs to another provider. The router treats each as
- * `pin:missing` — its pin check sits after the provider check, so a foreign
- * account is not a way around it — and none of them leaves a serving path to
- * describe.
- *
- * Unresolvable falls back to the provider-wide narrowing rather than to the
- * catalog's published figures, and the direction matters: narrowing across
- * every way in is by construction no wider than any single one of them, so a
- * pin that cannot be resolved never advertises more than the same target would
- * unpinned. The opposite reading would state a window for an account that does
- * not exist, and the request fails anyway.
- */
-function pinnedCredential(
-  target: Target,
-  byId: ReadonlyMap<string, ServingCredential>,
-): ServingCredential | undefined {
-  if (target.credentialId === undefined) return undefined;
-  const credential = byId.get(target.credentialId);
-  return credential?.provider === target.provider ? credential : undefined;
+  return { byProvider, routable };
 }
 
 /**
@@ -158,7 +148,7 @@ export function resolveModelLimits(
   model: VirtualModel,
   credentials: readonly ServingCredential[],
 ): ModelLimits {
-  const { byProvider, byId } = servingAuths(credentials);
+  const { byProvider, routable } = servingAuths(credentials);
   let limits: ModelLimits = {};
   for (const target of model.targets) {
     limits = narrower(
@@ -166,7 +156,7 @@ export function resolveModelLimits(
       targetLimits(
         target,
         byProvider.get(target.provider) ?? new Set<CatalogAuth>(),
-        pinnedCredential(target, byId),
+        resolvePin(target, routable),
       ),
     );
   }

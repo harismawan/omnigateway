@@ -56,6 +56,8 @@ export async function describeModelsForSetup(store: Store): Promise<Described[]>
     provider: credential.provider,
     authType: credential.authType,
     enabled: credential.enabled,
+    // Custom endpoint is part of whether an account can serve a target.
+    providerData: credential.providerData,
   }));
   return models.map((model) => ({
     model,

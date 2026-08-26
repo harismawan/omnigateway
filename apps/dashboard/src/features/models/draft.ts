@@ -6,6 +6,11 @@ import {
   PROVIDER_MODEL_CATALOG,
   type ProviderModelChoice,
 } from "@omni/providers/catalog";
+// The one place the console asks a routing question, imported rather than
+// reimplemented for the same reason `vitals.ts` imports `sameWindow`: a second
+// copy of "which account can serve this target" is what put the picker and the
+// router out of step in the first place.
+import { servesTarget } from "@omni/store/types";
 import type { Credential, ProviderId, Strategy, Target, VirtualModel } from "../../api/types.ts";
 
 /**
@@ -230,13 +235,13 @@ export function pinChoices(
   scope: PinScope,
   credentials: readonly Credential[],
 ): ReadonlyArray<{ id: string; label: string }> {
+  // The shared rule with the pin deliberately left off, so this reads "which
+  // accounts could this target reach" rather than "which does it reach now".
+  // Same function the router filters with, so the picker cannot offer an
+  // account the router would then refuse.
+  const address = { provider: scope.provider, endpointId: scope.endpointId };
   return credentials
-    .filter((credential) => credential.provider === scope.provider)
-    .filter(
-      (credential) =>
-        scope.provider !== "custom" ||
-        String(credential.providerData.endpointId ?? "") === scope.endpointId,
-    )
+    .filter((credential) => servesTarget(address, credential))
     .map((credential) => ({
       id: credential.id,
       label: credential.accountEmail ?? credential.label,
@@ -260,6 +265,13 @@ export function pinNote(
   credentials: readonly Credential[],
 ): string | null {
   if (credentialId.length === 0) return null;
+  // No accounts at all is unknown, not broken — the same reading `reachable`
+  // takes two functions up. `ModelEditor` passes `credentials.data ?? []`, so
+  // an empty list is also what a request still in flight looks like, and what a
+  // failed one looks like permanently. Calling a live pin dead because a
+  // listing has not arrived is the worse error of the two: it accuses working
+  // configuration, in red, on a screen the operator came to for the truth.
+  if (credentials.length === 0) return null;
   if (pinChoices(scope, credentials).some((choice) => choice.id === credentialId)) return null;
   return (
     "No connected account has this id. Requests routed here will fail rather than " +

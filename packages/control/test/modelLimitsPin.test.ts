@@ -27,6 +27,7 @@ const serving = (
   provider: "openai",
   authType,
   enabled: true,
+  providerData: {},
   ...overrides,
 });
 

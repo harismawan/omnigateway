@@ -1,6 +1,12 @@
 import { GatewayError, type ProviderId } from "@omni/ir";
 import { type CatalogAuth, catalogModelAuths } from "@omni/providers/catalog";
-import type { Credential, Store, Target, VirtualModel } from "@omni/store";
+import {
+  type Credential,
+  resolvePin,
+  type Store,
+  type Target,
+  type VirtualModel,
+} from "@omni/store";
 import { modelSchema, parseOrThrow } from "./schemas.ts";
 
 export async function listModels(store: Store): Promise<VirtualModel[]> {
@@ -47,29 +53,6 @@ function heldAuths(credentials: readonly Credential[]): Map<ProviderId, Set<Cata
 /** A target's identity for the purpose of "was this already saved". */
 function pairOf(target: Target): string {
   return `${target.provider}\u0000${target.model}`;
-}
-
-/**
- * The account a pinned target names, when this installation still holds one of
- * the target's own provider.
- *
- * Undefined covers three states the router reads alike as `pin:missing`: no
- * pin, a pin at an account that is gone, and a pin at another provider's
- * account — its pin check sits after the provider check, so a foreign account
- * is not a way in and must not launder the provider-wide refusal. Each falls
- * back to the provider-wide rule, which is what this returning nothing means to
- * the caller.
- *
- * Existence, not `enabled`, for the same reason `heldAuths` counts a disabled
- * credential: a rejected token is still the operator's way into that account.
- */
-function pinnedCredential(
-  target: Target,
-  byId: ReadonlyMap<string, Credential>,
-): Credential | undefined {
-  if (target.credentialId === undefined) return undefined;
-  const credential = byId.get(target.credentialId);
-  return credential?.provider === target.provider ? credential : undefined;
 }
 
 /**
@@ -122,10 +105,17 @@ function unreachable(
   stored: VirtualModel | undefined,
 ): GatewayError | null {
   const held = heldAuths(credentials);
-  const byId = new Map(credentials.map((credential) => [credential.id, credential]));
   const grandfathered = new Set((stored?.targets ?? []).map(pairOf));
   for (const target of model.targets) {
-    const pinned = pinnedCredential(target, byId);
+    // Resolved through the shared rule, so a pin at another provider — or at a
+    // custom account on another endpoint — is unresolvable here for exactly the
+    // reason the router calls it `pin:missing`, and cannot launder the
+    // provider-wide refusal by looking like a valid pin.
+    //
+    // Every credential, not just the enabled ones, for the same reason
+    // `heldAuths` counts a disabled one: a rejected token is still the
+    // operator's way into that account.
+    const pinned = resolvePin(target, credentials);
     // Only the provider-wide reading is grandfathered; see the note above on
     // why the pin check is not.
     if (pinned === undefined && grandfathered.has(pairOf(target))) continue;
