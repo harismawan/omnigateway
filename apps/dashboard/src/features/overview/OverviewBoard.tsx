@@ -28,14 +28,14 @@ const WINDOW_MS = 3_600_000;
 export function OverviewBoard() {
   const { cadence } = useLive();
   const credentials = useCredentials();
-  const health = useCredentialHealth(cadence(10_000));
+  const health = useCredentialHealth(cadence(10_000, "res:credentials"));
   const models = useModels();
-  const logs = useLogs(500, cadence(10_000));
+  const logs = useLogs(500, cadence(10_000, "res:logs"));
   const settings = useSettings();
 
   const now = Date.now();
   const since = Math.floor((now - WINDOW_MS) / 60_000) * 60_000;
-  const usage = useUsage({ groupBy: "credential", since }, cadence(60_000));
+  const usage = useUsage({ groupBy: "credential", since }, cadence(60_000, "res:usage"));
 
   const rows = credentials.data ?? [];
   const healthByCredential = groupBy(health.data?.health ?? [], (row) => row.credentialId);

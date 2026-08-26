@@ -79,22 +79,25 @@ export function UsageBoard() {
   const activitySince = useMemo(() => startOfDay(Date.now() - ACTIVITY_DAYS * DAY_MS), []);
 
   const common = { since, grain: range.grain } as const;
-  const series = useUsage({ ...common, groupBy: range.by }, cadence(60_000));
+  const series = useUsage({ ...common, groupBy: range.by }, cadence(60_000, "res:usage"));
   const providers = useUsage(
     { ...common, groupBy: range.by, splitBy: "provider" },
-    cadence(60_000),
+    cadence(60_000, "res:usage"),
   );
   const modelTraffic = useUsage(
     { ...common, groupBy: range.by, splitBy: "model" },
-    cadence(60_000),
+    cadence(60_000, "res:usage"),
   );
-  const keyTraffic = useUsage({ ...common, groupBy: range.by, splitBy: "apiKey" }, cadence(60_000));
-  const models = useUsage({ ...common, groupBy: scope }, cadence(60_000));
-  const accounts = useUsage({ ...common, groupBy: "credential" }, cadence(60_000));
+  const keyTraffic = useUsage(
+    { ...common, groupBy: range.by, splitBy: "apiKey" },
+    cadence(60_000, "res:usage"),
+  );
+  const models = useUsage({ ...common, groupBy: scope }, cadence(60_000, "res:usage"));
+  const accounts = useUsage({ ...common, groupBy: "credential" }, cadence(60_000, "res:usage"));
   // A year of squares changes slowly; polling it at the panel cadence is waste.
   const activity = useUsage(
     { since: activitySince, grain: "daily", groupBy: "day" },
-    cadence(300_000),
+    cadence(300_000, "res:usage"),
   );
 
   const keys = useKeys();

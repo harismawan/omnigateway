@@ -3,7 +3,7 @@ import { get } from "../api/client.ts";
 import { queryKeys } from "../api/queries.ts";
 import type { StatusResponse } from "../api/types.ts";
 import { Rack } from "../components/Rack.tsx";
-import { LiveProvider } from "../session/live.tsx";
+import { StreamedLiveProvider, StreamProvider } from "../session/stream.tsx";
 
 /**
  * The gate in front of every console screen.
@@ -24,11 +24,16 @@ export const Route = createFileRoute("/_app")({
       throw redirect({ to: "/login", search: { next: location.href } });
     }
   },
+  // The socket is mounted above the LIVE switch, not beside it: the switch now
+  // reads transport state, so the provider that owns the transport has to be the
+  // outer one. Reversed, every board polls forever and nothing says so.
   component: () => (
-    <LiveProvider>
-      <Rack>
-        <Outlet />
-      </Rack>
-    </LiveProvider>
+    <StreamProvider>
+      <StreamedLiveProvider>
+        <Rack>
+          <Outlet />
+        </Rack>
+      </StreamedLiveProvider>
+    </StreamProvider>
   ),
 });

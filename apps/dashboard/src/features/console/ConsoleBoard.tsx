@@ -127,7 +127,7 @@ export function ConsoleBoard() {
   const [lines, setLines] = useState<number>(200);
   const [level, setLevel] = useState<string>("");
 
-  const consoleLog = useConsole(lines, level, cadence(CONSOLE_CADENCE_MS));
+  const consoleLog = useConsole(lines, level, cadence(CONSOLE_CADENCE_MS, "stream:console"));
   const read = consoleLog.data;
   const rows = read?.lines ?? [];
   const terminalRef = useRef<HTMLDivElement>(null);

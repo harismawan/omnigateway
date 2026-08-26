@@ -111,7 +111,7 @@ function useCommit() {
 export function AccountsBoard() {
   const { cadence } = useLive();
   const credentials = useCredentials();
-  const health = useCredentialHealth(cadence(10_000));
+  const health = useCredentialHealth(cadence(10_000, "res:credentials"));
   // Only for reading how old a snapshot may be before it stops being current.
   const settings = useSettings();
   const remove = useDeleteCredential();

@@ -106,7 +106,12 @@ const Value = styled.dd`
   word-break: break-all;
 `;
 
-/** One row per request, most recent first. Polling is the only feed available. */
+/**
+ * One row per request, most recent first.
+ *
+ * Fed by `res:logs` when the socket is up and by the two-second interval when it
+ * is not — the same fetch either way, chosen per render by `cadence`.
+ */
 export function LogsBoard() {
   const { cadence, live: liveUpdates } = useLive();
   const [limit, setLimit] = useState<number>(100);
@@ -114,7 +119,7 @@ export function LogsBoard() {
   const [term, setTerm] = useState("");
   const [open, setOpen] = useState<RequestLog | null>(null);
 
-  const logs = useLogs(limit, cadence(LOG_CADENCE_MS));
+  const logs = useLogs(limit, cadence(LOG_CADENCE_MS, "res:logs"));
   const credentials = useCredentials();
   const keys = useKeys();
   // Both keys, not just the setting: an installation whose environment never
