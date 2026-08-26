@@ -9,13 +9,12 @@ const body = (model: string) => ({
   messages: [{ role: "user", content: "hi" }],
 });
 
-test("unwinds a discovery mirror to the model it stands for", () => {
-  expect(normalizeClientModel("claude/gpt-5.6-sol").model).toBe("gpt-5.6-sol");
-});
-
-test("leaves a real claude-prefixed id alone", () => {
+// `claude/` was a discovery-mirror prefix that ingress unwound. Both are gone,
+// so every spelling of it is now an ordinary model name carried through intact.
+test("leaves a claude-prefixed id alone", () => {
   expect(normalizeClientModel("claude-opus-5").model).toBe("claude-opus-5");
   expect(normalizeClientModel("claude/").model).toBe("claude/");
+  expect(normalizeClientModel("claude/gpt-5.6-sol").model).toBe("claude/gpt-5.6-sol");
 });
 
 test("strips the 1m suffix and turns it into the beta it stands for", () => {
@@ -24,9 +23,9 @@ test("strips the 1m suffix and turns it into the beta it stands for", () => {
   expect(named.betas).toEqual([CONTEXT_1M_BETA]);
 });
 
-test("handles a mirrored id carrying the suffix", () => {
+test("strips the suffix from a slash-bearing id without touching the rest", () => {
   const named = normalizeClientModel("claude/gpt-5.6-sol[1m]");
-  expect(named.model).toBe("gpt-5.6-sol");
+  expect(named.model).toBe("claude/gpt-5.6-sol");
   expect(named.betas).toEqual([CONTEXT_1M_BETA]);
 });
 
@@ -39,9 +38,9 @@ test("a name that is only the suffix is left for resolution to reject", () => {
   expect(normalizeClientModel("[1m]").model).toBe("[1m]");
 });
 
-test("ingress resolves a mirrored id before anything downstream sees it", () => {
+test("ingress carries a claude-prefixed id through unchanged", () => {
   const request = parseAnthropicRequest(body("claude/opus"));
-  expect(request.model).toBe("opus");
+  expect(request.model).toBe("claude/opus");
 });
 
 test("ingress merges the suffix into the betas carried on the request", () => {

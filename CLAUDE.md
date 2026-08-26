@@ -120,6 +120,34 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     `routes/stream.ts` decide who may hold it, so opening channel never widen plugin's own reach.
     Outbound frame reuse socket registry's own bounded per-connection queue — no second queue, and
     nothing here touch `Store`.
+16. **No provider-specific code in a core module.** `ir`, `router`, `store`, `control`, `ratelimit`,
+    `rtk` never name a provider, never branch on a provider id, never hold a table keyed by one. A
+    provider's data live in its own descriptor; core read the registry it is handed. Core cannot
+    scan providers — `packages/providers` import `@omni/ir`, so reverse import is a cycle, and rules
+    1 and 3 forbid it anyway. Injection is the only direction.
+    Three outcomes when core seem to need provider knowledge, in this order: **descriptor data**;
+    **make the value carry its own provenance** so the branch delete; **a named extension point**
+    from the closed set. Prefer deletion — branch that not exist cannot drift, and need no contract,
+    no registration, no test. `providerNative` is the worked example: block already generic escape
+    hatch wearing one vendor's name, so tagging it with producing provider let routing rule read off
+    data and delete `needsAnthropicNative`, `ANTHROPIC_NATIVE_TOOLS` and the table read inside pure
+    router. Hook set is **closed**; growing it need a specific core site, a provider that cannot work
+    without it, and no self-describing alternative. `LogFields` never extensible — closed allowlist
+    and redaction boundary. `servesTarget` stay one rule with **one** call site consulting descriptor
+    from inside itself, because five sites once asked that question separately and three asked less
+    than the router did.
+    What core keep is provider-shaped **vocabulary**, not provider **logic**: `ErrorCode`,
+    `LogFields`, `StopReason`, `CacheControl.ttl`, `AuthType`, `WindowType`, `surface`,
+    `AnthropicToolFamily`. Provider needing new member of those edit core, by design — that is a
+    provider extending what gateway can *express*, not one the contract cover. Say that boundary
+    plainly rather than claim "no core edits"; unconditional claim is one a reader disprove in a
+    minute and then trust nothing else.
+    Trap this rule exist for: `autoCache` is **one boolean across six core files** —
+    `providers/types.ts`, `store/types.ts`, `control/schemas.ts`, `dispatch/index.ts`,
+    `dispatch/attempt.ts`, `SettingsBoard.tsx`. Nobody added six files on purpose; each step looked
+    small. Design:
+    [core/provider decoupling](docs/superpowers/specs/2026-08-27-core-provider-decoupling-design.md),
+    [descriptor registry](docs/superpowers/specs/2026-08-26-provider-descriptor-registry-design.md).
 
 ## Adding a provider
 
@@ -245,7 +273,9 @@ Preserve these translation invariants:
 - Adapters stream upstream. OpenAI chat usage need `stream_options.include_usage`; Responses API
   report usage on `response.completed`.
 - `/v1/models` report smallest target window in pool. Limits advertised, not enforced.
-- Normalize `claude/<id>` aliases and `[1m]` before key allowlist checks. `claude/` stay reserved.
+- Normalize `[1m]` before key allowlist checks: ingress rewrite the model name, so any spelling
+  of a pool reach policy as the pool's own id. `claude/` **not** reserved and not rewritten —
+  discovery mirrors removed, so it is an ordinary model id like any other.
 - Gateway not validate request-shape support per model; unsupported combos surface as upstream
   errors.
 - OpenAI surface read images from `messages[].images` (bare base64) and from `attachments` /
@@ -263,8 +293,7 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
 
 ## Runtime and data traps
 
-- `OMNI_EXPOSE_CLAUDE_CODE_ALIASES` default off, read at boot. `OMNI_BASE_URL` must be public
-  reverse-proxy origin. Changing `OMNI_ENCRYPTION_KEY` invalidate stored credentials.
+- `OMNI_BASE_URL` must be public reverse-proxy origin. Changing `OMNI_ENCRYPTION_KEY` invalidate stored credentials.
 - CLI root resolution: `--root` > `OMNI_ROOT` > install in cwd > `~/.config/omnigateway`. Root
   `.env` intentionally override ambient environment.
 - CLI database path: `--db` > that root's own `.env` > ambient `OMNI_DB_PATH` > `omnigateway.db` in

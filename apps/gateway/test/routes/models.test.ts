@@ -231,9 +231,11 @@ test("an empty listing has no cursors to follow", () => {
   expect(body.last_id).toBeNull();
 });
 
-test("does not advertise discovery mirrors unless asked", () => {
+test("lists a pool whose id begins with claude/ like any other", () => {
+  // `claude/` was once reserved for discovery mirrors. The mirrors are gone, so
+  // the prefix is an ordinary part of a pool's name and must list unchanged.
   const body = modelListBody(
-    [virtualModel({ id: "opus", targets: [target({ provider: "anthropic" })] })],
+    [virtualModel({ id: "claude/opus", targets: [target({ provider: "anthropic" })] })],
     [
       {
         id: "anthropic-oauth",
@@ -244,82 +246,7 @@ test("does not advertise discovery mirrors unless asked", () => {
       },
     ],
   );
-  expect(body.data.map((entry) => entry.id)).toEqual(["opus"]);
-});
-
-// Claude Code's picker lists only ids beginning with `claude` or `anthropic`,
-// so without a mirror a pool named anything else is invisible to it however
-// well it routes.
-test("mirrors a pool under a claude-prefixed id when asked", () => {
-  const body = modelListBody(
-    [
-      virtualModel({
-        id: "gpt-5.6-sol",
-        targets: [target({ provider: "openai", model: "gpt-5.6" })],
-      }),
-    ],
-    [
-      {
-        id: "openai-apiKey",
-        provider: "openai",
-        authType: "apiKey",
-        enabled: true,
-        providerData: {},
-      },
-    ],
-    { discoveryMirrors: true },
-  );
-
-  expect(body.data.map((entry) => entry.id)).toEqual(["gpt-5.6-sol", "claude/gpt-5.6-sol"]);
-  const mirror = body.data[1];
-  expect(mirror?.root).toBe("gpt-5.6-sol");
-  expect(mirror?.display_name).toBe(`${body.data[0]?.display_name} (OmniGateway)`);
-  // A mirror that lost the limits would be worse than no mirror: the operator
-  // would pick it and get the client's own default.
-  expect(mirror?.max_input_tokens).toBe(body.data[0]?.max_input_tokens);
-  expect(mirror?.max_tokens).toBe(body.data[0]?.max_tokens);
-  expect(body.last_id).toBe("claude/gpt-5.6-sol");
-});
-
-test("does not mirror an id the picker already accepts", () => {
-  const body = modelListBody(
-    [
-      virtualModel({ id: "claude-opus-5", targets: [target({ provider: "anthropic" })] }),
-      virtualModel({ id: "anthropic/opus", targets: [target({ provider: "anthropic" })] }),
-    ],
-    [
-      {
-        id: "anthropic-oauth",
-        provider: "anthropic",
-        authType: "oauth",
-        enabled: true,
-        providerData: {},
-      },
-    ],
-    { discoveryMirrors: true },
-  );
-  expect(body.data.map((entry) => entry.id)).toEqual(["claude-opus-5", "anthropic/opus"]);
-});
-
-test("a real pool is never shadowed by a mirror of the same name", () => {
-  const body = modelListBody(
-    [
-      virtualModel({ id: "opus", targets: [target({ provider: "anthropic" })] }),
-      virtualModel({ id: "claude/opus", targets: [target({ provider: "anthropic" })] }),
-    ],
-    [
-      {
-        id: "anthropic-oauth",
-        provider: "anthropic",
-        authType: "oauth",
-        enabled: true,
-        providerData: {},
-      },
-    ],
-    { discoveryMirrors: true },
-  );
-  const ids = body.data.map((entry) => entry.id);
-  expect(ids).toEqual(["opus", "claude/opus"]);
-  expect(body.data.filter((entry) => entry.id === "claude/opus")).toHaveLength(1);
-  expect(body.data.find((entry) => entry.id === "claude/opus")?.root).toBeUndefined();
+  expect(body.data.map((entry) => entry.id)).toEqual(["claude/opus"]);
+  expect(body.data[0]?.root).toBeUndefined();
+  expect(body.last_id).toBe("claude/opus");
 });

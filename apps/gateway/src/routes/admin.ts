@@ -47,7 +47,6 @@ export type AdminDeps = {
   sessionTtlMs: number;
   /** Public origin, which is what a generated client configuration points at. */
   baseUrl: string;
-  discoveryMirrors?: boolean;
   /**
    * Whether `OMNI_BODY_LOGGING_ALLOWED` was set at boot.
    *
@@ -274,10 +273,7 @@ export function adminRoutes(deps: AdminDeps) {
             files: await setupFiles(
               deps.store,
               client,
-              {
-                baseUrl: deps.baseUrl,
-                discoveryMirrors: deps.discoveryMirrors === true,
-              },
+              { baseUrl: deps.baseUrl },
               {
                 defaultModel,
                 ...(query.fableModel ? { fableModel: query.fableModel } : {}),
