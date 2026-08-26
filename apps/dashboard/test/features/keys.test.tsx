@@ -422,6 +422,73 @@ describe("KeysBoard", () => {
     });
   });
 
+  /**
+   * Editable after creation, like limits: an allowlist that cannot be adjusted
+   * without minting a new key and redeploying every client is one that gets set
+   * to unrestricted instead. The stored list is what the form starts from, and
+   * a named model that is no longer configured stays checked — dropping it
+   * silently would widen the key without anyone deciding to.
+   */
+  test("allowed models are editable after creation, and the list is sent whole", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({
+        keys: [apiKey({ modelAllowlist: ["fast", "legacy"], limits: {} })],
+      }),
+      "PUT /api/keys/key-1/models": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit models for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+
+    // Both configured models and the stale one render; the stored two start
+    // checked and the merely-available one does not.
+    expect(
+      (within(dialog).getByRole("checkbox", { name: "fast" }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(
+      (within(dialog).getByRole("checkbox", { name: "legacy" }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(
+      (within(dialog).getByRole("checkbox", { name: "deep" }) as HTMLInputElement).checked,
+    ).toBe(false);
+
+    await user.click(within(dialog).getByRole("checkbox", { name: "deep" }));
+    await user.click(within(dialog).getByRole("button", { name: "Save models" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.url).toBe("/api/keys/key-1/models");
+      // Sent whole, stale entry included: the gateway stores one document.
+      expect(put?.init?.body).toBe(JSON.stringify({ modelAllowlist: ["fast", "legacy", "deep"] }));
+    });
+  });
+
+  /**
+   * `null` and `[]` are opposite facts, and the dialog carries both spellings:
+   * the toggle restores every model, clearing every box denies all of them.
+   */
+  test("the every-model toggle sends null rather than an empty list", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey({ modelAllowlist: ["fast"], limits: {} })] }),
+      "PUT /api/keys/key-1/models": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit models for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+
+    await user.click(within(dialog).getByRole("switch", { name: "Allow every model" }));
+    await user.click(within(dialog).getByRole("button", { name: "Save models" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.init?.body).toBe(JSON.stringify({ modelAllowlist: null }));
+    });
+  });
+
   test("with no keys the screen says what to do", async () => {
     createFetchStub({
       "GET /api/keys": () => ({ keys: [] }),

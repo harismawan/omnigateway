@@ -1,4 +1,11 @@
-import { createKey, type LimitReading, listKeys, revokeKey, setKeyLimits } from "@omni/control";
+import {
+  createKey,
+  type LimitReading,
+  listKeys,
+  revokeKey,
+  setKeyLimits,
+  setKeyModels,
+} from "@omni/control";
 import type { LimitConfig } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, state } from "../command.ts";
@@ -372,5 +379,54 @@ export const keysRevoke: Command = {
 
     await revokeKey(await ctx.store(), id);
     emit(ctx, writer, { id, revoked: true }, () => `${id} revoked`);
+  },
+};
+
+export const keysModels: Command = {
+  usage: "keys models <id> [--allow <model> ...] [--all] [--none]",
+  summary: "Show or replace one key's allowed models",
+  options: {
+    allow: { type: "string", multiple: true },
+    all: { type: "boolean" },
+    none: { type: "boolean" },
+  },
+  async run(args, { ctx, writer }) {
+    const id = requirePositional(args, 0, "key id");
+    const allow = listFlag(args.values, "allow");
+    const all = boolFlag(args.values, "all");
+    const none = boolFlag(args.values, "none");
+
+    const store = await ctx.store();
+    const existing = (await listKeys(store)).find((entry) => entry.id === id);
+    if (existing === undefined) throw new CliError(`no api key "${id}"`);
+
+    let key = existing;
+    if (all || none || allow !== undefined) {
+      // One spelling per invocation: the three name opposite facts (every
+      // model, none, an exact list) and combining them would leave the edit
+      // meaning whichever the parser happened to test last.
+      if ([all, none, allow !== undefined].filter(Boolean).length > 1) {
+        throw new UsageError("--all, --none, and --allow cannot be combined");
+      }
+      // Sent whole through the same strict schema as creation: null is every
+      // model, [] denies all of them, and neither may collapse into the other.
+      const next = all ? null : none ? [] : (allow ?? []);
+      key = await setKeyModels(store, id, { modelAllowlist: next });
+    }
+
+    emit(ctx, writer, key, () => {
+      const head = fields([
+        ["id", key.id],
+        ["label", key.label],
+        ["prefix", `${key.prefix}…`],
+      ]);
+      const models =
+        key.modelAllowlist === null
+          ? "every model"
+          : key.modelAllowlist.length === 0
+            ? "no models; every request this key makes is refused"
+            : key.modelAllowlist.join(", ");
+      return `${head}\nmodels: ${models}`;
+    });
   },
 };

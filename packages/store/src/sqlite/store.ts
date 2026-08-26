@@ -146,6 +146,7 @@ export async function createStore(opts: {
       findByHash: (hash) => handle.keys.findByHash(hash),
       create: (input) => handle.keys.create(input),
       setLimits: (id, limits) => handle.keys.setLimits(id, limits),
+      setModelAllowlist: (id, modelAllowlist) => handle.keys.setModelAllowlist(id, modelAllowlist),
       revoke: (id) => handle.keys.revoke(id),
     },
 

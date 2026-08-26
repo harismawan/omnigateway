@@ -12,39 +12,18 @@ import { describeError } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { LimitFields } from "./LimitFields.tsx";
 import { draftFrom, draftToLimits, type LimitDraft } from "./limits.ts";
-
-const Choices = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 190px;
-  overflow-y: auto;
-  padding: ${({ theme }) => theme.space(1)};
-  border: 1px solid ${({ theme }) => theme.color.ruleStrong};
-  border-radius: ${({ theme }) => theme.radius.control};
-  background: ${({ theme }) => theme.color.panelSunk};
-`;
-
-const Choice = styled.label`
-  display: flex;
-  align-items: center;
-  gap: ${({ theme }) => theme.space(2)};
-  padding: 4px 6px;
-  border-radius: 2px;
-  cursor: pointer;
-  font-family: ${({ theme }) => theme.font.mono};
-  font-size: 12px;
-
-  &:hover {
-    background: ${({ theme }) => theme.color.panelRaised};
-  }
-`;
+import { ModelPicker } from "./ModelPicker.tsx";
 
 const Warning = styled.p`
   font-size: 12px;
   color: ${({ theme }) => theme.color.warn};
 `;
 
+/** Matches `Field`'s own hint, for a control that draws its own label. */
+const Hint = styled.p`
+  font-size: 11px;
+  color: ${({ theme }) => theme.color.inkDim};
+`;
 const Problem = styled.p`
   font-size: 12px;
   color: ${({ theme }) => theme.color.down};
@@ -58,12 +37,6 @@ const Once = styled.p`
 /** Opens the limit matrix, which is folded away until it is asked for. */
 const Disclosure = styled(Button)`
   gap: 4px;
-`;
-
-/** Matches `Field`'s own hint, for a control that draws its own label. */
-const Hint = styled.p`
-  font-size: 11px;
-  color: ${({ theme }) => theme.color.inkDim};
 `;
 
 export type MintKeyDialogProps = {
@@ -190,24 +163,11 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
 
             {unrestricted ? null : (
               <>
-                <Choices>
-                  {(models.data ?? []).map((model) => (
-                    <Choice key={model.id}>
-                      <input
-                        type="checkbox"
-                        checked={allowed.includes(model.id)}
-                        onChange={(event) =>
-                          setAllowed((current) =>
-                            event.target.checked
-                              ? [...current, model.id]
-                              : current.filter((id) => id !== model.id),
-                          )
-                        }
-                      />
-                      {model.id}
-                    </Choice>
-                  ))}
-                </Choices>
+                <ModelPicker
+                  configured={(models.data ?? []).map((entry) => entry.id)}
+                  checked={allowed}
+                  onChange={setAllowed}
+                />
                 {allowed.length === 0 ? (
                   <Warning>
                     With no model selected this key is allowed nothing and every request it makes

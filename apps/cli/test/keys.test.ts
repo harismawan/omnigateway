@@ -357,3 +357,72 @@ test("an unreadable matrix can be replaced by --set but not edited by --unset", 
   expect(repaired.code).toBe(0);
   expect(await limitsOf(root, "meddled")).toEqual({ requests: { "1m": 60 } });
 });
+
+type ModelsOutput = { id: string; modelAllowlist: string[] | null };
+
+/**
+ * Models are the other editable field, so the command mirrors `keys limits`:
+ * show when asked nothing, replace whole when given something. `null` (every
+ * model) and `[]` (none) are distinct facts, so each gets its own spelling.
+ */
+test("keys models shows the allowlist, and --allow replaces it whole", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "ci", "--allow", "fast", "--json"], { root });
+  const id = await idOf(root, "ci");
+
+  const shown = await cli(["keys", "models", id], { root });
+  expect(shown.code).toBe(0);
+  expect(shown.out).toContain("fast");
+
+  const edited = await cli(
+    ["keys", "models", id, "--allow", "fast", "--allow", "smart", "--json"],
+    { root },
+  );
+  expect(edited.code).toBe(0);
+  const listed = await cli(["keys", "list", "--json"], { root });
+  const key = (JSON.parse(listed.out) as { keys: ModelsOutput[] }).keys.find(
+    (entry) => entry.id === id,
+  );
+  expect(key?.modelAllowlist).toEqual(["fast", "smart"]);
+});
+
+test("--all restores unrestricted and --none denies everything, as distinct writes", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "ci", "--allow", "fast", "--json"], { root });
+  const id = await idOf(root, "ci");
+
+  async function allowlistOf(): Promise<string[] | null | undefined> {
+    const listed = await cli(["keys", "list", "--json"], { root });
+    return (JSON.parse(listed.out) as { keys: ModelsOutput[] }).keys.find(
+      (entry) => entry.id === id,
+    )?.modelAllowlist;
+  }
+
+  await cli(["keys", "models", id, "--none", "--json"], { root });
+  // [] must not collapse into null: the first is a key allowed nothing, the
+  // second is a key allowed everything.
+  expect(await allowlistOf()).toEqual([]);
+
+  await cli(["keys", "models", id, "--all", "--json"], { root });
+  expect(await allowlistOf()).toBeNull();
+});
+
+test("keys models refuses conflicting flags and an unknown key id", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "ci", "--allow", "fast", "--json"], { root });
+  const id = await idOf(root, "ci");
+
+  const conflicting = await cli(["keys", "models", id, "--all", "--allow", "fast"], { root });
+  expect(conflicting.code).not.toBe(0);
+  expect(conflicting.err).toContain("--all");
+
+  const missing = await cli(["keys", "models", "not-a-key"], { root });
+  expect(missing.code).not.toBe(0);
+  expect(missing.err).toContain("not-a-key");
+
+  // Nothing changed on the way past the refusals.
+  const listed = await cli(["keys", "list", "--json"], { root });
+  expect((JSON.parse(listed.out) as { keys: ModelsOutput[] }).keys[0]?.modelAllowlist).toEqual([
+    "fast",
+  ]);
+});

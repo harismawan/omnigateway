@@ -673,7 +673,8 @@ export interface KeyRepo {
   /**
    * Replaces one key's limit matrix, whole.
    *
-   * The one field on a key that is editable after minting, and deliberately so:
+   * One of two fields editable after minting — the allowlist via
+   * `setModelAllowlist` is the other — and deliberately so:
    * `bodyLoggingOptOut` is a promise to whoever holds the key, while a limit is
    * the operator's own ceiling on their own installation. A weekly spend cap
    * that cannot be adjusted without minting a new key and redeploying every
@@ -685,6 +686,17 @@ export interface KeyRepo {
    * rather than a repo's. Throws on a shape no reader could parse.
    */
   setLimits(id: string, limits: LimitConfig): Promise<void>;
+  /**
+   * Replaces one key's model allowlist, whole.
+   *
+   * The other field editable after minting, for the same reason as the matrix:
+   * an allowlist that cannot be adjusted without minting a new key and
+   * redeploying every client is one that gets set to unrestricted instead.
+   * Unlike `limits` there is no write-side parser guard — any array of names
+   * round-trips through its JSON column, and a junk entry simply never matches
+   * a request, which fails closed per request rather than failing open once.
+   */
+  setModelAllowlist(id: string, modelAllowlist: string[] | null): Promise<void>;
   revoke(id: string): Promise<void>;
 }
 

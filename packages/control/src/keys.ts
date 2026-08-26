@@ -8,7 +8,7 @@ import {
 } from "@omni/ratelimit/catalog";
 import type { ApiKey, Store, UsageSums } from "@omni/store";
 import { generateApiKey, hashApiKey } from "@omni/store";
-import { keyCreateSchema, keyLimitsSchema, parseOrThrow } from "./schemas.ts";
+import { keyCreateSchema, keyLimitsSchema, keyModelsSchema, parseOrThrow } from "./schemas.ts";
 
 /**
  * One configured ceiling and what the stored history says has gone against it.
@@ -193,6 +193,29 @@ export async function setKeyLimits(
 
   await store.keys.setLimits(id, body.limits);
   return toSummary(store, { ...key, limits: body.limits }, now);
+}
+
+/**
+ * Replaces one key's model allowlist and reports the key as it now stands.
+ *
+ * The list arrives whole, so `null` (every model) and `[]` (none) are
+ * expressible as themselves. An unknown id is refused before the write for
+ * the same reason `setKeyLimits` refuses one — an UPDATE that matches no row
+ * must not report success.
+ */
+export async function setKeyModels(
+  store: Store,
+  id: string,
+  input: unknown,
+  now: number = Date.now(),
+): Promise<ApiKeySummary> {
+  const body = parseOrThrow(keyModelsSchema, input);
+
+  const key = (await store.keys.list()).find((entry) => entry.id === id);
+  if (key === undefined) throw new GatewayError("BAD_REQUEST", "no such api key");
+
+  await store.keys.setModelAllowlist(id, body.modelAllowlist);
+  return toSummary(store, { ...key, modelAllowlist: body.modelAllowlist }, now);
 }
 
 export async function revokeKey(store: Store, id: string): Promise<void> {

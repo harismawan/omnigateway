@@ -24,6 +24,7 @@ import {
   removeModel,
   revokeKey,
   setKeyLimits,
+  setKeyModels,
   setupFiles,
 } from "@omni/control";
 import { describeError, GatewayError, type Logger, noopLogger, parseLogLevel } from "@omni/ir";
@@ -282,7 +283,8 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       /**
-       * The one field on a key that is editable after minting.
+       * One of the two fields on a key that are editable after minting — this
+       * one and the allowlist below.
        *
        * `bodyLoggingOptOut` has no route like this on purpose: it is a promise
        * to whoever holds the key. A limit is the operator's own ceiling on
@@ -293,6 +295,19 @@ export function adminRoutes(deps: AdminDeps) {
       .put("/api/keys/:id/limits", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         return setKeyLimits(deps.store, params.id, await readJson(request));
+      })
+
+      /**
+       * The other field on a key that is editable after minting.
+       *
+       * An allowlist that cannot be adjusted without minting a new key and
+       * redeploying every client is an allowlist that gets set to unrestricted
+       * instead. The list arrives whole: `null` (every model) and `[]` (none)
+       * are distinct facts, and both survive the write.
+       */
+      .put("/api/keys/:id/models", async ({ request, params }) => {
+        await requireAdmin(request, deps.admin);
+        return setKeyModels(deps.store, params.id, await readJson(request));
       })
 
       .delete("/api/keys/:id", async ({ request, params }) => {

@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Plus, SlidersHorizontal } from "lucide-react";
+import { ChevronDown, ChevronRight, ListChecks, Plus, SlidersHorizontal } from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
 import { useKeys, useRevokeKey } from "../../api/queries.ts";
@@ -13,6 +13,7 @@ import { Legend, Row, ScrollX, Truncate } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { EditLimitsDialog } from "./EditLimitsDialog.tsx";
+import { EditModelsDialog } from "./EditModelsDialog.tsx";
 import { LimitMatrix } from "./LimitMatrix.tsx";
 import { describeSlot, formatLimitValue, fractionOf, nearestExhaustion } from "./limits.ts";
 import { MintKeyDialog } from "./MintKeyDialog.tsx";
@@ -61,6 +62,7 @@ export function KeysBoard() {
   const revoke = useRevokeKey();
   const [minting, setMinting] = useState(false);
   const [editing, setEditing] = useState<ApiKeySummary | null>(null);
+  const [editingModels, setEditingModels] = useState<ApiKeySummary | null>(null);
   const [opened, setOpened] = useState<string | null>(null);
   const [doomed, setDoomed] = useState<ApiKeySummary | null>(null);
 
@@ -213,6 +215,16 @@ export function KeysBoard() {
                                   type="button"
                                   $variant="ghost"
                                   $size="sm"
+                                  aria-label={`Edit models for ${key.label}`}
+                                  title={`Edit models for ${key.label}`}
+                                  onClick={() => setEditingModels(key)}
+                                >
+                                  <ListChecks />
+                                </IconButton>
+                                <IconButton
+                                  type="button"
+                                  $variant="ghost"
+                                  $size="sm"
                                   aria-label={`Edit limits for ${key.label}`}
                                   title={`Edit limits for ${key.label}`}
                                   onClick={() => setEditing(key)}
@@ -257,6 +269,17 @@ export function KeysBoard() {
         apiKey={editing}
         onOpenChange={(next) => {
           if (!next) setEditing(null);
+        }}
+      />
+
+      {/* Keyed by the row, same reason as the limits dialog: opening a second
+          key starts from that key's allowlist rather than whatever was checked
+          into the last one. */}
+      <EditModelsDialog
+        key={editingModels?.id ?? "none"}
+        apiKey={editingModels}
+        onOpenChange={(next) => {
+          if (!next) setEditingModels(null);
         }}
       />
 
