@@ -23,6 +23,7 @@ import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
 import { createBroadcaster, DEFAULT_FLOOR_MS, INVALIDATION_FLOORS } from "./stream/broadcaster.ts";
 import { createCoalescer } from "./stream/coalescer.ts";
+import { startConsoleStream } from "./stream/console.ts";
 import { createSocketRegistry } from "./stream/registry.ts";
 import { createRing } from "./stream/ring.ts";
 
@@ -290,6 +291,11 @@ async function main(): Promise<void> {
     logger,
     broadcaster,
   });
+  // After the others because it is the one loop that publishes payloads rather
+  // than invalidations, and because a source that cannot start declares no
+  // topic: whether `stream:console` exists at all is decided here, and nothing
+  // downstream should be able to observe it half-decided.
+  const stopConsoleStream = startConsoleStream({ console, broadcaster, logger, now });
 
   // Elysia defaults Bun's socket `idleTimeout` to 30 seconds, which is shorter
   // than a request is allowed to take: `requestDeadlineMs` is 120s by default,
@@ -309,6 +315,7 @@ async function main(): Promise<void> {
       stopMaintenance,
       stopRefreshScheduler,
       stopQuotaPoller,
+      stopConsoleStream,
       () => pluginEvents.stop(),
       // Before `stopServer`, and that ordering is the point rather than tidiness.
       // `app.stop()` is called without `true`, so it drains rather than severs:

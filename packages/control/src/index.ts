@@ -31,6 +31,7 @@ export {
   type ConsoleSource,
   consoleLimit,
   MAX_CONSOLE_LINES,
+  parseConsoleLines,
   readConsole,
   resolveConsoleSource,
   UNIT_NAME,
@@ -182,7 +183,7 @@ export {
   type SetupInput,
   setupFiles,
 } from "./setup.ts";
-export { fileExists, tailFile } from "./tail.ts";
+export { type ForwardRead, fileExists, fileSize, readFrom, tailFile } from "./tail.ts";
 export {
   logLimit,
   MAX_LOG_LIMIT,

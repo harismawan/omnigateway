@@ -4,6 +4,7 @@ import {
   type ConsoleDeps,
   type ConsoleSource,
   MAX_CONSOLE_LINES,
+  parseConsoleLines,
   readConsole,
   resolveConsoleSource,
   UNIT_NAME,
@@ -225,6 +226,44 @@ describe("readConsole line clamping", () => {
     // The clamp reaches journalctl too, so a huge page cannot be pushed onto it.
     const n = d.argv[0]?.[d.argv[0].indexOf("-n") + 1];
     expect(Number(n)).toBeLessThanOrEqual(MAX_CONSOLE_LINES);
+  });
+});
+
+describe("parseConsoleLines is the one selector both surfaces use", () => {
+  const source: ConsoleSource = { kind: "file", path: "/tmp/gateway.log" };
+  const contents = [
+    line("debug", "d"),
+    line("info", "i"),
+    line("error", "e"),
+    "systemd[1]: omnigateway.service: Main process exited",
+  ].join("\n");
+
+  test("selects exactly what the REST read returns, level filter included", async () => {
+    // The `stream:console` source in the gateway publishes deltas through this
+    // function, and this is what stops the two disagreeing: a console that
+    // filtered levels one way over the socket and another way over a reload
+    // would show different output depending on how a line arrived, and neither
+    // rendering would be identifiably the wrong one.
+    for (const level of ["debug", "info", "warn", "error"] as const) {
+      const read = await readConsole(deps({ files: { "/tmp/gateway.log": contents } }), source, {
+        lines: 10,
+        level,
+      });
+      expect(parseConsoleLines(contents, { lines: 10, level })).toEqual(read.lines);
+    }
+  });
+
+  test("clamps a page the same way, so an unclamped zero cannot mean everything", () => {
+    // `.slice(-0)` is `.slice(0)`, which returns the whole array. The clamp
+    // lives in here rather than in each caller for exactly that reason.
+    expect(parseConsoleLines(contents, { lines: 0 })).toHaveLength(1);
+    expect(parseConsoleLines(contents, { lines: 100_000 })).toHaveLength(4);
+  });
+
+  test("keeps a line it could not parse, and drops the blanks a trailing newline leaves", () => {
+    const lines = parseConsoleLines(`${contents}\n\n`, { lines: 10 });
+    expect(lines).toHaveLength(4);
+    expect(lines[3]).toMatchObject({ at: null, level: null });
   });
 });
 
