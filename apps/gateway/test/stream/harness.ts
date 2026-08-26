@@ -80,7 +80,11 @@ export async function streamHarness(
   };
 
   const logger = captureLogger();
+  // Late-bound exactly as production does it, so the harness exercises the same
+  // wiring rather than a simpler one that would hide a missing hook-up.
+  let channelsRef: ChannelRegistry | undefined;
   const registry = createSocketRegistry({
+    onDetach: (id, topics) => channelsRef?.closed(id, topics),
     logger,
     now: () => clock,
     schedule,
@@ -94,6 +98,7 @@ export async function streamHarness(
     logger,
     scheduler: (run) => schedule(run, 0),
   });
+  channelsRef = channels;
   const ring = createRing({ frames: 100, bytes: 1024 * 1024 });
   const broadcaster = createBroadcaster({
     registry,

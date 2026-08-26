@@ -301,7 +301,22 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
       invalidateEverything(deps.client);
       return;
     }
-    if (frame.seq !== undefined) seen.set(topic, frame.seq);
+    if (frame.seq !== undefined) {
+      // A jump in the sequence is a hole, and the client is the only thing that
+      // can see it. The ring answers `gap` when a *reconnecting* subscriber has
+      // fallen off the back of it — but a frame dropped in flight, because the
+      // server's per-connection queue overflowed under backpressure, leaves the
+      // sequence discontinuous with no frame to say so. Appending across it is
+      // exactly the silent skip this class exists to prevent, so it is treated
+      // as the gap it is.
+      const previous = seen.get(topic);
+      seen.set(topic, frame.seq);
+      if (previous !== undefined && frame.seq > previous + 1) {
+        deliver(topic, { kind: "gap" });
+        invalidateTopic(deps.client, topic);
+        return;
+      }
+    }
 
     // A frame that carries its own content goes to whoever is rendering it, and
     // that is the whole point of the `stream:*` class: no refetch, and the ring

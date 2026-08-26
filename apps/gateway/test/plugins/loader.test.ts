@@ -18,7 +18,7 @@ import { createChannelRegistry } from "../../src/stream/channels.ts";
  * gateway with no connections answers too.
  */
 function channelRegistry() {
-  return createChannelRegistry({ sockets: { topics: () => [], sendTo: () => {} } });
+  return createChannelRegistry({ sockets: { has: () => false, sendTo: () => {} } });
 }
 
 let dir = "";
@@ -231,7 +231,7 @@ test("a plugin channel is namespaced with the host's plugin id, not the plugin's
   // the namespace off anything the plugin controls — a name from the manifest,
   // an argument to `open` — is how one plugin claims another's topic, which is
   // the socket-side shape of the storage-prefix rule.
-  const registry = createChannelRegistry({ sockets: { topics: () => [], sendTo: () => {} } });
+  const registry = createChannelRegistry({ sockets: { has: () => false, sendTo: () => {} } });
   await plugin({
     id: "chatty",
     manifest: { capabilities: ["channels"] },

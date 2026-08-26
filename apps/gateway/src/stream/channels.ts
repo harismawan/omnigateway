@@ -13,7 +13,7 @@ import type { SocketRegistry } from "./registry.ts";
  * structurally, so `createApp` hands its own over without an adapter and there
  * is nothing to keep in step.
  */
-export type ChannelSockets = Pick<SocketRegistry, "topics" | "sendTo">;
+export type ChannelSockets = Pick<SocketRegistry, "has" | "sendTo">;
 
 /**
  * The channel-name pattern, which is two constraints wearing one coat.
@@ -167,7 +167,11 @@ export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistr
    * anything of its own.
    */
   const holds = (connectionId: string, topic: string): boolean =>
-    deps.sockets.topics(connectionId).includes(topic);
+    // `has` rather than `topics(...).includes(...)`: the latter allocates the
+    // whole topic array on every frame in both directions, which on the
+    // keystroke-latency channel this exists to serve is an allocation per
+    // keystroke.
+    deps.sockets.has(connectionId, topic);
 
   const openChannel = (pluginId: string, name: string): PluginChannel => {
     if (!NAME_PATTERN.test(name)) {

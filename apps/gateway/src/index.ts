@@ -22,7 +22,7 @@ import { createPluginEventBus } from "./plugins/events.ts";
 import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
 import { createBroadcaster, DEFAULT_FLOOR_MS, INVALIDATION_FLOORS } from "./stream/broadcaster.ts";
-import { createChannelRegistry } from "./stream/channels.ts";
+import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
 import { createCoalescer } from "./stream/coalescer.ts";
 import { startConsoleStream } from "./stream/console.ts";
 import { createSocketRegistry } from "./stream/registry.ts";
@@ -209,8 +209,21 @@ async function main(): Promise<void> {
    * a channel registry constructed afterwards would hold none of them while
    * every plugin held a live-looking handle onto nothing.
    */
-  const streamRegistry = createSocketRegistry({ logger, now });
+  /**
+   * Late-bound because the two point at each other: channels read the socket
+   * registry to find who holds a topic, and the registry has to tell channels
+   * about a connection it is closing on its own initiative. Assigned on the very
+   * next line, so the only window where it is undefined is one with no
+   * connections in it.
+   */
+  let pluginChannelsRef: ChannelRegistry | undefined;
+  const streamRegistry = createSocketRegistry({
+    logger,
+    now,
+    onDetach: (id, topics) => pluginChannelsRef?.closed(id, topics),
+  });
   const pluginChannels = createChannelRegistry({ sockets: streamRegistry, logger });
+  pluginChannelsRef = pluginChannels;
 
   const loadedPlugins = await loadPlugins({
     root: pluginRoot,

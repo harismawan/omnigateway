@@ -10,29 +10,57 @@ import {
 } from "../../src/stream/registry.ts";
 
 /**
- * A socket a test drives.
+ * What Bun's `send` can do, spelled out because getting this wrong is what the
+ * second review caught.
  *
- * `accepting` models Bun's backpressure status: `send` reports whether a frame
- * went out rather than blocking on it, so a slow consumer is a socket that
- * keeps returning a non-positive status.
+ * - `"send"` — written straight out; status is a byte count.
+ * - `"buffer"` — uWS took it and **will deliver it**; status is `-1`. The frame
+ *   still arrives. An earlier version of this stub returned `-1` *and threw the
+ *   frame away*, which is not something Bun does, and the registry was written
+ *   to match the stub: it retried every `-1` frame on the next drain, so uWS
+ *   delivered it once and the retry delivered it again, forever. One sequence
+ *   number arrived 291 times in the reviewer's run.
+ * - `"drop"` — genuinely discarded; status is `0`. The only case that should be
+ *   retried.
+ *
+ * The lesson is worth keeping next to the code: a stub that models the
+ * implementation's assumptions rather than the runtime's behaviour turns the
+ * whole suite into a mirror.
  */
+type SendMode = "send" | "buffer" | "drop";
+
 function socket(): Socket & {
+  /** Frames the client would actually have received, buffered ones included. */
   sent: ServerFrame[];
+  /** Frames uWS accepted but has not handed on yet. */
+  buffered: ServerFrame[];
   closed: { code: number | undefined; reason: string | undefined }[];
   pings: number;
-  accepting: boolean;
+  mode: SendMode;
+  bufferedAmount: number;
 } {
   const state = {
     sent: [] as ServerFrame[],
+    buffered: [] as ServerFrame[],
     // `code` and `reason` are optional on `close`, and `exactOptionalPropertyTypes`
     // makes "absent" and "explicitly undefined" different types. Recording what
     // was actually passed means spelling the second one.
     closed: [] as { code: number | undefined; reason: string | undefined }[],
     pings: 0,
-    accepting: true,
+    mode: "send" as SendMode,
+    bufferedAmount: 0,
     send(data: string) {
-      if (!state.accepting) return -1;
-      state.sent.push(JSON.parse(data) as ServerFrame);
+      const frame = JSON.parse(data) as ServerFrame;
+      if (state.mode === "drop") return 0;
+      if (state.mode === "buffer") {
+        // Delivered, just not yet. It lands in `sent` too, because from the
+        // client's point of view a buffered frame is one that arrives.
+        state.buffered.push(frame);
+        state.sent.push(frame);
+        state.bufferedAmount += data.length;
+        return -1;
+      }
+      state.sent.push(frame);
       return data.length;
     },
     close(code?: number, reason?: string) {
@@ -41,6 +69,9 @@ function socket(): Socket & {
     ping() {
       state.pings++;
       return 1;
+    },
+    getBufferedAmount() {
+      return state.bufferedAmount;
     },
   };
   return state;
@@ -155,7 +186,7 @@ test("a slow consumer drops oldest, increments the counter, and the queue does n
   // an operator learns this happened at all.
   const h = harness({ queueCapacity: 3 });
   const a = socket();
-  a.accepting = false;
+  a.mode = "drop";
 
   h.registry.add("a", a, credential());
   h.registry.subscribe("a", "res:usage");
@@ -172,13 +203,13 @@ test("the frames kept under pressure are the newest ones", () => {
   // newest frame would deliver a stale view and then stop.
   const h = harness({ queueCapacity: 2 });
   const a = socket();
-  a.accepting = false;
+  a.mode = "drop";
 
   h.registry.add("a", a, credential());
   h.registry.subscribe("a", "res:usage");
   for (let i = 0; i < 5; i++) h.registry.publish("res:usage", event(i));
 
-  a.accepting = true;
+  a.mode = "send";
   h.registry.drain("a");
 
   expect(a.sent).toEqual([event(3), event(4)]);
@@ -194,14 +225,14 @@ test("a backpressured connection stops draining rather than reordering", () => {
   h.registry.subscribe("a", "res:usage");
 
   h.registry.publish("res:usage", event(1));
-  a.accepting = false;
+  a.mode = "drop";
   h.registry.publish("res:usage", event(2));
   h.registry.publish("res:usage", event(3));
 
   expect(a.sent).toEqual([event(1)]);
   expect(h.registry.stats().queued).toBe(2);
 
-  a.accepting = true;
+  a.mode = "send";
   h.registry.drain("a");
   expect(a.sent).toEqual([event(1), event(2), event(3)]);
   h.registry.stop();
@@ -212,7 +243,7 @@ test("dropped frames produce one batched warn per tick, not one per drop", async
   // consumer into a log volume problem on top of it.
   const h = harness({ queueCapacity: 1 });
   const a = socket();
-  a.accepting = false;
+  a.mode = "drop";
 
   h.registry.add("a", a, credential());
   h.registry.subscribe("a", "res:usage");
@@ -388,4 +419,199 @@ test("a send that throws does not remove the connection out from under its close
   // Removal is the close handler's job. Doing it here would race that path.
   expect(h.registry.stats().connections).toBe(1);
   h.registry.stop();
+});
+
+test("a buffered frame is delivered once and never re-sent", () => {
+  // The regression the second review caught. Bun's `-1` means uWS took the
+  // frame and will deliver it, so retrying it on the next drain delivers it
+  // twice — and since the retry is buffered too, forever. Measured on the real
+  // server before the fix: one sequence number delivered 291 times while the
+  // 316 frames behind it never arrived at all.
+  const h = harness();
+  const a = socket();
+  a.mode = "buffer";
+
+  h.registry.add("a", a, credential());
+  h.registry.subscribe("a", "res:usage");
+  for (let i = 0; i < 3; i++) h.registry.publish("res:usage", event(i));
+
+  // Handed over exactly once each, in order.
+  expect(a.sent).toEqual([event(0), event(1), event(2)]);
+  // And nothing is being held for a retry, which is what made it a loop.
+  expect(h.registry.stats().queued).toBe(0);
+
+  // A drain must not resend what uWS already owns.
+  h.registry.drain("a");
+  expect(a.sent).toEqual([event(0), event(1), event(2)]);
+  h.registry.stop();
+});
+
+test("a dropped frame, and only a dropped frame, is retried", () => {
+  // `0` is the one status that means the frame did not go out. It stays at the
+  // head so the next drain can try again.
+  const h = harness();
+  const a = socket();
+  h.registry.add("a", a, credential());
+  h.registry.subscribe("a", "res:usage");
+
+  a.mode = "drop";
+  h.registry.publish("res:usage", event(1));
+  expect(a.sent).toEqual([]);
+  expect(h.registry.stats().queued).toBe(1);
+
+  a.mode = "send";
+  h.registry.drain("a");
+  expect(a.sent).toEqual([event(1)]);
+  expect(h.registry.stats().queued).toBe(0);
+  h.registry.stop();
+});
+
+test("frames stop being handed to a socket already holding the high-water mark", () => {
+  // Backpressure is what uWS is holding, not what `send` returned. uWS buffers
+  // without bound; this queue is bounded and counts what it drops, so once uWS
+  // is loaded the right move is to stop feeding it and let the visible queue
+  // take the burst.
+  const h = harness({ queueCapacity: 50 });
+  const a = socket();
+  a.mode = "buffer";
+
+  h.registry.add("a", a, credential());
+  h.registry.subscribe("a", "res:usage");
+
+  // Each frame is far smaller than the mark, so this takes many publishes.
+  for (let i = 0; i < 40_000; i++) h.registry.publish("res:usage", event(i));
+
+  expect(a.bufferedAmount).toBeGreaterThanOrEqual(512 * 1024);
+  // Once the mark is reached the queue starts filling instead of uWS.
+  expect(h.registry.stats().queued).toBeGreaterThan(0);
+  h.registry.stop();
+});
+
+test("a server-initiated close announces the topics the connection held", () => {
+  // BLOCKER 2. `closeOne` used to announce nothing and leave it to the route's
+  // close handler — which reads `topics(id)` after the connection has already
+  // left the map, so it got `[]` and every plugin `onClose` went unfired on
+  // 4401 expiry, on the pong deadline, and on shutdown. Only a client-initiated
+  // close was ever covered.
+  const announced: { id: string; topics: readonly string[] }[] = [];
+  const clock = 100_000;
+  const registry = createSocketRegistry({
+    now: () => clock,
+    schedule: () => () => {},
+    onDetach: (id, topics) => announced.push({ id, topics }),
+  });
+
+  const a = socket();
+  registry.add("a", a, credential());
+  registry.subscribe("a", "plugin:alpha:s");
+
+  registry.closeAll(1001, "restart");
+
+  expect(announced).toEqual([{ id: "a", topics: ["plugin:alpha:s"] }]);
+  registry.stop();
+});
+
+test("an expired session announces its topics on the way out", async () => {
+  // The 4401 path, which is the one that runs against a live console rather
+  // than only at shutdown.
+  const announced: { id: string; topics: readonly string[] }[] = [];
+  let clock = 100_000;
+  const timers: { at: number; run: () => void; cancelled: boolean }[] = [];
+  const registry = createSocketRegistry({
+    now: () => clock,
+    schedule: (run, ms) => {
+      const timer = { at: clock + ms, run, cancelled: false };
+      timers.push(timer);
+      return () => {
+        timer.cancelled = true;
+      };
+    },
+    heartbeatMs: 20_000,
+    onDetach: (id, topics) => announced.push({ id, topics }),
+  });
+
+  const a = socket();
+  registry.add(
+    "a",
+    a,
+    credential(async () => false),
+  );
+  registry.subscribe("a", "plugin:alpha:s");
+
+  clock += 20_000;
+  for (const timer of timers) {
+    if (!timer.cancelled && timer.at <= clock) {
+      timer.cancelled = true;
+      timer.run();
+    }
+  }
+  // Lets the revalidation promise inside the tick settle.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  expect(a.closed[0]?.code).toBe(4401);
+  expect(announced).toEqual([{ id: "a", topics: ["plugin:alpha:s"] }]);
+  registry.stop();
+});
+
+test("a revalidation that never settles does not disable re-verification for good", () => {
+  // `checking` stops a slow verify from stacking. On its own it also means a
+  // verify that never settles pins the flag for the life of the socket, so the
+  // one connection whose store call is wedged becomes the one that stops being
+  // re-verified — and "a socket must not outlive its session" quietly stops
+  // applying to exactly it.
+  let calls = 0;
+  let clock = 100_000;
+  const timers: { at: number; run: () => void; cancelled: boolean }[] = [];
+  const registry = createSocketRegistry({
+    now: () => clock,
+    schedule: (run, ms) => {
+      const timer = { at: clock + ms, run, cancelled: false };
+      timers.push(timer);
+      return () => {
+        timer.cancelled = true;
+      };
+    },
+    heartbeatMs: 20_000,
+    checkStaleMs: 30_000,
+  });
+
+  const a = socket();
+  registry.add("a", a, {
+    principal: { kind: "admin" },
+    // Never settles, which is what a wedged store call looks like from here.
+    revalidate: () => new Promise<boolean>(() => {}),
+  });
+
+  const beat = () => {
+    clock += 20_000;
+    for (const timer of timers) {
+      if (!timer.cancelled && timer.at <= clock) {
+        timer.cancelled = true;
+        timer.run();
+      }
+    }
+  };
+
+  beat();
+  expect(calls).toBe(0);
+  // Second tick is inside the staleness window, so the in-flight check stands.
+  beat();
+  // Third is past it, so the wedged check is abandoned and a fresh one starts.
+  beat();
+
+  // Proven by the connection still being re-verifiable rather than by counting
+  // a private field: swap in a credential that answers, and the next tick acts
+  // on it. Under the bug the flag is still set and this never runs.
+  registry.remove("a");
+  const b = socket();
+  registry.add("b", b, {
+    principal: { kind: "admin" },
+    revalidate: async () => {
+      calls += 1;
+      return false;
+    },
+  });
+  beat();
+  expect(calls).toBeGreaterThan(0);
+  registry.stop();
 });

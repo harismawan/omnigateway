@@ -18,7 +18,7 @@ function sockets(held: Record<string, readonly string[]> = {}): ChannelSockets &
   const sent: { id: string; frame: ServerFrame }[] = [];
   return {
     sent,
-    topics: (id) => held[id] ?? [],
+    has: (id, topic) => (held[id] ?? []).includes(topic),
     sendTo: (id, frame) => {
       sent.push({ id, frame });
     },
@@ -167,13 +167,19 @@ test("per-subscriber channel queues drop rather than grow", () => {
   const backpressured: Socket & { sent: number } = {
     sent: 0,
     send() {
-      // Bun reports backpressure as a non-positive status rather than blocking.
-      return -1;
+      // Never reached: `getBufferedAmount` already says uWS is loaded, so the
+      // registry stops handing frames over before it calls this.
+      return 0;
     },
     close() {},
     ping() {
       return 1;
     },
+    // A genuinely stalled consumer, expressed the way the runtime expresses it.
+    // An earlier version of this stub returned `-1` from `send` to mean
+    // "stalled", which is precisely the misreading that shipped as BLOCKER 1:
+    // `-1` means uWS took the frame and will deliver it.
+    getBufferedAmount: () => 8 * 1024 * 1024,
   };
   const registry = createSocketRegistry({ queueCapacity: capacity, schedule: () => () => {} });
   registry.add("slow", backpressured, {
@@ -450,6 +456,97 @@ test("a real socket closing fires the plugin's onClose handler", async () => {
 
     const deadline = Date.now() + 2_000;
     while (closed.length === 0 && Date.now() < deadline) await Bun.sleep(5);
+
+    expect(closed).toEqual([connectionId]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a 4401 session expiry fires the plugin's onClose handler", async () => {
+  // The second review's probe, kept. The first review's test covers a
+  // client-initiated close and cannot see this path: the registry closes the
+  // socket itself here, so nothing about the route's ordering is involved.
+  const h = await streamHarness();
+  try {
+    const closed: string[] = [];
+    const seen: string[] = [];
+    const channel = h.channels.for("alpha").open("s");
+    channel.onMessage((message) => seen.push(message.connectionId));
+    channel.onClose((connectionId) => closed.push(connectionId));
+
+    const socket = await h.connect({ cookie: h.cookie });
+    socket.send({ id: "1", type: "subscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "1"), "the subscribe ack");
+    socket.send({ id: "2", type: "send", topic: "plugin:alpha:s", payload: null });
+    await socket.waitFor((f) => isAck(f, "2"), "the send ack");
+    const connectionId = seen[0] ?? "";
+
+    // Ending the session is what a restore does, and what a 12h expiry does.
+    await fetch(`http://127.0.0.1:${h.port}/api/logout`, {
+      method: "POST",
+      headers: { cookie: h.cookie },
+    });
+    await h.beat();
+
+    const closure = await socket.waitForClose("the 4401 close");
+    expect(closure.code).toBe(4401);
+    expect(closed).toEqual([connectionId]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a shutdown closeAll fires the plugin's onClose handler", async () => {
+  // What a gateway restart does. Left unfired, a plugin goes on believing every
+  // session it was serving is still live — which for the remote-control plugin
+  // this transport exists to unblock is the difference between reconnecting a
+  // session and orphaning it.
+  const h = await streamHarness();
+  try {
+    const closed: string[] = [];
+    const seen: string[] = [];
+    const channel = h.channels.for("alpha").open("s");
+    channel.onMessage((message) => seen.push(message.connectionId));
+    channel.onClose((connectionId) => closed.push(connectionId));
+
+    const socket = await h.connect({ cookie: h.cookie });
+    socket.send({ id: "1", type: "subscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "1"), "the subscribe ack");
+    socket.send({ id: "2", type: "send", topic: "plugin:alpha:s", payload: null });
+    await socket.waitFor((f) => isAck(f, "2"), "the send ack");
+    const connectionId = seen[0] ?? "";
+
+    // Exactly what the `stopLoops` entry runs at teardown.
+    h.registry.closeAll(1001, "restart");
+
+    const closure = await socket.waitForClose("the 1001 close");
+    expect(closure.code).toBe(1001);
+    expect(closed).toEqual([connectionId]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a pong deadline close fires the plugin's onClose handler", async () => {
+  const h = await streamHarness({ heartbeatMs: 1_000, pongDeadlineMs: 500 });
+  try {
+    const closed: string[] = [];
+    const seen: string[] = [];
+    const channel = h.channels.for("alpha").open("s");
+    channel.onMessage((message) => seen.push(message.connectionId));
+    channel.onClose((connectionId) => closed.push(connectionId));
+
+    const socket = await h.connect({ cookie: h.cookie });
+    socket.send({ id: "1", type: "subscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "1"), "the subscribe ack");
+    socket.send({ id: "2", type: "send", topic: "plugin:alpha:s", payload: null });
+    await socket.waitFor((f) => isAck(f, "2"), "the send ack");
+    const connectionId = seen[0] ?? "";
+
+    // The injected clock jumps past the deadline without a pong arriving.
+    await h.beat();
+    await h.beat();
 
     expect(closed).toEqual([connectionId]);
   } finally {

@@ -242,8 +242,19 @@ export function createApp(deps: AppDeps) {
 
   const latch = deps.latch ?? createQuiesceLatch();
 
-  const registry = deps.registry ?? createSocketRegistry({ logger, now });
+  // Late-bound for the reason the bootstrap's copy is: channels read the socket
+  // registry, and the registry must tell channels about a connection it closes
+  // on its own initiative, so neither can be fully built before the other.
+  let channelsRef: ChannelRegistry | undefined;
+  const registry =
+    deps.registry ??
+    createSocketRegistry({
+      logger,
+      now,
+      onDetach: (id, topics) => channelsRef?.closed(id, topics),
+    });
   const channels = deps.channels ?? createChannelRegistry({ sockets: registry, logger });
+  channelsRef = channels;
   const ring = deps.ring ?? createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
   const broadcaster =
     deps.broadcaster ??
