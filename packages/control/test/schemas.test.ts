@@ -72,6 +72,21 @@ test("a provider that does not exist is refused where it can be", () => {
   expect(() => modelSchema.parse(model("kilocode"))).toThrow();
 });
 
+test("providerIdSchema still refuses an id that cannot name a provider", () => {
+  // Restored after the schema stopped being an enum. Without it, this file
+  // asserted only that ids *parse*, so loosening the pattern to `/^.+$/` — which
+  // makes format and existence the same question — passed the whole suite.
+  //
+  // Format is a real gate: the id becomes a `--p-<id>` custom property, a
+  // `plugin_<id>_*` table prefix and a `plugin:<id>:*` topic, so an id that
+  // cannot be all three has to fail here rather than wherever notices first.
+  for (const bad of ["", "Anthropic", "1kilo", "kilo_code", "kilo.code", "-kilo", "a".repeat(33)]) {
+    expect(providerIdSchema.safeParse(bad).success).toBe(false);
+  }
+  // The positive control: a pattern refusing everything would satisfy the loop.
+  expect(providerIdSchema.safeParse("well-formed-plugin-id").success).toBe(true);
+});
+
 /**
  * The settings schema and the `Settings` type are two descriptions of one shape,
  * and only the type is checked by the compiler. A field on the type but absent

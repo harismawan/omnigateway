@@ -113,14 +113,19 @@ export type ProviderDescriptor = {
  * provider loaded from `<root>/plugins/` has an id no compiled-in union could
  * contain, and a closed key here is a closed door there.
  *
- * What survives is narrower and worth stating exactly. Totality over the
- * built-ins is a property of the assembly in `descriptors.ts`, not of this type
- * — the six literals are still written out, so a built-in with no descriptor is
- * still a compile error, in one file. Totality over a *stored* id is gone
- * outright: `Target.provider` comes back from SQLite unvalidated and can name a
- * provider this installation does not have. `noUncheckedIndexedAccess` makes
- * every read of this record answer `| undefined`, and each caller decides what
- * absence means rather than inheriting one default.
+ * What survives is narrower than it first looks, so it is worth stating exactly.
+ * A built-in missing from the literal in `descriptors.ts` is **not** a compile
+ * error — `Record<string, …>` accepts any subset; the unused-import lint and
+ * `test/descriptor.test.ts` are what catch it. Totality over a *stored* id is
+ * gone outright: `Target.provider` comes back from SQLite unvalidated and can
+ * name a provider this installation does not have.
+ *
+ * The two things the compiler still does are worth knowing precisely, because
+ * they are what the rest of the design leans on. Every field below is required,
+ * so a descriptor that exists but is incomplete does not compile. And
+ * `noUncheckedIndexedAccess` makes every read of this record answer
+ * `| undefined`, so each caller decides what absence means at the point of use
+ * rather than inheriting one default.
  */
 export type ProviderDescriptors = Readonly<Record<string, ProviderDescriptor>>;
 

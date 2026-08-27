@@ -33,11 +33,11 @@ export type ProviderRegistryEntry = ProviderDescriptor & {
 /**
  * Kept under its original name because dispatch and the tests already inject it.
  *
- * The six literals are written out, so a built-in with no adapter is a compile
- * error here. The key type is `string` because a provider id is one; dispatch
- * already handles a miss by throwing `INTERNAL`, which is the right answer
- * there — reaching it means the router admitted a candidate it should have
- * excluded.
+ * A built-in missing from this literal is *not* a compile error — see the note
+ * on `PROVIDER_DESCRIPTORS`. `descriptor.test.ts` is what catches it. The key
+ * type is `string` because a provider id is one; dispatch handles a miss by
+ * throwing `INTERNAL`, which is the right answer there — reaching it means the
+ * router admitted a candidate it should have excluded.
  */
 export const ADAPTERS: Readonly<Record<string, ProviderAdapter>> = {
   anthropic: anthropicAdapter,
