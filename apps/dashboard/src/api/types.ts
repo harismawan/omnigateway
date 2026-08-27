@@ -478,7 +478,15 @@ export type CatalogModel = {
   pricing: CatalogPricing;
   limits: CatalogLimits;
   oauthLimits?: CatalogLimits;
-  auth?: readonly AuthType[];
+  /**
+   * Which credential types can reach this model.
+   *
+   * Always present: the endpoint resolves it, applying the rule that a model
+   * states its own set or inherits the provider's. It was optional here while
+   * the console applied that rule itself — which was a second copy of it, and is
+   * why it moved.
+   */
+  auth: readonly AuthType[];
 };
 
 /**
