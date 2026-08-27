@@ -177,7 +177,11 @@ Circuit-breaker state and latency written back on every terminal outcome, so nex
 
 ## Providers
 
-Six adapters. Five are directories of roughly same four files — `wire.ts`, `decode.ts`, `models.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types, `kimi` and `grok` carry `device.ts` for device-code flows.
+Six adapters. Five are directories of roughly same files — `descriptor.ts`, `wire.ts`, `decode.ts`, `models.ts`, `profile.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types, `kimi` and `grok` carry `device.ts` for device-code flows.
+
+`descriptor.ts` is what core reads. Adding a provider used to mean editing sixteen tables spread across `ir`, `router`, `store`, `control`, the gateway, the CLI and the console; eight were compiler-checked `Record<ProviderId, …>` and eight were hand-written arrays, zod enums and CSS blocks that went stale in silence — five of them independent copies of the same six names. One record per provider replaced them, and the exhaustiveness survives because `PROVIDER_DESCRIPTORS` is a total record: a seventh provider fails to compile in one file rather than eight.
+
+Two subpaths, and the split is load-bearing. `@omni/providers/descriptors` is a **leaf** — capabilities, pricing fallbacks, catalog, model prefixes, presentation — which is how `packages/router` reads per-provider data while staying pure, and how the console reads labels and colours without an adapter reaching a browser bundle. `registry.ts` joins those to the adapter, the client profile and the body key order, and is what dispatch reads. Adapters import `BODY_ORDER` and profiles read `Bun.env`, so neither may sit upstream of the leaf. `packages/providers/test/leafSubpaths.test.ts` bundles each entry point for the browser and asserts the transport is absent *and* a known symbol present — "absent" being also what a harness that bundled nothing reports.
 
 ```mermaid
 flowchart LR
