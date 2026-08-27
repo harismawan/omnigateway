@@ -13,6 +13,7 @@ import {
   listKeys,
   listModels,
   patchCredential,
+  providerCatalog,
   putModel,
   putSettings,
   queryUsage,
@@ -254,6 +255,15 @@ export function adminRoutes(deps: AdminDeps) {
       .get("/api/models", async ({ request }) => {
         await requireReader(request, deps.admin);
         return { models: await listModels(deps.store) };
+      })
+      // What this installation *can* serve, as opposed to `/api/models`, which is
+      // what the operator configured. The console reads it for the model picker,
+      // catalog pricing hints, connect dialog and provider palette — everything
+      // it used to import from `@omni/providers` at build time, which a provider
+      // loaded from disk at boot could never have been part of.
+      .get("/api/catalog", async ({ request }) => {
+        await requireAdmin(request, deps.admin);
+        return { providers: providerCatalog() };
       })
 
       .put("/api/models/:id", async ({ request, params }) => {

@@ -12,6 +12,7 @@ export {
   createAdminAuth,
 } from "./adminAuth.ts";
 export { type RequestBodyRead, readRequestBody } from "./bodies.ts";
+export { type CatalogProvider, providerCatalog } from "./catalog.ts";
 export {
   type ClientRequestLog,
   isClientVisibleDegradation,
