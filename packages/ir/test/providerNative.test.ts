@@ -268,7 +268,7 @@ test("any provider's delta can annotate the text block it lands on", () => {
   expect(block).toEqual({ type: "text", text: "", citations: [citation] });
 });
 
-test("a native delta stating no fold is carried, never folded", () => {
+test("a native delta stating no fold leaves the assembled block alone", () => {
   // The default, and what every native delta but those two does. Asserted so
   // that adding a fold kind cannot silently change the meaning of the deltas
   // that state none.

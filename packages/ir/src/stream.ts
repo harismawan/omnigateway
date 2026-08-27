@@ -137,7 +137,7 @@ export type Delta =
        * streaming egress path still replays the delta verbatim, and `collect()`
        * — which builds the buffered form — keeps the block's own data and drops
        * the delta's. That is what the code did before this field existed, and
-       * `a native delta stating no fold is carried, never folded` asserts it.
+       * `a native delta stating no fold leaves the assembled block alone` asserts it.
        */
       fold?: "merge" | "citation";
       data: Record<string, unknown>;

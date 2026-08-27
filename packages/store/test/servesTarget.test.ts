@@ -36,7 +36,7 @@ test("a custom target is served only by an account at the same endpoint", () => 
   expect(servesTarget(t, account({ providerData: {} }))).toBe(false);
 });
 
-test("a target naming no endpoint is served by any account of its provider", () => {
+test("a target naming no endpoint is served by an account that names none either", () => {
   const t = target({ provider: "anthropic" });
   const a = account({ provider: "anthropic", providerData: { deviceId: "d" } });
   expect(servesTarget(t, a)).toBe(true);
