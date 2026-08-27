@@ -1,4 +1,4 @@
-import { CONTEXT_1M_BETA, CONTEXT_1M_TOKENS, GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
+import { CONTEXT_1M_BETA, CONTEXT_1M_TOKENS, GatewayError } from "@omni/ir";
 import { applyAnthropicSystem, BODY_ORDER, orderFields, signAnthropicBody } from "../body.ts";
 import { catalogLimits } from "../catalog.ts";
 import { httpError } from "../http.ts";
@@ -7,6 +7,7 @@ import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { buildToolCloak } from "./cloak.ts";
 import { decodeAnthropic, isFingerprintMessage } from "./decode.ts";
+import { anthropicDescriptor } from "./descriptor.ts";
 import { toWire } from "./wire.ts";
 
 const BASE_URL = "https://api.anthropic.com/v1/messages";
@@ -15,7 +16,7 @@ const OAUTH_BETA = "oauth-2025-04-20";
 
 export const anthropicAdapter: ProviderAdapter = {
   id: "anthropic",
-  capabilities: PROVIDER_CAPABILITIES.anthropic,
+  capabilities: anthropicDescriptor.capabilities,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const oauth = req.credentials.accessToken !== null;

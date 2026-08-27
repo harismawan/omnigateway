@@ -1,304 +1,43 @@
 import type { ProviderId } from "@omni/ir";
-import type { HeaderPair } from "./types.ts";
+import { anthropicProfile } from "./anthropic/profile.ts";
+import { customProfile } from "./custom/profile.ts";
+import { grokProfile } from "./grok/profile.ts";
+import { type ClientProfile, envOrder } from "./headers.ts";
+import { kiloProfile } from "./kilo/profile.ts";
+import { kimiProfile } from "./kimi/profile.ts";
+import { openaiProfile } from "./openai/profile.ts";
 
-export type ClientProfile = {
-  /** Headers with the CLI's own name casing, in declaration order. */
-  readonly headers: readonly HeaderPair[];
-  /** Canonical wire order. Matched case-insensitively; unlisted names append. */
-  readonly order: readonly string[];
-};
-
-/** Rejects anything that cannot go in a header value. */
-const SAFE = /^[\x20-\x7E]{1,200}$/;
-
-function env(name: string, fallback: string): string {
-  const raw = Bun.env[name];
-  if (typeof raw !== "string" || raw.length === 0) return fallback;
-  return SAFE.test(raw) ? raw : fallback;
-}
-
-/** Blank means "derive from host", so this distinguishes unset from set. */
-function envOrNull(name: string): string | null {
-  const raw = Bun.env[name];
-  if (typeof raw !== "string" || raw.length === 0) return null;
-  return SAFE.test(raw) ? raw : null;
-}
-
-function envOrder(name: string, fallback: readonly string[]): readonly string[] {
-  const raw = Bun.env[name];
-  if (typeof raw !== "string" || raw.length === 0) return fallback;
-  const parts = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0 && SAFE.test(s));
-  return parts.length > 0 ? parts : fallback;
-}
-
-/** Stainless spells the platform differently from node:process. */
-export function stainlessHost(platform: string, arch: string): { os: string; arch: string } {
-  const os =
-    platform === "darwin"
-      ? "MacOS"
-      : platform === "linux"
-        ? "Linux"
-        : platform === "win32"
-          ? "Windows"
-          : "Unknown";
-  return { os, arch };
-}
+export { ANTHROPIC_CLI_VERSION } from "./anthropic/profile.ts";
 
 /**
- * Grok spells the platform differently again: lowercase OS, and `arm64` under
- * its GNU name. Deliberately not folded into {@link stainlessHost} — the two
- * agree on nothing but the input, and one helper serving both would have to
- * branch on the caller anyway.
+ * The type and the header helpers live in `headers.ts` so that each
+ * `<id>/profile.ts` can read them without importing this module, which would
+ * close a cycle against the assembly below. They are re-exported here because
+ * this is the name every caller outside the package already imports.
  */
-export function grokHost(platform: string, arch: string): { os: string; arch: string } {
-  return { os: platform.toLowerCase(), arch: arch === "arm64" ? "aarch64" : arch };
-}
+export {
+  type ClientProfile,
+  grokHost,
+  mergeHeaders,
+  orderHeaders,
+  stainlessHost,
+} from "./headers.ts";
 
 /**
- * Reorders headers to a canonical wire order.
+ * Every provider's wire identity, keyed by id.
  *
- * Names are matched case-insensitively but emitted with the casing they were
- * given, because the casing is itself part of the fingerprint. Names not in
- * `order` are appended in their original relative order.
+ * Each profile is defined beside the adapter that wears it; this module only
+ * joins them and applies the `OMNI_ORDER_*` overrides. `custom` takes no
+ * override because it has no order of its own to override.
  */
-export function orderHeaders(pairs: readonly HeaderPair[], order: readonly string[]): HeaderPair[] {
-  const remaining = [...pairs];
-  const out: HeaderPair[] = [];
-  for (const name of order) {
-    const lower = name.toLowerCase();
-    const at = remaining.findIndex(([n]) => n.toLowerCase() === lower);
-    if (at !== -1) out.push(...remaining.splice(at, 1));
-  }
-  out.push(...remaining);
-  return out;
-}
-
-/**
- * Overlays headers onto a base set.
- *
- * A replaced header keeps the base's position but takes the override's value
- * and casing. New headers append. Position is preserved because reordering
- * happens later, against the profile's `order`, and a header that arrived
- * out of band should not jump the queue on its own.
- */
-export function mergeHeaders(
-  base: readonly HeaderPair[],
-  overrides: readonly HeaderPair[],
-): HeaderPair[] {
-  const out: HeaderPair[] = [...base];
-  for (const [name, value] of overrides) {
-    const lower = name.toLowerCase();
-    const at = out.findIndex(([n]) => n.toLowerCase() === lower);
-    if (at === -1) out.push([name, value]);
-    else out[at] = [name, value];
-  }
-  return out;
-}
-
-const host = stainlessHost(process.platform, process.arch);
-
-/**
- * Exported because not every Anthropic call wears the same identity: the CLI
- * reaches `/v1/messages` through its Stainless client but reads its account
- * usage with plain axios, so that request reports `claude-code/<version>`
- * rather than `claude-cli/<version> (external, cli)`.
- */
-export const ANTHROPIC_CLI_VERSION = env("OMNI_ANTHROPIC_CLI_VERSION", "2.1.219");
-
-const anthropic: ClientProfile = {
-  headers: [
-    ["User-Agent", env("OMNI_UA_ANTHROPIC", `claude-cli/${ANTHROPIC_CLI_VERSION} (external, cli)`)],
-    ["x-app", "cli"],
-    ["anthropic-dangerous-direct-browser-access", "true"],
-    ["X-Stainless-Lang", "js"],
-    ["X-Stainless-Package-Version", env("OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION", "0.94.0")],
-    ["X-Stainless-OS", envOrNull("OMNI_ANTHROPIC_STAINLESS_OS") ?? host.os],
-    ["X-Stainless-Arch", envOrNull("OMNI_ANTHROPIC_STAINLESS_ARCH") ?? host.arch],
-    // Forced to node: this is what the real CLI reports, and reporting "bun"
-    // would be a one-header giveaway.
-    ["X-Stainless-Runtime", "node"],
-    ["X-Stainless-Runtime-Version", env("OMNI_ANTHROPIC_STAINLESS_RUNTIME_VERSION", "v26.3.0")],
-    ["X-Stainless-Retry-Count", "0"],
-    ["Accept", "application/json"],
-  ],
-  order: [
-    "Accept",
-    "Authorization",
-    "Content-Type",
-    "User-Agent",
-    "X-Stainless-Arch",
-    "X-Stainless-Lang",
-    "X-Stainless-OS",
-    "X-Stainless-Package-Version",
-    "X-Stainless-Retry-Count",
-    "X-Stainless-Runtime",
-    "X-Stainless-Runtime-Version",
-    "X-Stainless-Timeout",
-    "anthropic-beta",
-    "anthropic-dangerous-direct-browser-access",
-    "anthropic-version",
-    "x-api-key",
-    "x-app",
-    "Connection",
-    "Host",
-    "Accept-Encoding",
-    "Content-Length",
-  ],
-};
-
-const OPENAI_CLI_VERSION = env("OMNI_OPENAI_CLI_VERSION", "0.144.1");
-const OPENAI_UA_PLATFORM = env("OMNI_OPENAI_UA_PLATFORM", "Windows 10.0.26200");
-const OPENAI_UA_ARCH = env("OMNI_OPENAI_UA_ARCH", "x64");
-
-const openai: ClientProfile = {
-  headers: [
-    [
-      "User-Agent",
-      env(
-        "OMNI_UA_OPENAI",
-        `codex-cli/${OPENAI_CLI_VERSION} (${OPENAI_UA_PLATFORM}; ${OPENAI_UA_ARCH})`,
-      ),
-    ],
-    ["originator", env("OMNI_OPENAI_ORIGINATOR", "codex_cli_rs")],
-    ["Version", OPENAI_CLI_VERSION],
-    ["Openai-Beta", "responses=experimental"],
-    ["X-Codex-Beta-Features", "responses_websockets"],
-    ["Accept", "text/event-stream"],
-  ],
-  order: [
-    "Host",
-    "Content-Type",
-    "Authorization",
-    "chatgpt-account-id",
-    "originator",
-    "Version",
-    "Openai-Beta",
-    "X-Codex-Beta-Features",
-    "Accept",
-    "User-Agent",
-    "Accept-Encoding",
-    "Content-Length",
-  ],
-};
-
-const KIMI_CLI_VERSION = env("OMNI_KIMI_CLI_VERSION", "0.26.0");
-
-// No traffic capture exists for kimi-code-cli. This order is constructed to be
-// plausible, not verified. Treat it as a weaker guarantee than the other two.
-const kimi: ClientProfile = {
-  headers: [
-    ["User-Agent", env("OMNI_UA_KIMI", `kimi-code-cli/${KIMI_CLI_VERSION}`)],
-    ["X-Msh-Platform", "kimi_code_cli"],
-    ["X-Msh-Version", KIMI_CLI_VERSION],
-    ["Accept", "application/json"],
-  ],
-  order: [
-    "Host",
-    "Content-Type",
-    "Authorization",
-    "X-Msh-Platform",
-    "X-Msh-Version",
-    "X-Msh-Device-Id",
-    "X-Msh-Device-Name",
-    "X-Msh-Device-Model",
-    "X-Msh-Os-Version",
-    "User-Agent",
-    "Accept",
-    "Accept-Encoding",
-    "Content-Length",
-  ],
-};
-
-const KILO_CLI_VERSION = env("OMNI_KILO_CLI_VERSION", "4.140.0");
-
-// No traffic capture exists for the Kilo Code extension either. This profile is
-// constructed to be plausible, not verified — the same weaker guarantee the
-// kimi profile above carries.
-//
-// `X-KILOCODE-EDITORNAME` is the one header the gateway is documented to
-// require, and it names the editor hosting the extension rather than the
-// machine it runs on: there is no device fingerprint to mint here. It reads
-// from the environment so a value Kilo starts rejecting is an operator fix
-// rather than a release.
-const kilo: ClientProfile = {
-  headers: [
-    ["User-Agent", env("OMNI_UA_KILO", `Kilo-Code/${KILO_CLI_VERSION}`)],
-    ["X-KILOCODE-EDITORNAME", env("OMNI_KILO_EDITOR_NAME", "vscode")],
-    ["Accept", "text/event-stream"],
-  ],
-  // `X-Kilocode-OrganizationID` sits with `Authorization` because it qualifies
-  // it. A header the adapter does not send is simply skipped, so listing it
-  // costs nothing on a credential with no organization.
-  order: [
-    "Host",
-    "Content-Type",
-    "Authorization",
-    "X-Kilocode-OrganizationID",
-    "X-KILOCODE-EDITORNAME",
-    "User-Agent",
-    "Accept",
-    "Accept-Encoding",
-    "Content-Length",
-  ],
-};
-
-// The version is the weakest constant in this file. xAI's source resolves it
-// from a build-time env var and falls back to its crate version, so the 1.0.3 in
-// the manifest is a source-tree artefact rather than what a shipped binary
-// reports. 0.2.120 is the newest value observed on the wire by implementations
-// that actually talk to the proxy — an observation, not a quote. The proxy gates
-// on this header, and no captured rejection exists, so the env override is what
-// makes a stale value an operator fix rather than a release. Treat this as a
-// weaker guarantee than the Anthropic and OpenAI profiles, as with kimi above.
-const GROK_CLI_VERSION = env("OMNI_GROK_CLI_VERSION", "0.2.120");
-const grokUa = grokHost(process.platform, process.arch);
-
-const grok: ClientProfile = {
-  headers: [
-    [
-      "User-Agent",
-      env("OMNI_UA_GROK", `grok-shell/${GROK_CLI_VERSION} (${grokUa.os}; ${grokUa.arch})`),
-    ],
-    // `grok-shell`, not `grok-cli`: no `grok-cli/<version>` identity exists
-    // anywhere in xAI's own source.
-    ["x-grok-client-identifier", "grok-shell"],
-    ["x-grok-client-version", GROK_CLI_VERSION],
-    ["x-grok-client-mode", "headless"],
-    ["Accept", "text/event-stream"],
-  ],
-  // The OAuth-only pair sits with `Authorization` because it qualifies it, and
-  // the per-request ids follow the client identity they belong to. A header the
-  // adapter does not send is simply skipped, so listing all of them costs
-  // nothing on the API-key route.
-  order: [
-    "Host",
-    "Content-Type",
-    "Authorization",
-    "X-XAI-Token-Auth",
-    "x-authenticateresponse",
-    "x-grok-client-identifier",
-    "x-grok-client-version",
-    "x-grok-client-mode",
-    "x-grok-agent-id",
-    "x-grok-req-id",
-    "x-grok-conv-id",
-    "x-grok-session-id",
-    "x-grok-model-override",
-    "User-Agent",
-    "Accept",
-    "Accept-Encoding",
-    "Content-Length",
-  ],
-};
-
 export const PROFILES: Readonly<Record<ProviderId, ClientProfile>> = {
-  anthropic: { ...anthropic, order: envOrder("OMNI_ORDER_ANTHROPIC", anthropic.order) },
-  openai: { ...openai, order: envOrder("OMNI_ORDER_OPENAI", openai.order) },
-  kimi: { ...kimi, order: envOrder("OMNI_ORDER_KIMI", kimi.order) },
-  kilo: { ...kilo, order: envOrder("OMNI_ORDER_KILO", kilo.order) },
-  grok: { ...grok, order: envOrder("OMNI_ORDER_GROK", grok.order) },
-  custom: { headers: [], order: [] },
+  anthropic: {
+    ...anthropicProfile,
+    order: envOrder("OMNI_ORDER_ANTHROPIC", anthropicProfile.order),
+  },
+  openai: { ...openaiProfile, order: envOrder("OMNI_ORDER_OPENAI", openaiProfile.order) },
+  kimi: { ...kimiProfile, order: envOrder("OMNI_ORDER_KIMI", kimiProfile.order) },
+  kilo: { ...kiloProfile, order: envOrder("OMNI_ORDER_KILO", kiloProfile.order) },
+  grok: { ...grokProfile, order: envOrder("OMNI_ORDER_GROK", grokProfile.order) },
+  custom: customProfile,
 };

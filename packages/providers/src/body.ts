@@ -1,4 +1,10 @@
 import type { ProviderId } from "@omni/ir";
+import { anthropicBodyOrder } from "./anthropic/profile.ts";
+import { customBodyOrder } from "./custom/profile.ts";
+import { grokBodyOrder } from "./grok/profile.ts";
+import { kiloBodyOrder } from "./kilo/profile.ts";
+import { kimiBodyOrder } from "./kimi/profile.ts";
+import { openaiBodyOrder } from "./openai/profile.ts";
 
 export type SystemBlock = {
   type: "text";
@@ -8,73 +14,12 @@ export type SystemBlock = {
 
 /** Top-level JSON key order, matching each CLI's own serializer. */
 export const BODY_ORDER: Readonly<Record<ProviderId, readonly string[]>> = {
-  anthropic: [
-    "model",
-    "messages",
-    "system",
-    "tools",
-    "tool_choice",
-    "metadata",
-    "max_tokens",
-    "temperature",
-    "thinking",
-    "context_management",
-    "output_config",
-    "stream",
-  ],
-  openai: [
-    "model",
-    "stream",
-    "input",
-    "instructions",
-    "store",
-    "reasoning",
-    "prompt_cache_key",
-    "tools",
-    "tool_choice",
-    "include",
-    "service_tier",
-    "client_metadata",
-    "parallel_tool_calls",
-    "metadata",
-  ],
-  // Constructed, not captured. See the profile note in Task 8B.
-  // `stream_options` is deliberately absent: the order mirrors what each CLI's
-  // own serializer emits, and this gateway adds that field for usage reporting
-  // rather than copying it from one. Unlisted keys append in insertion order.
-  kimi: ["model", "messages", "tools", "tool_choice", "max_tokens", "temperature", "stream"],
-  // Constructed, not captured, like the kimi profile. `reasoning` is
-  // OpenRouter's field, which Kilo's surface takes; `stream_options` is absent
-  // for the same reason it is absent above.
-  kilo: [
-    "model",
-    "messages",
-    "tools",
-    "tool_choice",
-    "max_tokens",
-    "temperature",
-    "reasoning",
-    "stream",
-  ],
-  // xAI's Responses surface takes the same field vocabulary as OpenAI's, so the
-  // order mirrors it rather than inventing a second spelling of the same body.
-  grok: [
-    "model",
-    "stream",
-    "input",
-    "instructions",
-    "store",
-    "reasoning",
-    "prompt_cache_key",
-    "tools",
-    "tool_choice",
-    "include",
-    "service_tier",
-    "client_metadata",
-    "parallel_tool_calls",
-    "metadata",
-  ],
-  custom: [],
+  anthropic: anthropicBodyOrder,
+  openai: openaiBodyOrder,
+  kimi: kimiBodyOrder,
+  kilo: kiloBodyOrder,
+  grok: grokBodyOrder,
+  custom: customBodyOrder,
 };
 
 /**

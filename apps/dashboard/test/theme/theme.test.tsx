@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -121,11 +122,56 @@ describe("styled-components theme", () => {
 
 describe("provider palette", () => {
   test("the console's provider list is the catalog's, not a stale copy", () => {
-    // tokens.ts hand-rolls its own list because the theme cannot import the
-    // store's runtime types. Nothing makes the two agree, so a provider added
-    // to the catalog and forgotten here goes uncoloured; this is that check.
+    // Both are now derived — the list from the descriptor registry, the catalog
+    // from the providers' own model lists — but they are still assembled
+    // separately by design, so nothing but this makes them agree.
     const listed: string[] = [...PROVIDER_IDS];
     expect(listed.sort()).toEqual(Object.keys(PROVIDER_MODEL_CATALOG).sort());
+  });
+
+  test("the console draws providers in the registry's declared order", () => {
+    // The order used to be a hand-written array in two places, and is now the
+    // sort in tokens.ts. Asserted as monotonicity plus "same set" rather than
+    // as equality with a locally re-sorted list: the registry's key order
+    // currently happens to match `presentation.order`, so an equality check
+    // passes just as well against an unsorted derivation and would only start
+    // meaning something on the day someone renumbered a provider.
+    const drawn = PROVIDER_IDS.map((id) => PROVIDER_DESCRIPTORS[id].presentation.order);
+    expect(drawn).toEqual([...drawn].sort((a, b) => a - b));
+    const listed: string[] = [...PROVIDER_IDS];
+    expect(listed.sort()).toEqual(Object.keys(PROVIDER_DESCRIPTORS).sort());
+  });
+
+  test("every registered provider is coloured in both themes", () => {
+    // The pair check below counts two declarations per provider without saying
+    // which blocks they landed in, so two light halves would satisfy it. This
+    // splits the generated sheet at `.dark` and requires the provider in each
+    // side: a provider present in only one renders colourless in the other,
+    // and nothing throws when it does.
+    const sheet = new ServerStyleSheet();
+    renderToStaticMarkup(
+      sheet.collectStyles(
+        <ThemeProvider>
+          <Probe />
+        </ThemeProvider>,
+      ),
+    );
+    const css = sheet.getStyleTags();
+    sheet.seal();
+
+    const darkAt = css.indexOf(".dark{");
+    expect(darkAt).toBeGreaterThan(-1);
+    const light = css.slice(0, darkAt);
+    const dark = css.slice(darkAt);
+
+    for (const descriptor of Object.values(PROVIDER_DESCRIPTORS)) {
+      const { id, presentation } = descriptor;
+      // No space after the colon: stylis minifies the declaration on the way
+      // through, so this is the shape it lands in, not the shape it was written
+      // in.
+      expect(light).toContain(`--p-${id}:${presentation.colour.light};`);
+      expect(dark).toContain(`--p-${id}:${presentation.colour.dark};`);
+    }
   });
 
   test("every provider has both halves of its palette", () => {

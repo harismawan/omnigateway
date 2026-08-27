@@ -1,4 +1,22 @@
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { createGlobalStyle } from "styled-components";
+import { PROVIDER_IDS } from "./tokens.ts";
+
+/**
+ * The `--p-<id>` half of one palette, written from the provider registry.
+ *
+ * Both modes are generated from the same list, which is what makes "a provider
+ * with only one half repaints to nothing in the other theme" unrepresentable
+ * rather than merely untested. The reasoning behind each hue lives in that
+ * provider's `descriptor.ts`, beside the value it explains — generated CSS
+ * cannot carry a comment, and a comment kept away from its value is one that
+ * goes stale unnoticed.
+ */
+function providerPalette(mode: "light" | "dark"): string {
+  return PROVIDER_IDS.map(
+    (id) => `--p-${id}: ${PROVIDER_DESCRIPTORS[id].presentation.colour[mode]};`,
+  ).join("\n    ");
+}
 
 /**
  * Palette values live here as custom properties rather than in the theme object
@@ -31,22 +49,7 @@ export const GlobalStyle = createGlobalStyle`
     --warn-wash: oklch(0.58 0.13 72 / 0.14);
     --down-wash: oklch(0.53 0.2 27 / 0.11);
 
-    --p-anthropic: oklch(0.56 0.13 45);
-    --p-openai: oklch(0.5 0.09 190);
-    --p-kimi: oklch(0.53 0.17 330);
-    /* Kilo takes the arc between openai and the accent: 224 is ~34deg from
-       openai and ~38 from the accent blue, and — the point — 106 from kimi.
-       Kimi and kilo are one letter apart and sit next to each other in every
-       list the console draws, so they are the one pair that must not also be
-       neighbours in hue. The other free arc, ~296, is 34 from kimi and would
-       have done the opposite. */
-    --p-kilo: oklch(0.52 0.14 224);
-    /* xAI's own identity is achromatic, and the neutral slot is already
-       custom's, so grok takes the widest free arc of the wheel instead: 125 is
-       ~70deg from both anthropic and openai and ~145 from kimi, which is what
-       keeps five series apart in the usage charts. */
-    --p-grok: oklch(0.52 0.14 125);
-    --p-custom: oklch(0.5 0.03 258);
+    ${providerPalette("light")}
 
     --grid-line: oklch(0.22 0.017 258 / 0.055);
     --shadow: 0 1px 2px oklch(0.22 0.017 258 / 0.06);
@@ -77,12 +80,7 @@ export const GlobalStyle = createGlobalStyle`
     --warn-wash: oklch(0.82 0.14 80 / 0.16);
     --down-wash: oklch(0.68 0.19 25 / 0.16);
 
-    --p-anthropic: oklch(0.74 0.12 48);
-    --p-openai: oklch(0.76 0.1 190);
-    --p-kimi: oklch(0.72 0.16 330);
-    --p-kilo: oklch(0.74 0.14 224);
-    --p-grok: oklch(0.74 0.14 125);
-    --p-custom: oklch(0.72 0.03 258);
+    ${providerPalette("dark")}
 
     --grid-line: oklch(0.94 0.006 250 / 0.045);
     --shadow: 0 1px 2px oklch(0 0 0 / 0.3);

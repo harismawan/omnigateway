@@ -27,7 +27,7 @@ The sixteen:
 | `apps/dashboard/src/theme/tokens.ts:75` `PROVIDER_LABEL` | total record | yes |
 | `packages/control/src/connect.ts:8` `PROVIDER_IDS` | hand-written array | no |
 | `packages/control/src/schemas.ts:42` | zod enum | no |
-| `packages/control/src/schemas.ts:59` | zod enum, **already missing `custom`** | no |
+| `packages/control/src/schemas.ts:59` | zod enum, five ids — see the correction below | no |
 | `packages/control/src/oauth/index.ts:9` `OAUTH_PROVIDERS` | partial record | no |
 | `apps/dashboard/src/theme/tokens.ts:72` `PROVIDER_IDS` | second id list + a **second `ProviderId` type** at `:73` | no |
 | `apps/dashboard/src/features/accounts/AccountsBoard.tsx:38` `PROVIDER_ORDER` | third id list | no |
@@ -91,20 +91,22 @@ edits" unconditionally.
 ## The descriptor
 
 ```ts
+/** The leaf half: no adapter, no profile, safe to bundle for a browser. */
 export type ProviderDescriptor = {
   readonly id: ProviderId;
 
   /** Was PROVIDER_CAPABILITIES (ir/capabilities.ts:43). */
-  readonly capabilities: Capabilities;
+  readonly capabilities: ProviderCapabilities;
 
-  /** Was ANTHROPIC_NATIVE_TOOLS (ir/capabilities.ts:23). */
+  /**
+   * Was ANTHROPIC_NATIVE_TOOLS (ir/capabilities.ts:23).
+   *
+   * Shipped in this sub-project and **deleted by the next one**: once a native
+   * block records the provider that produced it, the routing rule reads the
+   * block and this flag has no readers. Left in the sketch because this document
+   * describes what this sub-project built.
+   */
   readonly anthropicNativeTools: boolean;
-
-  /** Was BODY_ORDER (providers/body.ts:10). */
-  readonly bodyOrder: readonly string[];
-
-  /** Was PROFILES (providers/profile.ts:297). */
-  readonly profile: ClientProfile;
 
   /** Was WRITE_OVER_INPUT (gateway/dispatch/price.ts:17). */
   readonly writeOverInput: { fiveMinute: number; oneHour: number };
@@ -112,49 +114,55 @@ export type ProviderDescriptor = {
   /**
    * Was PROVIDER_MODEL_CATALOG[id] (providers/catalog.ts:44) — the whole value
    * that map holds for this id, not a bare model list. Consumers index it as
-   * `.models` today (`apps/dashboard/src/features/models/draft.ts:190`), so the
-   * shape is preserved rather than flattened.
+   * `.models` today, so the shape is preserved rather than flattened. A
+   * reference to the provider's own `*_MODELS` list, never a copy.
    */
-  readonly catalog: ProviderCatalogEntry;
+  readonly catalog: ProviderModelCatalogEntry;
 
-  /** Was PREFIX_PROVIDER (router/resolve.ts:12). Empty for most providers. */
+  /** Was PREFIX_PROVIDER (router/resolve.ts:12). Empty for kilo and custom. */
   readonly modelPrefixes: readonly string[];
 
   /** Was the CALLBACKS entry (control/connect.ts:36). Absent unless loopback. */
   readonly callback?: { uri: string; label: string };
-
-  /** Was the secret-shape rule in store/bodies/mask.ts. Absent unless distinctive. */
-  readonly secretPattern?: { pattern: RegExp; keep: number };
 
   readonly presentation: {
     /** Was PROVIDER_LABEL, in three copies. */
     label: string;
     /** Was PROVIDER_ORDER (AccountsBoard.tsx:38). */
     order: number;
-    /** Was theme.provider.<id> plus --p-<id> in light and dark. */
-    colour: { light: string; dark: string };
     /**
-     * Was PROVIDER_TONE (cli/command.ts:46). Declared as the tone *name*, not
-     * the CLI's `Tone` type: `packages/providers` must not import from
-     * `apps/cli`, and the CLI already owns the name-to-escape-code mapping.
+     * Was PROVIDER_TONE (cli/command.ts:46). The tone *name*, not the CLI's
+     * `Tone` type: `packages/providers` must not import from `apps/cli`, and the
+     * CLI already owns the name-to-escape-code mapping.
      */
     tone: string;
-    /** Was PASTE_HINT / CODE_PLACEHOLDER (ConnectDialog.tsx:54,70). */
+    /** Was theme.provider.<id> plus --p-<id> in light and dark. */
+    colour: { light: string; dark: string };
+    /** Was PASTE_HINT (ConnectDialog.tsx:54). CODE_PLACEHOLDER derives from `callback`. */
     pasteHint?: string;
   };
+};
 
+/** The server half, assembled in registry.ts. */
+export type ProviderRegistryEntry = ProviderDescriptor & {
   readonly adapter: ProviderAdapter;
-
-  /** Was the OAUTH_PROVIDERS entry (control/oauth/index.ts:9). */
-  readonly auth?: OAuthProvider;
+  /** Was PROFILES (providers/profile.ts:297). */
+  readonly profile: ClientProfile;
+  /** Was BODY_ORDER (providers/body.ts:10). */
+  readonly bodyOrder: readonly string[];
 };
 ```
 
-Every field is required except `auth`, `callback`, `secretPattern` and
-`presentation.pasteHint`. Each optional field is optional because its absence is
-a real state some current provider is in — `custom` has no OAuth flow, only
-`openai` and `grok` use a loopback redirect, only xAI has a distinctive key
-prefix — and not because a provider might forget to supply it.
+**The split into two types was forced, not chosen**, and both halves of the
+reason are load-bearing. Adapters import `BODY_ORDER` and `PROFILES`, so a record
+carrying adapters cannot also be what those tables derive from. And profiles read
+`Bun.env`, which has no business in the browser bundle the console and the pure
+router build from the leaf. `@omni/providers/descriptors` exports the leaf;
+`registry.ts` joins the rest.
+
+Only `callback` and `presentation.pasteHint` are optional, and each because its
+absence is a real state a current provider is in: only `openai` and `grok` use a
+loopback redirect.
 
 `writeOverInput` in particular is required with no default. It is `{1.25, 2}` for
 Anthropic and `{0, 0}` for everyone else, and a default of zero underprices cache
@@ -178,12 +186,12 @@ to end. `packages/control` keeps the flow *runner* (`connect.ts`, `refresh.ts`,
 `quota/poll.ts`), all of which already take an injected provider table and hold
 no id list of their own beyond `PROVIDER_IDS`.
 
-This is a move **within the monorepo** — `packages/control/src/oauth/kilo.ts`
-becomes `packages/providers/src/kilo/oauth.ts` — and is distinct from extracting
-kilo to a plugin, which is a later sub-project. The two are separated on purpose:
-this one is a relocation with no behaviour change and its existing tests
-(`packages/control/test/oauth/{kilo,kimi}.test.ts`) move with it, and the
-extraction is then a directory move rather than a redesign.
+**This did not happen in this sub-project, and step 6 records why.** The move
+would be within the monorepo — `packages/control/src/oauth/kilo.ts` becoming
+`packages/providers/src/kilo/oauth.ts` — but `OAuthProvider` is defined in terms
+of `@omni/store` types that `packages/providers` does not depend on, so it is a
+layering decision the published-contract sub-project has to make anyway. All
+seven flow files remain in `packages/control/src/oauth/`.
 
 An alternative worth recording: leave the flows where they are and have
 descriptors import them. That keeps this sub-project smaller, but preserves the
@@ -219,29 +227,83 @@ Behaviour-preserving throughout. Each step replaces a read, not a value.
    into descriptors. `packages/ir` must not import `packages/providers`
    (boundary rule 1), so the two tables become registry reads at their consumers:
    `packages/router/src/resolve.ts:53`, `packages/router/src/filters.ts:60`, and
-   `apps/cli/src/commands/models.ts:166`. The router stays pure — it reads a
+   `apps/cli/src/commands/models.ts:166`. (The `filters.ts` read is itself removed
+   by the next sub-project, which deletes the table it consults.) The router stays pure — it reads a
    record it is handed, exactly as it reads the snapshot today.
-3. **`packages/providers`** — `BODY_ORDER`, `PROFILES`, `PROVIDER_MODEL_CATALOG`
-   and `ADAPTERS` become views over the registry. The `@omni/providers/catalog`
-   subpath keeps its current shape and its leaf status; it is derived from the
-   descriptors at module scope, so the dashboard's four static importers are
-   untouched by this sub-project.
+3. **`packages/providers`** — `BODY_ORDER` and `PROFILES` assemble over
+   per-provider files; `ADAPTERS` stays a total record.
+
+   **`PROVIDER_MODEL_CATALOG` is *not* derived from the registry**, which is the
+   inverse of what an earlier draft said. `catalog.ts` is a browser-safe leaf and
+   the registry holds adapters, so deriving it would pull the adapters and the
+   HTTP client into the dashboard bundle. Descriptors reference the same
+   per-provider `*_MODELS` lists instead: both read one source, neither reads the
+   other, and a test asserts object identity so a copy cannot creep in.
 4. **`packages/router`** — `PREFIX_PROVIDER` (`resolve.ts:12`) is rebuilt from
    `descriptor.modelPrefixes`. `PROVIDERS` (`resolve.ts:6`) already derives from
    `Object.keys`; it derives from the registry instead.
 5. **`apps/gateway`** — `WRITE_OVER_INPUT` (`price.ts:17`) becomes a registry
    read at `price.ts:61`.
-6. **`packages/control`** — `PROVIDER_IDS` (`connect.ts:8`), both zod enums
-   (`schemas.ts:42,59`) and `CALLBACKS` (`connect.ts:36`) derive from the
-   registry. `schemas.ts:59` regains `custom`, which it should have had; that is
-   the one deliberate behaviour change in this sub-project and it needs its own
-   test. `OAUTH_PROVIDERS` (`oauth/index.ts:9`) becomes a projection of
-   descriptors that carry `auth`.
-7. **`packages/store`** — the `xaiKey` rule in `bodies/mask.ts:122,155,191`
-   derives from `descriptor.secretPattern`. `MaskRuleId` stops enumerating
-   vendor names. `@omni/store` may not import `@omni/providers`, so the patterns
-   are injected where the masker is constructed, the same way clocks and loggers
-   are injected elsewhere.
+6. **`packages/control`** — `PROVIDER_IDS` (`connect.ts:8`), `providerIdSchema`
+   (`schemas.ts:42`) and `CALLBACKS` (`connect.ts:36`) derive from the registry.
+
+   **`OAUTH_PROVIDERS` does not, and `auth` is not on the descriptor.** Deferred
+   to the published-contract sub-project, because it is not a mechanical
+   migration. `OAuthProvider` lives in `packages/control/src/oauth/types.ts` and
+   imports `ClientProfile`, `HeaderPair` and `HttpClient` from `@omni/providers`,
+   so a descriptor holding an `auth` value closes a package cycle. Breaking it
+   means moving the `OAuthProvider` contract into `packages/providers` — and that
+   type is defined in terms of `CredentialSecrets`, `UsageSecrets` and
+   `WindowType` from `@omni/store`, which `packages/providers` does not depend on
+   and should not acquire casually.
+
+   So the move is a layering decision about where the credential contract lives,
+   which is what sub-project 3 has to decide anyway when that contract is
+   published. Doing it here would settle it by accident. `OAUTH_PROVIDERS` stays
+   a hand-maintained partial record; `OAUTH_PROVIDER_IDS` already derives from
+   its keys, and a test asserts every id in it is one the registry describes.
+
+   **Correction, found during implementation.** An earlier draft of this spec
+   read `schemas.ts:59` as drift — a hand-written enum that had fallen out of
+   sync by omitting `custom` — and scheduled "regaining `custom`" as this
+   sub-project's one deliberate behaviour change. That was wrong, and acting on
+   it would have been a regression. `targetSchema` is a
+   `z.discriminatedUnion("provider", …)`: the enum at `:59` is the **non-custom
+   arm**, and `custom` is absent because it has its own arm requiring
+   `endpointId`. Adding it to the first arm would let a custom target save with
+   no endpoint id, which is precisely the field `servesTarget` matches an
+   account on.
+
+   So `:59` is not derived from the registry. Deriving it would also weaken the
+   discriminated union: zod infers the arm's `provider` type from the schema, and
+   a runtime-built enum widens it from the five literals back to `ProviderId`,
+   costing the exhaustiveness that makes the union worth having. It gets a
+   **pin** instead — a test asserting the two arms together cover exactly the
+   registry's ids, so a seventh provider fails loudly without the union being
+   rebuilt at runtime.
+
+   The general lesson is worth more than the fix: a five-of-six enum next to a
+   six-member list looks like drift and is sometimes a discriminant. Read what
+   the missing member does elsewhere before calling a difference a bug.
+7. **`packages/store`** — **nothing moves, and `secretPattern` is dropped from
+   the descriptor.**
+
+   An earlier draft had the `xaiKey` rule in `bodies/mask.ts` derive from a
+   `descriptor.secretPattern`, injected where the masker is constructed. On
+   reaching it, that is the wrong trade. `MASK_RULES` is the redaction boundary
+   for captured request bodies, and a provider-supplied pattern is a provider
+   deciding how much of its own secret survives into stored text. The direction
+   that fails is silent: a regex that matches too little leaks, and nothing
+   reports it. That is the same argument `LogFields` already wins, and it should
+   win here too.
+
+   The cost of leaving it is small and worth stating so nobody re-opens this
+   expecting a win: `PREFIXED_KEY` and `OPAQUE` already catch ordinary
+   `<vendor>-<long-run>` key shapes, so a new provider's secrets are redacted,
+   just not by a rule tuned to them. `xaiKey` exists only because `xai-` also
+   prefixes xAI *model names* and the shared class was destroying those — a
+   false-positive problem, not a leak. Adding a vendor rule stays a core edit and
+   should read as one.
 8. **`apps/cli`** — `PROVIDER_TONE` (`command.ts:46`) becomes a registry read.
 9. **`apps/dashboard`** — the second `ProviderId` type (`tokens.ts:73`), the
    three `PROVIDER_LABEL` copies, `PROVIDER_ORDER`, `PASTE_HINT`,
@@ -267,14 +329,22 @@ assertions.
 - **Completeness.** Every descriptor has every required field populated; a
   fixture descriptor missing `writeOverInput` is refused. The negative case is
   the point — absent it, the test passes against a validator that does nothing.
-- **Derivation, not restatement.** `packages/providers/test/catalog.test.ts:7`
-  re-enumerates the six ids by hand today; it derives them from the registry
-  instead. A test asserting the registry has six entries is the one place the
-  count is written down.
-- **Collision.** Registering an id a built-in holds is refused.
-- **`schemas.ts:59` regains `custom`.** A target with `provider: "custom"` now
-  validates through the non-custom arm's sibling; the existing custom arm keeps
-  requiring `endpointId`.
+- **Derivation, not restatement — except in tests.** An earlier draft had
+  `packages/providers/test/catalog.test.ts:7` stop re-enumerating the six ids by
+  hand and derive them from the registry. That was **not** done, and should not
+  be: a test that derives its expectation from the thing under test agrees with
+  any registry at all, which is the exact vacuity the equivalence fixtures three
+  paragraphs up exist to avoid. Production code derives; tests restate.
+- **Collision.** Not applicable as shipped, and worth saying so: there is no
+  registration API. `PROVIDER_DESCRIPTORS` is a total record built at module
+  scope, so a duplicate id is a syntax error rather than a runtime refusal. A
+  collision check becomes real only when providers load from disk.
+- **The target union covers every provider through some arm.** Asserted in
+  `packages/control/test/providerCoverage.test.ts`, together with a custom target
+  carrying no `endpointId` being refused. An earlier draft of this section said
+  `schemas.ts:59` should "regain `custom`" — step 6 records why that reading was
+  wrong and acting on it would be a regression. The bullet is replaced rather
+  than deleted so the wrong instruction cannot be rediscovered here.
 - **Dashboard.** `apps/dashboard/test/theme/theme.test.tsx` gains an assertion
   that every provider in the registry has both a light and a dark colour, since
   a missing one renders colourless rather than failing.
@@ -294,10 +364,10 @@ descriptor's `bodyOrder` and confirm the corresponding pin fails.
   If a consumer turns out to need the capabilities table somewhere `ir` cannot
   reach, the fallback is to leave those two tables in `ir` and have descriptors
   reference them — worse, but it preserves the boundary.
-- **`schemas.ts:59` regaining `custom` is a real behaviour change** and the only
-  one. It is included because leaving a known-wrong enum in place while
-  rewriting the file around it is how the next reader concludes the omission was
-  deliberate.
+- **This sub-project has no behaviour changes.** An earlier draft claimed one —
+  `schemas.ts:59` regaining `custom` — and that claim was wrong; see the
+  correction in step 6. Anything that looks like a behaviour change during
+  implementation is a signal to re-read, not to proceed.
 - **Scope creep toward the plugin host.** The union stays closed in this
   sub-project. Widening it here would make the change non-behaviour-preserving
   and cost the green-suite-on-both-sides property that makes it reviewable.
