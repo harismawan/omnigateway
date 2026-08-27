@@ -1,5 +1,5 @@
 import { GatewayError } from "@omni/ir";
-import { type KimiDevice, kimiDeviceHeaders, mintKimiDevice, PROFILES } from "@omni/providers";
+import { type KimiDevice, kimiDeviceHeaders, kimiProfile, mintKimiDevice } from "@omni/providers";
 import type {
   AuthorizeStart,
   DeviceOAuthProvider,
@@ -102,7 +102,7 @@ async function post(
   device: KimiDevice,
   deps: OAuthDeps,
 ): Promise<unknown> {
-  const { status, parsed } = await postJson(deps, "kimi", url, PROFILES.kimi, {
+  const { status, parsed } = await postJson(deps, "kimi", url, kimiProfile, {
     contentType: "application/x-www-form-urlencoded",
     body: new URLSearchParams({ ...body, client_id: CLIENT_ID }).toString(),
     extraHeaders: kimiDeviceHeaders(device),
@@ -263,7 +263,7 @@ export const kimiOAuth: DeviceOAuthProvider = {
   async usage(secrets, deps, providerData) {
     if (secrets.accessToken === null) return null;
     const device = deviceFrom(providerData);
-    const { status, parsed } = await getJson(deps, "kimi", USAGE_URL, PROFILES.kimi, {
+    const { status, parsed } = await getJson(deps, "kimi", USAGE_URL, kimiProfile, {
       accessToken: secrets.accessToken,
       // The device identity the credential was minted with. Kimi ties a session
       // to it, and a probe from an unknown device is answered differently.

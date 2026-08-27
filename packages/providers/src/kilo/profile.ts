@@ -1,4 +1,4 @@
-import { type ClientProfile, env } from "../headers.ts";
+import { type ClientProfile, env, envOrder } from "../headers.ts";
 
 const KILO_CLI_VERSION = env("OMNI_KILO_CLI_VERSION", "4.140.0");
 
@@ -20,7 +20,11 @@ export const kiloProfile: ClientProfile = {
   // `X-Kilocode-OrganizationID` sits with `Authorization` because it qualifies
   // it. A header the adapter does not send is simply skipped, so listing it
   // costs nothing on a credential with no organization.
-  order: [
+  // The operator override is applied here rather than where the table is
+  // assembled. An adapter reads this value directly, so a table that applied
+  // something the direct read did not would differ only on installations that
+  // set the variable — which is the shape of bug this repository keeps finding.
+  order: envOrder("OMNI_ORDER_KILO", [
     "Host",
     "Content-Type",
     "Authorization",
@@ -30,7 +34,7 @@ export const kiloProfile: ClientProfile = {
     "Accept",
     "Accept-Encoding",
     "Content-Length",
-  ],
+  ]),
 };
 
 // Constructed, not captured, like the kimi profile. `reasoning` is

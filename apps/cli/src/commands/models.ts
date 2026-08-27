@@ -144,7 +144,14 @@ function targetFromCatalog(spec: string): Target {
   }
   const providerId = spec.slice(0, separator);
   const model = spec.slice(separator + 1);
-  if (!isCatalogProvider(providerId)) {
+  // Resolved once, from the descriptors, and reused below. The membership test
+  // this replaced read `PROVIDER_MODEL_CATALOG` while the capabilities came
+  // from `PROVIDER_DESCRIPTORS` — two derived tables answering one question, so
+  // a provider present in one and not the other would pass the check and then
+  // fail to index. They agree today because both are built from the same six
+  // literals; asking one of them twice is what keeps that from mattering.
+  const descriptor = PROVIDER_DESCRIPTORS[providerId];
+  if (descriptor === undefined) {
     throw new UsageError(`unknown provider "${providerId}" in "${spec}"`);
   }
 
@@ -164,12 +171,8 @@ function targetFromCatalog(spec: string): Target {
     // target an OAuth credential serves through a narrower backend.
     // Capabilities are a property of the provider, not of the catalog entry;
     // the operator narrows them afterwards if a particular model is narrower.
-    capabilities: PROVIDER_DESCRIPTORS[providerId].capabilities,
+    capabilities: descriptor.capabilities,
   };
-}
-
-function isCatalogProvider(value: string): value is ProviderId {
-  return value in PROVIDER_MODEL_CATALOG;
 }
 
 /**

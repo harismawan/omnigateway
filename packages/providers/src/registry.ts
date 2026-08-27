@@ -1,4 +1,3 @@
-import type { ProviderId } from "@omni/ir";
 import { anthropicAdapter } from "./anthropic/index.ts";
 import { BODY_ORDER } from "./body.ts";
 import { customAdapter } from "./custom/index.ts";
@@ -20,12 +19,10 @@ import type { ProviderAdapter } from "./types.ts";
  * there: profiles read `Bun.env`, and `descriptors.ts` is a leaf the console
  * and the pure router bundle for the browser.
  *
- * Both are read from `PROFILES` and `BODY_ORDER` rather than from each
- * `<id>/profile.ts` directly. Those tables *are* the per-provider consts — they
- * assemble nothing else — but `PROFILES` also applies the `OMNI_ORDER_*`
- * overrides, and an entry here that skipped them would be a second answer to
- * "what order does this provider send its headers in" that disagrees with the
- * first only on installations that set the variable.
+ * Both are read from `PROFILES` and `BODY_ORDER`, which assemble nothing beyond
+ * the per-provider consts themselves — each `<id>/profile.ts` now applies its
+ * own `OMNI_ORDER_*` override, so there is one answer to "what order does this
+ * provider send its headers in" and every reader gets it.
  */
 export type ProviderRegistryEntry = ProviderDescriptor & {
   readonly adapter: ProviderAdapter;
@@ -35,9 +32,14 @@ export type ProviderRegistryEntry = ProviderDescriptor & {
 
 /**
  * Kept under its original name because dispatch and the tests already inject it.
- * Total, so a new provider fails to compile until an adapter exists for it.
+ *
+ * The six literals are written out, so a built-in with no adapter is a compile
+ * error here. The key type is `string` because a provider id is one; dispatch
+ * already handles a miss by throwing `INTERNAL`, which is the right answer
+ * there — reaching it means the router admitted a candidate it should have
+ * excluded.
  */
-export const ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>> = {
+export const ADAPTERS: Readonly<Record<string, ProviderAdapter>> = {
   anthropic: anthropicAdapter,
   openai: openaiAdapter,
   kimi: kimiAdapter,
@@ -51,15 +53,21 @@ export const ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>> = {
  *
  * Built by walking `PROVIDER_DESCRIPTORS` rather than restating the ids a third
  * time — the point of the registry is that the list is written once.
+ *
+ * A descriptor whose adapter, profile or body order is missing is dropped
+ * rather than joined to `undefined`. The cast this replaced asserted the join
+ * was total and would have produced an entry whose `adapter` was `undefined`
+ * while its type said otherwise — a lie the next reader has no way to see. The
+ * key-set equality test in `descriptor.test.ts` is what turns a drop into a
+ * failure; nothing in production reads this table yet, so a louder failure here
+ * would only be a boot crash over a table no request touches.
  */
-export const PROVIDERS: Readonly<Record<ProviderId, ProviderRegistryEntry>> = Object.fromEntries(
-  Object.entries(PROVIDER_DESCRIPTORS).map(([id, descriptor]) => [
-    id,
-    {
-      ...descriptor,
-      adapter: ADAPTERS[id as ProviderId],
-      profile: PROFILES[id as ProviderId],
-      bodyOrder: BODY_ORDER[id as ProviderId],
-    },
-  ]),
-) as Readonly<Record<ProviderId, ProviderRegistryEntry>>;
+export const PROVIDERS: Readonly<Record<string, ProviderRegistryEntry>> = Object.fromEntries(
+  Object.entries(PROVIDER_DESCRIPTORS).flatMap(([id, descriptor]) => {
+    const adapter = ADAPTERS[id];
+    const profile = PROFILES[id];
+    const bodyOrder = BODY_ORDER[id];
+    if (adapter === undefined || profile === undefined || bodyOrder === undefined) return [];
+    return [[id, { ...descriptor, adapter, profile, bodyOrder }] as const];
+  }),
+);

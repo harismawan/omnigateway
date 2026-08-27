@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { grokHost, mergeHeaders, orderHeaders, PROFILES, stainlessHost } from "../src/profile.ts";
+import { entry } from "./entry.ts";
 
 test("stainlessHost maps platform names to the Stainless spelling", () => {
   expect(stainlessHost("darwin", "arm64")).toEqual({ os: "MacOS", arch: "arm64" });
@@ -62,7 +63,9 @@ test("mergeHeaders keeps the base position when a header is replaced", () => {
 });
 
 test("anthropic profile carries the claude-cli identity", () => {
-  const h = new Map(PROFILES.anthropic.headers.map(([n, v]) => [n.toLowerCase(), v]));
+  const h = new Map(
+    entry(PROFILES, "anthropic", "PROFILES").headers.map(([n, v]) => [n.toLowerCase(), v]),
+  );
   expect(h.get("user-agent")).toMatch(/^claude-cli\/\d+\.\d+\.\d+ \(external, cli\)$/);
   expect(h.get("x-app")).toBe("cli");
   expect(h.get("anthropic-dangerous-direct-browser-access")).toBe("true");
@@ -72,14 +75,18 @@ test("anthropic profile carries the claude-cli identity", () => {
 });
 
 test("openai profile carries the codex-cli identity", () => {
-  const h = new Map(PROFILES.openai.headers.map(([n, v]) => [n.toLowerCase(), v]));
+  const h = new Map(
+    entry(PROFILES, "openai", "PROFILES").headers.map(([n, v]) => [n.toLowerCase(), v]),
+  );
   expect(h.get("user-agent")).toMatch(/^codex-cli\/\d+\.\d+\.\d+ \(.+; .+\)$/);
   expect(h.get("originator")).toBe("codex_cli_rs");
   expect(h.get("openai-beta")).toBe("responses=experimental");
 });
 
 test("kimi profile carries the kimi-code-cli identity", () => {
-  const h = new Map(PROFILES.kimi.headers.map(([n, v]) => [n.toLowerCase(), v]));
+  const h = new Map(
+    entry(PROFILES, "kimi", "PROFILES").headers.map(([n, v]) => [n.toLowerCase(), v]),
+  );
   expect(h.get("user-agent")).toMatch(/^kimi-code-cli\/\d+\.\d+\.\d+$/);
   expect(h.get("x-msh-platform")).toBe("kimi_code_cli");
 });

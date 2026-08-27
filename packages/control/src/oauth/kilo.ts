@@ -1,5 +1,5 @@
 import { GatewayError } from "@omni/ir";
-import { PROFILES } from "@omni/providers";
+import { kiloProfile } from "@omni/providers";
 import type { AuthorizeStart, DeviceOAuthProvider, FlowResult, OAuthDeps } from "./types.ts";
 import {
   getJson,
@@ -75,7 +75,7 @@ function deviceCodeFrom(value: unknown): DeviceCodeResponse {
  */
 async function orgIdFor(accessToken: string, deps: OAuthDeps): Promise<string | null> {
   try {
-    const { status, parsed } = await getJson(deps, "kilo", PROFILE_URL, PROFILES.kilo, {
+    const { status, parsed } = await getJson(deps, "kilo", PROFILE_URL, kiloProfile, {
       accessToken,
     });
     if (status < 200 || status >= 300) return null;
@@ -115,7 +115,7 @@ export const kiloOAuth: DeviceOAuthProvider = {
 
   /** Mints the code. Takes no device id: Kilo has no device identity. */
   async begin(_opts, deps): Promise<AuthorizeStart> {
-    const { status, parsed } = await postJson(deps, "kilo", CODES_URL, PROFILES.kilo, {
+    const { status, parsed } = await postJson(deps, "kilo", CODES_URL, kiloProfile, {
       contentType: "application/json",
       body: "",
     });
@@ -168,7 +168,7 @@ export const kiloOAuth: DeviceOAuthProvider = {
       deps,
       "kilo",
       `${CODES_URL}/${encodeURIComponent(code)}`,
-      PROFILES.kilo,
+      kiloProfile,
     );
 
     if (status === 202) throw pendingError("http_202");

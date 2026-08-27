@@ -1,4 +1,25 @@
-export type ProviderId = "anthropic" | "openai" | "kimi" | "kilo" | "grok" | "custom";
+/**
+ * Which provider serves a request.
+ *
+ * A string, not a union of the six that ship in the box. A provider loaded from
+ * `<root>/plugins/` at boot has an id that no compiled-in union could contain,
+ * and this type appears in the request shape itself — `vendor` is keyed by it —
+ * so a closed union here is a closed door there.
+ *
+ * The exhaustiveness this gave up was real and is not replaced by anything
+ * equally strong. What replaces it is validation at registration: every field on
+ * `ProviderDescriptor` is required with no defaults, and a descriptor that fails
+ * that check does not register. Tables assembled by walking the registry stay
+ * total by construction. Only a lookup keyed on a *stored* id — a target read
+ * back from SQLite naming a provider no longer installed — is genuinely partial,
+ * and `noUncheckedIndexedAccess` makes each of those a compile error at the point
+ * of use. Lean on that rather than casting it away.
+ *
+ * The format rule lives in `@omni/providers`, next to the registry that enforces
+ * it. It is not expressed here because `@omni/ir` must not know what a provider
+ * is, only that a request names one.
+ */
+export type ProviderId = string;
 
 /**
  * A caller-placed cache breakpoint, in the only shape providers accept.
@@ -255,7 +276,7 @@ export type ChatRequest = {
   stopSequences?: string[];
   stream: boolean;
   reasoning?: ReasoningConfig;
-  vendor?: Partial<Record<ProviderId, Record<string, unknown>>>;
+  vendor?: Record<string, Record<string, unknown>>;
   /**
    * Beta feature names the client opted into, verbatim.
    *

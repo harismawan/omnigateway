@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { ProviderId } from "@omni/ir";
 import { catalogModelAuths, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { PROVIDER_DESCRIPTORS, PROVIDER_IDS } from "@omni/providers/descriptors";
+import { entryOf } from "@omni/testkit";
 import {
   type CatalogProblem,
   isPaletteSafeColour,
@@ -38,8 +39,8 @@ test("every provider the registry describes is served", () => {
 
 test("every field the console reads survives assembly", () => {
   for (const provider of providerCatalog(unexpected)) {
-    const descriptor = PROVIDER_DESCRIPTORS[provider.id as keyof typeof PROVIDER_DESCRIPTORS];
-    const catalog = PROVIDER_MODEL_CATALOG[provider.id as keyof typeof PROVIDER_MODEL_CATALOG];
+    const descriptor = entryOf(PROVIDER_DESCRIPTORS, provider.id, "PROVIDER_DESCRIPTORS");
+    const catalog = entryOf(PROVIDER_MODEL_CATALOG, provider.id, "PROVIDER_MODEL_CATALOG");
 
     expect(provider.label).toBe(descriptor.presentation.label);
     expect(provider.order).toBe(descriptor.presentation.order);
@@ -111,7 +112,7 @@ test("a provider registered after module load is served", () => {
   // registered, ignored, and not reported. Mutating the registry is exactly what
   // the plugin host will do, so this test does it.
   const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
-  const seed = PROVIDER_DESCRIPTORS.anthropic;
+  const seed = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
   registry.acme = {
     ...seed,
     id: "acme",
@@ -198,7 +199,7 @@ test("a provider whose id cannot be a custom property is withheld", () => {
   // — the id keys `--p-<id>`, the picker and the palette, so serving one that
   // cannot be a property name is worse than serving nothing.
   const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
-  const seed = PROVIDER_DESCRIPTORS.anthropic;
+  const seed = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
   registry["Bad Id{}"] = { ...seed, id: "Bad Id{}" };
 
   try {
@@ -263,7 +264,7 @@ test("the payload survives a JSON round trip unchanged", () => {
  * assembly today. Every caller restores what it found in a `finally`.
  */
 function writableAnthropic(): { colour: { light: string; dark: string } } {
-  return PROVIDER_DESCRIPTORS.anthropic.presentation as {
+  return entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS").presentation as {
     colour: { light: string; dark: string };
   };
 }
