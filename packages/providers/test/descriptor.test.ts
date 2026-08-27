@@ -178,6 +178,23 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     custom: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
   };
 
+  /**
+   * `PASTE_HINT` from `ConnectDialog.tsx:54`.
+   *
+   * Added after review found this was the one moved field with no pin anywhere:
+   * mutating anthropic's hint, and deleting custom's outright, both survived the
+   * full core suite. Only openai's and kilo's were covered, incidentally, by a
+   * dashboard connect test.
+   */
+  const PASTE_HINTS_BEFORE: Readonly<Record<ProviderId, string>> = {
+    anthropic: "Authorize in the browser, then paste the code Anthropic shows you.",
+    openai: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
+    kimi: "Enter the code on Kimi's device page. This dialog finishes on its own.",
+    kilo: "Approve the code on Kilo's device page. This dialog finishes on its own.",
+    grok: "Authorize in the browser. When it redirects to 127.0.0.1, paste the whole URL.",
+    custom: "Enter endpoint metadata and API key.",
+  };
+
   /** `PROVIDER_ORDER` from `AccountsBoard.tsx`, as a rank per id. */
   const ORDER_BEFORE: readonly ProviderId[] = [
     "anthropic",
@@ -206,6 +223,12 @@ describe("presentation and routing data match their pre-change fixtures", () => 
       expect(label).toBe(LABELS_BEFORE[id]);
       expect(tone).toBe(TONES_BEFORE[id]);
       expect(colour).toEqual(COLOURS_BEFORE[id]);
+    }
+  });
+
+  test("paste hints match, and every provider states one", () => {
+    for (const id of IDS) {
+      expect(PROVIDER_DESCRIPTORS[id].presentation.pasteHint).toBe(PASTE_HINTS_BEFORE[id]);
     }
   });
 

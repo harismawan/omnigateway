@@ -317,10 +317,12 @@ assertions.
 - **Completeness.** Every descriptor has every required field populated; a
   fixture descriptor missing `writeOverInput` is refused. The negative case is
   the point — absent it, the test passes against a validator that does nothing.
-- **Derivation, not restatement.** `packages/providers/test/catalog.test.ts:7`
-  re-enumerates the six ids by hand today; it derives them from the registry
-  instead. A test asserting the registry has six entries is the one place the
-  count is written down.
+- **Derivation, not restatement — except in tests.** An earlier draft had
+  `packages/providers/test/catalog.test.ts:7` stop re-enumerating the six ids by
+  hand and derive them from the registry. That was **not** done, and should not
+  be: a test that derives its expectation from the thing under test agrees with
+  any registry at all, which is the exact vacuity the equivalence fixtures three
+  paragraphs up exist to avoid. Production code derives; tests restate.
 - **Collision.** Registering an id a built-in holds is refused.
 - **`schemas.ts:59` regains `custom`.** A target with `provider: "custom"` now
   validates through the non-custom arm's sibling; the existing custom arm keeps
