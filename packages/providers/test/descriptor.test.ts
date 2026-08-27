@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { ProviderId } from "@omni/ir";
+import { BODY_ORDER } from "../src/body.ts";
 import { PROVIDER_MODEL_CATALOG } from "../src/catalog.ts";
 import type { ProviderDescriptor } from "../src/descriptor.ts";
 import { PROVIDER_DESCRIPTORS } from "../src/descriptors.ts";
+import { PROFILES } from "../src/profile.ts";
 import { ADAPTERS, PROVIDERS } from "../src/registry.ts";
 
 /**
@@ -265,6 +267,19 @@ describe("the registry agrees with what it replaced", () => {
     for (const id of IDS) {
       expect(PROVIDERS[id].adapter.capabilities).toEqual(PROVIDER_DESCRIPTORS[id].capabilities);
     }
+  });
+
+  test("every entry joins its own profile and body order, not another's", () => {
+    // Identity per id. A mutant that joined one provider's profile to every
+    // entry survived the whole suite before this existed: `PROVIDERS` has no
+    // production consumer, so nothing else reads the join at all.
+    for (const id of IDS) {
+      expect(PROVIDERS[id].profile).toBe(PROFILES[id]);
+      expect(PROVIDERS[id].bodyOrder).toBe(BODY_ORDER[id]);
+    }
+    // And the joined values are actually distinguishable, so the assertions
+    // above cannot pass by every provider sharing one object.
+    expect(new Set(IDS.map((id) => PROVIDERS[id].profile)).size).toBe(IDS.length);
   });
 
   test("every entry joins the adapter that serves it", () => {

@@ -31,7 +31,8 @@ shape and why the HTTP client is built on `node:http`.
    `descriptor.ts` must not import the adapter, and `profile.ts` must not be imported from
    `descriptors.ts`. Both rules are one rule: `@omni/providers/descriptors` is a leaf the console and
    the pure router bundle for the browser, adapters pull the HTTP client, and profiles read
-   `Bun.env`. `packages/providers/test/leafSubpaths.test.ts` enforces it.
+   `Bun.env`. `packages/providers/test/leafSubpaths.test.ts` enforces it, by import graph and by browser bundle
+   together. Its file counts derive from the provider list, so adding one does not fail it.
 4. Fork `wire.ts` and `decode.ts` per provider. Never import another provider's directory: vendors
    look alike on paper and diverge in practice, a shared encoder collects a branch per quirk, and a
    cross-provider import is exactly what stops an adapter becoming a standalone plugin later.

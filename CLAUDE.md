@@ -93,9 +93,14 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     Console held own copy of every one, plus **second `ProviderId` type** no compiler tied to
     `@omni/ir`'s, and `PROVIDER_LABEL` in **three** places. Subpath admissible on exactly terms
     `catalog` already was: leaf, no adapter, no HTTP client, pinned by
-    `packages/providers/test/leafSubpaths.test.ts`, which bundle each entry point for browser and
-    assert transport absent **and** known symbol present — "absent" is also what harness that
-    bundled nothing report. SDK permitted because alternative was second copy of rule about what may leave plugin's
+    `packages/providers/test/leafSubpaths.test.ts`, which use **two instrument, neither sufficient
+    alone**: walk each entry point's import graph via `Bun.Transpiler.scanImports` (real parser, so
+    dynamic `import()` and type-only import classified right), **and** build browser bundle and check
+    for `Bun.env`. Walk catch adapter or profile import no marker reveal — adapter take `HttpClient`
+    by injection. Bundle catch a global, which have no import edge to walk. Two hand-written version
+    shipped before this, one of each kind, and each miss exactly what other now cover. Never
+    hand-roll the parser: regex version was defeated by a doc comment containing words
+    `import type`. SDK permitted because alternative was second copy of rule about what may leave plugin's
     own API prefix — rule held in two places is one that end up true in one. Same argument later
     moved LIVE switch there: which control pause polling is a rule too. SDK **no longer** leaf with
     no imports — `live.ts` import React — so it now in `SHARED_IMPORTS`, one copy served to console
