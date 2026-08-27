@@ -249,6 +249,7 @@ test("citation and compaction deltas preserve their canonical payloads", async (
       type: "providerNative",
       provider: "anthropic",
       deltaType: "citations_delta",
+      fold: "citation",
       data: { citation },
     },
   });
@@ -259,6 +260,7 @@ test("citation and compaction deltas preserve their canonical payloads", async (
       type: "providerNative",
       provider: "anthropic",
       deltaType: "compaction_delta",
+      fold: "merge",
       data: { content: "summary", encrypted_content: "opaque" },
     },
   });

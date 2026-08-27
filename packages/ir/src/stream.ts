@@ -121,6 +121,22 @@ export type Delta =
       type: "providerNative";
       provider: ProviderId;
       deltaType: string;
+      /**
+       * What this delta does to the block it belongs to, in IR terms.
+       *
+       * The decoder states it, because the decoder is the only thing that knows
+       * what its own delta names mean. Core used to switch on those names
+       * directly — `citations_delta` and `compaction_delta`, two Anthropic wire
+       * strings sitting inside `collect()` — which made stream folding
+       * un-extendable without editing `packages/ir`.
+       *
+       * `"merge"` folds `data` into the block's own data at completion.
+       * `"citation"` appends `data.citation` to the containing text block, which
+       * is the one case where a native delta lands on a block of another kind.
+       * Absent means the delta is carried and replayed verbatim, which is what
+       * every other native delta does.
+       */
+      fold?: "merge" | "citation";
       data: Record<string, unknown>;
     };
 
@@ -159,7 +175,11 @@ type Accum =
       blockType: string;
       data: Record<string, unknown>;
       json: string;
-      deltas: Array<{ deltaType: string; data: Record<string, unknown> }>;
+      deltas: Array<{
+        deltaType: string;
+        fold?: "merge" | "citation";
+        data: Record<string, unknown>;
+      }>;
     };
 
 /**
@@ -220,7 +240,7 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
           acc.json += ev.delta.partial;
         else if (ev.delta.type === "providerNative") {
           if (acc.kind === "providerNative") acc.deltas.push(ev.delta);
-          else if (acc.kind === "text" && ev.delta.deltaType === "citations_delta")
+          else if (acc.kind === "text" && ev.delta.fold === "citation")
             acc.citations.push(ev.delta.data.citation);
         }
         break;
@@ -252,7 +272,7 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
       if (acc.kind === "providerNative") {
         let data = acc.json === "" ? acc.data : { ...acc.data, input: parseJson(acc.json) };
         for (const delta of acc.deltas) {
-          if (delta.deltaType === "compaction_delta") data = { ...data, ...delta.data };
+          if (delta.fold === "merge") data = { ...data, ...delta.data };
         }
         return { type: "providerNative", provider: acc.provider, blockType: acc.blockType, data };
       }
