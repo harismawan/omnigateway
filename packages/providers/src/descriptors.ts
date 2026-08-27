@@ -20,10 +20,11 @@ import { openaiDescriptor } from "./openai/descriptor.ts";
  * silently undo that, and `packages/router`'s purity depends on it — the router
  * already reads `@omni/providers/catalog` on the same terms.
  *
- * Anything wanting a live adapter reads `PROVIDERS` from `registry.ts`, which
- * joins these to them. That split is not stylistic: adapters import `BODY_ORDER`
- * and `PROFILES`, so a descriptor table that carried adapters could not also be
- * what those tables derive from.
+ * Anything wanting a live adapter, a client profile or a body order reads
+ * `PROVIDERS` from `registry.ts`, which joins those to these. That split is not
+ * stylistic: adapters import `BODY_ORDER` and `PROFILES`, so a table carrying
+ * adapters cannot sit upstream of them, and profiles read `Bun.env`, which has
+ * no business in a browser bundle.
  */
 export const PROVIDER_DESCRIPTORS: ProviderDescriptors = {
   anthropic: anthropicDescriptor,
