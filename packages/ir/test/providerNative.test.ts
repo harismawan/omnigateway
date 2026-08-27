@@ -200,3 +200,103 @@ test("a portable tool and a tool the custom provider defines are distinguishable
   expect(tools.filter((t) => t.kind === "portable")).toEqual([portable]);
   expect(tools.filter((t) => t.kind === "provider")).toEqual([byCustomProvider]);
 });
+
+/**
+ * The point of `fold`, and the reason it is not just a rename.
+ *
+ * `collect()` used to switch on `citations_delta` and `compaction_delta` —
+ * Anthropic's own wire strings, sitting in `packages/ir`. A second provider
+ * wanting either behaviour had to add its spelling to that switch. Now the
+ * decoder states the operation and core performs it, so a provider that spells
+ * its deltas nothing like Anthropic's gets both for free.
+ *
+ * These use `kimi` deliberately. Nothing in the repository decodes a kimi native
+ * delta today; if this passes, the mechanism is generic rather than Anthropic's
+ * behaviour under a new name.
+ */
+test("any provider's delta can merge into its own native block", () => {
+  const events: StreamEvent[] = [
+    { type: "start", id: "m", model: "kimi-k2" },
+    {
+      type: "blockStart",
+      index: 0,
+      block: { type: "providerNative", provider: "kimi", blockType: "vendor_thing", data: {} },
+    },
+    {
+      type: "blockDelta",
+      index: 0,
+      delta: {
+        type: "providerNative",
+        provider: "kimi",
+        deltaType: "kimi_specific_name",
+        fold: "merge",
+        data: { merged: true },
+      },
+    },
+    { type: "end", stopReason: "endTurn", usage: usage() },
+  ];
+
+  const [block] = collect(events).content;
+  expect(block).toEqual({
+    type: "providerNative",
+    provider: "kimi",
+    blockType: "vendor_thing",
+    data: { merged: true },
+  });
+});
+
+test("any provider's delta can annotate the text block it lands on", () => {
+  const citation = { cited_text: "hi", document_index: 0 };
+  const events: StreamEvent[] = [
+    { type: "start", id: "m", model: "kimi-k2" },
+    { type: "blockStart", index: 0, block: { type: "text" } },
+    {
+      type: "blockDelta",
+      index: 0,
+      delta: {
+        type: "providerNative",
+        provider: "kimi",
+        deltaType: "kimi_source_ref",
+        fold: "citation",
+        data: { citation },
+      },
+    },
+    { type: "end", stopReason: "endTurn", usage: usage() },
+  ];
+
+  const [block] = collect(events).content;
+  expect(block).toEqual({ type: "text", text: "", citations: [citation] });
+});
+
+test("a native delta stating no fold is carried, never folded", () => {
+  // The default, and what every native delta but those two does. Asserted so
+  // that adding a fold kind cannot silently change the meaning of the deltas
+  // that state none.
+  const events: StreamEvent[] = [
+    { type: "start", id: "m", model: "kimi-k2" },
+    {
+      type: "blockStart",
+      index: 0,
+      block: { type: "providerNative", provider: "kimi", blockType: "vendor_thing", data: {} },
+    },
+    {
+      type: "blockDelta",
+      index: 0,
+      delta: {
+        type: "providerNative",
+        provider: "kimi",
+        deltaType: "kimi_specific_name",
+        data: { merged: true },
+      },
+    },
+    { type: "end", stopReason: "endTurn", usage: usage() },
+  ];
+
+  const [block] = collect(events).content;
+  expect(block).toEqual({
+    type: "providerNative",
+    provider: "kimi",
+    blockType: "vendor_thing",
+    data: {},
+  });
+});

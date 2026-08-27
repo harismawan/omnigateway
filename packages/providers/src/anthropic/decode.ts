@@ -284,6 +284,10 @@ export async function* decodeAnthropic(
               type: "providerNative",
               provider: "anthropic",
               deltaType: delta.type,
+              // A citation delta lands on the *text* block it annotates, not on
+              // a native block. Stating the fold here is what lets `collect()`
+              // do that without knowing Anthropic's name for it.
+              fold: "citation",
               data: { citation: delta.citation },
             },
           };
@@ -295,6 +299,9 @@ export async function* decodeAnthropic(
               type: "providerNative",
               provider: "anthropic",
               deltaType: delta.type,
+              // Merged into the block's data when the block completes, rather
+              // than replayed as a separate delta.
+              fold: "merge",
               data: {
                 ...(delta.content === undefined ? {} : { content: delta.content }),
                 ...(delta.encrypted_content === undefined

@@ -437,10 +437,31 @@ export type TargetAddress = {
  */
 export function servesTarget(target: TargetAddress, account: ServingAccount): boolean {
   if (account.provider !== target.provider) return false;
-  // Read from the account rather than trusting a saved string: a custom
+  // A target that names an endpoint is served only by an account at that
+  // endpoint. Read from the account rather than trusting a saved string: an
   // endpoint is the credential's own property, and the router compares it the
   // same way.
-  if (target.provider === "custom" && account.providerData.endpointId !== target.endpointId) {
+  //
+  // Keyed on the target naming one rather than on `provider === "custom"`, which
+  // is what it used to say. Equivalent for every validly-saved target — the
+  // control schema requires `endpointId` on the custom arm and offers it on no
+  // other — and it takes the last provider name out of this file.
+  //
+  // It is deliberately *stricter* on data the schema never saw. `sqlite/config.ts`
+  // reads targets back with `JSON.parse` and no validation, so a restored or
+  // hand-edited database can carry an `endpointId` on a non-custom target. That
+  // used to be ignored; it is now enforced, which fails closed on a constraint
+  // the row states rather than serving it from an account that does not match.
+  //
+  // `""` counts as naming none, not as an endpoint to match. The console's
+  // `TargetDraft.endpointId` is a non-optional string and carries `""` for every
+  // non-custom target, and the control schema refuses `""` on the way in for the
+  // same reason: it is an id nothing matches, not a third state. Reading it as a
+  // real value here would make this function disagree with the callers it exists
+  // to be the only copy for — the pin picker would offer no account at all for
+  // every non-custom target.
+  const endpoint = target.endpointId;
+  if (endpoint !== undefined && endpoint !== "" && account.providerData.endpointId !== endpoint) {
     return false;
   }
   return target.credentialId === undefined || account.id === target.credentialId;
