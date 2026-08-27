@@ -1,8 +1,11 @@
 # Core/provider decoupling
 
 Removing provider-specific behaviour from `ir`, `router`, `store`, `control`,
-`ratelimit` and `rtk` — by making IR values carry their own provenance where that
-is possible, and by a closed set of named extension points where it is not.
+`ratelimit` and `rtk` by making IR values carry their own provenance.
+
+This design also specified a closed set of named extension points for whatever
+that could not reach. On implementation there was nothing left for them to do —
+see Outcome 3. No hook was built.
 
 Sub-project 1b. Depends on
 [the provider descriptor registry](2026-08-26-provider-descriptor-registry-design.md),
@@ -51,7 +54,10 @@ preference:
 3. **A named extension point.** A closed, enumerated set. Adding one is a
    deliberate core change with a name and a doc comment.
 
-Outcome 2 is most of this design. Outcome 3 is deliberately small.
+Outcome 2 was expected to be most of this design and Outcome 3 deliberately
+small. It turned out to be all of it: every site the third outcome was drafted
+for had an answer in the second, or an argument for staying in core. The
+preference order is the part that earned its place.
 
 ## Outcome 2: values that carry their own provenance
 
@@ -92,9 +98,13 @@ for every request expressible today.
 
 The same rename applies to the two delta variants (`ir/stream.ts:110-111`), the
 `ContentBlockStart` arm (`:98`), the `Accum` arm (`:143-149`) and the
-`collect()` cases (`:180-186`, `:203-210`, `:236-241`), and to
-`ANTHROPIC_NATIVE_BLOCK_TYPES`, which becomes descriptor data — the set of block
-types *that provider* treats as native.
+`collect()` cases (`:180-186`, `:203-210`, `:236-241`), `ANTHROPIC_NATIVE_BLOCK_TYPES` was to become descriptor data — the set of block
+types *that provider* treats as native — and did **not**. It stays in
+`packages/providers/src/anthropic/tools.ts`, read by the Anthropic ingress. It is
+a provider's own vocabulary held inside that provider's directory, which is where
+this design wants provider knowledge to live; moving it onto the descriptor would
+only matter once a second provider produced native blocks. Left for whoever adds
+one.
 
 ### `ToolDef.provider` — and a footgun to fix while we are here
 
@@ -143,8 +153,15 @@ The `capabilityOnly` branch redacts `credentialId` from the degradation, and its
 reasoning is sound and survives: a capability exclusion is a fact about the
 target's provider, not about the account, so naming an account there would blame
 one that is fine. What does not survive is discovering that by comparing a
-string. `Excluded` gains a discriminator and dispatch tests `e.kind ===
-"capability"`.
+string. `Excluded` gains a discriminator and dispatch tests it instead.
+
+Its values shipped as `"target" | "account"`, not `"capability" | "credential"`
+as first drafted. Three exclusions whose `reason` begins `capability:` —
+`tools`, `images`, `reasoning` — are facts about the account, and the shipped
+string match did not cover them. Naming the discriminator after the reason string
+would therefore have described the opposite of what it does. It answers "is this
+about the target or about the account", which is the only question the redaction
+asks.
 
 **The emitted string still changes**, because the concept is renamed:
 `excluded:capability:anthropicTools` becomes
@@ -155,74 +172,84 @@ contract in the same class as `RTK_FILTER_IDS`. The decision is: **rename, do no
 migrate.** Degradations are a forensic set rendered for operators, not parsed on
 read the way `isRtkFilterId` parses filter ids, so old rows stay readable and
 nothing drops. Rows written before this release carry the old spelling; rows
-after carry the new one; both are documented in `ARCHITECTURE.md`, and the old
-spelling ages out with retention. A migration was considered and rejected: it
+after carry the new one; both are documented in `CLAUDE.md`'s client-contract rules, and the old spelling
+ages out with retention. (`ARCHITECTURE.md` was named first and has no
+degradations section to carry it.) A migration was considered and rejected: it
 would rewrite a table that is very large on a busy install, synchronously,
 for cosmetics.
 
-## Outcome 3: the closed extension-point set
+## Outcome 3: the closed extension-point set — which turned out to be empty
 
-Four points, and the intent is that this list stays four. Each is optional on a
-descriptor; a provider that implements none behaves exactly as today.
+**This section specified four named hooks and said the list should stay four. On
+implementation all four dissolved, and none was built.** The section is kept
+rather than deleted because the reasoning is the useful part: each hook was a
+real provider-specific core site, and each turned out to have a better answer
+than an extension point.
 
-```ts
-export type ProviderHooks = {
-  /**
-   * Whether a content block may carry a cache breakpoint.
-   * Replaces the thinking-block exclusion hard-coded into
-   * `cacheControlOf` (ir/request.ts:90-95), which exists because Anthropic
-   * rejects a marker on a thinking block.
-   */
-  cacheEligible?(block: ContentBlock): boolean;
+The four, and what happened to each:
 
-  /**
-   * Folds a provider-native delta into its accumulator.
-   * Replaces the `citations_delta` (ir/stream.ts:204) and `compaction_delta`
-   * (:238) literals inside core stream folding. Returning undefined means
-   * "fold as an opaque append", today's default for every other delta type.
-   */
-  foldNativeDelta?(blockType: string, deltaType: string, accum: NativeAccum, delta: unknown): NativeAccum | undefined;
+**`cacheEligible(block)` — unnecessary.** It was to replace the thinking-block
+exclusion in `cacheControlOf` (`ir/request.ts:90-95`), on the grounds that
+"Anthropic rejects a marker on a thinking block" is Anthropic's rule. But
+`ThinkingBlock` is `{ type: "thinking"; text: string; signature?: string }` — it
+has no `cacheControl` field at all. The exclusion is type narrowing, and the
+absence is a property of the type exactly as that function's comment already
+said. Reading the comment as describing a rule rather than a shape is what put
+this on the list.
 
-  /**
-   * Health penalty for an error code this provider raises.
-   * Replaces the FINGERPRINT_REFUSED entry in `router/breaker.ts:26-38`, whose
-   * "none" penalty exists because a fingerprint refusal says nothing about the
-   * credential's health.
-   */
-  breakerPenalty?(code: ErrorCode): Penalty | undefined;
+**`foldNativeDelta(...)` — became data, not a hook.** `collect()` switched on
+`citations_delta` and `compaction_delta`, two Anthropic wire strings inside
+`packages/ir`. A hook would have needed injecting into `collect()`, which `ir`
+cannot do — `packages/providers` imports `ir`, so `ir` cannot read the registry.
+The decoder is the only thing that knows what its own delta names mean, so it
+states the operation instead: `fold?: "merge" | "citation"` on the native delta,
+performed by core, absent meaning "carry verbatim". The wire names now appear
+only in `packages/providers/src/anthropic/decode.ts`.
 
-  /**
-   * An extra condition on whether an account serves a target, beyond provider
-   * identity and the pin. Replaces the `endpointId` branch in
-   * `servesTarget` (store/types.ts:388).
-   */
-  servesTarget?(target: TargetAddress, account: ServingAccount): boolean;
-};
-```
+This is outcome 2 again, and the pattern is worth naming: **a hook that has to be
+injected into a pure package is usually a value that should have been on the
+data.** The injection cost is what exposes it.
 
-### Constraints on hooks, each of which has already been broken once elsewhere
+**`breakerPenalty(code)` — the wrong shape.** `router/breaker.ts`'s table is keyed
+by `ErrorCode`, not by provider, and `ErrorCode` is core vocabulary this design
+deliberately keeps core. The entry looks Anthropic-specific only because
+Anthropic is the sole raiser of `FINGERPRINT_REFUSED` today. A hook here would
+let a provider set the health policy for a shared failure code — a real
+capability, with the obvious downside, and no current need. Vocabulary that stays
+core keeps its policy in core.
 
-- **Hooks called from `ir` or `router` must be pure.** No I/O, no clock, no
-  randomness — the same contract those packages hold themselves to (boundary
-  rules 1 and 3). Not compiler-enforceable; enforced by review and by tests that
-  run each hook twice and assert identical output.
-- **Resolved once, not per call.** `collect()` runs per stream event. The hook is
-  looked up by provider id from a record — one map read — and never by scanning
-  the registry.
-- **`servesTarget` stays one rule in one place.** CLAUDE.md records that five
-  sites once asked "can this account serve this target" separately and three
-  asked less than the router did, so a target pinned to another provider's
-  account saved clean, hard-failed every request, and `doctor` called it healthy.
-  The hook does **not** reintroduce that: `servesTarget` in `@omni/store/types`
-  remains the single copy and the single call site, and consults the descriptor
-  from inside itself. Nothing else may call the hook directly. This is the one
-  extension point where the invariant is more important than the extensibility,
-  and it is included only because the `custom` endpoint branch is otherwise
-  permanent.
-- **`LogFields` does not become extensible, ever.** It is a closed allowlist and
-  the redaction boundary; `cloakedTools` stays a core field. A provider that
-  wants new telemetry does not get a hook for it. Stated here because it is the
-  obvious next request and the answer must be no.
+**`servesTarget(...)` — became one word.** The rule was
+`target.provider === "custom" && account.providerData.endpointId !== target.endpointId`.
+It is now "a target naming an endpoint is served only by an account at that
+endpoint", which is equivalent for every validly-saved target — the control
+schema requires `endpointId` on the custom arm and offers it on no other — and it
+removes the last provider name from `packages/store`. No hook, no second caller,
+and the invariant this design was most worried about is untouched.
+
+Two things that change surfaced, both now pinned:
+
+- It is **stricter on data the schema never saw**. `sqlite/config.ts` reads
+  targets back with `JSON.parse` and no validation, so a restored or hand-edited
+  database can carry an `endpointId` on a non-custom target. That used to be
+  ignored and now fails closed.
+- The first version read `""` as an endpoint to match, which **broke the
+  console's pin picker for every non-custom target**. `TargetDraft.endpointId` is
+  a non-optional string holding `""` for none, and the control schema refuses
+  `""` on the way in for the same reason: it is an id nothing matches, not a
+  third state. Three dashboard tests caught it; the store's own tests did not,
+  because none of them spelled "none" that way. This is precisely the failure
+  mode CLAUDE.md records for this function — callers asking the question
+  differently from the single copy — reproduced while generalising it.
+
+### What this means for the next such design
+
+The instinct to specify an extension surface up front was wrong here in every
+case, and the corrective is cheap: **for each proposed hook, try to write the
+value that would make it unnecessary first.** Three of the four had one. The
+fourth had a reason not to exist at all.
+
+`LogFields` still never becomes extensible, and redaction rules still never do —
+those were never hooks in this design and are stated in CLAUDE.md rule 16.
 
 ## What stays in core, deliberately
 
@@ -240,11 +267,14 @@ provider-specific *logic* from core, not provider-shaped *vocabulary*.
   providers), the target set selected by the new rule equals the set selected by
   `ANTHROPIC_NATIVE_TOOLS` today. Written before the table is deleted, against a
   checked-in copy of it.
-- **Each hook has a negative test.** A descriptor implementing none of the four
-  produces today's behaviour exactly. Without this, a hook that is never invoked
-  looks identical to one that works.
-- **Each hook has a purity test**: invoked twice with equal input, equal output,
-  no observable side effect.
+- **The `fold` generalisation is tested with a provider that does not use it.**
+  A `kimi` delta, spelled nothing like Anthropic's, gets both `merge` and
+  `citation` behaviour, and a delta stating no fold is carried verbatim. Testing
+  it only with Anthropic's own deltas would pass equally against a rename.
+- **`servesTarget` is pinned on both the stricter case and the `""` case.** The
+  first is the deliberate behaviour change on unvalidated data; the second is the
+  regression that broke the console's pin picker and that the store's own tests
+  missed, because none of them spelled "none" the way its callers do.
 - **The `kind: "portable"` rename gets a collision test**: a tool defined by the
   `custom` *provider* and a portable tool are distinguishable, which they are not
   today.
@@ -265,13 +295,13 @@ provider-specific *logic* from core, not provider-shaped *vocabulary*.
   `packages/rtk/test/anthropicNative.test.ts`. That test moves and keeps
   asserting byte-identical preservation; it is the only thing standing between a
   renamed variant and silent rewriting.
-- **The hook set will be asked to grow.** Four is a deliberate number. Each
-  addition should require the same evidence this design required: a specific core
-  site, a provider that cannot work without it, and no self-describing
-  alternative.
-- **`servesTarget` is the dangerous one.** If a second call site to the hook ever
-  appears, the bug CLAUDE.md records comes back. A test asserting the hook has
-  exactly one caller is worth its cost.
+- **A hook set will be proposed again.** When it is, the corrective that worked
+  here is cheap: for each proposed hook, write the value that would make it
+  unnecessary first. Three of four had one; the fourth had an argument for
+  staying in core.
+- **`servesTarget` remains the dangerous one**, hook or no hook. It is still the
+  single copy of a question five sites once asked separately, and generalising it
+  reproduced that exact failure mode once before the dashboard tests caught it.
 
 ## Out of scope
 
