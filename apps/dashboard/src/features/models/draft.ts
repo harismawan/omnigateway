@@ -1,17 +1,50 @@
-import {
-  type CatalogAuth,
-  catalogLimits,
-  catalogModelAuths,
-  catalogPricing,
-  PROVIDER_MODEL_CATALOG,
-  type ProviderModelChoice,
-} from "@omni/providers/catalog";
 // The one place the console asks a routing question, imported rather than
 // reimplemented for the same reason `vitals.ts` imports `sameWindow`: a second
 // copy of "which account can serve this target" is what put the picker and the
 // router out of step in the first place.
 import { servesTarget } from "@omni/store/types";
-import type { Credential, ProviderId, Strategy, Target, VirtualModel } from "../../api/types.ts";
+import { findProvider } from "../../api/queries.ts";
+import type {
+  AuthType,
+  CatalogModel,
+  CatalogProvider,
+  Credential,
+  ProviderId,
+  Strategy,
+  Target,
+  VirtualModel,
+} from "../../api/types.ts";
+
+/**
+ * The loaded provider catalog, as every helper below takes it.
+ *
+ * A parameter rather than a module import: the catalog arrives over
+ * `/api/catalog` now, so there is nothing to close over — and passing it in is
+ * what lets these functions be tested against a two-provider fixture instead of
+ * against whatever the shipped catalog happens to list this week.
+ */
+export type Catalog = readonly CatalogProvider[];
+
+/** One catalog entry, or undefined for a model the catalog does not list. */
+function modelEntry(catalog: Catalog, provider: string, model: string): CatalogModel | undefined {
+  return findProvider(catalog, provider)?.models.find((entry) => entry.id === model);
+}
+
+/**
+ * Which credential types can reach one provider model.
+ *
+ * The *fact*, not the rule: callers decide what to do about it. Two answers
+ * collapse to the provider's whole set — a choice with no `auth` is served
+ * either way, which is the normal case, and a model the catalog does not list
+ * is unknown rather than restricted. A provider the catalog does not carry at
+ * all is unknown in the same way, and answering "nothing can reach it" there
+ * would hide every model of a provider whose entry failed to arrive.
+ */
+function modelAuths(catalog: Catalog, provider: string, model: string): readonly AuthType[] | null {
+  const entry = findProvider(catalog, provider);
+  if (entry === undefined) return null;
+  return entry.models.find((choice) => choice.id === model)?.auth ?? entry.authTypes;
+}
 
 /**
  * The editor holds numbers as strings.
@@ -104,14 +137,15 @@ function nextKey(): string {
  * operator's own numbers alone.
  */
 export function catalogPrices(
+  catalog: Catalog,
   provider: ProviderId,
   model: string,
 ): Pick<
   TargetDraft,
   "costInput" | "costOutput" | "costCacheRead" | "costCacheWrite5m" | "costCacheWrite1h"
 > | null {
-  const listed = catalogPricing(provider, model);
-  if (listed === null) return null;
+  const listed = modelEntry(catalog, provider, model)?.pricing;
+  if (listed === undefined) return null;
   return {
     costInput: String(listed.input),
     costOutput: String(listed.output),
@@ -126,11 +160,15 @@ export function catalogPrices(
  * Null for a model it does not list, which leaves the operator's figures alone.
  */
 export function catalogTokenLimits(
+  catalog: Catalog,
   provider: ProviderId,
   model: string,
 ): Pick<TargetDraft, "contextWindow" | "maxOutputTokens"> | null {
-  const listed = catalogLimits(provider, model);
-  if (listed === null) return null;
+  // The published figures, which are the API's. A target served through an
+  // OAuth backend may be narrower, and that narrowing is the gateway's to work
+  // out per listing — writing it into the field here would pin it.
+  const listed = modelEntry(catalog, provider, model)?.limits;
+  if (listed === undefined) return null;
   return {
     contextWindow: String(listed.contextWindow),
     maxOutputTokens: String(listed.maxOutputTokens),
@@ -138,14 +176,14 @@ export function catalogTokenLimits(
 }
 
 /** Which ways in the installation holds, per provider. Absent means none. */
-export type HeldAuths = Partial<Record<ProviderId, readonly CatalogAuth[]>>;
+export type HeldAuths = Partial<Record<ProviderId, readonly AuthType[]>>;
 
-const AUTH_NOUN: Readonly<Record<CatalogAuth, string>> = {
+const AUTH_NOUN: Readonly<Record<AuthType, string>> = {
   oauth: "OAuth",
   apiKey: "an API key",
 };
 
-function phrase(auths: readonly CatalogAuth[]): string {
+function phrase(auths: readonly AuthType[]): string {
   return auths.map((auth) => AUTH_NOUN[auth]).join(" or ");
 }
 
@@ -158,7 +196,7 @@ function phrase(auths: readonly CatalogAuth[]): string {
  * failure would be worse than showing them.
  */
 export function heldAuths(credentials: readonly Credential[]): HeldAuths {
-  const held: Record<string, CatalogAuth[]> = {};
+  const held: Record<string, AuthType[]> = {};
   for (const credential of credentials) {
     const ways = held[credential.provider] ?? [];
     if (!ways.includes(credential.authType)) ways.push(credential.authType);
@@ -176,20 +214,28 @@ export function heldAuths(credentials: readonly Credential[]): HeldAuths {
  * catalog does not list is also unknown: the curated list is a subset of what
  * a provider serves, and Kilo's is a few dozen rows out of several hundred.
  */
-export function reachable(provider: ProviderId, model: string, held: HeldAuths): boolean {
+export function reachable(
+  catalog: Catalog,
+  provider: ProviderId,
+  model: string,
+  held: HeldAuths,
+): boolean {
   const have = held[provider];
   if (have === undefined || have.length === 0) return true;
-  return catalogModelAuths(provider, model).some((auth) => have.includes(auth));
+  const serves = modelAuths(catalog, provider, model);
+  if (serves === null) return true;
+  return serves.some((auth) => have.includes(auth));
 }
 
 /** The catalog choices worth offering: the ones a connected account can serve. */
 export function reachableChoices(
+  catalog: Catalog,
   provider: ProviderId,
   held: HeldAuths,
-): readonly ProviderModelChoice[] {
-  return PROVIDER_MODEL_CATALOG[provider].models.filter((choice) =>
-    reachable(provider, choice.id, held),
-  );
+): readonly CatalogModel[] {
+  const entry = findProvider(catalog, provider);
+  if (entry === undefined) return [];
+  return entry.models.filter((choice) => reachable(catalog, provider, choice.id, held));
 }
 
 /**
@@ -206,14 +252,18 @@ export function reachableChoices(
  * likely to be reading this.
  */
 export function unreachableNote(
+  catalog: Catalog,
   provider: ProviderId,
   model: string,
   held: HeldAuths,
 ): string | null {
-  if (model.trim().length === 0 || reachable(provider, model, held)) return null;
+  if (model.trim().length === 0 || reachable(catalog, provider, model, held)) return null;
   const have = held[provider] ?? [];
+  // Non-null by construction: `reachable` returns true for a provider the
+  // catalog does not carry, so an unreachable model always had an entry.
+  const serves = modelAuths(catalog, provider, model) ?? [];
   return (
-    `${provider} serves this model to ${phrase(catalogModelAuths(provider, model))} only, ` +
+    `${provider} serves this model to ${phrase(serves)} only, ` +
     `and every ${provider} account here is ${phrase(have)}. Requests routed here will fail.`
   );
 }
@@ -314,22 +364,26 @@ export function reEndpointDraft(target: TargetDraft, endpointId: string): Target
  * operator's choice on every keystroke in the model field.
  */
 export function retargetDraft(
+  catalog: Catalog,
   target: TargetDraft,
   next: Pick<TargetDraft, "provider" | "model">,
 ): TargetDraft {
   return {
     ...target,
     ...next,
-    ...(catalogPrices(next.provider, next.model) ?? {}),
+    ...(catalogPrices(catalog, next.provider, next.model) ?? {}),
     ...(next.provider === target.provider ? {} : { credentialId: "" }),
     contextWindow: "",
     maxOutputTokens: "",
   };
 }
 
-export function blankTarget(provider: ProviderId = "anthropic"): TargetDraft {
-  const model = PROVIDER_MODEL_CATALOG[provider].defaultModel;
-  const prices = catalogPrices(provider, model);
+export function blankTarget(catalog: Catalog, provider: ProviderId = "anthropic"): TargetDraft {
+  // Empty for a provider the catalog does not name — the same state `custom`
+  // is in permanently, since the models an operator's own endpoint serves are
+  // not knowable from here. The field is required and the operator fills it.
+  const model = findProvider(catalog, provider)?.defaultModel ?? "";
+  const prices = catalogPrices(catalog, provider, model);
   return {
     key: nextKey(),
     provider,
@@ -359,8 +413,8 @@ export function blankTarget(provider: ProviderId = "anthropic"): TargetDraft {
   };
 }
 
-export function blankModel(): ModelDraft {
-  return { id: "", strategy: "score", isAlias: false, targets: [blankTarget()] };
+export function blankModel(catalog: Catalog): ModelDraft {
+  return { id: "", strategy: "score", isAlias: false, targets: [blankTarget(catalog)] };
 }
 
 export function toDraft(model: VirtualModel): ModelDraft {

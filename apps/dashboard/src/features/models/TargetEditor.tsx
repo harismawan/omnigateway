@@ -1,14 +1,15 @@
-import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { RotateCcw, Trash2 } from "lucide-react";
 import { useId } from "react";
 import styled from "styled-components";
+import { findProvider } from "../../api/queries.ts";
 import type { Credential, ProviderId } from "../../api/types.ts";
-import { PROVIDER_LABEL } from "../../theme/tokens.ts";
+import { providerColor } from "../../theme/tokens.ts";
 import { Button, IconButton } from "../../ui/Button.tsx";
 import { Input, NumberInput, Select } from "../../ui/Field.tsx";
 import { Legend, Row, Spacer, Stack } from "../../ui/primitives.ts";
 import { Toggle } from "../../ui/Toggle.tsx";
 import {
+  type Catalog,
   catalogPrices,
   catalogTokenLimits,
   type HeldAuths,
@@ -21,11 +22,9 @@ import {
   unreachableNote,
 } from "./draft.ts";
 
-const PROVIDER_IDS = Object.keys(PROVIDER_MODEL_CATALOG) as ProviderId[];
-
 const Frame = styled.fieldset<{ $provider: ProviderId }>`
   border: 1px solid ${({ theme }) => theme.color.rule};
-  border-left: 3px solid ${({ theme, $provider }) => theme.provider[$provider]};
+  border-left: 3px solid ${({ $provider }) => providerColor($provider)};
   border-radius: ${({ theme }) => theme.radius.control};
   padding: ${({ theme }) => theme.space(3)};
   margin: 0;
@@ -86,6 +85,14 @@ export type TargetEditorProps = {
   onChange: (next: TargetDraft) => void;
   onRemove: () => void;
   removable: boolean;
+  /**
+   * Every provider the gateway can serve, from `/api/catalog`.
+   *
+   * Passed down rather than read here: the editor above already holds it, for
+   * the blank target it mints, and two subscriptions to one boot-time value
+   * would be two chances for the picker and the price to disagree.
+   */
+  catalog: Catalog;
   endpoints: Array<{ id: string; label: string }>;
   /**
    * Which ways in each provider has here. Kilo splits its catalog by backend —
@@ -109,14 +116,15 @@ export function TargetEditor({
   onChange,
   onRemove,
   removable,
+  catalog,
   endpoints,
   held,
   credentials,
 }: TargetEditorProps) {
   const listId = useId();
-  const catalog = PROVIDER_MODEL_CATALOG[target.provider];
-  const choices = reachableChoices(target.provider, held);
-  const unreachable = unreachableNote(target.provider, target.model, held);
+  const entry = findProvider(catalog, target.provider);
+  const choices = reachableChoices(catalog, target.provider, held);
+  const unreachable = unreachableNote(catalog, target.provider, target.model, held);
   const accounts = pinChoices(target, credentials);
   const danglingPin = pinNote(target.credentialId, target, credentials);
 
@@ -124,11 +132,11 @@ export function TargetEditor({
     onChange({ ...target, [key]: value });
   };
 
-  const listed = catalogPrices(target.provider, target.model);
-  const listedLimits = catalogTokenLimits(target.provider, target.model);
+  const listed = catalogPrices(catalog, target.provider, target.model);
+  const listedLimits = catalogTokenLimits(catalog, target.provider, target.model);
 
   const retarget = (next: Pick<TargetDraft, "provider" | "model">) => {
-    onChange(retargetDraft(target, next));
+    onChange(retargetDraft(catalog, target, next));
   };
 
   return (
@@ -159,20 +167,19 @@ export function TargetEditor({
             value={target.provider}
             onChange={(event) => {
               const provider = event.target.value as ProviderId;
+              const next = findProvider(catalog, provider);
               // Swapping provider carries the model name over only if it is
               // still meaningful; otherwise fall back to that provider's default.
-              const known = PROVIDER_MODEL_CATALOG[provider].models.some(
-                (m) => m.id === target.model,
-              );
+              const known = next?.models.some((m) => m.id === target.model) ?? false;
               retarget({
                 provider,
-                model: known ? target.model : PROVIDER_MODEL_CATALOG[provider].defaultModel,
+                model: known ? target.model : (next?.defaultModel ?? ""),
               });
             }}
           >
-            {PROVIDER_IDS.map((id) => (
-              <option key={id} value={id}>
-                {PROVIDER_LABEL[id]}
+            {catalog.map((provider) => (
+              <option key={provider.id} value={provider.id}>
+                {provider.label}
               </option>
             ))}
           </Select>
@@ -206,7 +213,7 @@ export function TargetEditor({
             id={`${listId}-model`}
             list={`${listId}-catalog`}
             value={target.model}
-            placeholder={catalog.defaultModel}
+            placeholder={entry?.defaultModel ?? ""}
             onChange={(event) => retarget({ provider: target.provider, model: event.target.value })}
           />
           <datalist id={`${listId}-catalog`}>

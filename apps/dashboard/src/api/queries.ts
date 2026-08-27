@@ -1,5 +1,6 @@
 import type { Cadence } from "@omnigateway/dashboard-sdk";
 import {
+  queryOptions,
   type UseMutationResult,
   type UseQueryResult,
   useMutation,
@@ -11,6 +12,8 @@ import type {
   AgentModelMapping,
   ApiKeySummary,
   BurnEstimate,
+  CatalogProvider,
+  CatalogResponse,
   ConnectPollResult,
   ConnectStart,
   ConsoleResponse,
@@ -82,7 +85,54 @@ export const queryKeys = {
   snapshots: ["database", "snapshots"] as const,
   lifecycle: ["lifecycle"] as const,
   plugins: ["plugins"] as const,
+  catalog: ["catalog"] as const,
 };
+
+/**
+ * Every provider the gateway can serve, and everything the console draws about
+ * one: label, colour, display order, connect flow, models, prices and limits.
+ *
+ * Stated as shared options rather than as a hook alone because two callers need
+ * the same query: `routes/_app.tsx` awaits it in `beforeLoad`, and the screens
+ * read it back through `useProviderCatalog`. Written out twice, the unwrapping
+ * of `{ providers }` and the sort would be two copies of one rule.
+ *
+ * Held for a long time for `usePlugins`' reason: the catalog is assembled at
+ * boot from the provider registry, so it cannot change under a console that
+ * stays open. A restart is the one thing that moves it, and the restart watcher
+ * reloads the page outright — no push topic for a value with this lifetime.
+ */
+export const catalogQuery = queryOptions({
+  queryKey: queryKeys.catalog,
+  queryFn: async ({ signal }) => {
+    const { providers } = await get<CatalogResponse>("/api/catalog", signal);
+    // Sorted here, once. The endpoint sends `order` rather than a sorted array
+    // because wire order is not a contract, and every screen wants the same
+    // sequence: a provider must not move between the accounts board and the
+    // model picker.
+    return [...providers].sort((a, b) => a.order - b.order);
+  },
+  staleTime: 5 * 60_000,
+});
+
+export function useProviderCatalog(): UseQueryResult<CatalogProvider[]> {
+  return useQuery(catalogQuery);
+}
+
+/**
+ * One provider out of the loaded catalog, or undefined.
+ *
+ * Undefined is a real answer and callers have to decide what it means. A model
+ * id that belongs to no listed provider is *unknown*, never *forbidden* — the
+ * catalog curates a subset of what a provider serves — so the surfaces that ask
+ * fall back to showing the raw id rather than to hiding or refusing anything.
+ */
+export function findProvider(
+  catalog: readonly CatalogProvider[],
+  id: string,
+): CatalogProvider | undefined {
+  return catalog.find((provider) => provider.id === id);
+}
 
 /**
  * Refresh cadence. `false` means this query does not refetch on its own, which

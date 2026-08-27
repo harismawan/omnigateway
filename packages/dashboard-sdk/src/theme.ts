@@ -52,6 +52,12 @@ export const CSS_VARIABLES = [
   // Provider identity. Hues are spaced so that no two providers that sit next
   // to each other in a list are neighbours on the wheel; a plugin that charts
   // per-provider data should use these rather than inventing a series palette.
+  //
+  // The values arrive over `/api/catalog` and are written into the document by
+  // the shell, so `--p-<id>` exists for every provider the *installation*
+  // serves, not only for the six a stock build compiles in. Those six are what
+  // this list can promise; a plugin that wants the rest reads the catalog for
+  // the ids and builds the name, exactly as the console does.
   "--p-anthropic",
   "--p-openai",
   "--p-kimi",

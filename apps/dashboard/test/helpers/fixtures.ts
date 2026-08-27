@@ -2,6 +2,7 @@ import type {
   ApiKeySummary,
   BodyArtifact,
   BurnEstimate,
+  CatalogProvider,
   Credential,
   CredentialHealth,
   DatabaseOverview,
@@ -337,4 +338,151 @@ export function databaseOverview(patch: Partial<DatabaseOverview> = {}): Databas
 /** systemd by default: the shape where both controls are real. */
 export function lifecycle(patch: Partial<LifecycleCapability> = {}): LifecycleCapability {
   return { supervisor: "systemd", canRestart: true, canShutdown: true, ...patch };
+}
+
+/**
+ * The provider catalog every rendered test runs against.
+ *
+ * Hand-written rather than imported from `@omni/providers`. The console reads
+ * this over `/api/catalog` now, and a fixture is what keeps a price edit in
+ * `kilo/models.ts` from failing a test about draft state — the assertions state
+ * their own numbers and this states the numbers they assert.
+ *
+ * Small on purpose: two or three models per provider, chosen for the shapes the
+ * console has to handle rather than for coverage of the real list. What it does
+ * keep faithful is the *structure* — a provider with no models at all
+ * (`custom`), one whose catalog splits by way in (`kilo`), one whose window
+ * narrows through OAuth (`openai`), and a `pasteHint` and `callback` where the
+ * real descriptors carry them.
+ */
+export function catalogFixture(): CatalogProvider[] {
+  return [
+    {
+      id: "anthropic",
+      label: "Anthropic",
+      order: 1,
+      colour: { light: "oklch(0.56 0.13 45)", dark: "oklch(0.74 0.12 48)" },
+      pasteHint: "Authorize in the browser, then paste the code Anthropic shows you.",
+      defaultModel: "claude-opus-5",
+      authTypes: ["oauth", "apiKey"],
+      models: [
+        {
+          id: "claude-opus-5",
+          label: "Claude Opus 5",
+          pricing: { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
+          limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+        },
+        {
+          id: "claude-haiku-4-5",
+          label: "Claude Haiku 4.5",
+          pricing: { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
+          limits: { contextWindow: 200_000, maxOutputTokens: 64_000 },
+        },
+      ],
+    },
+    {
+      id: "openai",
+      label: "OpenAI",
+      order: 2,
+      colour: { light: "oklch(0.5 0.09 190)", dark: "oklch(0.76 0.1 190)" },
+      pasteHint: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
+      callback: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
+      defaultModel: "gpt-5.6",
+      authTypes: ["oauth", "apiKey"],
+      models: [
+        {
+          id: "gpt-5.6",
+          label: "GPT-5.6",
+          pricing: { input: 5, output: 30, cacheRead: 0.5, cacheWrite5m: 0, cacheWrite1h: 0 },
+          limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
+          oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
+        },
+        {
+          id: "gpt-5.6-sol",
+          label: "GPT-5.6 Sol — deepest reasoning",
+          pricing: { input: 5, output: 30, cacheRead: 0.5, cacheWrite5m: 0, cacheWrite1h: 0 },
+          limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
+          oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
+        },
+      ],
+    },
+    {
+      id: "kimi",
+      label: "Kimi",
+      order: 3,
+      colour: { light: "oklch(0.53 0.17 330)", dark: "oklch(0.72 0.16 330)" },
+      pasteHint: "Enter the code on Kimi's device page. This dialog finishes on its own.",
+      defaultModel: "k3-256k",
+      authTypes: ["oauth", "apiKey"],
+      models: [
+        {
+          id: "k3-256k",
+          label: "Kimi K3 — 256K",
+          pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 0, cacheWrite1h: 0 },
+          limits: { contextWindow: 262_144, maxOutputTokens: 131_072 },
+        },
+      ],
+    },
+    {
+      id: "kilo",
+      label: "Kilo",
+      order: 4,
+      colour: { light: "oklch(0.52 0.14 224)", dark: "oklch(0.74 0.14 224)" },
+      pasteHint: "Approve the code on Kilo's device page. This dialog finishes on its own.",
+      defaultModel: "anthropic/claude-sonnet-5",
+      authTypes: ["oauth", "apiKey"],
+      models: [
+        {
+          id: "anthropic/claude-sonnet-5",
+          label: "Claude Sonnet 5",
+          pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 2.5 },
+          limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+        },
+        {
+          // Gateway-only: a subscription token cannot reach the auto routers.
+          id: "kilo-auto/frontier",
+          label: "Kilo Auto — frontier",
+          pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 0, cacheWrite1h: 0 },
+          limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+          auth: ["apiKey"],
+        },
+        {
+          id: "cohere/north-mini-code:free",
+          label: "North Mini Code — free",
+          pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 },
+          limits: { contextWindow: 256_000, maxOutputTokens: 64_000 },
+          auth: ["apiKey"],
+        },
+      ],
+    },
+    {
+      id: "grok",
+      label: "Grok",
+      order: 5,
+      colour: { light: "oklch(0.52 0.14 125)", dark: "oklch(0.74 0.14 125)" },
+      pasteHint: "Authorize in the browser. When it redirects to 127.0.0.1, paste the whole URL.",
+      callback: { uri: "http://127.0.0.1:56121/callback", label: "Grok" },
+      defaultModel: "grok-4.6",
+      authTypes: ["oauth", "apiKey"],
+      models: [
+        {
+          id: "grok-4.6",
+          label: "Grok 4.6",
+          pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 0, cacheWrite1h: 0 },
+          limits: { contextWindow: 2_000_000, maxOutputTokens: 128_000 },
+        },
+      ],
+    },
+    {
+      // No catalog and one way in: what an operator's own endpoint looks like.
+      id: "custom",
+      label: "OpenAI Compatible",
+      order: 6,
+      colour: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
+      pasteHint: "Enter endpoint metadata and API key.",
+      defaultModel: "",
+      authTypes: ["apiKey"],
+      models: [],
+    },
+  ];
 }
