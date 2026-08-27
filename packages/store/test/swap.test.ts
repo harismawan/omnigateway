@@ -122,3 +122,36 @@ test("reopen with no swap leaves the store usable, and close stays idempotent", 
     await cleanup(store, root);
   }
 });
+
+/**
+ * Every forwarder passes on every argument it was handed.
+ *
+ * The swap layer hand-writes one arrow per repo method, spelling out the
+ * parameters. Dropping one is not a type error — an arrow of lower arity still
+ * satisfies the interface — so the argument simply vanishes and the call
+ * succeeds with a default. `usage.recent` shipped that way for one commit while
+ * its second parameter carried the API-key scope: the forwarder passed only
+ * `limit`, so a scoped read silently returned every key's rows.
+ *
+ * Reading the source is the only way to see it. A behavioural test catches the
+ * method it covers and says nothing about the next one added.
+ */
+test("no repo forwarder drops an argument the source hands it", async () => {
+  const src = await Bun.file(new URL("../src/sqlite/store.ts", import.meta.url)).text();
+  const forwarder = /^ {6}(\w+): \(([^)]*)\) => handle\.(\w+)\.(\w+)\(([^)]*)\)/gm;
+  const count = (s: string): number => (s.trim() === "" ? 0 : s.split(",").length);
+
+  const dropped: string[] = [];
+  let seen = 0;
+  for (const m of src.matchAll(forwarder)) {
+    const [, name, params, repo, , args] = m;
+    seen += 1;
+    if (count(params ?? "") !== count(args ?? "")) dropped.push(`${repo}.${name}`);
+  }
+
+  // Asserted first, because zero forwarders matched is also what a regex that
+  // stopped matching the file's formatting reports, and it would report it as
+  // a pass.
+  expect(seen).toBeGreaterThan(30);
+  expect(dropped).toEqual([]);
+});

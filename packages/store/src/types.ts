@@ -818,6 +818,17 @@ export type UsageQuery = {
    * `provider` — without asking the caller to issue a query per series.
    */
   splitBy?: UsageDimension;
+  /**
+   * Restricts every bucket to one API key.
+   *
+   * A filter, not a dimension: it constrains the rows before grouping, so it
+   * applies whatever `groupBy` and `splitBy` are — including `apiKey` itself,
+   * where an unscoped query would otherwise report that other keys exist.
+   *
+   * Served without a scan at either grain. `usage_daily` has `api_key_id` in
+   * its primary key, and `request_logs` has `idx_request_logs_key_at`.
+   */
+  apiKeyId?: string;
 };
 
 export type UsageBucket = {
@@ -879,7 +890,14 @@ export interface UsageRepo {
    * Returns how many were swept.
    */
   sweepPending(): Promise<number>;
-  recent(limit: number): Promise<RequestLog[]>;
+  /**
+   * The newest rows, newest first, optionally restricted to one API key.
+   *
+   * The limit applies after the filter, so a key whose rows are all older than
+   * another's still fills a page rather than being paged out by traffic it
+   * cannot see. Anonymous rows carry a NULL `api_key_id` and match no scope.
+   */
+  recent(limit: number, apiKeyId?: string): Promise<RequestLog[]>;
   aggregate(q: UsageQuery): Promise<UsageBucket[]>;
   /**
    * What one API key has consumed since an instant, for the sliding windows a

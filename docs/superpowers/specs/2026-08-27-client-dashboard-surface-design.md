@@ -162,8 +162,20 @@ Two alternatives were considered and rejected:
 `packages/store`:
 
 - `UsageQuery` gains `apiKeyId?: string`.
-- `UsageRepo.recent(limit)` becomes `recent(q: { limit: number; apiKeyId?: string })`.
+- `UsageRepo.recent(limit)` becomes `recent(limit, apiKeyId?)`. An options object
+  would read better in isolation and was the first draft, but `recent` has around
+  fifty call sites in the existing suites and none of them are about scoping;
+  churning all of them buys nothing this design needs.
 - `packages/store/src/sqlite/usage.ts` adds the corresponding `WHERE` clauses.
+- The swap-forwarding layer in `packages/store/src/sqlite/store.ts` must pass the
+  new argument on. It hand-writes one arrow per repo method with the parameters
+  spelled out, and an arrow of lower arity still satisfies the interface — so a
+  dropped optional parameter is not a type error, it is a value that silently
+  becomes `undefined`. This happened during implementation: `recent` forwarded
+  only `limit`, and a scoped read returned every key's rows with nothing raised.
+  `packages/store/test/swap.test.ts` now reads the forwarder source and asserts no
+  arrow drops an argument, because a behavioural test covers the method it names
+  and says nothing about the next one added.
 
 Both reads stay index reads. The aggregate rides `usage_daily`'s primary key; the
 log listing rides `idx_request_logs_key_at`. Nothing added here scans, which

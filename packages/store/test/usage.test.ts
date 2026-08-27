@@ -623,3 +623,85 @@ test("sumSince counts one key only, and an unknown key is zero rather than every
   expect(await s.usage.sumSince("nobody", 0)).toEqual({ requests: 0, tokens: 0, costUsd: 0 });
   s.close();
 });
+
+test("recent scoped to a key returns that key's rows and none of another's", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "mine-old", at: now - 3_000, apiKeyId: "k1" }));
+  await s.usage.append(log({ id: "theirs", at: now - 2_000, apiKeyId: "k2" }));
+  await s.usage.append(log({ id: "mine-new", at: now - 1_000, apiKeyId: "k1" }));
+  await s.usage.append(log({ id: "anonymous", at: now - 500, apiKeyId: null }));
+
+  expect((await s.usage.recent(10)).map((r) => r.id)).toEqual([
+    "anonymous",
+    "mine-new",
+    "theirs",
+    "mine-old",
+  ]);
+  // Ordering survives the filter, and the limit applies after it rather than
+  // before: a key whose rows are all older than another's must still fill the page.
+  expect((await s.usage.recent(10, "k1")).map((r) => r.id)).toEqual(["mine-new", "mine-old"]);
+  expect((await s.usage.recent(1, "k1")).map((r) => r.id)).toEqual(["mine-new"]);
+  expect(await s.usage.recent(10, "nobody")).toEqual([]);
+  s.close();
+});
+
+test("a scoped recent never returns an anonymous row", async () => {
+  const s = await store();
+  const now = Date.now();
+  await s.usage.append(log({ id: "anonymous", at: now - 1_000, apiKeyId: null }));
+
+  // `api_key_id` is nullable, and `= ?` never matches NULL in SQL. Asserted
+  // rather than assumed: an implementation reaching for `IS NOT DISTINCT FROM`
+  // or building the clause by interpolation could hand one client another's
+  // untagged traffic.
+  expect(await s.usage.recent(10, "k1")).toEqual([]);
+  s.close();
+});
+
+test("aggregate scoped to a key isolates two keys at both grains", async () => {
+  const s = await store();
+  for (const grain of ["raw", "daily"] as const) {
+    const s2 = await store();
+    await s2.usage.append(log({ id: "a1", at: noon(1), apiKeyId: "k1", costUsd: 1 }));
+    await s2.usage.append(log({ id: "a2", at: noon(1), apiKeyId: "k1", costUsd: 2 }));
+    await s2.usage.append(log({ id: "b1", at: noon(1), apiKeyId: "k2", costUsd: 100 }));
+    await s2.usage.append(log({ id: "anon", at: noon(1), apiKeyId: null, costUsd: 500 }));
+
+    const all = await s2.usage.aggregate({ since: noon(2), grain, groupBy: "provider" });
+    expect(all[0]?.requests).toBe(4);
+
+    const mine = await s2.usage.aggregate({
+      since: noon(2),
+      grain,
+      groupBy: "provider",
+      apiKeyId: "k1",
+    });
+    expect(mine[0]?.requests).toBe(2);
+    expect(mine[0]?.costUsd).toBeCloseTo(3, 10);
+
+    expect(
+      await s2.usage.aggregate({ since: noon(2), grain, groupBy: "provider", apiKeyId: "nobody" }),
+    ).toEqual([]);
+    s2.close();
+  }
+  s.close();
+});
+
+test("a scoped aggregate splitting by apiKey cannot report another key", async () => {
+  const s = await store();
+  await s.usage.append(log({ id: "a", at: noon(1), apiKeyId: "k1" }));
+  await s.usage.append(log({ id: "b", at: noon(1), apiKeyId: "k2" }));
+
+  // The scope is a WHERE, so it constrains every dimension including the one
+  // being grouped on. A scope applied only to some group-by columns would leak
+  // the existence of other keys through this exact query.
+  const buckets = await s.usage.aggregate({
+    since: noon(2),
+    grain: "daily",
+    groupBy: "apiKey",
+    apiKeyId: "k1",
+  });
+  expect(buckets.map((b) => b.key)).toEqual(["k1"]);
+  s.close();
+});
