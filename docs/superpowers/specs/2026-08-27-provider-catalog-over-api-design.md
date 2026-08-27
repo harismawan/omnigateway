@@ -71,7 +71,7 @@ Non-goals:
         pricing: { input; output; cacheRead; cacheWrite5m; cacheWrite1h };
         limits: { contextWindow: number; maxOutputTokens: number };
         oauthLimits?: { contextWindow: number; maxOutputTokens: number };
-        auth?: readonly ("oauth" | "apiKey")[];
+        auth: readonly ("oauth" | "apiKey")[]; // always present, resolved server-side
       }[];
     },
   ];
@@ -98,6 +98,34 @@ them, and the router's own reads are the only ones that should exist.
 `order` is sent rather than the array being pre-sorted. The console sorts by it
 today and a wire order is not a contract; a client that re-sorted would be
 correct either way.
+
+## Validation
+
+Colours and provider ids now arrive from the registry and will later arrive from
+a plugin, so the assembly validates both before they reach a stylesheet.
+
+A colour containing `;`, `{`, `}`, `<`, `>`, a backslash or a newline is refused
+and served as a neutral grey. Six characters are denied rather than a colour
+grammar asserted: a grammar ages badly against a CSS spec that keeps growing, and
+these six are what close a declaration or a block. Confirmed necessary — before
+this, `"red; } body { display: none; "` produced a closed block and a second
+rule.
+
+A provider id that is not a usable custom-property name withholds **the whole
+provider** from the response. The id keys the colour, the picker and the palette,
+so there is no half of that worth serving. This is operator-visible: a provider
+can disappear from the console entirely, which is why it is reported rather than
+repaired silently.
+
+`providerCatalog` takes a **required** reporter, so a new caller must decide
+where the line goes rather than inherit silence. The route logs one line per
+distinct problem per process — the catalog is fixed at boot, so per-request would
+spam.
+
+Validation is server-side only. A second content check in the browser cannot
+help: anything that can change what `/api/catalog` returns already serves the
+console's own JavaScript, and a check that cannot fail is decoration in a
+security path.
 
 ## The console
 
@@ -193,7 +221,12 @@ the same time and by the same mechanism.
 
 ## Rules
 
-**Rule 9 is retired.** Nothing browser-imports `@omni/providers/catalog`.
+**Rule 9 is rewritten, not retired.** Nothing browser-imports
+`@omni/providers/catalog` any more — but the rule survives with a different
+justification: `packages/router` imports `descriptors` and must stay pure, and
+the leaf property is what lets it. An earlier draft of this section, and the
+first PR description, both said "retired"; the shipped `CLAUDE.md` says
+otherwise and is correct.
 
 **Rule 12's allowlist loses both provider subpaths** — `catalog` and
 `descriptors`. The console imports `@omni/store/types`, `@omni/ir` and
@@ -240,8 +273,11 @@ what lets it, and it is unaffected by the console no longer being a consumer.
   question the server can answer directly in the usage response, and doing so
   would remove its dependency on the catalog entirely. Worth doing; not here,
   because it changes a response shape this design does not otherwise touch.
-- **`authTypes` vs per-model `auth`.** The catalog states both deliberately, and
-  the endpoint forwards both. Collapsing them is a catalog question, not an API
-  one.
+- **`authTypes` vs per-model `auth`.** The catalog states both deliberately. The
+  endpoint forwards `authTypes` and **resolves** each model's `auth` — a model
+  states its own set or inherits the provider's — so `auth` is always present on
+  the wire. That resolution moved here after review found the console had grown a
+  second copy of the rule; one place decides. Collapsing the two fields entirely
+  is a catalog question, not an API one.
 - Serving the catalog unauthenticated, or outside `/api/*`. Considered for the
   palette specifically, to avoid gating; rejected with the gate decision.

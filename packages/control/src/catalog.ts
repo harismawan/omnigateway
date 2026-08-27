@@ -1,6 +1,5 @@
 import type { CatalogAuth, ProviderModelChoice } from "@omni/providers/catalog";
-import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS, PROVIDER_IDS } from "@omni/providers/descriptors";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 
 /**
  * One provider, as the console needs to render it.
@@ -176,7 +175,13 @@ function paletteHalf(
  * decide where the line goes rather than inherit silence.
  */
 export function providerCatalog(report: (problem: CatalogProblem) => void): CatalogProvider[] {
-  return PROVIDER_IDS.flatMap((id) => {
+  // `Object.entries` at call time, never the module-scope `PROVIDER_IDS`. That
+  // constant is `Object.keys(...)` evaluated once at import, which is long before
+  // `loadPlugins()` runs — so iterating it would serve a build-time snapshot and
+  // a provider registered at boot would be missing from the console with nothing
+  // reported. That is the exact claim this endpoint exists to make good on, and
+  // it was false until this line changed.
+  return Object.entries(PROVIDER_DESCRIPTORS).flatMap(([id, descriptor]) => {
     if (!SAFE_PROVIDER_ID.test(id)) {
       report({
         // Capped: this is the one field on a `CatalogProblem` that is not
@@ -188,8 +193,14 @@ export function providerCatalog(report: (problem: CatalogProblem) => void): Cata
       return [];
     }
 
-    const descriptor = PROVIDER_DESCRIPTORS[id];
-    const catalog = PROVIDER_MODEL_CATALOG[id];
+    // The descriptor's own catalog, not `PROVIDER_MODEL_CATALOG[id]`. Both hold
+    // the same object today — a test asserts the identity — but the second is a
+    // parallel lookup that can miss, and this function validates ids and colours
+    // meticulously and would then have dereferenced an unchecked one two lines
+    // later. A miss threw a TypeError, which is a 500 on `/api/catalog`, which
+    // the console's all-or-nothing gate turns into every screen reading "Console
+    // unavailable". Keyed on the descriptor, the lookup is total by construction.
+    const catalog = descriptor.catalog;
     const { label, order, colour, pasteHint } = descriptor.presentation;
 
     return {
