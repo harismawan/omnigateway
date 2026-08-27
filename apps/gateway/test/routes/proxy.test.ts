@@ -8,6 +8,7 @@ import {
 } from "@omni/providers";
 import {
   captureLogger,
+  entryOf,
   memoryStore,
   seedApiKey,
   seedCredential,
@@ -1429,7 +1430,7 @@ test("enforces exact model allowlists before dispatch", async () => {
   );
   let sends = 0;
   const adapters = stubAdapters(EVENTS);
-  const anthropic = adapters.anthropic;
+  const anthropic = entryOf(adapters, "anthropic", "stubAdapters");
   const counting: ProviderAdapter = {
     ...anthropic,
     async send(request) {
@@ -1507,7 +1508,7 @@ test("rate limits are atomic, per-key, and refuse a burst across the minute boun
   let sends = 0;
   const logger = captureLogger();
   const adapters = stubAdapters(EVENTS);
-  const anthropic = adapters.anthropic;
+  const anthropic = entryOf(adapters, "anthropic", "stubAdapters");
   const app = proxyRoutes({
     store,
     adapters: {

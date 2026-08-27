@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { GatewayError } from "@omni/ir";
-import { BODY_ORDER, orderFields } from "../body.ts";
+import { orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
-import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
+import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeGrokResponses } from "./decode.ts";
 import { grokDescriptor } from "./descriptor.ts";
 import { grokDeviceHeaders } from "./device.ts";
+import { grokBodyOrder, grokProfile } from "./profile.ts";
 import { toGrokWire } from "./wire.ts";
 
 /**
@@ -91,7 +92,7 @@ export const grokAdapter: ProviderAdapter = {
     protocol.push(...grokDeviceHeaders(req.credentials.providerData));
 
     // The client identity headers and `Accept` come from the profile.
-    const profile = PROFILES.grok;
+    const profile = grokProfile;
     const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
 
     // Non-streaming client requests are served by collecting the stream in
@@ -101,7 +102,7 @@ export const grokAdapter: ProviderAdapter = {
       url: oauth ? PROXY_URL : API_URL,
       method: "POST",
       headers,
-      body: JSON.stringify(orderFields({ ...body, stream: true }, BODY_ORDER.grok)),
+      body: JSON.stringify(orderFields({ ...body, stream: true }, grokBodyOrder)),
       signal: req.signal,
     });
 

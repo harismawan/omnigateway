@@ -1,4 +1,3 @@
-import type { ProviderId } from "@omni/ir";
 import { anthropicBodyOrder } from "./anthropic/profile.ts";
 import { customBodyOrder } from "./custom/profile.ts";
 import { grokBodyOrder } from "./grok/profile.ts";
@@ -13,7 +12,7 @@ export type SystemBlock = {
 };
 
 /** Top-level JSON key order, matching each CLI's own serializer. */
-export const BODY_ORDER: Readonly<Record<ProviderId, readonly string[]>> = {
+export const BODY_ORDER: Readonly<Record<string, readonly string[]>> = {
   anthropic: anthropicBodyOrder,
   openai: openaiBodyOrder,
   kimi: kimiBodyOrder,

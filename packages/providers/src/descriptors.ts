@@ -6,12 +6,18 @@ import { kiloDescriptor } from "./kilo/descriptor.ts";
 import { kimiDescriptor } from "./kimi/descriptor.ts";
 import { openaiDescriptor } from "./openai/descriptor.ts";
 
+// Re-exported from the leaf so a reader of one descriptor need not know that the
+// type lives next door — `packages/router` already imports the record from here.
+export type { ProviderDescriptor, ProviderDescriptors } from "./descriptor.ts";
+
 /**
  * Every provider's data, keyed by id.
  *
- * Total rather than partial, which is what keeps the exhaustiveness the
- * separate `Record<ProviderId, …>` tables used to give us: adding a member to
- * `ProviderId` breaks this one file until a descriptor exists for it.
+ * The six built-ins are written out here as literals, so a built-in with no
+ * descriptor is a compile error in this one file — that much of the old
+ * per-table exhaustiveness survives. The *type* is not total; see
+ * `ProviderDescriptors`. Every other id-keyed table in this package is derived
+ * by walking one of these lists, so they carry exactly the ids this one does.
  *
  * This module is deliberately free of imports beyond the descriptor files and a
  * type, for the same reason `catalog.ts` is: `@omni/providers/descriptors` is a

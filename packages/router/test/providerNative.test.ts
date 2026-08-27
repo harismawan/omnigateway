@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { ChatRequest, ProviderId } from "@omni/ir";
+import type { ChatRequest } from "@omni/ir";
 import { credential, snapshot, target } from "@omni/testkit";
 import { eligible, requiredProvider } from "../src/filters.ts";
 
@@ -196,19 +196,29 @@ test("a portable custom tool still routes to every provider", () => {
  * with any table at all, including one that had drifted — which is the whole
  * failure this fixture exists to prevent.
  */
-const NATIVE_TOOLS_BEFORE: Readonly<Record<ProviderId, boolean>> = {
+const NATIVE_TOOLS_BEFORE = {
   anthropic: true,
   openai: false,
   kimi: false,
   kilo: false,
   grok: false,
   custom: false,
-};
+} as const satisfies Readonly<Record<string, boolean>>;
 
-const IDS = Object.keys(NATIVE_TOOLS_BEFORE) as ProviderId[];
+/**
+ * The six the fixture names.
+ *
+ * `ProviderId` is a validated string now, so `Record<ProviderId, boolean>`
+ * would make every read of the fixture `| undefined` and let a provider go
+ * missing from it silently — the exact drift the fixture exists to catch. The
+ * literal keys are the totality, so they are what the reads are keyed on.
+ */
+type BuiltIn = keyof typeof NATIVE_TOOLS_BEFORE;
+
+const IDS = Object.keys(NATIVE_TOOLS_BEFORE) as BuiltIn[];
 
 /** The rule as it stood, applied to one target. */
-function admittedBefore(needNative: boolean, provider: ProviderId): boolean {
+function admittedBefore(needNative: boolean, provider: BuiltIn): boolean {
   return !needNative || NATIVE_TOOLS_BEFORE[provider];
 }
 

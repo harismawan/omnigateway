@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { HttpClient, HttpRequest } from "@omni/providers";
-import { PROFILES } from "@omni/providers";
+import { kiloProfile } from "@omni/providers";
 import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
 import { getJson, getJsonUnauthenticated } from "../../src/oauth/types.ts";
 
@@ -34,7 +34,7 @@ function headers(req: HttpRequest, name: string): string[] {
 test("getJson authenticates the read and keeps the client identity", async () => {
   const http = stubHttp();
 
-  await getJson(deps(http), "kilo", "https://api.kilo.ai/api/profile", PROFILES.kilo, {
+  await getJson(deps(http), "kilo", "https://api.kilo.ai/api/profile", kiloProfile, {
     accessToken: "kilo-token-1",
     extraHeaders: [["X-Kilocode-OrganizationID", "org-42"]],
   });
@@ -55,7 +55,7 @@ test("getJsonUnauthenticated sends no Authorization at all, not an empty one", a
     deps(http),
     "kilo",
     "https://api.kilo.ai/api/device-auth/codes/KILO-1",
-    PROFILES.kilo,
+    kiloProfile,
   );
 
   const sent = http.sent();

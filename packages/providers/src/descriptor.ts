@@ -6,9 +6,15 @@ import type { ProviderModelCatalogEntry } from "./catalog-types.ts";
  *
  * The point of this type is that adding a provider stops meaning "edit sixteen
  * tables". Each field below replaces a `Record<ProviderId, …>` that used to live
- * somewhere else, and the compiler-checked exhaustiveness those tables gave us
- * is preserved here: `PROVIDER_DESCRIPTORS` is a total record, so a seventh
- * provider is a type error in exactly one place instead of eight.
+ * somewhere else, and the eight scattered exhaustiveness checks those tables
+ * gave us collapse into one object with one completeness check.
+ *
+ * That is a real trade and not a free one. `ProviderId` is a validated string,
+ * so `PROVIDER_DESCRIPTORS` cannot be total in the type — see
+ * `ProviderDescriptors` below for what is left of the guarantee. Every field
+ * here being required is what remains of it: a descriptor is either complete or
+ * it does not compile, and for a plugin it is either complete or it does not
+ * register.
  *
  * **The adapter is deliberately not on this type**, and neither are `profile` or
  * `bodyOrder`. Two separate reasons, both load-bearing:
@@ -100,5 +106,20 @@ export type ProviderDescriptor = {
   };
 };
 
-/** Total, so a new provider fails to compile until it is described. */
-export type ProviderDescriptors = Readonly<Record<ProviderId, ProviderDescriptor>>;
+/**
+ * Every installed provider's descriptor, keyed by id.
+ *
+ * Keyed by `string`, so this is *not* total in the type. It cannot be: a
+ * provider loaded from `<root>/plugins/` has an id no compiled-in union could
+ * contain, and a closed key here is a closed door there.
+ *
+ * What survives is narrower and worth stating exactly. Totality over the
+ * built-ins is a property of the assembly in `descriptors.ts`, not of this type
+ * — the six literals are still written out, so a built-in with no descriptor is
+ * still a compile error, in one file. Totality over a *stored* id is gone
+ * outright: `Target.provider` comes back from SQLite unvalidated and can name a
+ * provider this installation does not have. `noUncheckedIndexedAccess` makes
+ * every read of this record answer `| undefined`, and each caller decides what
+ * absence means rather than inheriting one default.
+ */
+export type ProviderDescriptors = Readonly<Record<string, ProviderDescriptor>>;

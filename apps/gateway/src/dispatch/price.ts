@@ -41,7 +41,18 @@ export function priceOf(prices: TargetPricing, usage: Usage, provider: ProviderI
   // at more than fresh input, while OpenAI and Kimi cache automatically and bill
   // no premium. Guessing Anthropic's rate for a Kimi target overcharges exactly
   // the tokens its decoder now reports.
-  const fallback = PROVIDER_DESCRIPTORS[provider].writeOverInput;
+  //
+  // A provider id is a validated string, so this lookup is partial in the type.
+  // It is not partial in practice: the router excludes a target whose provider
+  // has no descriptor, and dispatch throws `INTERNAL` before the first byte if
+  // one reaches it anyway — so a priced request has an installed provider by
+  // the time it gets here. Zero is what an unreachable branch evaluates to, not
+  // a claim that writes are free; the loud failure is upstream, where it can
+  // still change the outcome.
+  const fallback = PROVIDER_DESCRIPTORS[provider]?.writeOverInput ?? {
+    fiveMinute: 0,
+    oneHour: 0,
+  };
   const readRate = cacheReadRate(prices);
   const write5mRate = prices.cacheWrite5m ?? prices.input * fallback.fiveMinute;
   const write1hRate = prices.cacheWrite1h ?? prices.input * fallback.oneHour;

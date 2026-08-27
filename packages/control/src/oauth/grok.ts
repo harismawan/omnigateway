@@ -1,5 +1,5 @@
 import { GatewayError } from "@omni/ir";
-import { mergeHeaders, mintGrokDevice, orderHeaders, PROFILES } from "@omni/providers";
+import { grokProfile, mergeHeaders, mintGrokDevice, orderHeaders } from "@omni/providers";
 import { createPkce, randomState } from "./pkce.ts";
 import {
   type AuthorizeStart,
@@ -106,8 +106,8 @@ async function discover(deps: OAuthDeps): Promise<Endpoints> {
     url: DISCOVERY_URL,
     method: "GET",
     headers: orderHeaders(
-      mergeHeaders(PROFILES.grok.headers, [["Accept", "application/json"]]),
-      PROFILES.grok.order,
+      mergeHeaders(grokProfile.headers, [["Accept", "application/json"]]),
+      grokProfile.order,
     ),
     body: "",
     // Short: a connect flow waits on this, and a slow answer is worth
@@ -174,7 +174,7 @@ async function postToken(
   deps: OAuthDeps,
 ): Promise<TokenResponse> {
   // Form-encoded, and with no client_secret: a public client has none to send.
-  const { status, parsed } = await postJson(deps, "grok", tokenUrl, PROFILES.grok, {
+  const { status, parsed } = await postJson(deps, "grok", tokenUrl, grokProfile, {
     contentType: "application/x-www-form-urlencoded",
     body: new URLSearchParams(body).toString(),
   });

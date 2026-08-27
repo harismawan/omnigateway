@@ -1,11 +1,12 @@
 import { GatewayError } from "@omni/ir";
-import { BODY_ORDER, orderFields } from "../body.ts";
+import { orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
-import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
+import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeKiloChat } from "./decode.ts";
 import { kiloDescriptor } from "./descriptor.ts";
+import { kiloBodyOrder, kiloProfile } from "./profile.ts";
 import { toKiloWire } from "./wire.ts";
 
 /**
@@ -51,7 +52,7 @@ export const kiloAdapter: ProviderAdapter = {
     ];
 
     // The editor identity and `Accept` come from the profile.
-    const profile = PROFILES.kilo;
+    const profile = kiloProfile;
     const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
 
     // Non-streaming client requests are served by collecting the stream in
@@ -61,7 +62,7 @@ export const kiloAdapter: ProviderAdapter = {
       url: oauth ? OAUTH_URL : API_URL,
       method: "POST",
       headers,
-      body: JSON.stringify(orderFields({ ...body, stream: true }, BODY_ORDER.kilo)),
+      body: JSON.stringify(orderFields({ ...body, stream: true }, kiloBodyOrder)),
       signal: req.signal,
     });
 

@@ -11,6 +11,7 @@ import { kiloAdapter } from "../src/kilo/index.ts";
 import { toKiloWire } from "../src/kilo/wire.ts";
 import { ADAPTERS } from "../src/registry.ts";
 import type { SseMessage } from "../src/sse.ts";
+import { entry } from "./entry.ts";
 
 const OAUTH_URL = "https://api.kilo.ai/api/openrouter/chat/completions";
 const API_URL = "https://api.kilo.ai/api/gateway/chat/completions";
@@ -869,10 +870,14 @@ test("the registry serves kilo with its canonical capabilities", () => {
     "kimi",
     "openai",
   ]);
-  expect(ADAPTERS.kilo.id).toBe("kilo");
+  expect(entry(ADAPTERS, "kilo", "ADAPTERS").id).toBe("kilo");
   // Kilo fronts Claude, GPT and Gemini: an under-claimed `images` would drop
   // every kilo target from a request carrying a screenshot.
-  expect(ADAPTERS.kilo.capabilities).toEqual({ tools: true, images: true, reasoning: true });
+  expect(entry(ADAPTERS, "kilo", "ADAPTERS").capabilities).toEqual({
+    tools: true,
+    images: true,
+    reasoning: true,
+  });
 });
 
 // --- Block sequencing, text and tool calls ------------------------------------

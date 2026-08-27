@@ -1,4 +1,4 @@
-import { type ClientProfile, env } from "../headers.ts";
+import { type ClientProfile, env, envOrder } from "../headers.ts";
 
 const KIMI_CLI_VERSION = env("OMNI_KIMI_CLI_VERSION", "0.26.0");
 
@@ -11,7 +11,11 @@ export const kimiProfile: ClientProfile = {
     ["X-Msh-Version", KIMI_CLI_VERSION],
     ["Accept", "application/json"],
   ],
-  order: [
+  // The operator override is applied here rather than where the table is
+  // assembled. An adapter reads this value directly, so a table that applied
+  // something the direct read did not would differ only on installations that
+  // set the variable — which is the shape of bug this repository keeps finding.
+  order: envOrder("OMNI_ORDER_KIMI", [
     "Host",
     "Content-Type",
     "Authorization",
@@ -25,7 +29,7 @@ export const kimiProfile: ClientProfile = {
     "Accept",
     "Accept-Encoding",
     "Content-Length",
-  ],
+  ]),
 };
 
 // Constructed, not captured. See the profile note in Task 8B.

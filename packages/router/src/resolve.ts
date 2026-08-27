@@ -1,13 +1,12 @@
 import { GatewayError, type ProviderId } from "@omni/ir";
 import { catalogLimits, catalogPricing } from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptor } from "@omni/providers/descriptors";
 import type { Target, VirtualModel } from "@omni/store";
 import type { Snapshot } from "./types.ts";
 
 // Both provider imports are leaf subpaths carrying model lists and per-provider
 // data — no adapters, no HTTP client, no I/O. The router stays pure by reading
 // records it is handed, and these are handed to it at module scope.
-const PROVIDERS = new Set<string>(Object.keys(PROVIDER_DESCRIPTORS));
 
 /**
  * Prefixes for bare model names, so a client can pass a concrete upstream model
@@ -19,15 +18,26 @@ const PROVIDERS = new Set<string>(Object.keys(PROVIDER_DESCRIPTORS));
  * prefix of another prefix, so the two readings agreed — but a provider adding
  * one would have inherited the wrong rule silently.
  */
-const PREFIX_PROVIDER: ReadonlyArray<readonly [string, ProviderId]> = Object.entries(
-  PROVIDER_DESCRIPTORS,
-)
-  .flatMap(([id, descriptor]) =>
-    descriptor.modelPrefixes.map((prefix) => [prefix, id as ProviderId] as const),
-  )
-  .sort(([a], [b]) => b.length - a.length);
+const PREFIX_PROVIDER: ReadonlyArray<readonly [string, ProviderId, ProviderDescriptor]> =
+  Object.entries(PROVIDER_DESCRIPTORS)
+    .flatMap(([id, descriptor]) =>
+      descriptor.modelPrefixes.map((prefix) => [prefix, id as ProviderId, descriptor] as const),
+    )
+    .sort(([a], [b]) => b.length - a.length);
 
-function synthesize(provider: ProviderId, model: string): VirtualModel {
+/**
+ * The descriptor is passed in rather than looked up again.
+ *
+ * Both callers have already resolved one — that is how they decided this is a
+ * provider at all — and a second lookup here would be partial under a widened
+ * `ProviderId`, inviting a non-null assertion at the one place the caller
+ * already holds the answer.
+ */
+function synthesize(
+  provider: ProviderId,
+  model: string,
+  descriptor: ProviderDescriptor,
+): VirtualModel {
   // The catalog's list price, so a bare model name is cost-ranked like a
   // configured one. A model the catalog does not list stays at zero, which the
   // scorer reads as "unpriced" and drops from the cost term rather than
@@ -57,7 +67,7 @@ function synthesize(provider: ProviderId, model: string): VirtualModel {
     ...(limits === null
       ? {}
       : { contextWindow: limits.contextWindow, maxOutputTokens: limits.maxOutputTokens }),
-    capabilities: PROVIDER_DESCRIPTORS[provider].capabilities,
+    capabilities: descriptor.capabilities,
   };
   return { id: `${provider}/${model}`, targets: [target], strategy: "score", isAlias: true };
 }
@@ -76,14 +86,15 @@ export function resolveModel(name: string, snapshot: Snapshot): VirtualModel {
   if (sep > 0) {
     const prefix = name.slice(0, sep);
     const rest = name.slice(sep + 1);
-    if (PROVIDERS.has(prefix) && prefix !== "custom" && rest.length > 0) {
-      return synthesize(prefix as ProviderId, rest);
+    const descriptor = PROVIDER_DESCRIPTORS[prefix];
+    if (descriptor !== undefined && prefix !== "custom" && rest.length > 0) {
+      return synthesize(prefix, rest, descriptor);
     }
     throw new GatewayError("NO_CANDIDATES", `unknown provider "${prefix}" in model "${name}"`);
   }
 
-  for (const [prefix, provider] of PREFIX_PROVIDER) {
-    if (name.startsWith(prefix)) return synthesize(provider, name);
+  for (const [prefix, provider, descriptor] of PREFIX_PROVIDER) {
+    if (name.startsWith(prefix)) return synthesize(provider, name, descriptor);
   }
 
   throw new GatewayError(

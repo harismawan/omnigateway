@@ -34,7 +34,17 @@ test("a kilo credential can be created and a kilo target can be configured", () 
 });
 
 test("every provider id but custom can back a plain target", () => {
-  const ids: ProviderId[] = ["anthropic", "openai", "kimi", "kilo", "grok"];
+  // The literal tuple, not `ProviderId[]`. `targetSchema`'s non-custom arm keeps
+  // a hand-written five-member enum, so what it parses back is narrower than the
+  // validated string a provider id is — and that narrowing is the point: it is
+  // now the only compile-time check that a new provider was thought about at all.
+  const ids = [
+    "anthropic",
+    "openai",
+    "kimi",
+    "kilo",
+    "grok",
+  ] as const satisfies readonly ProviderId[];
   for (const id of ids) {
     expect(providerIdSchema.parse(id)).toBe(id);
     expect(isProviderId(id)).toBe(true);
