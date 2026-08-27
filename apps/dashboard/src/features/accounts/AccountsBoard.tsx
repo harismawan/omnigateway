@@ -22,6 +22,7 @@ import {
   WINDOW_LABEL,
 } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
+import { PROVIDER_IDS, PROVIDER_LABEL } from "../../theme/tokens.ts";
 import { Button, IconButton } from "../../ui/Button.tsx";
 import { Chip } from "../../ui/Chip.tsx";
 import { Input, NumberInput } from "../../ui/Field.tsx";
@@ -34,17 +35,6 @@ import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { ConnectDialog } from "./ConnectDialog.tsx";
 import { QuotaHistory } from "./QuotaHistory.tsx";
-
-const PROVIDER_ORDER: ProviderId[] = ["anthropic", "openai", "kimi", "kilo", "grok", "custom"];
-
-const PROVIDER_LABEL: Record<ProviderId, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  kimi: "Kimi",
-  kilo: "Kilo",
-  grok: "Grok",
-  custom: "OpenAI Compatible",
-};
 
 /** Carries the provider's identity on the module edge, so the tables need not. */
 const ProviderModule = styled(Module)<{ $provider: ProviderId }>`
@@ -226,7 +216,7 @@ export function AccountsBoard() {
         </Module>
       ) : (
         <Stack $gap={4}>
-          {PROVIDER_ORDER.filter((provider) => rows.some((row) => row.provider === provider)).map(
+          {PROVIDER_IDS.filter((provider) => rows.some((row) => row.provider === provider)).map(
             (provider) => {
               const group = rows.filter((row) => row.provider === provider);
               return (
