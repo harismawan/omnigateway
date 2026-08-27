@@ -10,13 +10,16 @@ import type { ProviderModelCatalogEntry } from "./catalog-types.ts";
  * is preserved here: `PROVIDER_DESCRIPTORS` is a total record, so a seventh
  * provider is a type error in exactly one place instead of eight.
  *
- * **The adapter is deliberately not on this type.** Adapters import `BODY_ORDER`
- * and `PROFILES`, and those are derived from descriptors — so a descriptor that
- * carried its own adapter would close an import cycle. `ProviderRegistryEntry`
- * in `registry.ts` is where the two are joined, and it is what anything holding
- * a live adapter should read. Keeping the data half free of adapter imports is
- * also what lets `descriptor.ts` be safe for callers that must not pull in the
- * HTTP client.
+ * **The adapter is deliberately not on this type**, and neither are `profile` or
+ * `bodyOrder`. Two separate reasons, both load-bearing:
+ *
+ * - Adapters import `BODY_ORDER` and `PROFILES`, so a descriptor carrying its
+ *   own adapter would close an import cycle.
+ * - Profiles read `Bun.env`, and `descriptors.ts` is a leaf the console and the
+ *   pure router bundle for the browser.
+ *
+ * `ProviderRegistryEntry` in `registry.ts` is where all of it is joined, and it
+ * is what anything holding a live adapter should read.
  *
  * Every field is required. There are no defaults on purpose: `writeOverInput`
  * defaulting to zero would underprice cache writes silently and permanently,
