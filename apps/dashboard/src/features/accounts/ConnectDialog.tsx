@@ -1,4 +1,5 @@
 import { type CatalogAuth, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import styled from "styled-components";
@@ -10,6 +11,7 @@ import {
 } from "../../api/queries.ts";
 import type { ConnectStart, Credential, ProviderId } from "../../api/types.ts";
 import { CopyValue } from "../../components/CopyValue.tsx";
+import { PROVIDER_LABEL } from "../../theme/tokens.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Field, Input, Select } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
@@ -41,36 +43,36 @@ const AUTH_LABEL: Record<CatalogAuth, string> = {
   apiKey: "Paste an API key",
 };
 
-const PROVIDER_LABEL: Record<ProviderId, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  kimi: "Kimi",
-  kilo: "Kilo",
-  grok: "Grok",
-  custom: "OpenAI Compatible",
-};
-
-/** What the operator has to do next, in their words, per flow shape. */
-const PASTE_HINT: Record<ProviderId, string> = {
-  anthropic: "Authorize in the browser, then paste the code Anthropic shows you.",
-  openai: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
-  kimi: "Enter the code on Kimi's device page. This dialog finishes on its own.",
-  kilo: "Approve the code on Kilo's device page. This dialog finishes on its own.",
-  grok: "Authorize in the browser. When it redirects to 127.0.0.1, paste the whole URL.",
-  custom: "Enter endpoint metadata and API key.",
-};
+/**
+ * What the operator has to do next, in their words, per flow shape.
+ *
+ * Read off the provider rather than restated here: the sentence describes that
+ * provider's flow, so it belongs with the flow. Empty for a provider that
+ * states none, which renders the hint away rather than inventing one.
+ */
+function pasteHint(provider: ProviderId): string {
+  return PROVIDER_DESCRIPTORS[provider].presentation.pasteHint ?? "";
+}
 
 /**
  * The shape of what gets pasted back, per flow.
  *
  * A loopback redirect fails to connect — nothing is listening on that port —
- * so what the operator has is the address bar, not a page. Providers absent
- * here show the operator a bare code instead.
+ * so what the operator has is the address bar, not a page. Derived from the
+ * provider's own redirect URI, so the two can no longer disagree about the
+ * port or the path; providers that declare no callback have no redirect to
+ * show and get the bare-code placeholder instead.
  */
-const CODE_PLACEHOLDER: Partial<Record<ProviderId, string>> = {
-  openai: "http://localhost:1455/auth/callback?code=…",
-  grok: "http://127.0.0.1:56121/callback?code=…",
-};
+const CODE_PLACEHOLDER: Partial<Record<ProviderId, string>> = Object.fromEntries(
+  Object.values(PROVIDER_DESCRIPTORS).flatMap((descriptor) =>
+    // `flatMap` rather than `filter` + `map`: a filter does not narrow the
+    // optional away, and the fallback that would silence the compiler is what
+    // renders the literal string "undefined" into the field.
+    descriptor.callback === undefined
+      ? []
+      : [[descriptor.id, `${descriptor.callback.uri}?code=…`] as const],
+  ),
+);
 
 const Step = styled.ol`
   display: flex;
@@ -489,11 +491,11 @@ export function ConnectDialog({
             )}
 
             {flow.kind === "device" ? (
-              <Waiting>{PASTE_HINT[provider]} Waiting for authorization…</Waiting>
+              <Waiting>{pasteHint(provider)} Waiting for authorization…</Waiting>
             ) : (
               <Field
                 label="Authorization code"
-                hint={PASTE_HINT[provider]}
+                hint={pasteHint(provider)}
                 {...(problem === null ? {} : { problem })}
               >
                 {(props) => (
