@@ -30,6 +30,12 @@ export type CatalogProvider = {
 /**
  * Every provider the gateway can serve, for the console.
  *
+ * **Fields are listed, never spread.** A `...model` passthrough ships whatever
+ * `ProviderModelChoice` grows next to every browser that loads the console, with
+ * nothing failing — it already shipped `reasoningForm`, which the console does
+ * not read and which appeared in neither the design nor the console's own mirror
+ * of this type. Listing them means adding a field is a decision made here.
+ *
  * Three fields the descriptor carries are deliberately absent. `tone` names a
  * terminal colour and the CLI owns the mapping from that name to an escape code.
  * `capabilities` and `writeOverInput` are router internals: shipping them to a
@@ -59,7 +65,20 @@ export function providerCatalog(): CatalogProvider[] {
       ...(descriptor.callback === undefined ? {} : { callback: descriptor.callback }),
       defaultModel: catalog.defaultModel,
       authTypes: catalog.authTypes,
-      models: catalog.models,
+      // Each model's auth is **resolved here**, never left for the console to
+      // combine. `catalogModelAuths` in the provider package is the rule — a
+      // model states its own set or inherits the provider's — and the console
+      // had grown a second copy of that expression, thirty lines below a comment
+      // saying a second copy is what put the picker and the router out of step
+      // before. Sending the answer means only one of them decides.
+      models: catalog.models.map((model) => ({
+        id: model.id,
+        label: model.label,
+        pricing: model.pricing,
+        limits: model.limits,
+        ...(model.oauthLimits === undefined ? {} : { oauthLimits: model.oauthLimits }),
+        auth: model.auth ?? catalog.authTypes,
+      })),
     };
   });
 }
