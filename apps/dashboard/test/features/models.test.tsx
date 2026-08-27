@@ -11,6 +11,7 @@ import {
   parseDraft,
   pinChoices,
   pinNote,
+  reachable,
   reachableChoices,
   reEndpointDraft,
   retargetDraft,
@@ -272,6 +273,24 @@ describe("per-model auth", () => {
     expect(reachableChoices(CATALOG, "kilo", other).map((choice) => choice.id)).toContain(
       "kilo-auto/frontier",
     );
+  });
+
+  test("a provider named after an Object member is unknown too, not a crash", () => {
+    // `credential.provider` is a stored string arriving from `/api/credentials`,
+    // and a provider id may be any `[a-z][a-z0-9-]{0,31}` — `constructor`
+    // included. Built on an ordinary `{}`, `held["constructor"]` answers the
+    // `Object` constructor: `heldAuths` throws on `ways.includes`, and
+    // `reachable` gets past its `have.length === 0` early return because that
+    // length is 1, then throws on `have.includes`. The models board white-screens
+    // rather than degrading, which is the opposite of the rule the test above
+    // states — unknown is not blocked, and it must not be fatal either.
+    for (const provider of ["constructor", "toString", "valueof"]) {
+      const held = heldAuths([credential({ provider, authType: "oauth" })]);
+      expect(reachable(CATALOG, "kilo", "kilo-auto/frontier", held)).toBe(true);
+      // And the id it actually names still records its own way in, so the map is
+      // not merely answering `undefined` to everything.
+      expect(held[provider]).toEqual(["oauth"]);
+    }
   });
 
   test("a disabled credential still counts, so one bad token hides nothing", () => {

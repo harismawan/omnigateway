@@ -18,9 +18,16 @@ shape and why the HTTP client is built on `node:http`.
    Five tables list the built-ins by hand and each needs your id: `PROVIDER_DESCRIPTORS`
    (`descriptors.ts`), `ADAPTERS` (`registry.ts`), `PROFILES` (`profile.ts`), `BODY_ORDER`
    (`body.ts`) and `PROVIDER_MODEL_CATALOG` (`catalog.ts`). Miss one and **`tsc` stays green** —
-   `Record<string, …>` accepts any subset. What fails is `bun run lint`, because the import you added
-   goes unused, and `packages/providers/test/descriptor.test.ts`, which holds all five to a literal
-   id list. Run both before you believe you are done.
+   `Record<string, …>` accepts any subset.
+   **`bun run lint` will not save you either, and this is the trap.** Lint catches a *deletion* — an
+   entry removed leaves its import unused — but when you are *adding* a provider there is no import
+   yet, so there is nothing to be unused and lint passes. Measured by simulating a seventh provider
+   with four of the five tables forgotten: typecheck passed, lint passed. The nets that actually fire
+   are `packages/providers/test/descriptor.test.ts` and
+   `packages/control/test/providerCoverage.test.ts`. **Run `bun test` before you believe you are
+   done**; a green typecheck and a green lint here mean nothing.
+   (Worth knowing even for the deletion direction: `noUnusedImports` is a *fixable* rule, so
+   `bun run fmt` deletes the orphaned import and takes the lint signal with it.)
    Everything the descriptor holds is required, and that much the compiler *does* ask for in one
    place: capabilities, `writeOverInput`, catalog, model prefixes, and the
    presentation block (label, display order, terminal tone, `--p-<id>` colour in **both** themes,

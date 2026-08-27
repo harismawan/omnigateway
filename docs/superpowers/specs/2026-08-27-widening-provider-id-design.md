@@ -124,10 +124,29 @@ same treatment:
   stays `INTERNAL` and stays a throw, because reaching dispatch means the router
   admitted a candidate it should have excluded — that is a gateway bug, not an
   operator one, and the two must not read alike.
-- **Write paths stay permissive.** `putModel` accepts a target naming an
-  uninstalled provider, for the reason it already accepts a dangling pin:
-  removing a plugin must not make an unrelated edit unsavable. `providerIdSchema`
-  validates the *format* of the id, never its installation.
+- **Write paths were to stay permissive, and this did not happen.** The intent
+  was that `putModel` accept a target naming an uninstalled provider, for the
+  reason it already accepts a dangling pin: removing a plugin must not make an
+  unrelated edit unsavable. `providerIdSchema` does validate format only, as
+  designed — but it is not what guards this path. `putModel` opens with
+  `parseOrThrow(modelSchema, …)`, and `targetSchema`'s non-custom arm is still a
+  hand-written five-member enum, which this spec deliberately kept (see
+  *Schema*). So the two decisions collide: `PUT /api/models/:id` and
+  `omni models put -f` refuse such a target outright, and
+  `packages/control/test/schemas.test.ts` asserts it.
+
+  Nothing here is broken today, because the enum also refuses the providers this
+  sub-project cannot yet produce. It becomes load-bearing the moment the plugin
+  host exists: a plugin provider's target will be unsaveable through the console
+  and the CLI until that enum is widened, and doing so is the plugin host's work.
+  Recorded rather than fixed here, because widening it now costs the
+  exhaustiveness the union exists for while nothing yet needs the room.
+
+  The stored-id state is reachable regardless — `sqlite/config.ts` reads targets
+  back with `JSON.parse` and no validation, so a restored or hand-edited database
+  produces it. That is what `provider:missing` and the `doctor` check below are
+  for, and it is why the CLI test that seeds one writes through
+  `store.config.putModel` rather than control's.
 - **`omni doctor` carries the weight**, as it already does for pins. It reports
   targets naming providers this installation does not have, which is the one
   place an operator finds out before a request does.

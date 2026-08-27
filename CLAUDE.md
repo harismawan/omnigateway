@@ -441,26 +441,45 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   provider's id is both kinds at once, so that is a real gap, not a technicality; do not describe it
   as mirror-and-pin, which is what `@omni/ratelimit/catalog` have and this not.
 - **Every provider-keyed table drop its prototype, and that is one invariant standing in for a guard
-  at each reader.** `PROVIDER_DESCRIPTORS`, `ADAPTERS`, `PROFILES`, `BODY_ORDER`,
-  `PROVIDER_MODEL_CATALOG` and `PROVIDERS` each end with `Object.setPrototypeOf(…, null)`; six
-  mutants covering their removal all die. Reason: a provider id arrive from a client's `model` name
-  and from unvalidated JSON in `virtual_models.targets`, and on ordinary object literal
-  `table["constructor"]` answer the `Object` constructor. So `!== undefined` and `?.` both read
-  "installed", then throw on next property access. Shipped once: `resolveModel` replaced a `Set.has`
-  — which never consult a prototype — with an index check, and `model: "constructor/foo"` returned
-  **500 carrying an internal source expression** where `nope/foo` correctly returned 503. Same keys
-  defeated four more readers including the `provider:missing` guard and `omni doctor`'s check, each
-  going silent in the exact case it exist for. **`noUncheckedIndexedAccess` cannot see any of it** —
-  it force a guard, and the guard it force is the one a prototype key defeat. Do not add
-  `Object.hasOwn` at the readers instead: it cover only those asking existence, not `catalogPricing`'s
-  `?.`, and partial protection that read as total is worse than none. That version was written, and
-  every one of its mutants survived removal.
-- **A module-scope `Object.keys(PROVIDER_DESCRIPTORS)` is a build-time snapshot**, and `loadPlugins()`
-  run long after import. Three sites read one and were wrong the same way: `providerCatalog` served a
-  console missing every plugin provider, `providerIdSchema` was `z.enum(PROVIDER_IDS)` and would have
-  refused their credentials, `isProviderId` reported them as not existing. Ask the registry **at call
-  time**. `PROVIDER_IDS` still exist and is still a snapshot — it feed CLI usage messages and tests,
-  never a gate.
+  at each reader.** Reason: a provider id arrive from a client's `model` name and from unvalidated
+  JSON in `virtual_models.targets`, and on ordinary object literal `table["constructor"]` answer the
+  `Object` constructor. So `!== undefined` and `?.` both read "installed", then throw on next
+  property access. Shipped once: `resolveModel` replaced a `Set.has` — which never consult a
+  prototype — with an index check, and `model: "constructor/foo"` returned **500 carrying an internal
+  source expression** where `nope/foo` correctly returned 503. Same keys defeated four more readers
+  including the `provider:missing` guard and `omni doctor`'s check, each going silent in the exact
+  case it exist for. `PROVIDER_ID_PATTERN` accept `constructor`, so nothing upstream stop such an id
+  being stored. **`noUncheckedIndexedAccess` cannot see any of it** — it force a guard, and the guard
+  it force is the one a prototype key defeat. Do not add `Object.hasOwn` at the readers instead: it
+  cover only those asking existence, not `catalogPricing`'s `?.`, and partial protection that read as
+  total is worse than none. That version was written, and every one of its mutants survived removal.
+  **Do not enumerate the tables here.** An earlier version did, listing the six in
+  `@omni/providers`, and `OAUTH_PROVIDERS` in `@omni/control` went on leaking for another review
+  round — a raw `TypeError` out of `refresh.ts` with the same signature as the bug the rule was
+  written for, plus `CALLBACKS` and the console's `heldAuths` map. A list of what to check have
+  exactly the property the thing it check lack. `packages/control/test/providerTables.test.ts`
+  **discover** them instead: it walk the exported surface of both packages, treat anything holding
+  two or more registered provider ids as a table, and assert the walk found something before
+  asserting anything about what it found. New table is covered the day it is exported.
+  Two facts the idiom hide, both worth knowing before writing a new one: spreading a null-prototype
+  object give an **ordinary** object, so `{...ADAPTERS, x}` silently revert the invariant — the
+  gateway normalise injected adapter maps at `app.ts` for that reason — and `.hasOwnProperty()`
+  called as a **method** on one of these throw. Use `Object.hasOwn(table, key)`.
+  Console cannot import `@omni/providers` (rule 12), so `heldAuths` restate the rule with
+  `Object.create(null)` and carry its own test.
+- **A module-scope `Object.keys`/`Object.entries` over `PROVIDER_DESCRIPTORS` is a build-time
+  snapshot**, and `loadPlugins()` run long after import. **Five** sites read one and were wrong the
+  same way — the count went three, then five, because each sweep stopped at the sites the previous
+  bug had made visible: `providerCatalog` served a console missing every plugin provider,
+  `providerIdSchema` was `z.enum(PROVIDER_IDS)` and would have refused their credentials,
+  `isProviderId` reported them as not existing, `PREFIX_PROVIDER` made a provider's own
+  `modelPrefixes` unreachable while `provider/model` for the same provider resolved — an asymmetry
+  *inside one function* — and `CALLBACKS` redirected nowhere. All five ask the registry **at call
+  time** now; `CALLBACKS` was deleted outright, since a second table derived from the first is a
+  thing to keep in step rather than a thing to have. Assume a sixth exist until you have grepped for
+  the pattern rather than for the names above.
+  `PROVIDER_IDS` still exist and is still a snapshot — it feed CLI usage messages and tests, never a
+  gate. `descriptors.ts` say so at the definition, which is where a reader meet it.
 - `provider:missing` is the pin rule applied to the provider, and follow it exactly: emitted **once
   per target**, `kind: "target"` with `credentialId: ""`, because no account is at fault. It is the
   **first** guard in the target loop, so a target that is also pinned report the provider rather than
@@ -470,12 +489,22 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   is the *other* half and stay a throw: reaching it mean the router admitted a candidate it should
   have excluded, which is a gateway bug, and `deps.adapters` is a separate injection point from the
   descriptors, so the two can disagree.
-- **Format and existence are two questions.** `providerIdSchema` check format alone. Existence is
-  asked per caller because the answers differ: `createApiKeyCredential` refuse to mint an account for
-  a provider that does not exist — no history to preserve — while `putModel` accept a target naming
-  one, same exemption it give a dangling pin. `catalogModelAuths` answer "every way in" for an
-  unknown provider, matching what it already answer for an unlisted model: empty would read as "no
-  credential can reach this" and refuse every plugin provider's target.
+- **Format and existence are two questions.** `providerIdSchema` check format alone, and it is the
+  gate on **credentials**, not on targets: `createApiKeyCredential` parse it, then ask `isProviderId`
+  and refuse to mint an account for a provider that does not exist — no history to preserve.
+  `catalogModelAuths` answer "every way in" for an unknown provider, matching what it already answer
+  for an unlisted model: empty would read as "no credential can reach this" and refuse every plugin
+  provider's target.
+  **A target naming an uninstalled provider cannot be saved through any supported path today**, and
+  an earlier version of this bullet claimed the opposite. `putModel` open with
+  `parseOrThrow(modelSchema, …)`, and `targetSchema`'s non-custom arm is still
+  `z.enum(["anthropic","openai","kimi","kilo","grok"])` — so `PUT /api/models/:id` and
+  `omni models put -f` **refuse** it, and `packages/control/test/schemas.test.ts` assert exactly that.
+  The state is real anyway, because `sqlite/config.ts` read targets back with `JSON.parse` and no
+  validation, so a restored or hand-edited database produce it — which is why `provider:missing` and
+  `omni doctor`'s check exist and why the CLI test seeding one write through `store.config.putModel`
+  rather than control's. When the plugin host land, that enum is what stop a plugin provider's target
+  being saved at all; widening it is that sub-project's work, not a thing to assume already done.
 - Nothing validate the pin at write time, same exemption `putModel` give stored targets: removing an
   account must not make unrelated edit unsavable. `omni doctor` carry that weight instead, and it
   must resolve through `resolvePin` — an existence check report "none" for the cross-provider and

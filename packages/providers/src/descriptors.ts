@@ -65,7 +65,15 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptors = {
 // Pinned by `descriptor.test.ts`.
 Object.setPrototypeOf(PROVIDER_DESCRIPTORS, null);
 
-/** Every provider id, derived so the list is written once. */
+/**
+ * Every provider id, derived so the list is written once.
+ *
+ * **A build-time snapshot**, evaluated at import — long before `loadPlugins()`
+ * runs — so it does not contain a provider registered at boot. Safe for what it
+ * feeds today: CLI usage messages and tests. Never use it as a gate. Four sites
+ * did and each was wrong in its own direction; see the note in CLAUDE.md. Ask
+ * `PROVIDER_DESCRIPTORS` at call time instead.
+ */
 export const PROVIDER_IDS = Object.keys(PROVIDER_DESCRIPTORS) as ReadonlyArray<
   keyof typeof PROVIDER_DESCRIPTORS
 >;
