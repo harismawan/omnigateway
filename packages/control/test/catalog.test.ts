@@ -132,6 +132,85 @@ test("a provider registered after module load is served", () => {
   expect(providerCatalog(() => {}).find((p) => p.id === "acme")).toBeUndefined();
 });
 
+test("a colour that would destroy the stylesheet is refused", () => {
+  // Every one of these was ACCEPTED by the first validator and measured through
+  // the real stylis pipeline: the first two emptied the whole ProviderPalette
+  // sheet (0 of 12 declarations survived, both themes colourless), the NUL
+  // closed the block early and spilled the rest to top level, and the truncated
+  // call — a plain typo, no adversary — absorbed the template's own `}` and
+  // `.dark {` into a custom-property value.
+  const NUL = String.fromCharCode(0);
+  for (const hostile of [
+    "oklch(0.53 0.17 330) /*",
+    'oklch(0.53 0.17 330) "',
+    `oklch(0.53 0.17 330)${NUL}x`,
+    NUL,
+    "oklch(0.53 0.17 330",
+    "x */ red",
+    "red; } body { display: none; ",
+    "red)",
+  ]) {
+    expect(isPaletteSafeColour(hostile)).toBe(false);
+  }
+});
+
+test("a colour that fetches is refused even though its characters are legal", () => {
+  // Inert today — every consumer puts `--p-<id>` in `color`, `border-left` or
+  // `color-mix`, none of which fetch — but a future `background: var(--p-x)`
+  // would make one an outbound request from a value a plugin supplied.
+  for (const fetching of ["url(https://evil/x)", "image-set(url(x))", "attr(data-x)"]) {
+    expect(isPaletteSafeColour(fetching)).toBe(false);
+  }
+});
+
+test("every colour form the platform actually uses still passes", () => {
+  // The risk an allowlist carries, and the reason the first version was a
+  // denylist: a rule that rejects a working value is the one that hurts.
+  for (const real of [
+    "oklch(0.52 0.14 224)",
+    "#aabbcc",
+    "#aabbccdd",
+    "rgb(1 2 3 / 50%)",
+    "hsl(210 50% 40%)",
+    "color-mix(in oklch, red 50%, blue)",
+    "var(--p-anthropic)",
+    "rebeccapurple",
+    "transparent",
+  ]) {
+    expect(isPaletteSafeColour(real)).toBe(true);
+  }
+});
+
+test("an empty or blank colour is refused", () => {
+  // `--p-<id>:` with nothing after it is a parse error that takes the rest of
+  // the block with it in some engines. The rule existed and was asserted
+  // nowhere, so deleting either the trim or the length check survived the suite.
+  expect(isPaletteSafeColour("")).toBe(false);
+  expect(isPaletteSafeColour("   ")).toBe(false);
+  expect(isPaletteSafeColour(" \t ")).toBe(false);
+  // And a value that is only meaningful after trimming is served trimmed.
+  expect(isPaletteSafeColour("  red  ")).toBe(true);
+});
+
+test("a provider whose id cannot be a custom property is withheld", () => {
+  // The call site, not the predicate. `isPaletteSafeProviderId` was tested
+  // directly while the branch using it survived being replaced by `if (false)`
+  // — the id keys `--p-<id>`, the picker and the palette, so serving one that
+  // cannot be a property name is worse than serving nothing.
+  const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
+  const seed = PROVIDER_DESCRIPTORS.anthropic;
+  registry["Bad Id{}"] = { ...seed, id: "Bad Id{}" };
+
+  try {
+    const problems: string[] = [];
+    const served = providerCatalog((p) => problems.push(`${p.provider} ${p.field}`));
+    expect(served.some((p) => p.id === "Bad Id{}")).toBe(false);
+    expect(problems).toContain("Bad Id{} id");
+  } finally {
+    delete registry["Bad Id{}"];
+  }
+});
+
 test("router internals are not shipped to the browser", () => {
   // `capabilities` and `writeOverInput` decide routing and pricing fallbacks. A
   // browser that could read them would eventually have something depend on them.
