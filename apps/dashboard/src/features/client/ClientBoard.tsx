@@ -9,10 +9,12 @@ import {
 import type { LimitReading, ProviderHeadroom, RequestLog, UsageBucket } from "../../api/types.ts";
 import { formatCount, formatPercent, formatRelative, formatUsd } from "../../lib/format.ts";
 import { useLive } from "../../session/live.tsx";
+import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Grid, Legend, Mono, Muted, Row, ScrollX, Stack } from "../../ui/primitives.ts";
 import { Readout } from "../../ui/Readout.tsx";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
+import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 
 const DAY_MS = 86_400_000;
 
@@ -23,48 +25,6 @@ const RANGES = [
 ] as const;
 
 type RangeId = (typeof RANGES)[number]["id"];
-
-const Table = styled.table`
-  width: 100%;
-  border-collapse: collapse;
-  th,
-  td {
-    text-align: left;
-    padding: ${({ theme }) => theme.space(1)} ${({ theme }) => theme.space(2)};
-    border-bottom: 1px solid ${({ theme }) => theme.color.rule};
-    white-space: nowrap;
-  }
-  th {
-    color: ${({ theme }) => theme.color.inkDim};
-    font-weight: 500;
-  }
-  td.num,
-  th.num {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-`;
-
-/**
- * A limit's consumption as a bar.
- *
- * Colour means state here, which is the one thing it is allowed to mean: green
- * until the ceiling is in sight, amber approaching it, red at it.
- */
-const Meter = styled.div<{ $percent: number }>`
-  height: 4px;
-  border-radius: 2px;
-  background: ${({ theme }) => theme.color.rule};
-  overflow: hidden;
-  &::after {
-    content: "";
-    display: block;
-    height: 100%;
-    width: ${({ $percent }) => Math.min(100, Math.max(0, $percent))}%;
-    background: ${({ theme, $percent }) =>
-      $percent >= 90 ? theme.color.down : $percent >= 70 ? theme.color.warn : theme.color.ok};
-  }
-`;
 
 const Choice = styled.button<{ $on?: boolean }>`
   border: 1px solid
@@ -113,54 +73,74 @@ function LimitRow({ reading }: { reading: LimitReading }) {
       ? "concurrent requests"
       : `${reading.dimension} ${WINDOW_LABEL[reading.window] ?? reading.window}`;
   const show = reading.dimension === "spend" ? formatUsd : formatCount;
+  // A ceiling of zero admits nothing, so it is full rather than undefined.
+  const fraction =
+    reading.used === null ? null : reading.limit === 0 ? 1 : reading.used / reading.limit;
 
   return (
-    <tr>
-      <td>{label}</td>
-      <td className="num">
+    <Tr>
+      <Td>{label}</Td>
+      <Td $align="right" $mono>
         {/*
           Null is not zero. `concurrency` is a gauge held in the gateway process
           with no row behind it, so rendering 0 would tell a client they have
           nothing in flight when nobody actually knows.
         */}
         {reading.used === null ? <Muted>unknown</Muted> : show(reading.used)}
-      </td>
-      <td className="num">{show(reading.limit)}</td>
-      <td style={{ width: "30%" }}>
-        {reading.used === null ? null : (
-          <Meter $percent={reading.limit === 0 ? 100 : (reading.used / reading.limit) * 100} />
+      </Td>
+      <Td $align="right" $mono>
+        {show(reading.limit)}
+      </Td>
+      <Td>
+        {fraction === null ? null : (
+          // `ui/Meter` owns the amber-at-70 / red-at-90 thresholds, and owning
+          // them in one place is the point: they are a reading of state, and a
+          // second copy is one that gets tuned without this one.
+          <Meter fraction={fraction} label={`${label}, ${Math.round(fraction * 100)}% used`} />
         )}
-      </td>
-    </tr>
+      </Td>
+    </Tr>
   );
 }
 
 function HeadroomRow({ row }: { row: ProviderHeadroom }) {
   return (
-    <tr>
-      <td>{row.provider}</td>
-      <td>{row.windowType}</td>
-      <td className="num">
+    <Tr>
+      <Td>{row.provider}</Td>
+      <Td>{row.windowType}</Td>
+      <Td $align="right" $mono>
         {/* Unknown, never "plenty": a provider that named no ceiling told us nothing. */}
         {row.usedRatio === null ? <Muted>unknown</Muted> : formatPercent(row.usedRatio, 0)}
-      </td>
-      <td>{row.resetsAt === null ? <Muted>—</Muted> : formatRelative(row.resetsAt)}</td>
-    </tr>
+      </Td>
+      <Td>
+        {row.usedRatio === null ? null : (
+          <Meter
+            fraction={row.usedRatio}
+            label={`${row.provider} ${row.windowType} window, ${Math.round(row.usedRatio * 100)}% used`}
+          />
+        )}
+      </Td>
+      <Td>{row.resetsAt === null ? <Muted>—</Muted> : formatRelative(row.resetsAt)}</Td>
+    </Tr>
   );
 }
 
 function LogRow({ row }: { row: RequestLog }) {
   return (
-    <tr>
-      <td>{formatRelative(row.at)}</td>
-      <td>
-        <Mono>{row.requestedModel}</Mono>
-      </td>
-      <td>{row.resolvedProvider ?? <Muted>—</Muted>}</td>
-      <td className="num">{row.status}</td>
-      <td className="num">{formatCount(row.inputTokens + row.outputTokens)}</td>
-      <td className="num">{formatUsd(row.costUsd)}</td>
-    </tr>
+    <Tr>
+      <Td>{formatRelative(row.at)}</Td>
+      <Td $mono>{row.requestedModel}</Td>
+      <Td>{row.resolvedProvider ?? <Muted>—</Muted>}</Td>
+      <Td $align="right" $mono>
+        {row.status}
+      </Td>
+      <Td $align="right" $mono>
+        {formatCount(row.inputTokens + row.outputTokens)}
+      </Td>
+      <Td $align="right" $mono>
+        {formatUsd(row.costUsd)}
+      </Td>
+    </Tr>
   );
 }
 
@@ -261,22 +241,26 @@ export function ClientBoard() {
             <Table>
               <thead>
                 <tr>
-                  <th>Model</th>
-                  <th className="num">Requests</th>
-                  <th className="num">Tokens</th>
-                  <th className="num">Spend</th>
+                  <Th>Model</Th>
+                  <Th $align="right">Requests</Th>
+                  <Th $align="right">Tokens</Th>
+                  <Th $align="right">Spend</Th>
                 </tr>
               </thead>
               <tbody>
                 {(usage.data ?? []).map((bucket) => (
-                  <tr key={bucket.key}>
-                    <td>
-                      <Mono>{bucket.key}</Mono>
-                    </td>
-                    <td className="num">{formatCount(bucket.requests)}</td>
-                    <td className="num">{formatCount(tokensOf(bucket))}</td>
-                    <td className="num">{formatUsd(bucket.costUsd)}</td>
-                  </tr>
+                  <Tr key={bucket.key}>
+                    <Td $mono>{bucket.key}</Td>
+                    <Td $align="right" $mono>
+                      {formatCount(bucket.requests)}
+                    </Td>
+                    <Td $align="right" $mono>
+                      {formatCount(tokensOf(bucket))}
+                    </Td>
+                    <Td $align="right" $mono>
+                      {formatUsd(bucket.costUsd)}
+                    </Td>
+                  </Tr>
                 ))}
               </tbody>
             </Table>
@@ -303,10 +287,10 @@ export function ClientBoard() {
             <Table>
               <thead>
                 <tr>
-                  <th>Limit</th>
-                  <th className="num">Used</th>
-                  <th className="num">Ceiling</th>
-                  <th aria-label="Consumption" />
+                  <Th>Limit</Th>
+                  <Th $align="right">Used</Th>
+                  <Th $align="right">Ceiling</Th>
+                  <Th $width="30%">Consumption</Th>
                 </tr>
               </thead>
               <tbody>
@@ -337,10 +321,11 @@ export function ClientBoard() {
             <Table>
               <thead>
                 <tr>
-                  <th>Provider</th>
-                  <th>Window</th>
-                  <th className="num">Used</th>
-                  <th>Resets</th>
+                  <Th>Provider</Th>
+                  <Th>Window</Th>
+                  <Th $align="right">Used</Th>
+                  <Th $width="30%">Consumption</Th>
+                  <Th>Resets</Th>
                 </tr>
               </thead>
               <tbody>
@@ -366,12 +351,12 @@ export function ClientBoard() {
             <Table>
               <thead>
                 <tr>
-                  <th>When</th>
-                  <th>Model</th>
-                  <th>Provider</th>
-                  <th className="num">Status</th>
-                  <th className="num">Tokens</th>
-                  <th className="num">Spend</th>
+                  <Th>When</Th>
+                  <Th>Model</Th>
+                  <Th>Provider</Th>
+                  <Th $align="right">Status</Th>
+                  <Th $align="right">Tokens</Th>
+                  <Th $align="right">Spend</Th>
                 </tr>
               </thead>
               <tbody>

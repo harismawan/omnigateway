@@ -462,8 +462,20 @@ export function adminRoutes(deps: AdminDeps) {
        * was never captured at all. This handler adds no error mapping of its
        * own, so there is nothing here to leak a path, a digest, or a stack.
        */
+      /**
+       * The operator alone, not a reader.
+       *
+       * Every other GET on this surface widened to `requireReader`; this one did
+       * not, and the asymmetry is the point. A read-only administrator exists so
+       * somebody can diagnose an installation without being able to change it —
+       * that is a claim about *write* access, and it is not a reason to hand
+       * them every prompt and completion the gateway has stored. Body capture is
+       * also the one thing a key holder can be promised is never retained
+       * (`bodyLoggingOptOut`), and a promise that widens with the reader count
+       * is not one.
+       */
       .get("/api/requests/:id/body", async ({ request, params }) => {
-        await requireReader(request, deps.admin);
+        await requireAdmin(request, deps.admin);
         return readRequestBody(deps.store, params.id);
       })
 

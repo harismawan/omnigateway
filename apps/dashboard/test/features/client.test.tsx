@@ -168,3 +168,70 @@ describe("client board", () => {
     expect(screen.getByText("laptop")).toBeTruthy();
   });
 });
+
+/**
+ * The client surface is on the shared primitives, not on copies of them.
+ *
+ * These assert the behaviour those primitives carry, which a hand-rolled table
+ * and bar silently lacked: an accessible meter, and thresholds owned in one
+ * place. A visual-only assertion would pass for either version, so each of
+ * these is anchored on something `ui/Meter` provides and a plain `<div>` does
+ * not.
+ */
+describe("client board uses the shared primitives", () => {
+  test("a limit's consumption is an accessible meter, not a decorative bar", async () => {
+    stub({
+      "GET /api/client/summary": () =>
+        apiKey({
+          limits: { requests: { "1m": 100 } },
+          limitUsage: [{ dimension: "requests", window: "1m", limit: 100, used: 25 }],
+        }),
+    });
+    renderWithProviders(<ClientBoard />);
+
+    const meter = await screen.findByRole("meter", { name: /requests per minute/i });
+    expect(meter.getAttribute("aria-valuenow")).toBe("25");
+    expect(meter.getAttribute("aria-valuemin")).toBe("0");
+    expect(meter.getAttribute("aria-valuemax")).toBe("100");
+  });
+
+  test("provider headroom carries a meter naming its provider and window", async () => {
+    stub({
+      "GET /api/client/quota": () => ({
+        headroom: [
+          { provider: "anthropic", windowType: "fiveHour", usedRatio: 0.62, resetsAt: null },
+        ],
+      }),
+    });
+    renderWithProviders(<ClientBoard />);
+
+    const meter = await screen.findByRole("meter", { name: /anthropic fiveHour/i });
+    expect(meter.getAttribute("aria-valuenow")).toBe("62");
+  });
+
+  test("a gauge with no reading renders no meter at all", async () => {
+    stub({ "GET /api/client/summary": () => apiKey({ limits: { concurrency: 4 } }) });
+    renderWithProviders(<ClientBoard />);
+
+    await screen.findByText("concurrent requests");
+    // `used` is null for a gauge. A meter at 0 would claim the key is idle,
+    // which is precisely the reading nobody has.
+    expect(screen.queryByRole("meter")).toBeNull();
+  });
+
+  test("a ceiling of zero reads as full rather than as unknown", async () => {
+    stub({
+      "GET /api/client/summary": () =>
+        apiKey({
+          limits: { requests: { "1m": 0 } },
+          limitUsage: [{ dimension: "requests", window: "1m", limit: 0, used: 0 }],
+        }),
+    });
+    renderWithProviders(<ClientBoard />);
+
+    // 0/0 is not a fraction, and a limit of zero admits nothing — so the honest
+    // rendering is a full bar, never a division that yields NaN.
+    const meter = await screen.findByRole("meter");
+    expect(meter.getAttribute("aria-valuenow")).toBe("100");
+  });
+});
