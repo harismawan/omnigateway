@@ -1382,6 +1382,15 @@ const MUTATIONS: ReadonlyArray<{
     body: "settings",
     topics: ["res:settings"],
   },
+  // Granting or withdrawing read-only access. Announces `res:settings` because
+  // that is where the console renders whether the access exists.
+  {
+    route: "/api/settings/viewer-password",
+    method: "PUT",
+    path: "/api/settings/viewer-password",
+    body: { password: "read-only-pass-1" },
+    topics: ["res:settings"],
+  },
   // A POST that writes nothing: it ranks the targets a model already has.
   {
     route: "/api/models/:id/dry-run",

@@ -7,7 +7,7 @@ import type { ChannelRegistry } from "../stream/channels.ts";
 import { parseClientFrame, type ServerFrame, topicClass } from "../stream/protocol.ts";
 import type { Credential, Principal, SocketRegistry } from "../stream/registry.ts";
 import type { Ring } from "../stream/ring.ts";
-import { apiErrorHandler, readCookie, requireAdmin } from "./http.ts";
+import { apiErrorHandler, readCookie } from "./http.ts";
 
 export type StreamDeps = {
   admin: AdminAuth;
@@ -46,7 +46,11 @@ export type StreamDeps = {
  */
 const CLIENT_TOPICS: ReadonlySet<string> = new Set(["res:usage", "res:logs"]);
 
-function authorised(channels: ChannelRegistry, principal: Principal, topic: string): boolean {
+export function authorised(
+  channels: ChannelRegistry,
+  principal: Principal,
+  topic: string,
+): boolean {
   const kind = topicClass(topic);
   if (kind === null) return false;
 
@@ -64,11 +68,13 @@ function authorised(channels: ChannelRegistry, principal: Principal, topic: stri
   if (principal.kind === "admin") return true;
 
   if (principal.kind === "viewer") {
-    // Every invalidation the console listens to, so a read-only console stays as
-    // fresh as the operator's. Not `stream:*`: that class carries payloads
-    // rather than invalidations, and the one that exists is the gateway's own
-    // stdout — operator output, not installation state.
-    return kind === "res";
+    // A viewer is the operator minus mutations and minus secrets, so it holds
+    // every `res:*` and every declared `stream:*` — including the stdout tail,
+    // which is a diagnostic and is neither. That is the whole use for the role:
+    // somebody who can work out what is wrong without being able to change it.
+    // It stops at plugin channels, handled above, because those are opened by
+    // third-party code rather than declared by the host.
+    return kind === "res" || kind === "stream";
   }
 
   if (principal.kind === "client") return CLIENT_TOPICS.has(topic);
@@ -134,11 +140,15 @@ export function streamRoutes(deps: StreamDeps) {
           throw new GatewayError("AUTH", "present one credential, not two");
         }
 
-        await requireAdmin(request, deps.admin);
         if (cookie === null) throw new GatewayError("AUTH", "admin session required");
+        // Any session opens a socket; `authorised` decides what it may then hold.
+        // Refusing the upgrade per kind would push the same rule into two places
+        // and give a client a different failure mode than a refused subscribe.
+        const principal = await deps.admin.verify(cookie);
+        if (principal === null) throw new GatewayError("AUTH", "admin session required");
 
         resolved.set(request, {
-          principal: { kind: "admin" },
+          principal,
           // A thunk over the token rather than the token itself: the registry
           // never learns what a cookie is, and the machine arm slots in later
           // as a different thunk with no registry change.
