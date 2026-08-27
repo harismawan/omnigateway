@@ -468,8 +468,21 @@ export function servesTarget(target: TargetAddress, account: ServingAccount): bo
   // or an account that somehow holds one its target does not name, is refused
   // rather than ignored: unreachable through the schema, and failing closed is
   // the right direction for a constraint a row states and cannot honour.
-  const named = (value: unknown): string | undefined =>
-    typeof value === "string" && value !== "" ? value : undefined;
+  // `providerData` is `Record<string, unknown>` and `sqlite/credentials.ts` reads
+  // it back with a bare `JSON.parse`, so `endpointId` can be any JSON value at
+  // all. A first version mapped every non-string to `undefined`, which made a
+  // corrupt id read as *no* id — so a custom target naming no endpoint was
+  // served by any account whose `endpointId` was a number, `null`, `false` or an
+  // object. That is the same fail-open this rule was written to close, one layer
+  // down, and it was looser than the rule it replaced: comparing raw values,
+  // `42 !== undefined` refused.
+  //
+  // Present-but-uncomparable therefore becomes a value that matches nothing,
+  // including another of its kind, rather than a synonym for absent.
+  const named = (value: unknown): string | symbol | undefined => {
+    if (value === undefined || value === "") return undefined;
+    return typeof value === "string" ? value : Symbol("unusable-endpoint");
+  };
   if (named(target.endpointId) !== named(account.providerData.endpointId)) return false;
   return target.credentialId === undefined || account.id === target.credentialId;
 }

@@ -278,8 +278,12 @@ provider-specific *logic* from core, not provider-shaped *vocabulary*.
 - **The `kind: "portable"` rename gets a collision test**: a tool defined by the
   `custom` *provider* and a portable tool are distinguishable, which they are not
   today.
-- **Degradation spelling** is pinned on both sides: the new string is emitted,
-  and a fixture row carrying the old string still renders in the console.
+- **Degradation spelling** is pinned where it is written — `dispatch.test.ts`
+  asserts the new string is emitted. It is deliberately **not** pinned on the
+  read side: nothing in the repository parses `degradations`, the console renders
+  each entry as a raw chip with no lookup, so a console fixture carrying the old
+  spelling would assert that a string renders as itself. An earlier draft of this
+  section claimed such a fixture exists; it does not, and should not.
 - **Mutation-test the equivalence pins.** Change one descriptor's native block
   types and confirm the routing pin fails. An equivalence test that reads through
   the registry on both sides asserts nothing.
