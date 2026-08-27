@@ -82,6 +82,7 @@ export {
   createKey,
   type LimitReading,
   listKeys,
+  readOwnKey,
   revokeKey,
   setKeyLimits,
   setKeyModels,
@@ -144,7 +145,17 @@ export {
   removePlugin,
   verifyPlugin,
 } from "./plugins.ts";
+export {
+  ALL,
+  canMutate,
+  type Principal,
+  type PrincipalKind,
+  type Scope,
+  scopeKey,
+  scopeOf,
+} from "./principal.ts";
 export { type BurnEstimate, type BurnInput, burnEstimates, burnFor } from "./quota/burn.ts";
+export { type ProviderHeadroom, providerHeadroom } from "./quota/headroom.ts";
 export {
   type GatewayRate,
   type QuotaHistoryInput,

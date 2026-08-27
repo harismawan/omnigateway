@@ -11,6 +11,15 @@ import { DEFAULT_SETTINGS } from "../types.ts";
 
 const SETTINGS_KEY = "settings";
 const ADMIN_HASH_KEY = "adminPasswordHash";
+/**
+ * The read-only administrator's password, kept in its own row.
+ *
+ * Its own row and not a field inside `settings`, because `putSettings` merges a
+ * patch over the stored object and is reachable from the settings API — a
+ * password hash living in there would be readable by anything that reads
+ * settings and clearable by anything that writes them.
+ */
+const VIEWER_HASH_KEY = "viewerPasswordHash";
 
 /**
  * Takes only the weights the router still scores, defaulting the rest.
@@ -144,6 +153,22 @@ export function createConfigRepo(
 
     async setAdminPasswordHash(hash: string) {
       writeRaw(ADMIN_HASH_KEY, hash);
+    },
+
+    async getViewerPasswordHash() {
+      return readRaw(VIEWER_HASH_KEY);
+    },
+
+    async setViewerPasswordHash(hash: string | null) {
+      // Nullable where the admin hash is not: the read-only password is an
+      // optional feature an operator turns off again, and deleting the row is
+      // what "off" is. An empty string would be a hash that verifies against
+      // nothing while `isConfigured` still reported it as set.
+      if (hash === null) {
+        db.run("DELETE FROM settings WHERE key = ?", [VIEWER_HASH_KEY]);
+        return;
+      }
+      writeRaw(VIEWER_HASH_KEY, hash);
     },
   };
 }

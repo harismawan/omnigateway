@@ -141,6 +141,32 @@ export async function listKeys(store: Store, now: number = Date.now()): Promise<
   return Promise.all(keys.map((key) => toSummary(store, key, now)));
 }
 
+/**
+ * One key as its own holder sees it.
+ *
+ * Deliberately the same `ApiKeySummary` the operator's listing is built from,
+ * produced by the same `toSummary`. A second, narrower shape for the client
+ * would be a second answer to "what is safe to show about a key", and the two
+ * would drift — the summary already excludes `hash` because that question was
+ * settled once, here.
+ *
+ * `bodyLoggingOptOut` is included and is the point: it is a promise made to
+ * whoever holds this key, and the holder is exactly who should be able to
+ * check it.
+ */
+export async function readOwnKey(
+  store: Store,
+  apiKeyId: string,
+  now: number = Date.now(),
+): Promise<ApiKeySummary> {
+  const key = (await store.keys.list()).find((entry) => entry.id === apiKeyId);
+  // A live session whose key vanished. Refused rather than reported empty: an
+  // empty summary reads as "a key with no limits", which is the opposite of
+  // what a missing key means.
+  if (key === undefined) throw new GatewayError("AUTH", "no such api key");
+  return toSummary(store, key, now);
+}
+
 export type CreatedKey = { id: string; label: string; prefix: string; key: string };
 
 /**

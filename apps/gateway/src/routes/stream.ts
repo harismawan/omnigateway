@@ -34,18 +34,46 @@ export type StreamDeps = {
  * function says who may hold it. A plugin therefore cannot widen its own reach
  * by opening a channel.
  */
+/**
+ * The `res:*` topics a client session may hold.
+ *
+ * Two, and an allowlist rather than a prefix test. A `res:*` frame carries only
+ * `{ keys }`, so holding one leaks no rows — the client refetches against its
+ * own scoped endpoint and the socket never transports another key's data. That
+ * argument is what makes this safe, and it is an argument about *these* topics:
+ * a future frame carrying a payload would break it, which is why the set is
+ * enumerated here rather than derived.
+ */
+const CLIENT_TOPICS: ReadonlySet<string> = new Set(["res:usage", "res:logs"]);
+
 function authorised(channels: ChannelRegistry, principal: Principal, topic: string): boolean {
   const kind = topicClass(topic);
   if (kind === null) return false;
+
   if (kind === "plugin") {
     if (!channels.opened(topic)) return false;
     if (principal.kind === "admin") return true;
     // The machine arm is unreachable until `plugin_machine_tokens` exists. When
     // it does, a machine token reaches its own plugin's topics and nothing else.
-    return topic.startsWith(`plugin:${principal.pluginId}:`);
+    if (principal.kind === "machine") return topic.startsWith(`plugin:${principal.pluginId}:`);
+    // A viewer renders plugin panels but is not the operator, and a client does
+    // not render the console at all. Neither gets a plugin's channel.
+    return false;
   }
-  // Everything that is not a plugin channel belongs to the console alone.
-  return principal.kind === "admin";
+
+  if (principal.kind === "admin") return true;
+
+  if (principal.kind === "viewer") {
+    // Every invalidation the console listens to, so a read-only console stays as
+    // fresh as the operator's. Not `stream:*`: that class carries payloads
+    // rather than invalidations, and the one that exists is the gateway's own
+    // stdout — operator output, not installation state.
+    return kind === "res";
+  }
+
+  if (principal.kind === "client") return CLIENT_TOPICS.has(topic);
+
+  return false;
 }
 
 /**
@@ -114,7 +142,11 @@ export function streamRoutes(deps: StreamDeps) {
           // A thunk over the token rather than the token itself: the registry
           // never learns what a cookie is, and the machine arm slots in later
           // as a different thunk with no registry change.
-          revalidate: () => deps.admin.verify(cookie),
+          // Still-verified is a narrower question than who-are-you: a session
+          // that changed kind mid-connection is impossible (kinds are fixed at
+          // issue), so the thunk collapses the principal to a boolean here and
+          // the registry stays ignorant of both cookies and kinds.
+          revalidate: async () => (await deps.admin.verify(cookie)) !== null,
         });
       },
 

@@ -619,6 +619,13 @@ export interface ConfigRepo {
   setAdminPasswordHashIfAbsent(hash: string): Promise<boolean>;
   /** Replaces an existing password hash for the authenticated password-change path. */
   setAdminPasswordHash(hash: string): Promise<void>;
+  /**
+   * The read-only administrator's password hash, or null where the operator has
+   * not set one. Absent is the default: a fresh install has no viewer.
+   */
+  getViewerPasswordHash(): Promise<string | null>;
+  /** Sets the read-only password, or removes it entirely with `null`. */
+  setViewerPasswordHash(hash: string | null): Promise<void>;
 }
 
 /**

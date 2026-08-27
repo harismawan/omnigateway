@@ -1,3 +1,4 @@
+import type { Principal } from "@omni/control";
 import { type Logger, noopLogger } from "@omni/ir";
 import type { Clock, Schedule } from "./coalescer.ts";
 import type { ServerFrame } from "./protocol.ts";
@@ -5,13 +6,16 @@ import type { ServerFrame } from "./protocol.ts";
 /**
  * Who is on the other end of a connection.
  *
- * The `machine` arm is declared and currently unreachable: it belongs to the
- * remote-control plugin's `routes:machine` capability and its
- * `plugin_machine_tokens` table, and that design is still a draft. Declaring it
- * here costs nothing and is what lets the machine arm land later without the
- * registry learning a second shape.
+ * Defined in `@omni/control` and re-exported here, because the session layer
+ * there is what *decides* a principal while this registry only carries one. Two
+ * declarations would be two answers to "who may read this", and they would drift
+ * apart in the direction that fails open.
+ *
+ * The `machine` arm is declared there and currently unreachable: it belongs to
+ * the remote-control plugin's `routes:machine` capability and its
+ * `plugin_machine_tokens` table, and that design is still a draft.
  */
-export type Principal = { kind: "admin" } | { kind: "machine"; tokenId: string; pluginId: string };
+export type { Principal } from "@omni/control";
 
 /**
  * A verified principal plus a way to ask whether it is still verified.

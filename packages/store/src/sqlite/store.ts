@@ -139,6 +139,8 @@ export async function createStore(opts: {
       getAdminPasswordHash: () => handle.config.getAdminPasswordHash(),
       setAdminPasswordHashIfAbsent: (hash) => handle.config.setAdminPasswordHashIfAbsent(hash),
       setAdminPasswordHash: (hash) => handle.config.setAdminPasswordHash(hash),
+      getViewerPasswordHash: () => handle.config.getViewerPasswordHash(),
+      setViewerPasswordHash: (hash) => handle.config.setViewerPasswordHash(hash),
     },
 
     keys: {
