@@ -1636,6 +1636,37 @@ test("the mutation table covers every mutating route this surface registers", as
   expect(covered).toEqual(registered);
 });
 
+/**
+ * The companion to the mutation table, and the same argument.
+ *
+ * The session list above is hand-maintained, so a new unguarded GET simply is
+ * not in it — which is how `/api/catalog` shipped with the guard written
+ * correctly and nothing that would have noticed if it had not been. Rather than
+ * reconcile two lists, this drives every GET the surface actually registers.
+ */
+test("every GET route this surface registers refuses an anonymous caller", async () => {
+  const { app } = await harness();
+  const registered = (app as unknown as { routes: { method: string; path: string }[] }).routes
+    .filter((route) => route.method === "GET")
+    // `/api/status` answers without a session by design: it is what the login
+    // screen asks *before* there is one.
+    .filter((route) => route.path !== "/api/status")
+    .map((route) => route.path);
+
+  expect(registered.length).toBeGreaterThan(5);
+
+  const refused: string[] = [];
+  for (const path of registered) {
+    // A concrete instance of a parameterised path. The value need not exist —
+    // the session check runs before anything looks it up.
+    const concrete = path.replace(/:[^/]+/g, "probe");
+    const response = await app.handle(new Request(`http://localhost${concrete}`));
+    if (response.status !== 401) refused.push(`${concrete} -> ${response.status}`);
+  }
+
+  expect(refused).toEqual([]);
+});
+
 test("a provider whose colour had to be repaired is said out loud, once", async () => {
   // `providerCatalog` refuses a value that would close the declaration it is
   // written into and serves a neutral instead. Substituting quietly is the

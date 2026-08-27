@@ -38,14 +38,49 @@ export type CatalogProvider = {
  * `<style>` element during SSR, which is what `<` and `>` are for; and a
  * backslash or a newline is how one of the others is hidden from a reader.
  *
- * Deliberately a refusal rather than an attempt to recognise a colour. The set
- * of valid colour syntaxes grows with the platform — `oklch()` is itself recent
- * — so an allowlist of colour *forms* has to be revised every time a browser
- * gains one, and the revision that lags is the one that rejects a value that
- * works. A denylist of six characters ages the other way: nothing a future CSS
- * colour needs is on it.
+ * An allowlist of *characters*, plus two structural checks. The first version
+ * of this was a denylist of six characters, argued for on the grounds that "a
+ * denylist of six characters ages the other way: nothing a future CSS colour
+ * needs is on it". Review demonstrated that both halves of that were wrong —
+ * four accepted values destroyed the entire stylesheet, measured through the
+ * real stylis pipeline:
+ *
+ * - `oklch(0.53 0.17 330) /*` — an unterminated comment swallowed every
+ *   declaration after it: 0 of 12 survived, both themes colourless.
+ * - a stray `"` — same, 0 of 12.
+ * - a NUL byte — functionally `;}`: the block closed early and the remaining
+ *   properties were emitted at top level with no selector.
+ * - `oklch(0.53 0.17 330` — a plain typo, no adversary at all — absorbed the
+ *   template's own `}` and `.dark {` into a custom-property value.
+ *
+ * So the shape is inverted. A colour is written with letters, digits, and a
+ * small fixed set of punctuation; anything else is not a colour, whatever the
+ * platform adds next. `oklch()`, `color-mix()`, `#aabbcc`, `rgb(1 2 3 / 50%)`
+ * and named colours all pass unchanged.
+ *
+ * `*` and `"` are absent from the set, which is what closes the first two cases;
+ * NUL and every other control character are absent, which closes the third; and
+ * unbalanced parentheses are refused separately, which closes the fourth.
+ *
+ * `url(`, `attr(` and `image-set(` are refused by name even though their
+ * characters are legal. They are inert today — every consumer of `--p-<id>`
+ * puts it in `color`, `border-left` or `color-mix`, none of which fetch — but a
+ * future `background: var(--p-x)` would make one an outbound request from a
+ * value a plugin supplied.
  */
-const UNSAFE_IN_CSS_VALUE = /[;{}<>\\\n\r]/;
+const SAFE_CSS_COLOUR = /^[a-zA-Z0-9 ().,%#/+-]{1,128}$/;
+const FETCHING_FUNCTION = /\b(?:url|attr|image-set|element|expression)\s*\(/i;
+
+/** Parentheses must balance, and never dip below zero. */
+function balancedParens(value: string): boolean {
+  let depth = 0;
+  for (const char of value) {
+    if (char === "(") depth += 1;
+    else if (char === ")") depth -= 1;
+    if (depth < 0) return false;
+  }
+  return depth === 0;
+}
 
 /**
  * A provider id that can be pasted into `--p-<id>` without escaping.
@@ -115,7 +150,14 @@ function colourHalf(colour: unknown, mode: "light" | "dark"): unknown {
 function safeColour(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  if (trimmed.length === 0 || UNSAFE_IN_CSS_VALUE.test(trimmed)) return null;
+  // No separate empty check: `SAFE_CSS_COLOUR` requires at least one character,
+  // so `""` and a whitespace-only value both fail it after the trim. An earlier
+  // version had both, and deleting the length test survived the suite — a branch
+  // that cannot fail is one a later reader trusts for a guarantee it is not
+  // giving.
+  if (!SAFE_CSS_COLOUR.test(trimmed)) return null;
+  if (!balancedParens(trimmed)) return null;
+  if (FETCHING_FUNCTION.test(trimmed)) return null;
   return trimmed;
 }
 
