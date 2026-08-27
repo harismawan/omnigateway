@@ -1,6 +1,7 @@
 import type { ErrorCode, ProviderId } from "@omni/ir";
 import type {
   ApiKey,
+  AuthType,
   BodyArtifact,
   BodyAttempt,
   BodyDetailState,
@@ -33,6 +34,7 @@ import type {
  */
 export type {
   ApiKey,
+  AuthType,
   BodyArtifact,
   BodyAttempt,
   BodyDetailState,
@@ -449,3 +451,70 @@ export type PluginCatalogEntry = {
 };
 
 export type PluginsResponse = { plugins: PluginCatalogEntry[] };
+
+/** List price in US dollars per million tokens, as the catalog publishes it. */
+export type CatalogPricing = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+};
+
+/** Published context and output ceilings, in tokens. */
+export type CatalogLimits = { contextWindow: number; maxOutputTokens: number };
+
+/**
+ * One curated model of one provider.
+ *
+ * `auth` is stated only where a provider does not serve the same model to both
+ * ways in — Kilo's free tier answers an API key and not a subscription — and
+ * absent means both. `oauthLimits` is the same idea for the window: absent
+ * means one set of limits covers either backend.
+ */
+export type CatalogModel = {
+  id: string;
+  label: string;
+  pricing: CatalogPricing;
+  limits: CatalogLimits;
+  oauthLimits?: CatalogLimits;
+  /**
+   * Which credential types can reach this model.
+   *
+   * Always present: the endpoint resolves it, applying the rule that a model
+   * states its own set or inherits the provider's. It was optional here while
+   * the console applied that rule itself — which was a second copy of it, and is
+   * why it moved.
+   */
+  auth: readonly AuthType[];
+};
+
+/**
+ * One provider the gateway can serve, as `/api/catalog` reports it.
+ *
+ * Mirrored rather than imported: the shape is assembled by `providerCatalog()`
+ * in `packages/control`, and per boundary 12 the console may not reach into the
+ * gateway or control for a type — nor, since this endpoint exists, into the
+ * provider package for the data itself. A provider that loads from a plugin at
+ * boot has no build-time module to import, which is the whole reason the
+ * console reads this over the wire.
+ *
+ * `order` is the rank the console draws providers in; the wire order is not a
+ * contract, so `useProviderCatalog` sorts by it on the way in.
+ */
+export type CatalogProvider = {
+  id: string;
+  label: string;
+  order: number;
+  colour: { light: string; dark: string };
+  /** What the operator does next in that provider's own words, or absent. */
+  pasteHint?: string;
+  /** The redirect a PKCE flow lands on. Absent for providers that have none. */
+  callback?: { uri: string; label: string };
+  defaultModel: string;
+  /** Which kinds of credential the gateway can hold for this provider. */
+  authTypes: readonly AuthType[];
+  models: readonly CatalogModel[];
+};
+
+export type CatalogResponse = { providers: CatalogProvider[] };

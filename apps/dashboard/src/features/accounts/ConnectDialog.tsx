@@ -1,24 +1,27 @@
-import { type CatalogAuth, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import styled from "styled-components";
 import {
+  findProvider,
   pollConnect,
   useConnectFinish,
   useConnectStart,
   useCreateApiKeyCredential,
+  useProviderCatalog,
 } from "../../api/queries.ts";
-import type { ConnectStart, Credential, ProviderId } from "../../api/types.ts";
+import type {
+  AuthType,
+  CatalogProvider,
+  ConnectStart,
+  Credential,
+  ProviderId,
+} from "../../api/types.ts";
 import { CopyValue } from "../../components/CopyValue.tsx";
-import { PROVIDER_LABEL } from "../../theme/tokens.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Field, Input, Select } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { Legend, Row, Stack } from "../../ui/primitives.ts";
 import { describeError } from "../../ui/States.tsx";
-
-const PROVIDER_IDS = Object.keys(PROVIDER_MODEL_CATALOG) as ProviderId[];
 
 /**
  * How a provider can be connected, read from the catalog instead of decided
@@ -29,30 +32,32 @@ const PROVIDER_IDS = Object.keys(PROVIDER_MODEL_CATALOG) as ProviderId[];
  * authenticates with a raw key, so that stranded four providers whose operators
  * hold a console key and no subscription.
  */
-function waysIn(provider: ProviderId): readonly CatalogAuth[] {
-  return PROVIDER_MODEL_CATALOG[provider].authTypes;
+function waysIn(entry: CatalogProvider | undefined): readonly AuthType[] {
+  return entry?.authTypes ?? [];
 }
 
 /** Authorizing is the better path where a provider offers it, so it leads. */
-function defaultWayIn(provider: ProviderId): CatalogAuth {
-  return waysIn(provider).includes("oauth") ? "oauth" : "apiKey";
+function defaultWayIn(entry: CatalogProvider | undefined): AuthType {
+  return waysIn(entry).includes("oauth") ? "oauth" : "apiKey";
 }
 
-const AUTH_LABEL: Record<CatalogAuth, string> = {
+/**
+ * The provider a picker over this catalog starts on: the one it draws first.
+ *
+ * `"anthropic"` is the fallback for an empty catalog only, which the gate makes
+ * unreachable — it is here so the state has a value at all, not as a default
+ * anybody should end up with. The cast is the same one the `onChange` handlers
+ * make: `CatalogProvider.id` is a string because a plugin may supply one, and
+ * the console's `ProviderId` is the compiled-in union.
+ */
+function firstProvider(catalog: readonly CatalogProvider[]): ProviderId {
+  return (catalog[0]?.id ?? "anthropic") as ProviderId;
+}
+
+const AUTH_LABEL: Record<AuthType, string> = {
   oauth: "Authorize in the browser",
   apiKey: "Paste an API key",
 };
-
-/**
- * What the operator has to do next, in their words, per flow shape.
- *
- * Read off the provider rather than restated here: the sentence describes that
- * provider's flow, so it belongs with the flow. Empty for a provider that
- * states none, which renders the hint away rather than inventing one.
- */
-function pasteHint(provider: ProviderId): string {
-  return PROVIDER_DESCRIPTORS[provider].presentation.pasteHint ?? "";
-}
 
 /**
  * The shape of what gets pasted back, per flow.
@@ -63,16 +68,10 @@ function pasteHint(provider: ProviderId): string {
  * port or the path; providers that declare no callback have no redirect to
  * show and get the bare-code placeholder instead.
  */
-const CODE_PLACEHOLDER: Partial<Record<ProviderId, string>> = Object.fromEntries(
-  Object.values(PROVIDER_DESCRIPTORS).flatMap((descriptor) =>
-    // `flatMap` rather than `filter` + `map`: a filter does not narrow the
-    // optional away, and the fallback that would silence the compiler is what
-    // renders the literal string "undefined" into the field.
-    descriptor.callback === undefined
-      ? []
-      : [[descriptor.id, `${descriptor.callback.uri}?code=…`] as const],
-  ),
-);
+function codePlaceholder(entry: CatalogProvider | undefined): string {
+  const callback = entry?.callback;
+  return callback === undefined ? "code#state" : `${callback.uri}?code=…`;
+}
 
 const Step = styled.ol`
   display: flex;
@@ -121,9 +120,31 @@ export function ConnectDialog({
   onOpenChange,
   onConnected,
 }: ConnectDialogProps) {
-  const [provider, setProvider] = useState<ProviderId>("anthropic");
-  const [authType, setAuthType] = useState<CatalogAuth>(defaultWayIn("anthropic"));
+  // Loaded before any screen mounts, by the gate in `routes/_app.tsx`.
+  const catalog = useProviderCatalog().data ?? [];
+  /**
+   * What the `<Select>` below shows before anyone touches it.
+   *
+   * The catalog's first entry, not a name written here. `"anthropic"` was the
+   * hardcoded default, and on an installation whose catalog does not list it —
+   * a build with a provider removed, or a plugin-only one — the control showed
+   * its first option while this state and the `POST` body still said
+   * `anthropic`. Nothing in the browser is wrong-looking when that happens: the
+   * operator picks the account they can see and the gateway is asked for one
+   * they cannot.
+   *
+   * Read once, in an initialiser, because the gate has already resolved the
+   * catalog by the time this mounts — there is no later value to wait for.
+   */
+  const [provider, setProvider] = useState<ProviderId>(() => firstProvider(catalog));
+  const entry = findProvider(catalog, provider);
+  const [authType, setAuthType] = useState<AuthType>(() =>
+    defaultWayIn(findProvider(catalog, firstProvider(catalog))),
+  );
   const [label, setLabel] = useState("");
+  // The id itself for a provider the catalog does not name, which is what an
+  // operator would have to type anyway — never the empty string.
+  const providerLabel = entry?.label ?? provider;
   const [flow, setFlow] = useState<ConnectStart | null>(null);
   const [code, setCode] = useState("");
   const [endpointId, setEndpointId] = useState("");
@@ -225,7 +246,7 @@ export function ConnectDialog({
       return;
     }
     start.mutate(
-      { provider, label: label.trim().length === 0 ? PROVIDER_LABEL[provider] : label.trim() },
+      { provider, label: label.trim().length === 0 ? providerLabel : label.trim() },
       {
         onSuccess: (result) => setFlow(result),
         onError: (error) => setProblem(describeError(error)),
@@ -311,26 +332,26 @@ export function ConnectDialog({
                     // The way in belongs to the provider. Carrying the old one
                     // across would offer to store a key under a provider that
                     // has no key path, or authorize one that has no flow.
-                    setAuthType(defaultWayIn(next));
+                    setAuthType(defaultWayIn(findProvider(catalog, next)));
                   }}
                 >
-                  {PROVIDER_IDS.map((id) => (
-                    <option key={id} value={id}>
-                      {PROVIDER_LABEL[id]}
+                  {catalog.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.label}
                     </option>
                   ))}
                 </Select>
               )}
             </Field>
-            {waysIn(provider).length > 1 ? (
+            {waysIn(entry).length > 1 ? (
               <Field label="How to connect">
                 {(props) => (
                   <Select
                     {...props}
                     value={authType}
-                    onChange={(event) => setAuthType(event.target.value as CatalogAuth)}
+                    onChange={(event) => setAuthType(event.target.value as AuthType)}
                   >
-                    {waysIn(provider).map((way) => (
+                    {waysIn(entry).map((way) => (
                       <option key={way} value={way}>
                         {AUTH_LABEL[way]}
                       </option>
@@ -457,7 +478,7 @@ export function ConnectDialog({
                 <Input
                   {...props}
                   value={label}
-                  placeholder={PROVIDER_LABEL[provider]}
+                  placeholder={providerLabel}
                   onChange={(event) => setLabel(event.target.value)}
                 />
               )}
@@ -477,7 +498,7 @@ export function ConnectDialog({
                   $size="sm"
                 >
                   <ExternalLink />
-                  Open {PROVIDER_LABEL[provider]}
+                  Open {providerLabel}
                 </Button>
               </Row>
               <CopyValue value={flow.authorizeUrl} label="Copy authorization link" />
@@ -491,11 +512,13 @@ export function ConnectDialog({
             )}
 
             {flow.kind === "device" ? (
-              <Waiting>{pasteHint(provider)} Waiting for authorization…</Waiting>
+              <Waiting>{entry?.pasteHint ?? ""} Waiting for authorization…</Waiting>
             ) : (
               <Field
                 label="Authorization code"
-                hint={pasteHint(provider)}
+                // Empty for a provider that states none, which renders the hint
+                // away rather than inventing one.
+                hint={entry?.pasteHint ?? ""}
                 {...(problem === null ? {} : { problem })}
               >
                 {(props) => (
@@ -503,7 +526,7 @@ export function ConnectDialog({
                     {...props}
                     value={code}
                     autoFocus
-                    placeholder={CODE_PLACEHOLDER[provider] ?? "code#state"}
+                    placeholder={codePlaceholder(entry)}
                     onChange={(event) => setCode(event.target.value)}
                   />
                 )}

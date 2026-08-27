@@ -1,22 +1,77 @@
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { createGlobalStyle } from "styled-components";
-import { PROVIDER_IDS } from "./tokens.ts";
 
 /**
- * The `--p-<id>` half of one palette, written from the provider registry.
+ * Everything the palette needs of a provider: an id and both its hues.
  *
- * Both modes are generated from the same list, which is what makes "a provider
- * with only one half repaints to nothing in the other theme" unrepresentable
- * rather than merely untested. The reasoning behind each hue lives in that
- * provider's `descriptor.ts`, beside the value it explains — generated CSS
- * cannot carry a comment, and a comment kept away from its value is one that
- * goes stale unnoticed.
+ * Both halves are optional, and that is a statement about the wire rather than
+ * about the design. This arrives as JSON from `/api/catalog`, so the compiler
+ * has checked nothing about it — the type describes what a *correct* payload
+ * looks like, and this component has to survive an incorrect one.
  */
-function providerPalette(mode: "light" | "dark"): string {
-  return PROVIDER_IDS.map(
-    (id) => `--p-${id}: ${PROVIDER_DESCRIPTORS[id].presentation.colour[mode]};`,
-  ).join("\n    ");
+export type PaletteProvider = {
+  id: string;
+  colour?: { light?: string | undefined; dark?: string | undefined } | undefined;
+};
+
+/**
+ * The `--p-<id>` half of one palette, written from the loaded catalog.
+ *
+ * Both modes are generated from the same list, so a provider is normally
+ * written into both. It is **not** unrepresentable for one half to be missing —
+ * an earlier version of this comment said it was, which was true of a
+ * compiled-in `Record<ProviderId, …>` and stopped being true the moment these
+ * values started arriving over the wire. What happens now is that the half is
+ * left out: `--p-x: undefined;` is dropped by the CSS parser without a word,
+ * and `--p-x: ;` is worse, so a value that is not a string is not written at
+ * all. The provider then paints colourless in that one mode, which is the same
+ * outcome as before and reached without the sheet carrying a lie.
+ *
+ * Nothing here validates the *content* of a hue. `packages/control/src/catalog.ts`
+ * does that, and it is the only place that should: this template concatenates,
+ * and a second check on this side of the wire would be a guard against a server
+ * that also serves the script running it.
+ *
+ * The reasoning behind each hue lives in that provider's `descriptor.ts`,
+ * beside the value it explains — generated CSS cannot carry a comment, and a
+ * comment kept away from its value is one that goes stale unnoticed.
+ */
+function providerPalette(providers: readonly PaletteProvider[], mode: "light" | "dark"): string {
+  return providers
+    .flatMap(({ id, colour }) => {
+      const value = colour?.[mode];
+      // Only "is there a string here", not "is it a good one". An empty one is
+      // refused by `packages/control/src/catalog.ts` and, if it ever got past,
+      // is stripped by the minifier on the way into the sheet — a check for it
+      // here would be a branch no test could tell from its absence.
+      return typeof value === "string" ? [`--p-${id}: ${value};`] : [];
+    })
+    .join("\n    ");
 }
+
+/**
+ * The provider hues, as the custom properties `theme.provider` points at.
+ *
+ * Separate from `GlobalStyle` because the two have different lifetimes now that
+ * the values arrive over `/api/catalog`. The chassis palette is known at module
+ * scope and the login screen needs it before there is a session; these are
+ * gateway state, so this is mounted inside the shell gate — `_app`'s
+ * `beforeLoad` resolves the catalog before the shell renders, and the styles go
+ * in during the same commit as the first provider-coloured element.
+ *
+ * That ordering is the point rather than an optimisation. `var(--p-unknown)`
+ * resolves to nothing and renders colourless *with no error*, so a palette that
+ * arrived one paint late would be a silent failure, and a permanent one if the
+ * fetch had failed.
+ */
+export const ProviderPalette = createGlobalStyle<{ $providers: readonly PaletteProvider[] }>`
+  :root {
+    ${({ $providers }) => providerPalette($providers, "light")}
+  }
+
+  .dark {
+    ${({ $providers }) => providerPalette($providers, "dark")}
+  }
+`;
 
 /**
  * Palette values live here as custom properties rather than in the theme object
@@ -49,8 +104,6 @@ export const GlobalStyle = createGlobalStyle`
     --warn-wash: oklch(0.58 0.13 72 / 0.14);
     --down-wash: oklch(0.53 0.2 27 / 0.11);
 
-    ${providerPalette("light")}
-
     --grid-line: oklch(0.22 0.017 258 / 0.055);
     --shadow: 0 1px 2px oklch(0.22 0.017 258 / 0.06);
   }
@@ -79,8 +132,6 @@ export const GlobalStyle = createGlobalStyle`
     --ok-wash: oklch(0.75 0.14 162 / 0.16);
     --warn-wash: oklch(0.82 0.14 80 / 0.16);
     --down-wash: oklch(0.68 0.19 25 / 0.16);
-
-    ${providerPalette("dark")}
 
     --grid-line: oklch(0.94 0.006 250 / 0.045);
     --shadow: 0 1px 2px oklch(0 0 0 / 0.3);

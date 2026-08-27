@@ -3,8 +3,10 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type BodyArtifact, createStore, deriveKey, type Store } from "@omni/store";
 import {
+  captureLogger,
   memoryStore,
   requestLog,
   seedApiKey,
@@ -29,6 +31,8 @@ type HarnessOptions = {
   store?: Store;
   /** Whether `OMNI_BODY_LOGGING_ALLOWED` was set at boot. */
   bodyLoggingAllowed?: boolean;
+  /** For the routes whose only visible effect is a line on stdout. */
+  logger?: AdminDeps["logger"];
 };
 
 async function harness({
@@ -37,6 +41,7 @@ async function harness({
   now = NOW,
   store: provided,
   bodyLoggingAllowed,
+  logger,
 }: HarnessOptions = {}) {
   const store = provided ?? (await memoryStore());
   const admin = createAdminAuth(store, { now: () => now, sessionTtlMs: SESSION_TTL_MS });
@@ -67,6 +72,7 @@ async function harness({
     broadcaster: { invalidate: (topic) => void topics.push(topic) },
     ...(consoleDeps === undefined ? {} : { console: consoleDeps }),
     ...(bodyLoggingAllowed === undefined ? {} : { bodyLoggingAllowed }),
+    ...(logger === undefined ? {} : { logger }),
   });
 
   const call = (
@@ -219,6 +225,7 @@ test("every data route requires a session", async () => {
     "/api/credentials/health",
     "/api/credentials/quota/history",
     "/api/models",
+    "/api/catalog",
     "/api/keys",
     "/api/settings",
     "/api/usage",
@@ -1459,4 +1466,78 @@ test("the mutation table covers every mutating route this surface registers", as
   const covered = MUTATIONS.map((mutation) => `${mutation.method} ${mutation.route}`).sort();
 
   expect(covered).toEqual(registered);
+});
+
+/**
+ * The companion to the mutation table, and the same argument.
+ *
+ * The session list above is hand-maintained, so a new unguarded GET simply is
+ * not in it — which is how `/api/catalog` shipped with the guard written
+ * correctly and nothing that would have noticed if it had not been. Rather than
+ * reconcile two lists, this drives every GET the surface actually registers.
+ */
+test("every GET route this surface registers refuses an anonymous caller", async () => {
+  const { app } = await harness();
+  const registered = (app as unknown as { routes: { method: string; path: string }[] }).routes
+    .filter((route) => route.method === "GET")
+    // `/api/status` answers without a session by design: it is what the login
+    // screen asks *before* there is one.
+    .filter((route) => route.path !== "/api/status")
+    .map((route) => route.path);
+
+  expect(registered.length).toBeGreaterThan(5);
+
+  const refused: string[] = [];
+  for (const path of registered) {
+    // A concrete instance of a parameterised path. The value need not exist —
+    // the session check runs before anything looks it up.
+    const concrete = path.replace(/:[^/]+/g, "probe");
+    const response = await app.handle(new Request(`http://localhost${concrete}`));
+    if (response.status !== 401) refused.push(`${concrete} -> ${response.status}`);
+  }
+
+  expect(refused).toEqual([]);
+});
+
+test("a provider whose colour had to be repaired is said out loud, once", async () => {
+  // `providerCatalog` refuses a value that would close the declaration it is
+  // written into and serves a neutral instead. Substituting quietly is the
+  // other failure — grey is a colour somebody might have chosen — so the route
+  // is what turns the substitution into a line an operator can find.
+  //
+  // Once, not once per request: the catalog is assembled from a registry fixed
+  // at boot, so the same repair would otherwise be announced every time a
+  // console loads.
+  const logger = captureLogger();
+  const { call } = await harness({ logger });
+  const presentation = PROVIDER_DESCRIPTORS.anthropic.presentation as {
+    colour: { light: string; dark: string };
+  };
+  const original = presentation.colour;
+  try {
+    presentation.colour = { light: "red; } body { display: none; ", dark: original.dark };
+    const first = (await (await call("GET", "/api/catalog")).json()) as {
+      providers: Array<{ id: string; colour: { light: string } }>;
+    };
+    await call("GET", "/api/catalog");
+
+    expect(first.providers.find((p) => p.id === "anthropic")?.colour.light).not.toContain(";");
+  } finally {
+    presentation.colour = original;
+  }
+
+  const repaired = logger.records.filter((line) => line.msg === "provider catalog repaired");
+  expect(repaired).toHaveLength(1);
+  expect(repaired[0]?.level).toBe("warn");
+  expect(repaired[0]?.fields.reason).toContain("anthropic colour.light");
+});
+
+test("a catalog with nothing to repair says nothing", async () => {
+  // The other half, and the one that keeps the assertion above honest: a route
+  // that logged unconditionally would satisfy it too.
+  const logger = captureLogger();
+  const { call } = await harness({ logger });
+  await call("GET", "/api/catalog");
+
+  expect(logger.records.filter((line) => line.msg === "provider catalog repaired")).toEqual([]);
 });

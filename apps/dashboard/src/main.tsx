@@ -6,14 +6,13 @@ import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { routeTree } from "./routeTree.gen.ts";
-import { createDashboardQueryClient } from "./session/queryClient.ts";
+import { createDashboardQueryClient, sessionHandlers } from "./session/queryClient.ts";
 import { ThemeProvider } from "./theme/ThemeProvider.tsx";
 
 let router: ReturnType<typeof createRouter<typeof routeTree>>;
-const queryClient = createDashboardQueryClient({
-  isLoginRoute: () => router.state.location.pathname === "/login",
-  onUnauthenticated: () => void router.navigate({ to: "/login" }),
-});
+// The handlers live in `session/queryClient.ts`, where a test can reach them:
+// nothing in this file can be imported without mounting the console.
+const queryClient = createDashboardQueryClient(sessionHandlers(() => router));
 router = createRouter({ routeTree, context: { queryClient } });
 
 declare module "@tanstack/react-router" {

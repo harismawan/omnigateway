@@ -2,10 +2,12 @@ import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
 import {
+  findProvider,
   useCredentialHealth,
   useCredentials,
   useDeleteCredential,
   useModels,
+  useProviderCatalog,
   useSettings,
   useUpdateCredential,
 } from "../../api/queries.ts";
@@ -22,7 +24,7 @@ import {
   WINDOW_LABEL,
 } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
-import { PROVIDER_IDS, PROVIDER_LABEL } from "../../theme/tokens.ts";
+import { providerColor } from "../../theme/tokens.ts";
 import { Button, IconButton } from "../../ui/Button.tsx";
 import { Chip } from "../../ui/Chip.tsx";
 import { Input, NumberInput } from "../../ui/Field.tsx";
@@ -38,7 +40,7 @@ import { QuotaHistory } from "./QuotaHistory.tsx";
 
 /** Carries the provider's identity on the module edge, so the tables need not. */
 const ProviderModule = styled(Module)<{ $provider: ProviderId }>`
-  border-left: 3px solid ${({ theme, $provider }) => theme.provider[$provider]};
+  border-left: 3px solid ${({ $provider }) => providerColor($provider)};
 `;
 
 const LabelInput = styled(Input)`
@@ -138,6 +140,7 @@ export function AccountsBoard() {
   // Those targets do not fall back to a sibling — they hard-fail — so removal
   // is destructive to them in a way it is not to an unpinned target.
   const models = useModels();
+  const catalogQuery = useProviderCatalog();
   const remove = useDeleteCredential();
   const { commit } = useCommit();
 
@@ -155,6 +158,17 @@ export function AccountsBoard() {
 
   const now = Date.now();
   const rows = credentials.data ?? [];
+  // Loaded before this screen mounts, by the gate in `routes/_app.tsx`.
+  const catalog = catalogQuery.data ?? [];
+  // The catalog decides the order, the connected accounts decide the set. Built
+  // from the rows rather than by filtering the catalog so a provider the
+  // catalog no longer names — one whose plugin was removed — still shows the
+  // accounts held for it instead of dropping them off the board silently.
+  const rank = (provider: ProviderId): number =>
+    findProvider(catalog, provider)?.order ?? Number.POSITIVE_INFINITY;
+  const providers = [...new Set(rows.map((row) => row.provider))].sort((a, b) => rank(a) - rank(b));
+  const labelOf = (provider: ProviderId): string =>
+    findProvider(catalog, provider)?.label ?? provider;
   const healthByCredential = groupBy(health.data?.health ?? [], (row) => row.credentialId);
   const quotaByCredential = groupBy(health.data?.quota ?? [], (row) => row.credentialId);
   const burnByCredential = groupBy(health.data?.burn ?? [], (row) => row.credentialId);
@@ -208,227 +222,223 @@ export function AccountsBoard() {
         </Module>
       ) : (
         <Stack $gap={4}>
-          {PROVIDER_IDS.filter((provider) => rows.some((row) => row.provider === provider)).map(
-            (provider) => {
-              const group = rows.filter((row) => row.provider === provider);
-              return (
-                <ProviderModule
-                  key={provider}
-                  $provider={provider}
-                  legend={PROVIDER_LABEL[provider]}
-                  meta={`${group.length} account${group.length === 1 ? "" : "s"}`}
-                  flush
-                >
-                  <ScrollX>
-                    {/* Fixed widths so the three provider tables line up as one list. */}
-                    <Table>
-                      <thead>
-                        <tr>
-                          <Th $width="24%">Account</Th>
-                          <Th $width="20%">Sign-in</Th>
-                          <Th $align="right" $width="86px">
-                            Tier
-                          </Th>
-                          <Th $align="right" $width="94px">
-                            Weight
-                          </Th>
-                          <Th $align="center" $width="86px">
-                            Enabled
-                          </Th>
-                          <Th $width="240px">Quota</Th>
-                          <Th $align="right" $width="88px">
-                            TTFT
-                          </Th>
-                          <Th $align="right" $width="130px">
-                            Token expires
-                          </Th>
-                          <Th $width="76px" />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {group.map((credential) => {
-                          const status = credentialStatus(
-                            healthByCredential.get(credential.id) ?? [],
-                            now,
-                            credential.enabled,
-                            credential.disabledReason,
-                          );
-                          const reported = quotaByCredential.get(credential.id) ?? [];
-                          const estimates = burnByCredential.get(credential.id) ?? [];
-                          const windows = quotaUsage(reported);
-                          const open = expanded.has(credential.id);
-                          return (
-                            <Fragment key={credential.id}>
-                              <Tr>
-                                <Td>
-                                  <Row $gap={2}>
-                                    <Lamp
-                                      state={status.state}
-                                      label={status.note === "" ? "healthy" : status.note}
-                                    />
-                                    <LabelInput
-                                      defaultValue={credential.label}
-                                      aria-label={`Label for ${credential.label}`}
-                                      onBlur={(event) => {
-                                        const next = event.target.value.trim();
-                                        if (next.length === 0 || next === credential.label) {
-                                          event.target.value = credential.label;
-                                          return;
-                                        }
-                                        commit(credential.id, { label: next });
-                                      }}
-                                    />
-                                  </Row>
-                                  {status.note === "" ? null : <Note>{status.note}</Note>}
-                                </Td>
-                                <Td>
-                                  <Row $gap={1}>
-                                    <Chip>
-                                      {credential.authType === "oauth" ? "oauth" : "api key"}
-                                    </Chip>
-                                    {credential.accountEmail === null ? null : (
-                                      <Legend>{credential.accountEmail}</Legend>
-                                    )}
-                                  </Row>
-                                </Td>
-                                <Td $align="right">
-                                  <Small
-                                    min={1}
-                                    step={1}
-                                    defaultValue={credential.tier}
-                                    aria-label={`Tier for ${credential.label}`}
+          {providers.map((provider) => {
+            const group = rows.filter((row) => row.provider === provider);
+            return (
+              <ProviderModule
+                key={provider}
+                $provider={provider}
+                legend={labelOf(provider)}
+                meta={`${group.length} account${group.length === 1 ? "" : "s"}`}
+                flush
+              >
+                <ScrollX>
+                  {/* Fixed widths so the three provider tables line up as one list. */}
+                  <Table>
+                    <thead>
+                      <tr>
+                        <Th $width="24%">Account</Th>
+                        <Th $width="20%">Sign-in</Th>
+                        <Th $align="right" $width="86px">
+                          Tier
+                        </Th>
+                        <Th $align="right" $width="94px">
+                          Weight
+                        </Th>
+                        <Th $align="center" $width="86px">
+                          Enabled
+                        </Th>
+                        <Th $width="240px">Quota</Th>
+                        <Th $align="right" $width="88px">
+                          TTFT
+                        </Th>
+                        <Th $align="right" $width="130px">
+                          Token expires
+                        </Th>
+                        <Th $width="76px" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.map((credential) => {
+                        const status = credentialStatus(
+                          healthByCredential.get(credential.id) ?? [],
+                          now,
+                          credential.enabled,
+                          credential.disabledReason,
+                        );
+                        const reported = quotaByCredential.get(credential.id) ?? [];
+                        const estimates = burnByCredential.get(credential.id) ?? [];
+                        const windows = quotaUsage(reported);
+                        const open = expanded.has(credential.id);
+                        return (
+                          <Fragment key={credential.id}>
+                            <Tr>
+                              <Td>
+                                <Row $gap={2}>
+                                  <Lamp
+                                    state={status.state}
+                                    label={status.note === "" ? "healthy" : status.note}
+                                  />
+                                  <LabelInput
+                                    defaultValue={credential.label}
+                                    aria-label={`Label for ${credential.label}`}
                                     onBlur={(event) => {
-                                      const next = Number(event.target.value);
-                                      if (
-                                        !Number.isInteger(next) ||
-                                        next < 1 ||
-                                        next === credential.tier
-                                      ) {
-                                        event.target.value = String(credential.tier);
+                                      const next = event.target.value.trim();
+                                      if (next.length === 0 || next === credential.label) {
+                                        event.target.value = credential.label;
                                         return;
                                       }
-                                      commit(credential.id, { tier: next });
+                                      commit(credential.id, { label: next });
                                     }}
                                   />
-                                </Td>
-                                <Td $align="right">
-                                  <Small
-                                    min={0.1}
-                                    step={0.1}
-                                    defaultValue={credential.weight}
-                                    aria-label={`Weight for ${credential.label}`}
-                                    onBlur={(event) => {
-                                      const next = Number(event.target.value);
-                                      if (
-                                        !Number.isFinite(next) ||
-                                        next <= 0 ||
-                                        next === credential.weight
-                                      ) {
-                                        event.target.value = String(credential.weight);
-                                        return;
-                                      }
-                                      commit(credential.id, { weight: next });
-                                    }}
-                                  />
-                                </Td>
-                                <Td $align="center">
-                                  <Toggle
-                                    checked={credential.enabled}
-                                    label={`Route to ${credential.label}`}
-                                    onCheckedChange={(enabled) =>
-                                      commit(credential.id, { enabled })
-                                    }
-                                  />
-                                </Td>
-                                <Td>
-                                  {windows.length === 0 ? (
-                                    // Quota is what the provider reported. Nothing
-                                    // reported is not the same claim as no limit.
-                                    <Legend>unknown</Legend>
-                                  ) : (
-                                    <QuotaStack>
-                                      {windows.map(({ window, fraction }) => (
-                                        <QuotaCell key={window.windowType}>
-                                          <Meter
-                                            fraction={fraction}
-                                            label={`${WINDOW_LABEL[window.windowType]} window, ${Math.round(fraction * 100)}% used`}
-                                          />
-                                          <Legend>
-                                            {quotaLegend(
-                                              window,
-                                              now,
-                                              pollIntervalMs,
-                                              formatRelative,
-                                              burnOf(estimates, window.windowType),
-                                            )}
-                                          </Legend>
-                                        </QuotaCell>
-                                      ))}
-                                    </QuotaStack>
+                                </Row>
+                                {status.note === "" ? null : <Note>{status.note}</Note>}
+                              </Td>
+                              <Td>
+                                <Row $gap={1}>
+                                  <Chip>
+                                    {credential.authType === "oauth" ? "oauth" : "api key"}
+                                  </Chip>
+                                  {credential.accountEmail === null ? null : (
+                                    <Legend>{credential.accountEmail}</Legend>
                                   )}
-                                </Td>
-                                <Td $align="right" $mono>
-                                  {formatMs(status.ttftMs)}
-                                </Td>
-                                <Td $align="right" $mono>
-                                  {credential.expiresAt === null
-                                    ? "never"
-                                    : formatRelative(credential.expiresAt, now)}
-                                </Td>
-                                <Td $align="right">
-                                  <Row $gap={1} $justify="flex-end">
-                                    {/* Nothing reported is nothing to chart, so the
+                                </Row>
+                              </Td>
+                              <Td $align="right">
+                                <Small
+                                  min={1}
+                                  step={1}
+                                  defaultValue={credential.tier}
+                                  aria-label={`Tier for ${credential.label}`}
+                                  onBlur={(event) => {
+                                    const next = Number(event.target.value);
+                                    if (
+                                      !Number.isInteger(next) ||
+                                      next < 1 ||
+                                      next === credential.tier
+                                    ) {
+                                      event.target.value = String(credential.tier);
+                                      return;
+                                    }
+                                    commit(credential.id, { tier: next });
+                                  }}
+                                />
+                              </Td>
+                              <Td $align="right">
+                                <Small
+                                  min={0.1}
+                                  step={0.1}
+                                  defaultValue={credential.weight}
+                                  aria-label={`Weight for ${credential.label}`}
+                                  onBlur={(event) => {
+                                    const next = Number(event.target.value);
+                                    if (
+                                      !Number.isFinite(next) ||
+                                      next <= 0 ||
+                                      next === credential.weight
+                                    ) {
+                                      event.target.value = String(credential.weight);
+                                      return;
+                                    }
+                                    commit(credential.id, { weight: next });
+                                  }}
+                                />
+                              </Td>
+                              <Td $align="center">
+                                <Toggle
+                                  checked={credential.enabled}
+                                  label={`Route to ${credential.label}`}
+                                  onCheckedChange={(enabled) => commit(credential.id, { enabled })}
+                                />
+                              </Td>
+                              <Td>
+                                {windows.length === 0 ? (
+                                  // Quota is what the provider reported. Nothing
+                                  // reported is not the same claim as no limit.
+                                  <Legend>unknown</Legend>
+                                ) : (
+                                  <QuotaStack>
+                                    {windows.map(({ window, fraction }) => (
+                                      <QuotaCell key={window.windowType}>
+                                        <Meter
+                                          fraction={fraction}
+                                          label={`${WINDOW_LABEL[window.windowType]} window, ${Math.round(fraction * 100)}% used`}
+                                        />
+                                        <Legend>
+                                          {quotaLegend(
+                                            window,
+                                            now,
+                                            pollIntervalMs,
+                                            formatRelative,
+                                            burnOf(estimates, window.windowType),
+                                          )}
+                                        </Legend>
+                                      </QuotaCell>
+                                    ))}
+                                  </QuotaStack>
+                                )}
+                              </Td>
+                              <Td $align="right" $mono>
+                                {formatMs(status.ttftMs)}
+                              </Td>
+                              <Td $align="right" $mono>
+                                {credential.expiresAt === null
+                                  ? "never"
+                                  : formatRelative(credential.expiresAt, now)}
+                              </Td>
+                              <Td $align="right">
+                                <Row $gap={1} $justify="flex-end">
+                                  {/* Nothing reported is nothing to chart, so the
                                         control is absent rather than opening onto
                                         an empty panel. */}
-                                    {reported.length === 0 ? null : (
-                                      <IconButton
-                                        type="button"
-                                        $variant="ghost"
-                                        $size="sm"
-                                        aria-expanded={open}
-                                        aria-label={`${open ? "Hide" : "Show"} quota history for ${credential.label}`}
-                                        title={`${open ? "Hide" : "Show"} quota history for ${credential.label}`}
-                                        onClick={() => toggle(credential.id)}
-                                      >
-                                        {open ? <ChevronDown /> : <ChevronRight />}
-                                      </IconButton>
-                                    )}
+                                  {reported.length === 0 ? null : (
                                     <IconButton
                                       type="button"
                                       $variant="ghost"
                                       $size="sm"
-                                      aria-label={`Remove ${credential.label}`}
-                                      title={`Remove ${credential.label}`}
-                                      onClick={() => setDoomed(credential)}
+                                      aria-expanded={open}
+                                      aria-label={`${open ? "Hide" : "Show"} quota history for ${credential.label}`}
+                                      title={`${open ? "Hide" : "Show"} quota history for ${credential.label}`}
+                                      onClick={() => toggle(credential.id)}
                                     >
-                                      <Trash2 />
+                                      {open ? <ChevronDown /> : <ChevronRight />}
                                     </IconButton>
-                                  </Row>
+                                  )}
+                                  <IconButton
+                                    type="button"
+                                    $variant="ghost"
+                                    $size="sm"
+                                    aria-label={`Remove ${credential.label}`}
+                                    title={`Remove ${credential.label}`}
+                                    onClick={() => setDoomed(credential)}
+                                  >
+                                    <Trash2 />
+                                  </IconButton>
+                                </Row>
+                              </Td>
+                            </Tr>
+                            {open ? (
+                              <Tr>
+                                <Td colSpan={9}>
+                                  <QuotaHistory
+                                    credentialId={credential.id}
+                                    windows={reported}
+                                    burn={estimates}
+                                    pollIntervalMs={pollIntervalMs}
+                                    now={now}
+                                  />
                                 </Td>
                               </Tr>
-                              {open ? (
-                                <Tr>
-                                  <Td colSpan={9}>
-                                    <QuotaHistory
-                                      credentialId={credential.id}
-                                      windows={reported}
-                                      burn={estimates}
-                                      pollIntervalMs={pollIntervalMs}
-                                      now={now}
-                                    />
-                                  </Td>
-                                </Tr>
-                              ) : null}
-                            </Fragment>
-                          );
-                        })}
-                      </tbody>
-                    </Table>
-                  </ScrollX>
-                </ProviderModule>
-              );
-            },
-          )}
+                            ) : null}
+                          </Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </Table>
+                </ScrollX>
+              </ProviderModule>
+            );
+          })}
         </Stack>
       )}
 
@@ -448,7 +458,7 @@ export function AccountsBoard() {
         body={
           doomed === null
             ? ""
-            : `Removing "${doomed.label}" deletes its stored token. Any model target pointing at ${PROVIDER_LABEL[doomed.provider]} loses this account, and reconnecting means authorizing again.` +
+            : `Removing "${doomed.label}" deletes its stored token. Any model target pointing at ${labelOf(doomed.provider)} loses this account, and reconnecting means authorizing again.` +
               pinnedWarning(doomed, models.data)
         }
         confirmLabel="Remove account"

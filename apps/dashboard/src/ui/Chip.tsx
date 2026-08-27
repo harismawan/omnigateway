@@ -1,5 +1,6 @@
 import styled from "styled-components";
 import type { ProviderId } from "../api/types.ts";
+import { providerColor } from "../theme/tokens.ts";
 
 export type ChipTone = "neutral" | "ok" | "warn" | "down" | "accent";
 
@@ -34,7 +35,7 @@ const Tag = styled.span<{ $provider: ProviderId }>`
   gap: 5px;
   font-family: ${({ theme }) => theme.font.mono};
   font-size: 11.5px;
-  color: ${({ theme, $provider }) => theme.provider[$provider]};
+  color: ${({ $provider }) => providerColor($provider)};
   white-space: nowrap;
 
   &::before {

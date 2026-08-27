@@ -34,29 +34,39 @@ function providerIds(): string[] {
 }
 
 /**
- * The custom properties declared inside one selector block of `GlobalStyle.ts`.
+ * The custom properties declared for one selector in `GlobalStyle.ts`.
  *
  * Read from the source rather than from a rendered document because the point
  * is the contract, not the computed value: this test has to fail when the
  * palette changes, in the core suite, without a DOM.
  *
- * The `--p-<id>` half of each block is written by `providerPalette(…)` from the
- * provider registry, so it is expanded here rather than matched literally. That
- * is what keeps this test's job intact after the console stopped hand-writing
- * those lines: adding a provider still has to add a name to `CSS_VARIABLES`.
+ * **Every** block for that selector, not the first. There are two of each now:
+ * the chassis palette is known at build time, and the provider hues arrive over
+ * `/api/catalog` and are written by a separate global style the shell mounts
+ * once the catalog has loaded. Both are mounted on every console screen, so
+ * both count towards what a plugin may reach for — and reading only the first
+ * would quietly halve this list, which is a shape that passes.
+ *
+ * The `--p-<id>` half is written by `providerPalette(…)` from whatever the
+ * gateway serves, so it is expanded here from the registry rather than matched
+ * literally. Adding a provider still has to add a name to `CSS_VARIABLES`.
  */
 function declaredIn(selector: string): string[] {
   const source = readFileSync(globalStylePath, "utf8");
-  const start = source.indexOf(`${selector} {`);
+  const names: string[] = [];
+  let start = source.indexOf(`${selector} {`);
   expect(start).toBeGreaterThan(-1);
-  const end = source.indexOf("\n  }", start);
-  expect(end).toBeGreaterThan(start);
-  const block = source.slice(start, end);
-  const literal = [...block.matchAll(/^\s*(--[a-z0-9-]+)\s*:/gm)].map((m) => m[1] as string);
-  const generated = block.includes("providerPalette(")
-    ? providerIds().map((id) => `--p-${id}`)
-    : [];
-  return [...literal, ...generated].sort();
+  while (start > -1) {
+    const end = source.indexOf("\n  }", start);
+    expect(end).toBeGreaterThan(start);
+    const block = source.slice(start, end);
+    names.push(...[...block.matchAll(/^\s*(--[a-z0-9-]+)\s*:/gm)].map((m) => m[1] as string));
+    if (block.includes("providerPalette(")) {
+      names.push(...providerIds().map((id) => `--p-${id}`));
+    }
+    start = source.indexOf(`${selector} {`, end);
+  }
+  return names.sort();
 }
 
 test("every exported name is a CSS custom property", () => {
