@@ -24,3 +24,9 @@ snapshots/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# Scratch probes and mutation harnesses. Two of these were committed once by a
+# `git add -A`, and one of them was the codemod that had just rewritten five
+# source files — so the rule is that they cannot be staged, not that you should
+# remember to delete them.
+.tmp-*

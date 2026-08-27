@@ -207,7 +207,18 @@ function phrase(auths: readonly AuthType[]): string {
  * failure would be worse than showing them.
  */
 export function heldAuths(credentials: readonly Credential[]): HeldAuths {
-  const held: Record<string, AuthType[]> = {};
+  // `Object.create(null)`, not `{}`. `credential.provider` is a stored string
+  // that reaches here straight from `/api/credentials`, and a provider id may
+  // be any `[a-z][a-z0-9-]{0,31}` — `constructor` included. On an ordinary
+  // object `held["constructor"]` answers the `Object` constructor, so the
+  // `?? []` never fires and `ways.includes` throws; in `reachable` below it is
+  // worse, because `have.length` is 1 rather than 0, so the early return that
+  // would have rescued it is skipped too. Either way the models board
+  // white-screens instead of degrading.
+  //
+  // Same rule as the provider tables in `@omni/providers`, restated because the
+  // console cannot import them — see boundary rule 12.
+  const held: Record<string, AuthType[]> = Object.create(null);
   for (const credential of credentials) {
     const ways = held[credential.provider] ?? [];
     if (!ways.includes(credential.authType)) ways.push(credential.authType);

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { snapshot, target } from "@omni/testkit";
 import { resolveModel } from "../src/resolve.ts";
 
@@ -86,4 +87,49 @@ test("throws NO_CANDIDATES for an unresolvable name", () => {
 
 test("rejects an unknown provider prefix rather than guessing", () => {
   expect(() => resolveModel("bedrock/claude", snapshot({}))).toThrow(GatewayError);
+});
+
+test("a provider registered after import is reachable by both of its names", () => {
+  // Both branches of `resolveModel`, because they disagreed. The explicit
+  // `provider/model` branch reads the registry directly and was already correct;
+  // the bare-name branch iterated `PREFIX_PROVIDER`, an `Object.entries(...)`
+  // evaluated at import — long before `loadPlugins()` — so a provider registered
+  // at boot could be reached one way and not the other, inside one function.
+  //
+  // Measured before the fix: `prefixed/x` resolved, `pfx-1` threw
+  // NO_CANDIDATES. The asymmetry is the bug; a plugin provider declaring
+  // `modelPrefixes` would have had them silently ignored.
+  const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
+  const seed = PROVIDER_DESCRIPTORS.anthropic;
+
+  // Absent first, so the assertions below cannot pass by the id having been
+  // there all along.
+  expect(() => resolveModel("pfx-1", snapshot({}))).toThrow(GatewayError);
+
+  registry.prefixed = { ...seed, id: "prefixed", modelPrefixes: ["pfx-"] };
+  try {
+    expect(resolveModel("prefixed/x", snapshot({})).targets[0]?.provider).toBe("prefixed");
+    expect(resolveModel("pfx-1", snapshot({})).targets[0]?.provider).toBe("prefixed");
+  } finally {
+    delete registry.prefixed;
+  }
+
+  // And gone again, so nothing leaks into another test in this file.
+  expect(() => resolveModel("pfx-1", snapshot({}))).toThrow(GatewayError);
+});
+
+test("longest match still wins once prefixes are read per call", () => {
+  // The property the sort exists for, re-asserted against the per-call build:
+  // a shorter prefix registered later must not shadow a longer one.
+  const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
+  const seed = PROVIDER_DESCRIPTORS.anthropic;
+  registry.shortpfx = { ...seed, id: "shortpfx", modelPrefixes: ["dup-"] };
+  registry.longpfx = { ...seed, id: "longpfx", modelPrefixes: ["dup-long-"] };
+  try {
+    expect(resolveModel("dup-long-1", snapshot({})).targets[0]?.provider).toBe("longpfx");
+    expect(resolveModel("dup-1", snapshot({})).targets[0]?.provider).toBe("shortpfx");
+  } finally {
+    delete registry.shortpfx;
+    delete registry.longpfx;
+  }
 });

@@ -17,13 +17,25 @@ import type { Snapshot } from "./types.ts";
  * table it replaced was iterated in declaration order and happened to contain no
  * prefix of another prefix, so the two readings agreed — but a provider adding
  * one would have inherited the wrong rule silently.
+ *
+ * Built per call, not once at import. `loadPlugins()` runs long after this
+ * module is imported, so a snapshot here would leave a provider registered at
+ * boot unable to be reached by its own `modelPrefixes` — while the explicit
+ * `provider/model` branch below, which reads the registry directly, would route
+ * it fine. That split lived inside this one function until it was measured:
+ * `late-arrival/x` resolved and `latearr-1` did not.
+ *
+ * The cost is one walk of six descriptors and a sort per unconfigured bare name,
+ * on a path that is about to make a network call. If that ever matters, cache it
+ * against the registry's identity rather than reverting to a snapshot.
  */
-const PREFIX_PROVIDER: ReadonlyArray<readonly [string, ProviderId, ProviderDescriptor]> =
-  Object.entries(PROVIDER_DESCRIPTORS)
+function prefixProviders(): ReadonlyArray<readonly [string, ProviderId, ProviderDescriptor]> {
+  return Object.entries(PROVIDER_DESCRIPTORS)
     .flatMap(([id, descriptor]) =>
       descriptor.modelPrefixes.map((prefix) => [prefix, id as ProviderId, descriptor] as const),
     )
     .sort(([a], [b]) => b.length - a.length);
+}
 
 /**
  * The descriptor is passed in rather than looked up again.
@@ -101,7 +113,7 @@ export function resolveModel(name: string, snapshot: Snapshot): VirtualModel {
     throw new GatewayError("NO_CANDIDATES", `unknown provider "${prefix}" in model "${name}"`);
   }
 
-  for (const [prefix, provider, descriptor] of PREFIX_PROVIDER) {
+  for (const [prefix, provider, descriptor] of prefixProviders()) {
     if (name.startsWith(prefix)) return synthesize(provider, name, descriptor);
   }
 
