@@ -564,3 +564,106 @@ test("api-key credentials are never treated as expired", () => {
     }).pairs,
   ).toHaveLength(1);
 });
+
+// --- Targets naming a provider this installation does not have ----------------
+//
+// `Target` comes back from `virtual_models.targets` as unvalidated JSON, and
+// `ProviderId` is a validated string rather than a closed union, so this is an
+// ordinary state now: a plugin removed, a database restored onto a different
+// install, a hand-edited row. The failure it guards against is the one
+// `pin:missing` exists for — a request that fails with nothing in `excluded` to
+// explain it.
+
+test("a target naming a provider that is not installed is excluded with a reason", () => {
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "acme", model: "acme-1" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs).toHaveLength(0);
+  // Never empty. An empty list is what the pre-change code produced: no
+  // credential matches the provider, so the inner loop drops every one silently
+  // and the request fails with no reason recorded anywhere.
+  expect(excluded).toEqual([
+    { credentialId: "", model: "acme-1", reason: "provider:missing", kind: "target" },
+  ]);
+});
+
+test("provider:missing names no account, because no account is at fault", () => {
+  // `kind: "target"` is what dispatch reads to decide whether to redact
+  // `credentialId` from the degradation. A provider that is not installed is a
+  // fact about the target; blaming an account would send an operator to look at
+  // a credential that is fine. The snapshot here holds an account claiming that
+  // very provider, which is the case a `kind: "account"` row would get wrong.
+  const { excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "acme", model: "acme-1" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "acme" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(excluded.map((e) => [e.kind, e.credentialId])).toEqual([["target", ""]]);
+});
+
+test("provider:missing is emitted once per target, not once per credential", () => {
+  const { excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "acme", model: "acme-1" })]),
+    snapshot: snapshot({
+      credentials: [
+        credential({ id: "a", provider: "anthropic" }),
+        credential({ id: "b", provider: "openai" }),
+        credential({ id: "c", provider: "kimi" }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(excluded).toHaveLength(1);
+});
+
+test("an uninstalled provider reports itself rather than pin:missing", () => {
+  // Guard order. The provider check is first, so a target that is also pinned
+  // reports the provider — the pin could not have been served either way, and
+  // two rows for one target buries the one naming the real problem.
+  const { excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "acme", model: "acme-1", credentialId: "gone" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  // The whole row, not just the reason. Asserting only the reason let a mutant
+  // survive that carried the pin into `credentialId` — which reaches
+  // `LogFields.credentialId` and `request_logs.degradations`, contradicting the
+  // `kind: "target"` claim that this row names no account.
+  expect(excluded).toEqual([
+    { credentialId: "", model: "acme-1", reason: "provider:missing", kind: "target" },
+  ]);
+});
+
+test("an installed provider's targets are unaffected by the check", () => {
+  // The positive control. A guard that excluded every target would pass all four
+  // assertions above, and nothing else in this file distinguishes the two.
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "acme", model: "acme-1" }), target()]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs.map((p) => p.target.provider)).toEqual(["anthropic"]);
+  expect(excluded.map((e) => e.reason)).toEqual(["provider:missing"]);
+});

@@ -1,5 +1,5 @@
 import { GatewayError } from "@omni/ir";
-import { PROVIDER_IDS } from "@omni/providers/descriptors";
+import { PROVIDER_ID_PATTERN } from "@omni/providers/descriptors";
 import { limitConfigSchema } from "@omni/ratelimit/catalog";
 import type { UsageDimension, UsageGrain } from "@omni/store";
 import { z } from "zod";
@@ -41,20 +41,25 @@ export function optionalNumber(value: string | number | undefined, fallback: num
 }
 
 /**
- * Zod needs a non-empty tuple, and the registry hands us a plain array.
+ * A provider id, validated by *format* rather than against a list.
  *
- * A runtime throw for a case the type system already forbids, kept because the
- * alternative is a cast that would quietly produce an enum matching nothing if
- * the registry were ever empty.
+ * It was `z.enum(PROVIDER_IDS)`, and that was wrong in a way nothing caught:
+ * `PROVIDER_IDS` is `Object.keys(...)` evaluated at import, which is long before
+ * `loadPlugins()` runs — so the enum froze a build-time snapshot and would have
+ * refused a credential for a provider the gateway had just registered. The same
+ * bug `providerCatalog` had, in the one place where the symptom is "connecting
+ * this account is impossible" rather than "this provider is missing from a list".
+ *
+ * Format alone is not the whole answer, and is not meant to be. Whether the
+ * provider is *installed* is asked separately by each caller, because they want
+ * different answers: `createApiKeyCredential` refuses to mint an account for a
+ * provider that does not exist, while `putModel` accepts a target naming one,
+ * for the same reason it accepts a dangling pin — removing a provider must not
+ * make an unrelated edit unsavable.
  */
-function nonEmpty<T extends string>(values: readonly T[]): [T, ...T[]] {
-  const [first, ...rest] = values;
-  if (first === undefined) throw new Error("the provider registry is empty");
-  return [first, ...rest];
-}
-
-/** Derived, so adding a provider does not mean remembering this file. */
-export const providerIdSchema = z.enum(nonEmpty(PROVIDER_IDS));
+export const providerIdSchema = z
+  .string()
+  .regex(PROVIDER_ID_PATTERN, "must be a lowercase provider id");
 
 /**
  * A hypothetical request, described only by required capabilities. This keeps

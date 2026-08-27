@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { listPlugins, orphanPluginTables, type PluginSummary, pluginsDir } from "@omni/control";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { resolvePin } from "@omni/store";
 import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
@@ -234,6 +235,37 @@ async function danglingPins(ctx: Context): Promise<string[] | null> {
   }
 }
 
+/**
+ * Targets naming a provider this installation does not have.
+ *
+ * The sibling of `danglingPins`, and it exists for the same reason. `Target` is
+ * read back from `virtual_models.targets` as unvalidated JSON and `putModel`
+ * accepts a provider it cannot resolve — removing a provider must not make an
+ * unrelated edit unsavable — so this state is allowed by design and nothing
+ * cleans it up. The router excludes such a target with `provider:missing`, which
+ * an operator sees only after a request has already failed.
+ *
+ * Reads the registry at call time rather than a module-scope id list: the CLI
+ * has no plugins loaded, but the list is a snapshot either way and a check that
+ * asks a stale question is worse than no check.
+ *
+ * Same null-versus-empty rule as the checks above: `null` is "not checked".
+ */
+async function missingProviders(ctx: Context): Promise<string[] | null> {
+  if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
+  try {
+    const store = await ctx.store();
+    return (await store.config.listModels()).flatMap((model) =>
+      model.targets
+        .filter((target) => PROVIDER_DESCRIPTORS[target.provider] === undefined)
+        .map((target) => `${model.id}/${target.model} → ${target.provider}`),
+    );
+  } catch {
+    // Already reported by `config` or `database` above.
+    return null;
+  }
+}
+
 export const doctor: Command = {
   usage: "doctor",
   summary: "Check what this CLI resolved, and whether it can do anything with it",
@@ -249,6 +281,7 @@ export const doctor: Command = {
     const plugins: PluginSummary[] = listPlugins(doctorPluginDeps(), deps.root);
     const orphans = await orphanTables(ctx);
     const pins = await danglingPins(ctx);
+    const uninstalled = await missingProviders(ctx);
 
     const checks = {
       root: deps.root,
@@ -270,6 +303,7 @@ export const doctor: Command = {
       plugins,
       orphanPluginTables: orphans,
       danglingPins: pins,
+      missingProviders: uninstalled,
       // Repeated from stderr on purpose: `doctor` is the command an operator
       // runs to find out why the paths above are what they are, and `--json`
       // is read by scripts that never see stderr.
@@ -324,6 +358,17 @@ export const doctor: Command = {
               : // Named, like the orphans above: the fix is to repoint or clear
                 // the target in the model editor, and that needs to know which.
                 paint(ctx, "yellow", `${pins.length}: ${pins.join(", ")}`),
+        ],
+        [
+          "missing providers",
+          uninstalled === null
+            ? paint(ctx, "dim", "not checked")
+            : uninstalled.length === 0
+              ? ok(true, "none")
+              : // Named for the same reason the pins are: the fix is to repoint
+                // the target or reinstall the provider, and either needs to know
+                // which target and which provider.
+                paint(ctx, "yellow", `${uninstalled.length}: ${uninstalled.join(", ")}`),
         ],
         ...checks.warnings.map(
           (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],

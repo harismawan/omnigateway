@@ -918,6 +918,67 @@ test("doctor prints the dangling pins in its own table, not only under --json", 
   expect(row(healthy.out)).toBe("none");
 });
 
+test("doctor reports a target naming a provider this installation does not have", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  // A provider id is a validated string, and `virtual_models.targets` is read
+  // back with `JSON.parse` and no validation — so a plugin removed, a database
+  // restored onto a different install, or a hand-edited row all produce this.
+  // `putModel` accepts it on purpose, for the reason it accepts a dangling pin,
+  // which makes doctor the only compensating control.
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "acme",
+        model: "acme-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      // The healthy sibling. A check that flagged this too is one operators
+      // learn to ignore.
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const checks = JSON.parse(result.out) as { missingProviders: string[] };
+  expect(checks.missingProviders).toEqual(["billed/acme-1 → acme"]);
+
+  // And in the table, which is what the operator running the command sees. A
+  // finding that exists only under `--json` is a finding nobody is told about.
+  const printed = await cli(["doctor"], { root, service });
+  const row = printed.out
+    .split("\n")
+    .find((line) => line.startsWith("missing providers"))
+    ?.trim()
+    .split(/\s{2,}/)[1];
+  expect(row).toBe("1: billed/acme-1 → acme");
+});
+
+test("doctor says none rather than nothing when every provider is installed", async () => {
+  const root = await installation();
+  const result = await cli(["doctor", "--json"], { root, service: fakeService({ root }) });
+  // `[]` is "checked, nothing wrong". Null would mean the question could not be
+  // asked, and the two must not read alike.
+  expect(
+    (JSON.parse(result.out) as { missingProviders: string[] | null }).missingProviders,
+  ).toEqual([]);
+});
+
 test("doctor says none rather than nothing when every pin resolves", async () => {
   const root = await installation();
   const service = fakeService({ root });

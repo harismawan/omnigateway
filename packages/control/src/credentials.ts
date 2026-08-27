@@ -1,6 +1,7 @@
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import type { Credential, CredentialHealth, QuotaWindow, Store } from "@omni/store";
 import { createAdminAuth } from "./adminAuth.ts";
+import { isProviderId } from "./connect.ts";
 import type { Refresher } from "./oauth/refresh.ts";
 import { type BurnEstimate, burnEstimates } from "./quota/burn.ts";
 import { credentialPatchSchema, parseOrThrow, providerIdSchema } from "./schemas.ts";
@@ -128,6 +129,18 @@ export async function createApiKeyCredential(
   logger: Logger = noopLogger,
 ): Promise<CredentialSummary> {
   const provider = parseOrThrow(providerIdSchema, input.provider);
+  // Format, then existence. The schema stopped being an enum over the registry
+  // because that enum was a build-time snapshot — but minting an account for a
+  // provider that does not exist produces a credential that stores, lists, and
+  // fails on first dispatch, so the existence question is asked here instead,
+  // against the registry as it stands right now.
+  //
+  // Deliberately not the rule `putModel` follows. A target naming a removed
+  // provider is existing state an operator must still be able to edit; a new
+  // credential has no such history to preserve.
+  if (!isProviderId(provider)) {
+    throw new GatewayError("BAD_REQUEST", `provider: no provider named "${provider}"`);
+  }
   const apiKey = requiredString(input.apiKey, "apiKey");
   if (input.label !== undefined && typeof input.label !== "string") {
     throw new GatewayError("BAD_REQUEST", "label: must be a string");

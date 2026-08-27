@@ -9,6 +9,7 @@ import { openaiDescriptor } from "./openai/descriptor.ts";
 // Re-exported from the leaf so a reader of one descriptor need not know that the
 // type lives next door — `packages/router` already imports the record from here.
 export type { ProviderDescriptor, ProviderDescriptors } from "./descriptor.ts";
+export { isProviderIdFormat, PROVIDER_ID_PATTERN } from "./descriptor.ts";
 
 /**
  * Every provider's data, keyed by id.

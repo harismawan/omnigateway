@@ -1,4 +1,5 @@
 import type { ChatRequest, ProviderCapabilities, ProviderId } from "@omni/ir";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type CredentialView, servesTarget, type Target } from "@omni/store/types";
 import { healthKey } from "./snapshot.ts";
 import type { Excluded, RankInput } from "./types.ts";
@@ -60,6 +61,28 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
   const excluded: Excluded[] = [];
 
   for (const target of model.targets) {
+    // A target naming a provider this installation does not have. `Target` comes
+    // back from `virtual_models.targets` as unvalidated JSON, so this is an
+    // ordinary state now that a provider can arrive from `<root>/plugins/`: the
+    // plugin was removed, the database was restored onto a different install, or
+    // someone edited a row.
+    //
+    // Read at call time, never from a module-scope key list — `loadPlugins()`
+    // runs long after import, so a snapshot taken there would call a working
+    // provider missing. Emitted once per target, `kind: "target"` because it is
+    // a fact about the target and names no account. First guard in the loop, so
+    // a target that is also pinned reports the provider rather than reporting
+    // `pin:missing` about an account that could not have served it either way.
+    if (PROVIDER_DESCRIPTORS[target.provider] === undefined) {
+      excluded.push({
+        kind: "target",
+        credentialId: "",
+        model: target.model,
+        reason: "provider:missing",
+      });
+      continue;
+    }
+
     // A provider-native block or provider-defined tool routes only to the
     // provider that owns it. Read off the request's own data rather than from a
     // table of who accepts whose dialect: the block records its producer, so the
