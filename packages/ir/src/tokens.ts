@@ -60,7 +60,7 @@ function blockTokens(block: ContentBlock): number {
       return BLOCK_OVERHEAD + fromText(block.name) + fromText(safeJson(block.input));
     case "toolResult":
       return BLOCK_OVERHEAD + fromText(block.toolUseId) + fromText(block.content);
-    case "anthropicNative":
+    case "providerNative":
       // A web-search result block is mostly its payload, and a session that
       // searches repeatedly carries several. Counting only the discriminator
       // would under-report those turns by thousands of tokens.
@@ -82,10 +82,10 @@ function messageTokens(message: Message): number {
  * conversation itself in the early turns.
  */
 function toolTokens(tool: ToolDef): number {
-  if (tool.provider === "anthropic") {
-    // An Anthropic-defined tool sends a versioned type and its options, not a
-    // schema — the schema lives on Anthropic's side and is charged for, but its
-    // size is not something the request carries or this side can know.
+  if (tool.kind === "provider") {
+    // A provider-defined tool sends a versioned type and its options, not a
+    // schema — the schema lives on the provider's side and is charged for, but
+    // its size is not something the request carries or this side can know.
     return (
       BLOCK_OVERHEAD + fromText(tool.name) + fromText(tool.type) + fromText(safeJson(tool.wire))
     );

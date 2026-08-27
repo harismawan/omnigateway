@@ -286,7 +286,7 @@ test("parses tools and the required tool choice", () => {
     tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
     tool_choice: "required",
   });
-  expect(req.tools).toEqual([{ provider: "custom", name: "f", inputSchema: { type: "object" } }]);
+  expect(req.tools).toEqual([{ kind: "portable", name: "f", inputSchema: { type: "object" } }]);
   expect(req.toolChoice).toEqual({ type: "any" });
 });
 
@@ -516,7 +516,7 @@ test("keeps a breakpoint on a tool definition, at either level", () => {
   });
   expect(outer.tools).toEqual([
     {
-      provider: "custom",
+      kind: "portable",
       name: "f",
       inputSchema: { type: "object" },
       cacheControl: { type: "ephemeral", ttl: "1h" },
@@ -539,7 +539,7 @@ test("keeps a breakpoint on a tool definition, at either level", () => {
   });
   expect(inner.tools).toEqual([
     {
-      provider: "custom",
+      kind: "portable",
       name: "f",
       inputSchema: { type: "object" },
       cacheControl: { type: "ephemeral" },
@@ -589,7 +589,7 @@ test("a malformed marker at one tool level does not mask a good one at the other
   });
   expect(req.tools).toEqual([
     {
-      provider: "custom",
+      kind: "portable",
       name: "f",
       inputSchema: { type: "object" },
       cacheControl: { type: "ephemeral", ttl: "1h" },

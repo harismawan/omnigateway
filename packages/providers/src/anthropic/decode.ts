@@ -235,7 +235,7 @@ export async function* decodeAnthropic(
           yield {
             type: "blockStart",
             index,
-            block: { type: "anthropicNative", blockType: cb.type, data },
+            block: { type: "providerNative", provider: "anthropic", blockType: cb.type, data },
           };
         } else {
           yield protocolError(`unrecognized Anthropic content block type "${String(cb.type)}"`);
@@ -269,7 +269,11 @@ export async function* decodeAnthropic(
             type: "blockDelta",
             index,
             delta: nativeBlocks.has(index)
-              ? { type: "anthropicNativeJson", partial: delta.partial_json ?? "" }
+              ? {
+                  type: "providerNativeJson",
+                  provider: "anthropic",
+                  partial: delta.partial_json ?? "",
+                }
               : { type: "toolJson", partial: delta.partial_json ?? "" },
           };
         else if (delta.type === "citations_delta")
@@ -277,7 +281,8 @@ export async function* decodeAnthropic(
             type: "blockDelta",
             index,
             delta: {
-              type: "anthropicNative",
+              type: "providerNative",
+              provider: "anthropic",
               deltaType: delta.type,
               data: { citation: delta.citation },
             },
@@ -287,7 +292,8 @@ export async function* decodeAnthropic(
             type: "blockDelta",
             index,
             delta: {
-              type: "anthropicNative",
+              type: "providerNative",
+              provider: "anthropic",
               deltaType: delta.type,
               data: {
                 ...(delta.content === undefined ? {} : { content: delta.content }),

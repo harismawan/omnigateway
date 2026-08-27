@@ -422,7 +422,10 @@ function readBlock(raw: unknown, role: Message["role"], path: string): ContentBl
       }
       const { type: _type, cache_control, ...data } = parsed.data;
       return {
-        type: "anthropicNative",
+        type: "providerNative",
+        // This surface only accepts Anthropic's own native block types, so the
+        // producer is known statically rather than read off the request.
+        provider: "anthropic",
         blockType: type,
         data,
         ...(cache_control === undefined || cache_control === null

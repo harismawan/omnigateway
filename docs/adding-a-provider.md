@@ -15,7 +15,7 @@ shape and why the HTTP client is built on `node:http`.
    there are far fewer than there used to be, because most of what used to be one table per concern
    is now one field per provider on `ProviderDescriptor`.
    Everything the descriptor holds is required, so the compiler asks for all of it in one place:
-   capabilities, `anthropicNativeTools`, `writeOverInput`, catalog, model prefixes, and the
+   capabilities, `writeOverInput`, catalog, model prefixes, and the
    presentation block (label, display order, terminal tone, `--p-<id>` colour in **both** themes,
    paste hint). `callback` is optional and only for a provider using a loopback redirect.
    **One core edit remains and the compiler will not find it**:

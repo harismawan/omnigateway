@@ -321,10 +321,17 @@ Preserve these translation invariants:
 - `ToolDef` is union. `CustomToolDef` stay portable; `AnthropicToolDef` carry exact versioned `type`
   never normalized or upgraded. Versions in `packages/providers/src/anthropic/tools.ts`; unknown
   dated types rejected, not prefix-matched.
-- Anthropic-native content blocks use `anthropicNative` IR variant, keep payload verbatim, stay out
-  of tool-id correlation, orphan removal, cross-provider translation, RTK.
-- `AnthropicToolDef` or `anthropicNative` history block exclude every provider whose
-  `ANTHROPIC_NATIVE_TOOLS` entry false at routing — currently everything except Anthropic.
+- Provider-native content blocks use `providerNative` IR variant, keep payload verbatim, stay out
+  of tool-id correlation, orphan removal, cross-provider translation, RTK. Block carry `provider` —
+  who produced it — and that field is what routing read.
+- `ToolDef` discriminant is `kind`: `"portable"` (was `provider: "custom"`, colliding with the
+  `custom` **provider id** and meaning something else) or `"provider"` plus a real `ProviderId`.
+- Provider-defined tool or `providerNative` history block admit **only** that provider's targets at
+  routing — today only Anthropic produce either. Replaced "exclude every provider whose
+  `ANTHROPIC_NATIVE_TOOLS` entry false", which selected the same targets and needed a table.
+  Degradation spelled `excluded:capability:providerNative`; rows written before the rename carry
+  `excluded:capability:anthropicTools` and stay readable, because degradations are forensic text
+  never parsed on read. Redaction of `credentialId` there read `Excluded.kind`, never the string.
 - `pauseTurn` is own stop reason; never fold into `endTurn` or `toolUse`.
 - Client tool names renamed to PascalCase on Anthropic **OAuth** leg only, restored in
   `anthropic/decode.ts` — never at egress. Anthropic fingerprint some name sets and refuse them

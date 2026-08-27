@@ -70,7 +70,7 @@ function clientToolNames(request: ChatRequest): { renamable: string[]; reserved:
   };
 
   for (const tool of request.tools ?? []) {
-    if (tool.provider === "custom") add(tool.name);
+    if (tool.kind === "portable") add(tool.name);
   }
   for (const message of request.messages) {
     for (const block of message.content) {
@@ -125,7 +125,7 @@ export function buildToolCloak(request: ChatRequest): ToolCloak | null {
     claims.set(name, (claims.get(name) ?? 0) + 1);
   };
   for (const tool of request.tools ?? []) {
-    if (tool.provider === "anthropic" && tool.name !== "") claim(tool.name);
+    if (tool.kind === "provider" && tool.name !== "") claim(tool.name);
   }
   for (const name of reserved) claim(name);
 

@@ -21,7 +21,7 @@ const model = (targets = [target()]) => ({
 test("derives required capabilities from the request", () => {
   expect(requiredCapabilities(req)).toEqual({ tools: false, images: false, reasoning: false });
   expect(
-    requiredCapabilities({ ...req, tools: [{ provider: "custom", name: "f", inputSchema: {} }] })
+    requiredCapabilities({ ...req, tools: [{ kind: "portable", name: "f", inputSchema: {} }] })
       .tools,
   ).toBe(true);
   expect(
@@ -110,7 +110,7 @@ test("a pin is hard: an ineligible pinned account does not spill to another", ()
   // The pinned account's own reason survives, so the operator learns why rather
   // than only that nothing was left.
   expect(excluded).toEqual([
-    { credentialId: "pinned", model: "claude-opus-4", reason: "disabled" },
+    { credentialId: "pinned", model: "claude-opus-4", reason: "disabled", kind: "account" },
   ]);
 });
 
@@ -128,7 +128,7 @@ test("a pin naming no existing credential reports itself", () => {
   // Without this row the request fails with nothing in `excluded` explaining
   // why, which is the one case where the silent skip above costs the answer.
   expect(excluded).toEqual([
-    { credentialId: "deleted", model: "claude-opus-4", reason: "pin:missing" },
+    { credentialId: "deleted", model: "claude-opus-4", reason: "pin:missing", kind: "account" },
   ]);
 });
 
@@ -167,7 +167,9 @@ test("a pin does not rescue a credential the provider filter already rejects", (
   });
 
   expect(pairs).toHaveLength(0);
-  expect(excluded).toEqual([{ credentialId: "k", model: "claude-opus-4", reason: "pin:missing" }]);
+  expect(excluded).toEqual([
+    { credentialId: "k", model: "claude-opus-4", reason: "pin:missing", kind: "account" },
+  ]);
 });
 
 test("every dangling pin in a model is reported, not just the first", () => {
@@ -189,8 +191,13 @@ test("every dangling pin in a model is reported, not just the first", () => {
 
   expect(pairs.map((pair) => pair.target.model)).toEqual(["claude-opus-4"]);
   expect(excluded).toEqual([
-    { credentialId: "gone", model: "claude-sonnet-4", reason: "pin:missing" },
-    { credentialId: "also-gone", model: "claude-haiku-4", reason: "pin:missing" },
+    { credentialId: "gone", model: "claude-sonnet-4", reason: "pin:missing", kind: "account" },
+    {
+      credentialId: "also-gone",
+      model: "claude-haiku-4",
+      reason: "pin:missing",
+      kind: "account",
+    },
   ]);
 });
 
@@ -198,7 +205,7 @@ test("a pinned target reports one reason, not its own reason and pin:missing too
   // `pinSeen` must be set before the capability drop. Set after it, a pinned
   // target that fails any earlier check emits two rows for one target.
   const { excluded } = eligible({
-    request: { ...req, tools: [{ provider: "custom", name: "f", inputSchema: {} }] },
+    request: { ...req, tools: [{ kind: "portable", name: "f", inputSchema: {} }] },
     model: model([
       target({ capabilities: { tools: false, images: true, reasoning: true }, credentialId: "a" }),
     ]),
@@ -209,7 +216,7 @@ test("a pinned target reports one reason, not its own reason and pin:missing too
   });
 
   expect(excluded).toEqual([
-    { credentialId: "a", model: "claude-opus-4", reason: "capability:tools" },
+    { credentialId: "a", model: "claude-opus-4", reason: "capability:tools", kind: "account" },
   ]);
 });
 
@@ -241,7 +248,7 @@ test("a pin cannot reach a custom credential on another endpoint", () => {
 
   expect(pairs).toHaveLength(0);
   expect(excluded).toEqual([
-    { credentialId: "remote-account", model: "llama", reason: "pin:missing" },
+    { credentialId: "remote-account", model: "llama", reason: "pin:missing", kind: "account" },
   ]);
 });
 
@@ -289,7 +296,7 @@ test("a pin on an installation with no credentials at all still reports itself",
 
   expect(pairs).toHaveLength(0);
   expect(excluded).toEqual([
-    { credentialId: "gone", model: "claude-opus-4", reason: "pin:missing" },
+    { credentialId: "gone", model: "claude-opus-4", reason: "pin:missing", kind: "account" },
   ]);
 });
 
@@ -314,7 +321,7 @@ test("a dangling pin reports itself once, not once per account it skipped", () =
 
   expect(pairs).toEqual([]);
   expect(excluded).toEqual([
-    { credentialId: "gone", model: "claude-opus-4", reason: "pin:missing" },
+    { credentialId: "gone", model: "claude-opus-4", reason: "pin:missing", kind: "account" },
   ]);
 });
 
@@ -328,12 +335,17 @@ test("excludes disabled credentials", () => {
     load: new Map(),
   });
   expect(pairs).toHaveLength(0);
-  expect(excluded[0]).toEqual({ credentialId: "a", model: "claude-opus-4", reason: "disabled" });
+  expect(excluded[0]).toEqual({
+    credentialId: "a",
+    model: "claude-opus-4",
+    reason: "disabled",
+    kind: "account",
+  });
 });
 
 test("excludes targets that lack a required capability", () => {
   const { pairs, excluded } = eligible({
-    request: { ...req, tools: [{ provider: "custom", name: "f", inputSchema: {} }] },
+    request: { ...req, tools: [{ kind: "portable", name: "f", inputSchema: {} }] },
     model: model([target({ capabilities: { tools: false, images: true, reasoning: true } })]),
     snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
     now: NOW,

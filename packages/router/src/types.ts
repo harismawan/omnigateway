@@ -35,6 +35,28 @@ export type Candidate = {
 };
 
 export type Excluded = {
+  /**
+   * Whether the exclusion describes the target's provider or the account named
+   * in `credentialId`.
+   *
+   * `"target"` means no account would have helped: the request names one
+   * provider — it carries that provider's native block or its provider-defined
+   * tool — and this target is not it. Dispatch omits `credentialId` from the
+   * degradation it writes for those, because naming an account there blames one
+   * that is fine. Dispatch used to discover that by string-matching `reason`,
+   * which made a rename of the concept a silent change to a persisted string.
+   *
+   * The three portable capability checks (`tools`, `images`, `reasoning`) stay
+   * `"account"`, which is what shipped — note that their `reason` still begins
+   * `capability:`, so the discriminator deliberately does not follow the reason
+   * string. It answers "is this a fact about the target or about the account",
+   * which is the only question the redaction needs. They read `target.capabilities`,
+   * which an operator sets per target, so the row that leads to the fix is the
+   * pair rather than the provider. Widening the redaction to cover them is a
+   * behaviour change with its own decision behind it, not a consequence of
+   * this discriminator existing.
+   */
+  kind: "target" | "account";
   credentialId: string;
   model: string;
   reason: string;

@@ -122,7 +122,7 @@ test("parses tools and tool choice", () => {
     tool_choice: { type: "tool", name: "f" },
   });
   expect(req.tools).toEqual([
-    { provider: "custom", name: "f", description: "d", inputSchema: { type: "object" } },
+    { kind: "portable", name: "f", description: "d", inputSchema: { type: "object" } },
   ]);
   expect(req.toolChoice).toEqual({ type: "tool", name: "f" });
 });
@@ -353,7 +353,7 @@ test("keeps a cache breakpoint on a tool definition", () => {
   });
   expect(req.tools).toEqual([
     {
-      provider: "custom",
+      kind: "portable",
       name: "f",
       inputSchema: { type: "object" },
       cacheControl: { type: "ephemeral", ttl: "1h" },
