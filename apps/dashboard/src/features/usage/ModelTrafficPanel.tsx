@@ -7,7 +7,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { useProviderCatalog } from "../../api/queries.ts";
+import { findProvider, useProviderCatalog } from "../../api/queries.ts";
 import type { CatalogProvider, UsageBucket } from "../../api/types.ts";
 import { type ProviderId, providerColor } from "../../theme/tokens.ts";
 import { Stack, Truncate } from "../../ui/primitives.ts";
@@ -105,8 +105,17 @@ export function ModelTrafficPanel({
   // Grouped by provider so the shade ramp reads as one hue stepping down, and
   // walked in the fixed provider order so a model going quiet never recolours
   // the ones that stayed.
+  //
+  // The walk covers the providers the *targets* name as well as the ones the
+  // catalog lists, for the reason `ProviderPanel` does: a model routed to a
+  // provider the catalog no longer carries matches no pass of this loop, so it
+  // is not folded into a band — it is left out of the chart and the legend with
+  // its tokens still counted in every total beside them.
+  const unlisted = [...new Set(kept.map(([name]) => providerOf(catalog, name, providers)))]
+    .filter((id): id is string => id !== null && findProvider(catalog, id) === undefined)
+    .sort();
   const bands: Band[] = [];
-  for (const provider of [...catalog.map((entry) => entry.id), null]) {
+  for (const provider of [...catalog.map((entry) => entry.id), ...unlisted, null]) {
     kept
       .filter(([name]) => providerOf(catalog, name, providers) === provider)
       .forEach(([name, totals], index) => {

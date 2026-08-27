@@ -12,7 +12,14 @@ export {
   createAdminAuth,
 } from "./adminAuth.ts";
 export { type RequestBodyRead, readRequestBody } from "./bodies.ts";
-export { type CatalogProvider, providerCatalog } from "./catalog.ts";
+export {
+  type CatalogProblem,
+  type CatalogProvider,
+  isPaletteSafeColour,
+  isPaletteSafeProviderId,
+  NEUTRAL_COLOUR,
+  providerCatalog,
+} from "./catalog.ts";
 export { type Config, loadConfig } from "./config.ts";
 export {
   type ConnectDeps,

@@ -295,6 +295,22 @@ describe("per-model auth", () => {
         "Requests routed here will fail.",
     );
   });
+
+  test("a provider the catalog does not carry is silent, not accused", () => {
+    // What `modelAuths` returning `null` for an unknown provider actually buys.
+    // It does *not* keep such a provider's models in the picker — that list is
+    // empty either way, because `reachableChoices` returns `[]` before
+    // `reachable` is ever asked — so a comment claiming it prevents "hiding
+    // every model" was describing an effect it does not have. What it prevents
+    // is this note: an accusation in red, on the screen an operator opens to
+    // find out whether their configuration is sound, about a target that is
+    // fine and a provider that merely is not listed here.
+    const shrunk = CATALOG.filter((provider) => provider.id !== "anthropic");
+    const held = heldAuths([credential({ provider: "anthropic", authType: "oauth" })]);
+
+    expect(reachableChoices(shrunk, "anthropic", held)).toEqual([]);
+    expect(unreachableNote(shrunk, "anthropic", "claude-opus-5", held)).toBeNull();
+  });
 });
 
 describe("pinning a target to one account", () => {

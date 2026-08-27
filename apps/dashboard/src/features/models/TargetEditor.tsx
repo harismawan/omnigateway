@@ -182,6 +182,18 @@ export function TargetEditor({
                 {provider.label}
               </option>
             ))}
+            {/*
+              A saved target outlives the catalog entry it names — a provider
+              can be removed from a build, or supplied by a plugin that is no
+              longer installed. Without this option the `<Select>` falls back to
+              showing its first entry, so a target on a vanished provider reads
+              as "Anthropic" and one keystroke anywhere else saves it that way.
+              The raw id, for the same reason `AccountsBoard`'s `labelOf` shows
+              it: an id the operator can act on beats a label that is a lie.
+            */}
+            {entry === undefined ? (
+              <option value={target.provider}>{target.provider} (not in the catalog)</option>
+            ) : null}
           </Select>
         </Cell>
 

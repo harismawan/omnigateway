@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import styled, { ServerStyleSheet } from "styled-components";
 import type { CatalogProvider } from "../../src/api/types.ts";
-import { ProviderPalette } from "../../src/theme/GlobalStyle.ts";
+import { type PaletteProvider, ProviderPalette } from "../../src/theme/GlobalStyle.ts";
 import {
   applyTheme,
   isThemeMode,
@@ -121,8 +121,14 @@ describe("styled-components theme", () => {
   });
 });
 
-/** The palette as it is mounted in `_app`, over whatever the catalog said. */
-function paletteCss(providers: readonly CatalogProvider[]): string {
+/**
+ * The palette as it is mounted in `_app`, over whatever the catalog said.
+ *
+ * Typed as what the component accepts rather than as `CatalogProvider`, because
+ * half of what this file asks is what happens to a payload that is *not* one.
+ * The endpoint promises both halves; the wire cannot.
+ */
+function paletteCss(providers: readonly PaletteProvider[]): string {
   // Collected off the server sheet rather than off the document: happy-dom
   // never reflects what `createGlobalStyle` injects, so a DOM assertion here
   // would read an empty string and pass no matter what the palette says.
@@ -183,19 +189,48 @@ describe("provider palette", () => {
     // The point of reading the palette over `/api/catalog`: a provider supplied
     // by a plugin exists only at runtime, so no build-time list could have
     // carried it. Nothing here knows the id.
-    const css = paletteCss([
-      {
-        id: "plugin-provider",
-        label: "Some Plugin",
-        order: 9,
-        colour: { light: "oklch(0.5 0.1 10)", dark: "oklch(0.7 0.1 10)" },
-        defaultModel: "m",
-        authTypes: ["apiKey"],
-        models: [],
-      },
-    ]);
+    // A whole `CatalogProvider`, not the palette's own slice of one: the point
+    // is that what the endpoint serves goes in unchanged.
+    const grown: CatalogProvider = {
+      id: "plugin-provider",
+      label: "Some Plugin",
+      order: 9,
+      colour: { light: "oklch(0.5 0.1 10)", dark: "oklch(0.7 0.1 10)" },
+      defaultModel: "m",
+      authTypes: ["apiKey"],
+      models: [],
+    };
+    const css = paletteCss([grown]);
 
     expect(css).toContain("--p-plugin-provider:oklch(0.5 0.1 10);");
     expect(css).toContain("--p-plugin-provider:oklch(0.7 0.1 10);");
+  });
+
+  test("a provider with only one half is written once, not as the word undefined", () => {
+    // `--p-x:undefined;` is dropped by the parser with no error, so the console
+    // renders exactly as it would with no declaration at all — but the sheet
+    // says otherwise, and anything reading the sheet believes it. The half that
+    // exists is still written: losing a working light hue because the dark one
+    // was missing would be a second failure on top of the first.
+    const css = paletteCss([{ id: "halfway", colour: { light: "oklch(0.5 0.1 10)" } }]);
+
+    expect(css).toContain("--p-halfway:oklch(0.5 0.1 10);");
+    expect(css).not.toContain("undefined");
+    expect(css.match(/--p-halfway:/g)).toHaveLength(1);
+  });
+
+  test("a provider with no colour at all renders the rest of the palette", () => {
+    // The shape that used to throw a `TypeError` out of render. It is worse than
+    // a bad colour: the gate's error screen catches it, and its retry cannot
+    // clear it, because `beforeLoad` resolves the catalog from cache the second
+    // time and hands the same payload back to the same throw.
+    const css = paletteCss([
+      { id: "colourless" },
+      { id: "fine", colour: { light: "oklch(0.5 0.1 10)", dark: "oklch(0.7 0.1 10)" } },
+    ]);
+
+    expect(css).toContain("--p-fine:oklch(0.5 0.1 10);");
+    expect(css).toContain("--p-fine:oklch(0.7 0.1 10);");
+    expect(css).not.toContain("--p-colourless");
   });
 });

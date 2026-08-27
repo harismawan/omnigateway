@@ -1,20 +1,51 @@
 import { createGlobalStyle } from "styled-components";
 
-/** Everything the palette needs of a provider: an id and both its hues. */
-export type PaletteProvider = { id: string; colour: { light: string; dark: string } };
+/**
+ * Everything the palette needs of a provider: an id and both its hues.
+ *
+ * Both halves are optional, and that is a statement about the wire rather than
+ * about the design. This arrives as JSON from `/api/catalog`, so the compiler
+ * has checked nothing about it — the type describes what a *correct* payload
+ * looks like, and this component has to survive an incorrect one.
+ */
+export type PaletteProvider = {
+  id: string;
+  colour?: { light?: string | undefined; dark?: string | undefined } | undefined;
+};
 
 /**
  * The `--p-<id>` half of one palette, written from the loaded catalog.
  *
- * Both modes are generated from the same list, which is what makes "a provider
- * with only one half repaints to nothing in the other theme" unrepresentable
- * rather than merely untested. The reasoning behind each hue lives in that
- * provider's `descriptor.ts`, beside the value it explains — generated CSS
- * cannot carry a comment, and a comment kept away from its value is one that
- * goes stale unnoticed.
+ * Both modes are generated from the same list, so a provider is normally
+ * written into both. It is **not** unrepresentable for one half to be missing —
+ * an earlier version of this comment said it was, which was true of a
+ * compiled-in `Record<ProviderId, …>` and stopped being true the moment these
+ * values started arriving over the wire. What happens now is that the half is
+ * left out: `--p-x: undefined;` is dropped by the CSS parser without a word,
+ * and `--p-x: ;` is worse, so a value that is not a string is not written at
+ * all. The provider then paints colourless in that one mode, which is the same
+ * outcome as before and reached without the sheet carrying a lie.
+ *
+ * Nothing here validates the *content* of a hue. `packages/control/src/catalog.ts`
+ * does that, and it is the only place that should: this template concatenates,
+ * and a second check on this side of the wire would be a guard against a server
+ * that also serves the script running it.
+ *
+ * The reasoning behind each hue lives in that provider's `descriptor.ts`,
+ * beside the value it explains — generated CSS cannot carry a comment, and a
+ * comment kept away from its value is one that goes stale unnoticed.
  */
 function providerPalette(providers: readonly PaletteProvider[], mode: "light" | "dark"): string {
-  return providers.map(({ id, colour }) => `--p-${id}: ${colour[mode]};`).join("\n    ");
+  return providers
+    .flatMap(({ id, colour }) => {
+      const value = colour?.[mode];
+      // Only "is there a string here", not "is it a good one". An empty one is
+      // refused by `packages/control/src/catalog.ts` and, if it ever got past,
+      // is stripped by the minifier on the way into the sheet — a check for it
+      // here would be a branch no test could tell from its absence.
+      return typeof value === "string" ? [`--p-${id}: ${value};`] : [];
+    })
+    .join("\n    ");
 }
 
 /**

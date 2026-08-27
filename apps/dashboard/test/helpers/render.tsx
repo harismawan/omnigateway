@@ -14,7 +14,6 @@ import {
   StreamProvider,
   type StreamTimer,
 } from "../../src/session/stream.tsx";
-import { ProviderPalette } from "../../src/theme/GlobalStyle.ts";
 import { ThemeProvider } from "../../src/theme/ThemeProvider.tsx";
 import { catalogFixture } from "./fixtures.ts";
 
@@ -80,9 +79,17 @@ function Providers({
 }) {
   return (
     <ThemeProvider>
-      {/* What `_app` mounts inside its gate, so a bare-rendered board has the
-          same `--p-<id>` set it would have inside the shell. */}
-      <ProviderPalette $providers={catalogFixture()} />
+      {/*
+        `_app` also mounts `ProviderPalette` here, and this harness deliberately
+        does not. It used to, with a comment claiming a bare-rendered board got
+        the same `--p-<id>` set it would have inside the shell — which was never
+        true in this environment: `createGlobalStyle` injects nothing under
+        happy-dom, so the mount produced zero style elements and zero reads of
+        the values it was handed. It was also outside `QueryClientProvider`,
+        where the catalog it claimed to reflect does not exist. The palette is
+        asserted where it can be observed, against a server-rendered sheet, in
+        `test/theme/theme.test.tsx` and `test/routes/appGate.test.tsx`.
+      */}
       <QueryClientProvider client={client}>
         <StreamProvider
           enabled={stream?.enabled ?? false}

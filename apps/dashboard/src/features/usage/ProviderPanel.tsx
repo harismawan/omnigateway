@@ -35,8 +35,18 @@ function colorOf(catalog: readonly CatalogProvider[], name: string): string {
   return findProvider(catalog, name) === undefined ? "var(--ink-faint)" : providerColor(name);
 }
 
+/**
+ * What a band is called.
+ *
+ * Three answers, not two. `unknown` is the store's own word for a request whose
+ * upstream provider was never resolved, and "Unresolved" is what that means. A
+ * provider id the catalog does not list is a different fact — traffic really
+ * did go there, under a name the operator chose — so it keeps its id, the same
+ * fallback `AccountsBoard`'s `labelOf` makes for the same reason.
+ */
 function labelOf(catalog: readonly CatalogProvider[], name: string): string {
-  return findProvider(catalog, name)?.label ?? "Unresolved";
+  if (name === UNKNOWN) return "Unresolved";
+  return findProvider(catalog, name)?.label ?? name;
 }
 
 export type ProviderPanelProps = {
@@ -56,8 +66,17 @@ export function ProviderPanel({ buckets, by, since, until, metric }: ProviderPan
   // Loaded before this screen mounts, by the gate in `routes/_app.tsx`.
   const catalog = useProviderCatalog().data ?? [];
   const totals = bySplit(buckets, metric);
+  // The catalog decides the order, the traffic decides the set — the same split
+  // `AccountsBoard` makes, and for the same reason. Building the list from the
+  // catalog alone dropped every request served by a provider the catalog no
+  // longer names: not moved to an "other" band, not counted in the share
+  // column, gone from the chart, the legend and the table at once, on the one
+  // screen an operator opens to find out where their money went.
+  const unlisted = [...totals.keys()]
+    .filter((name) => name !== UNKNOWN && findProvider(catalog, name) === undefined)
+    .sort();
   // Fixed order, so a quiet provider dropping out never repaints the rest.
-  const ranked = [...catalog.map((provider) => provider.id), UNKNOWN]
+  const ranked = [...catalog.map((provider) => provider.id), ...unlisted, UNKNOWN]
     .map((name) => ({ name, totals: totals.get(name) }))
     .filter((entry): entry is { name: string; totals: Totals } => entry.totals !== undefined);
   const names = ranked.map((entry) => entry.name);

@@ -41,6 +41,19 @@ function defaultWayIn(entry: CatalogProvider | undefined): AuthType {
   return waysIn(entry).includes("oauth") ? "oauth" : "apiKey";
 }
 
+/**
+ * The provider a picker over this catalog starts on: the one it draws first.
+ *
+ * `"anthropic"` is the fallback for an empty catalog only, which the gate makes
+ * unreachable — it is here so the state has a value at all, not as a default
+ * anybody should end up with. The cast is the same one the `onChange` handlers
+ * make: `CatalogProvider.id` is a string because a plugin may supply one, and
+ * the console's `ProviderId` is the compiled-in union.
+ */
+function firstProvider(catalog: readonly CatalogProvider[]): ProviderId {
+  return (catalog[0]?.id ?? "anthropic") as ProviderId;
+}
+
 const AUTH_LABEL: Record<AuthType, string> = {
   oauth: "Authorize in the browser",
   apiKey: "Paste an API key",
@@ -109,10 +122,24 @@ export function ConnectDialog({
 }: ConnectDialogProps) {
   // Loaded before any screen mounts, by the gate in `routes/_app.tsx`.
   const catalog = useProviderCatalog().data ?? [];
-  const [provider, setProvider] = useState<ProviderId>("anthropic");
+  /**
+   * What the `<Select>` below shows before anyone touches it.
+   *
+   * The catalog's first entry, not a name written here. `"anthropic"` was the
+   * hardcoded default, and on an installation whose catalog does not list it —
+   * a build with a provider removed, or a plugin-only one — the control showed
+   * its first option while this state and the `POST` body still said
+   * `anthropic`. Nothing in the browser is wrong-looking when that happens: the
+   * operator picks the account they can see and the gateway is asked for one
+   * they cannot.
+   *
+   * Read once, in an initialiser, because the gate has already resolved the
+   * catalog by the time this mounts — there is no later value to wait for.
+   */
+  const [provider, setProvider] = useState<ProviderId>(() => firstProvider(catalog));
   const entry = findProvider(catalog, provider);
   const [authType, setAuthType] = useState<AuthType>(() =>
-    defaultWayIn(findProvider(catalog, "anthropic")),
+    defaultWayIn(findProvider(catalog, firstProvider(catalog))),
   );
   const [label, setLabel] = useState("");
   // The id itself for a provider the catalog does not name, which is what an

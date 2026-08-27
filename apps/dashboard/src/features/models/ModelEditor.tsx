@@ -207,7 +207,10 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
                     ...draft,
                     targets: [
                       ...draft.targets,
-                      blankTarget(catalog, draft.targets.at(-1)?.provider ?? "anthropic"),
+                      // Undefined rather than a name: with no previous target
+                      // to copy, the catalog's own first entry is the provider
+                      // the picker will be showing.
+                      blankTarget(catalog, draft.targets.at(-1)?.provider),
                     ],
                   })
                 }

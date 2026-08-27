@@ -341,7 +341,7 @@ export function lifecycle(patch: Partial<LifecycleCapability> = {}): LifecycleCa
 }
 
 /**
- * The provider catalog every rendered test runs against.
+ * The provider catalog as `/api/catalog` sends it: **not** in display order.
  *
  * Hand-written rather than imported from `@omni/providers`. The console reads
  * this over `/api/catalog` now, and a fixture is what keeps a price edit in
@@ -354,75 +354,17 @@ export function lifecycle(patch: Partial<LifecycleCapability> = {}): LifecycleCa
  * (`custom`), one whose catalog splits by way in (`kilo`), one whose window
  * narrows through OAuth (`openai`), and a `pasteHint` and `callback` where the
  * real descriptors carry them.
+ *
+ * And, deliberately, the *disorder*. The endpoint sends `order` rather than a
+ * sorted array — wire order is not a contract — so a fixture already in
+ * ascending `order` makes "sorted" and "unsorted" the same array, and no test
+ * written against it can tell a console that sorts from one that does not. That
+ * is what let the sort in `api/queries.ts` be deleted with 484 tests still
+ * green. Every screen wants `catalogFixture()`, which is this run through the
+ * rule; this one is for the code that has to apply that rule.
  */
-export function catalogFixture(): CatalogProvider[] {
+export function wireCatalogFixture(): CatalogProvider[] {
   return [
-    {
-      id: "anthropic",
-      label: "Anthropic",
-      order: 1,
-      colour: { light: "oklch(0.56 0.13 45)", dark: "oklch(0.74 0.12 48)" },
-      pasteHint: "Authorize in the browser, then paste the code Anthropic shows you.",
-      defaultModel: "claude-opus-5",
-      authTypes: ["oauth", "apiKey"],
-      models: [
-        {
-          id: "claude-opus-5",
-          label: "Claude Opus 5",
-          pricing: { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
-          limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
-        },
-        {
-          id: "claude-haiku-4-5",
-          label: "Claude Haiku 4.5",
-          pricing: { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
-          limits: { contextWindow: 200_000, maxOutputTokens: 64_000 },
-        },
-      ],
-    },
-    {
-      id: "openai",
-      label: "OpenAI",
-      order: 2,
-      colour: { light: "oklch(0.5 0.09 190)", dark: "oklch(0.76 0.1 190)" },
-      pasteHint: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
-      callback: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
-      defaultModel: "gpt-5.6",
-      authTypes: ["oauth", "apiKey"],
-      models: [
-        {
-          id: "gpt-5.6",
-          label: "GPT-5.6",
-          pricing: { input: 5, output: 30, cacheRead: 0.5, cacheWrite5m: 0, cacheWrite1h: 0 },
-          limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
-          oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
-        },
-        {
-          id: "gpt-5.6-sol",
-          label: "GPT-5.6 Sol — deepest reasoning",
-          pricing: { input: 5, output: 30, cacheRead: 0.5, cacheWrite5m: 0, cacheWrite1h: 0 },
-          limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
-          oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
-        },
-      ],
-    },
-    {
-      id: "kimi",
-      label: "Kimi",
-      order: 3,
-      colour: { light: "oklch(0.53 0.17 330)", dark: "oklch(0.72 0.16 330)" },
-      pasteHint: "Enter the code on Kimi's device page. This dialog finishes on its own.",
-      defaultModel: "k3-256k",
-      authTypes: ["oauth", "apiKey"],
-      models: [
-        {
-          id: "k3-256k",
-          label: "Kimi K3 — 256K",
-          pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 0, cacheWrite1h: 0 },
-          limits: { contextWindow: 262_144, maxOutputTokens: 131_072 },
-        },
-      ],
-    },
     {
       id: "kilo",
       label: "Kilo",
@@ -456,6 +398,66 @@ export function catalogFixture(): CatalogProvider[] {
       ],
     },
     {
+      id: "anthropic",
+      label: "Anthropic",
+      order: 1,
+      colour: { light: "oklch(0.56 0.13 45)", dark: "oklch(0.74 0.12 48)" },
+      pasteHint: "Authorize in the browser, then paste the code Anthropic shows you.",
+      defaultModel: "claude-opus-5",
+      authTypes: ["oauth", "apiKey"],
+      models: [
+        {
+          id: "claude-opus-5",
+          label: "Claude Opus 5",
+          pricing: { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
+          limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+        },
+        {
+          id: "claude-haiku-4-5",
+          label: "Claude Haiku 4.5",
+          pricing: { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
+          limits: { contextWindow: 200_000, maxOutputTokens: 64_000 },
+        },
+      ],
+    },
+    {
+      // No catalog and one way in: what an operator's own endpoint looks like.
+      id: "custom",
+      label: "OpenAI Compatible",
+      order: 6,
+      colour: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
+      pasteHint: "Enter endpoint metadata and API key.",
+      defaultModel: "",
+      authTypes: ["apiKey"],
+      models: [],
+    },
+    {
+      id: "openai",
+      label: "OpenAI",
+      order: 2,
+      colour: { light: "oklch(0.5 0.09 190)", dark: "oklch(0.76 0.1 190)" },
+      pasteHint: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
+      callback: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
+      defaultModel: "gpt-5.6",
+      authTypes: ["oauth", "apiKey"],
+      models: [
+        {
+          id: "gpt-5.6",
+          label: "GPT-5.6",
+          pricing: { input: 5, output: 30, cacheRead: 0.5, cacheWrite5m: 0, cacheWrite1h: 0 },
+          limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
+          oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
+        },
+        {
+          id: "gpt-5.6-sol",
+          label: "GPT-5.6 Sol — deepest reasoning",
+          pricing: { input: 5, output: 30, cacheRead: 0.5, cacheWrite5m: 0, cacheWrite1h: 0 },
+          limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
+          oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
+        },
+      ],
+    },
+    {
       id: "grok",
       label: "Grok",
       order: 5,
@@ -474,15 +476,38 @@ export function catalogFixture(): CatalogProvider[] {
       ],
     },
     {
-      // No catalog and one way in: what an operator's own endpoint looks like.
-      id: "custom",
-      label: "OpenAI Compatible",
-      order: 6,
-      colour: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
-      pasteHint: "Enter endpoint metadata and API key.",
-      defaultModel: "",
-      authTypes: ["apiKey"],
-      models: [],
+      id: "kimi",
+      label: "Kimi",
+      order: 3,
+      colour: { light: "oklch(0.53 0.17 330)", dark: "oklch(0.72 0.16 330)" },
+      pasteHint: "Enter the code on Kimi's device page. This dialog finishes on its own.",
+      defaultModel: "k3-256k",
+      authTypes: ["oauth", "apiKey"],
+      models: [
+        {
+          id: "k3-256k",
+          label: "Kimi K3 — 256K",
+          pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 0, cacheWrite1h: 0 },
+          limits: { contextWindow: 262_144, maxOutputTokens: 131_072 },
+        },
+      ],
     },
   ];
+}
+
+/**
+ * The same catalog in the order the console must draw it.
+ *
+ * What every screen holds: `_app`'s gate resolves `catalogQuery`, which sorts
+ * once, and each board then walks the array it was given. Seeded into the test
+ * client by `makeQueryClient`, so a board test starts where production starts.
+ *
+ * The comparison is restated here rather than imported from `api/queries.ts` on
+ * purpose. If this helper called the production sort, reversing that sort would
+ * reverse the seed too and every board assertion would keep passing against a
+ * console drawing providers backwards — the expectation has to be stated
+ * independently of the thing it judges.
+ */
+export function catalogFixture(): CatalogProvider[] {
+  return [...wireCatalogFixture()].sort((a, b) => a.order - b.order);
 }
