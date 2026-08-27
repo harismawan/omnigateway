@@ -1,7 +1,12 @@
 import { Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import styled from "styled-components";
-import { useCredentials, useDeleteModel, useSaveModel } from "../../api/queries.ts";
+import {
+  useCredentials,
+  useDeleteModel,
+  useProviderCatalog,
+  useSaveModel,
+} from "../../api/queries.ts";
 import type { Strategy, VirtualModel } from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { Button } from "../../ui/Button.tsx";
@@ -54,8 +59,11 @@ export type ModelEditorProps = {
  * behind under its old id.
  */
 export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
+  // Loaded, not loading: `_app`'s gate resolves the catalog before any screen
+  // mounts, so the fallback is the shape of a value that is already there.
+  const catalog = useProviderCatalog().data ?? [];
   const [draft, setDraft] = useState<ModelDraft>(() =>
-    model === null ? blankModel() : toDraft(model),
+    model === null ? blankModel(catalog) : toDraft(model),
   );
   const [problem, setProblem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -88,7 +96,7 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
   const editing = model?.id ?? null;
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the id by design.
   useEffect(() => {
-    setDraft(model === null ? blankModel() : toDraft(model));
+    setDraft(model === null ? blankModel(catalog) : toDraft(model));
     setProblem(null);
     setSaved(false);
   }, [editing]);
@@ -199,7 +207,7 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
                     ...draft,
                     targets: [
                       ...draft.targets,
-                      blankTarget(draft.targets.at(-1)?.provider ?? "anthropic"),
+                      blankTarget(catalog, draft.targets.at(-1)?.provider ?? "anthropic"),
                     ],
                   })
                 }
@@ -215,6 +223,7 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
                 target={target}
                 index={index}
                 removable={draft.targets.length > 1}
+                catalog={catalog}
                 endpoints={endpoints}
                 held={held}
                 credentials={credentials.data ?? []}

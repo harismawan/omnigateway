@@ -1,5 +1,4 @@
 import type { ProviderId } from "@omni/ir";
-import { PROVIDER_DESCRIPTORS, PROVIDER_IDS as REGISTERED_IDS } from "@omni/providers/descriptors";
 
 /**
  * The gateway's own provider id, not a second spelling of it.
@@ -11,29 +10,6 @@ import { PROVIDER_DESCRIPTORS, PROVIDER_IDS as REGISTERED_IDS } from "@omni/prov
  * definition, in `@omni/ir`.
  */
 export type { ProviderId };
-
-/**
- * Every provider, in the order the console draws them.
- *
- * Derived from the descriptor registry and sorted by `presentation.order`, so
- * "which providers exist" and "in what order" are answered where the providers
- * are defined. A seventh provider appears in every list here without this file
- * being touched.
- */
-export const PROVIDER_IDS: readonly ProviderId[] = [...REGISTERED_IDS].sort(
-  (a, b) => PROVIDER_DESCRIPTORS[a].presentation.order - PROVIDER_DESCRIPTORS[b].presentation.order,
-);
-
-/**
- * Builds a total per-provider table off the registry.
- *
- * The cast is over `Object.fromEntries`, whose return type cannot express that
- * the keys were exhaustive; the exhaustiveness itself is real and comes from
- * `PROVIDER_DESCRIPTORS` being a total record.
- */
-function byProvider<T>(pick: (id: ProviderId) => T): Record<ProviderId, T> {
-  return Object.fromEntries(PROVIDER_IDS.map((id) => [id, pick(id)])) as Record<ProviderId, T>;
-}
 
 /**
  * The console reads as an instrument rack: a graphite chassis, panel modules
@@ -75,11 +51,6 @@ export const theme = {
 
     shadow: "var(--shadow)",
   },
-  /**
-   * One `var(--p-<id>)` per provider. The values behind those names are written
-   * by `GlobalStyle.ts` from the same registry, so the two halves cannot drift.
-   */
-  provider: byProvider<string>((id) => `var(--p-${id})`),
   font: {
     sans: '"Archivo Variable", ui-sans-serif, system-ui, sans-serif',
     mono: '"Spline Sans Mono Variable", ui-monospace, "SF Mono", Menlo, monospace',
@@ -102,11 +73,19 @@ export const theme = {
 
 export type AppTheme = typeof theme;
 
-/** Display name per provider. Not the id: `custom` shows as "OpenAI Compatible". */
-export const PROVIDER_LABEL: Record<ProviderId, string> = byProvider(
-  (id) => PROVIDER_DESCRIPTORS[id].presentation.label,
-);
-
-export function providerColor(provider: ProviderId): string {
-  return theme.provider[provider];
+/**
+ * The custom property carrying one provider's hue.
+ *
+ * A name, not a value: `ProviderPalette` in `GlobalStyle.ts` writes what is
+ * behind it, from the catalog the shell gate has already loaded. Takes a bare
+ * string rather than a `ProviderId` because a provider supplied by a plugin is
+ * not in that union and is coloured the same way as any other.
+ *
+ * Which display name and which order go with that id are catalog questions now,
+ * and answered through `useProviderCatalog()`. This file no longer holds a
+ * provider list of its own — there was one, derived from a build-time registry,
+ * and it could not have seen a plugin's provider at all.
+ */
+export function providerColor(provider: string): string {
+  return `var(--p-${provider})`;
 }

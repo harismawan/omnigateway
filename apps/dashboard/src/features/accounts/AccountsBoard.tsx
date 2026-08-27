@@ -2,10 +2,12 @@ import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
 import {
+  findProvider,
   useCredentialHealth,
   useCredentials,
   useDeleteCredential,
   useModels,
+  useProviderCatalog,
   useSettings,
   useUpdateCredential,
 } from "../../api/queries.ts";
@@ -22,7 +24,7 @@ import {
   WINDOW_LABEL,
 } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
-import { PROVIDER_IDS, PROVIDER_LABEL } from "../../theme/tokens.ts";
+import { providerColor } from "../../theme/tokens.ts";
 import { Button, IconButton } from "../../ui/Button.tsx";
 import { Chip } from "../../ui/Chip.tsx";
 import { Input, NumberInput } from "../../ui/Field.tsx";
@@ -38,7 +40,7 @@ import { QuotaHistory } from "./QuotaHistory.tsx";
 
 /** Carries the provider's identity on the module edge, so the tables need not. */
 const ProviderModule = styled(Module)<{ $provider: ProviderId }>`
-  border-left: 3px solid ${({ theme, $provider }) => theme.provider[$provider]};
+  border-left: 3px solid ${({ $provider }) => providerColor($provider)};
 `;
 
 const LabelInput = styled(Input)`
@@ -146,6 +148,7 @@ export function AccountsBoard() {
   // Those targets do not fall back to a sibling — they hard-fail — so removal
   // is destructive to them in a way it is not to an unpinned target.
   const models = useModels();
+  const catalogQuery = useProviderCatalog();
   const remove = useDeleteCredential();
   const { commit } = useCommit();
 
@@ -163,6 +166,17 @@ export function AccountsBoard() {
 
   const now = Date.now();
   const rows = credentials.data ?? [];
+  // Loaded before this screen mounts, by the gate in `routes/_app.tsx`.
+  const catalog = catalogQuery.data ?? [];
+  // The catalog decides the order, the connected accounts decide the set. Built
+  // from the rows rather than by filtering the catalog so a provider the
+  // catalog no longer names — one whose plugin was removed — still shows the
+  // accounts held for it instead of dropping them off the board silently.
+  const rank = (provider: ProviderId): number =>
+    findProvider(catalog, provider)?.order ?? Number.POSITIVE_INFINITY;
+  const providers = [...new Set(rows.map((row) => row.provider))].sort((a, b) => rank(a) - rank(b));
+  const labelOf = (provider: ProviderId): string =>
+    findProvider(catalog, provider)?.label ?? provider;
   const healthByCredential = groupBy(health.data?.health ?? [], (row) => row.credentialId);
   const quotaByCredential = groupBy(health.data?.quota ?? [], (row) => row.credentialId);
   const burnByCredential = groupBy(health.data?.burn ?? [], (row) => row.credentialId);
@@ -216,14 +230,14 @@ export function AccountsBoard() {
         </Module>
       ) : (
         <Stack $gap={4}>
-          {PROVIDER_IDS.filter((provider) => rows.some((row) => row.provider === provider)).map(
+          {providers.map(
             (provider) => {
               const group = rows.filter((row) => row.provider === provider);
               return (
                 <ProviderModule
                   key={provider}
                   $provider={provider}
-                  legend={PROVIDER_LABEL[provider]}
+                  legend={labelOf(provider)}
                   meta={`${group.length} account${group.length === 1 ? "" : "s"}`}
                   flush
                 >
@@ -462,7 +476,7 @@ export function AccountsBoard() {
         body={
           doomed === null
             ? ""
-            : `Removing "${doomed.label}" deletes its stored token. Any model target pointing at ${PROVIDER_LABEL[doomed.provider]} loses this account, and reconnecting means authorizing again.` +
+            : `Removing "${doomed.label}" deletes its stored token. Any model target pointing at ${labelOf(doomed.provider)} loses this account, and reconnecting means authorizing again.` +
               pinnedWarning(doomed, models.data)
         }
         confirmLabel="Remove account"

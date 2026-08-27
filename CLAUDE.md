@@ -78,7 +78,10 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
    Long-lived schedulers stay in `apps/gateway`.
 7. Store rows + secrets stay behind `@omni/store`; never expose encrypted or raw provider secrets.
 8. All outbound provider HTTP use `HttpClient`; no direct production `fetch`.
-9. `@omni/providers/catalog` browser-imported, must stay leaf: model lists plus types only.
+9. `@omni/providers/catalog` and `/descriptors` must stay leaves: model lists, presentation, types.
+   No longer because a browser import them — console read provider data over `GET /api/catalog`
+   now — but because pure `packages/router` import `descriptors`, and leaf property is what let it.
+   `packages/providers/test/leafSubpaths.test.ts` still pin both.
 10. Catalog pricing give defaults. Router price from saved targets; catalog edits hit new targets
     only.
 11. CLI administer local installs through `@omni/control`, never `/api/*`. Inject every side effect
@@ -86,21 +89,22 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
 12. Dashboard call `/api/*` only — which now include the one WebSocket, `/api/stream`. One
     exception: `/health`, polled to watch gateway leave and return
     across restart. During restart no session and no authenticated surface to probe, so liveness is
-    the one question `/api/*` cannot answer. May import `@omni/store/types`, `@omni/ir`, catalog
-    subpath, `@omnigateway/dashboard-sdk`, but not provider adapters, HTTP client, runtime store
-    code. Allowlist gained `@omni/providers/descriptors` when provider presentation — label,
-    display order, tone, `--p-<id>` colour in both themes, paste hint — moved onto descriptors.
-    Console held own copy of every one, plus **second `ProviderId` type** no compiler tied to
-    `@omni/ir`'s, and `PROVIDER_LABEL` in **three** places. Subpath admissible on exactly terms
-    `catalog` already was: leaf, no adapter, no HTTP client, pinned by
-    `packages/providers/test/leafSubpaths.test.ts`, which use **two instrument, neither sufficient
-    alone**: walk each entry point's import graph via `Bun.Transpiler.scanImports` (real parser, so
-    dynamic `import()` and type-only import classified right), **and** build browser bundle and check
-    for `Bun.env`. Walk catch adapter or profile import no marker reveal — adapter take `HttpClient`
-    by injection. Bundle catch a global, which have no import edge to walk. Two hand-written version
-    shipped before this, one of each kind, and each miss exactly what other now cover. Never
-    hand-roll the parser: regex version was defeated by a doc comment containing words
-    `import type`. SDK permitted because alternative was second copy of rule about what may leave plugin's
+    the one question `/api/*` cannot answer. May import `@omni/store/types`, `@omni/ir`,
+    `@omnigateway/dashboard-sdk`, but **not** `@omni/providers` — neither subpath, not even the leaf
+    ones — nor provider adapters, HTTP client, runtime store code. Allowlist once held `catalog` and
+    `descriptors`, and lost both when provider data moved onto `GET /api/catalog`: a provider loaded
+    from `<root>/plugins/` at boot exist only at runtime, so **no build-time import can reach it**,
+    and a console that import its providers can route to a plugin provider while showing it nowhere.
+    Mirror wire shape in `api/types.ts` like `PluginCatalogEntry` already do; never import it back.
+    `ProviderId` still come from `@omni/ir` — one definition — but provider **list, order, label,
+    colour, models** now all come from the response, and `theme/tokens.ts` hold no provider list.
+    Shell gate in `routes/_app.tsx` make that safe: `beforeLoad` resolve catalog **after** session
+    check (admin-gated route, so unauthenticated path must never ask) and before any screen mount, so
+    `--p-<id>` exist at first paint and no board need a loading state for provider data.
+    Gate is all-or-nothing, so its `errorComponent` must render error **with retry** — never spinner,
+    never blank — and must not swallow `redirect` an expired session throw. Pinned by
+    `apps/dashboard/test/routes/appGate.test.tsx`. SDK permitted because alternative was second copy
+    of rule about what may leave plugin's
     own API prefix — rule held in two places is one that end up true in one. Same argument later
     moved LIVE switch there: which control pause polling is a rule too. SDK **no longer** leaf with
     no imports — `live.ts` import React — so it now in `SHARED_IMPORTS`, one copy served to console

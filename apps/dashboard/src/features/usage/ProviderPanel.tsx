@@ -7,9 +7,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { UsageBucket } from "../../api/types.ts";
+import { findProvider, useProviderCatalog } from "../../api/queries.ts";
+import type { CatalogProvider, UsageBucket } from "../../api/types.ts";
 import { formatCount, formatPercent, formatUsd } from "../../lib/format.ts";
-import { PROVIDER_IDS, PROVIDER_LABEL, providerColor } from "../../theme/tokens.ts";
+import { providerColor } from "../../theme/tokens.ts";
 import { Stack } from "../../ui/primitives.ts";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import {
@@ -30,14 +31,12 @@ import {
 /** Anything that never resolved to a provider still has to be countable. */
 const UNKNOWN = "unknown";
 
-function colorOf(name: string): string {
-  const known = PROVIDER_IDS.find((id) => id === name);
-  return known === undefined ? "var(--ink-faint)" : providerColor(known);
+function colorOf(catalog: readonly CatalogProvider[], name: string): string {
+  return findProvider(catalog, name) === undefined ? "var(--ink-faint)" : providerColor(name);
 }
 
-function labelOf(name: string): string {
-  const known = PROVIDER_IDS.find((id) => id === name);
-  return known === undefined ? "Unresolved" : PROVIDER_LABEL[known];
+function labelOf(catalog: readonly CatalogProvider[], name: string): string {
+  return findProvider(catalog, name)?.label ?? "Unresolved";
 }
 
 export type ProviderPanelProps = {
@@ -54,9 +53,11 @@ export type ProviderPanelProps = {
  * a provider keeps its colour whether or not the others appear in the window.
  */
 export function ProviderPanel({ buckets, by, since, until, metric }: ProviderPanelProps) {
+  // Loaded before this screen mounts, by the gate in `routes/_app.tsx`.
+  const catalog = useProviderCatalog().data ?? [];
   const totals = bySplit(buckets, metric);
   // Fixed order, so a quiet provider dropping out never repaints the rest.
-  const ranked = [...PROVIDER_IDS, UNKNOWN]
+  const ranked = [...catalog.map((provider) => provider.id), UNKNOWN]
     .map((name) => ({ name, totals: totals.get(name) }))
     .filter((entry): entry is { name: string; totals: Totals } => entry.totals !== undefined);
   const names = ranked.map((entry) => entry.name);
@@ -95,7 +96,8 @@ export function ProviderPanel({ buckets, by, since, until, metric }: ProviderPan
                     <div>{timeLabel(Number(label), by)}</div>
                     {payload.map((entry) => (
                       <div key={String(entry.dataKey)}>
-                        {labelOf(String(entry.dataKey))} {metric.format(Number(entry.value ?? 0))}
+                        {labelOf(catalog, String(entry.dataKey))}{" "}
+                        {metric.format(Number(entry.value ?? 0))}
                       </div>
                     ))}
                   </TipCard>
@@ -108,9 +110,9 @@ export function ProviderPanel({ buckets, by, since, until, metric }: ProviderPan
                 type="monotone"
                 dataKey={name}
                 stackId="providers"
-                stroke={colorOf(name)}
+                stroke={colorOf(catalog, name)}
                 strokeWidth={2}
-                fill={colorOf(name)}
+                fill={colorOf(catalog, name)}
                 fillOpacity={0.22}
                 isAnimationActive={false}
               />
@@ -122,7 +124,7 @@ export function ProviderPanel({ buckets, by, since, until, metric }: ProviderPan
       <LegendRow>
         {names.map((name) => (
           <span key={name}>
-            <Swatch $color={colorOf(name)} /> {labelOf(name)}
+            <Swatch $color={colorOf(catalog, name)} /> {labelOf(catalog, name)}
           </span>
         ))}
       </LegendRow>
@@ -143,7 +145,7 @@ export function ProviderPanel({ buckets, by, since, until, metric }: ProviderPan
             return (
               <Tr key={name}>
                 <Td>
-                  <Swatch $color={colorOf(name)} /> {labelOf(name)}
+                  <Swatch $color={colorOf(catalog, name)} /> {labelOf(catalog, name)}
                 </Td>
                 <Td $align="right" $mono>
                   {formatPercent(grand === 0 ? 0 : entry.requests / grand, 0)}

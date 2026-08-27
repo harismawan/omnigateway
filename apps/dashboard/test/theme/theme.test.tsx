@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import styled, { ServerStyleSheet } from "styled-components";
+import type { CatalogProvider } from "../../src/api/types.ts";
+import { ProviderPalette } from "../../src/theme/GlobalStyle.ts";
 import {
   applyTheme,
   isThemeMode,
@@ -14,7 +14,8 @@ import {
   ThemeProvider,
   useTheme,
 } from "../../src/theme/ThemeProvider.tsx";
-import { PROVIDER_IDS, theme } from "../../src/theme/tokens.ts";
+import { providerColor } from "../../src/theme/tokens.ts";
+import { catalogFixture } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 beforeEach(() => {
@@ -85,7 +86,7 @@ describe("ThemeProvider", () => {
 const Probe = styled.div`
   color: ${({ theme }) => theme.color.ink};
   font-family: ${({ theme }) => theme.font.mono};
-  border-left: 2px solid ${({ theme }) => theme.provider.kimi};
+  border-left: 2px solid ${providerColor("kimi")};
 `;
 
 function Tokens() {
@@ -120,81 +121,81 @@ describe("styled-components theme", () => {
   });
 });
 
+/** The palette as it is mounted in `_app`, over whatever the catalog said. */
+function paletteCss(providers: readonly CatalogProvider[]): string {
+  // Collected off the server sheet rather than off the document: happy-dom
+  // never reflects what `createGlobalStyle` injects, so a DOM assertion here
+  // would read an empty string and pass no matter what the palette says.
+  const sheet = new ServerStyleSheet();
+  renderToStaticMarkup(
+    sheet.collectStyles(
+      <ThemeProvider>
+        <ProviderPalette $providers={providers} />
+        <Probe />
+      </ThemeProvider>,
+    ),
+  );
+  const css = sheet.getStyleTags();
+  sheet.seal();
+  return css;
+}
+
 describe("provider palette", () => {
-  test("the console's provider list is the catalog's, not a stale copy", () => {
-    // Both are now derived — the list from the descriptor registry, the catalog
-    // from the providers' own model lists — but they are still assembled
-    // separately by design, so nothing but this makes them agree.
-    const listed: string[] = [...PROVIDER_IDS];
-    expect(listed.sort()).toEqual(Object.keys(PROVIDER_MODEL_CATALOG).sort());
-  });
-
-  test("the console draws providers in the registry's declared order", () => {
-    // The order used to be a hand-written array in two places, and is now the
-    // sort in tokens.ts. Asserted as monotonicity plus "same set" rather than
-    // as equality with a locally re-sorted list: the registry's key order
-    // currently happens to match `presentation.order`, so an equality check
-    // passes just as well against an unsorted derivation and would only start
-    // meaning something on the day someone renumbered a provider.
-    const drawn = PROVIDER_IDS.map((id) => PROVIDER_DESCRIPTORS[id].presentation.order);
-    expect(drawn).toEqual([...drawn].sort((a, b) => a - b));
-    const listed: string[] = [...PROVIDER_IDS];
-    expect(listed.sort()).toEqual(Object.keys(PROVIDER_DESCRIPTORS).sort());
-  });
-
-  test("every registered provider is coloured in both themes", () => {
+  test("every provider in the response is coloured in both themes", () => {
     // The pair check below counts two declarations per provider without saying
     // which blocks they landed in, so two light halves would satisfy it. This
     // splits the generated sheet at `.dark` and requires the provider in each
     // side: a provider present in only one renders colourless in the other,
     // and nothing throws when it does.
-    const sheet = new ServerStyleSheet();
-    renderToStaticMarkup(
-      sheet.collectStyles(
-        <ThemeProvider>
-          <Probe />
-        </ThemeProvider>,
-      ),
-    );
-    const css = sheet.getStyleTags();
-    sheet.seal();
+    const providers = catalogFixture();
+    const css = paletteCss(providers);
 
     const darkAt = css.indexOf(".dark{");
     expect(darkAt).toBeGreaterThan(-1);
     const light = css.slice(0, darkAt);
     const dark = css.slice(darkAt);
 
-    for (const descriptor of Object.values(PROVIDER_DESCRIPTORS)) {
-      const { id, presentation } = descriptor;
+    for (const { id, colour } of providers) {
       // No space after the colon: stylis minifies the declaration on the way
       // through, so this is the shape it lands in, not the shape it was written
       // in.
-      expect(light).toContain(`--p-${id}:${presentation.colour.light};`);
-      expect(dark).toContain(`--p-${id}:${presentation.colour.dark};`);
-    }
-  });
-
-  test("every provider has both halves of its palette", () => {
-    // Collected off the server sheet rather than off the document: happy-dom
-    // never reflects what `createGlobalStyle` injects, so a DOM assertion here
-    // would read an empty string and pass no matter what the palette says.
-    const sheet = new ServerStyleSheet();
-    renderToStaticMarkup(
-      sheet.collectStyles(
-        <ThemeProvider>
-          <Probe />
-        </ThemeProvider>,
-      ),
-    );
-    const css = sheet.getStyleTags();
-    sheet.seal();
-
-    for (const id of PROVIDER_IDS) {
-      expect(theme.provider[id]).toBe(`var(--p-${id})`);
+      expect(light).toContain(`--p-${id}:${colour.light};`);
+      expect(dark).toContain(`--p-${id}:${colour.dark};`);
       // Two declarations, one per palette. A pair that only got its light half
       // repaints to nothing the moment the console is switched to dark, which
       // no light-mode test would ever notice.
       expect(css.match(new RegExp(`--p-${id}:`, "g"))).toHaveLength(2);
     }
+  });
+
+  test("the name a component asks for is the name the palette writes", () => {
+    // The two halves are in different files and cannot be checked against each
+    // other by the compiler: `providerColor` builds a string, the palette
+    // writes a declaration. `var(--p-typo)` resolves to nothing and renders
+    // colourless with no error, so nothing but this would report a drift.
+    for (const { id } of catalogFixture()) {
+      expect(providerColor(id)).toBe(`var(--p-${id})`);
+      expect(paletteCss(catalogFixture())).toContain(`${providerColor(id).slice(4, -1)}:`);
+    }
+  });
+
+  test("a provider the gateway grew at boot is coloured like any other", () => {
+    // The point of reading the palette over `/api/catalog`: a provider supplied
+    // by a plugin exists only at runtime, so no build-time list could have
+    // carried it. Nothing here knows the id.
+    const css = paletteCss([
+      {
+        id: "plugin-provider",
+        label: "Some Plugin",
+        order: 9,
+        colour: { light: "oklch(0.5 0.1 10)", dark: "oklch(0.7 0.1 10)" },
+        defaultModel: "m",
+        authTypes: ["apiKey"],
+        models: [],
+      },
+    ]);
+
+    expect(css).toContain("--p-plugin-provider:oklch(0.5 0.1 10);");
+    expect(css).toContain("--p-plugin-provider:oklch(0.7 0.1 10);");
   });
 });
