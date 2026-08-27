@@ -382,12 +382,53 @@ export type TargetAddress = {
  */
 export function servesTarget(target: TargetAddress, account: ServingAccount): boolean {
   if (account.provider !== target.provider) return false;
-  // Read from the account rather than trusting a saved string: a custom
-  // endpoint is the credential's own property, and the router compares it the
-  // same way.
-  if (target.provider === "custom" && account.providerData.endpointId !== target.endpointId) {
-    return false;
-  }
+  // The endpoint an account is bound to and the endpoint a target names must be
+  // the same, including when neither names one. Read from the account rather
+  // than trusting a saved string: an endpoint is the credential's own property.
+  //
+  // Stated as an equality in both directions, which is the correction to a
+  // first version that asked only "does the target name an endpoint the account
+  // fails to match". That version failed **open** on the case it did not test: a
+  // `custom` target whose `endpointId` was absent or `""` skipped the check
+  // entirely and was then served by *every* custom account, at any endpoint. The
+  // rule it replaced compared `"endpoint-a" !== undefined`, refused, and left the
+  // target unroutable — the safe answer for a row that cannot say where it goes.
+  //
+  // Read paths reach that row even though write paths cannot mint it:
+  // `sqlite/config.ts` parses stored targets with no validation, so a restore, a
+  // hand edit or a foreign database supplies one. The consequence was not a
+  // failed request but a request sent to an arbitrary endpoint's origin with
+  // that endpoint's key, and an `omni doctor` that called the pin healthy —
+  // which is the inverse of the bug this function was made the single copy for.
+  //
+  // `""` means naming none, in both positions. The console's
+  // `TargetDraft.endpointId` is a non-optional string carrying `""` for every
+  // non-custom target, and the control schema refuses `""` on the way in for the
+  // same reason: it is an id nothing matches, not a third state. Treating it as
+  // a value would make this function disagree with the callers it exists to be
+  // the only copy for — the pin picker would offer no account for any
+  // non-custom target.
+  //
+  // No provider is named. A non-custom target that somehow carries an endpoint,
+  // or an account that somehow holds one its target does not name, is refused
+  // rather than ignored: unreachable through the schema, and failing closed is
+  // the right direction for a constraint a row states and cannot honour.
+  // `providerData` is `Record<string, unknown>` and `sqlite/credentials.ts` reads
+  // it back with a bare `JSON.parse`, so `endpointId` can be any JSON value at
+  // all. A first version mapped every non-string to `undefined`, which made a
+  // corrupt id read as *no* id — so a custom target naming no endpoint was
+  // served by any account whose `endpointId` was a number, `null`, `false` or an
+  // object. That is the same fail-open this rule was written to close, one layer
+  // down, and it was looser than the rule it replaced: comparing raw values,
+  // `42 !== undefined` refused.
+  //
+  // Present-but-uncomparable therefore becomes a value that matches nothing,
+  // including another of its kind, rather than a synonym for absent.
+  const named = (value: unknown): string | symbol | undefined => {
+    if (value === undefined || value === "") return undefined;
+    return typeof value === "string" ? value : Symbol("unusable-endpoint");
+  };
+  if (named(target.endpointId) !== named(account.providerData.endpointId)) return false;
   return target.credentialId === undefined || account.id === target.credentialId;
 }
 

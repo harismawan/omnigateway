@@ -810,6 +810,7 @@ test("Anthropic-native capability exclusions omit credential IDs from degradatio
       model: "native",
       tools: [
         {
+          kind: "provider",
           provider: "anthropic",
           family: "webSearch",
           type: "web_search_20260318",
@@ -827,7 +828,7 @@ test("Anthropic-native capability exclusions omit credential IDs from degradatio
   );
   await drain(outcome.events);
 
-  expect(outcome.log().degradations).toContain("excluded:capability:anthropicTools");
+  expect(outcome.log().degradations).toContain("excluded:capability:providerNative");
   expect(outcome.log().degradations.join(" ")).not.toContain("sensitive-openai-id");
   store.close();
 });
@@ -977,7 +978,7 @@ test("failover hands the second provider the client's own tool names, not Anthro
     id: "openai",
     capabilities: { tools: true, images: true, reasoning: true },
     async send(r) {
-      for (const t of r.request.tools ?? []) if (t.provider === "custom") second.push(t.name);
+      for (const t of r.request.tools ?? []) if (t.kind === "portable") second.push(t.name);
       for (const m of r.request.messages) {
         for (const b of m.content) if (b.type === "toolUse") second.push(b.name);
       }
@@ -996,7 +997,7 @@ test("failover hands the second provider the client's own tool names, not Anthro
       },
       { role: "user", content: [{ type: "toolResult", toolUseId: "tu_1", content: "done" }] },
     ],
-    tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+    tools: [{ kind: "portable", name: "session_search", inputSchema: { type: "object" } }],
   };
 
   const outcome = await dispatch(
@@ -1026,7 +1027,7 @@ const CLOAKED: ChatRequest = {
   model: "fast",
   stream: true,
   messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+  tools: [{ kind: "portable", name: "session_search", inputSchema: { type: "object" } }],
 };
 
 /** Answers the Anthropic leg with one canned HTTP response. */
@@ -2062,7 +2063,7 @@ const UNMARKED_PREFIX: ChatRequest = {
   stream: true,
   system: [{ type: "text", text: "You are a careful assistant. ".repeat(400) }],
   messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+  tools: [{ kind: "portable", name: "session_search", inputSchema: { type: "object" } }],
 };
 
 /** Runs the real Anthropic adapter and returns the bytes it put on the wire. */

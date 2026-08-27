@@ -16,7 +16,7 @@ function withTools(...names: string[]): ChatRequest {
   return {
     ...base,
     tools: names.map((name) => ({
-      provider: "custom" as const,
+      kind: "portable" as const,
       name,
       inputSchema: { type: "object" },
     })),
@@ -138,8 +138,9 @@ test("an alias landing on an Anthropic-defined name in the same request is suffi
   const cloak = buildToolCloak({
     ...base,
     tools: [
-      { provider: "custom", name: "web+search", inputSchema: { type: "object" } },
+      { kind: "portable", name: "web+search", inputSchema: { type: "object" } },
       {
+        kind: "provider",
         provider: "anthropic",
         family: "webSearch",
         type: "web_search_20250305",
@@ -201,8 +202,8 @@ const THREE_SITES: ChatRequest = {
     },
   ],
   tools: [
-    { provider: "custom", name: "delegate_task", inputSchema: { type: "object" } },
-    { provider: "custom", name: "session_search", inputSchema: { type: "object" } },
+    { kind: "portable", name: "delegate_task", inputSchema: { type: "object" } },
+    { kind: "portable", name: "session_search", inputSchema: { type: "object" } },
   ],
   toolChoice: { type: "tool", name: "session_search" },
 };
@@ -231,8 +232,15 @@ test("an Anthropic-defined tool keeps the name Anthropic pairs with its type", (
       // that looked the Anthropic name up would find a rename waiting for it.
       // Without this pairing the assertion passes on identity fallback alone
       // and proves nothing.
-      { provider: "custom", name: "bash", inputSchema: { type: "object" } },
-      { provider: "anthropic", family: "bash", type: "bash_20250124", name: "bash", wire: {} },
+      { kind: "portable", name: "bash", inputSchema: { type: "object" } },
+      {
+        kind: "provider",
+        provider: "anthropic",
+        family: "bash",
+        type: "bash_20250124",
+        name: "bash",
+        wire: {},
+      },
     ],
   };
   const cloak = buildToolCloak(req);
@@ -245,17 +253,19 @@ test("an Anthropic-defined tool keeps the name Anthropic pairs with its type", (
   expect(body.tools?.[0]).toEqual({ name: "Bash", input_schema: { type: "object" } });
 });
 
-test("an anthropicNative block's payload is byte-identical with the cloak on", () => {
+test("a providerNative block's payload is byte-identical with the cloak on", () => {
   const data = { id: "srvtoolu_1", name: "web_search", input: { query: "bun" } };
   const req: ChatRequest = {
     ...base,
     messages: [
       {
         role: "assistant",
-        content: [{ type: "anthropicNative", blockType: "server_tool_use", data }],
+        content: [
+          { type: "providerNative", provider: "anthropic", blockType: "server_tool_use", data },
+        ],
       },
     ],
-    tools: [{ provider: "custom", name: "web_search", inputSchema: { type: "object" } }],
+    tools: [{ kind: "portable", name: "web_search", inputSchema: { type: "object" } }],
   };
   const bare = toWire(req, "claude-opus-4", { oauth: true });
   const cloaked = toWire(req, "claude-opus-4", { oauth: true, cloak: buildToolCloak(req) });

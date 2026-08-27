@@ -100,7 +100,7 @@ function encodeBlock(b: ContentBlock, cloak: ToolCloak | null): unknown {
     // caller metadata and error objects go back exactly as they arrived. The
     // discriminator is spread last so a stray `type` inside `data` cannot
     // rename the block on its way out.
-    case "anthropicNative":
+    case "providerNative":
       return { ...b.data, type: b.blockType, ...cache };
   }
 }
@@ -154,7 +154,20 @@ function systemCacheControl(req: ChatRequest): {
  * at ingress, so renaming one breaks the request at both ends.
  */
 function encodeTool(t: ToolDef, cloak: ToolCloak | null): Record<string, unknown> {
-  if (t.provider === "anthropic") {
+  // `kind === "provider"` and not `provider === "anthropic"`, and the difference
+  // is a dependency worth naming. This branch encodes the tool as Anthropic's,
+  // so it is correct only because a provider-defined tool never reaches another
+  // provider's adapter — `requiredProvider` in `packages/router/src/filters.ts`
+  // admits only targets of the provider that owns it, pinned there for all six.
+  //
+  // The old discriminant was `provider === "anthropic"`, which was self-checking:
+  // a foreign provider-defined tool fell through to the portable branch. This one
+  // is not, so if that routing rule is ever weakened the failure moves here and
+  // becomes a silent mis-encode rather than an exclusion. No guard is added for
+  // it deliberately — a branch that cannot fire under correct routing would be
+  // decoration, and the repository has deleted such checks before once mutation
+  // showed the real decision was made elsewhere.
+  if (t.kind === "provider") {
     return {
       type: t.type,
       ...(t.name === "" ? {} : { name: t.name }),

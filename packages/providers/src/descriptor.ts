@@ -37,16 +37,6 @@ export type ProviderDescriptor = {
   readonly capabilities: ProviderCapabilities;
 
   /**
-   * Whether this provider accepts Anthropic-defined tools and Anthropic-native
-   * content blocks. Was `ANTHROPIC_NATIVE_TOOLS` in the same file.
-   *
-   * Slated for deletion: once a native block carries the provider that produced
-   * it, the routing rule reads off the block and this flag has no readers. See
-   * the core/provider decoupling design.
-   */
-  readonly anthropicNativeTools: boolean;
-
-  /**
    * Cache-write price as a multiple of base input price, for a target that
    * names no price of its own. Was `WRITE_OVER_INPUT` in
    * `apps/gateway/src/dispatch/price.ts`.

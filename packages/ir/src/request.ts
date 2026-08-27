@@ -50,26 +50,36 @@ export type ToolResultBlock = {
 };
 
 /**
- * A content block Anthropic owns end to end, carried through unread.
+ * A content block one provider owns end to end, carried through unread.
  *
  * Server tool use, web-search and web-fetch results, code-execution output,
  * tool-search references, advisor results and MCP server-tool blocks are all
- * produced by Anthropic and replayed to Anthropic. Their payloads carry
- * citations, container state, caller metadata and signatures the gateway has no
- * business rewriting, and no other provider in this set can express them — so
- * the canonical form holds the discriminator it needs to route on and keeps the
- * rest of the payload byte-identical.
+ * produced by one provider and replayed to it. Their payloads carry citations,
+ * container state, caller metadata and signatures the gateway has no business
+ * rewriting, and no other provider can express them — so the canonical form
+ * holds the discriminator it needs to route on and keeps the rest of the payload
+ * byte-identical.
+ *
+ * **`provider` is what makes the routing rule generic.** A block records who
+ * produced it, and the router admits only targets of that provider. That is one
+ * comparison against the block's own data, and it replaced both a
+ * `target.provider === "anthropic"` test inside the pure router and a
+ * `Record<ProviderId, boolean>` table in this file listing who could accept
+ * Anthropic's dialect. Today Anthropic is the only producer; nothing about the
+ * shape says so.
  *
  * Deliberately *not* a `toolUse`/`toolResult` pair: those two are the portable
  * shape, and they are the ones that enter tool-id correlation, orphan removal,
  * cross-provider translation and RTK compression. A native block does none of
  * that. Folding the two together would mean the gateway invents an `id` for a
- * block Anthropic already identified, or drops a result whose matching use it
+ * block the provider already identified, or drops a result whose matching use it
  * never registered.
  */
-export type AnthropicNativeBlock = {
-  type: "anthropicNative";
-  /** Anthropic's own `type` string, e.g. `server_tool_use`. Never normalized. */
+export type ProviderNativeBlock = {
+  type: "providerNative";
+  /** Which provider produced it, and therefore the only one that may receive it. */
+  provider: ProviderId;
+  /** The provider's own `type` string, e.g. `server_tool_use`. Never normalized. */
   blockType: string;
   /** The whole wire object minus `type`, structurally intact. */
   data: Record<string, unknown>;
@@ -82,7 +92,7 @@ export type ContentBlock =
   | ThinkingBlock
   | ToolUseBlock
   | ToolResultBlock
-  | AnthropicNativeBlock;
+  | ProviderNativeBlock;
 
 /**
  * Reads a block's cache breakpoint without every caller narrowing the union.
@@ -114,9 +124,17 @@ export type Message = { role: "user" | "assistant" | "system"; content: ContentB
 /**
  * A portable tool: a name, a description and a JSON Schema every provider in
  * this set can express. Unchanged in meaning from when it was the only shape.
+ *
+ * The discriminant is `kind`, and it used to be `provider: "custom"` — the same
+ * string as the `custom` **provider id**, meaning something else entirely. Two
+ * core sites wrote `provider: "custom"` as this tool-kind tag
+ * (`apps/gateway/src/ingress/openai.ts`, `packages/control/src/dryRun.ts`), so a
+ * grep for the custom provider found both and was wrong about both. Once
+ * `ProviderDefinedToolDef` below carries a real `ProviderId`, that collision
+ * stops being merely confusing and starts being ambiguous, so the tag moved.
  */
 export type CustomToolDef = {
-  provider: "custom";
+  kind: "portable";
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
@@ -159,7 +177,9 @@ export type AnthropicToolFamily =
  * mismatched pair is a request the client got wrong, not one to repair.
  */
 export type AnthropicToolDef = {
-  provider: "anthropic";
+  kind: "provider";
+  /** Whose schema this is, and therefore the only provider that may receive it. */
+  provider: ProviderId;
   family: AnthropicToolFamily;
   /** Exact versioned wire `type`. */
   type: string;

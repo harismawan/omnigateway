@@ -257,13 +257,18 @@ export async function dispatch(
   });
 
   for (const e of excluded) {
-    const capabilityOnly = e.reason === "capability:anthropicTools";
+    // A capability exclusion is a fact about the target's provider, not about
+    // the account, so naming an account there would blame one that is fine.
+    // Read off the router's own discriminator rather than off the reason
+    // string: that string is persisted, and matching it made renaming the
+    // concept a silent change to what gets redacted.
+    const aboutTheTarget = e.kind === "target";
     log.degradations.push(
-      capabilityOnly ? `excluded:${e.reason}` : `excluded:${e.credentialId}:${e.reason}`,
+      aboutTheTarget ? `excluded:${e.reason}` : `excluded:${e.credentialId}:${e.reason}`,
     );
     logger.debug("routing candidate excluded", {
       requestId,
-      ...(capabilityOnly ? {} : { credentialId: e.credentialId }),
+      ...(aboutTheTarget ? {} : { credentialId: e.credentialId }),
       reason: e.reason,
     });
   }

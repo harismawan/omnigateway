@@ -96,7 +96,7 @@ test("translates tools and tool choice", () => {
       ...base,
       tools: [
         {
-          provider: "custom",
+          kind: "portable",
           name: "get_weather",
           description: "d",
           inputSchema: { type: "object" },
@@ -442,7 +442,7 @@ test("renders a cache breakpoint on a tool definition", () => {
       ...base,
       tools: [
         {
-          provider: "custom",
+          kind: "portable",
           name: "f",
           inputSchema: { type: "object" },
           cacheControl: { type: "ephemeral", ttl: "1h" },
@@ -1085,7 +1085,7 @@ const WITH_SIGNATURES: ChatRequest = deepFreeze({
     { role: "user", content: [{ type: "toolResult", toolUseId: "tu_1", content: "ok" }] },
   ],
   tools: MEASURED_SIGNATURES.map((name) => ({
-    provider: "custom" as const,
+    kind: "portable" as const,
     name,
     inputSchema: { type: "object" },
   })),
@@ -1265,7 +1265,7 @@ function textOfTokens(tokens: number): string {
 
 /** A tool whose description alone clears the gate. */
 const BIG_TOOL: ToolDef = deepFreeze({
-  provider: "custom",
+  kind: "portable",
   name: "session_search",
   description: BIG_SYSTEM,
   inputSchema: { type: "object" },
@@ -1279,7 +1279,7 @@ const BIG_TOOL: ToolDef = deepFreeze({
 const UNMARKED: ChatRequest = deepFreeze({
   ...base,
   system: [{ type: "text", text: BIG_SYSTEM }],
-  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+  tools: [{ kind: "portable", name: "session_search", inputSchema: { type: "object" } }],
 });
 
 /** Tools, system and history all present, and each clearing the increment. */
@@ -1289,7 +1289,7 @@ const EVERYTHING: ChatRequest = deepFreeze({
     { type: "text", text: "first" },
     { type: "text", text: BIG_SYSTEM },
   ],
-  tools: [BIG_TOOL, { provider: "custom", name: "b", inputSchema: { type: "object" } }],
+  tools: [BIG_TOOL, { kind: "portable", name: "b", inputSchema: { type: "object" } }],
   messages: [{ role: "user", content: [{ type: "text", text: BIG_HISTORY }] }],
 });
 
@@ -1400,7 +1400,7 @@ test("each tier is measured against the last marker placed, not against the tier
     ...base,
     tools: [
       {
-        provider: "custom",
+        kind: "portable",
         name: "t",
         description: textOfTokens(1990),
         inputSchema: { type: "object" },
@@ -1480,7 +1480,7 @@ test("the oauth identity line is never the block a marker lands on", () => {
   // increment closes it as an ordinary case: fifteen is not a thousand.
   const toolsOnly: ChatRequest = {
     ...base,
-    tools: [BIG_TOOL, { provider: "custom", name: "b", inputSchema: { type: "object" } }],
+    tools: [BIG_TOOL, { kind: "portable", name: "b", inputSchema: { type: "object" } }],
   };
   const { body } = toWire(toolsOnly, "m", { oauth: true, autoCache: true });
   expect(body.system).toEqual([{ type: "text", text: OAUTH_IDENTITY }]);
@@ -1570,7 +1570,7 @@ test("skips a prompt too small for Anthropic to cache", () => {
 test("marks the last tool when the request carries no system prompt", () => {
   const toolsOnly: ChatRequest = {
     ...base,
-    tools: [BIG_TOOL, { provider: "custom", name: "b", inputSchema: { type: "object" } }],
+    tools: [BIG_TOOL, { kind: "portable", name: "b", inputSchema: { type: "object" } }],
   };
   const { body } = toWire(toolsOnly, "m", { oauth: false, autoCache: true });
   expect(body.system).toBeUndefined();
@@ -1850,11 +1850,12 @@ test("the history marker lands on a trailing tool_result block", () => {
 });
 
 test("the history marker lands on a trailing document block", () => {
-  // `document` reaches the wire only as an `anthropicNative` block — the IR has
+  // `document` reaches the wire only as a `providerNative` block — the IR has
   // no document variant, and the encoder re-emits the payload under the
   // `blockType` the decoder recorded.
   const req = historyEndingWith("user", {
-    type: "anthropicNative",
+    type: "providerNative",
+    provider: "anthropic",
     blockType: "document",
     data: { source: { type: "text", media_type: "text/plain", data: "notes" } },
   });
@@ -1864,7 +1865,7 @@ test("the history marker lands on a trailing document block", () => {
 });
 
 test("a native block outside the allowlist is walked past, not marked", () => {
-  // The other half of the guard. A `web_search_result` is `anthropicNative`
+  // The other half of the guard. A `web_search_result` is `providerNative`
   // like the document above, and Anthropic takes no `cache_control` on it, so
   // the walk has to keep going rather than mark the last block it finds.
   const req: ChatRequest = {
@@ -1875,7 +1876,12 @@ test("a native block outside the allowlist is walked past, not marked", () => {
         role: "assistant",
         content: [
           { type: "text", text: "found it" },
-          { type: "anthropicNative", blockType: "web_search_result", data: { url: "https://x" } },
+          {
+            type: "providerNative",
+            provider: "anthropic",
+            blockType: "web_search_result",
+            data: { url: "https://x" },
+          },
         ],
       },
     ],

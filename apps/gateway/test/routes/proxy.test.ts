@@ -955,7 +955,8 @@ test("completes the row once when serialising the response throws after it is wr
       type: "blockStart",
       index: 0,
       block: {
-        type: "anthropicNative",
+        type: "providerNative",
+        provider: "anthropic",
         blockType: "web_search_tool_result",
         // A BigInt is the one JSON type there is no encoding for, so this throws
         // in `JSON.stringify` and nowhere earlier.

@@ -56,7 +56,7 @@ export async function dryRun(
     ...(need.tools
       ? {
           tools: [
-            { provider: "custom", name: "probe", description: "", inputSchema: { type: "object" } },
+            { kind: "portable", name: "probe", description: "", inputSchema: { type: "object" } },
           ],
         }
       : {}),
@@ -81,6 +81,14 @@ export async function dryRun(
       score: candidate.score,
       reasons: candidate.reasons,
     })),
-    excluded: result.excluded,
+    // Projected field by field like `candidates` above, rather than passed
+    // through. `Excluded` also carries the router's `kind` discriminator, which
+    // exists so dispatch can decide what to redact; structural typing would let
+    // it ride along into a response the dashboard's own type does not declare.
+    excluded: result.excluded.map((e) => ({
+      credentialId: e.credentialId,
+      model: e.model,
+      reason: e.reason,
+    })),
   };
 }

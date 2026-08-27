@@ -248,7 +248,7 @@ test("emits assistant tool_calls and a tool role result", () => {
       ],
       tools: [
         {
-          provider: "custom",
+          kind: "portable",
           name: "f",
           description: "does f",
           inputSchema: { type: "object", properties: {} },
@@ -474,7 +474,12 @@ test("records a degradation for an Anthropic-native history block", () => {
         {
           role: "assistant",
           content: [
-            { type: "anthropicNative", blockType: "server_tool_use", data: { id: "srvtoolu_1" } },
+            {
+              type: "providerNative",
+              provider: "anthropic",
+              blockType: "server_tool_use",
+              data: { id: "srvtoolu_1" },
+            },
             { type: "text", text: "ok" },
           ],
         },
@@ -483,9 +488,9 @@ test("records a degradation for an Anthropic-native history block", () => {
     "anthropic/claude-sonnet-5",
   );
 
-  // Routing should keep such a request off kilo entirely
-  // (`ANTHROPIC_NATIVE_TOOLS.kilo` is false), so this is defence in depth — but
-  // it must never be forwarded as if this wire understood it.
+  // Routing should keep such a request off kilo entirely (the block names
+  // Anthropic as its producer, and kilo is not it), so this is defence in
+  // depth — but it must never be forwarded as if this wire understood it.
   expect(degradations).toContain("kilo:anthropic-native-block-dropped");
   expect(body.messages).toEqual([{ role: "assistant", content: "ok" }]);
 });
@@ -496,12 +501,13 @@ test("drops an Anthropic-defined tool rather than forwarding a malformed functio
       ...base,
       tools: [
         {
-          provider: "custom",
+          kind: "portable",
           name: "f",
           description: "does f",
           inputSchema: { type: "object", properties: {} },
         },
         {
+          kind: "provider",
           provider: "anthropic",
           family: "webSearch",
           type: "web_search_20250305",
@@ -533,7 +539,7 @@ test("records no tool degradation when every tool is portable", () => {
   const { degradations } = toKiloWire(
     {
       ...base,
-      tools: [{ provider: "custom", name: "f", inputSchema: { type: "object" } }],
+      tools: [{ kind: "portable", name: "f", inputSchema: { type: "object" } }],
     },
     "anthropic/claude-sonnet-5",
   );

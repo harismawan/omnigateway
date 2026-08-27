@@ -14,6 +14,7 @@ test("emits an Anthropic-defined tool with its exact version and options", () =>
       ...base,
       tools: [
         {
+          kind: "provider",
           provider: "anthropic",
           family: "webSearch",
           type: "web_search_20250305",
@@ -41,6 +42,7 @@ test("emits latest tool versions and options without normalization", () => {
       ...base,
       tools: [
         {
+          kind: "provider",
           provider: "anthropic",
           family: "webSearch",
           type: "web_search_20260318",
@@ -51,6 +53,7 @@ test("emits latest tool versions and options without normalization", () => {
           },
         },
         {
+          kind: "provider",
           provider: "anthropic",
           family: "webFetch",
           type: "web_fetch_20260318",
@@ -58,6 +61,7 @@ test("emits latest tool versions and options without normalization", () => {
           wire: { response_inclusion: "full", use_cache: false },
         },
         {
+          kind: "provider",
           provider: "anthropic",
           family: "codeExecution",
           type: "code_execution_20260521",
@@ -65,6 +69,7 @@ test("emits latest tool versions and options without normalization", () => {
           wire: {},
         },
         {
+          kind: "provider",
           provider: "anthropic",
           family: "advisor",
           type: "advisor_20260301",
@@ -100,6 +105,7 @@ test("a toolset entry carries no name", () => {
       ...base,
       tools: [
         {
+          kind: "provider",
           provider: "anthropic",
           family: "mcpToolset",
           type: "mcp_toolset",
@@ -119,8 +125,9 @@ test("preserves tool array order and each entry's cache breakpoint", () => {
     {
       ...base,
       tools: [
-        { provider: "custom", name: "a", inputSchema: { type: "object" } },
+        { kind: "portable", name: "a", inputSchema: { type: "object" } },
         {
+          kind: "provider",
           provider: "anthropic",
           family: "bash",
           type: "bash_20250124",
@@ -128,7 +135,7 @@ test("preserves tool array order and each entry's cache breakpoint", () => {
           wire: {},
           cacheControl: { type: "ephemeral", ttl: "1h" },
         },
-        { provider: "custom", name: "z", inputSchema: { type: "object" } },
+        { kind: "portable", name: "z", inputSchema: { type: "object" } },
       ],
     },
     "m",
@@ -151,7 +158,7 @@ test("carries Anthropic-only custom tool options through", () => {
       ...base,
       tools: [
         {
-          provider: "custom",
+          kind: "portable",
           name: "a",
           inputSchema: { type: "object" },
           options: { strict: true, defer_loading: true },
@@ -204,12 +211,14 @@ test("replays a native history block as itself, not as a function call", () => {
           role: "assistant",
           content: [
             {
-              type: "anthropicNative",
+              type: "providerNative",
+              provider: "anthropic",
               blockType: "server_tool_use",
               data: { id: "srvtoolu_1", name: "web_search", input: { query: "bun" } },
             },
             {
-              type: "anthropicNative",
+              type: "providerNative",
+              provider: "anthropic",
               blockType: "web_search_tool_result",
               data: {
                 tool_use_id: "srvtoolu_1",
@@ -246,7 +255,8 @@ test("a native block keeps its cache breakpoint on replay", () => {
           role: "user",
           content: [
             {
-              type: "anthropicNative",
+              type: "providerNative",
+              provider: "anthropic",
               blockType: "search_result",
               data: { source: "s", title: "t", content: [{ type: "text", text: "x" }] },
               cacheControl: { type: "ephemeral", ttl: "1h" },
