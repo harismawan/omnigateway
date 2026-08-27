@@ -44,28 +44,39 @@ export type Command = {
 };
 
 /**
- * Provider identity is one of the two things colour is allowed to mean.
+ * Every tone this CLI can paint, as a total record.
  *
- * The tone is stated on the provider's descriptor as a name; this file owns the
- * mapping from that name to an escape code, which is why the descriptor types it
- * as a plain string rather than importing `Tone` from here.
+ * Provider identity is one of the two things colour is allowed to mean. The tone
+ * is stated on the provider's descriptor as a name; this file owns the mapping
+ * from that name to an escape code, which is why the descriptor types it as a
+ * plain string rather than importing `Tone` from here.
+ *
+ * `Record<Tone, true>` rather than a `Set` with `satisfies Tone[]`: a set
+ * literal satisfies the array type while omitting members, so the first version
+ * of this silently left out `dim` — a descriptor naming it would have fallen
+ * back to `cyan` with nothing to say so. A total record cannot be short a key.
  */
-const TONES = new Set<string>([
-  "red",
-  "green",
-  "yellow",
-  "blue",
-  "magenta",
-  "cyan",
-  "orange",
-] satisfies Tone[]);
+const TONES: Record<Tone, true> = {
+  dim: true,
+  red: true,
+  green: true,
+  yellow: true,
+  blue: true,
+  magenta: true,
+  cyan: true,
+  orange: true,
+};
+
+function isTone(name: string): name is Tone {
+  return Object.hasOwn(TONES, name);
+}
 
 function toneOf(id: ProviderId): Tone {
   const named = PROVIDER_DESCRIPTORS[id].presentation.tone;
   // A descriptor naming a tone this terminal cannot paint is a bug in that
   // descriptor, but it is not worth failing a command over: the id still prints,
   // uncoloured, which is what a non-TTY gets anyway.
-  return TONES.has(named) ? (named as Tone) : "cyan";
+  return isTone(named) ? named : "cyan";
 }
 
 export function provider(ctx: Context, id: ProviderId): string {
