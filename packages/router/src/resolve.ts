@@ -12,17 +12,20 @@ const PROVIDERS = new Set<string>(Object.keys(PROVIDER_DESCRIPTORS));
 /**
  * Prefixes for bare model names, so a client can pass a concrete upstream model
  * without configuring a virtual model first. Longest match wins.
+ *
+ * Assembled from the descriptors and sorted longest-first, which is what makes
+ * the sentence above true rather than merely accurate today. The hand-written
+ * table it replaced was iterated in declaration order and happened to contain no
+ * prefix of another prefix, so the two readings agreed — but a provider adding
+ * one would have inherited the wrong rule silently.
  */
-const PREFIX_PROVIDER: ReadonlyArray<readonly [string, ProviderId]> = [
-  ["claude-", "anthropic"],
-  ["gpt-", "openai"],
-  ["o1", "openai"],
-  ["o3", "openai"],
-  ["o4", "openai"],
-  ["kimi-", "kimi"],
-  ["moonshot", "kimi"],
-  ["grok-", "grok"],
-];
+const PREFIX_PROVIDER: ReadonlyArray<readonly [string, ProviderId]> = Object.entries(
+  PROVIDER_DESCRIPTORS,
+)
+  .flatMap(([id, descriptor]) =>
+    descriptor.modelPrefixes.map((prefix) => [prefix, id as ProviderId] as const),
+  )
+  .sort(([a], [b]) => b.length - a.length);
 
 function synthesize(provider: ProviderId, model: string): VirtualModel {
   // The catalog's list price, so a bare model name is cost-ranked like a
