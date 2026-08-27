@@ -1,6 +1,7 @@
 import {
   ADMIN_COOKIE,
   type AdminAuth,
+  type CatalogProblem,
   type ConsoleDeps,
   type ConsoleSource,
   consoleLimit,
@@ -89,6 +90,28 @@ export type AdminDeps = {
  */
 export function adminRoutes(deps: AdminDeps) {
   const logger = deps.logger ?? noopLogger;
+  /**
+   * A provider whose catalog entry had to be repaired, said once.
+   *
+   * The catalog is assembled from a registry fixed at boot, so a problem in it
+   * is a property of the installation rather than of the request: reporting per
+   * call would put the same line on stdout every time a console loads, and the
+   * batching rule the channel registry already follows applies for the same
+   * reason. One line per distinct problem per process.
+   *
+   * `reason` is the only field a description can travel in — `LogFields` is a
+   * closed allowlist and `provider` is typed to the compiled-in ids, which a
+   * plugin-supplied one is not. Both halves are bounded before they get here.
+   */
+  const reportedCatalogProblems = new Set<string>();
+  const reportCatalogProblem = (problem: CatalogProblem): void => {
+    const key = `${problem.field} ${problem.provider}`;
+    if (reportedCatalogProblems.has(key)) return;
+    reportedCatalogProblems.add(key);
+    logger.warn("provider catalog repaired", {
+      reason: `${problem.provider} ${problem.field}: ${problem.reason}`,
+    });
+  };
   /**
    * What a mutation announces, called after the write and never before it.
    *
@@ -263,7 +286,7 @@ export function adminRoutes(deps: AdminDeps) {
       // loaded from disk at boot could never have been part of.
       .get("/api/catalog", async ({ request }) => {
         await requireAdmin(request, deps.admin);
-        return { providers: providerCatalog() };
+        return { providers: providerCatalog(reportCatalogProblem) };
       })
 
       .put("/api/models/:id", async ({ request, params }) => {

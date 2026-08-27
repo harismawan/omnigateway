@@ -56,8 +56,17 @@ export const CSS_VARIABLES = [
   // The values arrive over `/api/catalog` and are written into the document by
   // the shell, so `--p-<id>` exists for every provider the *installation*
   // serves, not only for the six a stock build compiles in. Those six are what
-  // this list can promise; a plugin that wants the rest reads the catalog for
-  // the ids and builds the name, exactly as the console does.
+  // this list can promise, and they are also all a plugin can reach: `api.ts`
+  // refuses any path that leaves `/api/plugins/<id>/`, so there is no supported
+  // way to read the catalog and no ids to build the rest of the names from.
+  // Widening that prefix to expose one endpoint is not the answer either — the
+  // prefix is the whole of what a plugin's UI is scoped to.
+  //
+  // A panel that charts per-provider data therefore has two honest options:
+  // colour only the ids below, or have its own backend — which does hold a
+  // capability-scoped context — tell it which providers it may draw. Reaching
+  // for `--p-<id>` on an id from anywhere else gets a `var()` that resolves to
+  // nothing and paints colourless, with no error.
   "--p-anthropic",
   "--p-openai",
   "--p-kimi",

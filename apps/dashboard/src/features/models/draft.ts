@@ -36,9 +36,16 @@ function modelEntry(catalog: Catalog, provider: string, model: string): CatalogM
  * The *fact*, not the rule: callers decide what to do about it. Two answers
  * collapse to the provider's whole set — a choice with no `auth` is served
  * either way, which is the normal case, and a model the catalog does not list
- * is unknown rather than restricted. A provider the catalog does not carry at
- * all is unknown in the same way, and answering "nothing can reach it" there
- * would hide every model of a provider whose entry failed to arrive.
+ * is unknown rather than restricted.
+ *
+ * A provider the catalog does not carry at all answers `null`, and what that
+ * buys is narrower than an earlier version of this comment claimed. It does not
+ * keep such a provider's models visible: `reachableChoices` returns `[]` for an
+ * unknown provider before `reachable` is ever consulted, so the picker is empty
+ * either way and the operator types the id. What `null` prevents is the red
+ * note under that field — `unreachableNote` would otherwise accuse a target
+ * whose provider merely is not listed, which is the one screen an operator
+ * visits to find out whether their configuration is sound.
  */
 function modelAuths(catalog: Catalog, provider: string, model: string): readonly AuthType[] | null {
   const entry = findProvider(catalog, provider);
@@ -382,15 +389,26 @@ export function retargetDraft(
   };
 }
 
-export function blankTarget(catalog: Catalog, provider: ProviderId = "anthropic"): TargetDraft {
+/**
+ * A fresh target, on a named provider or on the first the catalog lists.
+ *
+ * The default used to be the literal `"anthropic"`. On an installation whose
+ * catalog does not carry it, the provider `<Select>` in `TargetEditor` shows
+ * its first option while the draft — and the model this saves — says
+ * `anthropic`: a target pointed at a provider the operator never chose and the
+ * screen never showed. `"anthropic"` survives only as the value for an empty
+ * catalog, which the gate in `routes/_app.tsx` makes unreachable.
+ */
+export function blankTarget(catalog: Catalog, provider?: ProviderId): TargetDraft {
+  const on = provider ?? ((catalog[0]?.id ?? "anthropic") as ProviderId);
   // Empty for a provider the catalog does not name — the same state `custom`
   // is in permanently, since the models an operator's own endpoint serves are
   // not knowable from here. The field is required and the operator fills it.
-  const model = findProvider(catalog, provider)?.defaultModel ?? "";
-  const prices = catalogPrices(catalog, provider, model);
+  const model = findProvider(catalog, on)?.defaultModel ?? "";
+  const prices = catalogPrices(catalog, on, model);
   return {
     key: nextKey(),
-    provider,
+    provider: on,
     endpointId: "",
     model,
     tier: "1",
