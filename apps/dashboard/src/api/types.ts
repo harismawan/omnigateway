@@ -60,7 +60,38 @@ export type {
 
 export type ApiErrorBody = { error: { code: ErrorCode | string; message: string } };
 
-export type StatusResponse = { configured: boolean; authenticated: boolean };
+/**
+ * Which surface a session belongs to.
+ *
+ * Mirrored rather than imported: `Principal` is declared in `@omni/control`,
+ * which the console may not reach into. The `machine` arm is deliberately absent
+ * — it belongs to a plugin token and never opens a browser session, so a console
+ * that could represent one would invite a branch nothing can reach.
+ */
+export type SessionPrincipal =
+  | { kind: "admin" }
+  | { kind: "viewer" }
+  | { kind: "client"; apiKeyId: string };
+
+export type StatusResponse = {
+  configured: boolean;
+  authenticated: boolean;
+  /** Null when unauthenticated. */
+  principal: SessionPrincipal | null;
+  /** Whether a read-only password exists, so the login form knows to offer it. */
+  viewerConfigured: boolean;
+};
+
+/** Provider room as a client sees it: no credential ids, no account labels. */
+export type ProviderHeadroom = {
+  provider: ProviderId;
+  windowType: "fiveHour" | "daily" | "weekly";
+  /** Null where no account reported a ceiling. Unknown, never unlimited. */
+  usedRatio: number | null;
+  resetsAt: number | null;
+};
+
+export type ClientQuotaResponse = { headroom: ProviderHeadroom[] };
 
 export type CredentialsResponse = { credentials: Credential[] };
 

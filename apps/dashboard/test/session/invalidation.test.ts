@@ -165,3 +165,58 @@ test("the console subscribes to exactly the topics it can act on", () => {
   expect(RES_TOPICS).toContain("res:usage");
   expect(RES_TOPICS).not.toContain(GLOBAL_INVALIDATE);
 });
+
+/**
+ * The client branch's keys ride the same topics.
+ *
+ * A client session holds `res:usage` and `res:logs` and nothing else, so those
+ * two entries are the whole of what keeps that screen fresh. An entry covering
+ * only the console's key would leave the client subscribed to a frame that does
+ * nothing — and the symptom is silence, which is indistinguishable from a quiet
+ * gateway.
+ */
+const CLIENT_USAGE = queryKeys.clientUsage({ groupBy: "model", since: 0 });
+const CLIENT_LOGS = queryKeys.clientLogs(50);
+
+function seededClient(): QueryClient {
+  const client = seeded();
+  client.setQueryData(queryKeys.clientSummary, {});
+  client.setQueryData(CLIENT_USAGE, []);
+  client.setQueryData(CLIENT_LOGS, []);
+  client.setQueryData(queryKeys.clientQuota, []);
+  return client;
+}
+
+test("res:usage reaches the client's usage and its key summary", () => {
+  const client = seededClient();
+
+  invalidateTopic(client, "res:usage");
+
+  expect(stale(client, CLIENT_USAGE)).toBe(true);
+  // `limitUsage` is computed from usage rows, so this frame is when it moves.
+  // It rides this topic and not `res:keys`, which a client is not subscribed to.
+  expect(stale(client, queryKeys.clientSummary)).toBe(true);
+  // Still reaches the console's own key: the topic names a resource, and both
+  // branches read it.
+  expect(stale(client, USAGE)).toBe(true);
+});
+
+test("res:logs reaches the client's log page", () => {
+  const client = seededClient();
+
+  invalidateTopic(client, "res:logs");
+
+  expect(stale(client, CLIENT_LOGS)).toBe(true);
+  expect(stale(client, queryKeys.logs(100))).toBe(true);
+});
+
+test("res:usage leaves the client's quota alone, which is why that one polls", () => {
+  const client = seededClient();
+
+  invalidateTopic(client, "res:usage");
+
+  // Provider headroom does not move when this key serves a request, and a
+  // client cannot hold `res:quota`. The board polls it instead, and this pins
+  // the reason.
+  expect(stale(client, queryKeys.clientQuota)).toBe(false);
+});

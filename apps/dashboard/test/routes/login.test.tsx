@@ -200,3 +200,131 @@ describe("login screen", () => {
     ).toBeTruthy();
   });
 });
+
+describe("login modes", () => {
+  test("offers the operator and API key modes, and hides read-only until it exists", async () => {
+    createFetchStub({
+      "GET /api/status": () => ({
+        configured: true,
+        authenticated: false,
+        viewerConfigured: false,
+      }),
+    });
+    renderLogin();
+
+    expect(await screen.findByRole("tab", { name: "Operator" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "API key" })).toBeTruthy();
+    // An option that always refuses reads as broken rather than as switched off.
+    expect(screen.queryByRole("tab", { name: "Read-only" })).toBeNull();
+  });
+
+  test("offers read-only once the operator has set that password", async () => {
+    createFetchStub({
+      "GET /api/status": () => ({ configured: true, authenticated: false, viewerConfigured: true }),
+    });
+    renderLogin();
+
+    expect(await screen.findByRole("tab", { name: "Read-only" })).toBeTruthy();
+  });
+
+  test("a first run offers no modes at all", async () => {
+    createFetchStub({
+      "GET /api/status": () => ({
+        configured: false,
+        authenticated: false,
+        viewerConfigured: false,
+      }),
+    });
+    renderLogin();
+
+    await screen.findByText("First run");
+    // There is no operator password yet, so there is nothing to sign in beside.
+    expect(screen.queryByRole("tab")).toBeNull();
+  });
+
+  test("the read-only mode posts the viewer flag to the same endpoint", async () => {
+    const user = userEvent.setup();
+    const stub = createFetchStub({
+      "GET /api/status": () => ({ configured: true, authenticated: false, viewerConfigured: true }),
+      "POST /api/login": () => ({ ok: true }),
+    });
+    renderLogin();
+
+    await user.click(await screen.findByRole("tab", { name: "Read-only" }));
+    await user.type(screen.getByLabelText("Password"), "read-only-pass-1");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => {
+      const call = stub.calls.find((entry) => entry.url === "/api/login");
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.init?.body))).toEqual({
+        password: "read-only-pass-1",
+        mode: "viewer",
+      });
+    });
+  });
+
+  /** A key is not a password: different endpoint, different field name. */
+  test("the API key mode posts to the client endpoint under `key`", async () => {
+    const user = userEvent.setup();
+    const stub = createFetchStub({
+      "GET /api/status": () => ({
+        configured: true,
+        authenticated: false,
+        viewerConfigured: false,
+      }),
+      "POST /api/client/login": () => ({ ok: true }),
+    });
+    renderLogin();
+
+    await user.click(await screen.findByRole("tab", { name: "API key" }));
+    await user.type(screen.getByLabelText("API key"), "omni_sk_secret");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => {
+      const call = stub.calls.find((entry) => entry.url === "/api/client/login");
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.init?.body))).toEqual({ key: "omni_sk_secret" });
+    });
+    // The operator endpoint must never see the key.
+    expect(stub.calls.some((entry) => entry.url === "/api/login")).toBe(false);
+  });
+
+  /**
+   * The field means a different secret per mode, so what was typed for one must
+   * not be carried into the other — where it would be submitted to a different
+   * endpoint on the next click.
+   */
+  test("switching mode clears what was typed", async () => {
+    const user = userEvent.setup();
+    createFetchStub({
+      "GET /api/status": () => ({ configured: true, authenticated: false, viewerConfigured: true }),
+    });
+    renderLogin();
+
+    await user.type(await screen.findByLabelText("Password"), "hunter2hunter2");
+    await user.click(screen.getByRole("tab", { name: "API key" }));
+
+    expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe("");
+  });
+
+  test("a rejected key says so in the vocabulary of keys", async () => {
+    const user = userEvent.setup();
+    createFetchStub({
+      "GET /api/status": () => ({
+        configured: true,
+        authenticated: false,
+        viewerConfigured: false,
+      }),
+      "POST /api/client/login": () => ({ status: 401, body: { error: { code: "AUTH" } } }),
+    });
+    renderLogin();
+
+    await user.click(await screen.findByRole("tab", { name: "API key" }));
+    await user.type(screen.getByLabelText("API key"), "omni_sk_wrong");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText(/API key was not accepted/i)).toBeTruthy();
+    expect(screen.queryByText(/password does not match/i)).toBeNull();
+  });
+});

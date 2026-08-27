@@ -52,9 +52,7 @@ test("no credential id or label reaches the result", async () => {
   expect(payload).not.toContain("cred-secret-two");
   expect(payload).not.toContain("credentialId");
   expect(
-    rows.every(
-      (r) => Object.keys(r).sort().join(",") === "provider,resetsAt,usedPercent,windowType",
-    ),
+    rows.every((r) => Object.keys(r).sort().join(",") === "provider,resetsAt,usedRatio,windowType"),
   ).toBe(true);
   store.close();
 });
@@ -74,7 +72,7 @@ test("headroom reports the best account, not the worst or the average", async ()
 
   const [row] = await providerHeadroom(store);
   expect(row?.provider).toBe("anthropic");
-  expect(row?.usedPercent).toBeCloseTo(4, 6);
+  expect(row?.usedRatio).toBeCloseTo(0.04, 6);
   store.close();
 });
 
@@ -102,9 +100,9 @@ test("windows of one provider stay separate rows", async () => {
   // Collapsing to the provider alone would report one number for two different
   // questions, and the 5h figure would hide a week that is nearly spent.
   const rows = await providerHeadroom(store);
-  expect(rows.map((r) => [r.windowType, r.usedPercent])).toEqual([
-    ["fiveHour", 10],
-    ["weekly", 90],
+  expect(rows.map((r) => [r.windowType, r.usedRatio])).toEqual([
+    ["fiveHour", 0.1],
+    ["weekly", 0.9],
   ]);
   store.close();
 });
@@ -115,7 +113,7 @@ test("a provider that reported no ceiling is unknown rather than unlimited", asy
   const [row] = await providerHeadroom(store);
   // Null, not 0. Zero would render as "plenty of room" for an account whose
   // headroom nobody actually knows.
-  expect(row?.usedPercent).toBeNull();
+  expect(row?.usedRatio).toBeNull();
   store.close();
 });
 
@@ -126,7 +124,7 @@ test("a known figure beats an unknown one whichever order they arrive in", async
   ]);
 
   const [row] = await providerHeadroom(store);
-  expect(row?.usedPercent).toBeCloseTo(60, 6);
+  expect(row?.usedRatio).toBeCloseTo(0.6, 6);
   store.close();
 });
 

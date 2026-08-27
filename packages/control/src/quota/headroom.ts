@@ -19,7 +19,13 @@ export type ProviderHeadroom = {
   provider: ProviderId;
   windowType: WindowType;
   /**
-   * The best headroom any one account of this provider still has, 0..100.
+   * The best headroom any one account of this provider still has, as a ratio
+   * in `0..1`.
+   *
+   * A ratio and not a percentage, because `formatPercent` on the console side
+   * multiplies by 100 — a field already scaled to 0..100 rendered as `4200%`
+   * the first time it was wired up. One convention, and this is the one the
+   * repository already had.
    *
    * The minimum consumption across the provider's credentials, not the maximum
    * and not the mean. The router serves a request from whichever account can
@@ -30,12 +36,12 @@ export type ProviderHeadroom = {
    * Null where no account reported a ceiling. Missing data is unknown, never
    * unlimited.
    */
-  usedPercent: number | null;
+  usedRatio: number | null;
   /**
-   * When the account behind `usedPercent` rolls over, or null where it did not
+   * When the account behind `usedRatio` rolls over, or null where it did not
    * say. The instant that matters is the one attached to the account actually
-   * serving, so this tracks the same window the percentage came from rather
-   * than being the earliest reset of the group.
+   * serving, so this tracks the same window the ratio came from rather than
+   * being the earliest reset of the group.
    */
   resetsAt: number | null;
 };
@@ -66,46 +72,33 @@ export async function providerHeadroom(store: Store): Promise<ProviderHeadroom[]
     // dangling id from reaching a client through the group key.
     if (provider === undefined) continue;
 
-    const percent =
+    const ratio =
       window.limit === null || window.limit === 0
         ? null
-        : Math.min(100, Math.max(0, (window.used / window.limit) * 100));
+        : Math.min(1, Math.max(0, window.used / window.limit));
 
     const groupKey = `${provider}:${window.windowType}`;
     const current = best.get(groupKey);
+    const row: ProviderHeadroom = {
+      provider,
+      windowType: window.windowType,
+      usedRatio: ratio,
+      resetsAt: window.resetsAt,
+    };
 
     if (current === undefined) {
-      best.set(groupKey, {
-        provider,
-        windowType: window.windowType,
-        usedPercent: percent,
-        resetsAt: window.resetsAt,
-      });
+      best.set(groupKey, row);
       continue;
     }
 
     // A known figure always beats an unknown one: an account that reported a
     // ceiling tells the client more than one that did not, whichever came first.
-    if (current.usedPercent === null) {
-      if (percent !== null) {
-        best.set(groupKey, {
-          provider,
-          windowType: window.windowType,
-          usedPercent: percent,
-          resetsAt: window.resetsAt,
-        });
-      }
+    if (current.usedRatio === null) {
+      if (ratio !== null) best.set(groupKey, row);
       continue;
     }
 
-    if (percent !== null && percent < current.usedPercent) {
-      best.set(groupKey, {
-        provider,
-        windowType: window.windowType,
-        usedPercent: percent,
-        resetsAt: window.resetsAt,
-      });
-    }
+    if (ratio !== null && ratio < current.usedRatio) best.set(groupKey, row);
   }
 
   return [...best.values()].sort(

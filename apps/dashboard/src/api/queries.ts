@@ -11,6 +11,7 @@ import type {
   AgentModelMapping,
   ApiKeySummary,
   BurnEstimate,
+  ClientQuotaResponse,
   ConnectPollResult,
   ConnectStart,
   ConsoleResponse,
@@ -32,6 +33,7 @@ import type {
   ModelsResponse,
   PluginCatalogEntry,
   PluginsResponse,
+  ProviderHeadroom,
   ProviderId,
   QuotaHistoryQuery,
   QuotaHistoryResponse,
@@ -77,6 +79,27 @@ export const queryKeys = {
     ["quota-history", query.credentialId, query.since, query.until ?? null] as const,
   logs: (limit: number) => ["logs", limit] as const,
   requestBody: (requestId: string) => ["logs", "body", requestId] as const,
+  /**
+   * The client surface's own keys, under prefixes the console never uses.
+   *
+   * Separate prefixes and not a scoped variant of `usage` / `logs`, because the
+   * two answer different questions and the invalidation map routes by prefix: a
+   * `res:usage` frame invalidating `["usage", …]` must not also drop a client's
+   * cache under a key that means something else.
+   */
+  clientSummary: ["client", "summary"] as const,
+  clientUsage: (query: UsageQuery) =>
+    [
+      "client",
+      "usage",
+      query.grain ?? "raw",
+      query.groupBy,
+      query.splitBy ?? null,
+      query.since,
+      query.until ?? null,
+    ] as const,
+  clientLogs: (limit: number) => ["client", "logs", limit] as const,
+  clientQuota: ["client", "quota"] as const,
   console: (lines: number, level: string) => ["console", lines, level] as const,
   database: ["database"] as const,
   snapshots: ["database", "snapshots"] as const,
@@ -491,10 +514,29 @@ export function useShutdown(): UseMutationResult<{ ok: true }, Error, void> {
 
 /* ---------------------------------------------------------------- session -- */
 
-export function useLogin(): UseMutationResult<{ ok: true }, Error, string> {
+/** Which credential a login attempt is presenting. */
+export type LoginMode = "admin" | "viewer" | "client";
+
+export type LoginInput = { mode: LoginMode; secret: string };
+
+/**
+ * Signs in as one of the three principals.
+ *
+ * The mode is carried explicitly rather than inferred from what the secret looks
+ * like. A gateway API key and a password are both strings, and a heuristic that
+ * guessed would send one to the wrong endpoint on the day a password happens to
+ * start with the key prefix.
+ */
+export function useLogin(): UseMutationResult<{ ok: true }, Error, LoginInput> {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (password: string) => post<{ ok: true }>("/api/login", { password }),
+    mutationFn: ({ mode, secret }: LoginInput) =>
+      mode === "client"
+        ? post<{ ok: true }>("/api/client/login", { key: secret })
+        : post<{ ok: true }>("/api/login", {
+            password: secret,
+            ...(mode === "viewer" ? { mode: "viewer" } : {}),
+          }),
     onSuccess: () => client.invalidateQueries(),
   });
 }
@@ -515,6 +557,73 @@ export function useLogout(): UseMutationResult<{ ok: true }, Error, void> {
       // Nothing cached survives a sign-out; the next operator starts clean.
       client.clear();
     },
+  });
+}
+
+export function useClientLogout(): UseMutationResult<{ ok: true }, Error, void> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => post<{ ok: true }>("/api/client/logout"),
+    onSuccess: () => client.clear(),
+  });
+}
+
+/* ----------------------------------------------------------------- client -- */
+
+/**
+ * The client surface's reads.
+ *
+ * Four hooks against `/api/client/*` rather than the console's hooks with a
+ * parameter. The narrowing is the server's, not a query argument — a hook that
+ * took a key id would put the scope in the caller's hands, which is the shape
+ * this whole surface exists to avoid.
+ */
+export function useClientSummary(): UseQueryResult<ApiKeySummary> {
+  return useQuery({
+    queryKey: queryKeys.clientSummary,
+    queryFn: ({ signal }) => get<ApiKeySummary>("/api/client/summary", signal),
+  });
+}
+
+export function useClientUsage(
+  query: UsageQuery,
+  cadence: Cadence = 60_000,
+): UseQueryResult<UsageBucket[]> {
+  return useQuery({
+    queryKey: queryKeys.clientUsage(query),
+    queryFn: ({ signal }) =>
+      get<UsageBucket[]>(
+        withQuery("/api/client/usage", {
+          groupBy: query.groupBy,
+          since: query.since,
+          ...(query.grain === undefined ? {} : { grain: query.grain }),
+          ...(query.splitBy === undefined ? {} : { splitBy: query.splitBy }),
+          ...(query.until === undefined ? {} : { until: query.until }),
+        }),
+        signal,
+      ),
+    refetchInterval: cadence,
+  });
+}
+
+export function useClientLogs(
+  limit = 100,
+  cadence: Cadence = LOG_CADENCE_MS,
+): UseQueryResult<RequestLog[]> {
+  return useQuery({
+    queryKey: queryKeys.clientLogs(limit),
+    queryFn: async ({ signal }) =>
+      (await get<LogsResponse>(withQuery("/api/client/logs", { limit }), signal)).logs,
+    refetchInterval: cadence,
+  });
+}
+
+export function useClientQuota(cadence: Cadence = 60_000): UseQueryResult<ProviderHeadroom[]> {
+  return useQuery({
+    queryKey: queryKeys.clientQuota,
+    queryFn: async ({ signal }) =>
+      (await get<ClientQuotaResponse>("/api/client/quota", signal)).headroom,
+    refetchInterval: cadence,
   });
 }
 

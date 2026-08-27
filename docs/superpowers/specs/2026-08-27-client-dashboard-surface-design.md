@@ -206,10 +206,15 @@ that exists and refuses is a route someone later makes conditional.
 ### Redaction
 
 Provider quota reaches the client as per-provider headroom: a window type, a
-percentage, a reset time. Credential ids, account labels and per-credential
-figures are removed in `@omni/control` before the response is constructed, so
-they are not in the payload the browser receives and cannot be recovered from the
-network tab.
+consumption ratio, a reset time. Credential ids, account labels and
+per-credential figures are removed in `@omni/control` before the response is
+constructed, so they are not in the payload the browser receives and cannot be
+recovered from the network tab.
+
+The field is `usedRatio` in `0..1`, not a percentage. `formatPercent` on the
+console side multiplies by 100, and a field already scaled to 0..100 rendered as
+`4200%` the first time it was wired up. One convention per repository, and this
+is the one that was already here.
 
 This exists because the client asked *why am I being throttled* and the honest
 answer is upstream headroom, while the credential ids answering it are the
@@ -271,19 +276,34 @@ than a hardcoded `{ kind: "admin" }`.
 
 ## Dashboard
 
-Same SPA. A new `_client.*` route branch beside `_app.*`, with its own gate
-reading `principal` from `/api/status`. A client session that lands on `/app/*`
-is redirected to `/client`, and a viewer or admin session on `/client` is
-redirected out — a wrong-branch session should not render an empty shell.
+Same SPA. A flat `/client` route beside `_app`, with its own gate reading
+`principal` from `/api/status`. A client session that lands on `/app/*` is
+redirected to `/client`, and a viewer or admin session on `/client` is redirected
+out — a wrong-branch session should not render an empty shell built from 401s.
+
+Both guards read one `homeFor`, in `src/routes/-gate.ts`, so a session's
+destination is decided in one place. Split across the two route files, the pair
+would eventually disagree and bounce a session between them forever. The leading
+`-` keeps TanStack's file-based router from generating it as a route.
+
+A flat route rather than a `_client` layout with children, because there is one
+screen. The client has one key; a rail over four panels would be scaffolding for
+pages that do not exist, and the next reader would go looking for them. It gets
+its own shell (`ClientShell`) rather than `Rack` for the same reason.
 
 The branch reuses `ui/`, the theme, the query client and the LIVE socket. Nothing
 new is imported that the dashboard could not already import.
 
-One targeted refactor is in scope: `UsageBoard.tsx` and `LogsBoard.tsx` are each
-around 450 lines and mix fetching with layout. Lifting the fetch out lets both
-branches render the same panels against different endpoints. This is the
-improvement a developer makes to code they are already working in, not a
-general cleanup — no other board is touched.
+**The refactor of `UsageBoard.tsx` and `LogsBoard.tsx` did not happen, and should
+not.** The plan was to lift fetching out so both branches could share the panels.
+Once the client board existed it was clear the two want different things: the
+console's panels are built around comparing keys, credentials and providers,
+which is exactly the axis a client has no access to. Sharing them would have
+meant a `scope` prop threaded through a dozen components, each with a branch for
+a dimension the client cannot use. The client board is ~380 lines of its own and
+duplicates a table style and a totals reducer; that is the cheaper of the two
+duplications, and it is the one that cannot leak another key's data through a
+mis-threaded prop.
 
 ## Testing
 
