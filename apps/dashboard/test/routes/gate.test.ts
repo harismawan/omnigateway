@@ -104,3 +104,51 @@ describe("session gate", () => {
     }
   });
 });
+
+/**
+ * The malformed cases, spelled the way a wire response can actually spell them.
+ *
+ * `get<StatusResponse>()` casts unvalidated JSON, so the type is a claim about
+ * the gateway rather than a guarantee about the bytes. The existing test above
+ * covers `principal: null` — but a JSON body cannot produce `null` by omitting
+ * a key, it produces `undefined`, and `undefined === null` is false. The strict
+ * check fell through and threw inside `beforeLoad`.
+ *
+ * Cast at the boundary here on purpose: the whole point is a value the type
+ * says cannot exist.
+ */
+describe("session gate, malformed status", () => {
+  const malformed = (body: unknown): StatusResponse => body as StatusResponse;
+
+  test("an absent principal reaches login rather than throwing", () => {
+    expect(homeFor(malformed({ configured: true, authenticated: true }))).toBe("/login");
+    expect(
+      homeFor(malformed({ configured: true, authenticated: true, principal: undefined })),
+    ).toBe("/login");
+  });
+
+  test("an absent authenticated flag reaches login", () => {
+    expect(homeFor(malformed({ configured: true, principal: { kind: "admin" } }))).toBe("/login");
+  });
+
+  test("a principal kind this bundle does not know reaches login", () => {
+    // A gateway newer than this bundle. Guessing "/" would put an unknown
+    // session in front of the operator's console.
+    expect(
+      homeFor(malformed({ authenticated: true, principal: { kind: "machine", pluginId: "rc" } })),
+    ).toBe("/login");
+  });
+
+  test("neither guard throws on any malformed shape", () => {
+    for (const body of [
+      {},
+      { authenticated: true },
+      { authenticated: true, principal: null },
+      { authenticated: true, principal: {} },
+      { authenticated: "yes", principal: { kind: "admin" } },
+    ]) {
+      // Throwing a redirect is the correct outcome; throwing a TypeError is not.
+      expect(() => homeFor(malformed(body))).not.toThrow();
+    }
+  });
+});

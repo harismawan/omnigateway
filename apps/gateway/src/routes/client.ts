@@ -7,6 +7,7 @@ import {
   readOwnKey,
   recentLogs,
   scopeOf,
+  toClientLog,
 } from "@omni/control";
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
@@ -105,12 +106,16 @@ export function clientRoutes(deps: ClientDeps) {
 
       .get("/api/client/logs", async ({ request, query }) => {
         const apiKeyId = await requireClient(request, deps.admin);
-        const logs = await recentLogs(
+        const rows = await recentLogs(
           deps.store,
           logLimit(query.limit),
           scopeOf({ kind: "client", apiKeyId }),
         );
-        return { logs };
+        // Projected, never returned raw. `RequestLog` is the operator's row and
+        // names the account that served the request — in `credentialId` and,
+        // less obviously, inside the `excluded:<credentialId>:<reason>` strings
+        // in `degradations`. Both are the operator's infrastructure.
+        return { logs: rows.map(toClientLog) };
       })
 
       /** Provider room, with credential identity removed in `@omni/control`. */

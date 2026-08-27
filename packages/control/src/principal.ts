@@ -102,8 +102,3 @@ export function scopeKey(scope: Scope): string | undefined {
 export function readsNothing(scope: Scope): boolean {
   return scope.kind === "none" || (scope.kind === "key" && scope.apiKeyId === "");
 }
-
-/** Whether a principal may change anything. Only the operator may. */
-export function canMutate(principal: Principal): boolean {
-  return principal.kind === "admin";
-}

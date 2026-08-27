@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { canMutate, type Principal, scopeKey, scopeOf } from "../src/principal.ts";
+import type { Principal } from "../src/principal.ts";
+import { scopeKey, scopeOf } from "../src/principal.ts";
 
 const PRINCIPALS: Principal[] = [
   { kind: "admin" },
@@ -7,10 +8,6 @@ const PRINCIPALS: Principal[] = [
   { kind: "client", apiKeyId: "k1" },
   { kind: "machine", tokenId: "t1", pluginId: "p1" },
 ];
-
-test("only the operator may mutate", () => {
-  expect(PRINCIPALS.filter(canMutate)).toEqual([{ kind: "admin" }]);
-});
 
 test("admin and viewer read everything, a client reads its own key", () => {
   expect(scopeOf({ kind: "admin" })).toEqual({ kind: "all" });

@@ -12,6 +12,11 @@ export {
   createAdminAuth,
 } from "./adminAuth.ts";
 export { type RequestBodyRead, readRequestBody } from "./bodies.ts";
+export {
+  type ClientRequestLog,
+  isClientVisibleDegradation,
+  toClientLog,
+} from "./clientLog.ts";
 export { type Config, loadConfig } from "./config.ts";
 export {
   type ConnectDeps,
@@ -147,7 +152,6 @@ export {
 } from "./plugins.ts";
 export {
   ALL,
-  canMutate,
   NONE,
   type Principal,
   type PrincipalKind,

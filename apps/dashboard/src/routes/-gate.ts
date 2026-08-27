@@ -40,8 +40,23 @@ export async function readStatus(context: { queryClient: QueryClient }): Promise
  * disagree and bounce a session between them forever.
  */
 export function homeFor(status: StatusResponse): "/" | "/client" | "/login" {
-  if (!status.authenticated || status.principal === null) return "/login";
-  return status.principal.kind === "client" ? "/client" : "/";
+  // `== null` rather than `=== null`, and that is the one place in this file
+  // loose equality is right. `get<StatusResponse>()` casts unvalidated JSON, so
+  // the field is *typed* as nullable but can arrive **absent** — from an older
+  // gateway, a proxy that strips fields, or a partial response. `undefined ===
+  // null` is false, so the strict check fell through to `status.principal.kind`
+  // and threw a TypeError inside `beforeLoad`, giving a white error boundary
+  // where the login screen belongs.
+  const principal = status.principal;
+  if (status.authenticated !== true || principal == null) return "/login";
+  // An unrecognised kind is also not a console session. A gateway newer than
+  // this bundle can name a principal it has never heard of, and guessing "/"
+  // for it would put an unknown session in front of the operator's console.
+  return principal.kind === "client"
+    ? "/client"
+    : principal.kind === "admin" || principal.kind === "viewer"
+      ? "/"
+      : "/login";
 }
 
 /** Throws the redirect a console route needs, or returns for an allowed session. */

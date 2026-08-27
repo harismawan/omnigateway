@@ -162,3 +162,55 @@ test("a none scope reads nothing even where rows exist", async () => {
   expect(await recentLogs(store, 100, scopeOf(MACHINE))).toEqual([]);
   store.close();
 });
+
+/**
+ * Scoping rows is not scoping columns, and this is the case that proves it.
+ *
+ * `apiKeyId` narrows which rows are counted and does that correctly — but the
+ * bucket key is whatever dimension the caller grouped on, returned verbatim. A
+ * client asking `groupBy=credential` got its own rows back keyed by the
+ * operator's account ids: one bucket per account that had served it. The row
+ * filter cannot prevent that, because the question was never about rows.
+ *
+ * Found in review after the row-scoping tests were already green, which is the
+ * point — every one of those tests passed while this was wide open.
+ */
+test("a narrowed scope cannot group by credential, at either grain", async () => {
+  const { store, mine } = await seeded();
+  const client = scopeOf({ kind: "client", apiKeyId: mine.key.id });
+
+  for (const grain of ["raw", "daily"] as const) {
+    expect(queryUsage(deps(store), { groupBy: "credential", grain }, client)).rejects.toThrow();
+    // The second dimension too: `splitBy` reaches the same column.
+    expect(
+      queryUsage(deps(store), { groupBy: "model", splitBy: "credential", grain }, client),
+    ).rejects.toThrow();
+  }
+  store.close();
+});
+
+test("the operator may still group by credential", async () => {
+  const { store } = await seeded();
+  // The restriction is a property of the scope, not of the dimension. An
+  // installation-wide reader is exactly who that breakdown is for.
+  for (const principal of [{ kind: "admin" } as const, { kind: "viewer" } as const]) {
+    const buckets = await queryUsage(deps(store), { groupBy: "credential" }, scopeOf(principal));
+    expect(buckets.length).toBeGreaterThan(0);
+  }
+  store.close();
+});
+
+test("the dimensions a client may still ask for keep working", async () => {
+  const { store, mine } = await seeded();
+  const client = scopeOf({ kind: "client", apiKeyId: mine.key.id });
+
+  // Refusing `credential` must not turn into refusing everything: these name
+  // the caller's own request or something already public to it.
+  for (const groupBy of ["model", "provider", "requestedModel"] as const) {
+    expect((await queryUsage(deps(store), { groupBy }, client)).length).toBeGreaterThan(0);
+  }
+  // `apiKey` under a key scope can only ever produce the caller's own id.
+  const own = await queryUsage(deps(store), { groupBy: "apiKey", grain: "daily" }, client);
+  expect(own.map((b) => b.key)).toEqual([mine.key.id]);
+  store.close();
+});

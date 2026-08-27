@@ -177,6 +177,34 @@ test("a client session reads its own rows through the client surface", async () 
   expect(logs.logs.map((row) => row.id)).toEqual(["m1"]);
 });
 
+/**
+ * Asserted through the route, not against the projection.
+ *
+ * `toClientLog` has its own unit test; this one proves the handler actually
+ * calls it. A projection nobody applies is a projection that ships nothing, and
+ * the two failures look identical from the control package.
+ */
+test("a client's log rows name no credential, over the wire", async () => {
+  const { call, store } = await matrix();
+  await store.usage.append(
+    requestLog({
+      id: "m2",
+      at: NOW - 500,
+      apiKeyId: (await store.keys.list()).find((k) => k.label === "mine")?.id ?? "",
+      credentialId: "cred-secret-account",
+      degradations: ["excluded:cred-secret-account:disabled", "anthropic:context-1m-dropped"],
+    }),
+  );
+
+  const body = await (await call("GET", "/api/client/logs", "client")).text();
+
+  expect(body).not.toContain("cred-secret-account");
+  expect(body).not.toContain("credentialId");
+  expect(body).not.toContain("excluded:");
+  // What the client is owed survives.
+  expect(body).toContain("anthropic:context-1m-dropped");
+});
+
 test("a client's usage totals over the wire exclude another key's spend", async () => {
   const { call } = await matrix();
   const buckets = (await (
@@ -203,8 +231,45 @@ test("there is no client route that serves a request body", async () => {
   expect((await call("GET", "/api/requests/m1/body", "client")).status).toBe(401);
 });
 
+/**
+ * The exact requests that leaked, over the wire.
+ *
+ * Row scoping was correct and every row-scoping test was green while these
+ * returned the operator's account ids as bucket keys. Kept as literal query
+ * strings rather than as a loop over dimensions, because these four are the
+ * reproduction and a future reader should be able to paste one into a browser.
+ */
+test("a client cannot ask for its usage bucketed by the operator's accounts", async () => {
+  const { call, store } = await matrix();
+  await seedCredential(store, { id: "cred-OPERATOR-SECRET", accessToken: "t", refreshToken: null });
+  await store.usage.append(
+    requestLog({
+      id: "m3",
+      at: NOW - 400,
+      apiKeyId: (await store.keys.list()).find((k) => k.label === "mine")?.id ?? "",
+      credentialId: "cred-OPERATOR-SECRET",
+    }),
+  );
+
+  for (const query of [
+    "groupBy=credential",
+    "groupBy=credential&grain=daily",
+    "groupBy=model&splitBy=credential",
+    "groupBy=provider&splitBy=credential",
+  ]) {
+    const response = await call("GET", `/api/client/usage?${query}`, "client");
+    const body = await response.text();
+    expect({ query, status: response.status }).toEqual({ query, status: 400 });
+    expect(body).not.toContain("cred-OPERATOR-SECRET");
+  }
+
+  // And the operator, for whom that breakdown exists, still gets it.
+  const admin = await call("GET", "/api/usage?groupBy=credential", "admin");
+  expect(admin.status).toBe(200);
+});
+
 test("a client cannot widen its own scope through a query parameter", async () => {
-  const { call, theirs } = await matrix();
+  const { call, mine, theirs } = await matrix();
 
   // `groupBy=apiKey` is the one dimension that would enumerate other keys, and
   // it arrives from the URL, where the client controls it.
@@ -212,8 +277,11 @@ test("a client cannot widen its own scope through a query parameter", async () =
     await call("GET", "/api/client/usage?groupBy=apiKey&grain=daily", "client")
   ).json()) as { key: string }[];
 
+  // The exact set, not a bound. `toBeLessThanOrEqual(1)` passes for `[]`, so a
+  // route that returned nothing at all would have satisfied it — which is the
+  // failure mode a scoping test is least able to distinguish from success.
+  expect(buckets.map((b) => b.key)).toEqual([mine.key.id]);
   expect(buckets.map((b) => b.key)).not.toContain(theirs.key.id);
-  expect(buckets.length).toBeLessThanOrEqual(1);
 });
 
 test("an expired or revoked client session stops working mid-surface", async () => {

@@ -1,3 +1,4 @@
+import { GatewayError } from "@omni/ir";
 import type { RequestLog, Store, UsageBucket } from "@omni/store";
 import { ALL, readsNothing, type Scope, scopeKey } from "./principal.ts";
 import {
@@ -42,6 +43,27 @@ export async function queryUsage(
     input.splitBy === undefined
       ? undefined
       : requireDimension(grain, parseOrThrow(dimensionSchema, input.splitBy));
+
+  // Scoping the *rows* is not the same property as scoping the *columns*.
+  //
+  // `apiKeyId` narrows which rows are counted, and it does that correctly — but
+  // the bucket key is whatever dimension the caller asked to group on, and it is
+  // returned verbatim. A narrowed caller asking `groupBy=credential` therefore
+  // gets its own rows back, keyed by the operator's account ids: one bucket per
+  // account that served it. Nothing about the row filter prevents that, because
+  // the question was never about rows.
+  //
+  // `credential` is the only dimension naming operator infrastructure — the rest
+  // (`model`, `provider`, `apiKey`, `hour`, `day`) name either the caller's own
+  // request or something already public to it, and `apiKey` under a key scope
+  // can only ever produce the caller's own id.
+  if (scope.kind !== "all") {
+    for (const dimension of [groupBy, splitBy]) {
+      if (dimension === "credential") {
+        throw new GatewayError("BAD_REQUEST", "this dimension is not available on this surface");
+      }
+    }
+  }
 
   // Before the store, because `scopeKey` collapses `all` and `none` to the same
   // `undefined` and one of them means every row.

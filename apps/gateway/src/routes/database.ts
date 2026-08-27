@@ -151,6 +151,15 @@ async function swap(
       logger.warn("admin sessions ended: the restored database carries a different password", {
         reason: label,
       });
+    } else if (result.viewerPasswordChanged) {
+      // `else if`, because `invalidateSessions` above already cleared these.
+      // Only the viewer kind, and only when the operator's own password did not
+      // change: withdrawing someone else's read access is not a reason to log
+      // the operator out of the console they are restoring from.
+      deps.admin.invalidateKind("viewer");
+      logger.warn("read-only sessions ended: the restored database carries a different password", {
+        reason: label,
+      });
     }
     /**
      * Every console holding anything read out of the file that just moved.

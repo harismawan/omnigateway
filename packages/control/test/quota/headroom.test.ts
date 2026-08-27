@@ -9,6 +9,8 @@ type QuotaRow = {
   used: number;
   limit: number | null;
   windowType?: WindowType;
+  /** Distinct per row where a test needs to tell the winning account apart. */
+  resetsAt?: number;
 };
 
 async function withQuota(rows: QuotaRow[]) {
@@ -24,7 +26,7 @@ async function withQuota(rows: QuotaRow[]) {
         windowType: row.windowType ?? "fiveHour",
         used: row.used,
         limit: row.limit,
-        resetsAt: 1_800_000_000_000,
+        resetsAt: row.resetsAt ?? 1_800_000_000_000,
         observedAt: 1_799_000_000_000,
       }),
     ),
@@ -142,4 +144,62 @@ test("an install with no quota data reports nothing rather than full headroom", 
   const store = await memoryStore();
   expect(await providerHeadroom(store)).toEqual([]);
   store.close();
+});
+
+/**
+ * `resetsAt` must belong to the account whose ratio won.
+ *
+ * Every fixture above gives each row the same `resetsAt`, so the documented
+ * property was trivially true for any implementation — returning null, the
+ * first row's, or the minimum all passed. Found by mutation: replacing the
+ * field with `null` left the suite green.
+ *
+ * The instant that matters is the one attached to the account actually able to
+ * serve, so it has to track the ratio rather than be picked independently.
+ */
+test("resetsAt comes from the account the ratio came from", async () => {
+  const store = await withQuota([
+    { id: "busy", provider: "anthropic", used: 99, limit: 100, resetsAt: 1_111_111_111_111 },
+    { id: "idle", provider: "anthropic", used: 4, limit: 100, resetsAt: 2_222_222_222_222 },
+  ]);
+
+  const [row] = await providerHeadroom(store);
+  expect(row?.usedRatio).toBeCloseTo(0.04, 6);
+  // The idle account's instant, not the busy one's and not the earliest.
+  expect(row?.resetsAt).toBe(2_222_222_222_222);
+  store.close();
+});
+
+test("a ceiling of zero is unknown rather than a division", async () => {
+  // `limit: 0` is a different branch from `limit: null`, and dividing by it
+  // would render NaN% on the client surface.
+  const store = await withQuota([{ id: "a1", provider: "anthropic", used: 5, limit: 0 }]);
+  expect((await providerHeadroom(store))[0]?.usedRatio).toBeNull();
+  store.close();
+});
+
+test("usage past the ceiling clamps to fully spent", async () => {
+  // Reachable: spend is debited in `finishLog` after the request served, so a
+  // window can overshoot. A meter reading "150% used" is not a reading.
+  const store = await withQuota([{ id: "a1", provider: "anthropic", used: 150, limit: 100 }]);
+  expect((await providerHeadroom(store))[0]?.usedRatio).toBe(1);
+  store.close();
+});
+
+test("a known figure wins whichever order it arrives in — both orders", async () => {
+  // The existing test seeds one order only. The reverse takes a different path
+  // through the comparison and no fixture reached it.
+  const unknownFirst = await withQuota([
+    { id: "unknown", provider: "anthropic", used: 50, limit: null },
+    { id: "known", provider: "anthropic", used: 60, limit: 100 },
+  ]);
+  expect((await providerHeadroom(unknownFirst))[0]?.usedRatio).toBeCloseTo(0.6, 6);
+  unknownFirst.close();
+
+  const knownFirst = await withQuota([
+    { id: "known", provider: "anthropic", used: 60, limit: 100 },
+    { id: "unknown", provider: "anthropic", used: 50, limit: null },
+  ]);
+  expect((await providerHeadroom(knownFirst))[0]?.usedRatio).toBeCloseTo(0.6, 6);
+  knownFirst.close();
 });
