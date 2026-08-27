@@ -140,12 +140,12 @@ export function streamRoutes(deps: StreamDeps) {
           throw new GatewayError("AUTH", "present one credential, not two");
         }
 
-        if (cookie === null) throw new GatewayError("AUTH", "admin session required");
+        if (cookie === null) throw new GatewayError("AUTH", "a session is required");
         // Any session opens a socket; `authorised` decides what it may then hold.
         // Refusing the upgrade per kind would push the same rule into two places
         // and give a client a different failure mode than a refused subscribe.
         const principal = await deps.admin.verify(cookie);
-        if (principal === null) throw new GatewayError("AUTH", "admin session required");
+        if (principal === null) throw new GatewayError("AUTH", "a session is required");
 
         resolved.set(request, {
           principal,

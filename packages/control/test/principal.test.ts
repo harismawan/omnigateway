@@ -28,23 +28,39 @@ test("a client scope carries its own key and never another", () => {
  *
  * A `default:` returning `all` would be invisible until the remote-control
  * plugin's token table lands, and then it would hand a plugin token every key's
- * traffic. Scoping it to an id nothing matches fails closed instead.
+ * traffic.
  */
 test("a machine principal reads nothing rather than everything", () => {
-  const scope = scopeOf({ kind: "machine", tokenId: "t1", pluginId: "p1" });
-  expect(scope.kind).toBe("key");
-  expect(scopeKey(scope)).not.toBeUndefined();
-  expect(scopeKey(scope)).toBe("");
+  expect(scopeOf({ kind: "machine", tokenId: "t1", pluginId: "p1" })).toEqual({ kind: "none" });
+});
+
+/**
+ * The empty string is not "matches nothing", and an earlier version of this
+ * file asserted that it was.
+ *
+ * `usage_daily.api_key_id` is `NOT NULL DEFAULT ''`, so anonymous traffic is
+ * stored under the empty string. A scope of `{ kind: "key", apiKeyId: "" }`
+ * therefore reads every untagged row at the daily grain while reading, in the
+ * source, exactly like a scope that matches nothing. `NONE` is its own arm so
+ * that mistake cannot be made again.
+ */
+test("an empty key id never becomes a key scope", () => {
+  expect(scopeOf({ kind: "client", apiKeyId: "" })).toEqual({ kind: "none" });
+  for (const principal of PRINCIPALS) {
+    const scope = scopeOf(principal);
+    if (scope.kind === "key") expect(scope.apiKeyId).not.toBe("");
+  }
 });
 
 /**
  * `scopeKey` is what reaches the store, and `undefined` there means "every row".
- * Only the `all` scope may produce it — a narrowed scope that returned
- * `undefined` would widen silently at the one call that matters.
+ *
+ * Both `all` and `none` produce it, and they mean opposite things — so a caller
+ * must check for `none` first. That is why `queryUsage` and `recentLogs` are
+ * the only readers, and why this asserts the shape rather than trusting it.
  */
-test("undefined reaches the store for the all scope and for nothing else", () => {
-  const keys = PRINCIPALS.map((p) => scopeKey(scopeOf(p)));
-  expect(keys.filter((k) => k === undefined)).toHaveLength(2);
+test("only a key scope yields a key, and none is not a key", () => {
   expect(scopeKey({ kind: "all" })).toBeUndefined();
+  expect(scopeKey({ kind: "none" })).toBeUndefined();
   expect(scopeKey({ kind: "key", apiKeyId: "k1" })).toBe("k1");
 });

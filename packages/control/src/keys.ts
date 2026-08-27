@@ -159,11 +159,11 @@ export async function readOwnKey(
   apiKeyId: string,
   now: number = Date.now(),
 ): Promise<ApiKeySummary> {
-  const key = (await store.keys.list()).find((entry) => entry.id === apiKeyId);
+  const key = await store.keys.get(apiKeyId);
   // A live session whose key vanished. Refused rather than reported empty: an
   // empty summary reads as "a key with no limits", which is the opposite of
   // what a missing key means.
-  if (key === undefined) throw new GatewayError("AUTH", "no such api key");
+  if (key === null) throw new GatewayError("AUTH", "no such api key");
   return toSummary(store, key, now);
 }
 

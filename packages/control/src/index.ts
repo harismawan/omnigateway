@@ -148,8 +148,10 @@ export {
 export {
   ALL,
   canMutate,
+  NONE,
   type Principal,
   type PrincipalKind,
+  readsNothing,
   type Scope,
   scopeKey,
   scopeOf,

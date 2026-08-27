@@ -1,5 +1,5 @@
 import type { RequestLog, Store, UsageBucket } from "@omni/store";
-import { ALL, type Scope, scopeKey } from "./principal.ts";
+import { ALL, readsNothing, type Scope, scopeKey } from "./principal.ts";
 import {
   dimensionSchema,
   grainSchema,
@@ -43,6 +43,10 @@ export async function queryUsage(
       ? undefined
       : requireDimension(grain, parseOrThrow(dimensionSchema, input.splitBy));
 
+  // Before the store, because `scopeKey` collapses `all` and `none` to the same
+  // `undefined` and one of them means every row.
+  if (readsNothing(scope)) return [];
+
   const apiKeyId = scopeKey(scope);
   return deps.store.usage.aggregate({
     grain,
@@ -71,5 +75,8 @@ export async function recentLogs(
   requested?: string | number | undefined,
   scope: Scope = ALL,
 ): Promise<RequestLog[]> {
+  // Same gate as `queryUsage`, and it is not redundant: `scopeKey` on a `none`
+  // scope returns `undefined`, which the store reads as "every row".
+  if (readsNothing(scope)) return [];
   return store.usage.recent(logLimit(requested), scopeKey(scope));
 }

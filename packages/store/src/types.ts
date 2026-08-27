@@ -761,6 +761,15 @@ export interface KeyRepo {
    */
   list(): Promise<ApiKey[]>;
   findByHash(hash: string): Promise<ApiKey | null>;
+  /**
+   * One key by id, or null where there is none.
+   *
+   * Exists because a client dashboard session re-checks its own key's
+   * revocation on every request, and doing that through `list()` reads and
+   * parses every key in the installation to look at one of them — on a
+   * synchronous database, on a path a browser polls.
+   */
+  get(id: string): Promise<ApiKey | null>;
   /** Throws on a `limits` shape no reader could parse, rather than storing it. */
   create(input: ApiKeyInput): Promise<ApiKey>;
   /**

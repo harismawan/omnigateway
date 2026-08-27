@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { memoryStore, requestLog, seedApiKey } from "@omni/testkit";
 import { readOwnKey } from "../src/keys.ts";
-import { scopeOf } from "../src/principal.ts";
+import { type Principal, scopeOf } from "../src/principal.ts";
 import { queryUsage, recentLogs } from "../src/usage.ts";
+
+const MACHINE: Principal = { kind: "machine", tokenId: "t1", pluginId: "p1" };
 
 const NOW = 1_800_000_000_000;
 const deps = (store: Awaited<ReturnType<typeof memoryStore>>) => ({ store, now: () => NOW });
@@ -119,5 +121,44 @@ test("reading a key that no longer exists is refused, not reported empty", async
   // An empty summary reads as "a key with no limits", which is the opposite of
   // what a vanished key means.
   expect(readOwnKey(store, "not-a-key", NOW)).rejects.toThrow();
+  store.close();
+});
+
+/**
+ * Anonymous traffic belongs to no key, so no key may read it.
+ *
+ * At the raw grain `request_logs.api_key_id` is NULL and `= ?` never matches it,
+ * which makes this look automatic. It is not: `usage_daily.api_key_id` is
+ * `NOT NULL DEFAULT ''`, so at the daily grain untagged traffic sits under the
+ * empty string and any scope carrying `""` reads all of it. Both grains are
+ * asserted because only one of them was ever at risk.
+ */
+test("no scope reaches anonymous rows at either grain", async () => {
+  const store = await memoryStore();
+  await store.usage.append(
+    requestLog({ id: "anon", at: NOW - 1_000, apiKeyId: null, costUsd: 500 }),
+  );
+
+  for (const grain of ["raw", "daily"] as const) {
+    // The scope that used to be spelled "matches nothing".
+    expect(
+      await queryUsage(deps(store), { groupBy: "provider", grain }, { kind: "key", apiKeyId: "" }),
+    ).toEqual([]);
+    // And the one a machine principal produces, which is now its own arm.
+    expect(await queryUsage(deps(store), { groupBy: "provider", grain }, scopeOf(MACHINE))).toEqual(
+      [],
+    );
+  }
+
+  expect(await recentLogs(store, 100, scopeOf(MACHINE))).toEqual([]);
+  // The operator still sees it: it is their traffic, just not anyone's key.
+  expect((await recentLogs(store, 100, scopeOf({ kind: "admin" }))).length).toBe(1);
+  store.close();
+});
+
+test("a none scope reads nothing even where rows exist", async () => {
+  const { store } = await seeded();
+  expect(await queryUsage(deps(store), { groupBy: "provider" }, scopeOf(MACHINE))).toEqual([]);
+  expect(await recentLogs(store, 100, scopeOf(MACHINE))).toEqual([]);
   store.close();
 });

@@ -113,12 +113,16 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
    * Read on every verify, not only at login. A session that checked once would
    * outlive a revocation by up to the session TTL, which is a revocation that
    * did not revoke — the operator pulls a key precisely because they want it to
-   * stop working now. The read is by id against a table an installation has few
-   * rows in, and costs less than the Argon2 verify a password login already pays.
+   * stop working now.
+   *
+   * `keys.get` rather than scanning `keys.list()`: this runs on every request a
+   * client dashboard makes, and `list` reads and JSON-parses every key in the
+   * installation to look at one of them. `bun:sqlite` is synchronous, so that
+   * cost lands on the whole event loop rather than on this request.
    */
   const keyStillValid = async (apiKeyId: string): Promise<boolean> => {
-    const key = (await store.keys.list()).find((entry) => entry.id === apiKeyId);
-    return key !== undefined && key.revokedAt === null;
+    const key = await store.keys.get(apiKeyId);
+    return key !== null && key.revokedAt === null;
   };
 
   return {
