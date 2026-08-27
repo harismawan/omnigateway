@@ -133,8 +133,11 @@ export type Delta =
        * `"merge"` folds `data` into the block's own data at completion.
        * `"citation"` appends `data.citation` to the containing text block, which
        * is the one case where a native delta lands on a block of another kind.
-       * Absent means the delta is carried and replayed verbatim, which is what
-       * every other native delta does.
+       * Absent is the default and means "no effect on the assembled block": the
+       * streaming egress path still replays the delta verbatim, and `collect()`
+       * — which builds the buffered form — keeps the block's own data and drops
+       * the delta's. That is what the code did before this field existed, and
+       * `a native delta stating no fold is carried, never folded` asserts it.
        */
       fold?: "merge" | "citation";
       data: Record<string, unknown>;

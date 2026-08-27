@@ -437,33 +437,40 @@ export type TargetAddress = {
  */
 export function servesTarget(target: TargetAddress, account: ServingAccount): boolean {
   if (account.provider !== target.provider) return false;
-  // A target that names an endpoint is served only by an account at that
-  // endpoint. Read from the account rather than trusting a saved string: an
-  // endpoint is the credential's own property, and the router compares it the
-  // same way.
+  // The endpoint an account is bound to and the endpoint a target names must be
+  // the same, including when neither names one. Read from the account rather
+  // than trusting a saved string: an endpoint is the credential's own property.
   //
-  // Keyed on the target naming one rather than on `provider === "custom"`, which
-  // is what it used to say. Equivalent for every validly-saved target — the
-  // control schema requires `endpointId` on the custom arm and offers it on no
-  // other — and it takes the last provider name out of this file.
+  // Stated as an equality in both directions, which is the correction to a
+  // first version that asked only "does the target name an endpoint the account
+  // fails to match". That version failed **open** on the case it did not test: a
+  // `custom` target whose `endpointId` was absent or `""` skipped the check
+  // entirely and was then served by *every* custom account, at any endpoint. The
+  // rule it replaced compared `"endpoint-a" !== undefined`, refused, and left the
+  // target unroutable — the safe answer for a row that cannot say where it goes.
   //
-  // It is deliberately *stricter* on data the schema never saw. `sqlite/config.ts`
-  // reads targets back with `JSON.parse` and no validation, so a restored or
-  // hand-edited database can carry an `endpointId` on a non-custom target. That
-  // used to be ignored; it is now enforced, which fails closed on a constraint
-  // the row states rather than serving it from an account that does not match.
+  // Read paths reach that row even though write paths cannot mint it:
+  // `sqlite/config.ts` parses stored targets with no validation, so a restore, a
+  // hand edit or a foreign database supplies one. The consequence was not a
+  // failed request but a request sent to an arbitrary endpoint's origin with
+  // that endpoint's key, and an `omni doctor` that called the pin healthy —
+  // which is the inverse of the bug this function was made the single copy for.
   //
-  // `""` counts as naming none, not as an endpoint to match. The console's
-  // `TargetDraft.endpointId` is a non-optional string and carries `""` for every
+  // `""` means naming none, in both positions. The console's
+  // `TargetDraft.endpointId` is a non-optional string carrying `""` for every
   // non-custom target, and the control schema refuses `""` on the way in for the
-  // same reason: it is an id nothing matches, not a third state. Reading it as a
-  // real value here would make this function disagree with the callers it exists
-  // to be the only copy for — the pin picker would offer no account at all for
-  // every non-custom target.
-  const endpoint = target.endpointId;
-  if (endpoint !== undefined && endpoint !== "" && account.providerData.endpointId !== endpoint) {
-    return false;
-  }
+  // same reason: it is an id nothing matches, not a third state. Treating it as
+  // a value would make this function disagree with the callers it exists to be
+  // the only copy for — the pin picker would offer no account for any
+  // non-custom target.
+  //
+  // No provider is named. A non-custom target that somehow carries an endpoint,
+  // or an account that somehow holds one its target does not name, is refused
+  // rather than ignored: unreachable through the schema, and failing closed is
+  // the right direction for a constraint a row states and cannot honour.
+  const named = (value: unknown): string | undefined =>
+    typeof value === "string" && value !== "" ? value : undefined;
+  if (named(target.endpointId) !== named(account.providerData.endpointId)) return false;
   return target.credentialId === undefined || account.id === target.credentialId;
 }
 
