@@ -126,7 +126,7 @@ const REQUEST: ChatRequest = {
   ],
   tools: [
     {
-      provider: "custom",
+      kind: "portable",
       name: "get_weather",
       description: "look up weather",
       inputSchema: { type: "object", properties: { city: { type: "string" } } },
@@ -339,7 +339,7 @@ const CLOAKED_REQUEST: ChatRequest = {
   model: "claude-opus-4",
   stream: true,
   messages: [{ role: "user", content: [{ type: "text", text: "find it" }] }],
-  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+  tools: [{ kind: "portable", name: "session_search", inputSchema: { type: "object" } }],
 };
 
 const ALIASED_UPSTREAM = [

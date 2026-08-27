@@ -8,7 +8,6 @@ export const grokDescriptor: ProviderDescriptor = {
   // whose provider lacks `images` from any request carrying an image block, so
   // an under-claim makes grok targets vanish the moment a client pastes one.
   capabilities: { tools: true, images: true, reasoning: true },
-  anthropicNativeTools: false,
   writeOverInput: { fiveMinute: 0, oneHour: 0 },
   catalog: GROK_MODELS,
   modelPrefixes: ["grok-"],

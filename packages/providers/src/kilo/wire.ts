@@ -145,9 +145,9 @@ export function toKiloWire(
             content: block.content,
           });
           break;
-        case "anthropicNative":
+        case "providerNative":
           // Unreachable: the router excludes this provider from any request
-          // carrying Anthropic-native history. Recorded, not ignored.
+          // carrying another provider's native history. Recorded, not ignored.
           note("kilo:anthropic-native-block-dropped");
           break;
       }
@@ -169,7 +169,7 @@ export function toKiloWire(
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.stopSequences !== undefined) body.stop = req.stopSequences;
   if (req.tools !== undefined) {
-    const custom = req.tools.filter((t) => t.provider === "custom");
+    const custom = req.tools.filter((t) => t.kind === "portable");
     if (custom.length !== req.tools.length) note("kilo:anthropic-tool-dropped");
     body.tools = custom.map((t) => ({
       type: "function",

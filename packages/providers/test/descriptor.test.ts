@@ -56,16 +56,6 @@ const CAPABILITIES_BEFORE: Readonly<
   custom: { tools: true, images: true, reasoning: true },
 };
 
-/** Likewise for `ANTHROPIC_NATIVE_TOOLS`. */
-const NATIVE_TOOLS_BEFORE: Readonly<Record<ProviderId, boolean>> = {
-  anthropic: true,
-  openai: false,
-  kimi: false,
-  kilo: false,
-  grok: false,
-  custom: false,
-};
-
 describe("the registry describes every provider", () => {
   test("one descriptor per id, and no others", () => {
     expect(Object.keys(PROVIDER_DESCRIPTORS).sort()).toEqual([...IDS].sort());
@@ -79,7 +69,6 @@ describe("the registry describes every provider", () => {
       const descriptor = PROVIDER_DESCRIPTORS[id];
       expect(descriptor.id).toBe(id);
       expect(descriptor.capabilities).toBeDefined();
-      expect(typeof descriptor.anthropicNativeTools).toBe("boolean");
       expect(typeof descriptor.writeOverInput.fiveMinute).toBe("number");
       expect(typeof descriptor.writeOverInput.oneHour).toBe("number");
       expect(descriptor.catalog).toBeDefined();
@@ -95,7 +84,6 @@ describe("the registry describes every provider", () => {
     const incomplete = {
       id: "anthropic",
       capabilities: { tools: true, images: true, reasoning: true },
-      anthropicNativeTools: true,
       catalog: PROVIDER_MODEL_CATALOG.anthropic,
     };
     // @ts-expect-error — `writeOverInput` is required and absent.
@@ -108,12 +96,6 @@ describe("descriptors carry the values the old tables held", () => {
   test("capabilities match the pre-change fixture", () => {
     for (const id of IDS) {
       expect(PROVIDER_DESCRIPTORS[id].capabilities).toEqual(CAPABILITIES_BEFORE[id]);
-    }
-  });
-
-  test("anthropicNativeTools matches the pre-change fixture", () => {
-    for (const id of IDS) {
-      expect(PROVIDER_DESCRIPTORS[id].anthropicNativeTools).toBe(NATIVE_TOOLS_BEFORE[id]);
     }
   });
 

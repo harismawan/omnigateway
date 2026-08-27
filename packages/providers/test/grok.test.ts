@@ -169,7 +169,7 @@ test("never emits the parameters the proxy 400s on", () => {
 
 test("truncates a tool list past the proxy's ceiling", () => {
   const tools: ChatRequest["tools"] = Array.from({ length: 250 }, (_, i) => ({
-    provider: "custom" as const,
+    kind: "portable" as const,
     name: `f${i}`,
     inputSchema: { type: "object" },
   }));
@@ -183,7 +183,7 @@ test("truncates a tool list past the proxy's ceiling", () => {
 
 test("records nothing when the tool list fits", () => {
   const tools: ChatRequest["tools"] = Array.from({ length: 200 }, (_, i) => ({
-    provider: "custom" as const,
+    kind: "portable" as const,
     name: `f${i}`,
     inputSchema: { type: "object" },
   }));
@@ -345,7 +345,14 @@ test("records an anthropic-native block the router should never have sent here",
       messages: [
         {
           role: "assistant",
-          content: [{ type: "anthropicNative", blockType: "server_tool_use", data: {} }],
+          content: [
+            {
+              type: "providerNative",
+              provider: "anthropic",
+              blockType: "server_tool_use",
+              data: {},
+            },
+          ],
         },
       ],
     },

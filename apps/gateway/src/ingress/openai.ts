@@ -282,7 +282,7 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
     // This surface has no Anthropic-defined tools: a `function` entry is the
     // portable shape by construction.
     request.tools = parsed.tools.map((t) => ({
-      provider: "custom" as const,
+      kind: "portable" as const,
       name: t.function.name,
       ...(t.function.description !== undefined && { description: t.function.description }),
       inputSchema: t.function.parameters ?? { type: "object" },

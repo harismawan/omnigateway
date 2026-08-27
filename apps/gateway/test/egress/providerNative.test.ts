@@ -28,7 +28,8 @@ const searchEvents: StreamEvent[] = [
     type: "blockStart",
     index: 0,
     block: {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       blockType: "server_tool_use",
       data: { id: "srvtoolu_1", name: "web_search", input: {} },
     },
@@ -36,14 +37,15 @@ const searchEvents: StreamEvent[] = [
   {
     type: "blockDelta",
     index: 0,
-    delta: { type: "anthropicNativeJson", partial: '{"query":"bun"}' },
+    delta: { type: "providerNativeJson", provider: "anthropic", partial: '{"query":"bun"}' },
   },
   { type: "blockEnd", index: 0 },
   {
     type: "blockStart",
     index: 1,
     block: {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       blockType: "web_search_tool_result",
       data: { tool_use_id: "srvtoolu_1", content: [{ type: "web_search_result", url: "u" }] },
     },
@@ -122,19 +124,30 @@ test("citation and compaction deltas survive collection and streaming egress", a
     {
       type: "blockDelta",
       index: 0,
-      delta: { type: "anthropicNative", deltaType: "citations_delta", data: { citation } },
+      delta: {
+        type: "providerNative",
+        provider: "anthropic",
+        deltaType: "citations_delta",
+        data: { citation },
+      },
     },
     { type: "blockEnd", index: 0 },
     {
       type: "blockStart",
       index: 1,
-      block: { type: "anthropicNative", blockType: "compaction", data: { content: "" } },
+      block: {
+        type: "providerNative",
+        provider: "anthropic",
+        blockType: "compaction",
+        data: { content: "" },
+      },
     },
     {
       type: "blockDelta",
       index: 1,
       delta: {
-        type: "anthropicNative",
+        type: "providerNative",
+        provider: "anthropic",
         deltaType: "compaction_delta",
         data: { content: "summary", encrypted_content: "opaque" },
       },
@@ -170,7 +183,8 @@ test("a suppressed thinking block still renumbers around a native one", async ()
       type: "blockStart",
       index: 1,
       block: {
-        type: "anthropicNative",
+        type: "providerNative",
+        provider: "anthropic",
         blockType: "server_tool_use",
         data: { id: "s1", name: "web_search", input: {} },
       },

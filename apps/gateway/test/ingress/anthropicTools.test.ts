@@ -28,6 +28,7 @@ test("accepts the WebSearch declaration Claude Code sends", () => {
   });
   expect(req.tools).toEqual([
     {
+      kind: "provider",
       provider: "anthropic",
       family: "webSearch",
       type: "web_search_20250305",
@@ -53,7 +54,12 @@ test("every supported version parses with its fixed name", () => {
         : {}),
     };
     const req = parseAnthropicRequest(body);
-    expect(req.tools?.[0]).toMatchObject({ provider: "anthropic", family: spec.family, type });
+    expect(req.tools?.[0]).toMatchObject({
+      kind: "provider",
+      provider: "anthropic",
+      family: spec.family,
+      type,
+    });
   }
 });
 
@@ -68,7 +74,7 @@ test("an untagged custom tool and an explicit one normalize to the same variant"
   });
   expect(untagged.tools).toEqual(tagged.tools);
   expect(untagged.tools?.[0]).toEqual({
-    provider: "custom",
+    kind: "portable",
     name: "f",
     inputSchema: { type: "object" },
   });
@@ -169,8 +175,8 @@ test("latest tool versions validate and preserve new fields", () => {
   });
   expect(
     req.tools?.map((tool) => ({
-      type: tool.provider === "anthropic" ? tool.type : "",
-      wire: tool.provider === "anthropic" ? tool.wire : {},
+      type: tool.kind === "provider" ? tool.type : "",
+      wire: tool.kind === "provider" ? tool.wire : {},
     })),
   ).toEqual([
     {

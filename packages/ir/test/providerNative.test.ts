@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { AnthropicToolDef, ContentBlock, CustomToolDef } from "../src/request.ts";
+import type { AnthropicToolDef, ContentBlock, CustomToolDef, ToolDef } from "../src/request.ts";
 import { cacheControlOf } from "../src/request.ts";
 import type { StreamEvent, Usage } from "../src/stream.ts";
 import { collect } from "../src/stream.ts";
@@ -14,12 +14,13 @@ const usage = (): Usage => ({
 });
 
 const custom: CustomToolDef = {
-  provider: "custom",
+  kind: "portable",
   name: "get_weather",
   inputSchema: { type: "object" },
 };
 
 const webSearch: AnthropicToolDef = {
+  kind: "provider",
   provider: "anthropic",
   family: "webSearch",
   type: "web_search_20250305",
@@ -27,9 +28,10 @@ const webSearch: AnthropicToolDef = {
   wire: { max_uses: 5 },
 };
 
-test("an Anthropic-native block carries its wire type and payload verbatim", () => {
+test("a provider-native block carries its wire type and payload verbatim", () => {
   const block: ContentBlock = {
-    type: "anthropicNative",
+    type: "providerNative",
+    provider: "anthropic",
     blockType: "web_search_tool_result",
     data: { tool_use_id: "srvtoolu_1", content: [{ type: "web_search_result", url: "u" }] },
   };
@@ -46,20 +48,30 @@ test("collect assembles a native block start and its json deltas", () => {
       type: "blockStart",
       index: 0,
       block: {
-        type: "anthropicNative",
+        type: "providerNative",
+        provider: "anthropic",
         blockType: "server_tool_use",
         data: { id: "srvtoolu_1", name: "web_search", input: {} },
       },
     },
-    { type: "blockDelta", index: 0, delta: { type: "anthropicNativeJson", partial: '{"query":' } },
-    { type: "blockDelta", index: 0, delta: { type: "anthropicNativeJson", partial: '"bun"}' } },
+    {
+      type: "blockDelta",
+      index: 0,
+      delta: { type: "providerNativeJson", provider: "anthropic", partial: '{"query":' },
+    },
+    {
+      type: "blockDelta",
+      index: 0,
+      delta: { type: "providerNativeJson", provider: "anthropic", partial: '"bun"}' },
+    },
     { type: "blockEnd", index: 0 },
     { type: "end", stopReason: "pauseTurn", usage: usage() },
   ];
   const r = collect(events);
   expect(r.content).toEqual([
     {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       blockType: "server_tool_use",
       data: { id: "srvtoolu_1", name: "web_search", input: { query: "bun" } },
     },
@@ -74,7 +86,8 @@ test("collect keeps a native result block that carries no deltas", () => {
       type: "blockStart",
       index: 0,
       block: {
-        type: "anthropicNative",
+        type: "providerNative",
+        provider: "anthropic",
         blockType: "web_search_tool_result",
         data: { tool_use_id: "srvtoolu_1", content: [{ type: "web_search_result", url: "u" }] },
       },
@@ -84,7 +97,8 @@ test("collect keeps a native result block that carries no deltas", () => {
   ]);
   expect(r.content).toEqual([
     {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       blockType: "web_search_tool_result",
       data: { tool_use_id: "srvtoolu_1", content: [{ type: "web_search_result", url: "u" }] },
     },
@@ -100,12 +114,14 @@ test("native blocks survive validation without joining tool-id correlation", () 
         role: "assistant",
         content: [
           {
-            type: "anthropicNative",
+            type: "providerNative",
+            provider: "anthropic",
             blockType: "server_tool_use",
             data: { id: "srvtoolu_1", name: "web_search", input: {} },
           },
           {
-            type: "anthropicNative",
+            type: "providerNative",
+            provider: "anthropic",
             blockType: "web_search_tool_result",
             data: { tool_use_id: "srvtoolu_1", content: [] },
           },
@@ -117,8 +133,8 @@ test("native blocks survive validation without joining tool-id correlation", () 
     ],
   });
   expect(cleaned.messages[0]?.content.map((b) => b.type)).toEqual([
-    "anthropicNative",
-    "anthropicNative",
+    "providerNative",
+    "providerNative",
   ]);
 });
 
@@ -153,7 +169,8 @@ test("token estimation counts a native block's payload", () => {
         role: "assistant",
         content: [
           {
-            type: "anthropicNative",
+            type: "providerNative",
+            provider: "anthropic",
             blockType: "web_search_tool_result",
             data: { content: [{ type: "web_search_result", url: "u".repeat(400) }] },
           },
@@ -162,4 +179,24 @@ test("token estimation counts a native block's payload", () => {
     ],
   });
   expect(withNative).toBeGreaterThan(base + 80);
+});
+
+test("a portable tool and a tool the custom provider defines are distinguishable", () => {
+  // The portable variant's discriminant used to be `provider: "custom"` — the
+  // same string as the `custom` **provider id**, meaning something else
+  // entirely. Once the provider-defined variant carries a real `ProviderId`,
+  // these two tools collide on that field, and telling them apart is the whole
+  // reason the tag moved to `kind`.
+  const portable: CustomToolDef = { kind: "portable", name: "shared", inputSchema: {} };
+  const byCustomProvider: AnthropicToolDef = {
+    kind: "provider",
+    provider: "custom",
+    family: "webSearch",
+    type: "web_search_20250305",
+    name: "shared",
+    wire: {},
+  };
+  const tools: ToolDef[] = [portable, byCustomProvider];
+  expect(tools.filter((t) => t.kind === "portable")).toEqual([portable]);
+  expect(tools.filter((t) => t.kind === "provider")).toEqual([byCustomProvider]);
 });

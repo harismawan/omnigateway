@@ -58,7 +58,7 @@ test("counts tool definitions, including their schemas", () => {
   };
   const withTools = estimateInputTokens({
     ...base,
-    tools: [{ provider: "custom", name: "read", description: "reads a file", inputSchema: schema }],
+    tools: [{ kind: "portable", name: "read", description: "reads a file", inputSchema: schema }],
   });
   expect(withTools).toBeGreaterThan(estimateInputTokens(base) + 200);
 });
@@ -143,7 +143,7 @@ test("cached prefix spans tools and system before the conversation", () => {
     messages: [{ role: "user", content: [{ type: "text", text: "u".repeat(4_000) }] }],
     tools: [
       {
-        provider: "custom",
+        kind: "portable",
         name: "search",
         description: "d".repeat(4_000),
         inputSchema: { type: "object" },
