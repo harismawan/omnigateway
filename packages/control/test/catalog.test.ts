@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
+import type { ProviderId } from "@omni/ir";
+import { catalogModelAuths, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { PROVIDER_DESCRIPTORS, PROVIDER_IDS } from "@omni/providers/descriptors";
 import { providerCatalog } from "../src/catalog.ts";
 
@@ -29,7 +30,10 @@ test("every field the console reads survives assembly", () => {
     expect(provider.callback).toEqual(descriptor.callback);
     expect(provider.defaultModel).toBe(catalog.defaultModel);
     expect(provider.authTypes).toEqual(catalog.authTypes);
-    expect(provider.models).toEqual(catalog.models);
+    // Not a deep-equal against the catalog: the endpoint resolves each model's
+    // `auth` and lists fields rather than spreading them, so the two differ on
+    // purpose. The shape is pinned by its own test below.
+    expect(provider.models.map((m) => m.id)).toEqual(catalog.models.map((m) => m.id));
   }
 });
 
@@ -50,6 +54,33 @@ test("a model carries the pricing and limits the editor seeds a target from", ()
   ]);
   expect(typeof model?.limits.contextWindow).toBe("number");
   expect(typeof model?.limits.maxOutputTokens).toBe("number");
+});
+
+test("each model's auth arrives resolved, matching the catalog's own rule", () => {
+  // The console used to hold a second copy of this expression. The endpoint now
+  // answers it, so this asserts the answer is the same one `catalogModelAuths`
+  // gives — the single place that rule is allowed to live.
+  for (const provider of providerCatalog()) {
+    for (const model of provider.models) {
+      expect(model.auth).toEqual(catalogModelAuths(provider.id as ProviderId, model.id));
+      expect(model.auth).toBeDefined();
+    }
+  }
+});
+
+test("a model carries exactly the fields the console reads, and no others", () => {
+  // The guard against a spread. `ProviderModelChoice` gains a field, and without
+  // this it reaches every browser that loads the console with nothing failing —
+  // which is how `reasoningForm` shipped before this test existed.
+  const optional = new Set(["oauthLimits"]);
+  for (const provider of providerCatalog()) {
+    for (const model of provider.models) {
+      const keys = Object.keys(model)
+        .filter((k) => !optional.has(k))
+        .sort();
+      expect(keys).toEqual(["auth", "id", "label", "limits", "pricing"]);
+    }
+  }
 });
 
 test("router internals are not shipped to the browser", () => {

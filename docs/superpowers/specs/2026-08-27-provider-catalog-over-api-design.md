@@ -166,13 +166,30 @@ The catalog changes only at gateway boot, so it gets no `res:` topic. Adding one
 for data that changes once per process is the kind of thing the invalidation
 table's own comment warns against.
 
-**But a restart mid-session leaves the console holding the previous process's
-catalog**, and once plugins load providers that could mean a provider that no
-longer exists — a model picker offering targets nothing can serve. The console
-already polls `/health` to watch a gateway leave and return, precisely because
-that is the one question `/api/*` cannot answer during a restart. Invalidating
-the catalog on that transition closes it in one line, and is a better fit than a
-push topic for a value with this lifetime.
+**A restart mid-session leaves the console holding the previous process's
+catalog**, and once plugins load providers that could mean a model picker
+offering targets nothing can serve. An earlier draft of this section promised to
+close that by invalidating on the `/health` transition. **That was wrong twice
+over and is not built.**
+
+The `/health` watcher arms only on a *console-initiated* restart
+(`LifecycleControls`, `onSuccess: () => setWatching(true)`) and ends by calling
+`window.location.reload()`, so an invalidation beside it would be dead code and
+would miss every restart that matters — systemd, a deploy, `omni db restore`, a
+crash.
+
+The socket reconnect is the signal that would cover those, and the console
+already has `invalidateEveryTopic` for it. It is deliberately not used here,
+because its own comment states the rule: *"a reconnect says nothing about a
+captured body or about which plugins are installed."* The catalog changes at boot
+exactly as the plugin list does, and `/api/plugins` accepts the same staleness
+for the same reason. Adding the catalog and not the plugin list would be a second
+answer to one question.
+
+So the staleness is **accepted and documented**, not closed: a console open
+across an external restart may hold the previous process's catalog until it is
+reloaded. If that ever needs fixing, it should be fixed for the plugin list at
+the same time and by the same mechanism.
 
 ## Rules
 
@@ -203,7 +220,6 @@ what lets it, and it is unaffected by the console no longer being a consumer.
   the values now arrive.
 - **`draft.ts` helpers against a fixture catalog**, not the real one. A test that
   passes only because `kilo` happens to list 27 models is testing the catalog.
-- **Restart invalidation**: a `/health` transition refetches the catalog.
 
 ## Risks
 

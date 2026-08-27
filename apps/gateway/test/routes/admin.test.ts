@@ -219,6 +219,7 @@ test("every data route requires a session", async () => {
     "/api/credentials/health",
     "/api/credentials/quota/history",
     "/api/models",
+    "/api/catalog",
     "/api/keys",
     "/api/settings",
     "/api/usage",

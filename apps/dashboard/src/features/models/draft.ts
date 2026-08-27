@@ -43,6 +43,10 @@ function modelEntry(catalog: Catalog, provider: string, model: string): CatalogM
 function modelAuths(catalog: Catalog, provider: string, model: string): readonly AuthType[] | null {
   const entry = findProvider(catalog, provider);
   if (entry === undefined) return null;
+  // `auth` arrives resolved: the endpoint applies the model-states-its-own-set
+  // rule so this does not have to hold a second copy of it. The fallback is for
+  // a model the operator typed that the catalog does not list, which is unknown
+  // rather than forbidden — the same treatment the catalog itself gives it.
   return entry.models.find((choice) => choice.id === model)?.auth ?? entry.authTypes;
 }
 

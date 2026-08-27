@@ -37,7 +37,6 @@
         "@fontsource-variable/archivo": "^5.3.0",
         "@fontsource-variable/spline-sans-mono": "^5.3.0",
         "@omni/ir": "workspace:*",
-        "@omni/providers": "workspace:*",
         "@omni/store": "workspace:*",
         "@omnigateway/dashboard-sdk": "workspace:*",
         "@tanstack/react-query": "^5.101.4",
@@ -100,7 +99,7 @@
     },
     "packages/dashboard-sdk": {
       "name": "@omnigateway/dashboard-sdk",
-      "version": "0.1.0",
+      "version": "0.1.2",
       "dependencies": {
         "@omnigateway/plugin-api": "^0.1.0",
       },
@@ -120,7 +119,7 @@
     },
     "packages/plugin-api": {
       "name": "@omnigateway/plugin-api",
-      "version": "0.1.0",
+      "version": "0.1.2",
       "dependencies": {
         "zod": "4.4.3",
       },
