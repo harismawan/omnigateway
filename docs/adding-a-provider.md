@@ -10,18 +10,28 @@ HTTP may live — see [CLAUDE.md](../CLAUDE.md#architectural-boundaries) rules 2
 8, 9 and 10. [ARCHITECTURE.md](../ARCHITECTURE.md#providers) has the adapter
 shape and why the HTTP client is built on `node:http`.
 
-1. Start at `ProviderId` in `packages/ir/src/request.ts`. Adding a member makes the compiler
-   enumerate every exhaustive `Record<ProviderId, …>`; let it drive the work rather than keeping a
-   checklist. What it cannot find: hardcoded provider lists in tests (`kimi`, `custom`, `catalog`,
-   `proxy`), the dashboard's duplicated `PROVIDER_LABEL`, `PASTE_HINT`, and `PROVIDER_ORDER` maps,
-   the `--p-<id>` oklch pair in `theme/GlobalStyle.ts`, and free-text `"provider must be one of …"`
-   strings in CLI and control. Beware assertions that still pass by prefix.
+1. Start at `ProviderId` in `packages/ir/src/request.ts`, then write the descriptor. Adding a member
+   to the union makes the compiler enumerate the remaining exhaustive `Record<ProviderId, …>` maps —
+   there are far fewer than there used to be, because most of what used to be one table per concern
+   is now one field per provider on `ProviderDescriptor`.
+   Everything the descriptor holds is required, so the compiler asks for all of it in one place:
+   capabilities, `anthropicNativeTools`, `writeOverInput`, catalog, model prefixes, and the
+   presentation block (label, display order, terminal tone, `--p-<id>` colour in **both** themes,
+   paste hint). `callback` is optional and only for a provider using a loopback redirect.
+   What the compiler still cannot find: hardcoded provider lists in tests (`kimi`, `custom`,
+   `catalog`, `proxy`), and free-text `"provider must be one of …"` strings in CLI and control.
+   Beware assertions that still pass by prefix.
 2. No store migration. `credentials.provider` is `TEXT` with no `CHECK`, and `providerData` is
    free-form.
-3. Directory is `packages/providers/src/<id>/`: `index.ts` transport, `wire.ts` IR to request,
-   `decode.ts` stream to IR, `models.ts` catalog entry, plus `device.ts` where the provider wants a
-   stable client fingerprint. Mint fingerprints synthetically at connect time and freeze them onto
-   the credential; never read the real hostname or machine id.
+3. Directory is `packages/providers/src/<id>/`: `descriptor.ts` the record above, `index.ts`
+   transport, `wire.ts` IR to request, `decode.ts` stream to IR, `models.ts` catalog entry,
+   `profile.ts` header set and body key order, plus `device.ts` where the provider wants a stable
+   client fingerprint. Mint fingerprints synthetically at connect time and freeze them onto the
+   credential; never read the real hostname or machine id.
+   `descriptor.ts` must not import the adapter, and `profile.ts` must not be imported from
+   `descriptors.ts`. Both rules are one rule: `@omni/providers/descriptors` is a leaf the console and
+   the pure router bundle for the browser, adapters pull the HTTP client, and profiles read
+   `Bun.env`. `packages/providers/test/leafSubpaths.test.ts` enforces it.
 4. Fork `wire.ts` and `decode.ts` per provider. Never import another provider's directory: vendors
    look alike on paper and diverge in practice, a shared encoder collects a branch per quirk, and a
    cross-provider import is exactly what stops an adapter becoming a standalone plugin later.
@@ -30,9 +40,14 @@ shape and why the HTTP client is built on `node:http`.
    decoder and openai's responses codec, and paid with a regex rewriting degradation prefixes
    afterwards; it now forks both codecs into its own directory, emits `custom:*` degradations
    natively, and needs no other provider to build.
-5. Add `PROFILES.<id>` and `BODY_ORDER.<id>`. State in a comment whether the header set was captured
+5. Write `<id>/profile.ts`, exporting `<id>Profile` and `<id>BodyOrder`; the central `PROFILES` and
+   `BODY_ORDER` tables assemble over them. State in a comment whether the header set was captured
    from real traffic or constructed, as the kimi profile does. Put any version string the upstream
-   gates on behind `env()` so a stale value is an operator fix, not a release.
+   gates on behind `env()` so a stale value is an operator fix, not a release, and take those helpers
+   from `headers.ts` rather than from `profile.ts` — importing them from `profile.ts` closes a
+   module-initialisation cycle whose only symptom is a gateway that will not boot **on installations
+   that set an `OMNI_ORDER_*` variable**, because the helpers return their fallback before touching
+   the module-scope regex when the variable is unset. The suite stayed green through exactly that.
 6. OAuth is optional — `OAUTH_PROVIDERS` is `Partial`. Omit `usage` when there is no quota surface,
    so accounts read as unknown rather than unlimited. Refresh must retain the previous refresh token
    when a response omits one. Endpoints read from OIDC discovery must be validated as HTTPS on the
