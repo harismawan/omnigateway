@@ -123,3 +123,31 @@ export type ProviderDescriptor = {
  * absence means rather than inheriting one default.
  */
 export type ProviderDescriptors = Readonly<Record<string, ProviderDescriptor>>;
+
+/**
+ * What may name a provider.
+ *
+ * `ProviderId` is a validated string, and this is the validation. The id is not
+ * only a key: it becomes a `--p-<id>` custom property in the console's palette,
+ * a `plugin_<id>_<name>` table prefix, and a `plugin:<id>:<name>` channel topic.
+ * A rule that admitted anything else would push the refusal down into whichever
+ * of those noticed first, which is not the same place twice.
+ *
+ * The same expression `packages/plugin-api/src/manifest.ts` validates a plugin
+ * id with. Restated there rather than imported from here because that package is
+ * published and this one is not — but this is the copy every *provider* question
+ * reads, including the console palette's, which used to hold its own.
+ */
+export const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+
+/**
+ * Whether a string is shaped like a provider id.
+ *
+ * Format only. Whether the provider is *installed* is a different question with
+ * a different answer per caller — `putModel` accepts a target naming one that is
+ * not, for the same reason it accepts a dangling pin, while `createApiKey­Credential`
+ * refuses to mint an account for a provider that does not exist.
+ */
+export function isProviderIdFormat(value: unknown): value is ProviderId {
+  return typeof value === "string" && PROVIDER_ID_PATTERN.test(value);
+}

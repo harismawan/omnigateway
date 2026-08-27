@@ -66,14 +66,20 @@ export type ConnectStart = {
 export type ConnectPoll = { status: "complete"; id: string } | { status: "pending" };
 
 /**
- * Whether this names a provider at all — not whether it can be connected.
+ * Whether this names a provider this installation has — not whether it can be
+ * connected.
  *
  * `custom` is a `ProviderId` and has no authorization to start, so this is the
  * wrong question for the connect path and the right one for `add-key`. Callers
  * that mean "can I begin an OAuth flow for this" ask the provider table.
+ *
+ * Reads the registry at call time. It used to read `PROVIDER_IDS`, which is
+ * `Object.keys(...)` evaluated at import and therefore a snapshot taken before
+ * `loadPlugins()` ever runs — so a provider registered at boot would have been
+ * reported as not existing.
  */
 export function isProviderId(value: unknown): value is ProviderId {
-  return typeof value === "string" && PROVIDER_IDS.includes(value as ProviderId);
+  return typeof value === "string" && Object.hasOwn(PROVIDER_DESCRIPTORS, value);
 }
 
 /**

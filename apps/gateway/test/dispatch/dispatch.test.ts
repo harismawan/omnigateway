@@ -2108,3 +2108,79 @@ test("the auto-cache setting reaches the wire, on and off", async () => {
   expect(await wireBodyFor(off)).not.toContain("cache_control");
   off.close();
 });
+
+test("a candidate whose adapter is not injected fails INTERNAL, not silently", async () => {
+  // Dead code until `ProviderId` widened: with a closed union of six and
+  // `ADAPTERS` total over it, `deps.adapters[provider]` could not miss. It can
+  // now, because `deps.adapters` is a separate injection point from
+  // `PROVIDER_DESCRIPTORS` and the two can disagree — grok has a descriptor, so
+  // the router admits the target, and the map handed to dispatch has no adapter
+  // for it.
+  //
+  // `INTERNAL` and a throw, deliberately. Reaching here means the router
+  // admitted a candidate it should have excluded, which is a gateway bug rather
+  // than an operator one; a target naming a provider that is genuinely not
+  // installed is excluded upstream as `provider:missing` and never arrives.
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "g1",
+    provider: "grok",
+    label: "g1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "grok-key",
+    idToken: null,
+  });
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "grok",
+        model: "grok-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const configured = {
+    ...deps(
+      store,
+      stubAdapter(() => textStream("unreachable")),
+    ),
+    adapters: { anthropic: stubAdapter(() => textStream("unreachable")) },
+  };
+
+  // Thrown while draining, not from `dispatch` itself: the attempt loop runs
+  // inside the returned generator, so nothing fails until the first pull. That
+  // is worth pinning — a caller awaiting `dispatch` and never draining would see
+  // a clean resolve.
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_no_adapter");
+  // One drain, not two: a generator that has thrown is done, and a second pull
+  // resolves empty rather than throwing again.
+  const failure = await drain(outcome.events).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  expect(failure).toMatchObject({
+    code: "INTERNAL",
+    // Not retryable, so it ends the request rather than burning every remaining
+    // candidate on a bug none of them can fix.
+    retryable: false,
+  });
+  expect((failure as Error).message).toMatch(/no adapter for provider grok/);
+  store.close();
+});

@@ -56,6 +56,33 @@ test("createApiKeyCredential applies API-key defaults without returning the key"
   expect((await stored.openForInference()).apiKey).toBe("test-provider-key");
 });
 
+test("createApiKeyCredential refuses a provider this installation does not have", async () => {
+  // The existence check that `providerIdSchema` stopped making. The schema is
+  // format-only now, because an enum over the registry's keys is a snapshot
+  // taken at import — before `loadPlugins()` — and would have refused exactly
+  // the plugin providers this work exists to allow. Minting an account for a
+  // provider that does not exist produces a credential that stores, lists, and
+  // fails on first dispatch, so the refusal moved here rather than going away.
+  const store = await memoryStore();
+
+  const rejected = createApiKeyCredential(store, { provider: "acme", apiKey: "k" });
+  await expect(rejected).rejects.toThrow(GatewayError);
+  await expect(rejected).rejects.toThrow(/no provider named "acme"/);
+  expect(await store.credentials.list()).toHaveLength(0);
+});
+
+test("createApiKeyCredential refuses an id that cannot name a provider at all", async () => {
+  // The other half, and a different error: this one never reaches the existence
+  // check. Kept distinct because a single "invalid provider" message would hide
+  // which rule refused — format, or installation — and those have opposite fixes.
+  const store = await memoryStore();
+
+  await expect(
+    createApiKeyCredential(store, { provider: "Acme Corp", apiKey: "k" }),
+  ).rejects.toThrow(/provider/);
+  expect(await store.credentials.list()).toHaveLength(0);
+});
+
 test("createApiKeyCredential logs credential metadata without the API key", async () => {
   const store = await memoryStore();
   const logger = captureLogger();

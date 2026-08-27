@@ -1,5 +1,5 @@
 import type { CatalogAuth, ProviderModelChoice } from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
+import { PROVIDER_DESCRIPTORS, PROVIDER_ID_PATTERN } from "@omni/providers/descriptors";
 
 /**
  * One provider, as the console needs to render it.
@@ -85,15 +85,15 @@ function balancedParens(value: string): boolean {
 /**
  * A provider id that can be pasted into `--p-<id>` without escaping.
  *
- * The same expression `packages/plugin-api/src/manifest.ts` validates a plugin
- * id with, and for the same reason: a provider that arrives from a plugin is
- * named by that manifest, and the name is used to build a custom property, a
- * table name and a topic. Restated rather than imported because this is the
- * *palette's* requirement — an id that cannot be a CSS identifier cannot be
- * coloured — and the two happening to coincide today is not a reason for one to
- * silently follow the other if the manifest rule ever widens.
+ * This file used to restate the expression, on the argument that the palette's
+ * requirement is its own and should not silently follow another package's. The
+ * argument holds against `@omnigateway/plugin-api`, which is published and which
+ * this package does not depend on. It does not hold against `@omni/providers`:
+ * that is where the rule for what may name a provider now lives, and control
+ * already reads the registry it guards. Two copies of an identifier grammar in
+ * one dependency direction is the shape that diverges.
  */
-const SAFE_PROVIDER_ID = /^[a-z][a-z0-9-]{0,31}$/;
+const SAFE_PROVIDER_ID = PROVIDER_ID_PATTERN;
 
 /**
  * What a provider gets instead of a colour this endpoint refuses to serve.
