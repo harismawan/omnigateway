@@ -68,6 +68,10 @@ test("createApiKeyCredential refuses a provider this installation does not have"
   const rejected = createApiKeyCredential(store, { provider: "nonesuch", apiKey: "k" });
   await expect(rejected).rejects.toThrow(GatewayError);
   await expect(rejected).rejects.toThrow(/no provider named "nonesuch"/);
+  // The code, not just the message. `BAD_REQUEST` → `INTERNAL` survived a
+  // message-only assertion, which is an operator's typo rendered as a gateway
+  // bug: a 500 where the caller can see nothing to fix.
+  await expect(rejected).rejects.toMatchObject({ code: "BAD_REQUEST" });
   expect(await store.credentials.list()).toHaveLength(0);
 });
 
@@ -75,11 +79,17 @@ test("createApiKeyCredential refuses an id that cannot name a provider at all", 
   // The other half, and a different error: this one never reaches the existence
   // check. Kept distinct because a single "invalid provider" message would hide
   // which rule refused — format, or installation — and those have opposite fixes.
+  //
+  // Asserted against the *format* message specifically, and against the
+  // existence message being absent. `toThrow(/provider/)` matched both, so
+  // loosening `providerIdSchema` to `/^.+$/` — collapsing format into existence,
+  // exactly the confusion the comment above says this test prevents — passed
+  // here and in `schemas.test.ts` alike.
   const store = await memoryStore();
 
-  await expect(
-    createApiKeyCredential(store, { provider: "Acme Corp", apiKey: "k" }),
-  ).rejects.toThrow(/provider/);
+  const rejected = createApiKeyCredential(store, { provider: "Acme Corp", apiKey: "k" });
+  await expect(rejected).rejects.toThrow(/must be a lowercase provider id/);
+  await expect(rejected).rejects.not.toThrow(/no provider named/);
   expect(await store.credentials.list()).toHaveLength(0);
 });
 

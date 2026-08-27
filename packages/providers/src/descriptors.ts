@@ -14,11 +14,17 @@ export { isProviderIdFormat, PROVIDER_ID_PATTERN } from "./descriptor.ts";
 /**
  * Every provider's data, keyed by id.
  *
- * The six built-ins are written out here as literals, so a built-in with no
- * descriptor is a compile error in this one file — that much of the old
- * per-table exhaustiveness survives. The *type* is not total; see
- * `ProviderDescriptors`. Every other id-keyed table in this package is derived
- * by walking one of these lists, so they carry exactly the ids this one does.
+ * The six built-ins are written out here as literals. That is *not* a compile
+ * error if one goes missing — the type is `Record<string, …>`, which accepts any
+ * subset, so writing the ids as literals constrains nothing. Measured: deleting
+ * a line here typechecks cleanly. What catches it is the unused-import lint and
+ * `test/descriptor.test.ts`, whose key-set equality reads a literal list of its
+ * own.
+ *
+ * Nor is the rest of the package derived from this: `ADAPTERS`, `PROFILES`,
+ * `BODY_ORDER` and `PROVIDER_MODEL_CATALOG` are hand-written six-key literals
+ * too, and only `PROVIDERS` walks. `descriptor.test.ts` is what holds all of
+ * them to the same id set.
  *
  * This module is deliberately free of imports beyond the descriptor files and a
  * type, for the same reason `catalog.ts` is: `@omni/providers/descriptors` is a

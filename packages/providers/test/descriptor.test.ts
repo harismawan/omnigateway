@@ -129,13 +129,29 @@ describe("the registry describes every provider", () => {
 
   test("a descriptor missing a required field does not satisfy the type", () => {
     // The negative case, without which the completeness test above passes
-    // against a validator that does nothing. This is a compile-time guarantee,
-    // so the assertion is that the cast is needed at all: remove `writeOverInput`
-    // from `ProviderDescriptor` and this stops being an error.
+    // against a validator that does nothing. It is a compile-time guarantee, so
+    // what is asserted is that the directive is *needed*: make `writeOverInput`
+    // optional on `ProviderDescriptor` and TypeScript reports the
+    // `@ts-expect-error` as unused, which fails the typecheck.
+    //
+    // Every other required field is present, and that is the whole design of
+    // this fixture. Two earlier versions were satisfied by something other than
+    // the field they named — first by `modelPrefixes` and `presentation` being
+    // absent too, then by `PROVIDER_MODEL_CATALOG.anthropic` turning nullable
+    // when the table's key widened to `string`. A negative control that passes
+    // for an unrelated reason is indistinguishable from one that works, so this
+    // one is deliberately complete except for the single field under test.
     const incomplete = {
       id: "anthropic",
       capabilities: { tools: true, images: true, reasoning: true },
-      catalog: PROVIDER_MODEL_CATALOG.anthropic,
+      catalog: entry(PROVIDER_MODEL_CATALOG, "anthropic", "PROVIDER_MODEL_CATALOG"),
+      modelPrefixes: ["claude-"],
+      presentation: {
+        label: "Anthropic",
+        order: 1,
+        tone: "magenta",
+        colour: { light: "oklch(0.56 0.13 45)", dark: "oklch(0.74 0.12 48)" },
+      },
     };
     // @ts-expect-error — `writeOverInput` is required and absent.
     const rejected: ProviderDescriptor = incomplete;

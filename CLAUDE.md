@@ -420,15 +420,41 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   preserve while breaking the real thing.
 - **`ProviderId` is a validated string, not a union of six.** A provider loaded from
   `<root>/plugins/` has an id no compiled-in union could hold, so a closed type there is a closed
-  door here. The six built-ins are still written as literals in `descriptors.ts` and `ADAPTERS`, so a
-  built-in with no descriptor or adapter is still a compile error — in one file rather than eight —
-  and every other id-keyed table is derived by walking one of those, so it carry exactly their ids.
+  door here.
+  **What this cost, stated exactly, because the first version of this bullet overstated it and a
+  rule stated wrong is one a contributor preserve while breaking the real thing.** Five tables key
+  on a provider id — `PROVIDER_DESCRIPTORS`, `ADAPTERS`, `PROFILES`, `BODY_ORDER`,
+  `PROVIDER_MODEL_CATALOG` — and each is a hand-written six-key literal. Only `PROVIDERS` is derived
+  by walking one. Delete a built-in's line from any of the five and **typecheck pass**: measured, all
+  five. `Record<string, X>` accept any subset, so writing the ids as literals constrain nothing once
+  the key type open. What catch it is **lint** (the import go unused) and
+  `packages/providers/test/descriptor.test.ts` (key-set equality against a literal `IDS`) — never the
+  compiler. Do not write "compile error" here again; if the guarantee need to be stronger, the
+  honest move is a derived table, not a stronger sentence.
   Lookups keyed on a **stored** id are genuinely partial and `noUncheckedIndexedAccess` make each a
   compile error at the point of use. Do not cast that away; each site owe a decision, and the
-  decisions differ. `PROVIDER_ID_PATTERN` in `packages/providers` is the **one** copy of what may
-  name a provider — `packages/control/src/catalog.ts` re-export it. `@omnigateway/plugin-api` mirror
-  it instead, same mirror-and-pin reason as `@omni/ratelimit/catalog`: that package published, this
-  one not.
+  decisions differ. `PROVIDER_ID_PATTERN` in `packages/providers` is the source of what may name a
+  provider; `packages/control/src/catalog.ts` read it rather than restating it. Four other copies of
+  the same expression validate a **plugin** id — `packages/plugin-api/src/manifest.ts` (published, so
+  justified), `apps/gateway/src/plugins/routes.ts`, `packages/control/src/plugins.ts`,
+  `packages/store/src/sqlite/plugins.ts` — and **no test pin any of them to this one**. A plugin
+  provider's id is both kinds at once, so that is a real gap, not a technicality; do not describe it
+  as mirror-and-pin, which is what `@omni/ratelimit/catalog` have and this not.
+- **Every provider-keyed table drop its prototype, and that is one invariant standing in for a guard
+  at each reader.** `PROVIDER_DESCRIPTORS`, `ADAPTERS`, `PROFILES`, `BODY_ORDER`,
+  `PROVIDER_MODEL_CATALOG` and `PROVIDERS` each end with `Object.setPrototypeOf(…, null)`; six
+  mutants covering their removal all die. Reason: a provider id arrive from a client's `model` name
+  and from unvalidated JSON in `virtual_models.targets`, and on ordinary object literal
+  `table["constructor"]` answer the `Object` constructor. So `!== undefined` and `?.` both read
+  "installed", then throw on next property access. Shipped once: `resolveModel` replaced a `Set.has`
+  — which never consult a prototype — with an index check, and `model: "constructor/foo"` returned
+  **500 carrying an internal source expression** where `nope/foo` correctly returned 503. Same keys
+  defeated four more readers including the `provider:missing` guard and `omni doctor`'s check, each
+  going silent in the exact case it exist for. **`noUncheckedIndexedAccess` cannot see any of it** —
+  it force a guard, and the guard it force is the one a prototype key defeat. Do not add
+  `Object.hasOwn` at the readers instead: it cover only those asking existence, not `catalogPricing`'s
+  `?.`, and partial protection that read as total is worse than none. That version was written, and
+  every one of its mutants survived removal.
 - **A module-scope `Object.keys(PROVIDER_DESCRIPTORS)` is a build-time snapshot**, and `loadPlugins()`
   run long after import. Three sites read one and were wrong the same way: `providerCatalog` served a
   console missing every plugin provider, `providerIdSchema` was `z.enum(PROVIDER_IDS)` and would have

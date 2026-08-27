@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { credential, health, quota, snapshot, target } from "@omni/testkit";
 import { eligible, requiredCapabilities } from "../src/filters.ts";
 
@@ -666,4 +667,72 @@ test("an installed provider's targets are unaffected by the check", () => {
 
   expect(pairs.map((p) => p.target.provider)).toEqual(["anthropic"]);
   expect(excluded.map((e) => e.reason)).toEqual(["provider:missing"]);
+});
+
+test("every broken target in a pool reports, wherever it sits in the list", () => {
+  // Two mutants that every other test in this block misses, because each uses a
+  // single-target pool and the one multi-target pool has its broken target
+  // first: a dedupe flag hoisted *outside* the target loop (one row per pool),
+  // and a guard applied to `targets[0]` alone. This is the `pinSeen`-hoist trap
+  // CLAUDE.md already records for `pin:missing`, one guard higher up.
+  //
+  // Healthy target first, then two broken ones naming *different* providers, so
+  // a per-pool dedupe cannot pass by coincidence either.
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([
+      target(),
+      target({ provider: "nonesuch", model: "nonesuch-1" }),
+      target({ provider: "alsogone", model: "alsogone-1" }),
+    ]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs.map((p) => p.target.provider)).toEqual(["anthropic"]);
+  expect(excluded).toEqual([
+    { kind: "target", credentialId: "", model: "nonesuch-1", reason: "provider:missing" },
+    { kind: "target", credentialId: "", model: "alsogone-1", reason: "provider:missing" },
+  ]);
+});
+
+test("the registry is read when the request is routed, not when the module loaded", () => {
+  // The comment on the guard claims a call-time read, and the spec names three
+  // sites that got exactly this wrong — `Object.keys(...)` at import is a
+  // snapshot taken long before `loadPlugins()` runs. Nothing distinguished a
+  // call-time read from a module-scope `Set` built once, so a mutant that
+  // reintroduced the snapshot survived.
+  //
+  // Registering a descriptor mid-test is what the plugin host will do. The
+  // precedent for mutating this registry and restoring in a `finally` is
+  // `packages/control/test/catalog.test.ts`; the id here is its own, because a
+  // second suite reading the same global for the opposite fact is what made the
+  // doctor test fail one run in six.
+  const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
+  const seed = PROVIDER_DESCRIPTORS.anthropic;
+  const input = {
+    request: req,
+    model: model([target({ provider: "late-arrival", model: "late-1" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "late-arrival" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  };
+
+  // Before registration: excluded, which is the rest of this block's subject.
+  expect(eligible(input).excluded.map((e) => e.reason)).toEqual(["provider:missing"]);
+
+  registry["late-arrival"] = { ...seed, id: "late-arrival" };
+  try {
+    const { pairs, excluded } = eligible(input);
+    expect(excluded).toEqual([]);
+    expect(pairs.map((p) => p.credential.id)).toEqual(["a"]);
+  } finally {
+    delete registry["late-arrival"];
+  }
+
+  // And gone again, so the mutation cannot leak into another test in this file.
+  expect(eligible(input).excluded.map((e) => e.reason)).toEqual(["provider:missing"]);
 });

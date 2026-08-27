@@ -54,14 +54,21 @@ writes silently and permanently.
 
 So the replacement is **validation at registration**, not defaults at lookup:
 
-- A descriptor missing a required field, or carrying an id that is not a usable
-  identifier, fails to register and is reported. For a built-in that is a
-  compile error as it is today, because the six are still written as literals.
-  For a plugin it is a load failure, skipped and reported, never fatal — boundary
-  rule 15.
-- Lookups keyed on a registered id stay total **by construction**: `BODY_ORDER`,
-  `PROFILES` and `PROVIDERS` are assembled by walking the registry, so they carry
-  exactly the ids it holds.
+- A descriptor missing a required field fails to compile, because every field on
+  `ProviderDescriptor` is required. A descriptor carrying an unusable id is a
+  load failure for a plugin — skipped and reported, never fatal, boundary rule
+  15.
+- A built-in **absent** from one of the tables is a different matter, and this
+  spec originally got it wrong. `BODY_ORDER`, `PROFILES`, `ADAPTERS` and
+  `PROVIDER_MODEL_CATALOG` are *not* assembled by walking the registry; they are
+  hand-written six-key literals, as `PROVIDER_DESCRIPTORS` itself is. Only
+  `PROVIDERS` walks. Since the key type is `string`, a missing entry typechecks
+  cleanly — measured on all five. The lint (unused import) and
+  `descriptor.test.ts` (key-set equality against a literal) are the net. See the
+  *Sites* table below, which said this correctly while this paragraph did not.
+- Lookups keyed on a registered id are total in *fact*, then, rather than by
+  construction or by type — which is worth writing down as the weaker claim it
+  is, because a reader who believes the stronger one skips the lint run.
 - Lookups keyed on a *stored* id — a `Target.provider` read back from SQLite —
   become genuinely partial, because the database can name a provider that is no
   longer installed. Those are enumerated below and each gets a decision.
@@ -77,8 +84,19 @@ requirement, the two coinciding today is not a reason for one to follow the othe
 silently, and that package is published while this one is not.
 
 `packages/control/src/catalog.ts` already validates provider ids for the palette
-with an identical expression. That becomes a re-export of the one rule; two
-copies of an identifier grammar is exactly the shape this work has been removing.
+with an identical expression. That reads the shared one instead; two copies of an
+identifier grammar is exactly the shape this work has been removing.
+
+**It did not remove all of them, and claiming otherwise would be worse than the
+duplication.** Four further byte-identical copies validate a *plugin* id:
+`packages/plugin-api/src/manifest.ts` (published, so genuinely justified),
+`apps/gateway/src/plugins/routes.ts`, `packages/control/src/plugins.ts`, and
+`packages/store/src/sqlite/plugins.ts`. No test pins any of them to
+`PROVIDER_ID_PATTERN`. That is not the mirror-and-pin arrangement
+`@omni/ratelimit/catalog` has — a mirror with no pin is just a copy — and since a
+plugin provider's id is a provider id *and* a plugin id at once, the two grammars
+cannot drift apart without something breaking. Pinning them belongs to the
+plugin-host sub-project, where the provider capability makes the overlap real.
 
 ## The stored-id problem
 
@@ -208,6 +226,40 @@ values — `PROVIDER_ID_PATTERN` and `isProviderIdFormat` — so it joins the
 `@omni/providers/descriptors` leaf bundle. It stays leaf-safe on the same terms
 as the rest of it: a regular expression and a predicate, no adapter, no HTTP
 client, no `Bun.env`, and `leafSubpaths.test.ts` still proves each of those.
+(`isProviderIdFormat` currently has no caller; if the plugin host does not want
+it, delete it rather than leave an exported predicate nothing asks.)
+
+### The bug this shipped with, and what it changed
+
+Review found one, reachable by any client holding a valid API key, and it is the
+clearest argument for the design note above about which guard
+`noUncheckedIndexedAccess` forces.
+
+`resolveModel` asked `PROVIDERS.has(prefix)` against a `Set`, which never
+consults a prototype. Widening replaced it with
+`PROVIDER_DESCRIPTORS[prefix] !== undefined` against a plain object literal,
+which does — so `constructor`, `toString`, `valueOf` and `hasOwnProperty` all
+answered "installed", and the next property access threw a raw `TypeError` that
+`classify` reads as `INTERNAL`. `model: "constructor/foo"` returned a 500 whose
+body carried an internal source expression, where `model: "nope/foo"` correctly
+returned a 503. Four more readers were defeated by the same keys, two of them
+added by this very sub-project: the `provider:missing` guard was skipped
+entirely, producing the empty exclusion list it exists to prevent, and the new
+`omni doctor` check reported "none" for exactly the corrupt rows it is for.
+
+The fix is one invariant rather than five guards: every provider-keyed table
+drops its prototype. Guarding the readers would have covered only those asking
+an existence question and not `catalogPricing`'s `?.`, and partial protection
+that reads as total is worse than none. An intermediate version did both;
+mutation testing showed the `Object.hasOwn` calls all survived removal, so they
+went — the repository's own note that "decoration in security path invite belief
+that something is being done" decided it.
+
+The general lesson belongs in the spec because it generalises past this change:
+**`noUncheckedIndexedAccess` forces a guard, and on a plain object literal the
+guard it forces is the one a prototype key defeats.** Widening a key type to
+`string` is therefore not only a totality question; it is also the moment a
+table starts answering questions about JavaScript's own object model.
 
 ## Out of scope
 
