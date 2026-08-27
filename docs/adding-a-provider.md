@@ -18,9 +18,19 @@ shape and why the HTTP client is built on `node:http`.
    capabilities, `anthropicNativeTools`, `writeOverInput`, catalog, model prefixes, and the
    presentation block (label, display order, terminal tone, `--p-<id>` colour in **both** themes,
    paste hint). `callback` is optional and only for a provider using a loopback redirect.
-   What the compiler still cannot find: hardcoded provider lists in tests (`kimi`, `custom`,
-   `catalog`, `proxy`), and free-text `"provider must be one of …"` strings in CLI and control.
-   Beware assertions that still pass by prefix.
+   **One core edit remains and the compiler will not find it**:
+   `packages/control/src/schemas.ts`'s target union keeps its arms hand-written, because deriving
+   them widens the arm's inferred `provider` back to `ProviderId` and costs the exhaustiveness the
+   union exists for. Add the id to the non-custom arm, or a credential creates fine and no target
+   using it can be saved. `packages/control/test/providerCoverage.test.ts` fails until you do.
+   Also runtime-only, measured by adding a seventh provider rather than recalled: hardcoded lists in
+   `packages/providers/test/{kimi,custom,kilo,catalog}.test.ts` — three of which carry byte-identical
+   copies of the same `Object.keys(ADAPTERS)` assertion — plus `apps/cli/test/commands.test.ts` and
+   `packages/dashboard-sdk/test/theme.test.ts`. That last one is the trap: the console derives its
+   `--p-<id>` variables from the registry, but the **published** `@omnigateway/dashboard-sdk` lists
+   them, so a provider needs its colour added there by hand.
+   The free-text `"provider must be one of …"` strings are now derived and need no edit, and
+   `proxy.test.ts` is compiler-caught. Beware assertions that still pass by prefix.
 2. No store migration. `credentials.provider` is `TEXT` with no `CHECK`, and `providerData` is
    free-form.
 3. Directory is `packages/providers/src/<id>/`: `descriptor.ts` the record above, `index.ts`

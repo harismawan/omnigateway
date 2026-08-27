@@ -18,8 +18,10 @@ import type { ProviderModelCatalogEntry } from "./catalog-types.ts";
  * - Profiles read `Bun.env`, and `descriptors.ts` is a leaf the console and the
  *   pure router bundle for the browser.
  *
- * `ProviderRegistryEntry` in `registry.ts` is where all of it is joined, and it
- * is what anything holding a live adapter should read.
+ * `ProviderRegistryEntry` in `registry.ts` joins all of it. Nothing in production
+ * reads that join today — dispatch takes `ADAPTERS` — so it exists for a caller
+ * that wants a provider whole, and its own test is currently its only consumer.
+ * Worth deleting if none appears.
  *
  * Every field is required. There are no defaults on purpose: `writeOverInput`
  * defaulting to zero would underprice cache writes silently and permanently,

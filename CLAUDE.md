@@ -133,7 +133,14 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     Outbound frame reuse socket registry's own bounded per-connection queue — no second queue, and
     nothing here touch `Store`.
 16. **No provider-specific code in a core module.** `ir`, `router`, `store`, `control`, `ratelimit`,
-    `rtk` never name a provider, never branch on a provider id, never hold a table keyed by one. A
+    `rtk` hold no per-provider data and, with two named exceptions, never branch on a provider id.
+    `packages/store` and `packages/ir` are clean of both. The two that remain, and stay until the
+    sub-project that owns them: `router/src/resolve.ts` excludes `custom` from prefix routing,
+    because a bare model name cannot carry an endpoint id; and `control/src/schemas.ts` keeps the
+    target union's arms hand-written, because deriving them widens the arm's inferred `provider`
+    back to `ProviderId` and costs the exhaustiveness the union exists for. That second one **is** a
+    core edit a seventh provider must make — `packages/control/test/providerCoverage.test.ts` fail
+    until it do, and `docs/adding-a-provider.md` say so. A
     provider's data live in its own descriptor; core read the registry it is handed. Core cannot
     scan providers — `packages/providers` import `@omni/ir`, so reverse import is a cycle, and rules
     1 and 3 forbid it anyway. Injection is the only direction.
@@ -145,9 +152,11 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     data and delete `needsAnthropicNative`, `ANTHROPIC_NATIVE_TOOLS` and the table read inside pure
     router. Hook set is **closed**; growing it need a specific core site, a provider that cannot work
     without it, and no self-describing alternative. `LogFields` never extensible — closed allowlist
-    and redaction boundary. `servesTarget` stay one rule with **one** call site consulting descriptor
-    from inside itself, because five sites once asked that question separately and three asked less
-    than the router did.
+    and redaction boundary. `servesTarget` stay one rule in `@omni/store/types`, because five sites once
+    asked that question separately and three asked less than the router did. It consult **no**
+    descriptor and import nothing from `@omni/providers` — that would be the cycle rules 1 and 3
+    forbid. It name no provider either: rule is "target naming an endpoint is served only by account
+    at it", which cover `custom` without saying so.
     **Redaction never becomes extensible**, same family as `LogFields` and for the same reason.
     `MASK_RULES` in `packages/store/src/bodies/mask.ts` keep its `xaiKey` rule and its vendor
     prefixes in core, and a provider **not** supply its own pattern: a descriptor-supplied regex is a

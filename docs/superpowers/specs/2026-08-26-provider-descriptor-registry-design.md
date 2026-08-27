@@ -98,7 +98,14 @@ export type ProviderDescriptor = {
   /** Was PROVIDER_CAPABILITIES (ir/capabilities.ts:43). */
   readonly capabilities: ProviderCapabilities;
 
-  /** Was ANTHROPIC_NATIVE_TOOLS (ir/capabilities.ts:23). */
+  /**
+   * Was ANTHROPIC_NATIVE_TOOLS (ir/capabilities.ts:23).
+   *
+   * Shipped in this sub-project and **deleted by the next one**: once a native
+   * block records the provider that produced it, the routing rule reads the
+   * block and this flag has no readers. Left in the sketch because this document
+   * describes what this sub-project built.
+   */
   readonly anthropicNativeTools: boolean;
 
   /** Was WRITE_OVER_INPUT (gateway/dispatch/price.ts:17). */
@@ -220,7 +227,8 @@ Behaviour-preserving throughout. Each step replaces a read, not a value.
    into descriptors. `packages/ir` must not import `packages/providers`
    (boundary rule 1), so the two tables become registry reads at their consumers:
    `packages/router/src/resolve.ts:53`, `packages/router/src/filters.ts:60`, and
-   `apps/cli/src/commands/models.ts:166`. The router stays pure — it reads a
+   `apps/cli/src/commands/models.ts:166`. (The `filters.ts` read is itself removed
+   by the next sub-project, which deletes the table it consults.) The router stays pure — it reads a
    record it is handed, exactly as it reads the snapshot today.
 3. **`packages/providers`** — `BODY_ORDER` and `PROFILES` assemble over
    per-provider files; `ADAPTERS` stays a total record.

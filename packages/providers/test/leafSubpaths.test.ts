@@ -6,6 +6,17 @@ import { PROVIDER_IDS } from "../src/descriptors.ts";
 const SRC = resolve(import.meta.dir, "../src");
 
 /**
+ * The provider directories, as an alternation.
+ *
+ * Derived rather than written `[a-z]+`, which was the shape this file used until
+ * a review pointed out it fails a correct provider whose id carries a digit,
+ * hyphen, underscore or capital — `z-ai`, `01ai`, `together-ai` all break a
+ * legitimate addition. The count below was derived one commit earlier for
+ * exactly this reason; the pattern was missed in the same edit.
+ */
+const DIRS = PROVIDER_IDS.map((id) => id.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|");
+
+/**
  * Every module reachable from an entry point, and every bare specifier it names.
  *
  * Uses `Bun.Transpiler.scanImports` — the same parser that builds the code. Two
@@ -67,9 +78,8 @@ test("the descriptors subpath reaches only descriptors and model lists", () => {
   // dependency. The leaf is allowed none.
   expect(bare).toEqual([]);
 
-  const unexpected = files.filter(
-    (f) => !/^(descriptors\.ts|[a-z]+\/(descriptor|models)\.ts)$/.test(f),
-  );
+  const allowed = new RegExp(`^(descriptors\\.ts|(${DIRS})\\/(descriptor|models)\\.ts)$`);
+  const unexpected = files.filter((f) => !allowed.test(f));
   expect(unexpected).toEqual([]);
 
   // Derived, not a constant. A seventh provider is a correct change and must not
@@ -82,7 +92,8 @@ test("the catalog subpath reaches only model lists", () => {
   const { files, bare } = graphOf("catalog.ts");
 
   expect(bare).toEqual([]);
-  const unexpected = files.filter((f) => !/^(catalog\.ts|[a-z]+\/models\.ts)$/.test(f));
+  const allowed = new RegExp(`^(catalog\\.ts|(${DIRS})\\/models\\.ts)$`);
+  const unexpected = files.filter((f) => !allowed.test(f));
   expect(unexpected).toEqual([]);
   expect(files.length).toBe(1 + PROVIDER_IDS.length);
 });
@@ -93,12 +104,21 @@ test("the catalog subpath reaches only model lists", () => {
  * bundle check survives rather than being replaced by it. The two instruments
  * cover different things and neither is sufficient alone.
  */
-test("neither leaf reaches Bun.env or the transport in the built bundle", async () => {
+test("neither leaf reaches Bun, an env read, or an unresolvable import", async () => {
   for (const entry of ["descriptors.ts", "catalog.ts"]) {
-    expect(await bundleMarkers(entry, ["Bun.env", "process.env", "node:http"])).toEqual({
-      "Bun.env": false,
+    expect(await bundleMarkers(entry, ["Bun", "process.env", "import(", "import.meta"])).toEqual({
+      // The bare token, not `Bun.env`. A probe for `Bun.env` misses `Bun["env"]`,
+      // `const { env } = Bun` and `const B = Bun; B.env` — three reads that all
+      // throw in a browser and all left the previous probe green.
+      Bun: false,
       "process.env": false,
-      "node:http": false,
+      // A leaf has no dynamic imports at all, which is the only assertion that
+      // catches an unresolvable specifier. `import(`./${id}/index.ts`)` — the
+      // lazy adapter loader a contributor would naturally write — is invisible
+      // to the import walk *and* to the bundler, so neither of the other two
+      // instruments can see it. That is a third region, not a gap in one of them.
+      "import(": false,
+      "import.meta": false,
     });
   }
 });
@@ -114,5 +134,17 @@ test("the package root does reach the transport, so the checks above mean someth
   expect(files.some((f) => /^[a-z]+\/index\.ts$/.test(f))).toBe(true);
   expect(bare).toContain("node:http");
 
-  expect(await bundleMarkers("index.ts", ["Bun.env"])).toEqual({ "Bun.env": true });
+  // Positive controls for both bundle probes that do real work. `process.env`
+  // fires nowhere in this package, so it is asserted above without a control and
+  // proves only that nothing introduced it.
+  expect(await bundleMarkers("index.ts", ["Bun"])).toEqual({ Bun: true });
+
+  // `import(` has no legitimate occurrence in this package, so its probe needs a
+  // fixture that deliberately contains one. Without this, "no dynamic import in
+  // the leaf" would pass against a probe that never fires.
+  const probe = resolve(import.meta.dir, "fixtures/dynamicImportProbe.ts");
+  const built = await Bun.build({ entrypoints: [probe], target: "browser" });
+  expect(built.success).toBe(true);
+  const code = (await Promise.all(built.outputs.map((a) => a.text()))).join("\n");
+  expect(code.includes("import(")).toBe(true);
 });
