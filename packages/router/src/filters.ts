@@ -80,13 +80,27 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
     // endpoint checks, so a pin at another provider's account counts as unseen
     // rather than as a way around those checks.
     let pinSeen = false;
+    // Whether any account of this provider existed at all. Distinguishes "the
+    // operator has not connected this provider" — silent by design, and visible
+    // as an empty pool — from "accounts exist and the endpoint rule refused
+    // every one", which is a target nothing can serve and which otherwise
+    // produces no `excluded` row at all. See the note below `pinSeen`'s use.
+    let providerSeen = false;
+
+    // Whether any account got past `servesTarget` for this target. Distinct from
+    // `providerSeen`: accounts dropped later — disabled, expired, breakered,
+    // quota-spent — each leave their own row, so only a target nothing *serves*
+    // is unexplained.
+    let servedAny = false;
 
     for (const credential of snapshot.credentials) {
+      if (credential.provider === target.provider) providerSeen = true;
       // Provider, custom endpoint and pin in one question, from the single copy
       // of that rule in `@omni/store/types`. Silent: an account this excludes
       // was never a candidate for the target, and one `excluded` row per
       // sibling would bury the reasons describing the pinned account itself.
       if (!servesTarget(target, credential)) continue;
+      servedAny = true;
       pinSeen = target.credentialId !== undefined;
 
       const drop = (reason: string, kind: Excluded["kind"] = "account"): void => {
@@ -143,6 +157,22 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
       }
 
       pairs.push({ credential, target });
+    }
+
+    // The same argument as `pin:missing`, for the rule beside the pin. An
+    // endpoint mismatch drops every credential silently, so a target naming an
+    // endpoint no account is at — or carrying a corrupt one after an
+    // unvalidated read — fails every request with nothing to explain it, and
+    // `omni doctor` only inspects pinned targets. Emitted once per target, and
+    // only when accounts of the provider existed: a provider with no accounts
+    // at all is an empty pool, which is already legible.
+    if (target.credentialId === undefined && providerSeen && !servedAny) {
+      excluded.push({
+        kind: "target",
+        credentialId: "",
+        model: target.model,
+        reason: "endpoint:unmatched",
+      });
     }
 
     // A pin at an account that was deleted, or that belongs to another

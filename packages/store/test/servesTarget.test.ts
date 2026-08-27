@@ -126,3 +126,50 @@ test("an account bound to an endpoint refuses a target that names none", () => {
   const bound = account({ provider: "anthropic", providerData: { endpointId: "stray" } });
   expect(servesTarget({ provider: "anthropic" }, bound)).toBe(false);
 });
+
+/**
+ * `providerData` is `Record<string, unknown>` and `sqlite/credentials.ts` reads
+ * it back with a bare `JSON.parse`, so `endpointId` can hold any JSON value.
+ *
+ * These exist because the commit that fixed this shipped **no test at all**, and
+ * reverting it passed the entire suite. A present-but-uncomparable id must match
+ * nothing — not read as "no endpoint", which is how a custom target naming none
+ * came to be served by any account whose id was a number or an object.
+ */
+const CORRUPT: readonly unknown[] = [0, 42, null, false, {}, [], ["endpoint-a"]];
+
+test("an account whose endpoint id is not a string serves no target", () => {
+  for (const endpointId of CORRUPT) {
+    const corrupt = account({ providerData: { endpointId } });
+    // Against a target naming no endpoint: the case that regressed.
+    expect(servesTarget({ provider: "custom" }, corrupt)).toBe(false);
+    // And against one naming a real endpoint, which it plainly is not at.
+    expect(servesTarget({ provider: "custom", endpointId: "endpoint-a" }, corrupt)).toBe(false);
+  }
+});
+
+test("a pin does not rescue an account whose endpoint id is not a string", () => {
+  for (const endpointId of CORRUPT) {
+    const corrupt = account({ id: "acc", providerData: { endpointId } });
+    expect(servesTarget({ provider: "custom", credentialId: "acc" }, corrupt)).toBe(false);
+  }
+});
+
+test("two identically corrupt endpoint ids still do not match each other", () => {
+  // The case a single hoisted sentinel would get wrong: it would make every
+  // corrupt value equal every other, which is looser than the rule this
+  // replaced — that one compared raw values, so `42 !== {}` refused. A shared
+  // sentinel passes every other test in this file, so without this one the
+  // difference between "matches nothing" and "matches anything corrupt" is
+  // unpinned.
+  for (const endpointId of CORRUPT) {
+    const corrupt = account({ providerData: { endpointId } });
+    // `endpointId` on the target is typed `string | undefined`, so a corrupt
+    // value only reaches it from an unvalidated read. Cast to model that row.
+    const target = { provider: "custom", endpointId } as unknown as {
+      provider: "custom";
+      endpointId?: string;
+    };
+    expect(servesTarget(target, corrupt)).toBe(false);
+  }
+});
