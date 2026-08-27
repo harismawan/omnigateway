@@ -1,5 +1,9 @@
 import type { CatalogAuth, ProviderModelChoice } from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS, PROVIDER_ID_PATTERN } from "@omni/providers/descriptors";
+import {
+  PROVIDER_DESCRIPTORS,
+  PROVIDER_ID_PATTERN,
+  type ProviderDescriptors,
+} from "@omni/providers/descriptors";
 
 /**
  * One provider, as the console needs to render it.
@@ -216,14 +220,21 @@ function paletteHalf(
  * `report`, which is a required parameter precisely so that a new caller has to
  * decide where the line goes rather than inherit silence.
  */
-export function providerCatalog(report: (problem: CatalogProblem) => void): CatalogProvider[] {
+export function providerCatalog(
+  report: (problem: CatalogProblem) => void,
+  // Defaults to the real registry. A parameter so a test can describe an
+  // installation rather than editing the process-global one and restoring it in
+  // a `finally` — a shared mutable global under a runner that interleaves test
+  // files, which cost this repository a doctor test failing one run in six.
+  providers: ProviderDescriptors = PROVIDER_DESCRIPTORS,
+): CatalogProvider[] {
   // `Object.entries` at call time, never the module-scope `PROVIDER_IDS`. That
   // constant is `Object.keys(...)` evaluated once at import, which is long before
   // `loadPlugins()` runs — so iterating it would serve a build-time snapshot and
   // a provider registered at boot would be missing from the console with nothing
   // reported. That is the exact claim this endpoint exists to make good on, and
   // it was false until this line changed.
-  return Object.entries(PROVIDER_DESCRIPTORS).flatMap(([id, descriptor]) => {
+  return Object.entries(providers).flatMap(([id, descriptor]) => {
     if (!SAFE_PROVIDER_ID.test(id)) {
       report({
         // Capped: this is the one field on a `CatalogProblem` that is not

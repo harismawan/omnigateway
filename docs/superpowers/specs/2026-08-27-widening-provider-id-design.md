@@ -52,6 +52,33 @@ every field on `ProviderDescriptor` is required and there are no defaults, on th
 stated grounds that `writeOverInput` defaulting to zero would underprice cache
 writes silently and permanently.
 
+**That rule now has one exception, and it is accepted rather than argued away.**
+`apps/gateway/src/dispatch/price.ts` reads
+`PROVIDER_DESCRIPTORS[provider]?.writeOverInput ?? { fiveMinute: 0, oneHour: 0 }`
+— the precise default the descriptor design forbids, at the precise field it was
+written about. It exists because widening `ProviderId` made that lookup partial
+and `priceOf` runs inside `finishLog`, where throwing would break usage
+accounting for a request that already succeeded.
+
+What makes it safe today is a *coupling*, not a property of this function: the
+router excludes a target whose provider has no descriptor (`provider:missing`),
+and dispatch throws `INTERNAL` on a missing adapter before any attempt runs, so
+a priced request has an installed provider by the time it gets here. Both gates
+were verified by reading the path, and `rank()` and `resolveModel()` are now
+handed the same registry `price.ts` reads, so the three cannot disagree about
+which installation they are judging.
+
+**Known risk, to revisit when the plugin host lands.** That sub-project is
+expected to loosen exactly this coupling: a provider registered at boot, removed
+at runtime, or supplied through a different injection point than the router used
+would put a live request on this branch, and the failure is silent — cache
+writes priced at zero, no log line, no degradation, a `costUsd` that is simply
+too low. Nothing here would notice. When the host exists, the choices are to
+thread the descriptor down with the candidate (it is already resolved at
+routing), or to price from `Target.costPerMTok` alone and drop the fallback.
+Do not let this become the precedent that "the descriptor has no defaults"
+quietly means "except where it was inconvenient".
+
 So the replacement is **validation at registration**, not defaults at lookup:
 
 - A descriptor missing a required field fails to compile, because every field on

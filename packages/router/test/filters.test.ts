@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
-import { credential, health, quota, snapshot, target } from "@omni/testkit";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
+import { credential, entryOf, health, quota, snapshot, target } from "@omni/testkit";
 import { eligible, requiredCapabilities } from "../src/filters.ts";
 
 const NOW = 1_000_000;
@@ -698,20 +698,23 @@ test("every broken target in a pool reports, wherever it sits in the list", () =
   ]);
 });
 
-test("the registry is read when the request is routed, not when the module loaded", () => {
-  // The comment on the guard claims a call-time read, and the spec names three
-  // sites that got exactly this wrong — `Object.keys(...)` at import is a
-  // snapshot taken long before `loadPlugins()` runs. Nothing distinguished a
-  // call-time read from a module-scope `Set` built once, so a mutant that
-  // reintroduced the snapshot survived.
+test("the guard reads the registry it is handed, not one captured at import", () => {
+  // The guard claims a call-time read, and three shipped sites got exactly this
+  // wrong — `Object.keys(...)` at import is a snapshot taken long before
+  // `loadPlugins()` runs. Nothing distinguished a call-time read from a
+  // module-scope `Set` built once, so a mutant reintroducing the snapshot
+  // survived until this existed.
   //
-  // Registering a descriptor mid-test is what the plugin host will do. The
-  // precedent for mutating this registry and restoring in a `finally` is
-  // `packages/control/test/catalog.test.ts`; the id here is its own, because a
-  // second suite reading the same global for the opposite fact is what made the
-  // doctor test fail one run in six.
-  const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
-  const seed = PROVIDER_DESCRIPTORS.anthropic;
+  // Two registries handed to the same input, rather than one global edited and
+  // restored. An earlier version of this test mutated `PROVIDER_DESCRIPTORS`
+  // inside a `finally` — which is a shared mutable global under a runner that
+  // interleaves files, and this repository has already lost a doctor test to one
+  // run in six that way. `RankInput.providers` exists so a test can describe an
+  // installation instead of editing the one the process is using.
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    "late-arrival": { ...entryOf(PROVIDER_DESCRIPTORS, "anthropic"), id: "late-arrival" },
+  };
   const input = {
     request: req,
     model: model([target({ provider: "late-arrival", model: "late-1" })]),
@@ -721,18 +724,35 @@ test("the registry is read when the request is routed, not when the module loade
     load: new Map(),
   };
 
-  // Before registration: excluded, which is the rest of this block's subject.
+  // Against the real registry, which does not have it.
   expect(eligible(input).excluded.map((e) => e.reason)).toEqual(["provider:missing"]);
 
-  registry["late-arrival"] = { ...seed, id: "late-arrival" };
-  try {
-    const { pairs, excluded } = eligible(input);
-    expect(excluded).toEqual([]);
-    expect(pairs.map((p) => p.credential.id)).toEqual(["a"]);
-  } finally {
-    delete registry["late-arrival"];
-  }
+  // Against one that does, with nothing else changed.
+  const { pairs, excluded } = eligible({ ...input, providers: installed });
+  expect(excluded).toEqual([]);
+  expect(pairs.map((p) => p.credential.id)).toEqual(["a"]);
+});
 
-  // And gone again, so the mutation cannot leak into another test in this file.
-  expect(eligible(input).excluded.map((e) => e.reason)).toEqual(["provider:missing"]);
+test("an injected registry that is an ordinary object still refuses inherited keys", () => {
+  // `providers` is a caller's value now, so it may carry a prototype even though
+  // the real registry does not — the spread above produces exactly such an
+  // object. The guard therefore cannot rely on the table being null-prototype
+  // and asks `Object.hasOwn`.
+  const ordinary: ProviderDescriptors = { ...PROVIDER_DESCRIPTORS };
+  expect(Object.getPrototypeOf(ordinary)).not.toBeNull();
+
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "constructor", model: "c-1" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "constructor" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+    providers: ordinary,
+  });
+
+  expect(pairs).toHaveLength(0);
+  expect(excluded).toEqual([
+    { kind: "target", credentialId: "", model: "c-1", reason: "provider:missing" },
+  ]);
 });

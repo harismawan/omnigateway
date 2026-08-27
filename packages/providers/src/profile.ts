@@ -40,11 +40,13 @@ export { openaiProfile } from "./openai/profile.ts";
  * direct read — differing only on installations that set the variable, which is
  * the shape of bug this repository keeps finding.
  *
- * Nothing keyed on a provider id is exhaustive any more, so this table is a
- * plain `Record<string, …>` and is total by construction rather than by type:
- * it carries exactly the ids assembled below. Callers indexing it get
- * `| undefined` from `noUncheckedIndexedAccess`, which is the point — a stored
- * id can name a provider this installation does not have.
+ * Nothing keyed on a provider id is exhaustive any more, so this is a plain
+ * `Record<string, …>` — and it is a hand-written literal, not assembled from
+ * anything. A built-in missing from it is **not** a compile error, because that
+ * type accepts any subset; `descriptor.test.ts` and the unused-import lint are
+ * what catch one. Callers indexing it get `| undefined` from
+ * `noUncheckedIndexedAccess`, which is the point — a stored id can name a
+ * provider this installation does not have.
  */
 export const PROFILES: Readonly<Record<string, ClientProfile>> = {
   anthropic: anthropicProfile,

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
-import { snapshot, target } from "@omni/testkit";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
+import { entryOf, snapshot, target } from "@omni/testkit";
 import { resolveModel } from "../src/resolve.ts";
 
 test("resolves a configured virtual model by id", () => {
@@ -89,47 +89,65 @@ test("rejects an unknown provider prefix rather than guessing", () => {
   expect(() => resolveModel("bedrock/claude", snapshot({}))).toThrow(GatewayError);
 });
 
-test("a provider registered after import is reachable by both of its names", () => {
+test("a provider the registry gains is reachable by both of its names", () => {
   // Both branches of `resolveModel`, because they disagreed. The explicit
-  // `provider/model` branch reads the registry directly and was already correct;
-  // the bare-name branch iterated `PREFIX_PROVIDER`, an `Object.entries(...)`
-  // evaluated at import — long before `loadPlugins()` — so a provider registered
-  // at boot could be reached one way and not the other, inside one function.
+  // `provider/model` branch read the registry directly and was already correct;
+  // the bare-name branch iterated a module-scope `Object.entries(...)` built at
+  // import — long before `loadPlugins()` — so a provider registered at boot
+  // could be reached one way and not the other, inside one function. Measured
+  // before the fix: `prefixed/x` resolved, `pfx-1` threw NO_CANDIDATES.
   //
-  // Measured before the fix: `prefixed/x` resolved, `pfx-1` threw
-  // NO_CANDIDATES. The asymmetry is the bug; a plugin provider declaring
-  // `modelPrefixes` would have had them silently ignored.
-  const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
-  const seed = PROVIDER_DESCRIPTORS.anthropic;
+  // Handed as a parameter rather than written into the global. An earlier
+  // version of this test mutated `PROVIDER_DESCRIPTORS` and restored it in a
+  // `finally`, which is a shared mutable global under a runner that interleaves
+  // files — the same pattern that made a doctor test fail one run in six when a
+  // second suite registered an id it asserted absent.
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    prefixed: {
+      ...entryOf(PROVIDER_DESCRIPTORS, "anthropic"),
+      id: "prefixed",
+      modelPrefixes: ["pfx-"],
+    },
+  };
 
-  // Absent first, so the assertions below cannot pass by the id having been
-  // there all along.
+  // Against the real registry, which has neither name.
   expect(() => resolveModel("pfx-1", snapshot({}))).toThrow(GatewayError);
+  expect(() => resolveModel("prefixed/x", snapshot({}))).toThrow(GatewayError);
 
-  registry.prefixed = { ...seed, id: "prefixed", modelPrefixes: ["pfx-"] };
-  try {
-    expect(resolveModel("prefixed/x", snapshot({})).targets[0]?.provider).toBe("prefixed");
-    expect(resolveModel("pfx-1", snapshot({})).targets[0]?.provider).toBe("prefixed");
-  } finally {
-    delete registry.prefixed;
-  }
-
-  // And gone again, so nothing leaks into another test in this file.
-  expect(() => resolveModel("pfx-1", snapshot({}))).toThrow(GatewayError);
+  // Against one that does. Both branches, or the asymmetry is back.
+  expect(resolveModel("prefixed/x", snapshot({}), installed).targets[0]?.provider).toBe("prefixed");
+  expect(resolveModel("pfx-1", snapshot({}), installed).targets[0]?.provider).toBe("prefixed");
 });
 
 test("longest match still wins once prefixes are read per call", () => {
-  // The property the sort exists for, re-asserted against the per-call build:
-  // a shorter prefix registered later must not shadow a longer one.
-  const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
-  const seed = PROVIDER_DESCRIPTORS.anthropic;
-  registry.shortpfx = { ...seed, id: "shortpfx", modelPrefixes: ["dup-"] };
-  registry.longpfx = { ...seed, id: "longpfx", modelPrefixes: ["dup-long-"] };
-  try {
-    expect(resolveModel("dup-long-1", snapshot({})).targets[0]?.provider).toBe("longpfx");
-    expect(resolveModel("dup-1", snapshot({})).targets[0]?.provider).toBe("shortpfx");
-  } finally {
-    delete registry.shortpfx;
-    delete registry.longpfx;
+  // The property the sort exists for, re-asserted against the per-call build: a
+  // shorter prefix must not shadow a longer one that extends it.
+  const seed = entryOf(PROVIDER_DESCRIPTORS, "anthropic");
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    shortpfx: { ...seed, id: "shortpfx", modelPrefixes: ["dup-"] },
+    longpfx: { ...seed, id: "longpfx", modelPrefixes: ["dup-long-"] },
+  };
+
+  expect(resolveModel("dup-long-1", snapshot({}), installed).targets[0]?.provider).toBe("longpfx");
+  expect(resolveModel("dup-1", snapshot({}), installed).targets[0]?.provider).toBe("shortpfx");
+});
+
+test("an injected registry that is an ordinary object refuses inherited keys", () => {
+  // A caller's registry may carry a prototype — a spread of the real one does —
+  // so neither branch may rely on the table being null-prototype. Before this,
+  // `constructor/x` passed the existence check and threw a `TypeError` out of
+  // `synthesize`, which reached the client as a 500 carrying an internal
+  // expression.
+  const ordinary: ProviderDescriptors = { ...PROVIDER_DESCRIPTORS };
+  expect(Object.getPrototypeOf(ordinary)).not.toBeNull();
+
+  for (const name of ["constructor/x", "toString/x", "valueOf:x"]) {
+    expect(() => resolveModel(name, snapshot({}), ordinary)).toThrow(GatewayError);
   }
+  // The positive control: a real provider still resolves through the same table.
+  expect(resolveModel("anthropic/claude-opus-5", snapshot({}), ordinary).targets[0]?.provider).toBe(
+    "anthropic",
+  );
 });

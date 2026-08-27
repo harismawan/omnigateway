@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
 import { anthropicAdapter, type HttpClient, type ProviderAdapter } from "@omni/providers";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
 import { buildSnapshot, healthKey } from "@omni/router";
 import type { CredentialSecrets, Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
-import { captureLogger } from "@omni/testkit";
+import { captureLogger, entryOf } from "@omni/testkit";
 import { dispatch } from "../../src/dispatch/index.ts";
 import { createLoadRegistry } from "../../src/dispatch/loadRegistry.ts";
 
@@ -2182,5 +2183,84 @@ test("a candidate whose adapter is not injected fails INTERNAL, not silently", a
     retryable: false,
   });
   expect((failure as Error).message).toMatch(/no adapter for provider grok/);
+  store.close();
+});
+
+test("an adapter map built by a caller cannot answer for an Object member", async () => {
+  // `DispatchDeps.adapters` is a public injection point — this file, the proxy
+  // routes, and any embedder construct it as an ordinary object literal, so
+  // `adapters["constructor"]` answers the `Object` constructor. Before the read
+  // site asked `Object.hasOwn`, the lookup succeeded and dispatch called `.send`
+  // on a function that has no `send`: a raw `TypeError` where `INTERNAL` was
+  // intended, and `classify` turns that into a 500 blaming the gateway.
+  //
+  // Normalising the map inside `createApp` did not cover this, which is the
+  // whole point — this test deliberately does not go through `createApp`, and
+  // that is the path the earlier fix missed.
+  //
+  // Both injection points are supplied, because the router excludes an
+  // unregistered provider before dispatch ever looks: `providers` says the
+  // installation has `constructor`, `adapters` does not, and their disagreeing
+  // is exactly what `INTERNAL` reports.
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "p1",
+    provider: "constructor",
+    label: "p1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "k",
+    idToken: null,
+  });
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "constructor",
+        model: "m-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const anthropic = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
+  const providers: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    constructor: { ...anthropic, id: "constructor" },
+  };
+  const configured = {
+    ...deps(
+      store,
+      stubAdapter(() => textStream("unreachable")),
+    ),
+    providers,
+    // A plain literal with a prototype, exactly as every caller writes one.
+    adapters: { anthropic: stubAdapter(() => textStream("unreachable")) },
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_proto");
+  const failure = await drain(outcome.events).then(
+    () => null,
+    (error: unknown) => error,
+  );
+
+  expect(failure).toMatchObject({ code: "INTERNAL", retryable: false });
+  expect((failure as Error).message).toMatch(/no adapter for provider constructor/);
+  // Not a `TypeError` about `.send`, which is what the un-guarded lookup gave.
+  expect((failure as Error).message).not.toMatch(/is not a function/);
   store.close();
 });

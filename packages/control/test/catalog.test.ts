@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import type { ProviderId } from "@omni/ir";
 import { catalogModelAuths, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS, PROVIDER_IDS } from "@omni/providers/descriptors";
+import {
+  PROVIDER_DESCRIPTORS,
+  PROVIDER_IDS,
+  type ProviderDescriptors,
+} from "@omni/providers/descriptors";
 import { entryOf } from "@omni/testkit";
 import {
   type CatalogProblem,
@@ -102,35 +106,41 @@ test("a model carries exactly the fields the console reads, and no others", () =
   }
 });
 
-test("a provider registered after module load is served", () => {
+test("a provider the registry gains after module load is served", () => {
   // The claim this endpoint is justified by: a provider that comes into
-  // existence at boot — which is every plugin-supplied one — appears without
-  // further change here.
+  // existence at boot — which is every plugin-supplied one — appears here with
+  // no further change.
   //
-  // It was false. `PROVIDER_IDS` is `Object.keys(...)` evaluated at import, so
-  // iterating it served a build-time snapshot: a descriptor added afterwards was
-  // registered, ignored, and not reported. Mutating the registry is exactly what
-  // the plugin host will do, so this test does it.
-  const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
+  // It was false once. `PROVIDER_IDS` is `Object.keys(...)` evaluated at import,
+  // so iterating it served a build-time snapshot and a descriptor added
+  // afterwards was registered, ignored, and not reported.
+  //
+  // Handed as a parameter rather than written into `PROVIDER_DESCRIPTORS`. The
+  // earlier version mutated that global and restored it in a `finally`, which is
+  // a shared mutable object under a runner that interleaves test files — and the
+  // id it registered was one another suite asserted absent, which is what made a
+  // doctor test fail one run in six.
   const seed = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
-  registry["runtime-registered"] = {
-    ...seed,
-    id: "runtime-registered",
-    presentation: { ...seed.presentation, label: "Acme", order: 99 },
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    "runtime-registered": {
+      ...seed,
+      id: "runtime-registered",
+      presentation: { ...seed.presentation, label: "Runtime", order: 99 },
+    },
   };
 
-  try {
-    const served = providerCatalog(() => {});
-    const registered = served.find((p) => p.id === "runtime-registered");
-    expect(registered).toBeDefined();
-    expect(registered?.label).toBe("Acme");
-    // And it is a whole entry, not a stub: the picker needs its models.
-    expect(registered?.models.length).toBeGreaterThan(0);
-    expect(registered?.colour.light.length).toBeGreaterThan(0);
-  } finally {
-    delete registry["runtime-registered"];
-  }
-  expect(providerCatalog(() => {}).find((p) => p.id === "runtime-registered")).toBeUndefined();
+  const served = providerCatalog(() => {}, installed);
+  const registered = served.find((p) => p.id === "runtime-registered");
+  expect(registered).toBeDefined();
+  expect(registered?.label).toBe("Runtime");
+  // A whole entry, not a stub: the picker needs its models and its colour.
+  expect(registered?.models.length).toBeGreaterThan(0);
+  expect(registered?.colour.light.length).toBeGreaterThan(0);
+
+  // And the real registry is untouched, which is the property the `finally` used
+  // to be responsible for and no longer has to be.
+  expect(providerCatalog(unexpected).find((p) => p.id === "runtime-registered")).toBeUndefined();
 });
 
 test("a colour that would destroy the stylesheet is refused", () => {
@@ -198,18 +208,19 @@ test("a provider whose id cannot be a custom property is withheld", () => {
   // directly while the branch using it survived being replaced by `if (false)`
   // — the id keys `--p-<id>`, the picker and the palette, so serving one that
   // cannot be a property name is worse than serving nothing.
-  const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
   const seed = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
-  registry["Bad Id{}"] = { ...seed, id: "Bad Id{}" };
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    "Bad Id{}": { ...seed, id: "Bad Id{}" },
+  };
 
-  try {
-    const problems: string[] = [];
-    const served = providerCatalog((p) => problems.push(`${p.provider} ${p.field}`));
-    expect(served.some((p) => p.id === "Bad Id{}")).toBe(false);
-    expect(problems).toContain("Bad Id{} id");
-  } finally {
-    delete registry["Bad Id{}"];
-  }
+  const problems: string[] = [];
+  const served = providerCatalog((p) => problems.push(`${p.provider} ${p.field}`), installed);
+  expect(served.some((p) => p.id === "Bad Id{}")).toBe(false);
+  expect(problems).toContain("Bad Id{} id");
+  // The rest of the registry still comes through, so the withholding is one
+  // provider rather than the whole catalog collapsing.
+  expect(served.some((p) => p.id === "anthropic")).toBe(true);
 });
 
 test("router internals are not shipped to the browser", () => {

@@ -42,13 +42,27 @@ export function priceOf(prices: TargetPricing, usage: Usage, provider: ProviderI
   // no premium. Guessing Anthropic's rate for a Kimi target overcharges exactly
   // the tokens its decoder now reports.
   //
+  // **A known, accepted exception to "the descriptor has no defaults"**, which
+  // exists precisely so `writeOverInput` can never default to zero. It does here.
+  //
   // A provider id is a validated string, so this lookup is partial in the type.
-  // It is not partial in practice: the router excludes a target whose provider
-  // has no descriptor, and dispatch throws `INTERNAL` before the first byte if
-  // one reaches it anyway — so a priced request has an installed provider by
-  // the time it gets here. Zero is what an unreachable branch evaluates to, not
-  // a claim that writes are free; the loud failure is upstream, where it can
-  // still change the outcome.
+  // What keeps it from being partial in practice is a coupling between three
+  // call sites, not anything this function does: the router excludes a target
+  // whose provider has no descriptor (`provider:missing`), and dispatch throws
+  // `INTERNAL` on a missing adapter before the first byte. `rank()` and
+  // `resolveModel()` are handed the same registry this reads, so the three
+  // cannot disagree about which installation they are judging.
+  //
+  // Throwing instead is not available: `priceOf` runs inside `finishLog`, which
+  // must run at most once per request id and is what writes usage — a throw
+  // there loses accounting for a request that already succeeded.
+  //
+  // **The risk if that coupling loosens is silent**: cache writes priced at
+  // zero, no log line, no degradation, a `costUsd` that is simply too low.
+  // Nothing here would notice. The plugin host is expected to loosen it, and the
+  // fix then is to thread the descriptor down with the candidate — routing has
+  // already resolved one — or to price from `Target.costPerMTok` alone. Recorded
+  // in `docs/superpowers/specs/2026-08-27-widening-provider-id-design.md`.
   const fallback = PROVIDER_DESCRIPTORS[provider]?.writeOverInput ?? {
     fiveMinute: 0,
     oneHour: 0,
