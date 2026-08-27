@@ -175,6 +175,40 @@ now rather than after.
 - **The stored-id path is new and its failure mode is a request that does not
   route.** Every one of the four decisions above exists to make that loud.
 
+## As built
+
+Three things the design did not anticipate, recorded because each is a decision
+rather than a detail.
+
+**The enum was hiding a snapshot bug, and it was not the only one.**
+`providerIdSchema` was `z.enum(PROVIDER_IDS)`, and `PROVIDER_IDS` is
+`Object.keys(...)` evaluated at import — long before `loadPlugins()` runs. So
+the enum did not merely need widening: it would have refused a credential for a
+provider the gateway had just registered. `isProviderId` read the same list and
+reported such a provider as not existing. Both ask the registry at call time
+now, which is the same fix `providerCatalog` already needed and the third site
+to need it.
+
+**Format and existence separated, and each caller answers existence itself.**
+The spec said the schema validates format and never installation, which is
+right, but left "then who refuses `acme`?" unanswered. `createApiKeyCredential`
+does: minting an account for a provider that does not exist produces a
+credential that stores, lists, and fails on first dispatch, and unlike a stored
+target there is no existing state that refusing would strand. `putModel` stays
+permissive, as designed.
+
+**`catalogModelAuths` answers "every way in" for an unknown provider.** A plugin
+provider ships no catalog entry, so an empty answer would read as "no credential
+can reach this" and `putModel`'s reachability check would refuse every target
+naming it. The catalog already says an *unlisted model* is unknown rather than
+forbidden; an unlisted provider cannot answer more strictly.
+
+One structural consequence worth noting: `descriptor.ts` now carries runtime
+values — `PROVIDER_ID_PATTERN` and `isProviderIdFormat` — so it joins the
+`@omni/providers/descriptors` leaf bundle. It stays leaf-safe on the same terms
+as the rest of it: a regular expression and a predicate, no adapter, no HTTP
+client, no `Bun.env`, and `leafSubpaths.test.ts` still proves each of those.
+
 ## Out of scope
 
 - Publishing anything. `@omnigateway/ir` and `@omnigateway/provider-api` come
