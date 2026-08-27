@@ -42,6 +42,23 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptors = {
   custom: customDescriptor,
 };
 
+// Nothing to inherit, and this is load-bearing rather than tidy.
+//
+// A provider id arrives from a client's `model` name and from unvalidated JSON
+// in `virtual_models.targets`. On an ordinary object literal
+// `table["constructor"]` answers the `Object` constructor, so every
+// `!== undefined` and `?.` guard in the codebase reads "that provider exists"
+// and then throws on the next property access — `model: "constructor/foo"`
+// reached the client as a 500 carrying an internal source expression.
+//
+// `noUncheckedIndexedAccess` cannot see this: it forces a guard, and the guard
+// it forces is the one a prototype key defeats. Fixing each reader would leave
+// the next to rediscover it, and would cover only the readers that ask an
+// existence question — not `catalogPricing`'s `?.`. One invariant covers every
+// reader of every provider table instead, and every such table does this.
+// Pinned by `descriptor.test.ts`.
+Object.setPrototypeOf(PROVIDER_DESCRIPTORS, null);
+
 /** Every provider id, derived so the list is written once. */
 export const PROVIDER_IDS = Object.keys(PROVIDER_DESCRIPTORS) as ReadonlyArray<
   keyof typeof PROVIDER_DESCRIPTORS

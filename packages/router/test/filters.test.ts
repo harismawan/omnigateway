@@ -577,7 +577,7 @@ test("api-key credentials are never treated as expired", () => {
 test("a target naming a provider that is not installed is excluded with a reason", () => {
   const { pairs, excluded } = eligible({
     request: req,
-    model: model([target({ provider: "acme", model: "acme-1" })]),
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1" })]),
     snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
     now: NOW,
     rand: 0,
@@ -589,7 +589,7 @@ test("a target naming a provider that is not installed is excluded with a reason
   // credential matches the provider, so the inner loop drops every one silently
   // and the request fails with no reason recorded anywhere.
   expect(excluded).toEqual([
-    { credentialId: "", model: "acme-1", reason: "provider:missing", kind: "target" },
+    { credentialId: "", model: "nonesuch-1", reason: "provider:missing", kind: "target" },
   ]);
 });
 
@@ -601,8 +601,8 @@ test("provider:missing names no account, because no account is at fault", () => 
   // very provider, which is the case a `kind: "account"` row would get wrong.
   const { excluded } = eligible({
     request: req,
-    model: model([target({ provider: "acme", model: "acme-1" })]),
-    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "acme" })] }),
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "nonesuch" })] }),
     now: NOW,
     rand: 0,
     load: new Map(),
@@ -614,7 +614,7 @@ test("provider:missing names no account, because no account is at fault", () => 
 test("provider:missing is emitted once per target, not once per credential", () => {
   const { excluded } = eligible({
     request: req,
-    model: model([target({ provider: "acme", model: "acme-1" })]),
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1" })]),
     snapshot: snapshot({
       credentials: [
         credential({ id: "a", provider: "anthropic" }),
@@ -636,7 +636,7 @@ test("an uninstalled provider reports itself rather than pin:missing", () => {
   // two rows for one target buries the one naming the real problem.
   const { excluded } = eligible({
     request: req,
-    model: model([target({ provider: "acme", model: "acme-1", credentialId: "gone" })]),
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1", credentialId: "gone" })]),
     snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
     now: NOW,
     rand: 0,
@@ -648,7 +648,7 @@ test("an uninstalled provider reports itself rather than pin:missing", () => {
   // `LogFields.credentialId` and `request_logs.degradations`, contradicting the
   // `kind: "target"` claim that this row names no account.
   expect(excluded).toEqual([
-    { credentialId: "", model: "acme-1", reason: "provider:missing", kind: "target" },
+    { credentialId: "", model: "nonesuch-1", reason: "provider:missing", kind: "target" },
   ]);
 });
 
@@ -657,7 +657,7 @@ test("an installed provider's targets are unaffected by the check", () => {
   // assertions above, and nothing else in this file distinguishes the two.
   const { pairs, excluded } = eligible({
     request: req,
-    model: model([target({ provider: "acme", model: "acme-1" }), target()]),
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1" }), target()]),
     snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
     now: NOW,
     rand: 0,

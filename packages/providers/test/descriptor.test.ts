@@ -73,6 +73,46 @@ describe("the registry describes every provider", () => {
     expect(Object.keys(PROVIDERS).sort()).toEqual([...IDS].sort());
   });
 
+  test("no provider table answers for a key it does not hold", () => {
+    // A provider id arrives from a client's `model` name and from unvalidated
+    // JSON in `virtual_models.targets`. On an ordinary object literal,
+    // `table["constructor"]` is the `Object` constructor, so every
+    // `!== undefined` and `?.` guard reads "installed" and then throws on the
+    // next property access — `model: "constructor/foo"` returned a 500 carrying
+    // an internal source expression to the client.
+    //
+    // Asserting the *lookups* rather than `Object.getPrototypeOf(...) === null`
+    // on purpose: the property under test is what a reader gets back, and a
+    // future table built some other way (`Object.create(null)`, a `Map` wrapper,
+    // a frozen proxy) should pass this by being correct rather than by matching
+    // one implementation of correctness.
+    const tables: ReadonlyArray<readonly [string, Readonly<Record<string, unknown>>]> = [
+      ["PROVIDER_DESCRIPTORS", PROVIDER_DESCRIPTORS],
+      ["PROVIDER_MODEL_CATALOG", PROVIDER_MODEL_CATALOG],
+      ["PROFILES", PROFILES],
+      ["BODY_ORDER", BODY_ORDER],
+      ["ADAPTERS", ADAPTERS],
+      ["PROVIDERS", PROVIDERS],
+    ];
+    // `__proto__` is deliberately absent: on a null-prototype object it is an
+    // ordinary missing key, but on a plain one it is an accessor rather than a
+    // value, so it would fail here for a reason unrelated to the bug.
+    const inherited = ["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf"];
+
+    for (const [name, table] of tables) {
+      for (const key of inherited) {
+        expect({ table: name, key, value: table[key] }).toEqual({
+          table: name,
+          key,
+          value: undefined,
+        });
+      }
+      // The positive control. A table that answered `undefined` for everything
+      // would satisfy the loop above and nothing else in this test.
+      expect(table.anthropic).toBeDefined();
+    }
+  });
+
   test("every descriptor is complete", () => {
     // Required with no defaults: a missing `writeOverInput` must be a loud
     // failure here rather than a zero that underprices cache writes for good.

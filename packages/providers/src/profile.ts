@@ -54,3 +54,6 @@ export const PROFILES: Readonly<Record<string, ClientProfile>> = {
   grok: grokProfile,
   custom: customProfile,
 };
+
+// Nothing to inherit; see the note on `PROVIDER_DESCRIPTORS`.
+Object.setPrototypeOf(PROFILES, null);

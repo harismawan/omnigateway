@@ -257,6 +257,10 @@ async function missingProviders(ctx: Context): Promise<string[] | null> {
     const store = await ctx.store();
     return (await store.config.listModels()).flatMap((model) =>
       model.targets
+        // The same reading as the router's guard, and correct for the same
+        // reason: `PROVIDER_DESCRIPTORS` has no prototype. Against an ordinary
+        // object literal this reported "none" for a target naming `constructor`
+        // or `toString` — missing exactly the corrupt rows it is here to find.
         .filter((target) => PROVIDER_DESCRIPTORS[target.provider] === undefined)
         .map((target) => `${model.id}/${target.model} → ${target.provider}`),
     );

@@ -46,6 +46,9 @@ export const PROVIDER_MODEL_CATALOG: Readonly<Record<string, ProviderModelCatalo
   custom: CUSTOM_MODELS,
 };
 
+// Nothing to inherit; see the note on `PROVIDER_DESCRIPTORS`.
+Object.setPrototypeOf(PROVIDER_MODEL_CATALOG, null);
+
 /**
  * Every way in the catalog can describe.
  *

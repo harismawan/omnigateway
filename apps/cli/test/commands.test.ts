@@ -933,8 +933,8 @@ test("doctor reports a target naming a provider this installation does not have"
     isAlias: false,
     targets: [
       {
-        provider: "acme",
-        model: "acme-1",
+        provider: "nonesuch",
+        model: "nonesuch-1",
         tier: 1,
         weight: 1,
         costPerMTok: { input: 5, output: 25 },
@@ -956,7 +956,7 @@ test("doctor reports a target naming a provider this installation does not have"
 
   const result = await cli(["doctor", "--json"], { root, service });
   const checks = JSON.parse(result.out) as { missingProviders: string[] };
-  expect(checks.missingProviders).toEqual(["billed/acme-1 → acme"]);
+  expect(checks.missingProviders).toEqual(["billed/nonesuch-1 → nonesuch"]);
 
   // And in the table, which is what the operator running the command sees. A
   // finding that exists only under `--json` is a finding nobody is told about.
@@ -966,7 +966,7 @@ test("doctor reports a target naming a provider this installation does not have"
     .find((line) => line.startsWith("missing providers"))
     ?.trim()
     .split(/\s{2,}/)[1];
-  expect(row).toBe("1: billed/acme-1 → acme");
+  expect(row).toBe("1: billed/nonesuch-1 → nonesuch");
 });
 
 test("doctor says none rather than nothing when every provider is installed", async () => {

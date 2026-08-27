@@ -21,6 +21,9 @@ export const BODY_ORDER: Readonly<Record<string, readonly string[]>> = {
   custom: customBodyOrder,
 };
 
+// Nothing to inherit; see the note on `PROVIDER_DESCRIPTORS`.
+Object.setPrototypeOf(BODY_ORDER, null);
+
 /**
  * Rebuilds an object with `order`'s keys first.
  *

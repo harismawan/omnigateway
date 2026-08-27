@@ -73,6 +73,10 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
     // a fact about the target and names no account. First guard in the loop, so
     // a target that is also pinned reports the provider rather than reporting
     // `pin:missing` about an account that could not have served it either way.
+    // Correct because `PROVIDER_DESCRIPTORS` has no prototype — see the note in
+    // `resolve.ts`. Against an ordinary object literal this guard was skipped
+    // outright for `constructor` and `toString`, producing the empty exclusion
+    // list it exists to prevent.
     if (PROVIDER_DESCRIPTORS[target.provider] === undefined) {
       excluded.push({
         kind: "target",
