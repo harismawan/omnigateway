@@ -1,18 +1,19 @@
 import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
+import { PROVIDER_IDS as REGISTRY_PROVIDER_IDS } from "@omni/providers/descriptors";
 import type { Store } from "@omni/store";
 import { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
 import type { AuthorizeStart, DeviceOAuthProvider, OAuthProvider } from "./oauth/types.ts";
 import { isAuthorizationPending } from "./oauth/types.ts";
 
-export const PROVIDER_IDS: readonly ProviderId[] = [
-  "anthropic",
-  "openai",
-  "kimi",
-  "kilo",
-  "grok",
-  "custom",
-];
+/**
+ * Every provider the installation knows about.
+ *
+ * Derived from the provider registry rather than restated. Two hand-written
+ * copies of this list had already drifted once — see the note above
+ * `OAUTH_PROVIDER_IDS` in `oauth/index.ts` — and this was a third.
+ */
+export const PROVIDER_IDS: readonly ProviderId[] = REGISTRY_PROVIDER_IDS;
 const FLOW_TTL_MS = 600_000;
 
 /**

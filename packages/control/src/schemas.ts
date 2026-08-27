@@ -1,4 +1,5 @@
 import { GatewayError } from "@omni/ir";
+import { PROVIDER_IDS } from "@omni/providers/descriptors";
 import { limitConfigSchema } from "@omni/ratelimit/catalog";
 import type { UsageDimension, UsageGrain } from "@omni/store";
 import { z } from "zod";
@@ -39,7 +40,21 @@ export function optionalNumber(value: string | number | undefined, fallback: num
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-export const providerIdSchema = z.enum(["anthropic", "openai", "kimi", "kilo", "grok", "custom"]);
+/**
+ * Zod needs a non-empty tuple, and the registry hands us a plain array.
+ *
+ * A runtime throw for a case the type system already forbids, kept because the
+ * alternative is a cast that would quietly produce an enum matching nothing if
+ * the registry were ever empty.
+ */
+function nonEmpty<T extends string>(values: readonly T[]): [T, ...T[]] {
+  const [first, ...rest] = values;
+  if (first === undefined) throw new Error("the provider registry is empty");
+  return [first, ...rest];
+}
+
+/** Derived, so adding a provider does not mean remembering this file. */
+export const providerIdSchema = z.enum(nonEmpty(PROVIDER_IDS));
 
 /**
  * A hypothetical request, described only by required capabilities. This keeps

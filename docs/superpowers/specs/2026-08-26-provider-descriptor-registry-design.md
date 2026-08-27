@@ -27,7 +27,7 @@ The sixteen:
 | `apps/dashboard/src/theme/tokens.ts:75` `PROVIDER_LABEL` | total record | yes |
 | `packages/control/src/connect.ts:8` `PROVIDER_IDS` | hand-written array | no |
 | `packages/control/src/schemas.ts:42` | zod enum | no |
-| `packages/control/src/schemas.ts:59` | zod enum, **already missing `custom`** | no |
+| `packages/control/src/schemas.ts:59` | zod enum, five ids — see the correction below | no |
 | `packages/control/src/oauth/index.ts:9` `OAUTH_PROVIDERS` | partial record | no |
 | `apps/dashboard/src/theme/tokens.ts:72` `PROVIDER_IDS` | second id list + a **second `ProviderId` type** at `:73` | no |
 | `apps/dashboard/src/features/accounts/AccountsBoard.tsx:38` `PROVIDER_ORDER` | third id list | no |
@@ -231,12 +231,33 @@ Behaviour-preserving throughout. Each step replaces a read, not a value.
    `Object.keys`; it derives from the registry instead.
 5. **`apps/gateway`** — `WRITE_OVER_INPUT` (`price.ts:17`) becomes a registry
    read at `price.ts:61`.
-6. **`packages/control`** — `PROVIDER_IDS` (`connect.ts:8`), both zod enums
-   (`schemas.ts:42,59`) and `CALLBACKS` (`connect.ts:36`) derive from the
-   registry. `schemas.ts:59` regains `custom`, which it should have had; that is
-   the one deliberate behaviour change in this sub-project and it needs its own
-   test. `OAUTH_PROVIDERS` (`oauth/index.ts:9`) becomes a projection of
-   descriptors that carry `auth`.
+6. **`packages/control`** — `PROVIDER_IDS` (`connect.ts:8`), `providerIdSchema`
+   (`schemas.ts:42`) and `CALLBACKS` (`connect.ts:36`) derive from the registry.
+   `OAUTH_PROVIDERS` (`oauth/index.ts:9`) becomes a projection of descriptors
+   that carry `auth`.
+
+   **Correction, found during implementation.** An earlier draft of this spec
+   read `schemas.ts:59` as drift — a hand-written enum that had fallen out of
+   sync by omitting `custom` — and scheduled "regaining `custom`" as this
+   sub-project's one deliberate behaviour change. That was wrong, and acting on
+   it would have been a regression. `targetSchema` is a
+   `z.discriminatedUnion("provider", …)`: the enum at `:59` is the **non-custom
+   arm**, and `custom` is absent because it has its own arm requiring
+   `endpointId`. Adding it to the first arm would let a custom target save with
+   no endpoint id, which is precisely the field `servesTarget` matches an
+   account on.
+
+   So `:59` is not derived from the registry. Deriving it would also weaken the
+   discriminated union: zod infers the arm's `provider` type from the schema, and
+   a runtime-built enum widens it from the five literals back to `ProviderId`,
+   costing the exhaustiveness that makes the union worth having. It gets a
+   **pin** instead — a test asserting the two arms together cover exactly the
+   registry's ids, so a seventh provider fails loudly without the union being
+   rebuilt at runtime.
+
+   The general lesson is worth more than the fix: a five-of-six enum next to a
+   six-member list looks like drift and is sometimes a discriminant. Read what
+   the missing member does elsewhere before calling a difference a bug.
 7. **`packages/store`** — the `xaiKey` rule in `bodies/mask.ts:122,155,191`
    derives from `descriptor.secretPattern`. `MaskRuleId` stops enumerating
    vendor names. `@omni/store` may not import `@omni/providers`, so the patterns
@@ -294,10 +315,10 @@ descriptor's `bodyOrder` and confirm the corresponding pin fails.
   If a consumer turns out to need the capabilities table somewhere `ir` cannot
   reach, the fallback is to leave those two tables in `ir` and have descriptors
   reference them — worse, but it preserves the boundary.
-- **`schemas.ts:59` regaining `custom` is a real behaviour change** and the only
-  one. It is included because leaving a known-wrong enum in place while
-  rewriting the file around it is how the next reader concludes the omission was
-  deliberate.
+- **This sub-project has no behaviour changes.** An earlier draft claimed one —
+  `schemas.ts:59` regaining `custom` — and that claim was wrong; see the
+  correction in step 6. Anything that looks like a behaviour change during
+  implementation is a signal to re-read, not to proceed.
 - **Scope creep toward the plugin host.** The union stays closed in this
   sub-project. Widening it here would make the change non-behaviour-preserving
   and cost the green-suite-on-both-sides property that makes it reviewable.
