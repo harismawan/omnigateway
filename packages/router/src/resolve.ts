@@ -86,6 +86,14 @@ export function resolveModel(name: string, snapshot: Snapshot): VirtualModel {
   if (sep > 0) {
     const prefix = name.slice(0, sep);
     const rest = name.slice(sep + 1);
+    // `prefix` is a slice of a client-supplied model name, and this lookup
+    // replaced a `Set.has` — which never consults a prototype. On an ordinary
+    // object literal it therefore admitted `constructor/x` and `toString/x` and
+    // threw a `TypeError` out of `synthesize`, which reached the client as a 500
+    // carrying an internal expression. What makes the plain check correct is
+    // that `PROVIDER_DESCRIPTORS` has no prototype to inherit from; that is one
+    // invariant covering every reader of every provider table, and
+    // `descriptor.test.ts` pins it.
     const descriptor = PROVIDER_DESCRIPTORS[prefix];
     if (descriptor !== undefined && prefix !== "custom" && rest.length > 0) {
       return synthesize(prefix, rest, descriptor);

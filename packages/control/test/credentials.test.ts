@@ -65,9 +65,9 @@ test("createApiKeyCredential refuses a provider this installation does not have"
   // fails on first dispatch, so the refusal moved here rather than going away.
   const store = await memoryStore();
 
-  const rejected = createApiKeyCredential(store, { provider: "acme", apiKey: "k" });
+  const rejected = createApiKeyCredential(store, { provider: "nonesuch", apiKey: "k" });
   await expect(rejected).rejects.toThrow(GatewayError);
-  await expect(rejected).rejects.toThrow(/no provider named "acme"/);
+  await expect(rejected).rejects.toThrow(/no provider named "nonesuch"/);
   expect(await store.credentials.list()).toHaveLength(0);
 });
 

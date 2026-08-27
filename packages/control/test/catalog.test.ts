@@ -113,24 +113,24 @@ test("a provider registered after module load is served", () => {
   // the plugin host will do, so this test does it.
   const registry = PROVIDER_DESCRIPTORS as unknown as Record<string, unknown>;
   const seed = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
-  registry.acme = {
+  registry["runtime-registered"] = {
     ...seed,
-    id: "acme",
+    id: "runtime-registered",
     presentation: { ...seed.presentation, label: "Acme", order: 99 },
   };
 
   try {
     const served = providerCatalog(() => {});
-    const acme = served.find((p) => p.id === "acme");
-    expect(acme).toBeDefined();
-    expect(acme?.label).toBe("Acme");
+    const registered = served.find((p) => p.id === "runtime-registered");
+    expect(registered).toBeDefined();
+    expect(registered?.label).toBe("Acme");
     // And it is a whole entry, not a stub: the picker needs its models.
-    expect(acme?.models.length).toBeGreaterThan(0);
-    expect(acme?.colour.light.length).toBeGreaterThan(0);
+    expect(registered?.models.length).toBeGreaterThan(0);
+    expect(registered?.colour.light.length).toBeGreaterThan(0);
   } finally {
-    delete registry.acme;
+    delete registry["runtime-registered"];
   }
-  expect(providerCatalog(() => {}).find((p) => p.id === "acme")).toBeUndefined();
+  expect(providerCatalog(() => {}).find((p) => p.id === "runtime-registered")).toBeUndefined();
 });
 
 test("a colour that would destroy the stylesheet is refused", () => {

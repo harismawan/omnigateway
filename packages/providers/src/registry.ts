@@ -48,6 +48,9 @@ export const ADAPTERS: Readonly<Record<string, ProviderAdapter>> = {
   custom: customAdapter,
 };
 
+// Nothing to inherit; see the note on `PROVIDER_DESCRIPTORS`.
+Object.setPrototypeOf(ADAPTERS, null);
+
 /**
  * The assembled registry: descriptors plus their adapters.
  *
@@ -71,3 +74,8 @@ export const PROVIDERS: Readonly<Record<string, ProviderRegistryEntry>> = Object
     return [[id, { ...descriptor, adapter, profile, bodyOrder }] as const];
   }),
 );
+
+// Nothing to inherit; see the note on `PROVIDER_DESCRIPTORS`. Needed here too:
+// `Object.fromEntries` returns an ordinary object, so this table would carry the
+// prototype keys the tables it is built from were just written to drop.
+Object.setPrototypeOf(PROVIDERS, null);
