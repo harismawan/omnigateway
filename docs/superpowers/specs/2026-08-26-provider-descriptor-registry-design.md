@@ -179,12 +179,12 @@ to end. `packages/control` keeps the flow *runner* (`connect.ts`, `refresh.ts`,
 `quota/poll.ts`), all of which already take an injected provider table and hold
 no id list of their own beyond `PROVIDER_IDS`.
 
-This is a move **within the monorepo** — `packages/control/src/oauth/kilo.ts`
-becomes `packages/providers/src/kilo/oauth.ts` — and is distinct from extracting
-kilo to a plugin, which is a later sub-project. The two are separated on purpose:
-this one is a relocation with no behaviour change and its existing tests
-(`packages/control/test/oauth/{kilo,kimi}.test.ts`) move with it, and the
-extraction is then a directory move rather than a redesign.
+**This did not happen in this sub-project, and step 6 records why.** The move
+would be within the monorepo — `packages/control/src/oauth/kilo.ts` becoming
+`packages/providers/src/kilo/oauth.ts` — but `OAuthProvider` is defined in terms
+of `@omni/store` types that `packages/providers` does not depend on, so it is a
+layering decision the published-contract sub-project has to make anyway. All
+seven flow files remain in `packages/control/src/oauth/`.
 
 An alternative worth recording: leave the flows where they are and have
 descriptors import them. That keeps this sub-project smaller, but preserves the
@@ -222,11 +222,15 @@ Behaviour-preserving throughout. Each step replaces a read, not a value.
    `packages/router/src/resolve.ts:53`, `packages/router/src/filters.ts:60`, and
    `apps/cli/src/commands/models.ts:166`. The router stays pure — it reads a
    record it is handed, exactly as it reads the snapshot today.
-3. **`packages/providers`** — `BODY_ORDER`, `PROFILES`, `PROVIDER_MODEL_CATALOG`
-   and `ADAPTERS` become views over the registry. The `@omni/providers/catalog`
-   subpath keeps its current shape and its leaf status; it is derived from the
-   descriptors at module scope, so the dashboard's four static importers are
-   untouched by this sub-project.
+3. **`packages/providers`** — `BODY_ORDER` and `PROFILES` assemble over
+   per-provider files; `ADAPTERS` stays a total record.
+
+   **`PROVIDER_MODEL_CATALOG` is *not* derived from the registry**, which is the
+   inverse of what an earlier draft said. `catalog.ts` is a browser-safe leaf and
+   the registry holds adapters, so deriving it would pull the adapters and the
+   HTTP client into the dashboard bundle. Descriptors reference the same
+   per-provider `*_MODELS` lists instead: both read one source, neither reads the
+   other, and a test asserts object identity so a copy cannot creep in.
 4. **`packages/router`** — `PREFIX_PROVIDER` (`resolve.ts:12`) is rebuilt from
    `descriptor.modelPrefixes`. `PROVIDERS` (`resolve.ts:6`) already derives from
    `Object.keys`; it derives from the registry instead.
@@ -323,10 +327,16 @@ assertions.
   be: a test that derives its expectation from the thing under test agrees with
   any registry at all, which is the exact vacuity the equivalence fixtures three
   paragraphs up exist to avoid. Production code derives; tests restate.
-- **Collision.** Registering an id a built-in holds is refused.
-- **`schemas.ts:59` regains `custom`.** A target with `provider: "custom"` now
-  validates through the non-custom arm's sibling; the existing custom arm keeps
-  requiring `endpointId`.
+- **Collision.** Not applicable as shipped, and worth saying so: there is no
+  registration API. `PROVIDER_DESCRIPTORS` is a total record built at module
+  scope, so a duplicate id is a syntax error rather than a runtime refusal. A
+  collision check becomes real only when providers load from disk.
+- **The target union covers every provider through some arm.** Asserted in
+  `packages/control/test/providerCoverage.test.ts`, together with a custom target
+  carrying no `endpointId` being refused. An earlier draft of this section said
+  `schemas.ts:59` should "regain `custom`" — step 6 records why that reading was
+  wrong and acting on it would be a regression. The bullet is replaced rather
+  than deleted so the wrong instruction cannot be rediscovered here.
 - **Dashboard.** `apps/dashboard/test/theme/theme.test.tsx` gains an assertion
   that every provider in the registry has both a light and a dark colour, since
   a missing one renders colourless rather than failing.
