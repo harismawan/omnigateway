@@ -7,13 +7,22 @@
  * so a closed union here is a closed door there.
  *
  * The exhaustiveness this gave up was real and is not replaced by anything
- * equally strong. What replaces it is validation at registration: every field on
- * `ProviderDescriptor` is required with no defaults, and a descriptor that fails
- * that check does not register. Tables assembled by walking the registry stay
- * total by construction. Only a lookup keyed on a *stored* id — a target read
- * back from SQLite naming a provider no longer installed — is genuinely partial,
- * and `noUncheckedIndexedAccess` makes each of those a compile error at the point
- * of use. Lean on that rather than casting it away.
+ * equally strong. Stated exactly, because an earlier version of this comment
+ * claimed more than holds and outlived the retraction in four other files:
+ *
+ * - Every field on `ProviderDescriptor` is required with no defaults, so a
+ *   descriptor that *exists* but is incomplete does not compile. That much the
+ *   compiler still does.
+ * - A provider **missing** from one of the id-keyed tables is not a compile
+ *   error. Five of them are hand-written literals typed `Record<string, …>`,
+ *   which accepts any subset; only `PROVIDERS` is assembled by walking another.
+ *   Deleting a built-in's line from any of the five typechecks cleanly —
+ *   measured. The unused-import lint and
+ *   `packages/providers/test/descriptor.test.ts` are what catch it.
+ * - A lookup keyed on a *stored* id — a target read back from SQLite naming a
+ *   provider no longer installed — is genuinely partial, and
+ *   `noUncheckedIndexedAccess` makes each of those a compile error at the point
+ *   of use. Lean on that rather than casting it away.
  *
  * The format rule lives in `@omni/providers`, next to the registry that enforces
  * it. It is not expressed here because `@omni/ir` must not know what a provider

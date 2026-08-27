@@ -11,6 +11,7 @@ import {
   type StreamEvent,
 } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
+import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import {
   blankHealth,
   type Candidate,
@@ -39,6 +40,15 @@ export type DispatchDeps = {
   store: Store;
   snapshots: RoutingSnapshotSource;
   adapters: Readonly<Partial<Record<ProviderId, ProviderAdapter>>>;
+  /**
+   * Which providers this installation has. Defaults to the real registry.
+   *
+   * A separate injection point from `adapters`, and the two can disagree —
+   * that disagreement is exactly what the `INTERNAL "no adapter for provider"`
+   * throw below reports. Threaded into `resolveModel` and `rank` so routing
+   * judges the same installation this lookup does.
+   */
+  providers?: ProviderDescriptors;
   /** Order-preserving transport. Never globalThis.fetch — see Global Constraints. */
   http: HttpClient;
   now: () => number;
@@ -231,7 +241,7 @@ export async function dispatch(
     log.rtkEstimatedTokensSaved = transformed.report.estimatedTokensSaved;
     log.rtkFilters = transformed.report.filters;
     checkCancellation();
-    model = resolveModel(dispatchRequest.model, snapshot);
+    model = resolveModel(dispatchRequest.model, snapshot, deps.providers);
   } catch (error) {
     clearDeadline();
     if (isClientAbort(error)) return fail("TIMEOUT", "client disconnected", true);
@@ -246,6 +256,11 @@ export async function dispatch(
     now: startedAt,
     rand: deps.rand(),
     load: deps.loadRegistry.counts(),
+    // Threaded rather than left to the router's default, so routing and the
+    // adapter lookup below judge the same installation. A caller that injects
+    // one without the other is describing a gateway whose router admits a
+    // provider it has no adapter for, which is what `INTERNAL` reports.
+    ...(deps.providers === undefined ? {} : { providers: deps.providers }),
   });
 
   logger.debug("routing candidates ranked", {
@@ -402,7 +417,24 @@ export async function dispatch(
             candidate.credential.expiresAt !== null &&
             candidate.credential.expiresAt - DISPATCH_REFRESH_LEAD_MS <= attemptNow;
 
-          const adapter = deps.adapters[candidate.target.provider];
+          // `Object.hasOwn`, and here rather than at whoever built the map.
+          //
+          // `candidate.target.provider` is a stored string, and `deps.adapters`
+          // is a public injection point: `createApp` normalises the map it
+          // passes, but `DispatchDeps` is constructed directly by callers and by
+          // tests, and an ordinary object literal answers the `Object`
+          // constructor for `constructor`. The lookup would then succeed and
+          // `adapter.send` would be called on a function that has no `send`.
+          //
+          // Guarding at the read site rather than at construction is the whole
+          // point: this is the one place always on the path, and it cannot be
+          // bypassed by a caller who builds the map some other way. The
+          // `@omni/providers` tables drop their prototypes for the same reason
+          // — one invariant where the value is read, not a rule every producer
+          // has to remember.
+          const adapter = Object.hasOwn(deps.adapters, candidate.target.provider)
+            ? deps.adapters[candidate.target.provider]
+            : undefined;
           if (adapter === undefined) {
             throw new GatewayError(
               "INTERNAL",

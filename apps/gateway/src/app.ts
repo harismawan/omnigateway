@@ -208,13 +208,13 @@ export function createApp(deps: AppDeps) {
   const logger = deps.logger ?? noopLogger;
   const rand = deps.rand ?? Math.random;
   const http = deps.http ?? nodeHttpClient({ logger, now });
-  // `ADAPTERS` has no prototype; an injected map is an ordinary object literal
-  // written by a caller, so it is normalised here rather than trusted. Dispatch
-  // reads this by a *stored* `target.provider` and treats `undefined` as the
-  // signal to throw `INTERNAL`; handed `constructor`, an un-normalised map would
-  // answer the `Object` constructor and dispatch would call `.send` on it.
-  const adapters: Readonly<Record<string, ProviderAdapter>> =
-    deps.adapters === undefined ? ADAPTERS : Object.setPrototypeOf({ ...deps.adapters }, null);
+  // Not normalised here. An earlier version spread an injected map onto a null
+  // prototype at this line, which guarded `createApp` and nothing else —
+  // `DispatchDeps` and `ProxyDeps` are public injection points that callers and
+  // tests construct directly, so the map dispatch actually reads may never have
+  // passed through here. The guard belongs at the read site in
+  // `dispatch/index.ts`, which is on the path however the map was built.
+  const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
   const rateLimiter = deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger });
   const snapshots = createRoutingSnapshotCache(deps.store, logger);

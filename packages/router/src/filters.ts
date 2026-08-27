@@ -53,6 +53,9 @@ function cooldownMs(failures: number, threshold: number, base: number): number {
 
 export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[] } {
   const { request, model, snapshot, now } = input;
+  // The real registry unless a caller describes a different installation. See
+  // `RankInput.providers` for why this is a parameter and not a module read.
+  const providers = input.providers ?? PROVIDER_DESCRIPTORS;
   const { breakerThreshold, breakerCooldownMs } = snapshot.settings;
   const need = requiredCapabilities(request);
   const required = requiredProvider(request);
@@ -73,11 +76,12 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
     // a fact about the target and names no account. First guard in the loop, so
     // a target that is also pinned reports the provider rather than reporting
     // `pin:missing` about an account that could not have served it either way.
-    // Correct because `PROVIDER_DESCRIPTORS` has no prototype — see the note in
-    // `resolve.ts`. Against an ordinary object literal this guard was skipped
-    // outright for `constructor` and `toString`, producing the empty exclusion
-    // list it exists to prevent.
-    if (PROVIDER_DESCRIPTORS[target.provider] === undefined) {
+    // `Object.hasOwn` because `providers` may be a caller's own object literal
+    // now, not only the null-prototype registry. Against an ordinary literal a
+    // plain index check is skipped outright for `constructor` and `toString`,
+    // producing the empty exclusion list this guard exists to prevent — see the
+    // note in `resolve.ts`.
+    if (!Object.hasOwn(providers, target.provider)) {
       excluded.push({
         kind: "target",
         credentialId: "",

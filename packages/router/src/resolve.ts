@@ -1,6 +1,10 @@
 import { GatewayError, type ProviderId } from "@omni/ir";
 import { catalogLimits, catalogPricing } from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS, type ProviderDescriptor } from "@omni/providers/descriptors";
+import {
+  PROVIDER_DESCRIPTORS,
+  type ProviderDescriptor,
+  type ProviderDescriptors,
+} from "@omni/providers/descriptors";
 import type { Target, VirtualModel } from "@omni/store";
 import type { Snapshot } from "./types.ts";
 
@@ -29,8 +33,10 @@ import type { Snapshot } from "./types.ts";
  * on a path that is about to make a network call. If that ever matters, cache it
  * against the registry's identity rather than reverting to a snapshot.
  */
-function prefixProviders(): ReadonlyArray<readonly [string, ProviderId, ProviderDescriptor]> {
-  return Object.entries(PROVIDER_DESCRIPTORS)
+function prefixProviders(
+  providers: ProviderDescriptors,
+): ReadonlyArray<readonly [string, ProviderId, ProviderDescriptor]> {
+  return Object.entries(providers)
     .flatMap(([id, descriptor]) =>
       descriptor.modelPrefixes.map((prefix) => [prefix, id as ProviderId, descriptor] as const),
     )
@@ -90,7 +96,13 @@ function synthesize(
  * Concrete names become single-target virtual models so that routing has one
  * code path: a direct passthrough is just a degenerate load-balancing pool.
  */
-export function resolveModel(name: string, snapshot: Snapshot): VirtualModel {
+export function resolveModel(
+  name: string,
+  snapshot: Snapshot,
+  // Defaults to the real registry; a caller may describe a different
+  // installation. See `RankInput.providers` for why this is a parameter.
+  providers: ProviderDescriptors = PROVIDER_DESCRIPTORS,
+): VirtualModel {
   const configured = snapshot.models.get(name);
   if (configured !== undefined) return configured;
 
@@ -98,22 +110,20 @@ export function resolveModel(name: string, snapshot: Snapshot): VirtualModel {
   if (sep > 0) {
     const prefix = name.slice(0, sep);
     const rest = name.slice(sep + 1);
-    // `prefix` is a slice of a client-supplied model name, and this lookup
-    // replaced a `Set.has` — which never consults a prototype. On an ordinary
-    // object literal it therefore admitted `constructor/x` and `toString/x` and
-    // threw a `TypeError` out of `synthesize`, which reached the client as a 500
-    // carrying an internal expression. What makes the plain check correct is
-    // that `PROVIDER_DESCRIPTORS` has no prototype to inherit from; that is one
-    // invariant covering every reader of every provider table, and
-    // `descriptor.test.ts` pins it.
-    const descriptor = PROVIDER_DESCRIPTORS[prefix];
+    // `Object.hasOwn`, because `providers` may be a caller's own object literal
+    // and not only the null-prototype registry. This lookup replaced a
+    // `Set.has` — which never consults a prototype — and against an ordinary
+    // literal it admitted `constructor/x` and `toString/x`, then threw a
+    // `TypeError` out of `synthesize` that reached the client as a 500 carrying
+    // an internal expression.
+    const descriptor = Object.hasOwn(providers, prefix) ? providers[prefix] : undefined;
     if (descriptor !== undefined && prefix !== "custom" && rest.length > 0) {
       return synthesize(prefix, rest, descriptor);
     }
     throw new GatewayError("NO_CANDIDATES", `unknown provider "${prefix}" in model "${name}"`);
   }
 
-  for (const [prefix, provider, descriptor] of prefixProviders()) {
+  for (const [prefix, provider, descriptor] of prefixProviders(providers)) {
     if (name.startsWith(prefix)) return synthesize(provider, name, descriptor);
   }
 

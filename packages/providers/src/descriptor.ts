@@ -32,6 +32,18 @@ import type { ProviderModelCatalogEntry } from "./catalog-types.ts";
  * Every field is required. There are no defaults on purpose: `writeOverInput`
  * defaulting to zero would underprice cache writes silently and permanently,
  * which is the failure mode this whole record exists to make impossible.
+ *
+ * **One caller does it anyway, knowingly.** `apps/gateway/src/dispatch/price.ts`
+ * falls back to `{ fiveMinute: 0, oneHour: 0 }` when this record has no entry
+ * for a provider, because widening `ProviderId` made that lookup partial and
+ * `priceOf` runs inside `finishLog`, where throwing would break usage accounting
+ * for a request that already succeeded. It is unreachable today only because the
+ * router excludes a provider with no descriptor and dispatch throws `INTERNAL`
+ * on a missing adapter first — a coupling between three call sites, not a
+ * property of that function. Recorded as a known risk in
+ * `docs/superpowers/specs/2026-08-27-widening-provider-id-design.md`, to revisit
+ * when the plugin host loosens it. Do not read it as licence for a second
+ * default here.
  */
 export type ProviderDescriptor = {
   readonly id: ProviderId;
