@@ -244,3 +244,69 @@ test("the new rule selects exactly the targets the old table selected", () => {
     expect(now, c.name).toEqual(before);
   }
 });
+
+/**
+ * The reason row for the rule beside the pin.
+ *
+ * `pin:missing` exists because a pin that matches no account drops every
+ * credential silently and would fail the request with nothing in `excluded` to
+ * explain it. The endpoint rule does exactly the same thing and had no such row:
+ * a target naming an endpoint no account is at — or carrying a corrupt one after
+ * an unvalidated read — failed every request with an empty exclusion list, and
+ * `omni doctor` only inspects pinned targets.
+ */
+test("a target no account can serve reports why, even unpinned", () => {
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "custom", model: "m", endpointId: "nowhere" })]),
+    snapshot: snapshot({
+      credentials: [credential({ id: "c", provider: "custom", providerData: { endpointId: "a" } })],
+    }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs).toEqual([]);
+  expect(excluded.map((e) => [e.kind, e.reason])).toEqual([["target", "endpoint:unmatched"]]);
+});
+
+test("a provider with no accounts at all stays silent", () => {
+  // An empty pool is already legible; a row per unconnected provider would be
+  // noise on every dry-run.
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "custom", model: "m", endpointId: "nowhere" })]),
+    snapshot: snapshot({ credentials: [] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs).toEqual([]);
+  expect(excluded).toEqual([]);
+});
+
+test("an account dropped for its own reason is not also reported as unservable", () => {
+  // Disabled, expired, breakered and quota-spent each leave their own row. Only
+  // a target nothing serves is unexplained, so the two must not double up.
+  const { excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "custom", model: "m", endpointId: "a" })]),
+    snapshot: snapshot({
+      credentials: [
+        credential({
+          id: "c",
+          provider: "custom",
+          enabled: false,
+          providerData: { endpointId: "a" },
+        }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(excluded.map((e) => e.reason)).toEqual(["disabled"]);
+});
