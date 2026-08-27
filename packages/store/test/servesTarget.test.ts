@@ -81,10 +81,48 @@ test("a pin narrows to one account, on top of every other check", () => {
  * target — while the store's own tests stayed green, because none of them spelled
  * "none" that way.
  */
-test("an empty endpoint id names no endpoint, and does not narrow anything", () => {
+test("an empty endpoint id names no endpoint", () => {
+  // The case the pin picker actually asks about: a non-custom target as the
+  // console spells it, against an ordinary account of that provider.
   const t = target({ provider: "anthropic", endpointId: "" });
   expect(servesTarget(t, account({ provider: "anthropic", providerData: {} }))).toBe(true);
-  expect(
-    servesTarget(t, account({ provider: "anthropic", providerData: { endpointId: "one" } })),
-  ).toBe(true);
+});
+
+/**
+ * The regression an adversarial review caught, and the reason this rule is an
+ * equality in both directions rather than a one-sided check.
+ *
+ * The first generalisation asked only "does the target name an endpoint the
+ * account fails to match". A `custom` target whose `endpointId` was absent or
+ * `""` skipped that check and was then served by *every* custom account. The
+ * rule it replaced compared `"endpoint-a" !== undefined`, refused, and left the
+ * row unroutable.
+ *
+ * Write paths cannot mint such a row — the control schema requires `endpointId`
+ * on the custom arm and `putModel` independently refuses one with no live
+ * endpoint — but `sqlite/config.ts` parses stored targets without validation, so
+ * a restore or a hand edit supplies one. The consequence was not a failed
+ * request: it was a request sent to an arbitrary endpoint's origin with that
+ * endpoint's key, and an `omni doctor` that called the pin healthy. That is the
+ * inverse of the bug this function was made the single copy for.
+ */
+test("a custom target naming no endpoint is served by nobody", () => {
+  const real = account({ providerData: { endpointId: "endpoint-a" } });
+  expect(servesTarget({ provider: "custom" }, real)).toBe(false);
+  expect(servesTarget({ provider: "custom", endpointId: "" }, real)).toBe(false);
+});
+
+test("a custom target naming no endpoint is not rescued by a pin either", () => {
+  // The pin is applied after the endpoint check, so an unroutable row stays
+  // unroutable rather than the pin acting as an override.
+  const real = account({ id: "acc", providerData: { endpointId: "endpoint-a" } });
+  expect(servesTarget({ provider: "custom", credentialId: "acc" }, real)).toBe(false);
+});
+
+test("an account bound to an endpoint refuses a target that names none", () => {
+  // The other direction of the same equality. Unreachable through the schema for
+  // a non-custom provider, and failing closed is the right answer for a
+  // credential that states where it points at a target that does not.
+  const bound = account({ provider: "anthropic", providerData: { endpointId: "stray" } });
+  expect(servesTarget({ provider: "anthropic" }, bound)).toBe(false);
 });
