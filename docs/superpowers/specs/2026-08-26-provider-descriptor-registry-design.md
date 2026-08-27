@@ -91,20 +91,15 @@ edits" unconditionally.
 ## The descriptor
 
 ```ts
+/** The leaf half: no adapter, no profile, safe to bundle for a browser. */
 export type ProviderDescriptor = {
   readonly id: ProviderId;
 
   /** Was PROVIDER_CAPABILITIES (ir/capabilities.ts:43). */
-  readonly capabilities: Capabilities;
+  readonly capabilities: ProviderCapabilities;
 
   /** Was ANTHROPIC_NATIVE_TOOLS (ir/capabilities.ts:23). */
   readonly anthropicNativeTools: boolean;
-
-  /** Was BODY_ORDER (providers/body.ts:10). */
-  readonly bodyOrder: readonly string[];
-
-  /** Was PROFILES (providers/profile.ts:297). */
-  readonly profile: ClientProfile;
 
   /** Was WRITE_OVER_INPUT (gateway/dispatch/price.ts:17). */
   readonly writeOverInput: { fiveMinute: number; oneHour: number };
@@ -112,12 +107,12 @@ export type ProviderDescriptor = {
   /**
    * Was PROVIDER_MODEL_CATALOG[id] (providers/catalog.ts:44) — the whole value
    * that map holds for this id, not a bare model list. Consumers index it as
-   * `.models` today (`apps/dashboard/src/features/models/draft.ts:190`), so the
-   * shape is preserved rather than flattened.
+   * `.models` today, so the shape is preserved rather than flattened. A
+   * reference to the provider's own `*_MODELS` list, never a copy.
    */
-  readonly catalog: ProviderCatalogEntry;
+  readonly catalog: ProviderModelCatalogEntry;
 
-  /** Was PREFIX_PROVIDER (router/resolve.ts:12). Empty for most providers. */
+  /** Was PREFIX_PROVIDER (router/resolve.ts:12). Empty for kilo and custom. */
   readonly modelPrefixes: readonly string[];
 
   /** Was the CALLBACKS entry (control/connect.ts:36). Absent unless loopback. */
@@ -128,30 +123,39 @@ export type ProviderDescriptor = {
     label: string;
     /** Was PROVIDER_ORDER (AccountsBoard.tsx:38). */
     order: number;
-    /** Was theme.provider.<id> plus --p-<id> in light and dark. */
-    colour: { light: string; dark: string };
     /**
-     * Was PROVIDER_TONE (cli/command.ts:46). Declared as the tone *name*, not
-     * the CLI's `Tone` type: `packages/providers` must not import from
-     * `apps/cli`, and the CLI already owns the name-to-escape-code mapping.
+     * Was PROVIDER_TONE (cli/command.ts:46). The tone *name*, not the CLI's
+     * `Tone` type: `packages/providers` must not import from `apps/cli`, and the
+     * CLI already owns the name-to-escape-code mapping.
      */
     tone: string;
-    /** Was PASTE_HINT / CODE_PLACEHOLDER (ConnectDialog.tsx:54,70). */
+    /** Was theme.provider.<id> plus --p-<id> in light and dark. */
+    colour: { light: string; dark: string };
+    /** Was PASTE_HINT (ConnectDialog.tsx:54). CODE_PLACEHOLDER derives from `callback`. */
     pasteHint?: string;
   };
+};
 
+/** The server half, assembled in registry.ts. */
+export type ProviderRegistryEntry = ProviderDescriptor & {
   readonly adapter: ProviderAdapter;
-
-  /** Was the OAUTH_PROVIDERS entry (control/oauth/index.ts:9). */
-  readonly auth?: OAuthProvider;
+  /** Was PROFILES (providers/profile.ts:297). */
+  readonly profile: ClientProfile;
+  /** Was BODY_ORDER (providers/body.ts:10). */
+  readonly bodyOrder: readonly string[];
 };
 ```
 
-Every field is required except `auth`, `callback`, `secretPattern` and
-`presentation.pasteHint`. Each optional field is optional because its absence is
-a real state some current provider is in — `custom` has no OAuth flow, only
-`openai` and `grok` use a loopback redirect, only xAI has a distinctive key
-prefix — and not because a provider might forget to supply it.
+**The split into two types was forced, not chosen**, and both halves of the
+reason are load-bearing. Adapters import `BODY_ORDER` and `PROFILES`, so a record
+carrying adapters cannot also be what those tables derive from. And profiles read
+`Bun.env`, which has no business in the browser bundle the console and the pure
+router build from the leaf. `@omni/providers/descriptors` exports the leaf;
+`registry.ts` joins the rest.
+
+Only `callback` and `presentation.pasteHint` are optional, and each because its
+absence is a real state a current provider is in: only `openai` and `grok` use a
+loopback redirect.
 
 `writeOverInput` in particular is required with no default. It is `{1.25, 2}` for
 Anthropic and `{0, 0}` for everyone else, and a default of zero underprices cache
@@ -230,8 +234,22 @@ Behaviour-preserving throughout. Each step replaces a read, not a value.
    read at `price.ts:61`.
 6. **`packages/control`** — `PROVIDER_IDS` (`connect.ts:8`), `providerIdSchema`
    (`schemas.ts:42`) and `CALLBACKS` (`connect.ts:36`) derive from the registry.
-   `OAUTH_PROVIDERS` (`oauth/index.ts:9`) becomes a projection of descriptors
-   that carry `auth`.
+
+   **`OAUTH_PROVIDERS` does not, and `auth` is not on the descriptor.** Deferred
+   to the published-contract sub-project, because it is not a mechanical
+   migration. `OAuthProvider` lives in `packages/control/src/oauth/types.ts` and
+   imports `ClientProfile`, `HeaderPair` and `HttpClient` from `@omni/providers`,
+   so a descriptor holding an `auth` value closes a package cycle. Breaking it
+   means moving the `OAuthProvider` contract into `packages/providers` — and that
+   type is defined in terms of `CredentialSecrets`, `UsageSecrets` and
+   `WindowType` from `@omni/store`, which `packages/providers` does not depend on
+   and should not acquire casually.
+
+   So the move is a layering decision about where the credential contract lives,
+   which is what sub-project 3 has to decide anyway when that contract is
+   published. Doing it here would settle it by accident. `OAUTH_PROVIDERS` stays
+   a hand-maintained partial record; `OAUTH_PROVIDER_IDS` already derives from
+   its keys, and a test asserts every id in it is one the registry describes.
 
    **Correction, found during implementation.** An earlier draft of this spec
    read `schemas.ts:59` as drift — a hand-written enum that had fallen out of
