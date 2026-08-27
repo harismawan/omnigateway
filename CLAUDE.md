@@ -418,6 +418,38 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   widen membership is making an earlier guard conditional on the pin. An early version of this bullet
   named the wrong property, which is exactly the trap: a rule stated wrong is one a contributor
   preserve while breaking the real thing.
+- **`ProviderId` is a validated string, not a union of six.** A provider loaded from
+  `<root>/plugins/` has an id no compiled-in union could hold, so a closed type there is a closed
+  door here. The six built-ins are still written as literals in `descriptors.ts` and `ADAPTERS`, so a
+  built-in with no descriptor or adapter is still a compile error — in one file rather than eight —
+  and every other id-keyed table is derived by walking one of those, so it carry exactly their ids.
+  Lookups keyed on a **stored** id are genuinely partial and `noUncheckedIndexedAccess` make each a
+  compile error at the point of use. Do not cast that away; each site owe a decision, and the
+  decisions differ. `PROVIDER_ID_PATTERN` in `packages/providers` is the **one** copy of what may
+  name a provider — `packages/control/src/catalog.ts` re-export it. `@omnigateway/plugin-api` mirror
+  it instead, same mirror-and-pin reason as `@omni/ratelimit/catalog`: that package published, this
+  one not.
+- **A module-scope `Object.keys(PROVIDER_DESCRIPTORS)` is a build-time snapshot**, and `loadPlugins()`
+  run long after import. Three sites read one and were wrong the same way: `providerCatalog` served a
+  console missing every plugin provider, `providerIdSchema` was `z.enum(PROVIDER_IDS)` and would have
+  refused their credentials, `isProviderId` reported them as not existing. Ask the registry **at call
+  time**. `PROVIDER_IDS` still exist and is still a snapshot — it feed CLI usage messages and tests,
+  never a gate.
+- `provider:missing` is the pin rule applied to the provider, and follow it exactly: emitted **once
+  per target**, `kind: "target"` with `credentialId: ""`, because no account is at fault. It is the
+  **first** guard in the target loop, so a target that is also pinned report the provider rather than
+  `pin:missing` about an account that could not have served it either way. `credentialId` must stay
+  `""` — a mutant carrying the pin there survive a `reason`-only assertion and put the string into
+  `LogFields.credentialId`, contradicting `kind`. Dispatch's `INTERNAL "no adapter for provider …"`
+  is the *other* half and stay a throw: reaching it mean the router admitted a candidate it should
+  have excluded, which is a gateway bug, and `deps.adapters` is a separate injection point from the
+  descriptors, so the two can disagree.
+- **Format and existence are two questions.** `providerIdSchema` check format alone. Existence is
+  asked per caller because the answers differ: `createApiKeyCredential` refuse to mint an account for
+  a provider that does not exist — no history to preserve — while `putModel` accept a target naming
+  one, same exemption it give a dangling pin. `catalogModelAuths` answer "every way in" for an
+  unknown provider, matching what it already answer for an unlisted model: empty would read as "no
+  credential can reach this" and refuse every plugin provider's target.
 - Nothing validate the pin at write time, same exemption `putModel` give stored targets: removing an
   account must not make unrelated edit unsavable. `omni doctor` carry that weight instead, and it
   must resolve through `resolvePin` — an existence check report "none" for the cross-provider and
