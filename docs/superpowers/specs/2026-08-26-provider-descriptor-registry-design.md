@@ -123,9 +123,6 @@ export type ProviderDescriptor = {
   /** Was the CALLBACKS entry (control/connect.ts:36). Absent unless loopback. */
   readonly callback?: { uri: string; label: string };
 
-  /** Was the secret-shape rule in store/bodies/mask.ts. Absent unless distinctive. */
-  readonly secretPattern?: { pattern: RegExp; keep: number };
-
   readonly presentation: {
     /** Was PROVIDER_LABEL, in three copies. */
     label: string;
@@ -258,11 +255,25 @@ Behaviour-preserving throughout. Each step replaces a read, not a value.
    The general lesson is worth more than the fix: a five-of-six enum next to a
    six-member list looks like drift and is sometimes a discriminant. Read what
    the missing member does elsewhere before calling a difference a bug.
-7. **`packages/store`** — the `xaiKey` rule in `bodies/mask.ts:122,155,191`
-   derives from `descriptor.secretPattern`. `MaskRuleId` stops enumerating
-   vendor names. `@omni/store` may not import `@omni/providers`, so the patterns
-   are injected where the masker is constructed, the same way clocks and loggers
-   are injected elsewhere.
+7. **`packages/store`** — **nothing moves, and `secretPattern` is dropped from
+   the descriptor.**
+
+   An earlier draft had the `xaiKey` rule in `bodies/mask.ts` derive from a
+   `descriptor.secretPattern`, injected where the masker is constructed. On
+   reaching it, that is the wrong trade. `MASK_RULES` is the redaction boundary
+   for captured request bodies, and a provider-supplied pattern is a provider
+   deciding how much of its own secret survives into stored text. The direction
+   that fails is silent: a regex that matches too little leaks, and nothing
+   reports it. That is the same argument `LogFields` already wins, and it should
+   win here too.
+
+   The cost of leaving it is small and worth stating so nobody re-opens this
+   expecting a win: `PREFIXED_KEY` and `OPAQUE` already catch ordinary
+   `<vendor>-<long-run>` key shapes, so a new provider's secrets are redacted,
+   just not by a rule tuned to them. `xaiKey` exists only because `xai-` also
+   prefixes xAI *model names* and the shared class was destroying those — a
+   false-positive problem, not a leak. Adding a vendor rule stays a core edit and
+   should read as one.
 8. **`apps/cli`** — `PROVIDER_TONE` (`command.ts:46`) becomes a registry read.
 9. **`apps/dashboard`** — the second `ProviderId` type (`tokens.ts:73`), the
    three `PROVIDER_LABEL` copies, `PROVIDER_ORDER`, `PASTE_HINT`,

@@ -131,6 +131,109 @@ describe("descriptors carry the values the old tables held", () => {
   });
 });
 
+describe("presentation and routing data match their pre-change fixtures", () => {
+  /** `PREFIX_PROVIDER` as it stood in `packages/router/src/resolve.ts`. */
+  const PREFIXES_BEFORE: Readonly<Record<ProviderId, readonly string[]>> = {
+    anthropic: ["claude-"],
+    openai: ["gpt-", "o1", "o3", "o4"],
+    kimi: ["kimi-", "moonshot"],
+    kilo: [],
+    grok: ["grok-"],
+    custom: [],
+  };
+
+  /** `CALLBACKS` as it stood in `packages/control/src/connect.ts`. */
+  const CALLBACKS_BEFORE: Readonly<Partial<Record<ProviderId, { uri: string; label: string }>>> = {
+    openai: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
+    grok: { uri: "http://127.0.0.1:56121/callback", label: "Grok" },
+  };
+
+  /** `PROVIDER_LABEL`, which existed in three separate copies. */
+  const LABELS_BEFORE: Readonly<Record<ProviderId, string>> = {
+    anthropic: "Anthropic",
+    openai: "OpenAI",
+    kimi: "Kimi",
+    kilo: "Kilo",
+    grok: "Grok",
+    custom: "OpenAI Compatible",
+  };
+
+  /** `PROVIDER_TONE` as it stood in `apps/cli/src/command.ts`. */
+  const TONES_BEFORE: Readonly<Record<ProviderId, string>> = {
+    anthropic: "magenta",
+    openai: "green",
+    kimi: "blue",
+    kilo: "orange",
+    grok: "yellow",
+    custom: "cyan",
+  };
+
+  /** The `--p-<id>` custom properties, both themes, from `GlobalStyle.ts`. */
+  const COLOURS_BEFORE: Readonly<Record<ProviderId, { light: string; dark: string }>> = {
+    anthropic: { light: "oklch(0.56 0.13 45)", dark: "oklch(0.74 0.12 48)" },
+    openai: { light: "oklch(0.5 0.09 190)", dark: "oklch(0.76 0.1 190)" },
+    kimi: { light: "oklch(0.53 0.17 330)", dark: "oklch(0.72 0.16 330)" },
+    kilo: { light: "oklch(0.52 0.14 224)", dark: "oklch(0.74 0.14 224)" },
+    grok: { light: "oklch(0.52 0.14 125)", dark: "oklch(0.74 0.14 125)" },
+    custom: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
+  };
+
+  /** `PROVIDER_ORDER` from `AccountsBoard.tsx`, as a rank per id. */
+  const ORDER_BEFORE: readonly ProviderId[] = [
+    "anthropic",
+    "openai",
+    "kimi",
+    "kilo",
+    "grok",
+    "custom",
+  ];
+
+  test("model prefixes match", () => {
+    for (const id of IDS) {
+      expect(PROVIDER_DESCRIPTORS[id].modelPrefixes).toEqual(PREFIXES_BEFORE[id]);
+    }
+  });
+
+  test("callbacks match, and only the two loopback providers have one", () => {
+    for (const id of IDS) {
+      expect(PROVIDER_DESCRIPTORS[id].callback).toEqual(CALLBACKS_BEFORE[id]);
+    }
+  });
+
+  test("labels, tones and colours match", () => {
+    for (const id of IDS) {
+      const { label, tone, colour } = PROVIDER_DESCRIPTORS[id].presentation;
+      expect(label).toBe(LABELS_BEFORE[id]);
+      expect(tone).toBe(TONES_BEFORE[id]);
+      expect(colour).toEqual(COLOURS_BEFORE[id]);
+    }
+  });
+
+  test("display order matches, and every rank is distinct", () => {
+    const ranked = [...IDS].sort(
+      (a, b) =>
+        PROVIDER_DESCRIPTORS[a].presentation.order - PROVIDER_DESCRIPTORS[b].presentation.order,
+    );
+    expect(ranked).toEqual([...ORDER_BEFORE]);
+
+    // Two providers sharing a rank sort unpredictably, so the board's order
+    // would depend on object key order rather than on anything stated.
+    const ranks = IDS.map((id) => PROVIDER_DESCRIPTORS[id].presentation.order);
+    expect(new Set(ranks).size).toBe(ranks.length);
+  });
+
+  test("every provider states a colour for both themes", () => {
+    // A provider with only one renders colourless in the other, and nothing
+    // throws — the CSS custom property simply resolves to nothing.
+    for (const id of IDS) {
+      const { light, dark } = PROVIDER_DESCRIPTORS[id].presentation.colour;
+      expect(light.length).toBeGreaterThan(0);
+      expect(dark.length).toBeGreaterThan(0);
+      expect(light).not.toBe(dark);
+    }
+  });
+});
+
 describe("the registry agrees with what it replaced", () => {
   test("every adapter reports the capabilities its descriptor states", () => {
     // The adapters used to read `PROVIDER_CAPABILITIES` from `@omni/ir`. They

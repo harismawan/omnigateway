@@ -1,5 +1,6 @@
 import type { ConnectFlows } from "@omni/control";
 import type { ProviderId } from "@omni/ir";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import type { Store } from "@omni/store";
 import type { OptionSpec, Parsed } from "./args.ts";
 import type { Context } from "./context.ts";
@@ -42,23 +43,33 @@ export type Command = {
   run: (args: Parsed, env: CommandEnv) => Promise<void>;
 };
 
-/** Provider identity is one of the two things colour is allowed to mean. */
-const PROVIDER_TONE: Record<ProviderId, Tone> = {
-  anthropic: "magenta",
-  openai: "green",
-  kimi: "blue",
-  // Deliberately nowhere near kimi's blue: the two names are one letter apart
-  // and print next to each other, so hue is the only thing separating them at
-  // a glance.
-  kilo: "orange",
-  // Not red: that tone is the failure half of `state()` below, and a provider
-  // name wearing it would read as a broken credential in the same table.
-  grok: "yellow",
-  custom: "cyan",
-};
+/**
+ * Provider identity is one of the two things colour is allowed to mean.
+ *
+ * The tone is stated on the provider's descriptor as a name; this file owns the
+ * mapping from that name to an escape code, which is why the descriptor types it
+ * as a plain string rather than importing `Tone` from here.
+ */
+const TONES = new Set<string>([
+  "red",
+  "green",
+  "yellow",
+  "blue",
+  "magenta",
+  "cyan",
+  "orange",
+] satisfies Tone[]);
+
+function toneOf(id: ProviderId): Tone {
+  const named = PROVIDER_DESCRIPTORS[id].presentation.tone;
+  // A descriptor naming a tone this terminal cannot paint is a bug in that
+  // descriptor, but it is not worth failing a command over: the id still prints,
+  // uncoloured, which is what a non-TTY gets anyway.
+  return TONES.has(named) ? (named as Tone) : "cyan";
+}
 
 export function provider(ctx: Context, id: ProviderId): string {
-  return paint(ctx, PROVIDER_TONE[id], id);
+  return paint(ctx, toneOf(id), id);
 }
 
 /** The other: state. */

@@ -1,6 +1,9 @@
 import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
-import { PROVIDER_IDS as REGISTRY_PROVIDER_IDS } from "@omni/providers/descriptors";
+import {
+  PROVIDER_DESCRIPTORS,
+  PROVIDER_IDS as REGISTRY_PROVIDER_IDS,
+} from "@omni/providers/descriptors";
 import type { Store } from "@omni/store";
 import { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
 import type { AuthorizeStart, DeviceOAuthProvider, OAuthProvider } from "./oauth/types.ts";
@@ -34,10 +37,12 @@ const FLOW_TTL_MS = 600_000;
  * the exchange. A provider absent from this table redirects nowhere and hands
  * the operator a code directly.
  */
-const CALLBACKS: Readonly<Partial<Record<ProviderId, { uri: string; label: string }>>> = {
-  openai: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
-  grok: { uri: "http://127.0.0.1:56121/callback", label: "Grok" },
-};
+const CALLBACKS: Readonly<Partial<Record<ProviderId, { uri: string; label: string }>>> =
+  Object.fromEntries(
+    Object.entries(PROVIDER_DESCRIPTORS)
+      .filter(([, descriptor]) => descriptor.callback !== undefined)
+      .map(([id, descriptor]) => [id, descriptor.callback]),
+  );
 
 export type ConnectDeps = {
   store: Store;

@@ -62,6 +62,50 @@ export type ProviderDescriptor = {
    * source; neither reads the other.
    */
   readonly catalog: ProviderModelCatalogEntry;
+
+  /**
+   * Prefixes that infer this provider from a bare model name, so a client can
+   * pass a concrete upstream model without configuring a virtual model first.
+   * Was `PREFIX_PROVIDER` in `packages/router/src/resolve.ts`.
+   *
+   * Empty for a provider whose models are only reachable through a configured
+   * target — `kilo`, which fronts other vendors' model names, and `custom`,
+   * whose endpoint id a bare name cannot carry.
+   */
+  readonly modelPrefixes: readonly string[];
+
+  /**
+   * Where a redirect flow sends the operator's browser. Was `CALLBACKS` in
+   * `packages/control/src/connect.ts`.
+   *
+   * Absent for every provider that hands the operator a code directly, which is
+   * most of them. Nothing here binds a port: the gateway is as often as not on a
+   * different machine than the browser, so the redirect is *expected* to fail to
+   * connect and the operator pastes the resulting URL back.
+   */
+  readonly callback?: { readonly uri: string; readonly label: string };
+
+  /**
+   * How this provider is named and coloured wherever a human sees it. Was
+   * `PROVIDER_LABEL` (in three separate copies), `PROVIDER_ORDER`,
+   * `PROVIDER_TONE`, `theme.provider` and the `--p-<id>` custom properties.
+   *
+   * Presentation lives beside the rest of a provider's data rather than in the
+   * console because the console was not the only place holding it, and three
+   * copies of a label is how two of them come to disagree.
+   */
+  readonly presentation: {
+    /** Display name. Not the id: `custom` shows as "OpenAI Compatible". */
+    readonly label: string;
+    /** Rank in every list the console and CLI draw. Lower sorts first. */
+    readonly order: number;
+    /** Terminal colour name. The CLI owns the mapping to an escape code. */
+    readonly tone: string;
+    /** `--p-<id>`, in both themes. A provider with only one renders wrong in the other. */
+    readonly colour: { readonly light: string; readonly dark: string };
+    /** Shown under the code box when a flow asks the operator to paste something. */
+    readonly pasteHint?: string;
+  };
 };
 
 /** Total, so a new provider fails to compile until it is described. */

@@ -18,4 +18,24 @@ export const kiloDescriptor: ProviderDescriptor = {
   // buys a cache entry to be charged for.
   writeOverInput: { fiveMinute: 0, oneHour: 0 },
   catalog: KILO_MODELS,
+  // None, and not an oversight: Kilo fronts other vendors' models under their
+  // own names, so a bare `claude-…` or `gpt-…` names the vendor rather than
+  // Kilo. Reaching Kilo means configuring a target that says so.
+  modelPrefixes: [],
+  presentation: {
+    label: "Kilo",
+    order: 4,
+    // Deliberately nowhere near kimi's blue: the two names are one letter apart
+    // and print next to each other, so hue is the only thing separating them at
+    // a glance.
+    tone: "orange",
+    // Kilo takes the arc between openai and the accent: 224 is ~34deg from
+    // openai and ~38 from the accent blue, and — the point — 106 from kimi.
+    // Kimi and kilo are one letter apart and sit next to each other in every
+    // list the console draws, so they are the one pair that must not also be
+    // neighbours in hue. The other free arc, ~296, is 34 from kimi and would
+    // have done the opposite.
+    colour: { light: "oklch(0.52 0.14 224)", dark: "oklch(0.74 0.14 224)" },
+    pasteHint: "Approve the code on Kilo's device page. This dialog finishes on its own.",
+  },
 };

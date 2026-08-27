@@ -88,7 +88,14 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     across restart. During restart no session and no authenticated surface to probe, so liveness is
     the one question `/api/*` cannot answer. May import `@omni/store/types`, `@omni/ir`, catalog
     subpath, `@omnigateway/dashboard-sdk`, but not provider adapters, HTTP client, runtime store
-    code. SDK permitted because alternative was second copy of rule about what may leave plugin's
+    code. Allowlist gained `@omni/providers/descriptors` when provider presentation — label,
+    display order, tone, `--p-<id>` colour in both themes, paste hint — moved onto descriptors.
+    Console held own copy of every one, plus **second `ProviderId` type** no compiler tied to
+    `@omni/ir`'s, and `PROVIDER_LABEL` in **three** places. Subpath admissible on exactly terms
+    `catalog` already was: leaf, no adapter, no HTTP client, pinned by
+    `packages/providers/test/leafSubpaths.test.ts`, which bundle each entry point for browser and
+    assert transport absent **and** known symbol present — "absent" is also what harness that
+    bundled nothing report. SDK permitted because alternative was second copy of rule about what may leave plugin's
     own API prefix — rule held in two places is one that end up true in one. Same argument later
     moved LIVE switch there: which control pause polling is a rule too. SDK **no longer** leaf with
     no imports — `live.ts` import React — so it now in `SHARED_IMPORTS`, one copy served to console
@@ -136,6 +143,13 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     and redaction boundary. `servesTarget` stay one rule with **one** call site consulting descriptor
     from inside itself, because five sites once asked that question separately and three asked less
     than the router did.
+    **Redaction never becomes extensible**, same family as `LogFields` and for the same reason.
+    `MASK_RULES` in `packages/store/src/bodies/mask.ts` keep its `xaiKey` rule and its vendor
+    prefixes in core, and a provider **not** supply its own pattern: a descriptor-supplied regex is a
+    provider deciding how much of its own secret survive into captured bodies, and the direction that
+    go wrong is silent. Gap is narrow by construction — `PREFIXED_KEY` and `OPAQUE` already catch
+    ordinary `xyz-…` key shapes, so new provider is covered, only not optimally. Adding a vendor rule
+    is a core edit and should read as one.
     What core keep is provider-shaped **vocabulary**, not provider **logic**: `ErrorCode`,
     `LogFields`, `StopReason`, `CacheControl.ttl`, `AuthType`, `WindowType`, `surface`,
     `AnthropicToolFamily`. Provider needing new member of those edit core, by design — that is a
