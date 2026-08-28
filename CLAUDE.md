@@ -563,6 +563,25 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   called as a **method** on one of these throw. Use `Object.hasOwn(table, key)`.
   Console cannot import `@omni/providers` (rule 12), so `heldAuths` restate the rule with
   `Object.create(null)` and carry its own test.
+- **A registry threaded into some of a call graph and not all is this repository's most repeated
+  bug, and it is the *sweep* that keep failing, not the fix.** Three review round in a row each
+  found it in the previous round's fix: prototype sweep covered `@omni/providers` and left
+  `OAUTH_PROVIDERS`, `CALLBACKS` and console's `heldAuths`; injection covered `resolveModel` and
+  `rank` and left `priceOf`, so a $12.50 cache write bill $0.00 with no throw and no log; then the
+  test pinning *that* covered injected path and not default, because `??` only fire on `undefined`.
+  Every one found by hand, by someone thinking to try that one site.
+  So do not add one test per site — they go stale the day a fourth site appear. **Inject a sentinel
+  registry holding one synthetic provider and none of the six**, and assert a real request end to
+  end. Any consumer reading module-global instead see a registry without it and fail loudly:
+  `resolveModel` cannot infer the prefix, `eligible` exclude `provider:missing`, `priceOf` bill
+  writes at zero. `apps/gateway/test/dispatch/dispatch.test.ts` hold it, and it kill all four
+  threading mutants **alone**, with every per-site test deselected. Same instrument as
+  `providerTables.test.ts`, which discover leaking table instead of listing them, and for same
+  reason: a list of what to check have exactly the property the thing it check lack.
+  Two shapes it need two dispatches for, and both are traps: a **configured** model short-circuit
+  `resolveModel` before any registry is read, and an **inferred** target is priced from
+  `PROVIDER_MODEL_CATALOG` — a different global, not injected — so it carry zero prices and can show
+  no multiplier.
 - **A module-scope `Object.keys`/`Object.entries` over `PROVIDER_DESCRIPTORS` is a build-time
   snapshot**, and `loadPlugins()` run long after import. **Five** sites read one and were wrong the
   same way — the count went three, then five, because each sweep stopped at the sites the previous
