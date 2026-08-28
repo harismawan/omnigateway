@@ -98,7 +98,16 @@ function renderGate() {
   return router;
 }
 
-const SESSION = { configured: true, authenticated: true };
+// The full shape `homeFor` reads. `authenticated: true` alone is not a console
+// session any more: the client surface added `principal`, and a status without
+// one resolves to `/login` — correctly, since a gateway that cannot say *who* is
+// authenticated has not said the operator is.
+const SESSION = {
+  configured: true,
+  authenticated: true,
+  principal: { kind: "admin" as const },
+  viewerConfigured: false,
+};
 
 /**
  * Keeps `/api/catalog` unanswered until the returned function is called.
@@ -200,7 +209,12 @@ describe("the shell gate", () => {
     // nothing in the gate may catch it on the way past and render it as an
     // error instead.
     const stub = createFetchStub({
-      "GET /api/status": () => ({ configured: true, authenticated: false }),
+      "GET /api/status": () => ({
+        configured: true,
+        authenticated: false,
+        principal: null,
+        viewerConfigured: false,
+      }),
       "GET /api/catalog": () => ({ providers: [] }),
     });
     const router = renderGate();

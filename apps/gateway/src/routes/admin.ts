@@ -284,8 +284,15 @@ export function adminRoutes(deps: AdminDeps) {
       // catalog pricing hints, connect dialog and provider palette — everything
       // it used to import from `@omni/providers` at build time, which a provider
       // loaded from disk at boot could never have been part of.
+      // `requireReader`, not `requireAdmin`. The console shell awaits this for
+      // every screen and admits the read-only administrator, so an admin-only
+      // catalog turned a viewer's whole console into "Console unavailable" —
+      // the all-or-nothing gate doing exactly what it says. Provider reference
+      // data is also strictly less sensitive than `GET /api/models`, which a
+      // viewer already reads: labels, colours, curated model ids and list
+      // prices, none of it installation state.
       .get("/api/catalog", async ({ request }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         return { providers: providerCatalog(reportCatalogProblem) };
       })
 
