@@ -22,6 +22,18 @@ export type Pair = { credential: CredentialView; target: Target };
  * change the conversation the model sees. Asking here, before dispatch, is what
  * turns "no target can do this" into one clear routing failure rather than an
  * adapter discovering it mid-encode.
+ *
+ * **`vendor` is deliberately excluded, and "every" above means every position a
+ * block can sit in — not every field keyed by a provider id.** `ChatRequest.vendor`
+ * is `Record<ProviderId, …>`, so it names providers too, and it is passthrough
+ * rather than ownership: each adapter reads only its own key and a foreign bag is
+ * extras, not a payload that would be mis-encoded. Routing on it would refuse a
+ * portable request for carrying an unused hint.
+ *
+ * The cost is real and belongs here rather than in a reader's assumption: a
+ * client's `anthropic`-keyed extras vanish on failover to OpenAI with **no**
+ * degradation recorded, because none of the six adapters `note()` the drop. That
+ * is worth fixing at the adapters, not by widening this.
  */
 export function requiredProviders(request: ChatRequest): ReadonlySet<ProviderId> {
   // **Every** owner, not the first. This returned the first provider-owned item

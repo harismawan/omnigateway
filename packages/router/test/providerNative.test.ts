@@ -118,6 +118,68 @@ test("two history blocks from different providers name both", () => {
   expect([...requiredProviders({ ...req, messages: mixed })].sort()).toEqual(["acme", "anthropic"]);
 });
 
+/**
+ * Two owners inside **one** block array, in each position that holds one.
+ *
+ * The loops the other tests cannot see. `two history blocks from different
+ * providers` puts each owner in its own message, so it pins the outer *message*
+ * loop and a `break` in the inner *block* loop survives it — and the inner loop
+ * is where the original bug's `return` actually lived. `system` is a flat array,
+ * so "break on first hit" there is the same defect one level up, and the test
+ * above it uses a single-block fixture: the very shape this branch criticised the
+ * previous round for.
+ *
+ * Both survived a full sweep. Unreachable in production today — a well-formed
+ * assistant turn comes from one provider — and reachable the moment a plugin
+ * codec emits these, which is what the whole capability exists for.
+ */
+const acmeBlock = {
+  type: "providerNative" as const,
+  provider: "acme",
+  blockType: "acme_lookup",
+  data: { id: "srv_1" },
+};
+const anthropicBlock = {
+  type: "providerNative" as const,
+  provider: "anthropic",
+  blockType: "web_search_tool_result",
+  data: { tool_use_id: "srvtoolu_1", content: [] },
+};
+
+test("two owners in one message's content name both", () => {
+  const request = {
+    ...req,
+    messages: [{ role: "assistant" as const, content: [acmeBlock, anthropicBlock] }],
+  };
+  expect([...requiredProviders(request)].sort()).toEqual(["acme", "anthropic"]);
+});
+
+test("two owners in one system prompt name both", () => {
+  const request = { ...req, system: [acmeBlock, anthropicBlock] };
+  expect([...requiredProviders(request)].sort()).toEqual(["acme", "anthropic"]);
+});
+
+test("two provider-defined tools name both", () => {
+  // The third loop, for symmetry — it was already pinned by the tool/history
+  // fixture, but only because the other owner came from somewhere else. Two in
+  // the tool list alone is what isolates it.
+  const request = {
+    ...req,
+    tools: [
+      webSearch,
+      {
+        kind: "provider" as const,
+        provider: "acme" as const,
+        family: "webSearch" as const,
+        type: "acme_search_v1",
+        name: "acme_search",
+        wire: {},
+      },
+    ],
+  };
+  expect([...requiredProviders(request)].sort()).toEqual(["acme", "anthropic"]);
+});
+
 test("a provider-native block in the system prompt names its producer", () => {
   // `ChatRequest.system` is a `ContentBlock[]`, so it carries these too, and it
   // was not scanned. Such a request routed to *any* provider with an empty

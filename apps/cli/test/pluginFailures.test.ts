@@ -72,9 +72,14 @@ test("every command reading the plugin registry reports what it could not read",
 
   const silent = reading.filter((entry) => {
     const source = code(entry.source);
-    // Destructured at the call site — a caller that drops `failures` there
-    // cannot report them however much it prints elsewhere.
-    const takes = /\{\s*descriptors,\s*failures\s*\}\s*=\s*await pluginProviders\(/.test(source);
+    // `failures` bound somewhere, not bound *immediately* at the call. The
+    // first version required `{ descriptors, failures } = await
+    // pluginProviders(` as one expression and fired the moment `add-key` grew a
+    // short-circuit for built-ins — a change that kept every reporting
+    // behaviour and merely put a ternary in between. An instrument that
+    // constrains the shape of a correct fix costs more than it catches; what
+    // matters is that the value is taken and reported, not how it is spelled.
+    const takes = /\bfailures\b/.test(source);
     // On stderr, for a person reading a terminal.
     const prints = /note\([\s\S]{0,200}?failure\.reason/.test(source);
     // And in the payload, for a script. Matched **inside an `emit(` call**, not

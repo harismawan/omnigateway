@@ -329,8 +329,10 @@ const codec = {
       },
     };
   },
-  async *decode(response) {
-    // yield StreamEvents
+  async *decode({ body, headers, decodeState }) {
+    // `body` is the upstream response stream; `decodeState` is whatever your own
+    // `buildRequest` returned under that key, which is how a decoder learns what
+    // the request it is decoding did. Yield StreamEvents.
   },
   classifyError({ status, body }) {
     // optional: return a GatewayError, or undefined to accept the default
@@ -339,8 +341,8 @@ const codec = {
 ```
 
 `buildRequest` receives the **decrypted credential for your own provider**, and
-that is the one documented exception to everything §0 says about what a plugin is
-handed. A codec that cannot authenticate cannot build a request. It is bounded
+that is the one documented exception to everything the opening section says about
+what a plugin is handed. A codec that cannot authenticate cannot build a request. It is bounded
 two ways: routing only produces candidates for your own provider id, so you see
 your provider's secrets and no other; and the codec never holds the HTTP client
 or the store, so it cannot send them anywhere the host did not ask for.

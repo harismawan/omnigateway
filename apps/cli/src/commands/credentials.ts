@@ -13,6 +13,7 @@ import {
   removeCredential,
 } from "@omni/control";
 import { nodeHttpClient } from "@omni/providers";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { boolFlag, numberFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -270,7 +271,23 @@ export const credentialsAddKey: Command = {
     // nothing from the compiler and is exactly why it is worth writing: the
     // exported type had no consumer at all, which made it documentation nothing
     // pointed at.
-    const { descriptors, failures } = await pluginProviders(ctx.root.root);
+    // **The built-ins first, so a key for `anthropic` runs nobody's plugin.**
+    // `pluginProviders` imports every provider-declaring plugin's module, which
+    // executes its top-level code — and this command stores a secret. Calling it
+    // unconditionally meant `omni credentials add-key anthropic` evaluated
+    // third-party code that had nothing to do with the account being created,
+    // took five seconds per hanging plugin before the prompt appeared, and then
+    // printed yellow warnings about plugins on a command that went on to
+    // succeed. A warning about something irrelevant is one an operator learns to
+    // scroll past.
+    //
+    // `PROVIDER_IDS` is a build-time snapshot and that is exactly right here: it
+    // is the set of providers compiled in, which cannot change at runtime. The
+    // registry read below is what answers for everything else.
+    const builtIn = PROVIDER_IDS.includes(providerId);
+    const { descriptors, failures } = builtIn
+      ? { descriptors: PROVIDER_DESCRIPTORS, failures: [] as const }
+      : await pluginProviders(ctx.root.root);
     // Named before the refusal, because a plugin that failed to read is the
     // likeliest reason the provider below is about to be reported as unknown.
     for (const failure of failures) {

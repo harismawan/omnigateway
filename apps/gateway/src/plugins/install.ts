@@ -3,7 +3,7 @@ import type { Logger } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS, registerProvider } from "@omni/providers";
 
 /**
- * Installs the providers plugins supplied, and refuses the ones that collide.
+ * Installs the providers plugins supplied.
  *
  * Called from boot and nowhere else, because boot is the one place that knows
  * the ordering constraint: every registry read is a call-time read, so a
@@ -11,9 +11,21 @@ import { PROVIDER_DESCRIPTORS, registerProvider } from "@omni/providers";
  * earlier ones. Registering before the app is built makes "installed" a property
  * of boot rather than a race.
  *
- * **A collision with a built-in is refused rather than allowed to win.** A plugin
- * shadowing `anthropic` would take its traffic, its stored credentials and its
- * `--p-anthropic` colour with nothing in the log saying so.
+ * **The collision check below is no longer the rule, and this docblock said it
+ * was for one release.** A plugin shadowing `anthropic` would take its traffic,
+ * its stored credentials and its `--p-anthropic` colour — and that is refused in
+ * `readProviders`, which the loader and the CLI both go through, because it was
+ * being enforced *here* and nowhere on the CLI's path: the CLI's merge applied
+ * the plugin's descriptor over the built-in, so `omni setup` wrote a plugin's
+ * context window into an agent's config while the gateway served the real
+ * adapter. Two copies of one rule, disagreeing on their first day.
+ *
+ * What remains here is the guard on `registerProvider`'s throw, and it is
+ * unreachable from the loader today. It stays because a throw at this point
+ * escapes to the top-level catch and `process.exit(1)`s — a plugin turning into
+ * a boot outage, which rule 15 forbids — so the cost of keeping it is one branch
+ * and the cost of removing it is that failure mode returning silently. Read it
+ * as defence, not as the place the decision is made.
  *
  * Extracted from `index.ts` so it can be tested at all, and that is the whole
  * reason it exists as a function. It sat inline in `main()`, outside anything a
