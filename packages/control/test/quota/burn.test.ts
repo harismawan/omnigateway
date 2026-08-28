@@ -110,6 +110,43 @@ test("a reading nobody believes is suppressed rather than extrapolated", () => {
   });
 });
 
+test("a window past its own reset is suppressed, however fresh the reading", () => {
+  // The row is overwritten by the poller and by nothing else, so for up to one
+  // poll interval after a rollover it holds a reading of a window that has
+  // already ended. Extrapolating from it reported the spent window's rate and
+  // its exhaustion instant while the new one was already running — and the
+  // reading itself is minutes old, so no staleness check catches it. The router
+  // has always dropped these; this is the same rule, asked once.
+  const rolledOver = window({ resetsAt: OBSERVED + 60_000 });
+  const estimate = burnFor(rolledOver, at(OBSERVED + 120_000));
+
+  expect(estimate).toEqual({
+    credentialId: "c1",
+    windowType: "fiveHour",
+    // Kept: a restatement of the reset and the window's length, as true of the
+    // window that ended as of one still running, and what the console charts
+    // the retained readings against. Only the inference is dropped.
+    windowStartsAt: OBSERVED + 60_000 - 5 * HOUR,
+    ratePerHour: null,
+    exhaustsAt: null,
+    survives: null,
+    stale: true,
+  });
+
+  // A minute earlier the same reading still describes a live window.
+  expect(burnFor(rolledOver, at(OBSERVED + 59_000)).stale).toBe(false);
+});
+
+test("a stale reading keeps nothing, a rolled-over one keeps where it began", () => {
+  // The two suppressions are not the same verdict. A reading too old to believe
+  // says nothing about the window at all; one whose reset has passed places the
+  // window exactly and only stops claiming what is being spent inside it.
+  const rolledOver = window({ resetsAt: OBSERVED + 60_000 });
+
+  expect(burnFor(rolledOver, at(OBSERVED + 120_000)).windowStartsAt).not.toBeNull();
+  expect(burnFor(window(), at(OBSERVED + STALE_AFTER + 1)).windowStartsAt).toBeNull();
+});
+
 test("a window never observed at all is suppressed", () => {
   const estimate = burnFor(window({ observedAt: 0 }), at(OBSERVED));
 

@@ -1,4 +1,4 @@
-import { quotaVerdict } from "@omni/store/types";
+import { quotaRolledOver, quotaVerdict } from "@omni/store/types";
 import {
   CartesianGrid,
   Line,
@@ -194,6 +194,22 @@ type WindowPanelProps = {
 };
 
 /**
+ * What the projection reached, phrased against where it stopped.
+ *
+ * `projectedPace` truncates at the ceiling, so a pace that would have overshot
+ * ends at 100% at its crossing instant rather than above it at the reset. "By
+ * reset" would then be untrue in the one case it most matters: the window is
+ * full before the reset arrives, which is the opposite of what that reads as.
+ */
+function projectedText(window: QuotaWindow, projection: QuotaPace | null): string {
+  if (projection === null) return "unknown";
+  if (window.resetsAt !== null && projection.to.at < window.resetsAt) {
+    return "100% of limit before it resets";
+  }
+  return `${Math.round(projection.to.percent)}% of limit by reset`;
+}
+
+/**
  * How the exhaustion estimate reads, always phrased against the reset.
  *
  * The verdict comes from `@omni/store/types` rather than from `survives`
@@ -228,7 +244,17 @@ function WindowPanel({
 
   // The same rule the bars and the router use. An estimate derived from a
   // reading nobody believes is worse than no estimate at all.
-  if (estimate === undefined || estimate.stale || isQuotaStale(window, now, pollIntervalMs)) {
+  //
+  // A rolled-over window is not that case and is not blanked here. `burnFor`
+  // suppresses its rate, its exhaustion instant and its verdict — every claim
+  // about a window still being spent — but keeps where the window began, and
+  // the retained readings underneath were measured and stay measured. So the
+  // chart is drawn and every derived figure below reads "unknown" on its own,
+  // with the note saying which of the two happened. Blanking it instead threw
+  // away real history for up to a poll interval after every rollover.
+  const rolledOver = quotaRolledOver(window, now);
+  const stale = isQuotaStale(window, now, pollIntervalMs);
+  if (estimate === undefined || stale || (estimate.stale && !rolledOver)) {
     return (
       <Stack $gap={2}>
         <Row $gap={2} $wrap>
@@ -262,16 +288,13 @@ function WindowPanel({
   // Only a measured reading gets a tooltip; the pace lines are figures the
   // facts row already states in words.
   const measured = new Set(segments.map((segment) => segment.key));
-  // Room for an overshoot, so a projection past the ceiling reads as one rather
-  // than being clipped flat against it. Readings are already capped at a full
-  // window, and both ends of the projection are named here because a window
-  // read past its own reset projects downward from where it already is.
-  const ceiling = Math.max(
-    100,
-    ...(projection === null
-      ? []
-      : [projection.from.percent, projection.to.percent].map((percent) => Math.ceil(percent))),
-  );
+  // A full window and no further. Readings are capped at one, budgets end at
+  // one, and `projectedPace` truncates at the instant it reaches one — so
+  // nothing drawn here can exceed it. Scaling to an overshoot instead is what
+  // this used to do, and in the minutes after a rollover the whole-window
+  // average is large enough to put the axis in the thousands of percent and
+  // flatten every measured reading onto the floor.
+  const ceiling = 100;
   // Computed once, because the axis is labelled by how much time it covers as
   // well as bounded by it: a span wider than a day gets dated ticks, and dated
   // ticks are wide enough to need a wider gap kept between them.
@@ -283,6 +306,10 @@ function WindowPanel({
       <Row $gap={2} $wrap>
         <Legend>{label} window</Legend>
         <Absent>{spent}</Absent>
+        {/* Said beside the reading it qualifies, because that reading is the
+            spent window's and the figures below are all "unknown" without it
+            saying why. */}
+        {rolledOver ? <Absent>· rolled over, waiting for the next reading</Absent> : null}
       </Row>
 
       <Facts>
@@ -298,11 +325,7 @@ function WindowPanel({
         </Fact>
         <Fact>
           <Legend>Projected</Legend>
-          <Mono>
-            {projection === null
-              ? "unknown"
-              : `${Math.round(projection.to.percent)}% of limit by reset`}
-          </Mono>
+          <Mono>{projectedText(window, projection)}</Mono>
         </Fact>
         <Fact>
           {/* Provider units and gateway tokens do not convert, so this is a

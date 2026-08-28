@@ -345,6 +345,33 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   Same reason a timeout around store read cannot fire; do not add one back.
 - `quota_windows` store provider observations, not gateway counts. Missing data mean unknown, not
   unlimited. Probe failure must never disable credential.
+- **`quotaRolledOver` in `@omni/store/types` is the only copy of "has this window already ended".**
+  Poller overwrite the row and nothing else do, so between a rollover and next probe — up to
+  `quotaPollIntervalMs`, 300_000 default — newest reading on file count a window that no longer
+  exist. Nothing about the reading say so: it is minutes old, so every staleness check report it
+  current, and only signal is its own stated reset now behind us. `quotaHeadroom` spelled that test
+  out inline and was the **only** reader that did; console kept drawing spent window's rate,
+  exhaustion instant and bar under a legend counting down to a reset in the past. Never re-derive it
+  locally, same rule `servesTarget` and `scopeOf` follow. Null `resetsAt` is **not** rolled over —
+  nothing was said about when it end, which is not having ended, and reading it otherwise blank
+  every figure for a provider that report no reset.
+  Rollover suppress the **inference**, never the measurement: `burnFor` drop `ratePerHour`,
+  `exhaustsAt` and `survives` but **keep `windowStartsAt`**, because that instant is a restatement of
+  `resetsAt` and the window's length, as true of ended window as live one, and it is what console
+  chart retained readings against. Suppressing it too make `spanStartOf` null, so panel request no
+  history and blank a chart of real readings for a poll interval after every rollover — and that
+  blanking also delete the only cover `connectNulls` have, since budget endpoint landing mid-run
+  require exactly this window shape. Surfaces phrasing both verdict say **staleness first**: probe
+  that not got through for hours make both true, and only probe is operator's to fix.
+- Projection line **truncate at the ceiling**, never overshoot. `ratePerHour` is whole-window
+  average, so in minutes after rollover it divide `used` by elapsed span of minutes and come out
+  enormous; axis scaled to that endpoint put plot in thousands of percent and flatten every measured
+  reading onto floor. `projectedPace` move endpoint to instant line reach 100% — same instant
+  `exhaustsAt` name, so slope stay the rate that was read and two stay one claim. Crossing need no
+  clamp to the span: `usedPercent` capped at 100 so crossing never fall behind reading, and that arm
+  run only when endpoint passed 100 by the reset, which is what put crossing before it. Fact read
+  "100% of limit before it resets" there, not "160% by reset", which invite reading window as fine
+  until reset when it fill hours earlier.
 - RTK filter ids persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is storage contract,
   not internal enum. `isRtkFilterId` drop unknown ids on read, so renaming one lose history silently
   rather than failing. Add ids freely; rename or remove only with migration.

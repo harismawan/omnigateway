@@ -2,7 +2,7 @@
 // them. `sameWindow` is imported rather than reimplemented because the store
 // dedups on it, and a chart that disagreed with storage about what a window is
 // would be a worse bug than either being wrong alone.
-import { durationFor, sameWindow } from "@omni/store/types";
+import { durationFor, quotaRolledOver, sameWindow } from "@omni/store/types";
 import type {
   BurnEstimate,
   CredentialHealth,
@@ -307,7 +307,12 @@ export function burnOf(
  *
  * A fresh reading gets its reset time, which is the number the operator plans
  * around. A stale one says so instead, because a bar drawn from an old reading
- * with a countdown beside it reads as live when it is not.
+ * with a countdown beside it reads as live when it is not. A reading whose own
+ * reset has passed says that instead of counting down to it: the countdown
+ * would run backwards, and the bar above it is the spent window's.
+ *
+ * Staleness is asked first. A probe that has not got through for hours makes
+ * both true, and the one the operator can act on is the probe.
  *
  * The estimate is named only when the window runs out first. "You will not run
  * out" is already what the reset time says, and a far-off instant printed beside
@@ -326,6 +331,9 @@ export function quotaLegend(
   if (window.observedAt <= 0) return `${label} · never observed`;
   if (isQuotaStale(window, now, pollIntervalMs)) {
     return `${label} · stale, read ${formatRelative(window.observedAt, now)}`;
+  }
+  if (quotaRolledOver(window, now)) {
+    return `${label} · rolled over, waiting for the next reading`;
   }
   if (window.resetsAt === null) return label;
 
@@ -499,6 +507,15 @@ const HOUR_MS = 3_600_000;
  * converted against the same ceiling the readings are drawn against. Staleness
  * is the caller's guard: a panel that does not believe its reading draws none
  * of this.
+ *
+ * It ends at the ceiling and never above it. `ratePerHour` is a whole-window
+ * average, so in the minutes after a rollover it divides `used` by an elapsed
+ * span of minutes and comes out enormous — an unbounded endpoint then lands in
+ * the thousands of percent, and the panel scales its axis to whatever the
+ * projection reached, flattening every measured reading onto the floor. The
+ * endpoint moves to the instant the line reaches 100% rather than being clipped
+ * flat there: that instant is the one `exhaustsAt` names, so the slope drawn is
+ * still the rate that was read and the two stay one claim.
  */
 export function projectedPace(window: QuotaWindow, estimate: BurnEstimate): QuotaPace | null {
   const { limit, resetsAt, observedAt, used } = window;
@@ -507,15 +524,19 @@ export function projectedPace(window: QuotaWindow, estimate: BurnEstimate): Quot
   // and a flat line would promise it never moves again.
   if (limit === null || limit <= 0 || resetsAt === null || rate === null || rate <= 0) return null;
 
-  const usedPercent = (used / limit) * 100;
+  const usedPercent = Math.min(100, (used / limit) * 100);
   const percentPerHour = (rate / limit) * 100;
-  return {
-    from: { at: observedAt, percent: usedPercent },
-    to: {
-      at: resetsAt,
-      percent: usedPercent + percentPerHour * ((resetsAt - observedAt) / HOUR_MS),
-    },
-  };
+  const from = { at: observedAt, percent: usedPercent };
+  const endPercent = usedPercent + percentPerHour * ((resetsAt - observedAt) / HOUR_MS);
+  if (endPercent <= 100) return { from, to: { at: resetsAt, percent: endPercent } };
+
+  // Where the line reaches the ceiling. It needs no clamping to the span, and
+  // clamping it would be a branch nothing can reach: `usedPercent` is capped at
+  // 100 so the crossing never falls behind the reading, and this arm runs only
+  // when the endpoint passed 100 by the reset, which is what puts the crossing
+  // before it.
+  const crossesAt = observedAt + ((100 - usedPercent) / percentPerHour) * HOUR_MS;
+  return { from, to: { at: crossesAt, percent: 100 } };
 }
 
 /** Shortest window first, so a row reads left-to-right from soonest to latest. */
