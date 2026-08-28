@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { CatalogProvider as ServerCatalogProvider } from "@omni/control";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type BodyArtifact, createStore, deriveKey, type Store } from "@omni/store";
@@ -15,7 +16,31 @@ import {
   target,
   virtualModel,
 } from "@omni/testkit";
+import type { CatalogProvider as ConsoleCatalogProvider } from "../../../dashboard/src/api/types.ts";
 import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
+
+/**
+ * The console's mirror, pinned to the server's own type.
+ *
+ * Both directions, because each catches what the other cannot: a server field
+ * the console never declared, and a console rename the server knows nothing
+ * about. The runtime key list below catches neither on its own — it is a third
+ * independent restatement, and renaming `colour` to `color` in the console plus
+ * its fixtures left every suite green while production painted
+ * `--p-<id>: undefined`.
+ *
+ * A `satisfies`-style assignment rather than a runtime assertion, because these
+ * are types: the check runs under `bun run typecheck` and reports there. Written
+ * as two declarations rather than a conditional type so the compiler names the
+ * offending field instead of collapsing the answer to `false`.
+ *
+ * Deliberately **not** `toEqual` on a sample response. Optional fields are
+ * absent on most providers, so a value-level comparison would pass while the
+ * types disagreed about everything optional — which is where a mirror actually
+ * drifts.
+ */
+const _consoleAcceptsServer: ConsoleCatalogProvider = {} as ServerCatalogProvider;
+const _serverAcceptsConsole: ServerCatalogProvider = {} as ConsoleCatalogProvider;
 
 const NOW = 1_000_000;
 const SESSION_TTL_MS = 60_000;
@@ -1761,18 +1786,33 @@ test("a provider whose colour had to be repaired is said out loud, once", async 
  * help — the response still parses.
  *
  * The key set is written out here rather than derived, which is the point: it is
- * the console's contract restated independently, so a change to either side has
- * to come through this list. Same instrument as `packages/store/test/swap.test.ts`
- * reading the forwarder's source, and for the same reason — a behavioural test
- * covers the field it names and says nothing about the next one.
+ * the console's contract restated independently. Same instrument as
+ * `packages/store/test/swap.test.ts` reading the forwarder's source, and for the
+ * same reason — a behavioural test covers the field it names and says nothing
+ * about the next one.
+ *
+ * **But a restatement pins one side only, and this docstring used to claim both.**
+ * "A change to either side has to come through this list" was false for the
+ * console: renaming `colour` to `color` in `apps/dashboard/src/api/types.ts` and
+ * in its fixtures left the dashboard typechecking, both suites green, and
+ * production painting `--p-<id>: undefined` in both themes. The list is a third
+ * independent copy pinned to the server, not a bridge between the two.
+ *
+ * So the response is also assigned to the console's own type below. That is a
+ * compile-time check and it runs under `bun run typecheck`, not `bun test` — a
+ * drift shows up there rather than here, which is why the runtime list stays as
+ * well. The two catch different things: the assignment catches a console-side
+ * rename, the list catches a server-side field the console never declared.
  */
 test("the catalog response carries exactly the keys the console declares", async () => {
   const { call } = await harness();
 
-  const body = (await (await call("GET", "/api/catalog")).json()) as {
+  const raw = (await (await call("GET", "/api/catalog")).json()) as {
     providers: Record<string, unknown>[];
   };
-  expect(body.providers.length).toBeGreaterThan(0);
+  expect(raw.providers.length).toBeGreaterThan(0);
+
+  const body = raw;
 
   // Optional in the console's type, so present on some providers and not others.
   const OPTIONAL = new Set(["pasteHint", "callback"]);

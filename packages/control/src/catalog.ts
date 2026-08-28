@@ -27,7 +27,35 @@ export type CatalogProvider = {
   callback?: { uri: string; label: string };
   defaultModel: string;
   authTypes: readonly CatalogAuth[];
-  models: readonly ProviderModelChoice[];
+  models: readonly CatalogModel[];
+};
+
+/**
+ * One model as it leaves this endpoint.
+ *
+ * Not `ProviderModelChoice`. That type has `auth` optional — absent means "the
+ * provider's whole set" — and this serializer *resolves* it
+ * (`model.auth ?? catalog.authTypes`), so the wire always carries it. Declaring
+ * the catalog's own type here said the field might be missing when it never is,
+ * which is a contract weaker than the code and in the direction that lets a
+ * consumer write a branch for a case that cannot happen.
+ *
+ * Found by pinning this type against the console's mirror in
+ * `apps/gateway/test/routes/admin.test.ts`: the console had it required, matching
+ * the wire, and the two would not unify. The runtime key-set check could not see
+ * it — `auth` is present in every sample, which is exactly the point.
+ */
+export type CatalogModel = {
+  id: string;
+  label: string;
+  pricing: ProviderModelChoice["pricing"];
+  limits: ProviderModelChoice["limits"];
+  // Same shape as `limits`, and written as the non-optional type: with
+  // `exactOptionalPropertyTypes` an optional property must not also admit
+  // `undefined`, and `ProviderModelChoice["oauthLimits"]` carries it.
+  oauthLimits?: ProviderModelChoice["limits"];
+  /** Resolved, never absent: an unqualified model reaches with the provider's set. */
+  auth: readonly CatalogAuth[];
 };
 
 /**
