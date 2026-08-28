@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
-import { memoryStore, seedCredential, target, virtualModel } from "@omni/testkit";
-import { resolveModelLimits, type ServingCredential } from "../src/modelLimits.ts";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
+import { entryOf, memoryStore, seedCredential, target, virtualModel } from "@omni/testkit";
+import {
+  modelDisplayName,
+  resolveModelLimits,
+  type ServingCredential,
+} from "../src/modelLimits.ts";
 import { describeModelsForSetup } from "../src/setup.ts";
 
 /**
@@ -146,4 +151,65 @@ test("the figure written into an agent's configuration follows the pin", async (
 
   const described = await describeModelsForSetup(store);
   expect(described[0]?.limits.contextWindow).toBe(API_WINDOW);
+});
+
+/**
+ * A plugin-supplied provider advertises the window its descriptor holds.
+ *
+ * `PROVIDER_MODEL_CATALOG` is assembled at import and `loadPlugins()` runs long
+ * after, so the id-keyed lookup this function used found nothing for a plugin
+ * provider and returned `{}` — a target whose descriptor stated a 123,000-token
+ * window advertised none, and `setup.ts` wrote nothing where
+ * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` belongs. The same build-time-snapshot defect
+ * `synthesize` had, at the sibling call site, found only because the fix for the
+ * first one was reviewed.
+ *
+ * The registry is injected rather than registered, so this asserts the threading
+ * and not a global left mutated for whatever runs next.
+ */
+test("a plugin-supplied provider's own catalog is what its targets advertise", () => {
+  const seed = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    sentinel: {
+      ...seed,
+      id: "sentinel",
+      catalog: {
+        defaultModel: "sent-1",
+        authTypes: ["apiKey"],
+        models: [
+          {
+            id: "sent-1",
+            label: "Sentinel One",
+            pricing: { input: 1, output: 2, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 },
+            limits: { contextWindow: 123_000, maxOutputTokens: 4_096 },
+          },
+        ],
+      },
+    },
+  };
+  const model = virtualModel({
+    id: "m",
+    targets: [target({ provider: "sentinel", model: "sent-1" })],
+  });
+  const account: ServingCredential = {
+    id: "s1",
+    provider: "sentinel",
+    authType: "apiKey",
+    enabled: true,
+    providerData: {},
+  };
+
+  expect(resolveModelLimits(model, [account], installed)).toEqual({
+    contextWindow: 123_000,
+    maxOutputTokens: 4_096,
+  });
+  // The default registry has no `sentinel`, so the same call without it must say
+  // nothing rather than invent a figure — which is also the positive control
+  // proving the assertion above came from the injected registry.
+  expect(resolveModelLimits(model, [account])).toEqual({});
+
+  // The label follows the same registry, for the same reason.
+  expect(modelDisplayName(model, installed)).toBe("Sentinel One");
+  expect(modelDisplayName(model)).toBe("m");
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Prompt } from "../src/prompt.ts";
@@ -413,21 +413,98 @@ describe("omni credentials add-key", () => {
 
   test("refuses a plugin that supplies no provider", async () => {
     const root = await migrated();
-    // Installed, and its id is well-formed — the capability is the whole
-    // difference, and without asserting it the guard would admit every plugin.
+    // Installed, loadable, and its id is well-formed — the capability is the
+    // whole difference from the accepting case above, and without this the
+    // guard would admit every plugin. Asserted on the *listing* rather than
+    // trusting the fixture, because the distinction between this test and the
+    // next one lives entirely in what is on disk.
     place(root, "poke-dex", MANIFEST);
+    const before = await cli(["plugin", "list", "--json"], { root });
+    expect(JSON.parse(before.out).plugins).toMatchObject([{ id: "poke-dex", loadable: true }]);
+
+    const result = await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain('"provider" capability');
+  });
+
+  test("refuses a provider nothing supplies", async () => {
+    const root = await migrated();
+    // Nothing on disk at all — the other half of the pair above. Asserted, so
+    // that a `place()` that silently wrote to the wrong path cannot make both
+    // tests pass for the same reason.
+    const before = await cli(["plugin", "list", "--json"], { root });
+    expect(JSON.parse(before.out).plugins).toEqual([]);
 
     const result = await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret });
     expect(result.code).not.toBe(0);
     expect(result.err).toContain("provider must be one of");
   });
 
-  test("refuses a provider nothing supplies", async () => {
-    const root = await migrated();
+  /**
+   * A manifest declaring the capability is not a provider that will exist.
+   *
+   * Three of these shipped admitted for one commit, each minting a live
+   * encrypted secret under an id routing can only answer with
+   * `provider:missing`. `listPlugins` returns a full summary for a plugin the
+   * host will refuse — deliberately, so `plugin list` survives a broken one —
+   * and the first version of this guard read the summary without reading
+   * `loadable`.
+   */
+  test("refuses a plugin the host would refuse to load", async () => {
+    const cases: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+      // The manifest id disagrees with its directory: fatal, and it is the check
+      // that stops a plugin claiming another's tables and topics.
+      ["id mismatch", { ...PROVIDER, id: "somethingelse" }],
+      // An api the host does not implement.
+      ["unsupported api", { ...PROVIDER, api: 99 }],
+    ];
+    for (const [what, manifest] of cases) {
+      const root = await migrated();
+      place(root, "poke-dex", manifest);
+      // The premise: the host says it will not load, and `plugin list` says so.
+      const listed = await cli(["plugin", "list", "--json"], { root });
+      expect(JSON.parse(listed.out).plugins, what).toMatchObject([{ loadable: false }]);
 
-    const result = await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret });
-    expect(result.code).not.toBe(0);
-    expect(result.err).toContain("provider must be one of");
+      const result = await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret });
+      expect(result.code, what).not.toBe(0);
+      // Nothing stored, not merely a non-zero exit: the failure this closes is a
+      // secret at rest, so the absence of the row is the assertion that matters.
+      const after = await cli(["credentials", "list", "--json"], { root });
+      expect(JSON.parse(after.out).credentials, what).toEqual([]);
+    }
+  });
+
+  /**
+   * The fourth way, which no manifest read can close, and which `doctor` carries
+   * instead.
+   *
+   * The `provider` capability is *permission* to call `ctx.provider.register`,
+   * not proof that the plugin does — `manifest.ts` does not even require a
+   * `server` entry beside it. So this credential is admitted, and the honest
+   * thing is to say where an operator finds out.
+   */
+  test("a plugin that declares the capability and registers nothing is caught by doctor", async () => {
+    const root = await migrated();
+    place(root, "poke-dex", PROVIDER);
+    expect((await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret })).code).toBe(
+      0,
+    );
+
+    // Loadable and healthy on every other line, which is exactly why this one
+    // has to exist: before it, `plugin list`, `doctor` and `add-key` all said ok.
+    const healthy = await cli(["doctor"], { root, service: fakeService({ root }) });
+    expect(healthy.out).toContain("stranded credentials");
+    // A declared provider is not stranded — `doctor` reads the lenient question,
+    // so a plugin that merely failed to load is reported on its own line and not
+    // accused twice.
+    expect(healthy.out).toMatch(/stranded credentials\s+none/);
+
+    // Remove the plugin and the same credential becomes stranded, which is the
+    // state a restore onto an installation without the plugin leaves behind.
+    rmSync(join(root, "plugins", "poke-dex"), { recursive: true });
+    const stranded = await cli(["doctor"], { root, service: fakeService({ root }) });
+    expect(stranded.out).toContain("poke-dex");
+    expect(stranded.out).not.toMatch(/stranded credentials\s+none/);
   });
 
   test("still stores a key for a built-in with no plugins installed", async () => {

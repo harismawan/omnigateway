@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import { listPlugins, orphanPluginTables, type PluginSummary, pluginsDir } from "@omni/control";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { resolvePin } from "@omni/store";
 import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
@@ -18,7 +17,7 @@ import {
   unitInstalled,
 } from "../service.ts";
 import { sourceHint } from "./console.ts";
-import { doctorPluginDeps, pluginDoctorLines } from "./plugins.ts";
+import { doctorPluginDeps, pluginDoctorLines, providerDeclared } from "./plugins.ts";
 
 /** The command line that runs the gateway from this installation. */
 function gatewayArgv(root: string): string[] {
@@ -260,7 +259,7 @@ async function missingProviders(
     const store = await ctx.store();
     return (await store.config.listModels()).flatMap((model) =>
       model.targets
-        .filter((target) => !providerExists(target.provider, plugins))
+        .filter((target) => !providerDeclared(target.provider, plugins))
         .map((target) => `${model.id}/${target.model} → ${target.provider}`),
     );
   } catch {
@@ -270,31 +269,42 @@ async function missingProviders(
 }
 
 /**
- * Whether this installation has the named provider — compiled in, or supplied by
- * an installed plugin.
+ * Credentials naming a provider nothing on this installation supplies.
  *
- * **The CLI does not load plugins**, and must not: a plugin's `setup` opens
- * channels, runs migrations and registers a provider, and `omni doctor` running
- * that is a diagnostic with side effects. So the built-in registry is only half
- * the answer here, and reading it alone made `doctor` report every
- * plugin-supplied target as a missing provider — a red finding against healthy
- * configuration, on the surface this repository made responsible for exactly
- * that question once `targetSchema` stopped refusing unknown providers.
+ * The third sibling of `danglingPins` and `missingProviders`, and the one that
+ * covers what no manifest read can. `providerLoadable` refuses to mint an
+ * account for a plugin the host will not load, but a plugin that loads cleanly,
+ * declares the `provider` capability and never calls `ctx.provider.register`
+ * supplies nothing — and the capability is *permission* to register, not proof.
+ * Nothing at write time can tell the two apart without running the plugin.
  *
- * The manifest is enough to answer it without executing anything, because
- * registration requires `descriptor.id` to equal the plugin's own id. A plugin
- * declaring the `provider` capability therefore supplies *that* provider and no
- * other, and the host enforces it — so matching on the id is not a guess.
+ * So this is the surface that finds out, exactly as it is for a pin the write
+ * path deliberately does not validate. Without it the failure was silent in
+ * every direction at once: `plugin list` said `ok`, `doctor` said
+ * `missing providers  none` because that check reads *targets*, and the
+ * credential sat encrypted under an id routing answers only with
+ * `provider:missing`.
  *
- * It is deliberately not exact in one direction: a plugin that declares the
- * capability and fails to load supplies nothing, and this still counts it. That
- * is the right way to be wrong — `doctor` already reports the failed plugin on
- * its own line, and a false "missing provider" beside it would send the operator
- * after the wrong thing.
+ * `providerDeclared`, not `providerLoadable`: a plugin that fails to load is
+ * already reported on its own line above, and naming its credentials here too
+ * would send the operator after the wrong thing.
+ *
+ * Same null-versus-empty rule as the checks above: `null` is "not checked".
  */
-function providerExists(id: string, plugins: readonly PluginSummary[]): boolean {
-  if (Object.hasOwn(PROVIDER_DESCRIPTORS, id)) return true;
-  return plugins.some((plugin) => plugin.id === id && plugin.capabilities.includes("provider"));
+async function danglingCredentials(
+  ctx: Context,
+  plugins: readonly PluginSummary[],
+): Promise<string[] | null> {
+  if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
+  try {
+    const store = await ctx.store();
+    return (await store.credentials.list())
+      .filter((credential) => !providerDeclared(credential.provider, plugins))
+      .map((credential) => `${credential.label} → ${credential.provider}`);
+  } catch {
+    // Already reported by `config` or `database` above.
+    return null;
+  }
 }
 
 export const doctor: Command = {
@@ -313,6 +323,7 @@ export const doctor: Command = {
     const orphans = await orphanTables(ctx);
     const pins = await danglingPins(ctx);
     const uninstalled = await missingProviders(ctx, plugins);
+    const strandedKeys = await danglingCredentials(ctx, plugins);
 
     const checks = {
       root: deps.root,
@@ -335,6 +346,7 @@ export const doctor: Command = {
       orphanPluginTables: orphans,
       danglingPins: pins,
       missingProviders: uninstalled,
+      danglingCredentials: strandedKeys,
       // Repeated from stderr on purpose: `doctor` is the command an operator
       // runs to find out why the paths above are what they are, and `--json`
       // is read by scripts that never see stderr.
@@ -400,6 +412,18 @@ export const doctor: Command = {
                 // the target or reinstall the provider, and either needs to know
                 // which target and which provider.
                 paint(ctx, "yellow", `${uninstalled.length}: ${uninstalled.join(", ")}`),
+        ],
+        [
+          "stranded credentials",
+          strandedKeys === null
+            ? paint(ctx, "dim", "not checked")
+            : strandedKeys.length === 0
+              ? ok(true, "none")
+              : // The account is a stored secret for a provider that does not
+                // exist, so every request naming it is `provider:missing`. The
+                // fix is to install the plugin that was meant to supply it or to
+                // remove the account, and both need to know which.
+                paint(ctx, "yellow", `${strandedKeys.length}: ${strandedKeys.join(", ")}`),
         ],
         ...checks.warnings.map(
           (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],

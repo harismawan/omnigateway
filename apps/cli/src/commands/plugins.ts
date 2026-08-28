@@ -9,6 +9,7 @@ import {
   removePlugin,
   verifyPlugin,
 } from "@omni/control";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { boolFlag, type Parsed, requirePositional, stringFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
@@ -247,6 +248,61 @@ export const pluginRemove: Command = {
  */
 export function doctorPluginDeps(): PluginDeps {
   return pluginDeps();
+}
+
+/**
+ * Which plugin would supply a given provider, if any.
+ *
+ * The manifest is enough to answer without executing anything, because
+ * registration requires `descriptor.id` to equal the plugin's own id and the
+ * host enforces it — so matching on the id is not a guess. This process
+ * deliberately never calls `loadPlugins`: `setup` opens channels, runs
+ * migrations and registers a provider, none of which a CLI command should do.
+ *
+ * **The capability is permission to call `ctx.provider.register`, not proof that
+ * the plugin does.** `packages/plugin-api/src/manifest.ts` does not even require
+ * a `server` entry alongside it. So no reading of a manifest can promise the
+ * provider will exist at runtime, and neither answer below claims to.
+ */
+function supplier(id: string, plugins: readonly PluginSummary[]): PluginSummary | undefined {
+  return plugins.find((plugin) => plugin.id === id && plugin.capabilities.includes("provider"));
+}
+
+/**
+ * Whether anything on disk *claims* this provider. `doctor`'s question.
+ *
+ * Deliberately not exact in one direction: a plugin that declares the capability
+ * and fails to load supplies nothing, and this still counts it. That is the
+ * right way to be wrong for a diagnostic — `doctor` already reports the failed
+ * plugin on its own line, and a false "missing provider" beside it would send
+ * the operator after the wrong thing.
+ */
+export function providerDeclared(id: string, plugins: readonly PluginSummary[]): boolean {
+  return Object.hasOwn(PROVIDER_DESCRIPTORS, id) || supplier(id, plugins) !== undefined;
+}
+
+/**
+ * Whether this provider can plausibly exist at runtime. The question any command
+ * that *writes* must ask.
+ *
+ * The same predicate as `providerDeclared` plus `loadable`, and the split is the
+ * whole point: the leniency above is harmless in a diagnostic and is not
+ * harmless in front of a write. `omni credentials add-key` shipped for one
+ * commit reading the lenient answer, and minted a live encrypted secret under a
+ * provider id that could never exist — for a manifest whose id disagreed with
+ * its directory, whose `api` the host refuses, or whose `server` file is absent.
+ * `doctor`'s compensating line ("will not load") is adjacent to the diagnostic
+ * and nowhere near the write.
+ *
+ * `loadable` closes three of the four ways this goes wrong. The fourth — a
+ * plugin that loads cleanly, declares the capability and never calls `register`
+ * — **cannot be closed by reading a manifest at all**, and is not closed here.
+ * `danglingCredentials` in `doctor` is what carries that weight, the same way
+ * `danglingPins` carries the pin the write path deliberately does not validate.
+ */
+export function providerLoadable(id: string, plugins: readonly PluginSummary[]): boolean {
+  if (Object.hasOwn(PROVIDER_DESCRIPTORS, id)) return true;
+  return supplier(id, plugins)?.loadable === true;
 }
 
 /**

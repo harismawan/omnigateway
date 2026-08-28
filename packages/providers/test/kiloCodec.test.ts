@@ -340,6 +340,91 @@ test("classifyError sees what the request gave up, and can carry it on the error
   });
 });
 
+test("what a codec attaches to the error it returns is bounded too", async () => {
+  // The column, not the argument. Bounding `degradations` going *into*
+  // `classifyError` guarded the host's own array — already capped on the success
+  // path — while what reaches `request_logs.degradations` is
+  // `error.degradations`, read by dispatch's `noteDegradations` off whatever the
+  // codec returned. Forty entries of four hundred characters landed in the
+  // column with the comment describing that exact threat sitting above the check
+  // that did not address it.
+  const hostile = codecAdapter("kilo", kiloDescriptor.capabilities, {
+    buildRequest: kiloCodec.buildRequest,
+    decode: kiloCodec.decode,
+    classifyError: () =>
+      new GatewayError("UPSTREAM", "refused", {
+        // A provider it does not serve. `provider` reaches `LogFields.provider`
+        // and gates `reasonField`, so a codec choosing this chooses whether the
+        // operator's reason line prints at all.
+        provider: "anthropic",
+        degradations: Array.from({ length: 40 }, () => "y".repeat(400)),
+      }),
+  });
+
+  const failure = await hostile
+    .send({
+      request,
+      model: "anthropic/claude-sonnet-5",
+      credentials: credentials(),
+      http: async () => ({
+        status: 400,
+        headers: new Headers(),
+        body: null,
+        text: async () => "no",
+      }),
+      signal: new AbortController().signal,
+    })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+  const error = failure as GatewayError;
+  expect(error.degradations).toHaveLength(16);
+  expect(error.degradations[0]).toHaveLength(64);
+  expect(error.provider).toBe("kilo");
+  // The classification survives, and that is the point of the hook: a codec
+  // saying what its own upstream's refusal means is the whole reason it exists.
+  expect(error.code).toBe("UPSTREAM");
+  expect(error.message).toBe("refused");
+});
+
+test("what a codec attaches to the error it throws is bounded the same way", async () => {
+  // `guard`'s `GatewayError` passthrough is deliberate — `dispatch` gates its
+  // OAuth refresh on `code === "AUTH"`, so flattening one would disable a
+  // self-healing path — but "the classification is the codec's" is not "every
+  // field is". The same two the host owns are restated on this path.
+  const hostile = codecAdapter("kilo", kiloDescriptor.capabilities, {
+    buildRequest: () => {
+      throw new GatewayError("AUTH", "no token", {
+        provider: "anthropic",
+        degradations: Array.from({ length: 40 }, () => "z".repeat(400)),
+      });
+    },
+    decode: kiloCodec.decode,
+  });
+
+  const failure = await hostile
+    .send({
+      request,
+      model: "m",
+      credentials: credentials(),
+      http: ok,
+      signal: new AbortController().signal,
+    })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+  const error = failure as GatewayError;
+  expect(error.degradations).toHaveLength(16);
+  expect(error.degradations[0]).toHaveLength(64);
+  expect(error.provider).toBe("kilo");
+  // `AUTH` survives, which is the case the passthrough exists for.
+  expect(error.code).toBe("AUTH");
+});
+
 // --- What the bridge forwards, and what it does when a codec misbehaves ------
 
 /** A codec that records what it was handed and returns a fixed request. */
@@ -574,11 +659,30 @@ test("a codec's own GatewayError keeps its classification", async () => {
 test("a codec returning a malformed request is refused before the transport", async () => {
   // Junk in, named error out — rather than `undefined is not an object` from
   // inside the bridge, which reads as a gateway bug and is not retryable.
+  // `url` and `method` are the same class as the header pair below, and shipped
+  // one line above it unchecked beyond `typeof === "string"`. Each of these
+  // reached `await req.http(…)` — outside every guard in the file — as a raw
+  // `TypeError`: `Invalid URL`, `Protocol "file:" not supported`, or
+  // `Method must be a valid HTTP token ["GET junk"]`, the last of which also
+  // echoed a codec-authored string into a client-visible message. `classify`
+  // reads all three `INTERNAL`, which is not retryable, so a request the rest of
+  // the pool could serve ended at the first candidate.
+  const wire = { headers: [], body: "{}" };
   for (const bad of [
     {},
     { request: {} },
     { request: { url: "https://x", method: "POST" } },
     { request: { url: 1, method: "POST", headers: [], body: "{}" } },
+    { request: { ...wire, url: "not a url", method: "POST" } },
+    { request: { ...wire, url: "", method: "POST" } },
+    { request: { ...wire, url: "/relative/path", method: "POST" } },
+    // Parses cleanly and is refused on its own terms: an outbound request the
+    // host believes is HTTP should not be reading the local filesystem.
+    { request: { ...wire, url: "file:///etc/passwd", method: "POST" } },
+    { request: { ...wire, url: "https://x.test", method: "GET junk" } },
+    { request: { ...wire, url: "https://x.test", method: "PO\r\nST" } },
+    { request: { ...wire, url: "https://x.test", method: "post" } },
+    { request: { ...wire, url: "https://x.test", method: "" } },
   ]) {
     let called = false;
     const { adapter } = recording({ buildRequest: () => bad as never });
@@ -648,10 +752,14 @@ test("a codec cannot write unbounded free text into request_logs", async () => {
       request: { url: "https://x.test", method: "POST", headers: [], body: "{}" },
       degradations: [
         "x".repeat(500),
-        ...Array.from({ length: 50 }, (_, i) => `note-${i}`),
-        // Not a string: dropped rather than coerced, because `[object Object]`
-        // looks like data and explains nothing.
+        // Not a string, and **inside the first sixteen** — which is the whole
+        // difference. This sat at index 51 and was discarded by `.slice(0, 16)`
+        // before the filter was reached, so removing the filter entirely passed
+        // this test. Within the cap it is also the case that matters: a
+        // non-string among the survivors makes `.slice(0, 64)` throw a raw
+        // `TypeError` from `send()`, outside every guard in the file.
         { toString: () => "sneaky" } as unknown as string,
+        ...Array.from({ length: 50 }, (_, i) => `note-${i}`),
       ],
     }),
   });
@@ -667,6 +775,10 @@ test("a codec cannot write unbounded free text into request_logs", async () => {
   expect(result.degradations).toHaveLength(16);
   expect(result.degradations[0]).toHaveLength(64);
   expect(result.degradations.some((d) => d.includes("object Object"))).toBe(false);
+  // The filter runs *before* the cap, so dropping one non-string does not cost a
+  // slot: sixteen strings survive and the second is the first `note-`, rather
+  // than fifteen surviving with a hole where the object was.
+  expect(result.degradations[1]).toBe("note-0");
 });
 
 test("cloakedTools is a count or it is nothing", async () => {
@@ -694,6 +806,24 @@ test("cloakedTools is a count or it is nothing", async () => {
     });
     expect(result.cloakedTools).toBeUndefined();
   }
+
+  // Zero is a count, and the boundary the guard is written on: `>= 0` rather
+  // than `> 0`, because "no tool name was cloaked" is a fact a codec may state
+  // and is not the same as declining to say. `> 0` survived the whole suite.
+  const { adapter: none } = recording({
+    buildRequest: () => ({
+      request: { url: "https://x.test", method: "POST", headers: [], body: "{}" },
+      cloakedTools: 0,
+    }),
+  });
+  const zero = await none.send({
+    request,
+    model: "m",
+    credentials: credentials(),
+    http: ok,
+    signal: new AbortController().signal,
+  });
+  expect(zero.cloakedTools).toBe(0);
 
   // The positive control: a real count still arrives.
   const { adapter } = recording();
@@ -750,7 +880,21 @@ test("a malformed header pair never reaches the transport", async () => {
   // is two strings, so it is structurally valid and Node is what refuses it.
   // This guard's job is shape, and claiming more would be a guard that looks
   // like it sanitises header content and does not.
-  for (const headers of [[null], [["only-name"]], [[{}, {}]], [["a", "b", "c"]], ["not-a-pair"]]) {
+  for (const headers of [
+    [null],
+    [["only-name"]],
+    [[{}, {}]],
+    [["a", "b", "c"]],
+    ["not-a-pair"],
+    // The two halves of the element type check, each on its own. Every fixture
+    // above has *both* elements wrong or neither, so each half was independently
+    // unpinned: dropping `typeof pair[1] === "string"` let `["X-Name", 42]`
+    // reach the transport, and dropping `typeof pair[0] === "string"` produced
+    // `TypeError: name.toLowerCase is not a function` — one of the three raw
+    // throws this guard is named after, reproduced by deleting half of it.
+    [["X-Name", 42]],
+    [[42, "value"]],
+  ]) {
     let called = false;
     const { adapter } = recording({
       buildRequest: () => ({

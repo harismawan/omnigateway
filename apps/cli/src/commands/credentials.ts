@@ -3,7 +3,6 @@ import {
   createRefresher,
   credentialHealth,
   getCredential,
-  isProviderId,
   listCredentials,
   listModels,
   listPlugins,
@@ -18,7 +17,7 @@ import { boolFlag, numberFlag, requirePositional, stringFlag, UsageError } from 
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatTime, note, paint, table } from "../output.ts";
-import { doctorPluginDeps } from "./plugins.ts";
+import { doctorPluginDeps, providerLoadable } from "./plugins.ts";
 
 /** One word for what the router would do with this credential right now. */
 function condition(credential: {
@@ -241,32 +240,33 @@ export const credentialsAddKey: Command = {
   async run(args, { ctx, writer, prompt }) {
     const providerId = requirePositional(args, 0, "provider");
     // Every provider, unlike `connect`: a key is the one way in that `custom`
-    // has — and now the only way in a plugin-supplied provider has at all.
+    // has — and the only way in a plugin-supplied provider has at all, since a
+    // plugin declares no OAuth flow.
     //
-    // The plugin's manifest, not the built-in registry alone. **This process
-    // does not load plugins** and must not: `setup` opens channels, runs
-    // migrations and registers a provider, none of which an `add-key` should
-    // do. So `isProviderId` answers only for the compiled-in six here, and
-    // asking it alone refused the API-key flow this capability exists to ship.
-    //
-    // Matching on the manifest id is exact rather than a guess: registration
-    // requires `descriptor.id` to equal the plugin's own id, and the host
-    // enforces it.
+    // `providerLoadable`, the strict question, not `providerDeclared` — see
+    // `commands/plugins.ts` for why the split exists and which of the four ways
+    // this goes wrong it closes. This process does not load plugins and must
+    // not, so the manifests are the only thing that can answer at all; the
+    // fourth way, a plugin that loads and never registers, is `doctor`'s
+    // `stranded credentials` line rather than anything checkable here.
     //
     // The same predicate is handed to `createApiKeyCredential` below rather than
     // being checked only here. Control asks the existence question again on its
     // own — it is the one place that can refuse an unreachable credential before
     // it is stored — and with the built-in registry as its only answer it
     // refused everything this guard had just admitted. A guard whose decision
-    // the next call overturns is not a guard.
-    const providerExists = (id: string): boolean =>
-      isProviderId(id) ||
-      listPlugins(doctorPluginDeps(), ctx.root.root).some(
-        (plugin) => plugin.id === id && plugin.capabilities.includes("provider"),
-      );
+    // the next call overturns is not a guard, and for one commit this one was
+    // not: the widened check was the only mutant of fourteen that survived.
+    const plugins = listPlugins(doctorPluginDeps(), ctx.root.root);
+    const providerExists = (id: string): boolean => providerLoadable(id, plugins);
     if (!providerExists(providerId)) {
+      // The capability and the loading are both named, because those are the
+      // two ways an operator who *has* installed the right plugin still lands
+      // here, and "or an installed plugin that supplies one" sent them to look
+      // at the one thing that was already true.
       throw new UsageError(
-        `provider must be one of ${PROVIDER_IDS.join(", ")}, or an installed plugin that supplies one`,
+        `provider must be one of ${PROVIDER_IDS.join(", ")}, or a plugin that declares the ` +
+          `"provider" capability and loads; omni plugin list shows which`,
       );
     }
 

@@ -1,5 +1,6 @@
 import type { ProviderId } from "@omni/ir";
-import { type CatalogAuth, catalogLimits, PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
+import { type CatalogAuth, entryLimits } from "@omni/providers/catalog";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
 import { resolvePin, type Target, type VirtualModel } from "@omni/store";
 
 /**
@@ -70,15 +71,27 @@ function targetLimits(
   target: Target,
   auths: ReadonlySet<CatalogAuth>,
   pinned: ServingCredential | undefined,
+  providers: ProviderDescriptors,
 ): ModelLimits {
   // No credential for this provider: nothing can serve the target, so there is
   // no serving path to narrow to and the published figures are the honest
   // answer.
   const ways: CatalogAuth[] =
     pinned !== undefined ? [pinned.authType] : auths.size === 0 ? ["apiKey"] : [...auths];
+  // The descriptor's own catalog, read at call time, rather than the id-keyed
+  // `PROVIDER_MODEL_CATALOG`. That table is assembled at import and
+  // `loadPlugins()` runs long after, so a target naming a plugin-supplied
+  // provider found nothing there and this function returned `{}` — leaving
+  // `GET /v1/models` and `setup.ts`'s `CLAUDE_CODE_MAX_CONTEXT_TOKENS` silent
+  // about a model whose window the descriptor was holding all along. The same
+  // build-time-snapshot defect `synthesize` had, at the sibling call site.
+  //
+  // Absent provider yields `{}` and not a guess, which is the existing answer
+  // for an unlisted model and the honest one here.
+  const catalog = providers[target.provider]?.catalog;
   let listed: ModelLimits = {};
-  for (const auth of ways) {
-    const entry = catalogLimits(target.provider, target.model, auth);
+  for (const auth of catalog === undefined ? [] : ways) {
+    const entry = catalog === undefined ? null : entryLimits(catalog, target.model, auth);
     if (entry === null) continue;
     listed = narrower(listed, {
       contextWindow: entry.contextWindow,
@@ -147,6 +160,7 @@ function servingAuths(credentials: readonly ServingCredential[]): {
 export function resolveModelLimits(
   model: VirtualModel,
   credentials: readonly ServingCredential[],
+  providers: ProviderDescriptors = PROVIDER_DESCRIPTORS,
 ): ModelLimits {
   const { byProvider, routable } = servingAuths(credentials);
   let limits: ModelLimits = {};
@@ -157,6 +171,7 @@ export function resolveModelLimits(
         target,
         byProvider.get(target.provider) ?? new Set<CatalogAuth>(),
         resolvePin(target, routable),
+        providers,
       ),
     );
   }
@@ -168,11 +183,19 @@ export function resolveModelLimits(
  * where that is the whole story. A pool of several targets keeps the operator's
  * own id, because no one target's label describes the others, and so does a
  * model the catalog does not list.
+ *
+ * Reads the registry at call time for the same reason `resolveModelLimits`
+ * above does, though the cost of being wrong here is only cosmetic: a
+ * plugin-supplied model showed the operator's own id where its descriptor had a
+ * label. Fixed together, because the next reader of one will assume the other.
  */
-export function modelDisplayName(model: VirtualModel): string {
+export function modelDisplayName(
+  model: VirtualModel,
+  providers: ProviderDescriptors = PROVIDER_DESCRIPTORS,
+): string {
   const only = model.targets.length === 1 ? model.targets[0] : undefined;
   if (only === undefined) return model.id;
-  const labelled = PROVIDER_MODEL_CATALOG[only.provider]?.models.find(
+  const labelled = providers[only.provider]?.catalog.models.find(
     (choice) => choice.id === only.model,
   );
   return labelled?.label ?? model.id;

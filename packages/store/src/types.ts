@@ -465,12 +465,13 @@ export function servesTarget(target: TargetAddress, account: ServingAccount): bo
   // offer no account for any non-custom target.
   //
   // An account is the other way round. Nothing legitimate writes `""` there:
-  // `parseCustomProviderData` reads it through `requiredString`, which refuses
-  // empty, and a non-custom account holds no `endpointId` key at all. So an
-  // account carrying `""` is a malformed row exactly as one carrying `42` is,
-  // and mapping it to "names none" made it serve every target that names none —
-  // the same fail-open direction the paragraph below closes for the other
-  // non-string values, missed because the empty string is a string.
+  // `customProviderData` in `packages/control/src/credentials.ts` reads it
+  // through `requiredString`, which refuses empty, and a non-custom account
+  // holds no `endpointId` key at all. So an account carrying `""` is a malformed
+  // row exactly as one carrying `42` is, and mapping it to "names none" made it
+  // serve every target that names none — the same fail-open direction the
+  // paragraph below closes for the other non-string values, missed because the
+  // empty string is a string.
   //
   // No provider is named. A non-custom target that somehow carries an endpoint,
   // or an account that somehow holds one its target does not name, is refused
@@ -485,14 +486,34 @@ export function servesTarget(target: TargetAddress, account: ServingAccount): bo
   // down, and it was looser than the rule it replaced: comparing raw values,
   // `42 !== undefined` refused.
   //
-  // Present-but-uncomparable therefore becomes a value that matches nothing,
-  // including another of its kind, rather than a synonym for absent.
-  const unusable = (value: unknown): string | symbol =>
-    typeof value === "string" && value !== "" ? value : Symbol("unusable-endpoint");
-  const namedByTarget = (value: string | undefined): string | symbol | undefined =>
+  // Present-but-unusable therefore becomes a value that matches nothing, rather
+  // than a synonym for absent.
+  //
+  // On the **account** side alone, and that is sufficient rather than lazy:
+  // `UNUSABLE` is a symbol, and no target-side value is one, so an account whose
+  // id is unusable matches nothing whatever the target holds — including a
+  // target read back from `sqlite/config.ts`'s unvalidated `JSON.parse` carrying
+  // the same corrupt value. A version that symbolised both sides was written and
+  // deleted: every mutant of the target half survived, because the account half
+  // already decided every case it could have.
+  //
+  // For the same reason `UNUSABLE` is one shared symbol rather than a fresh one
+  // per call. An earlier revision minted one each time, on the stated grounds
+  // that two identically corrupt ids must not match each other — but the compare
+  // is always target-against-account, never account-against-account, so no input
+  // can distinguish the two. That claim also had a test asserting it, which
+  // passed under a hoisted sentinel and was therefore proving nothing. Keeping a
+  // refinement no input can observe is how a reader comes to believe something
+  // is being defended that is not.
+  const UNUSABLE = Symbol("unusable-endpoint");
+  const namedByTarget = (value: string | undefined): string | undefined =>
     value === undefined || value === "" ? undefined : value;
-  const namedByAccount = (value: unknown): string | symbol | undefined =>
-    value === undefined ? undefined : unusable(value);
+  // The one asymmetry, and the whole fix: `""` is "names none" for a target and
+  // a malformed row for an account.
+  const namedByAccount = (value: unknown): string | symbol | undefined => {
+    if (value === undefined) return undefined;
+    return typeof value === "string" && value !== "" ? value : UNUSABLE;
+  };
   if (namedByTarget(target.endpointId) !== namedByAccount(account.providerData.endpointId)) {
     return false;
   }

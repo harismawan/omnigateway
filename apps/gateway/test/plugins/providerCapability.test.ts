@@ -139,3 +139,134 @@ test("a registration collected before a later failure is never applied", () => {
   // What matters is that nothing was written anywhere global.
   expect(Object.hasOwn(PROVIDER_DESCRIPTORS, "acme-ai")).toBe(false);
 });
+
+/**
+ * The registrations that used to be admitted and then crashed the router.
+ *
+ * These are the exact values a review drove through `resolveModel`: each passed
+ * the old `!== undefined` check, and `entryPricing`'s `entry.models.find` then
+ * threw a raw `TypeError`. `classify` reads that as `INTERNAL`,
+ * `RETRYABLE.INTERNAL` is false, and the message reaches the client body — the
+ * same shape as the `constructor/foo` bug, through a different table.
+ *
+ * The twin was `/api/catalog`, where `catalog.models.map` on the same value is a
+ * 500, and a 500 there is what the console's all-or-nothing shell gate turns
+ * into "Console unavailable" on every screen. One check at the boundary rather
+ * than a guard at each reader, for the reason the prototype sweep already
+ * settled: partial protection that reads as total is worse than none.
+ */
+test("a catalog that is not a catalog is refused at registration", () => {
+  const bad: ReadonlyArray<readonly [unknown, RegExp]> = [
+    [42, /catalog must be an object/],
+    ["a catalog, honest", /catalog must be an object/],
+    // `null` is present-and-wrong, not absent — only `undefined` reads as
+    // missing, which is the distinction the two messages exist to keep.
+    [null, /catalog must be an object/],
+    [undefined, /is missing catalog/],
+    // An array is an object to `typeof` and to nothing else, so `isRecord`
+    // refuses it explicitly rather than letting `catalog.models` be `undefined`.
+    [[], /catalog must be an object/],
+    [{}, /catalog\.defaultModel must be a string/],
+    [{ defaultModel: "m", authTypes: ["apiKey"] }, /catalog\.models must be an array/],
+    [
+      { defaultModel: "m", authTypes: ["apiKey"], models: "no" },
+      /catalog\.models must be an array/,
+    ],
+    [
+      { defaultModel: "m", authTypes: ["apiKey"], models: null },
+      /catalog\.models must be an array/,
+    ],
+    [{ defaultModel: "m", authTypes: "apiKey", models: [] }, /catalog\.authTypes must be an array/],
+    [{ defaultModel: "m", authTypes: ["oauth2"], models: [] }, /catalog\.authTypes\[0\]/],
+  ];
+  for (const [catalog, message] of bad) {
+    expect(() =>
+      validateRegistration("acme-ai", { descriptor: descriptor({ catalog }), codec }),
+    ).toThrow(message);
+  }
+});
+
+test("a model entry the router would price is checked field by field", () => {
+  const model = {
+    id: "acme-1",
+    label: "Acme 1",
+    pricing: { input: 1, output: 2, cacheRead: 0.1, cacheWrite5m: 1.2, cacheWrite1h: 2 },
+    limits: { contextWindow: 100, maxOutputTokens: 10 },
+  };
+  const withModel = (over: Record<string, unknown>) => ({
+    defaultModel: "acme-1",
+    authTypes: ["apiKey"],
+    models: [{ ...model, ...over }],
+  });
+
+  // Every field some consumer dereferences, and no more than those.
+  const bad: ReadonlyArray<readonly [Record<string, unknown>, RegExp]> = [
+    [{ id: 1 }, /catalog\.models\[0\]\.id must be a string/],
+    [{ label: null }, /catalog\.models\[0\]\.label must be a string/],
+    [{ pricing: undefined }, /catalog\.models\[0\]\.pricing must be an object/],
+    [{ pricing: { ...model.pricing, input: "free" } }, /pricing\.input must be a finite number/],
+    // `NaN` is the one that would not throw and would not be noticed: it
+    // propagates through every sum into `costUsd` and renders as a blank.
+    [{ pricing: { ...model.pricing, cacheWrite1h: Number.NaN } }, /pricing\.cacheWrite1h/],
+    [{ pricing: { ...model.pricing, output: Number.POSITIVE_INFINITY } }, /pricing\.output/],
+    [{ limits: { contextWindow: 100 } }, /limits\.maxOutputTokens must be a finite number/],
+    [{ oauthLimits: { contextWindow: "wide" } }, /oauthLimits\.contextWindow/],
+  ];
+  for (const [over, message] of bad) {
+    expect(() =>
+      validateRegistration("acme-ai", {
+        descriptor: descriptor({ catalog: withModel(over) }),
+        codec,
+      }),
+    ).toThrow(message);
+  }
+
+  // The positive control, and the one case absence is a fact rather than a gap:
+  // no `oauthLimits` means one set of limits covers both ways in.
+  expect(() =>
+    validateRegistration("acme-ai", { descriptor: descriptor({ catalog: withModel({}) }), codec }),
+  ).not.toThrow();
+});
+
+test("the fields dispatch and the console dereference are checked too", () => {
+  const bad: ReadonlyArray<readonly [Record<string, unknown>, RegExp]> = [
+    // Read by `priceOf` inside `finishLog`, where a throw would break usage
+    // accounting for a request that already succeeded.
+    [{ writeOverInput: { fiveMinute: 1.25 } }, /writeOverInput\.oneHour must be a finite number/],
+    [{ writeOverInput: 2 }, /writeOverInput must be an object/],
+    [{ capabilities: { tools: true, images: true } }, /capabilities\.reasoning must be a boolean/],
+    [{ capabilities: { tools: "yes", images: true, reasoning: true } }, /capabilities\.tools/],
+    // Iterated by the router's prefix table.
+    [{ modelPrefixes: "acme-" }, /modelPrefixes must be an array/],
+    [{ modelPrefixes: ["acme-", 7] }, /modelPrefixes\[1\] must be a string/],
+    // Destructured by `providerCatalog`, whose 500 blanks the whole console.
+    [{ presentation: { ...anthropic.presentation, label: 1 } }, /presentation\.label/],
+    [{ presentation: { ...anthropic.presentation, order: "first" } }, /presentation\.order/],
+    [
+      { presentation: { ...anthropic.presentation, colour: "red" } },
+      /presentation\.colour must be an object/,
+    ],
+    [
+      { presentation: { ...anthropic.presentation, colour: { light: "#fff" } } },
+      /presentation\.colour\.dark must be a string/,
+    ],
+    [{ presentation: { ...anthropic.presentation, pasteHint: 3 } }, /presentation\.pasteHint/],
+  ];
+  for (const [over, message] of bad) {
+    expect(() => validateRegistration("acme-ai", { descriptor: descriptor(over), codec })).toThrow(
+      message,
+    );
+  }
+
+  // A colour is checked for being a string and not for being *renderable*:
+  // `isPaletteSafeColour` already substitutes a neutral, and refusing a whole
+  // provider over an unrenderable colour is a worse trade than showing it grey.
+  expect(() =>
+    validateRegistration("acme-ai", {
+      descriptor: descriptor({
+        presentation: { ...anthropic.presentation, colour: { light: "url(evil)", dark: "x" } },
+      }),
+      codec,
+    }),
+  ).not.toThrow();
+});

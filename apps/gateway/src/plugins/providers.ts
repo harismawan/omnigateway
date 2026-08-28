@@ -16,6 +16,124 @@ export type RegisteredProvider = {
 };
 
 /**
+ * The structural checks behind `validateRegistration`'s field loop.
+ *
+ * Split out because the list is long and the reason each entry is on it is the
+ * same one sentence: some consumer dereferences that field without asking. Each
+ * failure names the path, because "provider acme is malformed" sends a plugin
+ * author to read their whole descriptor.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A finite number. `NaN` and the infinities are prices that corrupt a total silently. */
+function isNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function checkAt(ok: boolean, id: string, path: string, expected: string): void {
+  if (!ok) throw new Error(`provider ${id} descriptor: ${path} must be ${expected}`);
+}
+
+function checkLimits(id: string, path: string, value: unknown): void {
+  checkAt(isRecord(value), id, path, "an object");
+  const limits = value as Record<string, unknown>;
+  checkAt(isNumber(limits.contextWindow), id, `${path}.contextWindow`, "a finite number");
+  checkAt(isNumber(limits.maxOutputTokens), id, `${path}.maxOutputTokens`, "a finite number");
+}
+
+function checkDescriptor(id: string, record: Record<string, unknown>): void {
+  // Absence first, and phrased as absence. An author who left a field out and
+  // one who spelled its shape wrong are looking for two different things, and
+  // "catalog must be an object" sends the first to stare at a field they never
+  // wrote.
+  for (const field of [
+    "capabilities",
+    "writeOverInput",
+    "catalog",
+    "modelPrefixes",
+    "presentation",
+  ] as const) {
+    if (record[field] === undefined) {
+      throw new Error(`provider ${id} is missing ${field}`);
+    }
+  }
+
+  const capabilities = record.capabilities;
+  checkAt(isRecord(capabilities), id, "capabilities", "an object");
+  for (const flag of ["tools", "images", "reasoning"] as const) {
+    const value = (capabilities as Record<string, unknown>)[flag];
+    checkAt(typeof value === "boolean", id, `capabilities.${flag}`, "a boolean");
+  }
+
+  // Read by `priceOf` inside `finishLog`, where a throw would break usage
+  // accounting for a request that already succeeded — so it is checked here or
+  // it is not checked anywhere it can still be reported.
+  const write = record.writeOverInput;
+  checkAt(isRecord(write), id, "writeOverInput", "an object");
+  for (const ttl of ["fiveMinute", "oneHour"] as const) {
+    const value = (write as Record<string, unknown>)[ttl];
+    checkAt(isNumber(value), id, `writeOverInput.${ttl}`, "a finite number");
+  }
+
+  const catalog = record.catalog;
+  checkAt(isRecord(catalog), id, "catalog", "an object");
+  const entry = catalog as Record<string, unknown>;
+  checkAt(typeof entry.defaultModel === "string", id, "catalog.defaultModel", "a string");
+  checkAt(Array.isArray(entry.authTypes), id, "catalog.authTypes", "an array");
+  for (const [index, auth] of (entry.authTypes as unknown[]).entries()) {
+    const known = auth === "oauth" || auth === "apiKey";
+    checkAt(known, id, `catalog.authTypes[${index}]`, `"oauth" or "apiKey"`);
+  }
+  checkAt(Array.isArray(entry.models), id, "catalog.models", "an array");
+  for (const [index, model] of (entry.models as unknown[]).entries()) {
+    const at = `catalog.models[${index}]`;
+    checkAt(isRecord(model), id, at, "an object");
+    const choice = model as Record<string, unknown>;
+    checkAt(typeof choice.id === "string", id, `${at}.id`, "a string");
+    checkAt(typeof choice.label === "string", id, `${at}.label`, "a string");
+    checkAt(isRecord(choice.pricing), id, `${at}.pricing`, "an object");
+    const pricing = choice.pricing as Record<string, unknown>;
+    for (const field of ["input", "output", "cacheRead", "cacheWrite5m", "cacheWrite1h"] as const) {
+      checkAt(isNumber(pricing[field]), id, `${at}.pricing.${field}`, "a finite number");
+    }
+    checkLimits(id, `${at}.limits`, choice.limits);
+    // Absent means one set of limits covers both ways in, so absence is a fact
+    // rather than a gap. Present-and-malformed is still refused.
+    if (choice.oauthLimits !== undefined) {
+      checkLimits(id, `${at}.oauthLimits`, choice.oauthLimits);
+    }
+  }
+
+  const prefixes = record.modelPrefixes;
+  checkAt(Array.isArray(prefixes), id, "modelPrefixes", "an array");
+  for (const [index, prefix] of (prefixes as unknown[]).entries()) {
+    checkAt(typeof prefix === "string", id, `modelPrefixes[${index}]`, "a string");
+  }
+
+  const presentation = record.presentation;
+  checkAt(isRecord(presentation), id, "presentation", "an object");
+  const shown = presentation as Record<string, unknown>;
+  for (const field of ["label", "tone"] as const) {
+    checkAt(typeof shown[field] === "string", id, `presentation.${field}`, "a string");
+  }
+  checkAt(isNumber(shown.order), id, "presentation.order", "a finite number");
+  checkAt(isRecord(shown.colour), id, "presentation.colour", "an object");
+  for (const scheme of ["light", "dark"] as const) {
+    const value = (shown.colour as Record<string, unknown>)[scheme];
+    // A string, not a *safe* colour: `isPaletteSafeColour` in `@omni/control`
+    // decides that, and it already substitutes a neutral rather than failing.
+    // Refusing the whole provider for an unrenderable colour would be a worse
+    // trade than showing it grey.
+    checkAt(typeof value === "string", id, `presentation.colour.${scheme}`, "a string");
+  }
+  if (shown.pasteHint !== undefined) {
+    checkAt(typeof shown.pasteHint === "string", id, "presentation.pasteHint", "a string");
+  }
+}
+
+/**
  * Validates what a plugin passed to `ctx.provider.register`.
  *
  * `PluginProviderRegistry` types its argument as `unknown` — that package is
@@ -64,17 +182,23 @@ export function validateRegistration(
   // Required with no defaults, exactly as a built-in descriptor is. The failure
   // this prevents is `writeOverInput` defaulting to zero, which underprices
   // cache writes silently and permanently.
-  for (const field of [
-    "capabilities",
-    "writeOverInput",
-    "catalog",
-    "modelPrefixes",
-    "presentation",
-  ] as const) {
-    if (record[field] === undefined) {
-      throw new Error(`provider ${id} is missing ${field}`);
-    }
-  }
+  //
+  // Checked **structurally**, not for presence. `!== undefined` was what this
+  // did first, and it admitted `catalog: 42` and `catalog: {}` — which the
+  // router then dereferenced as `entry.models.find(…)`, throwing a raw
+  // `TypeError` out of `resolveModel`. `classify` reads that `INTERNAL`,
+  // `RETRYABLE.INTERNAL` is false, and the message reaches the client body: the
+  // same shape as the `constructor/foo` bug, re-opened through a different
+  // table. `/api/catalog` had the twin, where a 500 turns the console's
+  // all-or-nothing gate into "Console unavailable" on every screen.
+  //
+  // The rule for what is checked here is exactly "what a consumer
+  // dereferences", and nothing beyond it. A validator that went deeper would be
+  // asserting taste rather than safety, and one that went shallower would leave
+  // the next consumer to find out at runtime — which is what happened. The
+  // consumers are `entryPricing`/`entryLimits` in the router, `providerCatalog`
+  // in `@omni/control`, `priceOf` in dispatch, and the palette.
+  checkDescriptor(id, record);
 
   const codec = entry.codec;
   if (typeof codec !== "object" || codec === null) {

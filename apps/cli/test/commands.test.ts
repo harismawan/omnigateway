@@ -588,7 +588,8 @@ test("credentials add-key names custom among the providers connect does not", as
   // omits `custom` because there is nothing to authorize, and this one carries
   // it because a custom endpoint is reached by key alone.
   expect(result.err.split("\n")[0]).toBe(
-    "provider must be one of anthropic, openai, kimi, kilo, grok, custom, or an installed plugin that supplies one",
+    "provider must be one of anthropic, openai, kimi, kilo, grok, custom, or a plugin that " +
+      'declares the "provider" capability and loads; omni plugin list shows which',
   );
 });
 

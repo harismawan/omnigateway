@@ -184,6 +184,14 @@ test("a synthesized target is priced from the descriptor, not the id-keyed globa
               cacheWrite1h: 10,
             },
             limits: { contextWindow: 200_000, maxOutputTokens: 8_192 },
+            // Deliberately different, and the reason this field is here at all.
+            // `entryLimits` takes an `auth` defaulting to `"apiKey"`, and
+            // `synthesize` is the only caller that reaches the default —
+            // `catalogLimits` always passes one explicitly. With no
+            // `oauthLimits` in this fixture, flipping that default to `"oauth"`
+            // was invisible to the whole suite while changing what a real
+            // OpenAI model advertises: `gpt-5.6`'s window from 922000 to 272000.
+            oauthLimits: { contextWindow: 111, maxOutputTokens: 22 },
           },
         ],
       },
@@ -204,6 +212,13 @@ test("a synthesized target is priced from the descriptor, not the id-keyed globa
     });
     // Limits travel with the price, or a target carrying one and not the other
     // is a trap for the next reader.
+    //
+    // The API-key figures, never the OAuth ones. A synthesized target is
+    // inferred from a bare model name that carries no credential, so there is
+    // nothing to say which backend will serve it — and the router's own
+    // `resolveModelLimits` narrows across every way in afterwards. Advertising
+    // the narrower pair here would state as fact something no part of this call
+    // knows.
     expect(target?.contextWindow).toBe(200_000);
     expect(target?.maxOutputTokens).toBe(8_192);
   }

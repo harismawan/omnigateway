@@ -43,6 +43,75 @@ function boundedDegradations(entries: readonly string[] | undefined): string[] {
 }
 
 /**
+ * A codec-authored `GatewayError`, with the two fields the host owns restated.
+ *
+ * Bounding `degradations` on the way *in* to `classifyError` was the first
+ * version, and it guarded the wrong direction: the input is the host's own
+ * array, already capped on the success path, while what actually reaches
+ * `request_logs.degradations` is `error.degradations` — read by
+ * `dispatch/index.ts`'s `noteDegradations` off whatever the codec returned. A
+ * hostile codec attached forty entries of four hundred characters and every one
+ * landed in the column. The comment describing that threat sat directly above
+ * the check that did not address it.
+ *
+ * `provider` is restamped for the same reason it is stamped on the outbound
+ * request: it is the host's id for this codec, it reaches `LogFields.provider`
+ * and it gates `reasonField` in `apps/gateway/src/logging.ts`, so a codec naming
+ * another provider chooses whether the operator's reason line prints at all.
+ *
+ * `code` and `message` are deliberately *not* touched. Classifying its own
+ * upstream's failure is the entire purpose of the hook — including `AUTH`, which
+ * `dispatch` gates its credential refresh on, and which is bounded elsewhere: a
+ * refresh acts on that one credential, which a provider plugin already holds
+ * decrypted under rule 15's stated exception.
+ */
+function rebound(id: ProviderId, error: GatewayError): GatewayError {
+  return new GatewayError(error.code, error.message, {
+    provider: id,
+    ...(error.upstreamStatus === undefined ? {} : { status: error.upstreamStatus }),
+    ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+    degradations: boundedDegradations(error.degradations),
+    cause: error,
+  });
+}
+
+/**
+ * Whether a codec's `url` is one `HttpClient` can actually be handed.
+ *
+ * Parsed rather than pattern-matched, because the thing that must not throw is
+ * `new URL(…)` inside the transport, and the only honest way to know it will not
+ * is to have called it. The scheme check is the second half: `file:`,
+ * `data:` and the rest parse cleanly and then throw
+ * `Protocol "file:" not supported` a layer deeper — and an outbound request the
+ * host believes is HTTP is worth refusing on its own terms, not only because
+ * Node happens to.
+ */
+function isSendableUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a codec's `method` is one the transport will accept.
+ *
+ * A closed set rather than the RFC's token grammar. The grammar would admit
+ * `FROBNICATE`, which is a valid token and not a request any provider serves, so
+ * the narrower rule costs nothing and refuses at the point a reader can see why.
+ * Codecs that need another verb add it here, which is a two-line core edit and
+ * should read as one.
+ */
+const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
+
+function isHttpMethod(value: unknown): value is string {
+  return typeof value === "string" && HTTP_METHODS.has(value);
+}
+
+/**
  * Runs one codec hook, turning anything it throws into a failover-able error.
  *
  * A `GatewayError` passes through untouched, and that exception is the point.
@@ -58,7 +127,12 @@ function guard<T>(id: ProviderId, hook: string, run: () => T): T {
   try {
     return run();
   } catch (error) {
-    if (error instanceof GatewayError) throw error;
+    // Passed through, but not verbatim: the classification is the codec's and
+    // the `provider` and `degradations` fields are the host's. `kiloCodec`
+    // throwing `AUTH` for a credential with no token is the case this
+    // passthrough exists for, and it attaches neither — so `rebound` costs it
+    // nothing and closes the same column a returned error was closing.
+    if (error instanceof GatewayError) throw rebound(id, error);
     throw codecFailure(id, hook, "threw");
   }
 }
@@ -123,17 +197,27 @@ export function codecAdapter(
         }),
       );
       if (
-        typeof built?.request?.url !== "string" ||
-        typeof built.request.method !== "string" ||
-        typeof built.request.body !== "string" ||
+        typeof built?.request?.body !== "string" ||
+        !isSendableUrl(built.request.url) ||
+        !isHttpMethod(built.request.method) ||
         !Array.isArray(built.request.headers) ||
         // The elements, not just the array. `Array.isArray` alone let a
         // malformed pair through to `nodeHttpClient`, which threw a raw
         // `TypeError` — `ERR_INVALID_CHAR`, `ERR_INVALID_HTTP_TOKEN`, or
         // `name.toLowerCase is not a function` — from outside every guard in
         // this file. Node refuses the CRLF itself, so this was never request
-        // splitting; it was the one class of codec mistake that reached
-        // `classify` as `INTERNAL` and ended the request unretryably.
+        // splitting.
+        //
+        // A first version checked this pair and left `url` and `method` as bare
+        // `typeof === "string"` one line above — and its comment claimed the
+        // header pair was "the one class" of codec mistake reaching `classify`
+        // as `INTERNAL`. Measurably three: `"not a url"`, `""` and a `file:`
+        // scheme all throw `TypeError: Invalid URL`, and `"GET junk"` throws
+        // `Method must be a valid HTTP token`, each from `await req.http(…)`,
+        // which sits outside every guard here. The last one also echoed a
+        // codec-authored string into a client-visible message. Checking one
+        // member of a class and describing it as the class is how the other two
+        // survived a review that was looking straight at them.
         !built.request.headers.every(
           (pair) =>
             Array.isArray(pair) &&
@@ -190,7 +274,7 @@ export function codecAdapter(
           if (!(classified instanceof GatewayError)) {
             throw codecFailure(id, "classifyError", "returned something that is not an error");
           }
-          throw classified;
+          throw rebound(id, classified);
         }
         // Built field by field, never `{ ...res }`. On a captured request the
         // response is `bodyCapture`'s wrapper, whose `body` is a *getter* that

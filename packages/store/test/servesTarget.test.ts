@@ -160,7 +160,7 @@ test("an account bound to an endpoint refuses a target that names none", () => {
  * `""` is on this list and was the last one to get there. It is a *string*, so
  * the type-based guard let it through and it was then read as "no endpoint" —
  * serving every target that names none, the exact fail-open the rest of the list
- * closes. Nothing legitimate writes it: `parseCustomProviderData` reads the
+ * closes. Nothing legitimate writes it: `customProviderData` reads the
  * field through `requiredString`, which refuses empty, and a non-custom account
  * holds no `endpointId` key at all.
  */
@@ -183,13 +183,19 @@ test("a pin does not rescue an account whose endpoint id is not a string", () =>
   }
 });
 
-test("two identically corrupt endpoint ids still do not match each other", () => {
-  // The case a single hoisted sentinel would get wrong: it would make every
-  // corrupt value equal every other, which is looser than the rule this
-  // replaced — that one compared raw values, so `42 !== {}` refused. A shared
-  // sentinel passes every other test in this file, so without this one the
-  // difference between "matches nothing" and "matches anything corrupt" is
-  // unpinned.
+test("a corrupt target id does not match the identically corrupt account id", () => {
+  // `sqlite/config.ts` parses stored *targets* with a bare `JSON.parse` too, so
+  // the same corrupt value can arrive on both sides of the comparison at once —
+  // the one case where mapping unusable ids to a shared value would be visibly
+  // wrong, since a raw comparison of two equal values matches.
+  //
+  // This test previously claimed to pin something else: that each unusable id
+  // becomes a *fresh* value, "matching nothing including another of its kind".
+  // It could not. The compare is target-against-account and never
+  // account-against-account, so a hoisted sentinel passed it — and passed the
+  // whole suite — while the comment said it was the one thing standing between
+  // "matches nothing" and "matches anything corrupt". The refinement is gone;
+  // the assertion it was attached to is real and stays.
   for (const endpointId of CORRUPT) {
     const corrupt = account({ providerData: { endpointId } });
     // `endpointId` on the target is typed `string | undefined`, so a corrupt
@@ -200,4 +206,10 @@ test("two identically corrupt endpoint ids still do not match each other", () =>
     };
     expect(servesTarget(target, corrupt)).toBe(false);
   }
+
+  // The positive control the loop above needs: a *usable* id really does match
+  // itself on both sides, so "false for every corrupt pair" is not just this
+  // function refusing everything.
+  const real = account({ providerData: { endpointId: "endpoint-a" } });
+  expect(servesTarget({ provider: "custom", endpointId: "endpoint-a" }, real)).toBe(true);
 });

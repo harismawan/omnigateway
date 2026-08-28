@@ -207,6 +207,36 @@ test("kilo advertises the exact windows its upstreams report", () => {
   });
 });
 
+test("the auth a credential uses selects which window is advertised", () => {
+  // `oauthLimits` is the Codex backend, which an OAuth credential is routed to
+  // and an API key never sees — a genuinely narrower surface for the same model
+  // id. Two callers pass an explicit `auth`: `anthropic/index.ts` and
+  // `resolveModelLimits`, whose number `setup.ts` writes into
+  // `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, where being wrong outlives the request
+  // that would expose it.
+  //
+  // Both arms and the default, because the branch is one line and every mutant
+  // of it — dropping `oauthLimits`, flipping the default — was surviving the
+  // whole suite. `synthesize` is the only caller reaching the default, and it
+  // has no credential to ask, so `"apiKey"` is the wider and honest answer.
+  expect(catalogLimits("openai", "gpt-5.6", "oauth")).toEqual({
+    contextWindow: 272_000,
+    maxOutputTokens: 128_000,
+  });
+  expect(catalogLimits("openai", "gpt-5.6", "apiKey")).toEqual({
+    contextWindow: 922_000,
+    maxOutputTokens: 128_000,
+  });
+  expect(catalogLimits("openai", "gpt-5.6")).toEqual(catalogLimits("openai", "gpt-5.6", "apiKey"));
+
+  // A model stating no `oauthLimits` answers the same either way: absence means
+  // one set covers both ways in, never "no limits over OAuth".
+  expect(catalogLimits("anthropic", "claude-opus-5", "oauth")).toEqual(
+    catalogLimits("anthropic", "claude-opus-5", "apiKey"),
+  );
+  expect(catalogLimits("anthropic", "claude-opus-5", "oauth")).not.toBeNull();
+});
+
 test("kilo records the cache-write price its upstreams report", () => {
   // Every row that states a write price, exhaustively: a sampled assertion
   // leaves the unsampled rows free to be silently zeroed. A row missing here

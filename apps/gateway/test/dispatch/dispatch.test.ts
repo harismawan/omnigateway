@@ -2499,14 +2499,43 @@ test("a sentinel registry reaches every consumer dispatch has", async () => {
   //
   // Two dispatches because one request cannot reach all three: a *configured*
   // model short-circuits `resolveModel` before it consults any registry, while
-  // an *inferred* target is priced from `PROVIDER_MODEL_CATALOG` — a different
-  // global, not injected — so it carries zero prices and cannot show a
-  // multiplier. One sentinel registry, both paths.
+  // an *inferred* one goes through `synthesize`. One sentinel registry, both
+  // paths, and **both assert `costUsd`**.
+  //
+  // The inferred leg did not, and the comment here explained why: an inferred
+  // target was priced from `PROVIDER_MODEL_CATALOG`, a different global that is
+  // not injected, so it carried zero prices and could show no multiplier. That
+  // stopped being true when `synthesize` moved onto `descriptor.catalog` — and
+  // this comment went on telling the next reader not to bother, one assertion
+  // away from covering the fix. A stale reason not to test something is worse
+  // than no comment: it is the previous round's defect wearing the previous
+  // round's justification, which is exactly how three rounds in a row went.
   const sentinel: ProviderDescriptors = {
     sentinel: {
       ...entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS"),
       id: "sentinel",
       modelPrefixes: ["sent-"],
+      // Its own catalog, listing only the inferred model, at prices no built-in
+      // charges. A fallback to the global cannot produce these numbers by
+      // coincidence — the global has no `sentinel` key at all.
+      catalog: {
+        defaultModel: "sent-1",
+        authTypes: ["apiKey"],
+        models: [
+          {
+            id: "sent-1",
+            label: "Sentinel One",
+            pricing: {
+              input: 7,
+              output: 33,
+              cacheRead: 0.7,
+              cacheWrite5m: 11,
+              cacheWrite1h: 21,
+            },
+            limits: { contextWindow: 123_000, maxOutputTokens: 4_096 },
+          },
+        ],
+      },
     },
   };
 
@@ -2566,9 +2595,9 @@ test("a sentinel registry reaches every consumer dispatch has", async () => {
   expect(pricedLog.costUsd).toBeCloseTo(6.25, 10);
 
   // And the `resolveModel` half: the same registry has to be what infers a bare
-  // name from its prefix.
+  // name from its prefix, *and* what prices what it inferred.
   await store.config.removeModel("fast");
-  const inferredAdapter = stubAdapter(() => textStream("ok"));
+  const inferredAdapter = stubAdapter(() => cacheWriteStream(1_000_000));
   const inferred = await dispatch(
     { ...req, model: "sent-1" },
     {
@@ -2585,5 +2614,10 @@ test("a sentinel registry reaches every consumer dispatch has", async () => {
   expect(inferredLog.status).toBe(200);
   expect(inferredLog.resolvedProvider).toBe("sentinel");
   expect(inferredLog.resolvedModel).toBe("sent-1");
+  // One million cache-write tokens at the descriptor's own `cacheWrite5m` of 11.
+  // Zero is what pricing from the un-injected global gives, and 6.25 is what the
+  // configured leg above produces — so neither a fallback nor a copy of the
+  // other half can pass this by accident.
+  expect(inferredLog.costUsd).toBeCloseTo(11, 10);
   store.close();
 });
