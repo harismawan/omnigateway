@@ -606,3 +606,50 @@ test("a plugin with no provider capability still loads normally", async () => {
   expect(result.plugins).toHaveLength(1);
   expect(result.providers).toEqual([]);
 });
+
+test("a plugin rejected after setup does not leave its provider installed", async () => {
+  // The rejection paths do not stop at `setup`. A bad `ui` entry is refused
+  // nineteen lines later, and an earlier version pushed the registration before
+  // that check — so a plugin the operator was told was unavailable had its
+  // provider routing traffic, holding credentials and pricing requests, absent
+  // from `/api/plugins` and mounting no routes.
+  //
+  // Through the loader on purpose. The registry-level test for this builds its
+  // own object and never reaches these checks, which is why it could not see
+  // the bug: it asserted the property at the layer that already had it.
+  await plugin({
+    id: "acme-ai",
+    manifest: {
+      capabilities: ["provider"],
+      // Valid enough to get past `setup` and rejected by the UI rule after it.
+      ui: "dist/index.js",
+      sdk: "^1.0.0",
+    },
+    server: PROVIDER_PLUGIN("acme-ai"),
+  });
+
+  const result = await load();
+
+  expect(result.plugins).toEqual([]);
+  expect(result.failures).toHaveLength(1);
+  expect(result.failures[0]?.reason).toContain("ui entry must live under");
+  // The whole point: rejected means nothing installed.
+  expect(result.providers).toEqual([]);
+});
+
+test("a plugin accepted with a compatible ui keeps its provider", async () => {
+  // The positive control for the test above. A loader that returned no
+  // providers whenever a `ui` was present would satisfy it and be wrong.
+  await plugin({
+    id: "acme-ai",
+    manifest: { capabilities: ["provider"], ui: "ui/index.js", sdk: "^1.0.0" },
+    server: PROVIDER_PLUGIN("acme-ai"),
+  });
+
+  const result = await load();
+
+  expect(result.failures).toEqual([]);
+  expect(result.plugins).toHaveLength(1);
+  expect(result.providers).toHaveLength(1);
+  expect(result.providers[0]?.descriptor.id).toBe("acme-ai");
+});

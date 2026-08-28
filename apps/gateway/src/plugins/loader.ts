@@ -259,6 +259,7 @@ export async function loadPlugins(deps: {
     }
 
     let routes: readonly PluginRoute[] = [];
+    let pending: readonly RegisteredProvider[] = [];
     let migrations: readonly PluginMigration[] = [];
     if (manifest.server !== undefined) {
       const entry = resolve(home, manifest.server);
@@ -322,12 +323,10 @@ export async function loadPlugins(deps: {
         continue;
       }
 
-      // Applied only now, because `setup` returned without throwing. A provider
-      // written into the live tables as it was registered would outlive a plugin
-      // the host went on to reject two lines later — and routing would then
-      // admit a target dispatch has no adapter for, which is the `INTERNAL`
-      // path, on every request rather than never.
-      providers.push(...registry.registered());
+      // Held, not published. `setup` returning without throwing is not the
+      // same as the plugin being accepted — the UI checks below still reject
+      // one, and each of those is a `continue`.
+      pending = registry.registered();
     }
 
     const loaded: LoadedPlugin = { id, manifest, routes, migrations };
@@ -363,6 +362,17 @@ export async function loadPlugins(deps: {
           : { reason: `requires dashboard sdk ${manifest.sdk}, host ships ${deps.sdkVersion}` }),
       };
     }
+    // Past every `continue`, which is the whole point of it being here.
+    //
+    // An earlier version pushed as soon as `setup` returned, and a plugin
+    // rejected nineteen lines later for a bad `ui` path still had its provider
+    // installed: it routed traffic, held credentials and priced requests while
+    // the operator saw only `plugin unavailable` and found it in neither
+    // `/api/plugins` nor its own routes. The comment there claimed to prevent
+    // exactly that. **A registration is published where the plugin is
+    // accepted, not where `setup` returns** — the two are different lines and
+    // reviewers should keep them that way.
+    providers.push(...pending);
     plugins.push(loaded);
     logger.info("plugin loaded", { plugin: id });
   }

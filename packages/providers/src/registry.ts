@@ -85,9 +85,18 @@ Object.setPrototypeOf(PROVIDERS, null);
  *
  * The one supported mutation of the registry, and it exists for exactly one
  * caller: boot, after `loadPlugins` and before `createApp`. Every registry read
- * in the gateway is a call-time read — that was the point of widening
- * `ProviderId` — so a provider added here is visible to routing, pricing, the
- * console and `omni doctor` with no further wiring.
+ * in the *gateway process* is a call-time read — that was the point of widening
+ * `ProviderId` — so a provider added here is visible to routing, pricing and the
+ * console with no further wiring.
+ *
+ * **Not to the CLI.** An earlier version of this note claimed `omni doctor` too,
+ * and that was wrong in a way that mattered: the CLI never calls `loadPlugins`
+ * and must not, because a plugin's `setup` opens channels, runs migrations and
+ * registers a provider — none of which a diagnostic should do. So `omni doctor`
+ * and `omni credentials add-key` answer from the *manifest* instead, matching a
+ * target's provider against installed plugins that declare the `provider`
+ * capability. That is exact rather than approximate, because registration
+ * requires `descriptor.id` to equal the plugin's own id.
  *
  * Adding after `createApp` would be a different thing entirely: reads happen per
  * request, so the provider would exist for later requests and not earlier ones.

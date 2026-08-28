@@ -68,6 +68,22 @@ test("a custom target still requires its endpoint, and only custom may carry one
   expect(() => modelSchema.parse(builtIn)).toThrow(/only meaningful for a custom target/);
 });
 
+test("a target still refuses an unknown key", () => {
+  // `.strict()` survived the union collapse but stopped being asserted: the one
+  // test that covered it was rewritten to assert the new endpointId refine's
+  // message, and deleting `.strict()` then passed the whole suite.
+  //
+  // What it protects: `virtual_models.targets` is written whole as JSON and read
+  // back by `sqlite/config.ts` with `JSON.parse` and no validation, so a
+  // misspelled `contexWindow` or `costPerMtok` would save silently and read back
+  // absent forever — a pool priced from a field nothing set.
+  for (const key of ["contexWindow", "costPerMtok", "endpiontId", "provider2"]) {
+    const typo = model("anthropic");
+    typo.targets[0] = { ...typo.targets[0], [key]: 1 };
+    expect(() => modelSchema.parse(typo)).toThrow(/unrecognized key/i);
+  }
+});
+
 test("a provider that does not exist is refused where it can be", () => {
   // Three questions that used to have one answer, and now have two.
   //

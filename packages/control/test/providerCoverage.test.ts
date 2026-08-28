@@ -48,18 +48,19 @@ test("every OAuth provider is a provider the registry describes", () => {
 });
 
 /**
- * `targetSchema` is a discriminated union: one arm covers the providers whose
- * targets need nothing but a model, the other covers `custom`, which also
- * requires an `endpointId` because that is the field an account is matched on.
+ * `targetSchema` **was** a discriminated union whose non-custom arm listed the
+ * providers by hand, and this test stood in for derivation: a seventh provider
+ * nobody added to an arm failed here rather than being silently unsaveable.
  *
- * The arms are written out by hand and deliberately not derived — deriving the
- * first from the registry would widen its inferred `provider` type from the
- * literals back to `ProviderId`, and the union's exhaustiveness is the reason it
- * is a union at all. This test is what stands in for derivation: a seventh
- * provider that nobody added to an arm fails here rather than being silently
- * unsaveable.
+ * That is no longer what it does. The union is gone — it was written for
+ * exhaustiveness over a closed `ProviderId`, which no longer exists, and it
+ * refused every target naming a plugin-supplied provider. This test now asserts
+ * something weaker and still worth having: that each built-in round-trips
+ * through the schema, and that `custom` still needs its `endpointId`. **It
+ * cannot fail for a seventh provider**, so do not read it as the net that
+ * catches one; `packages/providers/test/descriptor.test.ts` is that.
  */
-test("every provider can be saved as a target through some arm of the union", () => {
+test("every provider round-trips through the target schema", () => {
   const base = {
     model: "a-model",
     tier: 1,

@@ -22,9 +22,10 @@ shape and why the HTTP client is built on `node:http`.
    **`bun run lint` will not save you either, and this is the trap.** Lint catches a *deletion* — an
    entry removed leaves its import unused — but when you are *adding* a provider there is no import
    yet, so there is nothing to be unused and lint passes. Measured by simulating a seventh provider
-   with four of the five tables forgotten: typecheck passed, lint passed. The nets that actually fire
-   are `packages/providers/test/descriptor.test.ts` and
-   `packages/control/test/providerCoverage.test.ts`. **Run `bun test` before you believe you are
+   with four of the five tables forgotten: typecheck passed, lint passed. The net that actually fires
+   is `packages/providers/test/descriptor.test.ts`. `providerCoverage.test.ts` no longer catches a
+   seventh provider at all — every assertion in it now passes for any format-valid id, because the
+   target union it stood in for is gone. **Run `bun test` before you believe you are
    done**; a green typecheck and a green lint here mean nothing.
    (Worth knowing even for the deletion direction: `noUnusedImports` is a *fixable* rule, so
    `bun run fmt` deletes the orphaned import and takes the lint signal with it.)
