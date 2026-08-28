@@ -1,4 +1,5 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { systemText } from "../system.ts";
 
 export type ChatBody = {
   model: string;
@@ -42,7 +43,7 @@ export function toChatWire(
 
   const messages: unknown[] = [];
 
-  const system = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const system = systemText(req.system, "kimi", note);
   if (system !== undefined && system.length > 0) messages.push({ role: "system", content: system });
 
   for (const message of req.messages) {

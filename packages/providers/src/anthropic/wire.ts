@@ -5,6 +5,7 @@ import {
   estimateInputTokens,
   GatewayError,
 } from "@omni/ir";
+import { systemTextBlocks } from "../system.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { anthropicReasoningForm } from "./models.ts";
 
@@ -527,11 +528,15 @@ export function toWire(
     if (!degradations.includes(d)) degradations.push(d);
   };
 
-  let system = req.system?.flatMap((b) =>
-    b.type === "text"
-      ? [{ type: "text" as const, text: b.text, ...wireCacheControl(b.cacheControl) }]
-      : [],
-  );
+  const keptSystem = systemTextBlocks(req.system, "anthropic", note);
+  let system =
+    req.system === undefined
+      ? undefined
+      : keptSystem.map((b) => ({
+          type: "text" as const,
+          text: b.text,
+          ...wireCacheControl(b.cacheControl),
+        }));
 
   // The OAuth token endpoint rejects requests whose first system block is not
   // this string. It is a functional requirement of the credential, not a

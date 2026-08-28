@@ -1,4 +1,5 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { systemText } from "../system.ts";
 
 /**
  * Custom's own wire codecs, one per protocol.
@@ -100,7 +101,7 @@ export function toCustomChatWire(
 
   const messages: unknown[] = [];
 
-  const system = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const system = systemText(req.system, "custom", note);
   if (system !== undefined && system.length > 0) messages.push({ role: "system", content: system });
 
   for (const message of req.messages) {
@@ -264,7 +265,7 @@ export function toCustomResponsesWire(
 
   const body: CustomResponsesBody = { model, input, stream: req.stream, store: false };
 
-  const instructions = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const instructions = systemText(req.system, "custom", note);
   if (instructions !== undefined && instructions.length > 0) body.instructions = instructions;
 
   if (req.maxTokens !== undefined) body.max_output_tokens = req.maxTokens;

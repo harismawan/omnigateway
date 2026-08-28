@@ -1,4 +1,5 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { systemText } from "../system.ts";
 
 export type ResponsesBody = {
   model: string;
@@ -125,7 +126,7 @@ export function toResponsesWire(
 
   const body: ResponsesBody = { model, input, stream: req.stream, store: false };
 
-  const instructions = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const instructions = systemText(req.system, "openai", note);
   if (instructions !== undefined && instructions.length > 0) body.instructions = instructions;
 
   if (req.maxTokens !== undefined) {

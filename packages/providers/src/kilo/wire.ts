@@ -5,6 +5,7 @@ import {
   type Message,
   type ToolChoice,
 } from "@omni/ir";
+import { systemText } from "../system.ts";
 
 /**
  * Kilo's request body: OpenAI chat completions, plus OpenRouter's `reasoning`.
@@ -94,7 +95,7 @@ export function toKiloWire(
 
   const messages: unknown[] = [];
 
-  const system = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const system = systemText(req.system, "kilo", note);
   if (system !== undefined && system.length > 0) messages.push({ role: "system", content: system });
 
   for (const message of req.messages) {

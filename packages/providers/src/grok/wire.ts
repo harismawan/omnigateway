@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { systemText } from "../system.ts";
 
 /**
  * Above this the proxy answers `Maximum tools limit reached` and the whole
@@ -142,7 +143,7 @@ export function toGrokWire(
     flush();
   }
 
-  const instructions = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const instructions = systemText(req.system, "grok", note);
 
   const body: GrokResponsesBody = {
     model,
