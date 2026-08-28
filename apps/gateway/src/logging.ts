@@ -66,12 +66,26 @@ export function newPendingRequestLog(input: PendingRequestLogInput): RequestLog 
 /**
  * Whether a failure's message can quote the request back at stdout.
  *
- * `GatewayError.provider` is set by `httpError` and nowhere else, and that is
- * the one constructor that fills a message from an upstream response body — up
- * to 500 characters of it, which a context-length or validation error echoes
- * prompt text into. So an upstream's words wait for debug. A message this
- * gateway wrote cannot leak a prompt and is the whole reason an operator reads
- * the line, so it prints at the default level.
+ * An upstream's words wait for debug: `httpError` fills a message from up to 500
+ * characters of the response body, which a context-length or validation error
+ * echoes prompt text into. A message this gateway wrote cannot leak a prompt and
+ * is the whole reason an operator reads the line, so it prints at the default
+ * level.
+ *
+ * **`provider` still decides, and `gatewayAuthored` is the one way past it.**
+ * The rule was `provider === undefined`, on the premise that "`httpError` sets
+ * it and nowhere else" — true when written, untrue from the moment
+ * codec-authored errors began naming their provider, which is what makes them
+ * actionable. The two purposes then fought and the gate won silently: a plugin
+ * codec failing on every request logged `code=UPSTREAM` with no reason,
+ * indistinguishable from a real outage, while the sentence naming the plugin and
+ * the hook existed and was withheld.
+ *
+ * Adding an arm rather than replacing the test is deliberate. Replacing it would
+ * have made every one of ~180 construction sites owe a correct answer, and a
+ * single wrong one puts an upstream body — prompt text included — on stdout.
+ * This way an unaudited site keeps the behaviour it has today and the flag only
+ * ever opens a message someone asserted this gateway wrote.
  *
  * This is the only predicate behind `reason` on a rejection line, and it asks
  * the error rather than the call site on purpose. Three call-site guesses —
@@ -81,7 +95,9 @@ export function newPendingRequestLog(input: PendingRequestLogInput): RequestLog 
  * `classify`) is what makes the question answerable at all.
  */
 export function reasonField(error: GatewayError, logger: Logger): { reason?: string } {
-  return error.provider === undefined || logger.enabled("debug") ? { reason: error.message } : {};
+  return error.provider === undefined || error.gatewayAuthored || logger.enabled("debug")
+    ? { reason: error.message }
+    : {};
 }
 
 /**

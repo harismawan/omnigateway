@@ -119,6 +119,37 @@ export class GatewayError extends Error {
   readonly provider: ProviderId | undefined;
   /** The upstream's own HTTP status, kept for logs — not what the client sees. */
   readonly upstreamStatus: number | undefined;
+  /**
+   * Whether this gateway wrote `message` itself.
+   *
+   * The redaction gate on the operator's reason line. An upstream error body —
+   * up to 500 characters of it — echoes prompt text back on a context-length or
+   * validation failure, so a message carrying one waits for debug; a message
+   * this gateway wrote cannot leak a prompt and is the whole reason an operator
+   * reads the line.
+   *
+   * **Opt in, defaulting false, and the direction is the point.** The gate used
+   * to infer this from `provider`, on the premise that "`provider` is set by
+   * `httpError` and nowhere else". That premise died the moment codec-authored
+   * errors began naming their provider — which is what makes them actionable —
+   * and the two purposes then fought: naming the provider silently suppressed
+   * the sentence naming it. A plugin codec failing on every request logged
+   * `code=UPSTREAM` with no reason, indistinguishable from an outage, while the
+   * text saying which plugin and which hook existed and was withheld.
+   *
+   * Written as an opt-out — "this one does not quote upstream" — it would have
+   * needed every one of ~180 construction sites audited correctly, and a single
+   * missed one leaks prompt text to stdout. As an opt-in, a site nobody has
+   * looked at keeps exactly the behaviour it has today, and only a message
+   * someone asserted is gateway-authored prints. Wrong here should cost a
+   * missing diagnostic, never a leaked prompt.
+   *
+   * Set it only for a message built from literals and values this repository
+   * owns. Never for one carrying an upstream body, and never for one authored
+   * outside this repository — a plugin codec's own text is unknown in exactly
+   * the way an upstream body is.
+   */
+  readonly gatewayAuthored: boolean;
   /** Milliseconds, when the upstream sent a Retry-After header. */
   readonly retryAfterMs: number | undefined;
   /**
@@ -152,6 +183,7 @@ export class GatewayError extends Error {
     opts?: {
       provider?: ProviderId;
       status?: number;
+      gatewayAuthored?: boolean;
       retryAfterMs?: number;
       degradations?: readonly string[];
       cause?: unknown;
@@ -163,6 +195,7 @@ export class GatewayError extends Error {
     this.retryable = RETRYABLE[code];
     this.provider = opts?.provider;
     this.upstreamStatus = opts?.status;
+    this.gatewayAuthored = opts?.gatewayAuthored ?? false;
     this.retryAfterMs = opts?.retryAfterMs;
     // Copied, not aliased: `readonly` is a compile-time claim, and the caller's
     // array is a local it may still be pushing to.

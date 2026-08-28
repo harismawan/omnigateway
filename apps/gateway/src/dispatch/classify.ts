@@ -18,19 +18,31 @@ const NETWORK_HINTS = [
  * message, and dispatch re-wraps an attempt's error into a fresh `GatewayError`
  * before anything logs it. Dropping the field there left the redaction gate
  * asking a question nothing could answer — every re-wrapped upstream error
- * looked gateway-authored. Only `httpError` sets it, so it stays absent for
- * everything this gateway raised itself.
+ * looked gateway-authored. It stays absent for everything raised without an
+ * upstream in hand — but it is no longer only `httpError` that sets it: codec
+ * errors name their provider too, because that is what makes them actionable.
+ * Whether a message may be printed is a separate question, and
+ * `GatewayError.quotesUpstream` is where it is now asked.
  */
 export function classify(error: unknown): {
   code: ErrorCode;
   retryAfterMs?: number;
   provider?: ProviderId;
+  /**
+   * Carried for the same reason `provider` is: the gate reads it, and a re-wrap
+   * that drops it turns a gateway-authored message back into a withheld one.
+   * Only ever `true` here — an error this function builds from something that is
+   * not a `GatewayError` has a message assembled by `describeError`, and that
+   * one quotes whatever the thrown value said.
+   */
+  gatewayAuthored?: boolean;
 } {
   if (error instanceof GatewayError) {
     return {
       code: error.code,
       ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
       ...(error.provider === undefined ? {} : { provider: error.provider }),
+      ...(error.gatewayAuthored ? { gatewayAuthored: true } : {}),
     };
   }
 

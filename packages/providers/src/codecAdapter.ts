@@ -22,7 +22,14 @@ import type { AdapterRequest, AdapterResult, Capabilities, ProviderAdapter } fro
 function codecFailure(id: ProviderId, hook: string, what: string): GatewayError {
   // `UPSTREAM` is in `RETRYABLE`, which is what makes the failover happen; no
   // option needs to say so, and one that did would be a second source of truth.
-  return new GatewayError("UPSTREAM", `${id} codec ${hook} ${what}`, { provider: id });
+  // Built from an id this host validated and two literals this file owns, so it
+  // carries nothing a client sent and nothing a plugin wrote. Naming the
+  // provider is what makes it actionable, and before this flag existed that same
+  // naming is what suppressed it.
+  return new GatewayError("UPSTREAM", `${id} codec ${hook} ${what}`, {
+    provider: id,
+    gatewayAuthored: true,
+  });
 }
 
 /**
@@ -68,6 +75,11 @@ function boundedDegradations(entries: readonly string[] | undefined): string[] {
 function rebound(id: ProviderId, error: GatewayError): GatewayError {
   return new GatewayError(error.code, error.message, {
     provider: id,
+    // No `gatewayAuthored`: `error.message` came from the codec's own
+    // `classifyError`, which is handed the upstream body and is authored outside
+    // this repository. Both halves make it exactly what the gate is for, and the
+    // default is what keeps it suppressed — the same reasoning that keeps
+    // `codecFailure` from carrying a codec's message at all.
     ...(error.upstreamStatus === undefined ? {} : { status: error.upstreamStatus }),
     ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
     degradations: boundedDegradations(error.degradations),
@@ -292,7 +304,10 @@ export function codecAdapter(
 
       const body = res.body;
       if (body === null) {
-        throw new GatewayError("UPSTREAM", "empty response body", { provider: id });
+        throw new GatewayError("UPSTREAM", "empty response body", {
+          provider: id,
+          gatewayAuthored: true,
+        });
       }
 
       return {

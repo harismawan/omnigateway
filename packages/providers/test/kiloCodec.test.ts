@@ -564,10 +564,24 @@ test("a codec that throws fails over instead of ending the request", async () =>
     })();
 
     expect(failure).toBeInstanceOf(GatewayError);
-    expect(failure).toMatchObject({ code: "UPSTREAM", provider: "kilo" });
+    // `gatewayAuthored` alongside `provider`, and the pair is the point. The
+    // operator's reason line is withheld for a message naming a provider unless
+    // this flag says the gateway wrote it — so without it, naming the provider
+    // is what suppressed the sentence naming it, and a codec throwing on every
+    // request logged `code=UPSTREAM` with no reason at all. Asserted here rather
+    // than only at the dispatch boundary because a test that builds this error
+    // by hand passes whether or not the real producer sets the flag: that is the
+    // one mutant the boundary test left alive.
+    expect(failure).toMatchObject({
+      code: "UPSTREAM",
+      provider: "kilo",
+      gatewayAuthored: true,
+    });
     expect((failure as Error).message).toContain(hook);
     // The codec's own message never reaches the error: it is authored outside
-    // this repository and `LogFields` is a closed allowlist.
+    // this repository and `LogFields` is a closed allowlist. Which is also why
+    // the flag above is safe to set — the message is this file's literals and an
+    // id the host validated, and nothing else.
     expect((failure as Error).message).not.toContain("plugin bug");
     expect(RETRYABLE[(failure as GatewayError).code]).toBe(true);
   }
@@ -622,6 +636,12 @@ test("a codec's own GatewayError keeps its classification", async () => {
     expect(failure).toBeInstanceOf(GatewayError);
     // Its own code, not the guard's.
     expect((failure as GatewayError).code).not.toBe("UPSTREAM");
+    // And **not** gateway-authored, which is the other direction of the same
+    // rule. `rebound` keeps the codec's message verbatim, and that message came
+    // from `classifyError` — handed the upstream body, and written outside this
+    // repository. Marking it printable would put both through the redaction
+    // gate the flag exists to hold open only for text this repository wrote.
+    expect((failure as GatewayError).gatewayAuthored).toBe(false);
   }
 
   // And the real codec: the adapter and the codec agree on the classification,

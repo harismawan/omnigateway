@@ -166,13 +166,18 @@ export async function dispatch(
   /**
    * Re-wraps a classified error, keeping who wrote the message.
    *
-   * `provider` is the redaction gate's only input; dropping it here is what
-   * made every re-wrapped upstream error read as gateway-authored.
+   * `provider` and `gatewayAuthored` are the redaction gate's two inputs, and
+   * dropping either here reverses the answer in its own direction: without the
+   * first every re-wrapped upstream error read as gateway-authored, and without
+   * the second a codec's own failure — the case the flag exists for — arrived
+   * with its reason withheld anyway. The second was live for exactly as long as
+   * it took a test to ask.
    */
   const rewrap = (classified: ReturnType<typeof classify>, message: string): GatewayError =>
     new GatewayError(classified.code, message, {
       ...(classified.retryAfterMs === undefined ? {} : { retryAfterMs: classified.retryAfterMs }),
       ...(classified.provider === undefined ? {} : { provider: classified.provider }),
+      ...(classified.gatewayAuthored ? { gatewayAuthored: true } : {}),
     });
 
   /**
@@ -765,7 +770,11 @@ export async function dispatch(
       reject(
         lastError?.provider === undefined
           ? new GatewayError(code, message)
-          : new GatewayError(code, message, { provider: lastError.provider }),
+          : new GatewayError(code, message, {
+              provider: lastError.provider,
+              // The message is `lastError`'s verbatim, so its provenance is too.
+              ...(lastError.gatewayAuthored ? { gatewayAuthored: true } : {}),
+            }),
       );
       yield {
         type: "error",

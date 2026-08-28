@@ -1973,6 +1973,43 @@ test("prints a rejection line for a request that never reached a candidate", asy
   store.close();
 });
 
+test("prints a codec's own failure at the default level, provider and all", async () => {
+  // The other half of the same gate, and the regression that prompted it.
+  //
+  // `codecFailure` names the provider because that is what makes the line
+  // actionable — and naming it is precisely what used to suppress the line,
+  // since the gate inferred "came from upstream" from that field. A plugin codec
+  // throwing on every request logged `code=UPSTREAM` with no reason, which reads
+  // exactly like a provider outage, while the sentence naming the plugin and the
+  // hook existed and was withheld.
+  //
+  // Asserted at `info`, not `debug`: the whole claim is that it does not wait.
+  const store = await seeded(1);
+  const logger = captureLogger("info");
+  const adapter = stubAdapter(
+    () =>
+      new GatewayError("UPSTREAM", "acme-ai codec buildRequest threw", {
+        provider: "anthropic",
+        gatewayAuthored: true,
+      }),
+  );
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(rejections(logger)).toHaveLength(1);
+  const fields = rejections(logger)[0]?.fields;
+  // Both, together: which provider, and what actually happened to it.
+  expect(fields?.provider).toBe("anthropic");
+  expect(fields?.reason).toBe("acme-ai codec buildRequest threw");
+  store.close();
+});
+
 test("prints the upstream message only where debug output was asked for", async () => {
   const upstreamBody = "REJECTION_BODY_SENTINEL";
   for (const [level, expected] of [
@@ -1981,9 +2018,11 @@ test("prints the upstream message only where debug output was asked for", async 
   ] as const) {
     const store = await seeded(1);
     const logger = captureLogger(level);
-    // `provider` is what marks a message as the upstream's own, and `httpError`
-    // — the only constructor that copies a response body into one — always sets
-    // it. An error built without it is a different case, not a looser fixture.
+    // `provider` with no `gatewayAuthored` is what an upstream body looks like:
+    // `httpError` — the constructor that copies a response body into a message —
+    // sets the first and not the second, and the flag defaults off so every
+    // unaudited site reads this way too. An error built without a provider is a
+    // different case, not a looser fixture.
     const adapter = stubAdapter(
       () => new GatewayError("BAD_REQUEST", upstreamBody, { provider: "anthropic" }),
     );
