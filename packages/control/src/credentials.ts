@@ -1,4 +1,4 @@
-import { GatewayError, type Logger, noopLogger } from "@omni/ir";
+import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { Credential, CredentialHealth, QuotaWindow, Store } from "@omni/store";
 import { createAdminAuth } from "./adminAuth.ts";
 import { isProviderId } from "./connect.ts";
@@ -123,22 +123,41 @@ function sameCustomEndpoint(a: Record<string, unknown>, b: CustomProviderData): 
   );
 }
 
+/**
+ * Whether this installation has a provider by that name.
+ *
+ * Injected because the two callers are asking the same question of two
+ * different installations. The gateway loads plugins at boot, so its own
+ * registry is the whole answer and `isProviderId` is it. The CLI **does not
+ * load plugins and must not** — `setup` opens channels, runs migrations and
+ * registers a provider, none of which storing an API key should do — so its
+ * registry holds the compiled-in six and nothing else. Asking it alone refused
+ * `omni credentials add-key <plugin-provider>` outright, which is the one way in
+ * a plugin-supplied provider has.
+ *
+ * The predicate, not a flag: "consult the manifests too" is a fact about how a
+ * caller can see its installation, and a boolean would have put that reasoning
+ * in here, where neither answer is available.
+ */
+export type ProviderExists = (provider: ProviderId) => boolean;
+
 export async function createApiKeyCredential(
   store: Store,
   input: ApiKeyCredentialInput,
   logger: Logger = noopLogger,
+  providerExists: ProviderExists = isProviderId,
 ): Promise<CredentialSummary> {
   const provider = parseOrThrow(providerIdSchema, input.provider);
   // Format, then existence. The schema stopped being an enum over the registry
   // because that enum was a build-time snapshot — but minting an account for a
   // provider that does not exist produces a credential that stores, lists, and
   // fails on first dispatch, so the existence question is asked here instead,
-  // against the registry as it stands right now.
+  // against the installation as it stands right now.
   //
   // Deliberately not the rule `putModel` follows. A target naming a removed
   // provider is existing state an operator must still be able to edit; a new
   // credential has no such history to preserve.
-  if (!isProviderId(provider)) {
+  if (!providerExists(provider)) {
     throw new GatewayError("BAD_REQUEST", `provider: no provider named "${provider}"`);
   }
   const apiKey = requiredString(input.apiKey, "apiKey");

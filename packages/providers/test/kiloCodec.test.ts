@@ -668,3 +668,168 @@ test("a codec cannot write unbounded free text into request_logs", async () => {
   expect(result.degradations[0]).toHaveLength(64);
   expect(result.degradations.some((d) => d.includes("object Object"))).toBe(false);
 });
+
+test("cloakedTools is a count or it is nothing", async () => {
+  // The contract says "a count and never the names… the contract can carry the
+  // number and has no way to carry the strings". It had a way: the value was
+  // forwarded unvalidated into `logger.debug("tool names cloaked", …)`, which
+  // is `LogFields` — the redaction boundary. A codec returning
+  // `"SessionSearch,ReadFile"` put client tool names into a log line.
+  //
+  // Dropped rather than coerced: `Number("names")` is `NaN`, which renders as
+  // `NaN` in the field and explains nothing.
+  for (const bad of ["SessionSearch,ReadFile", { names: ["a"] }, Number.NaN, -1, 1.5, null]) {
+    const { adapter } = recording({
+      buildRequest: () => ({
+        request: { url: "https://x.test", method: "POST", headers: [], body: "{}" },
+        cloakedTools: bad as never,
+      }),
+    });
+    const result = await adapter.send({
+      request,
+      model: "m",
+      credentials: credentials(),
+      http: ok,
+      signal: new AbortController().signal,
+    });
+    expect(result.cloakedTools).toBeUndefined();
+  }
+
+  // The positive control: a real count still arrives.
+  const { adapter } = recording();
+  const good = await adapter.send({
+    request,
+    model: "m",
+    credentials: credentials(),
+    http: ok,
+    signal: new AbortController().signal,
+  });
+  expect(good.cloakedTools).toBe(3);
+});
+
+test("a codec cannot return something that is not an error from classifyError", async () => {
+  // `guard` checked `instanceof GatewayError` on the throw path and had no
+  // equivalent on the return path, so `null` — the natural sibling of the
+  // documented `undefined` — produced `throw null`, and a string or object
+  // threw itself. Each reached `classify` as INTERNAL, which is not retryable.
+  for (const bad of [null, "nope", { code: "AUTH" }, 42]) {
+    const { adapter } = recording({ classifyError: () => bad as never });
+    const failure = await adapter
+      .send({
+        request,
+        model: "m",
+        credentials: credentials(),
+        http: async () => ({
+          status: 400,
+          headers: new Headers(),
+          body: null,
+          text: async () => "no",
+        }),
+        signal: new AbortController().signal,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(failure).toBeInstanceOf(GatewayError);
+    expect(failure).toMatchObject({ code: "UPSTREAM", provider: "kilo" });
+    expect((failure as Error).message).toContain("classifyError");
+    expect(RETRYABLE[(failure as GatewayError).code]).toBe(true);
+  }
+});
+
+test("a malformed header pair never reaches the transport", async () => {
+  // `Array.isArray` alone let these through to `nodeHttpClient`, which threw a
+  // raw TypeError from outside every guard in the file — ERR_INVALID_CHAR,
+  // ERR_INVALID_HTTP_TOKEN, or `name.toLowerCase is not a function`. Node
+  // refuses the CRLF itself, so this was never request splitting; it was the
+  // one codec mistake that bypassed the guards and ended the request
+  // unretryably.
+  // A CRLF inside a well-formed pair's *value* is deliberately absent: the pair
+  // is two strings, so it is structurally valid and Node is what refuses it.
+  // This guard's job is shape, and claiming more would be a guard that looks
+  // like it sanitises header content and does not.
+  for (const headers of [[null], [["only-name"]], [[{}, {}]], [["a", "b", "c"]], ["not-a-pair"]]) {
+    let called = false;
+    const { adapter } = recording({
+      buildRequest: () => ({
+        request: { url: "https://x.test", method: "POST", headers: headers as never, body: "{}" },
+      }),
+    });
+    const failure = await adapter
+      .send({
+        request,
+        model: "m",
+        credentials: credentials(),
+        http: async () => {
+          called = true;
+          return ok();
+        },
+        signal: new AbortController().signal,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(failure).toMatchObject({ code: "UPSTREAM", provider: "kilo" });
+    expect((failure as Error).message).toContain("did not return a usable request");
+    expect(called).toBe(false);
+  }
+
+  // A CRLF *inside a well-formed pair's value* is Node's to refuse, not this
+  // guard's — the pair is structurally valid. Asserted so the boundary is
+  // stated rather than assumed.
+  const { adapter } = recording({
+    buildRequest: () => ({
+      request: {
+        url: "https://x.test",
+        method: "POST",
+        headers: [["X-Fine", "ordinary"]],
+        body: "{}",
+      },
+    }),
+  });
+  await adapter.send({
+    request,
+    model: "m",
+    credentials: credentials(),
+    http: ok,
+    signal: new AbortController().signal,
+  });
+});
+
+test("degradations are bounded on the error path too", async () => {
+  // The success path capped at 16 x 64 and this one did not, from the same
+  // untrusted source into the same stored column.
+  const seen: CodecErrorInput[] = [];
+  const { adapter } = recording({
+    buildRequest: () => ({
+      request: { url: "https://x.test", method: "POST", headers: [], body: "{}" },
+      degradations: Array.from({ length: 40 }, () => "x".repeat(200)),
+    }),
+    classifyError(input) {
+      seen.push(input);
+      return undefined;
+    },
+  });
+
+  await adapter
+    .send({
+      request,
+      model: "m",
+      credentials: credentials(),
+      http: async () => ({
+        status: 500,
+        headers: new Headers(),
+        body: null,
+        text: async () => "down",
+      }),
+      signal: new AbortController().signal,
+    })
+    .catch(() => {});
+
+  expect(seen[0]?.degradations).toHaveLength(16);
+  expect(seen[0]?.degradations[0]).toHaveLength(64);
+});

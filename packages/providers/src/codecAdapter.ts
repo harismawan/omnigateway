@@ -126,7 +126,21 @@ export function codecAdapter(
         typeof built?.request?.url !== "string" ||
         typeof built.request.method !== "string" ||
         typeof built.request.body !== "string" ||
-        !Array.isArray(built.request.headers)
+        !Array.isArray(built.request.headers) ||
+        // The elements, not just the array. `Array.isArray` alone let a
+        // malformed pair through to `nodeHttpClient`, which threw a raw
+        // `TypeError` — `ERR_INVALID_CHAR`, `ERR_INVALID_HTTP_TOKEN`, or
+        // `name.toLowerCase is not a function` — from outside every guard in
+        // this file. Node refuses the CRLF itself, so this was never request
+        // splitting; it was the one class of codec mistake that reached
+        // `classify` as `INTERNAL` and ended the request unretryably.
+        !built.request.headers.every(
+          (pair) =>
+            Array.isArray(pair) &&
+            pair.length === 2 &&
+            typeof pair[0] === "string" &&
+            typeof pair[1] === "string",
+        )
       ) {
         throw codecFailure(id, "buildRequest", "did not return a usable request");
       }
@@ -158,11 +172,26 @@ export function codecAdapter(
             headers: res.headers,
             // What the request gave up, so a refusal caused by exactly that can
             // say so. `dispatch` writes `error.degradations` into `request_logs`.
-            degradations: built.degradations ?? [],
+            // Bounded here as on the success path. Unbounded, a codec could
+            // attach forty long strings to the error it returns and put all of
+            // them into `request_logs.degradations` — the same column the
+            // success path caps, from the same untrusted source.
+            degradations: boundedDegradations(built.degradations),
             decodeState: built.decodeState,
           }),
         );
-        if (classified !== undefined) throw classified;
+        // The *return*, not just the call. `guard` checks `instanceof
+        // GatewayError` on the throw path and had no equivalent here, so a
+        // codec returning `null` — the natural sibling of the documented
+        // `undefined` — produced `throw null`, and a string or plain object
+        // threw itself. Each reached `classify` as `INTERNAL`, which is not
+        // retryable, ending a request the rest of the pool could have served.
+        if (classified !== undefined) {
+          if (!(classified instanceof GatewayError)) {
+            throw codecFailure(id, "classifyError", "returned something that is not an error");
+          }
+          throw classified;
+        }
         // Built field by field, never `{ ...res }`. On a captured request the
         // response is `bodyCapture`'s wrapper, whose `body` is a *getter* that
         // tees the upstream stream and starts a capture drain — and object
@@ -203,7 +232,18 @@ export function codecAdapter(
         // same mistake with a different shape. Caps rather than refusal: a
         // chatty codec loses detail, it does not lose its request.
         degradations: boundedDegradations(built.degradations),
-        ...(built.cloakedTools === undefined ? {} : { cloakedTools: built.cloakedTools }),
+        // A count, which is what the contract says this is: "the contract can
+        // carry the number and has no way to carry the strings". It had a way —
+        // the value was forwarded unvalidated into `logger.debug("tool names
+        // cloaked", …)`, i.e. into `LogFields`, the redaction boundary. A codec
+        // returning `"SessionSearch,ReadFile"` put client tool names in a log
+        // line. Anything that is not a non-negative integer is dropped rather
+        // than coerced: `Number("names")` is `NaN`, which renders as `NaN`.
+        ...(typeof built.cloakedTools === "number" &&
+        Number.isInteger(built.cloakedTools) &&
+        built.cloakedTools >= 0
+          ? { cloakedTools: built.cloakedTools }
+          : {}),
       };
     },
   };

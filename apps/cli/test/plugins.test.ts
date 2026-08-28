@@ -369,3 +369,71 @@ describe("omni doctor", () => {
     expect(result.out).toContain("none");
   });
 });
+
+/**
+ * `omni credentials add-key` against a provider only a plugin supplies.
+ *
+ * The one way in a plugin-supplied provider has: `connect` covers OAuth flows
+ * the built-ins declare, and a plugin declares none. It shipped broken and the
+ * suite did not notice, because the CLI's own guard was widened to admit the id
+ * and `createApiKeyCredential` then asked the built-in registry again and
+ * refused it. Two guards, one of them dead.
+ *
+ * This process deliberately does not load plugins — `setup` opens channels, runs
+ * migrations and registers a provider, none of which storing a key should do —
+ * so the manifests on disk are the only thing that can answer, and the predicate
+ * that reads them is now handed to control rather than checked and discarded.
+ */
+describe("omni credentials add-key", () => {
+  const PROVIDER = { ...MANIFEST, id: "poke-dex", capabilities: ["provider"] } as const;
+  const secret: Prompt = {
+    isTty: false,
+    secret: async () => "pk-secret",
+    confirm: async () => true,
+  };
+
+  async function migrated(): Promise<string> {
+    const root = makeRoot();
+    expect((await cli(["db", "migrate"], { root })).code).toBe(0);
+    return root;
+  }
+
+  test("stores a key for a provider a plugin supplies", async () => {
+    const root = await migrated();
+    place(root, "poke-dex", PROVIDER);
+
+    const result = await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret });
+    expect(result.code).toBe(0);
+
+    const listed = await cli(["credentials", "list", "--json"], { root });
+    const body = JSON.parse(listed.out) as { credentials: Array<Record<string, unknown>> };
+    expect(body.credentials[0]).toMatchObject({ provider: "poke-dex", authType: "apiKey" });
+    expect(listed.out).not.toContain("pk-secret");
+  });
+
+  test("refuses a plugin that supplies no provider", async () => {
+    const root = await migrated();
+    // Installed, and its id is well-formed — the capability is the whole
+    // difference, and without asserting it the guard would admit every plugin.
+    place(root, "poke-dex", MANIFEST);
+
+    const result = await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("provider must be one of");
+  });
+
+  test("refuses a provider nothing supplies", async () => {
+    const root = await migrated();
+
+    const result = await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("provider must be one of");
+  });
+
+  test("still stores a key for a built-in with no plugins installed", async () => {
+    const root = await migrated();
+
+    const result = await cli(["credentials", "add-key", "anthropic"], { root, prompt: secret });
+    expect(result.code).toBe(0);
+  });
+});

@@ -58,6 +58,7 @@ export {
   credentialStatus,
   getCredential,
   listCredentials,
+  type ProviderExists,
   patchCredential,
   refreshCredential,
   removeCredential,

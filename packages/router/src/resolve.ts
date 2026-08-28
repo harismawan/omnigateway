@@ -1,5 +1,5 @@
 import { GatewayError, type ProviderId } from "@omni/ir";
-import { catalogLimits, catalogPricing } from "@omni/providers/catalog";
+import { entryLimits, entryPricing } from "@omni/providers/catalog";
 import {
   PROVIDER_DESCRIPTORS,
   type ProviderDescriptor,
@@ -56,17 +56,25 @@ function synthesize(
   model: string,
   descriptor: ProviderDescriptor,
 ): VirtualModel {
-  // The catalog's list price, so a bare model name is cost-ranked like a
-  // configured one. A model the catalog does not list stays at zero, which the
-  // scorer reads as "unpriced" and drops from the cost term rather than
-  // treating as free. Either way the operator can configure a virtual model to
-  // state the price they actually pay.
-  const listed = catalogPricing(provider, model);
+  // Priced from the descriptor this function was handed, not from the id-keyed
+  // global. They hold the same object for a built-in, and only the descriptor
+  // has anything at all for a provider that arrived from `<root>/plugins/`:
+  // `registerProvider` mutates `PROVIDER_DESCRIPTORS` and deliberately not
+  // `PROVIDER_MODEL_CATALOG`. Reading the global here priced every plugin
+  // provider's model at zero, which the scorer reads as "unpriced" and
+  // `priceOf` bills as free — no throw, no degradation, a `costUsd` of 0 and
+  // spend limits that never accumulate. `capabilities` two lines down already
+  // read the descriptor; these did not.
+  //
+  // A model the descriptor does not list still stays at zero, which is the
+  // documented "unpriced" case and the operator's cue to configure a virtual
+  // model stating the price they actually pay.
+  const listed = entryPricing(descriptor.catalog, model);
   // The same treatment for limits, so a synthesized target is shaped like a
   // configured one. Nothing reads them yet — `/v1/models` lists only configured
   // models — but a target that carried prices and not limits would be a trap
   // for the next reader of this function.
-  const limits = catalogLimits(provider, model);
+  const limits = entryLimits(descriptor.catalog, model);
   const target: Target = {
     provider,
     model,

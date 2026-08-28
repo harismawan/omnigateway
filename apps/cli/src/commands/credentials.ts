@@ -252,10 +252,19 @@ export const credentialsAddKey: Command = {
     // Matching on the manifest id is exact rather than a guess: registration
     // requires `descriptor.id` to equal the plugin's own id, and the host
     // enforces it.
-    const supplied = listPlugins(doctorPluginDeps(), ctx.root.root).some(
-      (plugin) => plugin.id === providerId && plugin.capabilities.includes("provider"),
-    );
-    if (!isProviderId(providerId) && !supplied) {
+    //
+    // The same predicate is handed to `createApiKeyCredential` below rather than
+    // being checked only here. Control asks the existence question again on its
+    // own — it is the one place that can refuse an unreachable credential before
+    // it is stored — and with the built-in registry as its only answer it
+    // refused everything this guard had just admitted. A guard whose decision
+    // the next call overturns is not a guard.
+    const providerExists = (id: string): boolean =>
+      isProviderId(id) ||
+      listPlugins(doctorPluginDeps(), ctx.root.root).some(
+        (plugin) => plugin.id === id && plugin.capabilities.includes("provider"),
+      );
+    if (!providerExists(providerId)) {
       throw new UsageError(
         `provider must be one of ${PROVIDER_IDS.join(", ")}, or an installed plugin that supplies one`,
       );
@@ -292,16 +301,21 @@ export const credentialsAddKey: Command = {
               ? existingEndpoint.providerData.basePath
               : ""
           }`;
-    const created = await createApiKeyCredential(store, {
-      provider: providerId,
-      apiKey: key,
-      label: stringFlag(args.values, "label"),
-      endpointId,
-      endpointLabel:
-        stringFlag(args.values, "endpoint-label") ?? existingEndpoint?.providerData.endpointLabel,
-      origin: stringFlag(args.values, "origin") ?? existingOrigin,
-      protocol: protocol ?? existingEndpoint?.providerData.protocol,
-    });
+    const created = await createApiKeyCredential(
+      store,
+      {
+        provider: providerId,
+        apiKey: key,
+        label: stringFlag(args.values, "label"),
+        endpointId,
+        endpointLabel:
+          stringFlag(args.values, "endpoint-label") ?? existingEndpoint?.providerData.endpointLabel,
+        origin: stringFlag(args.values, "origin") ?? existingOrigin,
+        protocol: protocol ?? existingEndpoint?.providerData.protocol,
+      },
+      undefined,
+      providerExists,
+    );
 
     emit(
       ctx,

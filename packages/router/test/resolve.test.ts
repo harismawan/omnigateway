@@ -151,3 +151,85 @@ test("an injected registry that is an ordinary object refuses inherited keys", (
     "anthropic",
   );
 });
+
+test("a synthesized target is priced from the descriptor, not the id-keyed global", () => {
+  // `registerProvider` mutates `PROVIDER_DESCRIPTORS` and deliberately not
+  // `PROVIDER_MODEL_CATALOG`, so a provider from `<root>/plugins/` exists in the
+  // first and never the second. Pricing through the second gave every such
+  // model `{input: 0, output: 0}` — which the scorer reads as "unpriced" and
+  // `priceOf` bills as free: `costUsd` of 0, spend limits that never
+  // accumulate, `usage_daily` recording nothing. No throw, no degradation.
+  //
+  // The plugin host *requires* `catalog` and `modelPrefixes` to register, so the
+  // plugin was forced to supply prices the router then ignored.
+  const seed = entryOf(PROVIDER_DESCRIPTORS, "anthropic");
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    sentinel: {
+      ...seed,
+      id: "sentinel",
+      modelPrefixes: ["sent-"],
+      catalog: {
+        defaultModel: "sent-1",
+        authTypes: ["apiKey"],
+        models: [
+          {
+            id: "sent-1",
+            label: "Sentinel One",
+            pricing: {
+              input: 5,
+              output: 25,
+              cacheRead: 0.5,
+              cacheWrite5m: 6.25,
+              cacheWrite1h: 10,
+            },
+            limits: { contextWindow: 200_000, maxOutputTokens: 8_192 },
+          },
+        ],
+      },
+    },
+  };
+
+  // Both branches: the bare name inferred from its prefix, and the explicit
+  // `provider/model` form. Each reaches `synthesize` by a different route.
+  for (const name of ["sent-1", "sentinel/sent-1"]) {
+    const target = resolveModel(name, snapshot({}), installed).targets[0];
+    expect(target?.provider).toBe("sentinel");
+    expect(target?.costPerMTok).toEqual({
+      input: 5,
+      output: 25,
+      cacheRead: 0.5,
+      cacheWrite5m: 6.25,
+      cacheWrite1h: 10,
+    });
+    // Limits travel with the price, or a target carrying one and not the other
+    // is a trap for the next reader.
+    expect(target?.contextWindow).toBe(200_000);
+    expect(target?.maxOutputTokens).toBe(8_192);
+  }
+});
+
+test("a model the descriptor does not list is still unpriced, not invented", () => {
+  // The other half. Zero here is the documented "unpriced" case the scorer
+  // drops from the cost term — the bug was that *every* plugin model looked
+  // like this, not that this case exists.
+  const seed = entryOf(PROVIDER_DESCRIPTORS, "anthropic");
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    sentinel: { ...seed, id: "sentinel", modelPrefixes: ["sent-"] },
+  };
+
+  const target = resolveModel("sent-unlisted", snapshot({}), installed).targets[0];
+  expect(target?.costPerMTok).toEqual({ input: 0, output: 0 });
+  expect(target?.contextWindow).toBeUndefined();
+});
+
+test("a built-in still prices exactly as it did", () => {
+  // The positive control, and the equivalence that matters for everything that
+  // already worked: for a built-in the descriptor's catalog *is* the global's
+  // entry, so this must be unchanged.
+  const viaPrefix = resolveModel("claude-opus-5", snapshot({})).targets[0];
+  expect(viaPrefix?.provider).toBe("anthropic");
+  expect(viaPrefix?.costPerMTok.input).toBeGreaterThan(0);
+  expect(viaPrefix?.costPerMTok.output).toBeGreaterThan(0);
+});

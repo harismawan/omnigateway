@@ -89,6 +89,27 @@ test("an empty endpoint id names no endpoint", () => {
 });
 
 /**
+ * ...and the account side does not, which is the asymmetry the two helpers
+ * exist for.
+ *
+ * One shared mapping is what shipped, and it read an account's `""` as "bound to
+ * no endpoint" — so a malformed custom account served every target that named
+ * none, and a pin to it resolved. Both directions are asserted, because a
+ * mapping that refuses only one of them still lets the pair match through the
+ * other.
+ */
+test("an account carrying an empty endpoint id serves nothing", () => {
+  const blank = account({ id: "acc", providerData: { endpointId: "" } });
+  expect(servesTarget({ provider: "custom" }, blank)).toBe(false);
+  expect(servesTarget({ provider: "custom", endpointId: "" }, blank)).toBe(false);
+  expect(servesTarget({ provider: "custom", credentialId: "acc" }, blank)).toBe(false);
+  // An account with no endpoint at all is the shape that *does* match a target
+  // naming none — the positive control that keeps the assertions above from
+  // passing for the wrong reason.
+  expect(servesTarget({ provider: "custom" }, account({ providerData: {} }))).toBe(true);
+});
+
+/**
  * The regression an adversarial review caught, and the reason this rule is an
  * equality in both directions rather than a one-sided check.
  *
@@ -135,8 +156,15 @@ test("an account bound to an endpoint refuses a target that names none", () => {
  * reverting it passed the entire suite. A present-but-uncomparable id must match
  * nothing — not read as "no endpoint", which is how a custom target naming none
  * came to be served by any account whose id was a number or an object.
+ *
+ * `""` is on this list and was the last one to get there. It is a *string*, so
+ * the type-based guard let it through and it was then read as "no endpoint" —
+ * serving every target that names none, the exact fail-open the rest of the list
+ * closes. Nothing legitimate writes it: `parseCustomProviderData` reads the
+ * field through `requiredString`, which refuses empty, and a non-custom account
+ * holds no `endpointId` key at all.
  */
-const CORRUPT: readonly unknown[] = [0, 42, null, false, {}, [], ["endpoint-a"]];
+const CORRUPT: readonly unknown[] = [0, 42, null, false, {}, [], ["endpoint-a"], ""];
 
 test("an account whose endpoint id is not a string serves no target", () => {
   for (const endpointId of CORRUPT) {

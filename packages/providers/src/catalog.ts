@@ -58,9 +58,27 @@ const EVERY_AUTH: readonly CatalogAuth[] = ["oauth", "apiKey"];
 
 /** The catalog's price for one provider model, or null if it is not listed. */
 export function catalogPricing(provider: ProviderId, model: string): ProviderModelPricing | null {
-  return (
-    PROVIDER_MODEL_CATALOG[provider]?.models.find((entry) => entry.id === model)?.pricing ?? null
-  );
+  const entry = PROVIDER_MODEL_CATALOG[provider];
+  return entry === undefined ? null : entryPricing(entry, model);
+}
+
+/**
+ * The same, from a catalog entry the caller already holds.
+ *
+ * For a caller that has resolved a descriptor: its `catalog` is the answer, and
+ * asking the id-keyed global instead reintroduces the build-time snapshot the
+ * registry exists to avoid. `registerProvider` mutates `PROVIDER_DESCRIPTORS`
+ * and deliberately not `PROVIDER_MODEL_CATALOG`, so a provider that arrived
+ * from `<root>/plugins/` is in the first and never the second — and pricing it
+ * through the second yields zero, which the scorer reads as "unpriced" and
+ * `priceOf` bills as free. Silent, and exactly the shape this epic has already
+ * paid for once.
+ */
+export function entryPricing(
+  entry: ProviderModelCatalogEntry,
+  model: string,
+): ProviderModelPricing | null {
+  return entry.models.find((choice) => choice.id === model)?.pricing ?? null;
 }
 
 /**
@@ -105,7 +123,17 @@ export function catalogLimits(
   model: string,
   auth: CatalogAuth = "apiKey",
 ): ProviderModelLimits | null {
-  const entry = PROVIDER_MODEL_CATALOG[provider]?.models.find((choice) => choice.id === model);
-  if (entry === undefined) return null;
-  return (auth === "oauth" ? entry.oauthLimits : undefined) ?? entry.limits;
+  const entry = PROVIDER_MODEL_CATALOG[provider];
+  return entry === undefined ? null : entryLimits(entry, model, auth);
+}
+
+/** The same, from a catalog entry the caller already holds. See `entryPricing`. */
+export function entryLimits(
+  entry: ProviderModelCatalogEntry,
+  model: string,
+  auth: CatalogAuth = "apiKey",
+): ProviderModelLimits | null {
+  const choice = entry.models.find((c) => c.id === model);
+  if (choice === undefined) return null;
+  return (auth === "oauth" ? choice.oauthLimits : undefined) ?? choice.limits;
 }

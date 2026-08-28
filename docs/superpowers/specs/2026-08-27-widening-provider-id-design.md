@@ -283,6 +283,23 @@ credential that stores, lists, and fails on first dispatch, and unlike a stored
 target there is no existing state that refusing would strand. `putModel` stays
 permissive, as designed.
 
+**Existence is a question about an *installation*, and the two callers see
+different ones.** `createApiKeyCredential` originally asked `isProviderId`
+directly, which reads the registry of the running process. That is the whole
+answer in the gateway, which loads plugins at boot. It is not in the CLI, which
+deliberately does not — `setup` opens channels, runs migrations and registers a
+provider, none of which storing an API key should do — so its registry holds the
+compiled-in six and `omni credentials add-key <plugin-provider>` was refused
+outright. That is the one way in a plugin-supplied provider has: `connect` covers
+OAuth flows the built-ins declare, and a plugin declares none.
+
+The existence check is therefore a `ProviderExists` predicate parameter
+defaulting to `isProviderId`, and the CLI passes one that also consults the
+installed manifests for the `provider` capability. A first attempt widened the
+CLI's own guard and left control's untouched, which produced two guards with the
+second overturning the first — the widened one was dead code, and the only
+mutant of fourteen that survived.
+
 **`catalogModelAuths` answers "every way in" for an unknown provider.** A plugin
 provider ships no catalog entry, so an empty answer would read as "no credential
 can reach this" and `putModel`'s reachability check would refuse every target

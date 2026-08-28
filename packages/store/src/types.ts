@@ -456,13 +456,21 @@ export function servesTarget(target: TargetAddress, account: ServingAccount): bo
   // that endpoint's key, and an `omni doctor` that called the pin healthy —
   // which is the inverse of the bug this function was made the single copy for.
   //
-  // `""` means naming none, in both positions. The console's
-  // `TargetDraft.endpointId` is a non-optional string carrying `""` for every
-  // non-custom target, and the control schema refuses `""` on the way in for the
-  // same reason: it is an id nothing matches, not a third state. Treating it as
-  // a value would make this function disagree with the callers it exists to be
-  // the only copy for — the pin picker would offer no account for any
-  // non-custom target.
+  // `""` means naming none **on the target side only**, and the asymmetry is the
+  // point. The console's `TargetDraft.endpointId` is a non-optional string
+  // carrying `""` for every non-custom target, and the control schema refuses
+  // `""` on the way in for the same reason: it is an id nothing matches, not a
+  // third state. Treating it as a value there would make this function disagree
+  // with the callers it exists to be the only copy for — the pin picker would
+  // offer no account for any non-custom target.
+  //
+  // An account is the other way round. Nothing legitimate writes `""` there:
+  // `parseCustomProviderData` reads it through `requiredString`, which refuses
+  // empty, and a non-custom account holds no `endpointId` key at all. So an
+  // account carrying `""` is a malformed row exactly as one carrying `42` is,
+  // and mapping it to "names none" made it serve every target that names none —
+  // the same fail-open direction the paragraph below closes for the other
+  // non-string values, missed because the empty string is a string.
   //
   // No provider is named. A non-custom target that somehow carries an endpoint,
   // or an account that somehow holds one its target does not name, is refused
@@ -479,11 +487,15 @@ export function servesTarget(target: TargetAddress, account: ServingAccount): bo
   //
   // Present-but-uncomparable therefore becomes a value that matches nothing,
   // including another of its kind, rather than a synonym for absent.
-  const named = (value: unknown): string | symbol | undefined => {
-    if (value === undefined || value === "") return undefined;
-    return typeof value === "string" ? value : Symbol("unusable-endpoint");
-  };
-  if (named(target.endpointId) !== named(account.providerData.endpointId)) return false;
+  const unusable = (value: unknown): string | symbol =>
+    typeof value === "string" && value !== "" ? value : Symbol("unusable-endpoint");
+  const namedByTarget = (value: string | undefined): string | symbol | undefined =>
+    value === undefined || value === "" ? undefined : value;
+  const namedByAccount = (value: unknown): string | symbol | undefined =>
+    value === undefined ? undefined : unusable(value);
+  if (namedByTarget(target.endpointId) !== namedByAccount(account.providerData.endpointId)) {
+    return false;
+  }
   return target.credentialId === undefined || account.id === target.credentialId;
 }
 
