@@ -35,6 +35,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { resolveBase } from "./lib/history.ts";
 
 const ROOT = join(import.meta.dir, "..");
 const git = (...args: string[]): string =>
@@ -114,42 +115,18 @@ const COMMON = new Set([
 const SCRIPT = "check:dead";
 
 /**
- * Both checks compare against `main`, so a repository without it cannot answer.
+ * The base is resolved in `scripts/lib/history.ts`, one copy for both checks.
  *
- * Refuses rather than skipping, and says what to do. A silent skip is what the
- * publish-drift guard did, and the review found it inert in CI for exactly that
- * reason — a skipped check and a passing check produce the same green. Failing
- * with an instruction is recoverable in one command; failing with an uncaught
- * `git merge-base` stack, which is what this did, reads as "the new check is
- * broken" and is how a check gets deleted.
+ * It was inline here and inline in the sibling, and the two drifted under
+ * repair: the working-tree fix and the `readable()` guard each landed in one
+ * of them. Two of the defects that found were the same sentence written twice.
  */
-function requireHistory(): void {
-  const shallow = git("rev-parse", "--is-shallow-repository").trim() === "true";
-  let hasMain = true;
-  try {
-    // `execFileSync` with stderr inherited would print git's own `fatal:` line
-    // just above the explanation below, which is the noise this replaces.
-    execFileSync("git", ["rev-parse", "--verify", "main"], {
-      cwd: ROOT,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-  } catch {
-    hasMain = false;
-  }
-  if (shallow || !hasMain) {
-    console.error(
-      `${SCRIPT}: needs full history and a \`main\` ref, and this checkout has ` +
-        `${shallow ? "a shallow clone" : "no `main`"}.\n` +
-        "  locally:  git fetch --unshallow origin main\n" +
-        "  in CI:    actions/checkout@v5 with fetch-depth: 0",
-    );
-    process.exit(2);
-  }
+const resolved = resolveBase(ROOT, SCRIPT);
+if (resolved.base === undefined) {
+  console.error(resolved.message);
+  process.exit(2);
 }
-
-requireHistory();
-
-const base = git("merge-base", "main", "HEAD").trim();
+const base = resolved.base;
 // `base` alone, not `base..HEAD`: the two-dot form compares commits, so a file
 // you have edited but not committed is absent from `touched` and never checked.
 // That made the check answer "no dead exports" for work in progress — and made
