@@ -1,7 +1,4 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ChatRequest, ContentBlock } from "@omni/ir";
 import { requiredCapabilities, requiredProviders } from "../src/filters.ts";
 
@@ -21,13 +18,11 @@ import { requiredCapabilities, requiredProviders } from "../src/filters.ts";
  * predicate that reads one position and not another fails a cell rather than
  * going unnoticed until a review happens to look at the right pair.
  *
- * The position list is checked against the type's own source below, so a new
- * `ContentBlock`-bearing field on `ChatRequest` fails here rather than silently
- * adding a row nothing covers. CLAUDE.md's own note on this: "a list of what to
- * check have exactly the property the thing it check lack."
+ * The position list is checked by the **compiler** below, so a new
+ * `ContentBlock`-bearing field on `ChatRequest` is a typecheck failure rather
+ * than a silently uncovered row. CLAUDE.md's own note on this: "a list of what
+ * to check have exactly the property the thing it check lack."
  */
-
-const IR_SOURCE = join(dirname(fileURLToPath(import.meta.url)), "../../ir/src/request.ts");
 
 /**
  * The fields of `ChatRequest` through which a `ContentBlock` reaches the router.
@@ -39,6 +34,43 @@ const IR_SOURCE = join(dirname(fileURLToPath(import.meta.url)), "../../ir/src/re
  */
 const POSITIONS = ["system", "messages"] as const;
 type Position = (typeof POSITIONS)[number];
+
+/**
+ * The position list is checked **by the compiler**, not by reading the type's
+ * source text.
+ *
+ * A first version sliced `request.ts` between two string literals and matched
+ * `/^\s{2}(\w+)\??:\s*(.+?);/gm` — a parser written in regex, and it lost to
+ * two ordinary spellings. A field long enough for Biome to wrap puts the `;` on
+ * a later line, so `bun run fmt` could make a new position invisible; and a
+ * field typed through an alias (`preamble?: Preamble` where
+ * `Preamble = ContentBlock[]`) never mentions `ContentBlock` at all. Both
+ * measured: the one-line and `readonly` forms were caught, those two were not.
+ *
+ * So the question goes to the thing that already knows the answer.
+ * `BlockBearing` maps over `ChatRequest` and keeps the keys a `ContentBlock`
+ * can reach, and the assignment below fails `bun run typecheck` — before any
+ * test runs — when that set stops being `POSITIONS`. Formatting cannot affect
+ * it, aliases resolve, and a new field is a compile error rather than a silent
+ * extra row.
+ */
+type BearsBlocks<V> = [ContentBlock[]] extends [NonNullable<V>]
+  ? true
+  : NonNullable<V> extends readonly { content: ContentBlock[] }[]
+    ? true
+    : false;
+
+type BlockBearing = {
+  [K in keyof ChatRequest]-?: BearsBlocks<ChatRequest[K]> extends true ? K : never;
+}[keyof ChatRequest];
+
+/**
+ * Both directions, so neither a new field nor a removed one passes silently.
+ * A one-way assignment would accept `POSITIONS` naming a field the type no
+ * longer has.
+ */
+const _positionsCoverTheType: BlockBearing extends Position ? true : false = true;
+const _typeCoversThePositions: Position extends BlockBearing ? true : false = true;
 
 /** Puts one block in one position, on a request that is otherwise empty of them. */
 function at(position: Position, block: ContentBlock): ChatRequest {
@@ -60,30 +92,13 @@ const NATIVE: ContentBlock = {
   data: { id: "srv_1" },
 };
 
-test("the position list matches what ChatRequest actually declares", () => {
-  // Read from the type's own source, so adding a `ContentBlock[]` field to
-  // `ChatRequest` fails here rather than quietly creating a position no
-  // predicate is checked against. The alternative — a hand-kept list — is the
-  // thing this file exists to stop being.
-  const source = readFileSync(IR_SOURCE, "utf8");
-  const body = source.slice(
-    source.indexOf("export type ChatRequest = {"),
-    source.indexOf("\n};", source.indexOf("export type ChatRequest = {")),
-  );
-  expect(body).not.toBe("");
-
-  const declared = [...body.matchAll(/^\s{2}(\w+)\??:\s*(.+?);/gm)].map(([, name, type]) => ({
-    name: name ?? "",
-    type: type ?? "",
-  }));
-  expect(declared.length).toBeGreaterThan(5);
-
-  // `Message[]` counts: `Message.content` is `ContentBlock[]`.
-  const bearing = declared
-    .filter(({ type }) => type.includes("ContentBlock") || type.includes("Message[]"))
-    .map(({ name }) => name);
-
-  expect(bearing.sort()).toEqual([...POSITIONS].sort());
+test("the compiler agrees the position list is complete", () => {
+  // The assignments above are the assertion; this makes the failure legible in
+  // a test report as well as in `tsc` output, and keeps the constants from
+  // reading as unused.
+  expect(_positionsCoverTheType).toBe(true);
+  expect(_typeCoversThePositions).toBe(true);
+  expect([...POSITIONS].sort()).toEqual(["messages", "system"]);
 });
 
 test("every predicate that reads blocks reads every position", () => {
