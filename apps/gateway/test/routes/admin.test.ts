@@ -7,6 +7,7 @@ import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type BodyArtifact, createStore, deriveKey, type Store } from "@omni/store";
 import {
   captureLogger,
+  entryOf,
   memoryStore,
   requestLog,
   seedApiKey,
@@ -1510,7 +1511,8 @@ test("a provider whose colour had to be repaired is said out loud, once", async 
   // console loads.
   const logger = captureLogger();
   const { call } = await harness({ logger });
-  const presentation = PROVIDER_DESCRIPTORS.anthropic.presentation as {
+  const presentation = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS")
+    .presentation as {
     colour: { light: string; dark: string };
   };
   const original = presentation.colour;

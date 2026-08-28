@@ -34,7 +34,17 @@ test("a kilo credential can be created and a kilo target can be configured", () 
 });
 
 test("every provider id but custom can back a plain target", () => {
-  const ids: ProviderId[] = ["anthropic", "openai", "kimi", "kilo", "grok"];
+  // The literal tuple, not `ProviderId[]`. `targetSchema`'s non-custom arm keeps
+  // a hand-written five-member enum, so what it parses back is narrower than the
+  // validated string a provider id is — and that narrowing is the point: it is
+  // now the only compile-time check that a new provider was thought about at all.
+  const ids = [
+    "anthropic",
+    "openai",
+    "kimi",
+    "kilo",
+    "grok",
+  ] as const satisfies readonly ProviderId[];
   for (const id of ids) {
     expect(providerIdSchema.parse(id)).toBe(id);
     expect(isProviderId(id)).toBe(true);
@@ -47,10 +57,34 @@ test("every provider id but custom can back a plain target", () => {
   expect(() => modelSchema.parse(model("custom"))).toThrow();
 });
 
-test("a provider that does not exist is refused everywhere", () => {
-  expect(() => providerIdSchema.parse("kilocode")).toThrow();
+test("a provider that does not exist is refused where it can be", () => {
+  // Three questions that used to have one answer, and now have two.
+  //
+  // `providerIdSchema` checks format alone: it was an enum over a module-scope
+  // key list, which is a snapshot taken before any plugin provider is
+  // registered, so keeping it would refuse exactly the ids this work exists to
+  // allow. `isProviderId` is the existence check, read from the registry at call
+  // time, and `createApiKeyCredential` is what calls it. `targetSchema`'s
+  // non-custom arm stays a hand-written enum by design — it is now the only
+  // compile-time check that a new provider was thought about at all.
+  expect(providerIdSchema.parse("kilocode")).toBe("kilocode");
   expect(isProviderId("kilocode")).toBe(false);
   expect(() => modelSchema.parse(model("kilocode"))).toThrow();
+});
+
+test("providerIdSchema still refuses an id that cannot name a provider", () => {
+  // Restored after the schema stopped being an enum. Without it, this file
+  // asserted only that ids *parse*, so loosening the pattern to `/^.+$/` — which
+  // makes format and existence the same question — passed the whole suite.
+  //
+  // Format is a real gate: the id becomes a `--p-<id>` custom property, a
+  // `plugin_<id>_*` table prefix and a `plugin:<id>:*` topic, so an id that
+  // cannot be all three has to fail here rather than wherever notices first.
+  for (const bad of ["", "Anthropic", "1kilo", "kilo_code", "kilo.code", "-kilo", "a".repeat(33)]) {
+    expect(providerIdSchema.safeParse(bad).success).toBe(false);
+  }
+  // The positive control: a pattern refusing everything would satisfy the loop.
+  expect(providerIdSchema.safeParse("well-formed-plugin-id").success).toBe(true);
 });
 
 /**

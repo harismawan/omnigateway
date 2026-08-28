@@ -1,13 +1,16 @@
 import { GatewayError, type ProviderId } from "@omni/ir";
 import { catalogLimits, catalogPricing } from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
+import {
+  PROVIDER_DESCRIPTORS,
+  type ProviderDescriptor,
+  type ProviderDescriptors,
+} from "@omni/providers/descriptors";
 import type { Target, VirtualModel } from "@omni/store";
 import type { Snapshot } from "./types.ts";
 
 // Both provider imports are leaf subpaths carrying model lists and per-provider
 // data — no adapters, no HTTP client, no I/O. The router stays pure by reading
 // records it is handed, and these are handed to it at module scope.
-const PROVIDERS = new Set<string>(Object.keys(PROVIDER_DESCRIPTORS));
 
 /**
  * Prefixes for bare model names, so a client can pass a concrete upstream model
@@ -18,16 +21,41 @@ const PROVIDERS = new Set<string>(Object.keys(PROVIDER_DESCRIPTORS));
  * table it replaced was iterated in declaration order and happened to contain no
  * prefix of another prefix, so the two readings agreed — but a provider adding
  * one would have inherited the wrong rule silently.
+ *
+ * Built per call, not once at import. `loadPlugins()` runs long after this
+ * module is imported, so a snapshot here would leave a provider registered at
+ * boot unable to be reached by its own `modelPrefixes` — while the explicit
+ * `provider/model` branch below, which reads the registry directly, would route
+ * it fine. That split lived inside this one function until it was measured:
+ * `late-arrival/x` resolved and `latearr-1` did not.
+ *
+ * The cost is one walk of six descriptors and a sort per unconfigured bare name,
+ * on a path that is about to make a network call. If that ever matters, cache it
+ * against the registry's identity rather than reverting to a snapshot.
  */
-const PREFIX_PROVIDER: ReadonlyArray<readonly [string, ProviderId]> = Object.entries(
-  PROVIDER_DESCRIPTORS,
-)
-  .flatMap(([id, descriptor]) =>
-    descriptor.modelPrefixes.map((prefix) => [prefix, id as ProviderId] as const),
-  )
-  .sort(([a], [b]) => b.length - a.length);
+function prefixProviders(
+  providers: ProviderDescriptors,
+): ReadonlyArray<readonly [string, ProviderId, ProviderDescriptor]> {
+  return Object.entries(providers)
+    .flatMap(([id, descriptor]) =>
+      descriptor.modelPrefixes.map((prefix) => [prefix, id as ProviderId, descriptor] as const),
+    )
+    .sort(([a], [b]) => b.length - a.length);
+}
 
-function synthesize(provider: ProviderId, model: string): VirtualModel {
+/**
+ * The descriptor is passed in rather than looked up again.
+ *
+ * Both callers have already resolved one — that is how they decided this is a
+ * provider at all — and a second lookup here would be partial under a widened
+ * `ProviderId`, inviting a non-null assertion at the one place the caller
+ * already holds the answer.
+ */
+function synthesize(
+  provider: ProviderId,
+  model: string,
+  descriptor: ProviderDescriptor,
+): VirtualModel {
   // The catalog's list price, so a bare model name is cost-ranked like a
   // configured one. A model the catalog does not list stays at zero, which the
   // scorer reads as "unpriced" and drops from the cost term rather than
@@ -57,7 +85,7 @@ function synthesize(provider: ProviderId, model: string): VirtualModel {
     ...(limits === null
       ? {}
       : { contextWindow: limits.contextWindow, maxOutputTokens: limits.maxOutputTokens }),
-    capabilities: PROVIDER_DESCRIPTORS[provider].capabilities,
+    capabilities: descriptor.capabilities,
   };
   return { id: `${provider}/${model}`, targets: [target], strategy: "score", isAlias: true };
 }
@@ -68,7 +96,13 @@ function synthesize(provider: ProviderId, model: string): VirtualModel {
  * Concrete names become single-target virtual models so that routing has one
  * code path: a direct passthrough is just a degenerate load-balancing pool.
  */
-export function resolveModel(name: string, snapshot: Snapshot): VirtualModel {
+export function resolveModel(
+  name: string,
+  snapshot: Snapshot,
+  // Defaults to the real registry; a caller may describe a different
+  // installation. See `RankInput.providers` for why this is a parameter.
+  providers: ProviderDescriptors = PROVIDER_DESCRIPTORS,
+): VirtualModel {
   const configured = snapshot.models.get(name);
   if (configured !== undefined) return configured;
 
@@ -76,14 +110,21 @@ export function resolveModel(name: string, snapshot: Snapshot): VirtualModel {
   if (sep > 0) {
     const prefix = name.slice(0, sep);
     const rest = name.slice(sep + 1);
-    if (PROVIDERS.has(prefix) && prefix !== "custom" && rest.length > 0) {
-      return synthesize(prefix as ProviderId, rest);
+    // `Object.hasOwn`, because `providers` may be a caller's own object literal
+    // and not only the null-prototype registry. This lookup replaced a
+    // `Set.has` — which never consults a prototype — and against an ordinary
+    // literal it admitted `constructor/x` and `toString/x`, then threw a
+    // `TypeError` out of `synthesize` that reached the client as a 500 carrying
+    // an internal expression.
+    const descriptor = Object.hasOwn(providers, prefix) ? providers[prefix] : undefined;
+    if (descriptor !== undefined && prefix !== "custom" && rest.length > 0) {
+      return synthesize(prefix, rest, descriptor);
     }
     throw new GatewayError("NO_CANDIDATES", `unknown provider "${prefix}" in model "${name}"`);
   }
 
-  for (const [prefix, provider] of PREFIX_PROVIDER) {
-    if (name.startsWith(prefix)) return synthesize(provider, name);
+  for (const [prefix, provider, descriptor] of prefixProviders(providers)) {
+    if (name.startsWith(prefix)) return synthesize(provider, name, descriptor);
   }
 
   throw new GatewayError(

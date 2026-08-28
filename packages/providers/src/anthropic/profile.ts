@@ -1,4 +1,4 @@
-import { type ClientProfile, env, envOrNull, stainlessHost } from "../headers.ts";
+import { type ClientProfile, env, envOrder, envOrNull, stainlessHost } from "../headers.ts";
 
 const host = stainlessHost(process.platform, process.arch);
 
@@ -26,7 +26,11 @@ export const anthropicProfile: ClientProfile = {
     ["X-Stainless-Retry-Count", "0"],
     ["Accept", "application/json"],
   ],
-  order: [
+  // The operator override is applied here rather than where the table is
+  // assembled. An adapter reads this value directly, so a table that applied
+  // something the direct read did not would differ only on installations that
+  // set the variable — which is the shape of bug this repository keeps finding.
+  order: envOrder("OMNI_ORDER_ANTHROPIC", [
     "Accept",
     "Authorization",
     "Content-Type",
@@ -48,7 +52,7 @@ export const anthropicProfile: ClientProfile = {
     "Host",
     "Accept-Encoding",
     "Content-Length",
-  ],
+  ]),
 };
 
 export const anthropicBodyOrder: readonly string[] = [

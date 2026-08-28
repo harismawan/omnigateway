@@ -1,4 +1,4 @@
-import { type ClientProfile, env, grokHost } from "../headers.ts";
+import { type ClientProfile, env, envOrder, grokHost } from "../headers.ts";
 
 // The version is the weakest constant in this file. xAI's source resolves it
 // from a build-time env var and falls back to its crate version, so the 1.0.3 in
@@ -28,7 +28,11 @@ export const grokProfile: ClientProfile = {
   // the per-request ids follow the client identity they belong to. A header the
   // adapter does not send is simply skipped, so listing all of them costs
   // nothing on the API-key route.
-  order: [
+  // The operator override is applied here rather than where the table is
+  // assembled. An adapter reads this value directly, so a table that applied
+  // something the direct read did not would differ only on installations that
+  // set the variable — which is the shape of bug this repository keeps finding.
+  order: envOrder("OMNI_ORDER_GROK", [
     "Host",
     "Content-Type",
     "Authorization",
@@ -46,7 +50,7 @@ export const grokProfile: ClientProfile = {
     "Accept",
     "Accept-Encoding",
     "Content-Length",
-  ],
+  ]),
 };
 
 // xAI's Responses surface takes the same field vocabulary as OpenAI's, so the

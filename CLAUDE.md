@@ -418,6 +418,112 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   widen membership is making an earlier guard conditional on the pin. An early version of this bullet
   named the wrong property, which is exactly the trap: a rule stated wrong is one a contributor
   preserve while breaking the real thing.
+- **`ProviderId` is a validated string, not a union of six.** A provider loaded from
+  `<root>/plugins/` has an id no compiled-in union could hold, so a closed type there is a closed
+  door here.
+  **What this cost, stated exactly, because the first version of this bullet overstated it and a
+  rule stated wrong is one a contributor preserve while breaking the real thing.** Five tables key
+  on a provider id — `PROVIDER_DESCRIPTORS`, `ADAPTERS`, `PROFILES`, `BODY_ORDER`,
+  `PROVIDER_MODEL_CATALOG` — and each is a hand-written six-key literal. Only `PROVIDERS` is derived
+  by walking one. Delete a built-in's line from any of the five and **typecheck pass**: measured, all
+  five. `Record<string, X>` accept any subset, so writing the ids as literals constrain nothing once
+  the key type open. What catch it is **lint** (the import go unused) and
+  `packages/providers/test/descriptor.test.ts` (key-set equality against a literal `IDS`) — never the
+  compiler. Do not write "compile error" here again; if the guarantee need to be stronger, the
+  honest move is a derived table, not a stronger sentence.
+  Lookups keyed on a **stored** id are genuinely partial and `noUncheckedIndexedAccess` make each a
+  compile error at the point of use. Do not cast that away; each site owe a decision, and the
+  decisions differ. `PROVIDER_ID_PATTERN` in `packages/providers` is the source of what may name a
+  provider; `packages/control/src/catalog.ts` read it rather than restating it. Four other copies of
+  the same expression validate a **plugin** id — `packages/plugin-api/src/manifest.ts` (published, so
+  justified), `apps/gateway/src/plugins/routes.ts`, `packages/control/src/plugins.ts`,
+  `packages/store/src/sqlite/plugins.ts` — and **no test pin any of them to this one**. A plugin
+  provider's id is both kinds at once, so that is a real gap, not a technicality; do not describe it
+  as mirror-and-pin, which is what `@omni/ratelimit/catalog` have and this not.
+- **Every provider-keyed table drop its prototype, and that is one invariant standing in for a guard
+  at each reader.** Reason: a provider id arrive from a client's `model` name and from unvalidated
+  JSON in `virtual_models.targets`, and on ordinary object literal `table["constructor"]` answer the
+  `Object` constructor. So `!== undefined` and `?.` both read "installed", then throw on next
+  property access. Shipped once: `resolveModel` replaced a `Set.has` — which never consult a
+  prototype — with an index check, and `model: "constructor/foo"` returned **500 carrying an internal
+  source expression** where `nope/foo` correctly returned 503. Same keys defeated four more readers
+  including the `provider:missing` guard and `omni doctor`'s check, each going silent in the exact
+  case it exist for. `PROVIDER_ID_PATTERN` accept `constructor`, so nothing upstream stop such an id
+  being stored. **`noUncheckedIndexedAccess` cannot see any of it** — it force a guard, and the guard
+  it force is the one a prototype key defeat. Do not add `Object.hasOwn` at the readers instead: it
+  cover only those asking existence, not `catalogPricing`'s `?.`, and partial protection that read as
+  total is worse than none. That version was written, and every one of its mutants survived removal.
+  **Do not enumerate the tables here.** An earlier version did, listing the six in
+  `@omni/providers`, and `OAUTH_PROVIDERS` in `@omni/control` went on leaking for another review
+  round — a raw `TypeError` out of `refresh.ts` with the same signature as the bug the rule was
+  written for, plus `CALLBACKS` and the console's `heldAuths` map. A list of what to check have
+  exactly the property the thing it check lack. `packages/control/test/providerTables.test.ts`
+  **discover** them instead: it walk the exported surface of both packages, treat anything holding
+  two or more registered provider ids as a table, and assert the walk found something before
+  asserting anything about what it found. New table is covered the day it is exported.
+  Two facts the idiom hide, both worth knowing before writing a new one: spreading a null-prototype
+  object give an **ordinary** object, so `{...ADAPTERS, x}` silently revert the invariant — the
+  gateway normalise injected adapter maps at `app.ts` for that reason — and `.hasOwnProperty()`
+  called as a **method** on one of these throw. Use `Object.hasOwn(table, key)`.
+  Console cannot import `@omni/providers` (rule 12), so `heldAuths` restate the rule with
+  `Object.create(null)` and carry its own test.
+- **A registry threaded into some of a call graph and not all is this repository's most repeated
+  bug, and it is the *sweep* that keep failing, not the fix.** Three review round in a row each
+  found it in the previous round's fix: prototype sweep covered `@omni/providers` and left
+  `OAUTH_PROVIDERS`, `CALLBACKS` and console's `heldAuths`; injection covered `resolveModel` and
+  `rank` and left `priceOf`, so a $12.50 cache write bill $0.00 with no throw and no log; then the
+  test pinning *that* covered injected path and not default, because `??` only fire on `undefined`.
+  Every one found by hand, by someone thinking to try that one site.
+  So do not add one test per site — they go stale the day a fourth site appear. **Inject a sentinel
+  registry holding one synthetic provider and none of the six**, and assert a real request end to
+  end. Any consumer reading module-global instead see a registry without it and fail loudly:
+  `resolveModel` cannot infer the prefix, `eligible` exclude `provider:missing`, `priceOf` bill
+  writes at zero. `apps/gateway/test/dispatch/dispatch.test.ts` hold it, and it kill all four
+  threading mutants **alone**, with every per-site test deselected. Same instrument as
+  `providerTables.test.ts`, which discover leaking table instead of listing them, and for same
+  reason: a list of what to check have exactly the property the thing it check lack.
+  Two shapes it need two dispatches for, and both are traps: a **configured** model short-circuit
+  `resolveModel` before any registry is read, and an **inferred** target is priced from
+  `PROVIDER_MODEL_CATALOG` — a different global, not injected — so it carry zero prices and can show
+  no multiplier.
+- **A module-scope `Object.keys`/`Object.entries` over `PROVIDER_DESCRIPTORS` is a build-time
+  snapshot**, and `loadPlugins()` run long after import. **Five** sites read one and were wrong the
+  same way — the count went three, then five, because each sweep stopped at the sites the previous
+  bug had made visible: `providerCatalog` served a console missing every plugin provider,
+  `providerIdSchema` was `z.enum(PROVIDER_IDS)` and would have refused their credentials,
+  `isProviderId` reported them as not existing, `PREFIX_PROVIDER` made a provider's own
+  `modelPrefixes` unreachable while `provider/model` for the same provider resolved — an asymmetry
+  *inside one function* — and `CALLBACKS` redirected nowhere. All five ask the registry **at call
+  time** now; `CALLBACKS` was deleted outright, since a second table derived from the first is a
+  thing to keep in step rather than a thing to have. Assume a sixth exist until you have grepped for
+  the pattern rather than for the names above.
+  `PROVIDER_IDS` still exist and is still a snapshot — it feed CLI usage messages and tests, never a
+  gate. `descriptors.ts` say so at the definition, which is where a reader meet it.
+- `provider:missing` is the pin rule applied to the provider, and follow it exactly: emitted **once
+  per target**, `kind: "target"` with `credentialId: ""`, because no account is at fault. It is the
+  **first** guard in the target loop, so a target that is also pinned report the provider rather than
+  `pin:missing` about an account that could not have served it either way. `credentialId` must stay
+  `""` — a mutant carrying the pin there survive a `reason`-only assertion and put the string into
+  `LogFields.credentialId`, contradicting `kind`. Dispatch's `INTERNAL "no adapter for provider …"`
+  is the *other* half and stay a throw: reaching it mean the router admitted a candidate it should
+  have excluded, which is a gateway bug, and `deps.adapters` is a separate injection point from the
+  descriptors, so the two can disagree.
+- **Format and existence are two questions.** `providerIdSchema` check format alone, and it is the
+  gate on **credentials**, not on targets: `createApiKeyCredential` parse it, then ask `isProviderId`
+  and refuse to mint an account for a provider that does not exist — no history to preserve.
+  `catalogModelAuths` answer "every way in" for an unknown provider, matching what it already answer
+  for an unlisted model: empty would read as "no credential can reach this" and refuse every plugin
+  provider's target.
+  **A target naming an uninstalled provider cannot be saved through any supported path today**, and
+  an earlier version of this bullet claimed the opposite. `putModel` open with
+  `parseOrThrow(modelSchema, …)`, and `targetSchema`'s non-custom arm is still
+  `z.enum(["anthropic","openai","kimi","kilo","grok"])` — so `PUT /api/models/:id` and
+  `omni models put -f` **refuse** it, and `packages/control/test/schemas.test.ts` assert exactly that.
+  The state is real anyway, because `sqlite/config.ts` read targets back with `JSON.parse` and no
+  validation, so a restored or hand-edited database produce it — which is why `provider:missing` and
+  `omni doctor`'s check exist and why the CLI test seeding one write through `store.config.putModel`
+  rather than control's. When the plugin host land, that enum is what stop a plugin provider's target
+  being saved at all; widening it is that sub-project's work, not a thing to assume already done.
 - Nothing validate the pin at write time, same exemption `putModel` give stored targets: removing an
   account must not make unrelated edit unsavable. `omni doctor` carry that weight instead, and it
   must resolve through `resolvePin` — an existence check report "none" for the cross-provider and

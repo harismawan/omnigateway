@@ -72,11 +72,14 @@ function isTone(name: string): name is Tone {
 }
 
 function toneOf(id: ProviderId): Tone {
-  const named = PROVIDER_DESCRIPTORS[id].presentation.tone;
-  // A descriptor naming a tone this terminal cannot paint is a bug in that
-  // descriptor, but it is not worth failing a command over: the id still prints,
-  // uncoloured, which is what a non-TTY gets anyway.
-  return isTone(named) ? named : "cyan";
+  // Two ways to reach the fallback, and the same answer serves both. A
+  // descriptor naming a tone this terminal cannot paint is a bug in that
+  // descriptor; an id with no descriptor at all is a stored target naming a
+  // provider this installation does not have, which `omni doctor` reports.
+  // Neither is worth failing a command over — the id still prints, uncoloured,
+  // which is what a non-TTY gets anyway.
+  const named = PROVIDER_DESCRIPTORS[id]?.presentation.tone;
+  return named !== undefined && isTone(named) ? named : "cyan";
 }
 
 export function provider(ctx: Context, id: ProviderId): string {

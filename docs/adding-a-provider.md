@@ -10,12 +10,26 @@ HTTP may live — see [CLAUDE.md](../CLAUDE.md#architectural-boundaries) rules 2
 8, 9 and 10. [ARCHITECTURE.md](../ARCHITECTURE.md#providers) has the adapter
 shape and why the HTTP client is built on `node:http`.
 
-1. Start at `ProviderId` in `packages/ir/src/request.ts`, then write the descriptor. Adding a member
-   to the union makes the compiler enumerate the remaining exhaustive `Record<ProviderId, …>` maps —
-   there are far fewer than there used to be, because most of what used to be one table per concern
-   is now one field per provider on `ProviderDescriptor`.
-   Everything the descriptor holds is required, so the compiler asks for all of it in one place:
-   capabilities, `writeOverInput`, catalog, model prefixes, and the
+1. Start with the descriptor. **There is no union to edit**: `ProviderId` in
+   `packages/ir/src/request.ts` is `string`, because a provider loaded from `<root>/plugins/` has an
+   id no compiled-in union could hold. Nothing enumerates the id-keyed maps for you any more, and
+   that is the single biggest change to this procedure — an earlier version of this step told you to
+   add a union member and let the compiler find the rest, which now finds nothing.
+   Five tables list the built-ins by hand and each needs your id: `PROVIDER_DESCRIPTORS`
+   (`descriptors.ts`), `ADAPTERS` (`registry.ts`), `PROFILES` (`profile.ts`), `BODY_ORDER`
+   (`body.ts`) and `PROVIDER_MODEL_CATALOG` (`catalog.ts`). Miss one and **`tsc` stays green** —
+   `Record<string, …>` accepts any subset.
+   **`bun run lint` will not save you either, and this is the trap.** Lint catches a *deletion* — an
+   entry removed leaves its import unused — but when you are *adding* a provider there is no import
+   yet, so there is nothing to be unused and lint passes. Measured by simulating a seventh provider
+   with four of the five tables forgotten: typecheck passed, lint passed. The nets that actually fire
+   are `packages/providers/test/descriptor.test.ts` and
+   `packages/control/test/providerCoverage.test.ts`. **Run `bun test` before you believe you are
+   done**; a green typecheck and a green lint here mean nothing.
+   (Worth knowing even for the deletion direction: `noUnusedImports` is a *fixable* rule, so
+   `bun run fmt` deletes the orphaned import and takes the lint signal with it.)
+   Everything the descriptor holds is required, and that much the compiler *does* ask for in one
+   place: capabilities, `writeOverInput`, catalog, model prefixes, and the
    presentation block (label, display order, terminal tone, `--p-<id>` colour in **both** themes,
    paste hint). `callback` is optional and only for a provider using a loopback redirect.
    **One core edit remains and the compiler will not find it**:

@@ -34,15 +34,20 @@ const FLOW_TTL_MS = 600_000;
  * `/auth/callback` above: xAI's own client redirects to
  * `http://127.0.0.1:PORT/callback` (`auth/oidc/login.rs`), and redirect URIs are
  * matched exactly, so the wrong path fails at the authorize step rather than at
- * the exchange. A provider absent from this table redirects nowhere and hands
- * the operator a code directly.
+ * the exchange. A provider whose descriptor names no callback redirects nowhere
+ * and hands the operator a code directly.
+ *
+ * A function rather than the `Object.fromEntries` table this replaced, which was
+ * wrong twice over. It was a module-scope snapshot — built at import, before
+ * `loadPlugins()` — so a provider registered at boot would have redirected
+ * nowhere with nothing to explain it. And being an ordinary object it answered
+ * for `constructor` and `toString`, the same defect `PROVIDER_DESCRIPTORS` drops
+ * its prototype to avoid. Reading the descriptor at call time has neither
+ * problem and needs no second table to keep in step with the first.
  */
-const CALLBACKS: Readonly<Partial<Record<ProviderId, { uri: string; label: string }>>> =
-  Object.fromEntries(
-    Object.entries(PROVIDER_DESCRIPTORS)
-      .filter(([, descriptor]) => descriptor.callback !== undefined)
-      .map(([id, descriptor]) => [id, descriptor.callback]),
-  );
+function callbackOf(provider: ProviderId): { uri: string; label: string } | undefined {
+  return PROVIDER_DESCRIPTORS[provider]?.callback;
+}
 
 export type ConnectDeps = {
   store: Store;
@@ -66,14 +71,20 @@ export type ConnectStart = {
 export type ConnectPoll = { status: "complete"; id: string } | { status: "pending" };
 
 /**
- * Whether this names a provider at all — not whether it can be connected.
+ * Whether this names a provider this installation has — not whether it can be
+ * connected.
  *
  * `custom` is a `ProviderId` and has no authorization to start, so this is the
  * wrong question for the connect path and the right one for `add-key`. Callers
  * that mean "can I begin an OAuth flow for this" ask the provider table.
+ *
+ * Reads the registry at call time. It used to read `PROVIDER_IDS`, which is
+ * `Object.keys(...)` evaluated at import and therefore a snapshot taken before
+ * `loadPlugins()` ever runs — so a provider registered at boot would have been
+ * reported as not existing.
  */
 export function isProviderId(value: unknown): value is ProviderId {
-  return typeof value === "string" && PROVIDER_IDS.includes(value as ProviderId);
+  return typeof value === "string" && Object.hasOwn(PROVIDER_DESCRIPTORS, value);
 }
 
 /**
@@ -114,7 +125,7 @@ export function createConnectFlows(deps: ConnectDeps) {
   const logger = deps.logger ?? noopLogger;
   const flows = createPendingFlows({ now: deps.now, ttlMs: FLOW_TTL_MS });
   const pollsInFlight = new Map<string, Promise<{ id: string }>>();
-  const callbackUri = (provider: ProviderId) => CALLBACKS[provider]?.uri ?? "";
+  const callbackUri = (provider: ProviderId) => callbackOf(provider)?.uri ?? "";
 
   /**
    * Accepts what the operator actually has in hand.
@@ -125,7 +136,7 @@ export function createConnectFlows(deps: ConnectDeps) {
    * an Anthropic-style flow shows — passes through untouched.
    */
   function normalizeAuthorizationCode(flow: StoredFlow, input: string): string {
-    const callback = CALLBACKS[flow.provider];
+    const callback = callbackOf(flow.provider);
     if (callback === undefined) return input;
     const expected = new URL(callback.uri);
 

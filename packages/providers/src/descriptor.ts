@@ -6,9 +6,15 @@ import type { ProviderModelCatalogEntry } from "./catalog-types.ts";
  *
  * The point of this type is that adding a provider stops meaning "edit sixteen
  * tables". Each field below replaces a `Record<ProviderId, …>` that used to live
- * somewhere else, and the compiler-checked exhaustiveness those tables gave us
- * is preserved here: `PROVIDER_DESCRIPTORS` is a total record, so a seventh
- * provider is a type error in exactly one place instead of eight.
+ * somewhere else, and the eight scattered exhaustiveness checks those tables
+ * gave us collapse into one object with one completeness check.
+ *
+ * That is a real trade and not a free one. `ProviderId` is a validated string,
+ * so `PROVIDER_DESCRIPTORS` cannot be total in the type — see
+ * `ProviderDescriptors` below for what is left of the guarantee. Every field
+ * here being required is what remains of it: a descriptor is either complete or
+ * it does not compile, and for a plugin it is either complete or it does not
+ * register.
  *
  * **The adapter is deliberately not on this type**, and neither are `profile` or
  * `bodyOrder`. Two separate reasons, both load-bearing:
@@ -26,6 +32,20 @@ import type { ProviderModelCatalogEntry } from "./catalog-types.ts";
  * Every field is required. There are no defaults on purpose: `writeOverInput`
  * defaulting to zero would underprice cache writes silently and permanently,
  * which is the failure mode this whole record exists to make impossible.
+ *
+ * **One caller does it anyway, knowingly.** `apps/gateway/src/dispatch/price.ts`
+ * falls back to `{ fiveMinute: 0, oneHour: 0 }` when this record has no entry
+ * for a provider, because widening `ProviderId` made that lookup partial and
+ * `priceOf` runs inside `finishLog`, where throwing would break usage accounting
+ * for a request that already succeeded. It is unreachable today only because the
+ * router excludes a provider with no descriptor and dispatch throws `INTERNAL`
+ * on a missing adapter first — a coupling between three call sites, not a
+ * property of that function, and one that broke the moment those sites read
+ * different registries. `priceOf` therefore takes the registry as a parameter
+ * like the router's entry points do. Recorded as a known risk in
+ * `docs/superpowers/specs/2026-08-27-widening-provider-id-design.md`, to revisit
+ * when the plugin host loosens it. Do not read it as licence for a second
+ * default here.
  */
 export type ProviderDescriptor = {
   readonly id: ProviderId;
@@ -100,5 +120,53 @@ export type ProviderDescriptor = {
   };
 };
 
-/** Total, so a new provider fails to compile until it is described. */
-export type ProviderDescriptors = Readonly<Record<ProviderId, ProviderDescriptor>>;
+/**
+ * Every installed provider's descriptor, keyed by id.
+ *
+ * Keyed by `string`, so this is *not* total in the type. It cannot be: a
+ * provider loaded from `<root>/plugins/` has an id no compiled-in union could
+ * contain, and a closed key here is a closed door there.
+ *
+ * What survives is narrower than it first looks, so it is worth stating exactly.
+ * A built-in missing from the literal in `descriptors.ts` is **not** a compile
+ * error — `Record<string, …>` accepts any subset; the unused-import lint and
+ * `test/descriptor.test.ts` are what catch it. Totality over a *stored* id is
+ * gone outright: `Target.provider` comes back from SQLite unvalidated and can
+ * name a provider this installation does not have.
+ *
+ * The two things the compiler still does are worth knowing precisely, because
+ * they are what the rest of the design leans on. Every field below is required,
+ * so a descriptor that exists but is incomplete does not compile. And
+ * `noUncheckedIndexedAccess` makes every read of this record answer
+ * `| undefined`, so each caller decides what absence means at the point of use
+ * rather than inheriting one default.
+ */
+export type ProviderDescriptors = Readonly<Record<string, ProviderDescriptor>>;
+
+/**
+ * What may name a provider.
+ *
+ * `ProviderId` is a validated string, and this is the validation. The id is not
+ * only a key: it becomes a `--p-<id>` custom property in the console's palette,
+ * a `plugin_<id>_<name>` table prefix, and a `plugin:<id>:<name>` channel topic.
+ * A rule that admitted anything else would push the refusal down into whichever
+ * of those noticed first, which is not the same place twice.
+ *
+ * The same expression `packages/plugin-api/src/manifest.ts` validates a plugin
+ * id with. Restated there rather than imported from here because that package is
+ * published and this one is not — but this is the copy every *provider* question
+ * reads, including the console palette's, which used to hold its own.
+ */
+export const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+
+/**
+ * Whether a string is shaped like a provider id.
+ *
+ * Format only. Whether the provider is *installed* is a different question with
+ * a different answer per caller — `putModel` accepts a target naming one that is
+ * not, for the same reason it accepts a dangling pin, while `createApiKey­Credential`
+ * refuses to mint an account for a provider that does not exist.
+ */
+export function isProviderIdFormat(value: unknown): value is ProviderId {
+  return typeof value === "string" && PROVIDER_ID_PATTERN.test(value);
+}

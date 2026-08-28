@@ -11,6 +11,7 @@ import {
   type StreamEvent,
 } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
+import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import {
   blankHealth,
   type Candidate,
@@ -39,6 +40,15 @@ export type DispatchDeps = {
   store: Store;
   snapshots: RoutingSnapshotSource;
   adapters: Readonly<Partial<Record<ProviderId, ProviderAdapter>>>;
+  /**
+   * Which providers this installation has. Defaults to the real registry.
+   *
+   * A separate injection point from `adapters`, and the two can disagree —
+   * that disagreement is exactly what the `INTERNAL "no adapter for provider"`
+   * throw below reports. Threaded into `resolveModel` and `rank` so routing
+   * judges the same installation this lookup does.
+   */
+  providers?: ProviderDescriptors;
   /** Order-preserving transport. Never globalThis.fetch — see Global Constraints. */
   http: HttpClient;
   now: () => number;
@@ -231,7 +241,7 @@ export async function dispatch(
     log.rtkEstimatedTokensSaved = transformed.report.estimatedTokensSaved;
     log.rtkFilters = transformed.report.filters;
     checkCancellation();
-    model = resolveModel(dispatchRequest.model, snapshot);
+    model = resolveModel(dispatchRequest.model, snapshot, deps.providers);
   } catch (error) {
     clearDeadline();
     if (isClientAbort(error)) return fail("TIMEOUT", "client disconnected", true);
@@ -246,6 +256,13 @@ export async function dispatch(
     now: startedAt,
     rand: deps.rand(),
     load: deps.loadRegistry.counts(),
+    // Threaded rather than left to the router's default, so routing, the
+    // adapter lookup and pricing all judge the same installation. Every site in
+    // this function passes `deps.providers` the same way and `undefined`
+    // everywhere selects the same real registry — one spelling, because the
+    // round that added two threadings and forgot the third is what more than
+    // one costs.
+    providers: deps.providers,
   });
 
   logger.debug("routing candidates ranked", {
@@ -402,7 +419,28 @@ export async function dispatch(
             candidate.credential.expiresAt !== null &&
             candidate.credential.expiresAt - DISPATCH_REFRESH_LEAD_MS <= attemptNow;
 
-          const adapter = deps.adapters[candidate.target.provider];
+          // `Object.hasOwn`, and here rather than at whoever built the map.
+          //
+          // `candidate.target.provider` is a stored string, and `deps.adapters`
+          // is a public injection point constructed directly by callers and by
+          // tests — an ordinary object literal, which answers the `Object`
+          // constructor for `constructor`. The lookup would then succeed and
+          // `adapter.send` would be called on a function that has no `send`.
+          //
+          // Nothing normalises the map upstream. An earlier version did so in
+          // `createApp`, which covered exactly one of the ways this object is
+          // built; that was deleted rather than kept, because a guard covering
+          // one construction path reads as if it covers all of them.
+          //
+          // Guarding at the read site rather than at construction is the whole
+          // point: this is the one place always on the path, and it cannot be
+          // bypassed by a caller who builds the map some other way. The
+          // `@omni/providers` tables drop their prototypes for the same reason
+          // — one invariant where the value is read, not a rule every producer
+          // has to remember.
+          const adapter = Object.hasOwn(deps.adapters, candidate.target.provider)
+            ? deps.adapters[candidate.target.provider]
+            : undefined;
           if (adapter === undefined) {
             throw new GatewayError(
               "INTERNAL",
@@ -473,10 +511,21 @@ export async function dispatch(
                   log.outputTokens = event.usage.outputTokens;
                   log.cacheReadTokens = event.usage.cacheReadTokens;
                   log.cacheWriteTokens = event.usage.cacheWriteTokens;
+                  // `deps.providers`, the same registry routing judged this
+                  // candidate against. Reading the module-global here instead
+                  // let the two disagree: a provider that the injected registry
+                  // held and the global one did not would route, dispatch, and
+                  // then have its cache writes priced at zero.
+                  //
+                  // Passing `undefined` is meaningful, not a gap — it selects
+                  // `priceOf`'s own default, which is that same module-global.
+                  // That is the production path, since `createApp` sets no
+                  // `providers`, and it has its own end-to-end test.
                   log.costUsd = priceOf(
                     candidate.target.costPerMTok,
                     event.usage,
                     candidate.target.provider,
+                    deps.providers,
                   );
                 }
 

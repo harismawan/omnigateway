@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
-import { credential, health, quota, snapshot, target } from "@omni/testkit";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
+import { credential, entryOf, health, quota, snapshot, target } from "@omni/testkit";
 import { eligible, requiredCapabilities } from "../src/filters.ts";
 
 const NOW = 1_000_000;
@@ -563,4 +564,195 @@ test("api-key credentials are never treated as expired", () => {
       load: new Map(),
     }).pairs,
   ).toHaveLength(1);
+});
+
+// --- Targets naming a provider this installation does not have ----------------
+//
+// `Target` comes back from `virtual_models.targets` as unvalidated JSON, and
+// `ProviderId` is a validated string rather than a closed union, so this is an
+// ordinary state now: a plugin removed, a database restored onto a different
+// install, a hand-edited row. The failure it guards against is the one
+// `pin:missing` exists for — a request that fails with nothing in `excluded` to
+// explain it.
+
+test("a target naming a provider that is not installed is excluded with a reason", () => {
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs).toHaveLength(0);
+  // Never empty. An empty list is what the pre-change code produced: no
+  // credential matches the provider, so the inner loop drops every one silently
+  // and the request fails with no reason recorded anywhere.
+  expect(excluded).toEqual([
+    { credentialId: "", model: "nonesuch-1", reason: "provider:missing", kind: "target" },
+  ]);
+});
+
+test("provider:missing names no account, because no account is at fault", () => {
+  // `kind: "target"` is what dispatch reads to decide whether to redact
+  // `credentialId` from the degradation. A provider that is not installed is a
+  // fact about the target; blaming an account would send an operator to look at
+  // a credential that is fine. The snapshot here holds an account claiming that
+  // very provider, which is the case a `kind: "account"` row would get wrong.
+  const { excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "nonesuch" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(excluded.map((e) => [e.kind, e.credentialId])).toEqual([["target", ""]]);
+});
+
+test("provider:missing is emitted once per target, not once per credential", () => {
+  const { excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1" })]),
+    snapshot: snapshot({
+      credentials: [
+        credential({ id: "a", provider: "anthropic" }),
+        credential({ id: "b", provider: "openai" }),
+        credential({ id: "c", provider: "kimi" }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(excluded).toHaveLength(1);
+});
+
+test("an uninstalled provider reports itself rather than pin:missing", () => {
+  // Guard order. The provider check is first, so a target that is also pinned
+  // reports the provider — the pin could not have been served either way, and
+  // two rows for one target buries the one naming the real problem.
+  const { excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1", credentialId: "gone" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  // The whole row, not just the reason. Asserting only the reason let a mutant
+  // survive that carried the pin into `credentialId` — which reaches
+  // `LogFields.credentialId` and `request_logs.degradations`, contradicting the
+  // `kind: "target"` claim that this row names no account.
+  expect(excluded).toEqual([
+    { credentialId: "", model: "nonesuch-1", reason: "provider:missing", kind: "target" },
+  ]);
+});
+
+test("an installed provider's targets are unaffected by the check", () => {
+  // The positive control. A guard that excluded every target would pass all four
+  // assertions above, and nothing else in this file distinguishes the two.
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "nonesuch", model: "nonesuch-1" }), target()]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs.map((p) => p.target.provider)).toEqual(["anthropic"]);
+  expect(excluded.map((e) => e.reason)).toEqual(["provider:missing"]);
+});
+
+test("every broken target in a pool reports, wherever it sits in the list", () => {
+  // Two mutants that every other test in this block misses, because each uses a
+  // single-target pool and the one multi-target pool has its broken target
+  // first: a dedupe flag hoisted *outside* the target loop (one row per pool),
+  // and a guard applied to `targets[0]` alone. This is the `pinSeen`-hoist trap
+  // CLAUDE.md already records for `pin:missing`, one guard higher up.
+  //
+  // Healthy target first, then two broken ones naming *different* providers, so
+  // a per-pool dedupe cannot pass by coincidence either.
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([
+      target(),
+      target({ provider: "nonesuch", model: "nonesuch-1" }),
+      target({ provider: "alsogone", model: "alsogone-1" }),
+    ]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  expect(pairs.map((p) => p.target.provider)).toEqual(["anthropic"]);
+  expect(excluded).toEqual([
+    { kind: "target", credentialId: "", model: "nonesuch-1", reason: "provider:missing" },
+    { kind: "target", credentialId: "", model: "alsogone-1", reason: "provider:missing" },
+  ]);
+});
+
+test("the guard reads the registry it is handed, not one captured at import", () => {
+  // The guard claims a call-time read, and three shipped sites got exactly this
+  // wrong — `Object.keys(...)` at import is a snapshot taken long before
+  // `loadPlugins()` runs. Nothing distinguished a call-time read from a
+  // module-scope `Set` built once, so a mutant reintroducing the snapshot
+  // survived until this existed.
+  //
+  // Two registries handed to the same input, rather than one global edited and
+  // restored. An earlier version of this test mutated `PROVIDER_DESCRIPTORS`
+  // inside a `finally` — which is a shared mutable global under a runner that
+  // interleaves files, and this repository has already lost a doctor test to one
+  // run in six that way. `RankInput.providers` exists so a test can describe an
+  // installation instead of editing the one the process is using.
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    "late-arrival": { ...entryOf(PROVIDER_DESCRIPTORS, "anthropic"), id: "late-arrival" },
+  };
+  const input = {
+    request: req,
+    model: model([target({ provider: "late-arrival", model: "late-1" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "late-arrival" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  };
+
+  // Against the real registry, which does not have it.
+  expect(eligible(input).excluded.map((e) => e.reason)).toEqual(["provider:missing"]);
+
+  // Against one that does, with nothing else changed.
+  const { pairs, excluded } = eligible({ ...input, providers: installed });
+  expect(excluded).toEqual([]);
+  expect(pairs.map((p) => p.credential.id)).toEqual(["a"]);
+});
+
+test("an injected registry that is an ordinary object still refuses inherited keys", () => {
+  // `providers` is a caller's value now, so it may carry a prototype even though
+  // the real registry does not — the spread above produces exactly such an
+  // object. The guard therefore cannot rely on the table being null-prototype
+  // and asks `Object.hasOwn`.
+  const ordinary: ProviderDescriptors = { ...PROVIDER_DESCRIPTORS };
+  expect(Object.getPrototypeOf(ordinary)).not.toBeNull();
+
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model([target({ provider: "constructor", model: "c-1" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a", provider: "constructor" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+    providers: ordinary,
+  });
+
+  expect(pairs).toHaveLength(0);
+  expect(excluded).toEqual([
+    { kind: "target", credentialId: "", model: "c-1", reason: "provider:missing" },
+  ]);
 });

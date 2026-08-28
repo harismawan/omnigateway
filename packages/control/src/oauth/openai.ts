@@ -1,5 +1,5 @@
 import { GatewayError } from "@omni/ir";
-import { PROFILES } from "@omni/providers";
+import { openaiProfile } from "@omni/providers";
 import type { WindowType } from "@omni/store";
 import { createPkce, randomState } from "./pkce.ts";
 import {
@@ -91,7 +91,7 @@ function parseTokenResponse(value: unknown): TokenResponse | null {
 }
 
 async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise<TokenResponse> {
-  const { status, parsed } = await postJson(deps, "openai", TOKEN_URL, PROFILES.openai, {
+  const { status, parsed } = await postJson(deps, "openai", TOKEN_URL, openaiProfile, {
     contentType: "application/x-www-form-urlencoded",
     body: new URLSearchParams({ ...body, client_id: CLIENT_ID }).toString(),
   });
@@ -262,7 +262,7 @@ export const openaiOAuth: OAuthProvider = {
   async usage(secrets, deps, providerData) {
     if (secrets.accessToken === null) return null;
     const accountId = accountIdFromProviderData(providerData);
-    const { status, parsed } = await getJson(deps, "openai", USAGE_URL, PROFILES.openai, {
+    const { status, parsed } = await getJson(deps, "openai", USAGE_URL, openaiProfile, {
       accessToken: secrets.accessToken,
       // Same account selector inference sends. Without it a token that can see
       // several workspaces reads the wrong one's usage.

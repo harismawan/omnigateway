@@ -11,10 +11,11 @@
  */
 import { BODY_ORDER } from "../../src/body.ts";
 import { PROFILES } from "../../src/profile.ts";
+import { entry } from "../entry.ts";
 
 process.stdout.write(
   JSON.stringify({
-    anthropicOrder: [...PROFILES.anthropic.order],
-    kiloBodyOrderLength: BODY_ORDER.kilo.length,
+    anthropicOrder: [...entry(PROFILES, "anthropic", "PROFILES").order],
+    kiloBodyOrderLength: entry(BODY_ORDER, "kilo", "BODY_ORDER").length,
   }),
 );

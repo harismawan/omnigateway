@@ -1,20 +1,25 @@
-import type { ProviderId } from "@omni/ir";
 import { anthropicProfile } from "./anthropic/profile.ts";
 import { customProfile } from "./custom/profile.ts";
 import { grokProfile } from "./grok/profile.ts";
-import { type ClientProfile, envOrder } from "./headers.ts";
+import type { ClientProfile } from "./headers.ts";
 import { kiloProfile } from "./kilo/profile.ts";
 import { kimiProfile } from "./kimi/profile.ts";
 import { openaiProfile } from "./openai/profile.ts";
 
-export { ANTHROPIC_CLI_VERSION } from "./anthropic/profile.ts";
-
-/**
- * The type and the header helpers live in `headers.ts` so that each
- * `<id>/profile.ts` can read them without importing this module, which would
- * close a cycle against the assembly below. They are re-exported here because
- * this is the name every caller outside the package already imports.
- */
+// Each profile is also re-exported under its own name, for callers that already
+// know which provider they are. An OAuth flow for one provider is not a lookup —
+// it is that provider's code, and naming the profile it wears is more honest
+// than indexing a table with a constant. It is also the only reading that
+// survives the widened `ProviderId` without an assertion: `PROFILES.kilo` is
+// `ClientProfile | undefined`, and no check at such a call site could ever fail.
+//
+// The type and the header helpers live in `headers.ts` so that each
+// `<id>/profile.ts` can read them without importing this module, which would
+// close a cycle against the assembly below. They are re-exported here because
+// this is the name every caller outside the package already imports.
+export { ANTHROPIC_CLI_VERSION, anthropicProfile } from "./anthropic/profile.ts";
+export { customProfile } from "./custom/profile.ts";
+export { grokProfile } from "./grok/profile.ts";
 export {
   type ClientProfile,
   grokHost,
@@ -22,22 +27,35 @@ export {
   orderHeaders,
   stainlessHost,
 } from "./headers.ts";
+export { kiloProfile } from "./kilo/profile.ts";
+export { kimiProfile } from "./kimi/profile.ts";
+export { openaiProfile } from "./openai/profile.ts";
 
 /**
  * Every provider's wire identity, keyed by id.
  *
- * Each profile is defined beside the adapter that wears it; this module only
- * joins them and applies the `OMNI_ORDER_*` overrides. `custom` takes no
- * override because it has no order of its own to override.
+ * Each profile is defined beside the adapter that wears it, and applies its own
+ * `OMNI_ORDER_*` override there rather than here. An adapter reads its profile
+ * directly, so an override applied at this join would be missing from the
+ * direct read — differing only on installations that set the variable, which is
+ * the shape of bug this repository keeps finding.
+ *
+ * Nothing keyed on a provider id is exhaustive any more, so this is a plain
+ * `Record<string, …>` — and it is a hand-written literal, not assembled from
+ * anything. A built-in missing from it is **not** a compile error, because that
+ * type accepts any subset; `descriptor.test.ts` and the unused-import lint are
+ * what catch one. Callers indexing it get `| undefined` from
+ * `noUncheckedIndexedAccess`, which is the point — a stored id can name a
+ * provider this installation does not have.
  */
-export const PROFILES: Readonly<Record<ProviderId, ClientProfile>> = {
-  anthropic: {
-    ...anthropicProfile,
-    order: envOrder("OMNI_ORDER_ANTHROPIC", anthropicProfile.order),
-  },
-  openai: { ...openaiProfile, order: envOrder("OMNI_ORDER_OPENAI", openaiProfile.order) },
-  kimi: { ...kimiProfile, order: envOrder("OMNI_ORDER_KIMI", kimiProfile.order) },
-  kilo: { ...kiloProfile, order: envOrder("OMNI_ORDER_KILO", kiloProfile.order) },
-  grok: { ...grokProfile, order: envOrder("OMNI_ORDER_GROK", grokProfile.order) },
+export const PROFILES: Readonly<Record<string, ClientProfile>> = {
+  anthropic: anthropicProfile,
+  openai: openaiProfile,
+  kimi: kimiProfile,
+  kilo: kiloProfile,
+  grok: grokProfile,
   custom: customProfile,
 };
+
+// Nothing to inherit; see the note on `PROVIDER_DESCRIPTORS`.
+Object.setPrototypeOf(PROFILES, null);

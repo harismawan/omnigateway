@@ -6,6 +6,7 @@ import type { ProviderDescriptor } from "../src/descriptor.ts";
 import { PROVIDER_DESCRIPTORS } from "../src/descriptors.ts";
 import { PROFILES } from "../src/profile.ts";
 import { ADAPTERS, PROVIDERS } from "../src/registry.ts";
+import { entry } from "./entry.ts";
 
 /**
  * The six ids, written out once here and nowhere else in this file.
@@ -24,6 +25,17 @@ const IDS = [
 ] as const satisfies readonly ProviderId[];
 
 /**
+ * The six, as a type.
+ *
+ * Every `*_BEFORE` fixture below is keyed on this rather than on `ProviderId`,
+ * which is a validated string now and would let a fixture drop a provider
+ * without a word. Keying on the tuple restores each fixture's own totality:
+ * delete a line from one and it stops compiling, which is the whole reason
+ * these fixtures are literals.
+ */
+type BuiltIn = (typeof IDS)[number];
+
+/**
  * A verbatim copy of `WRITE_OVER_INPUT` as it stood in
  * `apps/gateway/src/dispatch/price.ts` before the descriptors existed.
  *
@@ -33,20 +45,19 @@ const IDS = [
  * real pricing changes, this fixture changes in the same commit and the diff
  * says so.
  */
-const WRITE_OVER_INPUT_BEFORE: Readonly<
-  Record<ProviderId, { fiveMinute: number; oneHour: number }>
-> = {
-  anthropic: { fiveMinute: 1.25, oneHour: 2 },
-  openai: { fiveMinute: 0, oneHour: 0 },
-  kimi: { fiveMinute: 0, oneHour: 0 },
-  kilo: { fiveMinute: 0, oneHour: 0 },
-  grok: { fiveMinute: 0, oneHour: 0 },
-  custom: { fiveMinute: 0, oneHour: 0 },
-};
+const WRITE_OVER_INPUT_BEFORE: Readonly<Record<BuiltIn, { fiveMinute: number; oneHour: number }>> =
+  {
+    anthropic: { fiveMinute: 1.25, oneHour: 2 },
+    openai: { fiveMinute: 0, oneHour: 0 },
+    kimi: { fiveMinute: 0, oneHour: 0 },
+    kilo: { fiveMinute: 0, oneHour: 0 },
+    grok: { fiveMinute: 0, oneHour: 0 },
+    custom: { fiveMinute: 0, oneHour: 0 },
+  };
 
 /** Likewise for `PROVIDER_CAPABILITIES`, as it stood in `packages/ir`. */
 const CAPABILITIES_BEFORE: Readonly<
-  Record<ProviderId, { tools: boolean; images: boolean; reasoning: boolean }>
+  Record<BuiltIn, { tools: boolean; images: boolean; reasoning: boolean }>
 > = {
   anthropic: { tools: true, images: true, reasoning: true },
   openai: { tools: true, images: true, reasoning: true },
@@ -62,11 +73,51 @@ describe("the registry describes every provider", () => {
     expect(Object.keys(PROVIDERS).sort()).toEqual([...IDS].sort());
   });
 
+  test("no provider table answers for a key it does not hold", () => {
+    // A provider id arrives from a client's `model` name and from unvalidated
+    // JSON in `virtual_models.targets`. On an ordinary object literal,
+    // `table["constructor"]` is the `Object` constructor, so every
+    // `!== undefined` and `?.` guard reads "installed" and then throws on the
+    // next property access — `model: "constructor/foo"` returned a 500 carrying
+    // an internal source expression to the client.
+    //
+    // Asserting the *lookups* rather than `Object.getPrototypeOf(...) === null`
+    // on purpose: the property under test is what a reader gets back, and a
+    // future table built some other way (`Object.create(null)`, a `Map` wrapper,
+    // a frozen proxy) should pass this by being correct rather than by matching
+    // one implementation of correctness.
+    const tables: ReadonlyArray<readonly [string, Readonly<Record<string, unknown>>]> = [
+      ["PROVIDER_DESCRIPTORS", PROVIDER_DESCRIPTORS],
+      ["PROVIDER_MODEL_CATALOG", PROVIDER_MODEL_CATALOG],
+      ["PROFILES", PROFILES],
+      ["BODY_ORDER", BODY_ORDER],
+      ["ADAPTERS", ADAPTERS],
+      ["PROVIDERS", PROVIDERS],
+    ];
+    // `__proto__` is deliberately absent: on a null-prototype object it is an
+    // ordinary missing key, but on a plain one it is an accessor rather than a
+    // value, so it would fail here for a reason unrelated to the bug.
+    const inherited = ["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf"];
+
+    for (const [name, table] of tables) {
+      for (const key of inherited) {
+        expect({ table: name, key, value: table[key] }).toEqual({
+          table: name,
+          key,
+          value: undefined,
+        });
+      }
+      // The positive control. A table that answered `undefined` for everything
+      // would satisfy the loop above and nothing else in this test.
+      expect(table.anthropic).toBeDefined();
+    }
+  });
+
   test("every descriptor is complete", () => {
     // Required with no defaults: a missing `writeOverInput` must be a loud
     // failure here rather than a zero that underprices cache writes for good.
     for (const id of IDS) {
-      const descriptor = PROVIDER_DESCRIPTORS[id];
+      const descriptor = entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS");
       expect(descriptor.id).toBe(id);
       expect(descriptor.capabilities).toBeDefined();
       expect(typeof descriptor.writeOverInput.fiveMinute).toBe("number");
@@ -78,13 +129,29 @@ describe("the registry describes every provider", () => {
 
   test("a descriptor missing a required field does not satisfy the type", () => {
     // The negative case, without which the completeness test above passes
-    // against a validator that does nothing. This is a compile-time guarantee,
-    // so the assertion is that the cast is needed at all: remove `writeOverInput`
-    // from `ProviderDescriptor` and this stops being an error.
+    // against a validator that does nothing. It is a compile-time guarantee, so
+    // what is asserted is that the directive is *needed*: make `writeOverInput`
+    // optional on `ProviderDescriptor` and TypeScript reports the
+    // `@ts-expect-error` as unused, which fails the typecheck.
+    //
+    // Every other required field is present, and that is the whole design of
+    // this fixture. Two earlier versions were satisfied by something other than
+    // the field they named — first by `modelPrefixes` and `presentation` being
+    // absent too, then by `PROVIDER_MODEL_CATALOG.anthropic` turning nullable
+    // when the table's key widened to `string`. A negative control that passes
+    // for an unrelated reason is indistinguishable from one that works, so this
+    // one is deliberately complete except for the single field under test.
     const incomplete = {
       id: "anthropic",
       capabilities: { tools: true, images: true, reasoning: true },
-      catalog: PROVIDER_MODEL_CATALOG.anthropic,
+      catalog: entry(PROVIDER_MODEL_CATALOG, "anthropic", "PROVIDER_MODEL_CATALOG"),
+      modelPrefixes: ["claude-"],
+      presentation: {
+        label: "Anthropic",
+        order: 1,
+        tone: "magenta",
+        colour: { light: "oklch(0.56 0.13 45)", dark: "oklch(0.74 0.12 48)" },
+      },
     };
     // @ts-expect-error — `writeOverInput` is required and absent.
     const rejected: ProviderDescriptor = incomplete;
@@ -95,13 +162,17 @@ describe("the registry describes every provider", () => {
 describe("descriptors carry the values the old tables held", () => {
   test("capabilities match the pre-change fixture", () => {
     for (const id of IDS) {
-      expect(PROVIDER_DESCRIPTORS[id].capabilities).toEqual(CAPABILITIES_BEFORE[id]);
+      expect(entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS").capabilities).toEqual(
+        CAPABILITIES_BEFORE[id],
+      );
     }
   });
 
   test("writeOverInput matches the pre-change fixture", () => {
     for (const id of IDS) {
-      expect(PROVIDER_DESCRIPTORS[id].writeOverInput).toEqual(WRITE_OVER_INPUT_BEFORE[id]);
+      expect(entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS").writeOverInput).toEqual(
+        WRITE_OVER_INPUT_BEFORE[id],
+      );
     }
   });
 
@@ -110,14 +181,16 @@ describe("descriptors carry the values the old tables held", () => {
     // own models list rather than hold a copy of it, or the browser-safe catalog
     // and the registry become two sources that can disagree.
     for (const id of IDS) {
-      expect(PROVIDER_DESCRIPTORS[id].catalog).toBe(PROVIDER_MODEL_CATALOG[id]);
+      expect(entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS").catalog).toBe(
+        entry(PROVIDER_MODEL_CATALOG, id, "PROVIDER_MODEL_CATALOG"),
+      );
     }
   });
 });
 
 describe("presentation and routing data match their pre-change fixtures", () => {
   /** `PREFIX_PROVIDER` as it stood in `packages/router/src/resolve.ts`. */
-  const PREFIXES_BEFORE: Readonly<Record<ProviderId, readonly string[]>> = {
+  const PREFIXES_BEFORE: Readonly<Record<BuiltIn, readonly string[]>> = {
     anthropic: ["claude-"],
     openai: ["gpt-", "o1", "o3", "o4"],
     kimi: ["kimi-", "moonshot"],
@@ -127,13 +200,13 @@ describe("presentation and routing data match their pre-change fixtures", () => 
   };
 
   /** `CALLBACKS` as it stood in `packages/control/src/connect.ts`. */
-  const CALLBACKS_BEFORE: Readonly<Partial<Record<ProviderId, { uri: string; label: string }>>> = {
+  const CALLBACKS_BEFORE: Readonly<Partial<Record<BuiltIn, { uri: string; label: string }>>> = {
     openai: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
     grok: { uri: "http://127.0.0.1:56121/callback", label: "Grok" },
   };
 
   /** `PROVIDER_LABEL`, which existed in three separate copies. */
-  const LABELS_BEFORE: Readonly<Record<ProviderId, string>> = {
+  const LABELS_BEFORE: Readonly<Record<BuiltIn, string>> = {
     anthropic: "Anthropic",
     openai: "OpenAI",
     kimi: "Kimi",
@@ -143,7 +216,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
   };
 
   /** `PROVIDER_TONE` as it stood in `apps/cli/src/command.ts`. */
-  const TONES_BEFORE: Readonly<Record<ProviderId, string>> = {
+  const TONES_BEFORE: Readonly<Record<BuiltIn, string>> = {
     anthropic: "magenta",
     openai: "green",
     kimi: "blue",
@@ -153,7 +226,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
   };
 
   /** The `--p-<id>` custom properties, both themes, from `GlobalStyle.ts`. */
-  const COLOURS_BEFORE: Readonly<Record<ProviderId, { light: string; dark: string }>> = {
+  const COLOURS_BEFORE: Readonly<Record<BuiltIn, { light: string; dark: string }>> = {
     anthropic: { light: "oklch(0.56 0.13 45)", dark: "oklch(0.74 0.12 48)" },
     openai: { light: "oklch(0.5 0.09 190)", dark: "oklch(0.76 0.1 190)" },
     kimi: { light: "oklch(0.53 0.17 330)", dark: "oklch(0.72 0.16 330)" },
@@ -170,7 +243,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
    * full core suite. Only openai's and kilo's were covered, incidentally, by a
    * dashboard connect test.
    */
-  const PASTE_HINTS_BEFORE: Readonly<Record<ProviderId, string>> = {
+  const PASTE_HINTS_BEFORE: Readonly<Record<BuiltIn, string>> = {
     anthropic: "Authorize in the browser, then paste the code Anthropic shows you.",
     openai: "Authorize in the browser. When it redirects to localhost, paste the whole URL.",
     kimi: "Enter the code on Kimi's device page. This dialog finishes on its own.",
@@ -180,7 +253,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
   };
 
   /** `PROVIDER_ORDER` from `AccountsBoard.tsx`, as a rank per id. */
-  const ORDER_BEFORE: readonly ProviderId[] = [
+  const ORDER_BEFORE: readonly BuiltIn[] = [
     "anthropic",
     "openai",
     "kimi",
@@ -191,19 +264,27 @@ describe("presentation and routing data match their pre-change fixtures", () => 
 
   test("model prefixes match", () => {
     for (const id of IDS) {
-      expect(PROVIDER_DESCRIPTORS[id].modelPrefixes).toEqual(PREFIXES_BEFORE[id]);
+      expect(entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS").modelPrefixes).toEqual(
+        PREFIXES_BEFORE[id],
+      );
     }
   });
 
   test("callbacks match, and only the two loopback providers have one", () => {
     for (const id of IDS) {
-      expect(PROVIDER_DESCRIPTORS[id].callback).toEqual(CALLBACKS_BEFORE[id]);
+      expect(entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS").callback).toEqual(
+        CALLBACKS_BEFORE[id],
+      );
     }
   });
 
   test("labels, tones and colours match", () => {
     for (const id of IDS) {
-      const { label, tone, colour } = PROVIDER_DESCRIPTORS[id].presentation;
+      const { label, tone, colour } = entry(
+        PROVIDER_DESCRIPTORS,
+        id,
+        "PROVIDER_DESCRIPTORS",
+      ).presentation;
       expect(label).toBe(LABELS_BEFORE[id]);
       expect(tone).toBe(TONES_BEFORE[id]);
       expect(colour).toEqual(COLOURS_BEFORE[id]);
@@ -212,20 +293,25 @@ describe("presentation and routing data match their pre-change fixtures", () => 
 
   test("paste hints match, and every provider states one", () => {
     for (const id of IDS) {
-      expect(PROVIDER_DESCRIPTORS[id].presentation.pasteHint).toBe(PASTE_HINTS_BEFORE[id]);
+      expect(entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS").presentation.pasteHint).toBe(
+        PASTE_HINTS_BEFORE[id],
+      );
     }
   });
 
   test("display order matches, and every rank is distinct", () => {
     const ranked = [...IDS].sort(
       (a, b) =>
-        PROVIDER_DESCRIPTORS[a].presentation.order - PROVIDER_DESCRIPTORS[b].presentation.order,
+        entry(PROVIDER_DESCRIPTORS, a, "PROVIDER_DESCRIPTORS").presentation.order -
+        entry(PROVIDER_DESCRIPTORS, b, "PROVIDER_DESCRIPTORS").presentation.order,
     );
     expect(ranked).toEqual([...ORDER_BEFORE]);
 
     // Two providers sharing a rank sort unpredictably, so the board's order
     // would depend on object key order rather than on anything stated.
-    const ranks = IDS.map((id) => PROVIDER_DESCRIPTORS[id].presentation.order);
+    const ranks = IDS.map(
+      (id) => entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS").presentation.order,
+    );
     expect(new Set(ranks).size).toBe(ranks.length);
   });
 
@@ -233,7 +319,8 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     // A provider with only one renders colourless in the other, and nothing
     // throws — the CSS custom property simply resolves to nothing.
     for (const id of IDS) {
-      const { light, dark } = PROVIDER_DESCRIPTORS[id].presentation.colour;
+      const { light, dark } = entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS").presentation
+        .colour;
       expect(light.length).toBeGreaterThan(0);
       expect(dark.length).toBeGreaterThan(0);
       expect(light).not.toBe(dark);
@@ -247,7 +334,9 @@ describe("the registry agrees with what it replaced", () => {
     // now read their own descriptor, so this is what stops the two from
     // drifting — an adapter restating a literal would pass every other test here.
     for (const id of IDS) {
-      expect(PROVIDERS[id].adapter.capabilities).toEqual(PROVIDER_DESCRIPTORS[id].capabilities);
+      expect(entry(PROVIDERS, id, "PROVIDERS").adapter.capabilities).toEqual(
+        entry(PROVIDER_DESCRIPTORS, id, "PROVIDER_DESCRIPTORS").capabilities,
+      );
     }
   });
 
@@ -256,18 +345,20 @@ describe("the registry agrees with what it replaced", () => {
     // entry survived the whole suite before this existed: `PROVIDERS` has no
     // production consumer, so nothing else reads the join at all.
     for (const id of IDS) {
-      expect(PROVIDERS[id].profile).toBe(PROFILES[id]);
-      expect(PROVIDERS[id].bodyOrder).toBe(BODY_ORDER[id]);
+      expect(entry(PROVIDERS, id, "PROVIDERS").profile).toBe(entry(PROFILES, id, "PROFILES"));
+      expect(entry(PROVIDERS, id, "PROVIDERS").bodyOrder).toBe(entry(BODY_ORDER, id, "BODY_ORDER"));
     }
     // And the joined values are actually distinguishable, so the assertions
     // above cannot pass by every provider sharing one object.
-    expect(new Set(IDS.map((id) => PROVIDERS[id].profile)).size).toBe(IDS.length);
+    expect(new Set(IDS.map((id) => entry(PROVIDERS, id, "PROVIDERS").profile)).size).toBe(
+      IDS.length,
+    );
   });
 
   test("every entry joins the adapter that serves it", () => {
     for (const id of IDS) {
-      expect(PROVIDERS[id].adapter).toBe(ADAPTERS[id]);
-      expect(PROVIDERS[id].adapter.id).toBe(id);
+      expect(entry(PROVIDERS, id, "PROVIDERS").adapter).toBe(entry(ADAPTERS, id, "ADAPTERS"));
+      expect(entry(PROVIDERS, id, "PROVIDERS").adapter.id).toBe(id);
     }
   });
 });

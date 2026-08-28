@@ -78,14 +78,20 @@ test("the descriptors subpath reaches only descriptors and model lists", () => {
   // dependency. The leaf is allowed none.
   expect(bare).toEqual([]);
 
-  const allowed = new RegExp(`^(descriptors\\.ts|(${DIRS})\\/(descriptor|models)\\.ts)$`);
+  // `descriptor.ts` is on the walk because it now carries runtime values —
+  // `PROVIDER_ID_PATTERN` and `isProviderIdFormat`, the single copy of what may
+  // name a provider — and not only the type. It stays leaf-safe on the same
+  // terms as everything else here: a regular expression and a predicate, no
+  // adapter, no HTTP client, no `Bun.env`, which the probes below still check.
+  const allowed = new RegExp(`^(descriptors?\\.ts|(${DIRS})\\/(descriptor|models)\\.ts)$`);
   const unexpected = files.filter((f) => !allowed.test(f));
   expect(unexpected).toEqual([]);
 
   // Derived, not a constant. A seventh provider is a correct change and must not
   // fail this with an opaque "expected 13, received 15"; what is asserted is that
-  // the walk reached every provider, not that there are six of them.
-  expect(files.length).toBe(1 + PROVIDER_IDS.length * 2);
+  // the walk reached every provider, not that there are six of them. The two
+  // fixed files are `descriptors.ts` and the `descriptor.ts` it now pulls in.
+  expect(files.length).toBe(2 + PROVIDER_IDS.length * 2);
 });
 
 test("the catalog subpath reaches only model lists", () => {

@@ -26,6 +26,30 @@ import { createStore, DEFAULT_SETTINGS, deriveKey, generateApiKey, hashApiKey } 
 
 let seq = 0;
 
+/**
+ * Reads one entry out of a provider-keyed table, failing loudly if it is absent.
+ *
+ * Every such table is keyed by `string` since `ProviderId` widened, so a test
+ * naming a built-in gets `| undefined` from `noUncheckedIndexedAccess`. A `!`
+ * would silence that and turn a missing descriptor into `TypeError: Cannot read
+ * properties of undefined` several lines later, in a test whose name has
+ * nothing to do with the real failure. This names the table and the key.
+ *
+ * Use it only where the key is a *built-in* the assembly is expected to hold.
+ * Where absence is the behaviour under test, assert on `undefined` directly.
+ */
+export function entryOf<T>(
+  table: Readonly<Record<string, T>>,
+  id: string,
+  label = "provider table",
+): T {
+  const entry = table[id];
+  if (entry === undefined) {
+    throw new Error(`${label} has no entry for "${id}"; it holds ${Object.keys(table).join(", ")}`);
+  }
+  return entry;
+}
+
 export type CaptureLogger = Logger & {
   /** Rendered lines, exactly as they would reach stdout. */
   lines: string[];

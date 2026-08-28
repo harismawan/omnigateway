@@ -208,6 +208,12 @@ export function createApp(deps: AppDeps) {
   const logger = deps.logger ?? noopLogger;
   const rand = deps.rand ?? Math.random;
   const http = deps.http ?? nodeHttpClient({ logger, now });
+  // Not normalised here. An earlier version spread an injected map onto a null
+  // prototype at this line, which guarded `createApp` and nothing else —
+  // `DispatchDeps` and `ProxyDeps` are public injection points that callers and
+  // tests construct directly, so the map dispatch actually reads may never have
+  // passed through here. The guard belongs at the read site in
+  // `dispatch/index.ts`, which is on the path however the map was built.
   const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
   const rateLimiter = deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger });

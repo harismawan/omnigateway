@@ -8,11 +8,35 @@ test("the connect surface knows every provider the registry describes", () => {
   expect([...CONNECT_PROVIDER_IDS].sort()).toEqual([...PROVIDER_IDS].sort());
 });
 
-test("providerIdSchema accepts every provider and nothing else", () => {
+test("providerIdSchema accepts every provider, and any id shaped like one", () => {
   for (const id of PROVIDER_IDS) {
     expect(providerIdSchema.safeParse(id).success).toBe(true);
   }
-  expect(providerIdSchema.safeParse("not-a-provider").success).toBe(false);
+  // A well-formed id the registry has never heard of passes, and that is the
+  // change: the schema was `z.enum(PROVIDER_IDS)`, and `PROVIDER_IDS` is
+  // `Object.keys(...)` at import — long before `loadPlugins()` — so a plugin
+  // provider's credential would have been refused by a snapshot of the world
+  // taken before it existed. Existence is asked at the call site instead; the
+  // test below is where the refusal now lives.
+  expect(providerIdSchema.safeParse("not-a-provider").success).toBe(true);
+});
+
+test("providerIdSchema refuses an id that cannot name a provider", () => {
+  // Format is still a real gate. The id becomes a `--p-<id>` custom property, a
+  // `plugin_<id>_*` table prefix and a `plugin:<id>:*` topic, so an id that
+  // cannot be all three has to fail here rather than wherever noticed first.
+  for (const bad of [
+    "",
+    "Anthropic",
+    "1kilo",
+    "kilo_code",
+    "kilo.code",
+    "kilo code",
+    "-kilo",
+    "a".repeat(33),
+  ]) {
+    expect(providerIdSchema.safeParse(bad).success).toBe(false);
+  }
 });
 
 test("every OAuth provider is a provider the registry describes", () => {

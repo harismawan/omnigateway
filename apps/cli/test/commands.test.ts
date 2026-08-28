@@ -918,6 +918,90 @@ test("doctor prints the dangling pins in its own table, not only under --json", 
   expect(row(healthy.out)).toBe("none");
 });
 
+test("doctor reports a target naming a provider this installation does not have", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  const store = await openStore(root);
+  // A provider id is a validated string, and `virtual_models.targets` is read
+  // back with `JSON.parse` and no validation — so a plugin removed, a database
+  // restored onto a different install, or a hand-edited row all produce this.
+  // `putModel` accepts it on purpose, for the reason it accepts a dangling pin,
+  // which makes doctor the only compensating control.
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      // The healthy sibling goes *first*, so a check that stopped after
+      // `targets[0]` reports nothing. Flagging this one would be its own bug —
+      // a check that accuses working configuration is one operators learn to
+      // ignore — so both directions are under test here.
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      {
+        provider: "nonesuch",
+        model: "nonesuch-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  // A second model, so a check that stopped after the first one reports half an
+  // installation as healthy. Both `.slice(0, 1)` mutants — on the target list
+  // and on the model list — survived before these two changes.
+  await store.config.putModel({
+    id: "cheap",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "alsogone",
+        model: "alsogone-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 2 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const checks = JSON.parse(result.out) as { missingProviders: string[] };
+  expect(checks.missingProviders).toEqual([
+    "billed/nonesuch-1 → nonesuch",
+    "cheap/alsogone-1 → alsogone",
+  ]);
+
+  // And in the table, which is what the operator running the command sees. A
+  // finding that exists only under `--json` is a finding nobody is told about.
+  const printed = await cli(["doctor"], { root, service });
+  const row = printed.out
+    .split("\n")
+    .find((line) => line.startsWith("missing providers"))
+    ?.trim()
+    .split(/\s{2,}/)[1];
+  expect(row).toBe("2: billed/nonesuch-1 → nonesuch, cheap/alsogone-1 → alsogone");
+});
+
+test("doctor says none rather than nothing when every provider is installed", async () => {
+  const root = await installation();
+  const result = await cli(["doctor", "--json"], { root, service: fakeService({ root }) });
+  // `[]` is "checked, nothing wrong". Null would mean the question could not be
+  // asked, and the two must not read alike.
+  expect(
+    (JSON.parse(result.out) as { missingProviders: string[] | null }).missingProviders,
+  ).toEqual([]);
+});
+
 test("doctor says none rather than nothing when every pin resolves", async () => {
   const root = await installation();
   const service = fakeService({ root });
@@ -1014,9 +1098,51 @@ test("doctor still works when the installation has no encryption key", async () 
   expect(result.code).toBe(0);
   expect(body.encryptionKey).toBe("missing");
   expect(body.configError).toMatch(/OMNI_ENCRYPTION_KEY/);
-  // Nothing could be opened, so the rollup was not checked — which is a state
-  // of its own and not a clean bill of health.
+  // Nothing could be opened, so none of the store-backed checks ran — which is
+  // a state of its own and not a clean bill of health. Every one of them
+  // documents `null` as "could not be asked" and `[]` as "asked, nothing
+  // wrong"; until this assertion existed, no test produced `null` at all, so
+  // both the guard arm and the `catch` arm could return `[]` with the suite
+  // green and an unopenable database reported as healthy.
   expect(body.usageRollup).toBeNull();
+  expect(body.missingProviders).toBeNull();
+  expect(body.danglingPins).toBeNull();
+  expect(body.orphanPluginTables).toBeNull();
+});
+
+test("doctor says not-checked, never none, when the database will not open", async () => {
+  // The `catch` arm of every store-backed check. The guard above it covers the
+  // ordinary misses — no config, no database file — so nothing reached the
+  // `catch`, and each one could return `[]` instead of `null` with the suite
+  // green. `[]` reads as "checked, nothing wrong", so an installation whose
+  // database cannot be opened at all was reported as healthy.
+  //
+  // A file that exists and is not a database is the shortest way there, and it
+  // is a real state: a truncated restore, a half-written copy, a wrong path.
+  const root = await installation();
+  await Bun.write(`${root}/omnigateway.db`, "this is not a sqlite file");
+  const service = fakeService({ root });
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const body = JSON.parse(result.out) as Record<string, unknown>;
+
+  // Still exits 0 and still answers: `doctor` is the command an operator runs
+  // *because* something is wrong, so it must not fail to run.
+  expect(result.code).toBe(0);
+  expect(body.missingProviders).toBeNull();
+  expect(body.danglingPins).toBeNull();
+  expect(body.orphanPluginTables).toBeNull();
+
+  // And the table says so in words rather than printing a reassuring "none".
+  const printed = await cli(["doctor"], { root, service });
+  const row = (label: string): string | undefined =>
+    printed.out
+      .split("\n")
+      .find((line) => line.startsWith(label))
+      ?.trim()
+      .split(/\s{2,}/)[1];
+  expect(row("missing providers")).toBe("not checked");
+  expect(row("dangling pins")).toBe("not checked");
 });
 
 test("start runs the gateway that belongs to this root", async () => {

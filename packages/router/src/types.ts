@@ -1,4 +1,5 @@
 import type { ChatRequest } from "@omni/ir";
+import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import type {
   CredentialHealth,
   CredentialView,
@@ -77,6 +78,31 @@ export type RankInput = {
    * means zero.
    */
   load: ReadonlyMap<string, number>;
+  /**
+   * Which providers this installation has, for the `provider:missing` guard.
+   *
+   * Injected, defaulting to the real registry, so that a test can describe an
+   * installation without editing the process-global one. Three test files used
+   * to mutate `PROVIDER_DESCRIPTORS` and restore it in a `finally`; that is a
+   * shared mutable global under a test runner that interleaves files, and this
+   * repository has already lost a day to one such collision — a doctor test
+   * that failed one run in six because another suite registered an id it
+   * asserted absent.
+   *
+   * Deliberately not on `Snapshot`. The snapshot is cached across requests and
+   * built from the store; the registry is fixed at boot and comes from code, so
+   * folding one into the other would put a value with a different lifetime and
+   * a different source behind the same cache.
+   *
+   * `| undefined` is explicit so that a caller holding an optional registry can
+   * write `providers: deps.providers` directly. Under
+   * `exactOptionalPropertyTypes` a bare `?:` refuses an explicit `undefined`,
+   * which forced callers into a conditional spread — a third spelling of "pass
+   * the registry down" in a function that already had two, and the round that
+   * added two threadings and forgot the third is what that inconsistency costs.
+   * Same convention `@omni/store`'s `TargetPricing` already uses.
+   */
+  providers?: ProviderDescriptors | undefined;
 };
 
 export type RankResult = {

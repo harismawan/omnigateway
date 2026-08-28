@@ -3,6 +3,7 @@ import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { CredentialView, Store } from "@omni/store";
 import { memoryStore, seedCredential } from "@omni/testkit";
+import { OAUTH_PROVIDERS } from "../../src/oauth/index.ts";
 import { createRefresher } from "../../src/oauth/refresh.ts";
 import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
 
@@ -264,4 +265,59 @@ test("a failed refresh is not cached — the next call retries", async () => {
 
   await expect(refresh(view)).rejects.toThrow(GatewayError);
   expect((await refresh(view)).accessToken).toBe("test-token-3");
+});
+
+test("a provider with no OAuth refresh is refused cleanly, prototype names included", async () => {
+  // Two things at once, because they are the same bug seen from either end.
+  //
+  // `refresh.ts` reads `providers[credential.provider]` by a *stored* string and
+  // relies on `undefined` to raise `BAD_REQUEST`. `credential.provider` is
+  // whatever is in the row, and `PROVIDER_ID_PATTERN` accepts `constructor` — so
+  // on an ordinary object literal that lookup answers the `Object` constructor,
+  // the guard passes, and `provider.refresh(...)` throws a raw `TypeError` that
+  // `classify` reads as `INTERNAL`. Same signature as the 500 `resolveModel`
+  // shipped: an internal source expression, reaching the caller.
+  //
+  // Driven against the real `OAUTH_PROVIDERS`, not a fixture, because the thing
+  // under test is that table's own prototype. `custom` is the ordinary half of
+  // the guard — a real provider id with no authorization behind it — and proves
+  // the assertion is not passing merely because everything throws.
+  for (const provider of ["constructor", "toString", "hasOwnProperty", "custom"]) {
+    const store = await memoryStore();
+    await seedCredential(store, {
+      id: "c1",
+      provider,
+      expiresAt: NOW - 1,
+      accessToken: "test-token-1",
+      refreshToken: "test-token-2",
+    });
+    const view = (await store.credentials.get("c1")) as CredentialView;
+    const refresh = createRefresher({
+      store,
+      providers: OAUTH_PROVIDERS,
+      http: nodeHttpClient(),
+      now: () => NOW,
+    });
+
+    const failure = await refresh(view).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect({ provider, is: failure instanceof GatewayError }).toEqual({ provider, is: true });
+    expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+    expect((failure as Error).message).toBe("provider does not support OAuth refresh");
+    store.close();
+  }
+});
+
+test("a provider that does have a refresh still reaches it", async () => {
+  // The positive control for the loop above: `OAUTH_PROVIDERS` must still answer
+  // for its own five, or "refused cleanly" would be true of everything.
+  expect(Object.keys(OAUTH_PROVIDERS).sort()).toEqual([
+    "anthropic",
+    "grok",
+    "kilo",
+    "kimi",
+    "openai",
+  ]);
 });

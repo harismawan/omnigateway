@@ -6,6 +6,7 @@ import { kimiAdapter } from "../src/kimi/index.ts";
 import { toChatWire } from "../src/kimi/wire.ts";
 import { ADAPTERS } from "../src/registry.ts";
 import type { SseMessage } from "../src/sse.ts";
+import { entry } from "./entry.ts";
 
 const base: ChatRequest = {
   model: "cheap",
@@ -295,8 +296,8 @@ test("the registry exposes every provider", () => {
     "kimi",
     "openai",
   ]);
-  expect(ADAPTERS.kimi.capabilities.images).toBe(false);
-  expect(ADAPTERS.anthropic.capabilities.reasoning).toBe(true);
+  expect(entry(ADAPTERS, "kimi", "ADAPTERS").capabilities.images).toBe(false);
+  expect(entry(ADAPTERS, "anthropic", "ADAPTERS").capabilities.reasoning).toBe(true);
 });
 
 test("passes a mid-conversation system turn through in position", () => {
