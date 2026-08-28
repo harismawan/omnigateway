@@ -549,7 +549,7 @@ test("records no tool degradation when every tool is portable", () => {
 });
 
 // --- Reasoning request -------------------------------------------------------
-// `PROVIDER_CAPABILITIES.kilo.reasoning` is true, so the router actively sends
+// The kilo descriptor declares `reasoning: true`, so the router actively sends
 // reasoning requests here. What the encoder puts on the wire is therefore
 // load-bearing, not incidental.
 

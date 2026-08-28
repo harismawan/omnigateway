@@ -1,4 +1,4 @@
-import type { ChatRequest, ProviderCapabilities, ProviderId } from "@omni/ir";
+import type { ChatRequest, ContentBlock, ProviderCapabilities, ProviderId } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type CredentialView, servesTarget, type Target } from "@omni/store/types";
 import { healthKey } from "./snapshot.ts";
@@ -63,9 +63,32 @@ export function requiredProviders(request: ChatRequest): ReadonlySet<ProviderId>
   return owners;
 }
 
-/** What the request actually needs, so targets can be filtered on it. */
+/**
+ * What the request actually needs, so targets can be filtered on it.
+ *
+ * Reads **every** position a `ContentBlock` can occupy, which for images means
+ * `system` as well as `messages`. It did not, and the miss is worth recording
+ * because of where it sat: eleven lines below `requiredProviders`, in the same
+ * file, edited in the same commit that taught *that* function to read `system`.
+ * The fix reasoned carefully about completeness inside one function and never
+ * looked at the one underneath it.
+ *
+ * The consequence was reachable with no plugin at all — `ingress/openai.ts`
+ * routes a system message's parts through `contentBlocks()`, which emits an
+ * `ImageBlock` — so an image in a system prompt routed to an `images:false`
+ * target with an empty exclusion list, every encoder dropped it silently, and
+ * the request logged as a clean success. The identical image one message later
+ * was correctly refused with `capability:images`.
+ *
+ * `test/blockPositions.test.ts` is what keeps this true now: a matrix of
+ * positions against predicates, so a predicate reading one and not the other
+ * fails a cell rather than waiting for a review to look at the right pair.
+ */
 export function requiredCapabilities(request: ChatRequest): ProviderCapabilities {
-  const images = request.messages.some((m) => m.content.some((b) => b.type === "image"));
+  const hasImage = (blocks: readonly ContentBlock[]): boolean =>
+    blocks.some((b) => b.type === "image");
+  const images =
+    hasImage(request.system ?? []) || request.messages.some((m) => hasImage(m.content));
   return {
     tools: (request.tools?.length ?? 0) > 0,
     images,

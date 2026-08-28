@@ -775,6 +775,112 @@ test("collects the stream for a non-streaming request", async () => {
   store.close();
 });
 
+/**
+ * `request_logs.degradations` is a **set**, asserted on the column rather than on
+ * any one reason.
+ *
+ * `noteDegradations` says so in its own docstring and one writer did not use it:
+ * the routing-exclusion loop pushed directly, and `eligible` emits
+ * `capability:providerNative` from inside its *credential* loop. So a pool of N
+ * targets across M accounts wrote N×M identical strings — on an ordinary
+ * web-search request that succeeded. The column is unbounded `TEXT`, nothing
+ * truncates on write or read, and the console renders one chip per entry keyed
+ * on the string: 24 duplicates and a React duplicate-key warning on the happy
+ * path.
+ *
+ * Written as an invariant over whatever the run produced, not as a count for
+ * this fixture. A test asserting "3 entries" would pass while a fourth writer
+ * started repeating itself; this one fails for any duplicate from any source,
+ * which is the property the docstring already claimed.
+ */
+test("a request never records the same degradation twice, however many accounts it skipped", async () => {
+  const store = await seeded(1);
+  // Three Anthropic accounts and three OpenAI ones, so the exclusion loop runs
+  // six times against two targets. Under a direct push this produced one row per
+  // (target, credential) pair rather than one per distinct reason.
+  for (const [id, provider] of [
+    ["a2", "anthropic"],
+    ["a3", "anthropic"],
+    ["o1", "openai"],
+    ["o2", "openai"],
+    ["o3", "openai"],
+  ] as const) {
+    await store.credentials.create({
+      id,
+      provider,
+      label: id,
+      authType: "apiKey",
+      enabled: true,
+      tier: 1,
+      weight: 1,
+      expiresAt: null,
+      accountEmail: null,
+      providerData: {},
+      disabledReason: null,
+      disabledAt: null,
+      accessToken: null,
+      refreshToken: null,
+      apiKey: "synthetic-key",
+      idToken: null,
+    });
+  }
+  await store.config.putModel({
+    id: "native",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "openai",
+        model: "gpt-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const adapter = stubAdapter(() => textStream("ok"));
+  const outcome = await dispatch(
+    {
+      ...req,
+      model: "native",
+      // An Anthropic-defined tool, which is the ordinary Claude-Code shape. It
+      // excludes every OpenAI account — the `size === 1` arm, on a request that
+      // then succeeds against Anthropic.
+      tools: [
+        {
+          kind: "provider",
+          provider: "anthropic",
+          family: "webSearch",
+          type: "web_search_20250305",
+          name: "web_search",
+          wire: {},
+        },
+      ],
+    },
+    { ...deps(store, adapter), adapters: { anthropic: adapter, openai: adapter } },
+    new AbortController().signal,
+    "req_dedupe",
+  );
+  await drain(outcome.events);
+  const { degradations } = outcome.log();
+
+  // The request succeeded, which is the point: this is not an error path.
+  expect(outcome.log().status).toBe(200);
+  // Three OpenAI accounts were skipped for one reason.
+  expect(degradations).toContain("excluded:capability:providerNative");
+  expect(new Set(degradations).size).toBe(degradations.length);
+});
+
 test("Anthropic-native capability exclusions omit credential IDs from degradations", async () => {
   const store = await seeded(1);
   await store.credentials.create({

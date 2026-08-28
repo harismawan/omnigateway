@@ -280,9 +280,22 @@ export async function dispatch(
     // string: that string is persisted, and matching it made renaming the
     // concept a silent change to what gets redacted.
     const aboutTheTarget = e.kind === "target";
-    log.degradations.push(
+    // Through `noteDegradations`, not a bare push. This was the one writer in
+    // the file that bypassed it, and it is the one that can repeat: `eligible`
+    // emits `capability:providerNative` from inside its credential loop, so a
+    // pool of 5 targets across 6 accounts produced 24 identical rows — on an
+    // ordinary web-search request that *succeeded*. `request_logs.degradations`
+    // is unbounded text, and the console renders one chip per entry keyed on the
+    // string, so the logs panel showed 24 duplicates and a React duplicate-key
+    // warning on the happy path.
+    //
+    // Deduping here rather than moving `drop()` out of that loop, because the
+    // per-credential emission is what makes the *other* reasons name the account
+    // they are about. The set semantics `noteDegradations` documents twenty
+    // lines above is the invariant; this was the site that did not hold it.
+    noteDegradations([
       aboutTheTarget ? `excluded:${e.reason}` : `excluded:${e.credentialId}:${e.reason}`,
-    );
+    ]);
     logger.debug("routing candidate excluded", {
       requestId,
       ...(aboutTheTarget ? {} : { credentialId: e.credentialId }),
