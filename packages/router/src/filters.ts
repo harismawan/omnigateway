@@ -45,6 +45,16 @@ export function requiredProviders(request: ChatRequest): ReadonlySet<ProviderId>
   for (const tool of request.tools ?? []) {
     if (tool.kind === "provider") owners.add(tool.provider);
   }
+  // `system` as well as `messages`, and it was missed. `ChatRequest.system` is a
+  // full `ContentBlock[]`, so it can hold a `providerNative` block exactly as a
+  // message can — and a request whose system prompt carried one routed to any
+  // provider at all, with an empty exclusion list. Same reachability class as
+  // the two-owner case above: no ingress builds it today, and the reason to
+  // close it is that this function's own first line claims to name *every*
+  // provider the request carries.
+  for (const block of request.system ?? []) {
+    if (block.type === "providerNative") owners.add(block.provider);
+  }
   for (const message of request.messages) {
     for (const block of message.content) {
       if (block.type === "providerNative") owners.add(block.provider);

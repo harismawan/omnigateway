@@ -11,7 +11,7 @@ import {
   removePlugin,
   verifyPlugin,
 } from "@omni/control";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { boolFlag, type Parsed, requirePositional, stringFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
@@ -284,14 +284,30 @@ export async function pluginProviders(root: string): Promise<PluginProviderRead>
   // the right one for it to answer — but every caller here wants "what does this
   // installation have", and handing them the plugin half was measurably worse
   // than the bug it was fixing: `omni setup` wrote no context limit for
-  // *anthropic*. Caught by an existing test rather than by review.
+  // *anthropic*.
+  //
+  // **The two halves are disjoint**, so the argument order below decides
+  // nothing — reversing it is an equivalent mutant, and deliberately left
+  // untested for the reason a refinement no input can observe is worth deleting
+  // rather than propping up. `readProviders` refuses a plugin declaring a
+  // built-in's id, which is the one place that rule lives, and *that* is
+  // pinned. It did not always — the plugin half was
+  // applied *over* the built-ins here while the gateway refused the same
+  // collision at `installPluginProviders`, so a plugin directory named
+  // `anthropic` made `omni setup` write its window into an agent's config while
+  // the gateway served the real adapter at another. Two copies of a rule, and
+  // they disagreed on their first day.
   //
   // `Object.create(null)` rather than a spread, because spreading a
   // null-prototype object yields an ordinary one — `{...PROVIDER_DESCRIPTORS}`
   // silently reverts the invariant that makes `table["constructor"]` answer
   // `undefined`, and the gateway normalises injected adapter maps at `app.ts`
   // for the same reason.
-  const descriptors = Object.assign(Object.create(null), PROVIDER_DESCRIPTORS, read.descriptors);
+  const descriptors: ProviderDescriptors = Object.assign(
+    Object.create(null),
+    PROVIDER_DESCRIPTORS,
+    read.descriptors,
+  );
   return { descriptors, failures: read.failures };
 }
 
@@ -304,8 +320,8 @@ export async function pluginProviders(root: string): Promise<PluginProviderRead>
  * deliberately never calls `loadPlugins`: `setup` opens channels, runs
  * migrations and registers a provider, none of which a CLI command should do.
  *
- * **The capability is permission to call `ctx.provider.register`, not proof that
- * the plugin does.** `packages/plugin-api/src/manifest.ts` does not even require
+ * **The capability is permission to supply a provider, not proof that the plugin
+ * does.** `packages/plugin-api/src/manifest.ts` does not even require
  * a `server` entry alongside it. So no reading of a manifest can promise the
  * provider will exist at runtime, and neither answer below claims to.
  */
@@ -340,7 +356,7 @@ export function providerDeclared(id: string, plugins: readonly PluginSummary[]):
  * and nowhere near the write.
  *
  * `loadable` closes three of the four ways this goes wrong. The fourth — a
- * plugin that loads cleanly, declares the capability and never calls `register`
+ * plugin that loads cleanly, declares the capability and supplies nothing
  * — **cannot be closed by reading a manifest at all**, and is not closed here.
  * `danglingCredentials` in `doctor` is what carries that weight, the same way
  * `danglingPins` carries the pin the write path deliberately does not validate.

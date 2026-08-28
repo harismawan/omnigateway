@@ -2,7 +2,11 @@ import { expect, test } from "bun:test";
 import { ADAPTERS } from "@omni/providers";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { entryOf } from "@omni/testkit";
-import { readProviders, validateRegistration } from "../src/pluginProviders.ts";
+import {
+  readPluginProviders,
+  readProviders,
+  validateRegistration,
+} from "../src/pluginProviders.ts";
 
 /**
  * What a plugin hands the host, and what the host refuses to take its word for.
@@ -327,4 +331,149 @@ test("the fields dispatch and the console dereference are checked too", () => {
       codec,
     }),
   ).not.toThrow();
+});
+
+/**
+ * `readPluginProviders` — the half a review found entirely unpinned.
+ *
+ * Four mutants survived here at once: making the `catch` rethrow (so one broken
+ * plugin crashes `omni setup` and `omni models dry-run`, the documented
+ * opposite), dropping either failure message, and ignoring the manifest
+ * capability — which decides *whose module gets imported at all*, and is
+ * therefore the one that widens what a diagnostic executes.
+ *
+ * The importer is injected precisely so these are testable without touching a
+ * filesystem or Bun's module cache.
+ */
+const summary = (over: Record<string, unknown> = {}) => ({
+  id: "acme-ai",
+  path: "/plugins/acme-ai",
+  loadable: true,
+  manifest: { capabilities: ["provider"], server: "server.js" },
+  ...over,
+});
+
+const declaringModule = {
+  default: { providers: [{ descriptor: descriptor(), codec }], setup: () => undefined },
+};
+
+test("a declared provider is read into the registry, keyed by its id", () => {
+  return readPluginProviders([summary()], async () => declaringModule).then((read) => {
+    expect(Object.keys(read.descriptors)).toEqual(["acme-ai"]);
+    expect(read.failures).toEqual([]);
+    // Null-prototype, like every other provider-keyed table: a provider id
+    // arrives from a client's `model` name, and on an ordinary literal
+    // `table["constructor"]` answers the `Object` constructor.
+    expect(Object.getPrototypeOf(read.descriptors)).toBeNull();
+    expect((read.descriptors as Record<string, unknown>).constructor).toBeUndefined();
+  });
+});
+
+test("a plugin that throws on import is collected, never thrown over", async () => {
+  // The property the docblock states and nothing pinned. A rethrow here makes
+  // one broken plugin crash both commands — and a broken plugin is exactly the
+  // installation whose operator is running them.
+  const read = await readPluginProviders([summary()], async () => {
+    throw new Error("upstream SDK missing");
+  });
+
+  expect(read.descriptors).toEqual({});
+  expect(read.failures).toEqual([{ id: "acme-ai", reason: "upstream SDK missing" }]);
+});
+
+test("a plugin whose module never settles is given up on rather than waited for", async () => {
+  // `import()` runs top-level code, and top-level code can `await`. This hung
+  // `omni setup` and `omni models dry-run` forever — no output, no exit — and
+  // every plugin after it in the list went unread, because the loop is
+  // sequential. Rule 15 says a load failure is skipped and reported; a hang is
+  // neither.
+  const second = summary({ id: "later-ai", path: "/plugins/later-ai" });
+  const read = await readPluginProviders(
+    [summary(), second],
+    (entry) =>
+      entry.includes("acme-ai")
+        ? new Promise<never>(() => {})
+        : Promise.resolve({
+            default: {
+              providers: [{ descriptor: descriptor({ id: "later-ai" }), codec }],
+              setup: () => undefined,
+            },
+          }),
+    25,
+  );
+
+  expect(read.failures).toHaveLength(1);
+  expect(read.failures[0]?.id).toBe("acme-ai");
+  expect(read.failures[0]?.reason).toContain("took longer than 25ms");
+  // The plugin after it is still read: one hanging module must not silence the
+  // rest, which is the half a `for await` over a shared timeout would lose.
+  expect(Object.keys(read.descriptors)).toEqual(["later-ai"]);
+});
+
+test("a plugin declaring a provider with no server entry is named, not skipped silently", async () => {
+  const read = await readPluginProviders(
+    [summary({ manifest: { capabilities: ["provider"] } })],
+    async () => declaringModule,
+  );
+
+  expect(read.failures).toHaveLength(1);
+  expect(read.failures[0]?.reason).toContain("no server entry");
+});
+
+test("a module with no usable default export is named", async () => {
+  const read = await readPluginProviders([summary()], async () => ({ default: { setup: 1 } }));
+
+  expect(read.failures).toHaveLength(1);
+  expect(read.failures[0]?.reason).toContain("no default export with a setup");
+});
+
+test("a plugin without the capability is not imported at all", async () => {
+  // This early `continue` decides whose top-level code runs. Dropping it does
+  // not merely widen what is read — it widens what a diagnostic *executes*, for
+  // every plugin with a server entry.
+  let imported = false;
+  const read = await readPluginProviders(
+    [summary({ manifest: { capabilities: ["storage"], server: "server.js" } })],
+    async () => {
+      imported = true;
+      return declaringModule;
+    },
+  );
+
+  expect(imported).toBe(false);
+  expect(read.descriptors).toEqual({});
+  expect(read.failures).toEqual([]);
+});
+
+test("a plugin the host would refuse is not imported either", async () => {
+  let imported = false;
+  const read = await readPluginProviders([summary({ loadable: false })], async () => {
+    imported = true;
+    return declaringModule;
+  });
+
+  expect(imported).toBe(false);
+  expect(read.descriptors).toEqual({});
+});
+
+test("a plugin declaring a built-in's id is refused", async () => {
+  // The one place this rule lives. It was written twice — the gateway refused
+  // the collision at its registry write and the CLI's merge applied the plugin
+  // *over* the built-in — so a plugin directory named `anthropic` made
+  // `omni setup` write its window into an agent's config while the gateway
+  // served the real adapter at another.
+  const read = await readPluginProviders(
+    [summary({ id: "anthropic", path: "/plugins/anthropic" })],
+    async () => ({
+      default: {
+        providers: [{ descriptor: { ...anthropic, id: "anthropic" }, codec }],
+        setup: () => undefined,
+      },
+    }),
+  );
+
+  expect(read.descriptors).toEqual({});
+  expect(read.failures).toHaveLength(1);
+  expect(read.failures[0]?.id).toBe("anthropic");
+  expect(read.failures[0]?.reason).toContain("which is built in");
 });

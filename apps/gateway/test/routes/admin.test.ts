@@ -1786,15 +1786,37 @@ test("the catalog response carries exactly the keys the console declares", async
 
   // The model entries too, since the picker and the price display read them and
   // a dropped `pricing` renders as a blank rather than as an error.
+  //
+  // Across **every** provider, not the first one holding models. Checking one
+  // let an unmirrored key on every other provider through — and per-provider
+  // divergence is exactly where a plugin-supplied catalog would differ.
+  //
+  // `oauthLimits` is optional-and-asserted rather than filtered out. Filtering
+  // it unconditionally meant the server could stop sending it entirely and this
+  // test — whose whole purpose is pinning the wire shape — stayed green.
   const MODEL_REQUIRED = ["id", "label", "pricing", "limits", "auth"];
-  const withModels = body.providers.find((provider) => (provider.models as unknown[]).length > 0) as
-    | { models: Record<string, unknown>[] }
-    | undefined;
-  expect(withModels).toBeDefined();
-  for (const model of withModels?.models ?? []) {
-    const keys = Object.keys(model).filter((key) => key !== "oauthLimits");
-    expect(keys.sort()).toEqual([...MODEL_REQUIRED].sort());
+  const MODEL_OPTIONAL = new Set(["oauthLimits"]);
+  let modelsSeen = 0;
+  for (const provider of body.providers) {
+    for (const model of provider.models as Record<string, unknown>[]) {
+      modelsSeen += 1;
+      const keys = Object.keys(model);
+      expect(keys.filter((key) => !MODEL_OPTIONAL.has(key)).sort()).toEqual(
+        [...MODEL_REQUIRED].sort(),
+      );
+      expect(keys.every((key) => MODEL_REQUIRED.includes(key) || MODEL_OPTIONAL.has(key))).toBe(
+        true,
+      );
+    }
   }
+  expect(modelsSeen).toBeGreaterThan(0);
+
+  // And `oauthLimits` really does reach the wire where a model states one, so
+  // "optional" above cannot quietly become "never sent".
+  const withOauth = body.providers
+    .flatMap((provider) => provider.models as Record<string, unknown>[])
+    .filter((model) => model.oauthLimits !== undefined);
+  expect(withOauth.length).toBeGreaterThan(0);
 });
 
 test("a catalog with nothing to repair says nothing", async () => {

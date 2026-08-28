@@ -5,7 +5,6 @@ import {
   getCredential,
   listCredentials,
   listModels,
-  listPlugins,
   OAUTH_PROVIDERS,
   PROVIDER_IDS,
   type ProviderExists,
@@ -18,7 +17,7 @@ import { boolFlag, numberFlag, requirePositional, stringFlag, UsageError } from 
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatTime, note, paint, table } from "../output.ts";
-import { doctorPluginDeps, providerLoadable } from "./plugins.ts";
+import { pluginProviders } from "./plugins.ts";
 
 /** One word for what the router would do with this credential right now. */
 function condition(credential: {
@@ -244,12 +243,19 @@ export const credentialsAddKey: Command = {
     // has — and the only way in a plugin-supplied provider has at all, since a
     // plugin declares no OAuth flow.
     //
-    // `providerLoadable`, the strict question, not `providerDeclared` — see
-    // `commands/plugins.ts` for why the split exists and which of the four ways
-    // this goes wrong it closes. This process does not load plugins and must
-    // not, so the manifests are the only thing that can answer at all; the
-    // fourth way, a plugin that loads and never registers, is `doctor`'s
-    // `stranded credentials` line rather than anything checkable here.
+    // The **real registry**, not a manifest guess. This asked
+    // `providerLoadable`, which reads a manifest's `provider` capability — and
+    // the comment beside it said, correctly, that the fourth way this goes
+    // wrong (a plugin that loads cleanly, declares the capability, and never
+    // supplies a provider) "cannot be closed by reading a manifest at all".
+    // `readPluginProviders` closes it exactly, by reading the declaration, and
+    // it was written in the same commit and not threaded here. Confirmed by
+    // review: `omni credentials add-key ghost-ai` stored a live encrypted
+    // secret under a provider id that could never exist.
+    //
+    // So `doctor`'s `stranded credentials` line is now the safety net for a
+    // plugin that stops supplying a provider *after* the account was minted —
+    // not for one that never did.
     //
     // The same predicate is handed to `createApiKeyCredential` below rather than
     // being checked only here. Control asks the existence question again on its
@@ -259,27 +265,26 @@ export const credentialsAddKey: Command = {
     // the next call overturns is not a guard, and for one commit this one was
     // not: the widened check was the only mutant of fourteen that survived.
     //
-    // The manifests are read **once** and closed over, rather than the
-    // predicate re-reading them. It ran two filesystem sweeps per invocation:
-    // one here, one inside control. Immaterial for a command an operator types,
-    // and the reason to fix it anyway is that the next reader has no way to tell
-    // from the call site that this predicate touches a disk.
-    //
     // Annotated `ProviderExists` rather than `(id: string) => boolean`. The two
     // are the same type — `ProviderId` is a validated string — so this buys
     // nothing from the compiler and is exactly why it is worth writing: the
     // exported type had no consumer at all, which made it documentation nothing
     // pointed at.
-    const plugins = listPlugins(doctorPluginDeps(), ctx.root.root);
-    const providerExists: ProviderExists = (id) => providerLoadable(id, plugins);
+    const { descriptors, failures } = await pluginProviders(ctx.root.root);
+    // Named before the refusal, because a plugin that failed to read is the
+    // likeliest reason the provider below is about to be reported as unknown.
+    for (const failure of failures) {
+      note(ctx, writer, paint(ctx, "yellow", `plugin ${failure.id}: ${failure.reason}`));
+    }
+    const providerExists: ProviderExists = (id) => Object.hasOwn(descriptors, id);
     if (!providerExists(providerId)) {
       // The capability and the loading are both named, because those are the
       // two ways an operator who *has* installed the right plugin still lands
       // here, and "or an installed plugin that supplies one" sent them to look
       // at the one thing that was already true.
       throw new UsageError(
-        `provider must be one of ${PROVIDER_IDS.join(", ")}, or a plugin that declares the ` +
-          `"provider" capability and loads; omni plugin list shows which`,
+        `provider must be one of ${PROVIDER_IDS.join(", ")}, or a plugin that loads and ` +
+          `supplies one; omni plugin list shows which`,
       );
     }
 

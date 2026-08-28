@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   CAPABILITIES,
+  isApiCompatible,
   PLUGIN_API_VERSION,
   parseManifest,
   safeParseManifest,
@@ -50,7 +51,7 @@ test("a full manifest round-trips", () => {
   });
   expect(parseManifest(manifest)).toMatchObject({
     id: "pokemon",
-    api: 1,
+    api: PLUGIN_API_VERSION,
     capabilities: expect.arrayContaining(["storage"]),
     origins: ["https://pokeapi.co", "https://raw.githubusercontent.com"],
   });
@@ -146,4 +147,28 @@ test("a nav icon is refused, because nothing renders one", () => {
   // manifest, because nothing can be relying on it today.
   expect(safeParseManifest(base({ nav: { label: "Companion", icon: "sparkles" } })).ok).toBe(false);
   expect(safeParseManifest(base({ nav: { label: "Companion" } })).ok).toBe(true);
+});
+
+/**
+ * The generation counter has passed 1, and that fact is pinned on its own.
+ *
+ * `PLUGIN_API_VERSION` is what decides whether a plugin loads, and the commit
+ * removing `ctx.provider.register` left it at 1 — so a plugin written against the
+ * old context passed `omni plugin verify` and then failed at boot with a raw
+ * TypeError. Every other test here spells the current generation as the
+ * constant, so they follow it wherever it goes and none of them would notice it
+ * going backwards.
+ *
+ * A literal, therefore. Lowering the constant has to break something, because
+ * the one thing a compatibility generation may never do is decrease.
+ */
+test("the plugin API generation never goes backwards", () => {
+  expect(PLUGIN_API_VERSION).toBeGreaterThanOrEqual(2);
+
+  // And a manifest at generation 1 — the one `ctx.provider.register` was
+  // written against — parses fine and is refused as incompatible, which is the
+  // split that puts a version mismatch where a TypeError was.
+  const old = safeParseManifest(base({ api: 1 }));
+  expect(old.ok).toBe(true);
+  expect(old.ok && isApiCompatible(old.manifest)).toBe(false);
 });

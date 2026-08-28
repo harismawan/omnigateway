@@ -24,8 +24,21 @@
  * may never do.
  *
  * So they are independent, and only this one decides whether a plugin loads.
+ *
+ * **`2` because `ctx.provider.register` was removed.** A plugin supplying a
+ * provider now declares it as `PluginDefinition.providers`; one written against
+ * generation 1 calls a member of `PluginContext` that no longer exists. That is
+ * exactly what this counter is for, and the commit that removed the capability
+ * left it at `1` — so `omni plugin verify`, the command whose entire purpose is
+ * confidence before a restart, answered "this plugin would load", and the
+ * gateway then reported `undefined is not an object (evaluating
+ * 'ctx.provider.register')`. A raw TypeError where a version mismatch belongs.
+ *
+ * The rule above is easy to read as being about *additions* to the context and
+ * to skip for a removal. Both directions break an existing plugin; a removal
+ * breaks it louder.
  */
-export const PLUGIN_API_VERSION = 1;
+export const PLUGIN_API_VERSION = 2;
 
 /**
  * The dashboard SDK version the shipped console provides.

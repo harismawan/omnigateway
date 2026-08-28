@@ -274,7 +274,7 @@ async function missingProviders(
  * The third sibling of `danglingPins` and `missingProviders`, and the one that
  * covers what no manifest read can. `providerLoadable` refuses to mint an
  * account for a plugin the host will not load, but a plugin that loads cleanly,
- * declares the `provider` capability and never calls `ctx.provider.register`
+ * declares the `provider` capability and supplies no provider
  * supplies nothing — and the capability is *permission* to register, not proof.
  * Nothing at write time can tell the two apart without running the plugin.
  *

@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PLUGIN_API_VERSION } from "@omnigateway/plugin-api";
+import { pluginProviders } from "../src/commands/plugins.ts";
 import type { Prompt } from "../src/prompt.ts";
 import { cli, fakeService, makeRoot, openStore, silentPrompt } from "./helpers/harness.ts";
 
@@ -18,7 +20,7 @@ const MANIFEST = {
   id: "poke-dex",
   name: "Poke Dex",
   version: "1.4.2",
-  api: 1,
+  api: PLUGIN_API_VERSION,
   server: "server.js",
 } as const;
 
@@ -122,6 +124,29 @@ describe("omni plugin verify", () => {
 
     expect(result.code).not.toBe(0);
     expect(result.err).toContain("would not load");
+  });
+
+  test("a plugin built against the previous generation is refused, not run", async () => {
+    // The gate fires *downwards* too, and that is the direction it was written
+    // for. `ctx.provider.register` was removed in generation 2, so a plugin
+    // published against 1 calls a member of `PluginContext` that no longer
+    // exists — and the commit that removed it left `PLUGIN_API_VERSION` at 1, so
+    // this command answered "this plugin would load" and the gateway then
+    // reported `undefined is not an object (evaluating 'ctx.provider.register')`.
+    // A raw TypeError where a version mismatch belongs, from the one command
+    // whose purpose is confidence before a restart.
+    //
+    // `PLUGIN_API_VERSION - 1` rather than a literal `1`, so this keeps meaning
+    // "the previous generation" after the next bump.
+    const root = makeRoot();
+    place(root, "poke-dex", { ...MANIFEST, api: PLUGIN_API_VERSION - 1 });
+
+    const result = await cli(["plugin", "verify", "poke-dex"], { root });
+
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("would not load");
+    const listed = await cli(["plugin", "list", "--json"], { root });
+    expect(JSON.parse(listed.out).plugins).toMatchObject([{ loadable: false }]);
   });
 
   test("exits zero for a warning, because a warning is not a failure", async () => {
@@ -386,6 +411,44 @@ describe("omni doctor", () => {
  */
 describe("omni credentials add-key", () => {
   const PROVIDER = { ...MANIFEST, id: "poke-dex", capabilities: ["provider"] } as const;
+  /**
+   * A server entry that actually declares one, since the capability alone is no
+   * longer enough.
+   *
+   * It was for one commit, and that was the bug: the guard read the manifest,
+   * whose `provider` capability is *permission* to supply a provider rather than
+   * proof of one, so a plugin declaring the capability and nothing else minted a
+   * live encrypted secret under an id that could never exist. The guard now
+   * reads the declaration through `readPluginProviders`.
+   */
+  const DECLARES = `export default {
+  providers: [
+    {
+      descriptor: {
+        id: "poke-dex",
+        capabilities: { tools: true, images: false, reasoning: false },
+        writeOverInput: { fiveMinute: 1.25, oneHour: 2 },
+        catalog: { defaultModel: "p-1", authTypes: ["apiKey"], models: [] },
+        modelPrefixes: ["poke-"],
+        presentation: {
+          label: "Poke",
+          order: 90,
+          tone: "cyan",
+          colour: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
+        },
+      },
+      codec: {
+        buildRequest: () => ({
+          request: { url: "https://poke.test/v1", method: "POST", headers: [], body: "{}" },
+        }),
+        decode: async function* () {},
+      },
+    },
+  ],
+  setup() {
+    return {};
+  },
+};`;
   const secret: Prompt = {
     isTty: false,
     secret: async () => "pk-secret",
@@ -400,7 +463,7 @@ describe("omni credentials add-key", () => {
 
   test("stores a key for a provider a plugin supplies", async () => {
     const root = await migrated();
-    place(root, "poke-dex", PROVIDER);
+    place(root, "poke-dex", PROVIDER, { "server.js": DECLARES });
 
     const result = await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret });
     expect(result.code).toBe(0);
@@ -411,20 +474,29 @@ describe("omni credentials add-key", () => {
     expect(listed.out).not.toContain("pk-secret");
   });
 
-  test("refuses a plugin that supplies no provider", async () => {
+  test("refuses a plugin that declares the capability and supplies nothing", async () => {
     const root = await migrated();
-    // Installed, loadable, and its id is well-formed — the capability is the
-    // whole difference from the accepting case above, and without this the
-    // guard would admit every plugin. Asserted on the *listing* rather than
-    // trusting the fixture, because the distinction between this test and the
-    // next one lives entirely in what is on disk.
-    place(root, "poke-dex", MANIFEST);
+    // Installed, loadable, well-formed id, and it *declares the capability* —
+    // the only difference from the accepting case above is that its module
+    // exports no `providers`. That gap is the whole finding: the capability is
+    // permission to supply a provider, not proof of one, and reading the
+    // manifest alone minted a live encrypted secret under an id that could
+    // never exist. Asserted on the listing rather than trusting the fixture,
+    // because what separates this test from the next lives entirely on disk.
+    place(root, "poke-dex", PROVIDER);
     const before = await cli(["plugin", "list", "--json"], { root });
-    expect(JSON.parse(before.out).plugins).toMatchObject([{ id: "poke-dex", loadable: true }]);
+    expect(JSON.parse(before.out).plugins).toMatchObject([
+      { id: "poke-dex", loadable: true, capabilities: ["provider"] },
+    ]);
 
     const result = await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret });
     expect(result.code).not.toBe(0);
-    expect(result.err).toContain('"provider" capability');
+    expect(result.err).toContain("supplies one");
+
+    // Nothing stored: the failure being closed is a secret at rest, so the
+    // absence of the row is the assertion that matters.
+    const after = await cli(["credentials", "list", "--json"], { root });
+    expect(JSON.parse(after.out).credentials).toEqual([]);
   });
 
   test("refuses a provider nothing supplies", async () => {
@@ -475,33 +547,29 @@ describe("omni credentials add-key", () => {
   });
 
   /**
-   * The fourth way, which no manifest read can close, and which `doctor` carries
-   * instead.
+   * `doctor`'s net, for the account that outlives its plugin.
    *
-   * The `provider` capability is *permission* to call `ctx.provider.register`,
-   * not proof that the plugin does — `manifest.ts` does not even require a
-   * `server` entry beside it. So this credential is admitted, and the honest
-   * thing is to say where an operator finds out.
+   * `add-key` now reads the real declaration, so a plugin that supplies nothing
+   * is refused at the front door — this test used to mint an account through
+   * that gap. What it covers now is the state nothing at write time can
+   * prevent: an account minted correctly, and the plugin removed afterwards. A
+   * snapshot restored onto an installation without the plugin produces the same
+   * thing, which is why the tables are kept and reported rather than dropped.
    */
-  test("a plugin that declares the capability and registers nothing is caught by doctor", async () => {
+  test("an account whose plugin is gone is reported by doctor", async () => {
     const root = await migrated();
-    place(root, "poke-dex", PROVIDER);
+    place(root, "poke-dex", PROVIDER, { "server.js": DECLARES });
     expect((await cli(["credentials", "add-key", "poke-dex"], { root, prompt: secret })).code).toBe(
       0,
     );
 
-    // Loadable and healthy on every other line, which is exactly why this one
-    // has to exist: before it, `plugin list`, `doctor` and `add-key` all said ok.
+    // Healthy while the plugin is there — the positive control, without which
+    // "reports something" would pass for the wrong reason.
     const healthy = await cli(["doctor"], { root, service: fakeService({ root }) });
-    expect(healthy.out).toContain("stranded credentials");
-    // A declared provider is not stranded — `doctor` reads the lenient question,
-    // so a plugin that merely failed to load is reported on its own line and not
-    // accused twice.
     expect(healthy.out).toMatch(/stranded credentials\s+none/);
 
-    // Remove the plugin and the same credential becomes stranded, which is the
-    // state a restore onto an installation without the plugin leaves behind.
     rmSync(join(root, "plugins", "poke-dex"), { recursive: true });
+
     const stranded = await cli(["doctor"], { root, service: fakeService({ root }) });
     expect(stranded.out).toContain("poke-dex");
     expect(stranded.out).not.toMatch(/stranded credentials\s+none/);
@@ -540,8 +608,24 @@ describe("the CLI reads a plugin's declared provider", () => {
     server: "server.js",
   } as const;
 
-  /** A server entry that declares a provider and would notice if `setup` ran. */
-  const SERVER = `import { writeFileSync } from "node:fs";
+  /**
+   * A server entry that declares a provider, and records what actually ran.
+   *
+   * **Two** sentinels, and the paths are interpolated as string literals rather
+   * than read from `process.env`. The first version passed them through
+   * `cli({env})`, which sets `RunOptions.env` — and `context.ts` reads that as
+   * `options.env ?? process.env` and never writes it back, so inside the
+   * imported module the variable was `undefined` and the sentinel could not be
+   * written under *any* implementation. A mutant where `readPluginProviders`
+   * called `setup` and swallowed its throw survived the whole suite.
+   *
+   * The top-level sentinel is the positive control the first version also
+   * lacked: without it, "setup did not run" is equally satisfied by an import
+   * that never happened, which is the other way this test could pass while
+   * proving nothing.
+   */
+  const SERVER = (topLevel: string, inSetup: string) => `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(topLevel)}, "yes");
 export default {
   providers: [
     {
@@ -578,7 +662,7 @@ export default {
     },
   ],
   setup() {
-    writeFileSync(process.env.OMNI_TEST_SETUP_RAN, "yes");
+    writeFileSync(${JSON.stringify(inSetup)}, "yes");
     return {};
   },
 };`;
@@ -586,7 +670,9 @@ export default {
   async function installed(): Promise<string> {
     const root = makeRoot();
     expect((await cli(["db", "migrate"], { root })).code).toBe(0);
-    place(root, "acme-ai", PROVIDER, { "server.js": SERVER });
+    place(root, "acme-ai", PROVIDER, {
+      "server.js": SERVER(join(root, "imported"), join(root, "setup-ran")),
+    });
     expect(
       (
         await cli(["credentials", "add-key", "acme-ai"], {
@@ -600,6 +686,44 @@ export default {
     // not in, and deliberately so: the CLI's catalog *listing* omits plugin
     // models by design. What these commands read is the stored target, and a
     // target naming any well-formed provider saves.
+    const store = await openStore(root);
+    await store.config.putModel({
+      id: "fast",
+      strategy: "priority",
+      isAlias: false,
+      targets: [
+        {
+          provider: "acme-ai",
+          model: "acme-1",
+          tier: 1,
+          weight: 1,
+          costPerMTok: { input: 5, output: 25 },
+          capabilities: { tools: true, images: false, reasoning: false },
+        },
+      ],
+    });
+    store.close();
+    return root;
+  }
+
+  /**
+   * The same installation, but with a plugin whose module throws on import.
+   *
+   * A separate root rather than a rewrite of `installed()`'s, because a module
+   * is cached per process: overwriting `server.js` after the first import leaves
+   * the good one in the cache and the test passes against it. The manifest is
+   * untouched, so the plugin is still `loadable` and still declares the
+   * capability — the failure is in the module, which is where a real one is.
+   *
+   * The credential and the model are seeded through the store, since `add-key`
+   * would (correctly) refuse a provider it cannot read.
+   */
+  async function broken(): Promise<string> {
+    const root = makeRoot();
+    expect((await cli(["db", "migrate"], { root })).code).toBe(0);
+    place(root, "acme-ai", PROVIDER, {
+      "server.js": 'throw new Error("upstream SDK missing");',
+    });
     const store = await openStore(root);
     await store.config.putModel({
       id: "fast",
@@ -668,7 +792,14 @@ export default {
     // exist.
     const root = makeRoot();
     expect((await cli(["db", "migrate"], { root })).code).toBe(0);
-    place(root, "acme-ai", { ...PROVIDER, api: 99 }, { "server.js": SERVER });
+    place(
+      root,
+      "acme-ai",
+      { ...PROVIDER, api: 99 },
+      {
+        "server.js": SERVER(join(root, "imported"), join(root, "setup-ran")),
+      },
+    );
     const store = await openStore(root);
     await store.config.putModel({
       id: "fast",
@@ -699,20 +830,117 @@ export default {
     expect(result.out).toContain("provider:missing");
   });
 
-  test("neither command runs the plugin's setup", async () => {
-    // The property the declared field buys, asserted rather than argued. The
-    // sentinel is written by `setup` and by nothing else, so its absence is the
-    // whole claim: `import()` ran the module, and `setup` was never called.
-    const root = await installed();
-    const sentinel = join(root, "setup-ran");
+  /**
+   * A plugin that cannot be read is *named*, by both commands and in both
+   * formats.
+   *
+   * This is the original bug wearing a different coat. When the read fails, the
+   * provider is absent, so `omni setup` writes a config with no context limit
+   * and `omni models dry-run` reports `provider:missing` — and if neither says
+   * why, the operator is back to a silent omission and a red finding with no
+   * cause. `setup` discarded the failures entirely, and `note()` is a no-op under
+   * `--json`, so a script saw `provider:missing` with the explanation deleted.
+   */
+  test("a plugin that fails to import is named by dry-run, on stderr and in --json", async () => {
+    // Built with the throwing entry from the start, not overwritten after
+    // `installed()` — Bun caches a module per process, so a rewrite after the
+    // first import has no effect and the test would pass against the good one.
+    const root = await broken();
 
-    await cli(["models", "dry-run", "fast"], { root, env: { OMNI_TEST_SETUP_RAN: sentinel } });
-    await cli(["setup", "claude", "--dry-run"], {
+    const human = await cli(["models", "dry-run", "fast"], { root });
+    expect(human.code).toBe(0);
+    expect(human.err).toContain("acme-ai");
+    expect(human.err).toContain("upstream SDK missing");
+
+    const json = await cli(["models", "dry-run", "fast", "--json"], { root });
+    const body = JSON.parse(json.out) as {
+      pluginFailures: { id: string; reason: string }[];
+      excluded: { reason: string }[];
+    };
+    // The cause travels with the consequence. A payload carrying
+    // `provider:missing` and nothing else is what a support ticket is built on.
+    expect(body.excluded.map((row) => row.reason)).toContain("provider:missing");
+    expect(body.pluginFailures).toHaveLength(1);
+    expect(body.pluginFailures[0]?.id).toBe("acme-ai");
+    expect(body.pluginFailures[0]?.reason).toContain("upstream SDK missing");
+  });
+
+  test("a plugin that fails to import is named by setup too", async () => {
+    // `setup` is the command whose output outlives it, so a silent omission
+    // here is the more expensive one: the agent falls back to its own default
+    // while the gateway advertises the real window.
+    const root = await broken();
+
+    const result = await cli(["setup", "opencode", "--dir", root], {
       root,
-      prompt: silentPrompt,
-      env: { OMNI_TEST_SETUP_RAN: sentinel },
+      prompt: {
+        isTty: true,
+        secret: async () => "",
+        confirm: async () => true,
+        input: async () => "fast",
+      },
     });
 
-    expect(existsSync(sentinel)).toBe(false);
+    expect(result.code).toBe(0);
+    expect(result.err).toContain("acme-ai");
+    expect(result.err).toContain("upstream SDK missing");
+    // And the limit really is gone, so the warning is not decorating a working
+    // path — this is the state it exists to explain.
+    const config = JSON.parse(readFileSync(join(root, "opencode.json"), "utf8")) as {
+      provider: { omnigateway: { models: Record<string, { limit?: unknown }> } };
+    };
+    expect(config.provider.omnigateway.models.fast?.limit).toBeUndefined();
+  });
+
+  test("the merged registry keeps its null prototype", () => {
+    // Asserted directly rather than through a command, and the reason is worth
+    // recording: every reader that happens to exist today uses `Object.hasOwn`,
+    // which is not fooled by a prototype key — so no behavioural test can see
+    // this, and one written to try would pass under the spread that loses it.
+    //
+    // The invariant is the rule, not a consequence of one. CLAUDE.md states it
+    // for *every* provider-keyed table, precisely because a reader that asks
+    // `providers[id]?.catalog` — `resolveModelLimits` does — gets the `Object`
+    // constructor for `"constructor"` and throws on the next property access.
+    // A derived table that quietly drops it is a trap set for the next reader.
+    const root = makeRoot();
+    return pluginProviders(root).then(({ descriptors }) => {
+      expect(Object.getPrototypeOf(descriptors)).toBeNull();
+      expect((descriptors as Record<string, unknown>).constructor).toBeUndefined();
+      // And it really is populated, so "no prototype" is not just "no object".
+      expect(Object.keys(descriptors)).toContain("anthropic");
+    });
+  });
+
+  test("both commands import the module and neither calls its setup", async () => {
+    // The property the declared field buys, asserted rather than argued — and
+    // asserted from *both* ends, because each alone is satisfiable for the wrong
+    // reason. `imported` proves the module really was evaluated, so
+    // `setup-ran`'s absence means `setup` was skipped rather than that nothing
+    // happened at all.
+    const root = await installed();
+    const imported = join(root, "imported");
+    const ranSetup = join(root, "setup-ran");
+
+    expect((await cli(["models", "dry-run", "fast"], { root })).code).toBe(0);
+    // Written by the module's top level, so its presence proves a CLI command
+    // really evaluated the module. Not deleted and re-checked between commands:
+    // Bun caches a module per process, so the second import is a cache hit and
+    // the top level does not run again. That is correct — re-running a
+    // stranger's top-level code once per command would be worse — and it is why
+    // this asserts "was imported at all" rather than "was imported by each".
+    expect(existsSync(imported)).toBe(true);
+    expect(existsSync(ranSetup)).toBe(false);
+
+    await cli(["setup", "claude", "--dir", root], {
+      root,
+      prompt: {
+        isTty: true,
+        secret: async () => "",
+        confirm: async () => true,
+        input: async () => "fast",
+      },
+    });
+    expect(existsSync(ranSetup)).toBe(false);
   });
 });

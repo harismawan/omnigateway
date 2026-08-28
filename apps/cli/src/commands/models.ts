@@ -331,7 +331,11 @@ export const modelsDryRun: Command = {
       note(ctx, writer, paint(ctx, "yellow", `plugin ${failure.id}: ${failure.reason}`));
     }
 
-    emit(ctx, writer, result, () => {
+    // Carried in the payload, not only on stderr. `note()` is a no-op under
+    // `--json`, so a script or a support ticket built on it saw
+    // `provider:missing` with the cause deleted — and the cause is the whole
+    // reason these lines are printed before the result.
+    emit(ctx, writer, { ...result, pluginFailures: failures }, () => {
       const header = fields([
         ["model", result.modelId],
         ["strategy", result.strategy],

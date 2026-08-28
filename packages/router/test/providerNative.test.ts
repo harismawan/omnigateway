@@ -93,6 +93,58 @@ test("a request owned by two providers names both", () => {
   expect([...requiredProviders(both)].sort()).toEqual(["acme", "anthropic"]);
 });
 
+test("two history blocks from different providers name both", () => {
+  // **Not the same test as the one above**, and the difference is the whole
+  // point. That one puts one owner in `tools` and the other in `messages`, so
+  // the tools loop has already contributed before the history loop runs — which
+  // means it cannot see a history loop that returns on its first hit. The commit
+  // fixing this named *two* short-circuits and only one of them was pinned:
+  // restoring the second passed the entire repository suite, and the request
+  // then died at encode as a non-retryable 500 instead of failing to route.
+  const mixed: ChatRequest["messages"] = [
+    { role: "assistant", content: [acmeNative[0]?.content[0] as never] },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "providerNative",
+          provider: "anthropic",
+          blockType: "web_search_tool_result",
+          data: { tool_use_id: "srvtoolu_1", content: [] },
+        },
+      ],
+    },
+  ];
+  expect([...requiredProviders({ ...req, messages: mixed })].sort()).toEqual(["acme", "anthropic"]);
+});
+
+test("a provider-native block in the system prompt names its producer", () => {
+  // `ChatRequest.system` is a `ContentBlock[]`, so it carries these too, and it
+  // was not scanned. Such a request routed to *any* provider with an empty
+  // exclusion list — while this function's own first line claims to name every
+  // provider the request carries.
+  const system: ChatRequest["system"] = [
+    {
+      type: "providerNative",
+      provider: "acme",
+      blockType: "acme_lookup",
+      data: { id: "srv_1" },
+    },
+  ];
+  expect([...requiredProviders({ ...req, system })]).toEqual(["acme"]);
+
+  const { pairs, excluded } = eligible({
+    request: { ...req, system },
+    model: model([target({ provider: "openai", model: "gpt-5" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "o", provider: "openai" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+  expect(pairs).toEqual([]);
+  expect(excluded).toMatchObject([{ kind: "target", reason: "capability:providerNative" }]);
+});
+
 test("a request owned by two providers can be served by neither", () => {
   const { pairs, excluded } = eligible({
     request: { ...req, tools: [webSearch], messages: acmeNative },

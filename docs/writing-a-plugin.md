@@ -23,6 +23,11 @@ overreach impossible and makes a plugin's intent auditable from one file. It
 does not contain hostile code, which can `import` from `@omni/store` and read
 `process.env` regardless of what the host hands it.
 
+There is **one deliberate exception** to the list of things the context never
+carries, and it is stated here rather than buried: a plugin supplying a provider
+receives the decrypted credential for **its own** provider, because a codec that
+cannot authenticate cannot build a request. See §6.
+
 Install plugins you wrote or audited. If you are packaging one for other people,
 say the same thing in your own README.
 
@@ -69,7 +74,7 @@ your plugin.
   "id": "pokemon",
   "name": "Pokémon Companion",
   "version": "1.0.0",
-  "api": 1,
+  "api": 2,
   "sdk": "^0.1.0",
   "server": "server/index.js",
   "ui": "ui/index.js",
@@ -84,7 +89,7 @@ a URL segment, a SQL table prefix and a log field value, so it is validated once
 here and never escaped anywhere downstream.
 
 `api` is the host's plugin-API **generation** — a counter that only goes up, not
-the npm major of `@omnigateway/plugin-api`. It is `1` today while that package is
+the npm major of `@omnigateway/plugin-api`. It is `2` today while that package is
 `0.1.x`, and the two are independent on purpose: semver resets a stabilising
 package to `1.0.0`, and a compatibility generation may never go backwards. A
 mismatch skips the plugin at boot, server half included.
@@ -98,10 +103,17 @@ Note the range shape while the SDK is pre-1.0: `^0.1.0` means `>=0.1.0 <0.2.0`.
 Every minor is a breaking change until it reaches `1.0.0`, which is the correct
 promise for a contract that has not settled.
 
-`capabilities` is the whole list of what you get. Anything you did not declare
-is absent from the context, so reaching for it is a type error rather than a
-runtime surprise. `origins` is required with `net:outbound` and forbidden
-without it. `channels` is the push socket, covered in §4.
+`capabilities` is the whole list of what you get, with **one exception named
+below**. Anything you did not declare is absent from the context, so reaching for
+it is a type error rather than a runtime surprise. `origins` is required with
+`net:outbound` and forbidden without it. `channels` is the push socket, covered
+in §4.
+
+The exception is `provider`, which is a permission rather than a context member.
+Declaring it lets your plugin supply a provider through the `providers` field on
+the object you export — see §6 — and omitting it makes that field a load failure.
+It is the one capability you cannot reach through `ctx`, because a descriptor the
+host can only obtain by running your `setup` is one the CLI cannot read at all.
 
 `server` and `ui` are both optional; declare at least one.
 
@@ -243,7 +255,114 @@ redaction boundary — it is what makes "prompts never reach stdout" enforced by
 the compiler rather than by review. Handing plugins a wider one would give that
 away.
 
-## 6. The UI half
+## 6. Supplying a provider
+
+A plugin can add a whole upstream — a provider the gateway routes to, prices, and
+shows in the console beside the built-in ones. Declare `provider` in the
+manifest, then export the descriptor and codec from your server entry:
+
+```js
+export default {
+  providers: [{ descriptor, codec }],
+  setup(ctx) {
+    // ...
+  },
+};
+```
+
+**A field, not a `ctx` capability, and the reason is worth knowing before you
+write one.** The gateway is not the only reader. `omni setup` writes a model's
+context window into your agent's own configuration file, and `omni models
+dry-run` reports what would route — and neither may run your `setup`, because
+`setup` opens channels, applies migrations and mounts routes, which is a
+diagnostic with side effects. A descriptor that only exists after your `setup`
+has run is one only the gateway can see, so those commands answered from the
+built-in providers and silently said nothing about yours.
+
+Reading the field still imports your module, so its **top-level** code runs in
+the CLI. Keep it cheap and side-effect free: open sockets and read files in
+`setup`, not beside your imports. A module that never finishes evaluating is
+abandoned after five seconds and reported, rather than hanging the command.
+
+The descriptor is the same shape a built-in has, and every field is required —
+there are no defaults, because `writeOverInput` defaulting to zero would
+underprice cache writes silently and permanently:
+
+```js
+const descriptor = {
+  id: "acme-ai",                       // must equal your plugin id
+  capabilities: { tools: true, images: false, reasoning: true },
+  writeOverInput: { fiveMinute: 1.25, oneHour: 2 },
+  catalog: {
+    defaultModel: "acme-1",
+    authTypes: ["apiKey"],
+    models: [
+      {
+        id: "acme-1",
+        label: "Acme One",
+        pricing: { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
+        limits: { contextWindow: 200_000, maxOutputTokens: 8_192 },
+      },
+    ],
+  },
+  modelPrefixes: ["acme-"],            // infer this provider from a bare model name
+  presentation: {
+    label: "Acme",
+    order: 90,
+    tone: "cyan",
+    colour: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
+  },
+};
+```
+
+The codec is two functions and an optional third:
+
+```js
+const codec = {
+  buildRequest({ request, model, credentials }) {
+    return {
+      request: {
+        url: "https://acme.example/v1/chat",
+        method: "POST",
+        headers: [["authorization", `Bearer ${credentials.apiKey}`]],
+        body: JSON.stringify(toAcmeWire(request, model)),
+      },
+    };
+  },
+  async *decode(response) {
+    // yield StreamEvents
+  },
+  classifyError({ status, body }) {
+    // optional: return a GatewayError, or undefined to accept the default
+  },
+};
+```
+
+`buildRequest` receives the **decrypted credential for your own provider**, and
+that is the one documented exception to everything §0 says about what a plugin is
+handed. A codec that cannot authenticate cannot build a request. It is bounded
+two ways: routing only produces candidates for your own provider id, so you see
+your provider's secrets and no other; and the codec never holds the HTTP client
+or the store, so it cannot send them anywhere the host did not ask for.
+
+Some rules the host enforces, so you find out at load rather than in production:
+
+- Your `descriptor.id` must equal your plugin id. You cannot supply a provider
+  under another plugin's name, for the same reason you cannot open its channel
+  topic or name its tables.
+- You cannot take a built-in's name. A plugin directory called `anthropic` is
+  refused rather than allowed to win.
+- Every descriptor field is checked structurally, not just for presence — a
+  `catalog` that is not a catalog is a load failure, not a crash at the first
+  request that reaches it.
+- Declaring `providers` without the `provider` capability is a load failure. The
+  manifest is the audit trail.
+
+Your account is added with `omni credentials add-key <your-plugin-id>`. There is
+no `connect` flow for a plugin provider: `connect` covers OAuth flows the
+built-ins declare, and a plugin declares none.
+
+## 7. The UI half
 
 ```js
 import { definePluginUI } from "@omnigateway/dashboard-sdk";
@@ -305,7 +424,7 @@ re-rendering.
 Your mount sits inside an error boundary. A render failure shows an inline panel
 naming your plugin and leaves the rest of the console working.
 
-## 7. Install and verify
+## 8. Install and verify
 
 ```bash
 omni plugin install ./my-plugin           # or a tarball; runs nothing from it
@@ -321,7 +440,7 @@ entry.
 Plugins load once at boot. There is no hot reload: `install` writes files and
 tells you to restart.
 
-## 8. Shipping it
+## 9. Shipping it
 
 `omni plugin install` takes a directory, a `.tgz`, an `https://` URL, or an npm
 package name. Publishing to npm is the least work for whoever installs it:

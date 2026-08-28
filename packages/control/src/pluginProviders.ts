@@ -1,7 +1,12 @@
 import { join } from "node:path";
 import { describeError } from "@omni/ir";
 import type { ProviderAdapter, ProviderCodec, ProviderDescriptor } from "@omni/providers";
-import { codecAdapter, isProviderIdFormat, PROVIDER_ID_PATTERN } from "@omni/providers";
+import {
+  codecAdapter,
+  isProviderIdFormat,
+  PROVIDER_DESCRIPTORS,
+  PROVIDER_ID_PATTERN,
+} from "@omni/providers";
 import type { PluginDefinition } from "@omnigateway/plugin-api";
 
 /**
@@ -150,12 +155,12 @@ function checkDescriptor(id: string, record: Record<string, unknown>): void {
 }
 
 /**
- * Validates what a plugin passed to `ctx.provider.register`.
+ * Validates one entry of a plugin's `providers`.
  *
- * `PluginProviderRegistry` types its argument as `unknown` — that package is
- * published and cannot import `@omni/ir`, so the real types are not available
- * to it until a later sub-project. This is where that looseness is paid for:
- * nothing is trusted because it typechecked on the plugin's side.
+ * `PluginProvider` types both halves as `unknown` — that package is published
+ * and cannot import `@omni/ir`, so the real types are not available to it until
+ * a later sub-project. This is where that looseness is paid for: nothing is
+ * trusted because it typechecked on the plugin's side.
  *
  * Every failure throws. `setup` failures skip the plugin and are reported, which
  * is rule 15 and is what makes this safe to be strict about: the cost of
@@ -286,6 +291,28 @@ export function readProviders(
     throw new Error(`plugin ${pluginId} declares more than one provider`);
   }
 
+  // A plugin may not take a built-in's name, and this is the **one** place that
+  // rule lives. It was written twice: `installPluginProviders` refused the
+  // collision at the gateway's registry write, and the CLI's merge applied the
+  // plugin's descriptor *over* the built-in — so `omni setup` wrote a plugin's
+  // context window into an agent's configuration file for `anthropic` while the
+  // gateway served through the real adapter at a different one. Two copies of a
+  // rule is how they come to disagree, and these disagreed on their first day.
+  //
+  // Here rather than at either call site because this is the only function both
+  // the loader and the CLI go through. `installPluginProviders` keeps its own
+  // check as the guard on `registerProvider`'s throw; it is a second line now,
+  // not the rule.
+  //
+  // The table holds only built-ins while this runs: the loader collects every
+  // plugin's providers before installing any of them.
+  for (const entry of declared) {
+    const id = (entry.descriptor as { id?: unknown } | null)?.id;
+    if (typeof id === "string" && Object.hasOwn(PROVIDER_DESCRIPTORS, id)) {
+      throw new Error(`plugin ${pluginId} declares a provider named ${id}, which is built in`);
+    }
+  }
+
   return declared.map((entry) => validateRegistration(pluginId, entry));
 }
 
@@ -298,6 +325,51 @@ export function readProviders(
  * below at all, since its loader already holds the imported definition.
  */
 export type PluginImporter = (entry: string) => Promise<unknown>;
+
+/**
+ * How long a plugin's module may take to evaluate before it is given up on.
+ *
+ * `import()` runs the module's top-level code, and top-level code can `await`.
+ * A plugin whose entry opens a socket to an unreachable host, or writes
+ * `await new Promise(() => {})` by accident, hung `omni setup` and
+ * `omni models dry-run` **forever** — no output, no exit, and every plugin after
+ * it in the list unread, because the loop is sequential. Rule 15 says a load
+ * failure is skipped and reported, never fatal; a hang is neither, and it landed
+ * on a diagnostic an operator reaches for when something is already wrong.
+ *
+ * Five seconds because this is not a load, it is a read: nothing here waits on a
+ * network by design, so any module taking longer is doing something the CLI
+ * should not be waiting for. The gateway keeps no such bound — a plugin that
+ * hangs its boot is visible as a gateway that does not start, and cutting a
+ * legitimate slow initialisation short there would be worse.
+ */
+export const PLUGIN_IMPORT_TIMEOUT_MS = 5_000;
+
+/**
+ * Rejects if the promise has not settled in time, and clears its timer either
+ * way.
+ *
+ * The timer is cleared in a `finally` rather than only on the happy path: a
+ * pending `setTimeout` keeps a CLI process alive after its work is done, so a
+ * command whose plugins all imported cleanly would still sit for the full
+ * timeout before exiting. Losing the race does not cancel the import — nothing
+ * can, once a module has begun evaluating — so the module goes on running in the
+ * background until the process exits. That is acceptable here and would not be
+ * in the gateway, which is why the gateway does not use this.
+ */
+async function withTimeout<T>(work: Promise<T>, ms: number, reason: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(reason)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 export type PluginProviderRead = {
   /** Every provider read, keyed by id, ready to hand to a router or a pricer. */
@@ -334,6 +406,11 @@ export type PluginProviderRead = {
 export async function readPluginProviders(
   plugins: readonly { id: string; path: string; loadable: boolean; manifest: unknown }[],
   importer: PluginImporter,
+  // Injected so a test can drive the timeout without waiting for it, and
+  // defaulted so no caller has to know it exists. `setTimeout` rather than a
+  // clock, because what is being bounded is wall time inside someone else's
+  // module — there is no tick to advance.
+  timeoutMs: number = PLUGIN_IMPORT_TIMEOUT_MS,
 ): Promise<PluginProviderRead> {
   // Null-prototype, like every other provider-keyed table. A provider id arrives
   // from a client's `model` name and from unvalidated JSON in
@@ -360,7 +437,11 @@ export async function readPluginProviders(
     }
 
     try {
-      const module = await importer(join(plugin.path, server));
+      const module = await withTimeout(
+        importer(join(plugin.path, server)),
+        timeoutMs,
+        `reading its provider took longer than ${timeoutMs}ms`,
+      );
       const definition = (module as { default?: unknown }).default;
       if (
         typeof definition !== "object" ||
