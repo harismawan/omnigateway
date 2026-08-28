@@ -829,6 +829,65 @@ describe("AccountsBoard quota history", () => {
     }
   });
 
+  test("a rolled-over window keeps its history and claims nothing about the rate", async () => {
+    // The row is overwritten by the poller and by nothing else, so for up to a
+    // poll interval after a rollover the console held the spent window's rate,
+    // its exhaustion instant and a countdown to a reset already behind it. The
+    // readings underneath were measured and stay drawn; every figure inferred
+    // from them goes to "unknown", and the note says which of stale and rolled
+    // over happened.
+    const restore = measureCharts();
+    try {
+      const user = userEvent.setup();
+      const now = Date.now();
+      const resetsAt = now - 60_000;
+      stubAccounts({
+        "GET /api/credentials/health": () => ({
+          health: [health()],
+          quota: [quota({ used: 900, limit: 1_000, observedAt: now - 30_000, resetsAt })],
+          // What `burnFor` returns for a rolled-over reading: placed, but
+          // claiming nothing about what is being spent inside it.
+          burn: [
+            burn({
+              windowStartsAt: resetsAt - 5 * 3_600_000,
+              ratePerHour: null,
+              exhaustsAt: null,
+              survives: null,
+              stale: true,
+            }),
+          ],
+        }),
+        "GET /api/credentials/quota/history": () => ({
+          samples: [
+            quotaSample({ observedAt: now - 3_000_000, used: 400, resetsAt }),
+            quotaSample({ observedAt: now - 2_000_000, used: 900, resetsAt }),
+          ],
+          gatewayRates,
+        }),
+      });
+      const { container } = renderWithProviders(<AccountsBoard />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+      );
+      await screen.findByText("Window average");
+
+      const fact = (label: string): string =>
+        (screen.getByText(label).parentElement?.textContent ?? "").replace(label, "");
+
+      expect(screen.getByText("· rolled over, waiting for the next reading")).toBeTruthy();
+      expect(fact("Window average")).toBe("unknown");
+      expect(fact("Estimate")).toBe("unknown");
+      expect(fact("Projected")).toBe("unknown");
+      // Not blanked: the panel that used to say "reading is stale" here threw
+      // away real history over a reading taken thirty seconds ago.
+      expect(screen.queryByText("reading is stale")).toBeNull();
+      await waitFor(() => expect(dashedPaths(container, null)).toHaveLength(1));
+    } finally {
+      restore();
+    }
+  });
+
   test("a window read past its own reset still draws its run as one unbroken curve", async () => {
     // A poll landing after the stated reset — rollover lag or clock skew inside
     // one interval — puts the budget's endpoint, which sits at `resetsAt` by
@@ -1275,16 +1334,23 @@ describe("AccountsBoard quota pace", () => {
     }
   });
 
-  test("names what the reading projects to by the reset", async () => {
+  test("names the ceiling, not the overshoot, when the window fills before it resets", async () => {
     const now = Date.now();
     await openPace(now);
 
-    // 62% already spent, 24 points an hour, four hours and five minutes to go.
+    // 62% already spent, 24 points an hour, four hours and five minutes to go:
+    // unbounded that is 160%, and the pace reaches the ceiling well before the
+    // reset. "160% by reset" invited the reading that it is fine until then.
     expect(screen.getByText("Projected")).toBeTruthy();
-    expect(factValue("Projected")).toBe("160% of limit by reset");
+    expect(factValue("Projected")).toBe("100% of limit before it resets");
   });
 
-  test("lifts the ceiling of the chart so an overshoot is visible rather than clipped", async () => {
+  test("holds the chart axis at one full window whatever the pace projects", async () => {
+    // The axis used to scale to the projection's endpoint. `ratePerHour` is a
+    // whole-window average, so in the minutes after a rollover it divides `used`
+    // by an elapsed span of minutes: the endpoint lands in the thousands of
+    // percent and every measured reading is flattened onto the floor of the
+    // plot. The projection is truncated at the ceiling instead.
     const restore = measureCharts();
     try {
       const now = Date.now();
@@ -1292,7 +1358,10 @@ describe("AccountsBoard quota pace", () => {
 
       await waitFor(() => expect(axisTicks(container, "yAxis").length).toBeGreaterThan(0));
       const top = Math.max(...axisTicks(container, "yAxis").map((tick) => Number.parseFloat(tick)));
-      expect(top).toBeGreaterThanOrEqual(160);
+      expect(top).toBe(100);
+      // Still drawn: truncated is not suppressed, and the dashed line reaching
+      // the ceiling is what says the window fills.
+      expect(dashedPaths(container, PACE_DASH.projection)).toHaveLength(1);
     } finally {
       restore();
     }

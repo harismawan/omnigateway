@@ -1,7 +1,12 @@
 // The types subpath, not the package root: `@omni/store` pulls `openDb`,
 // `createStore`, and `encryption.ts`, which would put `bun:sqlite` and
 // `node:crypto` in the router's module graph. The router stays pure.
-import { type CredentialView, durationFor, type QuotaWindow } from "@omni/store/types";
+import {
+  type CredentialView,
+  durationFor,
+  type QuotaWindow,
+  quotaRolledOver,
+} from "@omni/store/types";
 
 /**
  * How the router reads a quota snapshot.
@@ -68,7 +73,10 @@ function paceAdjusted(window: QuotaWindow, now: number): number {
  * The tightest usable window wins, because that is the one that will block
  * first. A window is usable only if it was actually observed, is recent enough
  * to believe, and has not already rolled over: an exhausted reading past its
- * own reset time describes a window that no longer exists.
+ * own reset time describes a window that no longer exists. That last question
+ * is `quotaRolledOver`, asked from the same definition the console and the
+ * estimate ask it from — it was spelled out here alone once, and every other
+ * reader went on believing the spent window.
  */
 export function quotaHeadroom(
   credential: CredentialView,
@@ -84,7 +92,7 @@ export function quotaHeadroom(
       w.limit > 0 &&
       w.observedAt > 0 &&
       now - w.observedAt <= staleAfter &&
-      (w.resetsAt === null || w.resetsAt > now),
+      !quotaRolledOver(w, now),
   );
 
   if (usable.length === 0) {

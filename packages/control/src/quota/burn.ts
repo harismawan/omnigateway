@@ -1,5 +1,5 @@
 import { quotaStaleAfterMs } from "@omni/router";
-import { durationFor, type QuotaWindow, type WindowType } from "@omni/store";
+import { durationFor, type QuotaWindow, quotaRolledOver, type WindowType } from "@omni/store";
 
 /**
  * How fast a quota window is being spent, and whether it will last.
@@ -23,7 +23,13 @@ export type BurnEstimate = {
   exhaustsAt: number | null;
   /** Whether the window outlives its own reset. Null only when the estimate is suppressed. */
   survives: boolean | null;
-  /** True when the reading is too old to believe; every estimate above is then null. */
+  /**
+   * True when the reading must not be extrapolated from; every estimate above
+   * is then null. Two ways in: the reading is too old to believe, or it counts
+   * a window that has already rolled over. The second is not a kind of the
+   * first — such a reading is minutes old — but the consequence is the same,
+   * and a surface that phrases them differently asks `quotaRolledOver` itself.
+   */
   stale: boolean;
 };
 
@@ -66,6 +72,24 @@ export function burnFor(window: QuotaWindow, input: BurnInput): BurnEstimate {
   if (window.observedAt <= 0) return suppressed(window);
   if (input.now - window.observedAt > quotaStaleAfterMs(input.pollIntervalMs)) {
     return suppressed(window);
+  }
+  // A window whose own reset is behind us. Nothing below can tell: the poller
+  // overwrites the row and nothing else does, so for up to one poll interval
+  // after a rollover this counts a window that has ended, and `windowStartOf`
+  // still counts back from `resetsAt` to give a start, a span and a rate that
+  // all look ordinary. The router has always dropped these.
+  //
+  // Where it starts is kept, and only the inference is dropped. That instant is
+  // a restatement of `resetsAt` and the window's own length, true of the ended
+  // window as much as of a live one, and it is what the console charts the
+  // retained readings against — readings that were measured and stay measured.
+  // The rate, the exhaustion instant and the verdict are claims about a window
+  // still being spent, and there is no longer one.
+  if (quotaRolledOver(window, input.now)) {
+    return {
+      ...suppressed(window),
+      windowStartsAt: windowStartOf(window),
+    };
   }
 
   const windowStartsAt = windowStartOf(window);

@@ -86,6 +86,35 @@ export function sameWindow(a: number | null, b: number | null): boolean {
 }
 
 /**
+ * Whether a stored reading describes a window that has already ended.
+ *
+ * One definition, for the reason `sameWindow` and `servesTarget` have one. A
+ * `quota_windows` row is overwritten by the poller and by nothing else, so
+ * between a rollover and the next probe — up to `quotaPollIntervalMs`, five
+ * minutes by default — the newest reading on file counts a window that no
+ * longer exists. Nothing about the reading itself says so: it was taken minutes
+ * ago, so every staleness check reports it as current, and the only signal is
+ * that its own stated reset is now behind us.
+ *
+ * The router has always dropped these, and for a while it was the only reader
+ * that did: the console kept drawing the spent window's rate, its exhaustion
+ * instant and its bar, under a legend counting down to a reset in the past.
+ * Asking the question in one place is what keeps those two answers the same.
+ *
+ * Not the same verdict as staleness, and callers that phrase both should say
+ * staleness first: a probe that has not got through for hours makes both true,
+ * and only one of them is something the operator can act on.
+ *
+ * A window with no stated reset is never rolled over. Nothing was said about
+ * when it ends, which is not the same as having ended — reading it as rolled
+ * over would suppress every figure for a provider that simply does not report
+ * one.
+ */
+export function quotaRolledOver(window: { resetsAt: number | null }, now: number): boolean {
+  return window.resetsAt !== null && window.resetsAt <= now;
+}
+
+/**
  * The fields a burn estimate has to carry to be judged.
  *
  * Spelled structurally so this leaf stays clear of `@omni/control`, which owns

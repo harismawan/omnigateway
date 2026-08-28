@@ -2,11 +2,29 @@ import { expect, test } from "bun:test";
 import {
   durationFor,
   type QuotaBurnReading,
+  quotaRolledOver,
   quotaVerdict,
   SAME_WINDOW_TOLERANCE_MS,
   sameWindow,
   WINDOW_DURATION_MS,
 } from "../src/types.ts";
+
+const NOW = 1_700_000_000_000;
+
+test("a window is rolled over once its own reset is behind us", () => {
+  // The row is overwritten by the poller and by nothing else, so between the
+  // reset and the next probe it describes a window that has already ended.
+  expect(quotaRolledOver({ resetsAt: NOW - 1 }, NOW)).toBe(true);
+  expect(quotaRolledOver({ resetsAt: NOW }, NOW)).toBe(true);
+  expect(quotaRolledOver({ resetsAt: NOW + 1 }, NOW)).toBe(false);
+});
+
+test("a window with no stated reset is never rolled over", () => {
+  // Nothing was said about when it ends, which is not the same as having ended.
+  // Reading it as rolled over would suppress every figure for a provider that
+  // simply does not report a reset.
+  expect(quotaRolledOver({ resetsAt: null }, NOW)).toBe(false);
+});
 
 test("a provider-reported duration outranks the nominal one", () => {
   // Codex buckets a three-hour window under the `fiveHour` name. Inferring the

@@ -281,6 +281,38 @@ describe("quotaLegend", () => {
     expect(legend).toBe("5h · resets in 1h");
   });
 
+  test("says a window is waiting on its next reading once its reset has passed", () => {
+    // The poller overwrites the row and nothing else does, so for up to one
+    // poll interval after a rollover this reading describes a window that has
+    // already ended. "resets 5m ago" is a countdown run backwards, printed
+    // beside a bar drawn from the spent window's own `used`.
+    const legend = quotaLegend(
+      quota({ observedAt: NOW - 240_000, resetsAt: NOW - 300_000 }),
+      NOW,
+      POLL_MS,
+      formatRelative,
+      burn(),
+    );
+
+    expect(legend).toBe("5h · rolled over, waiting for the next reading");
+    expect(legend).not.toContain("empty");
+  });
+
+  test("a stale reading is reported as stale even once its reset has passed", () => {
+    // Both are true of a probe that has not got through for hours, and only one
+    // of them is the operator's problem. Reporting the rollover would describe
+    // the provider's clock while the gateway is the thing that stopped asking.
+    const legend = quotaLegend(
+      quota({ observedAt: NOW - 3_600_000, resetsAt: NOW - 1_800_000 }),
+      NOW,
+      POLL_MS,
+      formatRelative,
+      burn(),
+    );
+
+    expect(legend).toBe("5h · stale, read 1h ago");
+  });
+
   test("suppression wins over the estimate on a stale reading", () => {
     // The burn block deliberately still carries numbers: the guard is the
     // staleness of the reading, not whether an ETA happens to be present.
@@ -631,6 +663,40 @@ describe("projectedPace", () => {
         (pace.to.at - pace.from.at);
 
     expect(Math.abs(crossesAt - exhaustsAt)).toBeLessThan(1);
+  });
+
+  test("stops at the ceiling rather than projecting past it", () => {
+    // The minutes after a rollover are the case this exists for: `used` is
+    // divided by an elapsed span of minutes, so the rate is enormous and an
+    // unbounded endpoint lands in the thousands of percent. The panel scales
+    // its axis to whatever the projection reached, so one such endpoint flattens
+    // every measured reading onto the floor and the chart stops being readable.
+    const observedAt = NOW;
+    const resetsAt = NOW + 7 * 24 * HOUR;
+    const ratePerHour = 6_000;
+    const window = quota({ used: 500, limit: 1_000, observedAt, resetsAt });
+    const pace = projectedPace(window, burn({ ratePerHour }));
+    if (pace === null) throw new Error("expected a projection");
+
+    // Truncated at the ceiling, not clipped flat against it: the endpoint moves
+    // to the instant the line reaches 100%, which is the same instant
+    // `exhaustsAt` names, so the slope drawn is still the rate that was read.
+    expect(pace.to.percent).toBe(100);
+    expect(pace.to.at).toBe(observedAt + ((1_000 - 500) / ratePerHour) * HOUR);
+    expect(pace.from).toEqual({ at: observedAt, percent: 50 });
+  });
+
+  test("a window read past its own ceiling projects no further", () => {
+    // `used` over `limit` is what a provider reports when the window is spent.
+    // There is no crossing instant ahead of the reading, so the projection is a
+    // point at the ceiling rather than a line climbing away from it.
+    const window = quota({ used: 1_400, limit: 1_000, observedAt: NOW, resetsAt: NOW + HOUR });
+    const pace = projectedPace(window, burn({ ratePerHour: 100 }));
+
+    expect(pace).toEqual({
+      from: { at: NOW, percent: 100 },
+      to: { at: NOW, percent: 100 },
+    });
   });
 
   test("says nothing when there is no ceiling to be a percentage of", () => {
