@@ -1,5 +1,5 @@
 import type { ProviderAdapter, ProviderCodec, ProviderDescriptor } from "@omni/providers";
-import { codecAdapter, PROVIDER_ID_PATTERN } from "@omni/providers";
+import { codecAdapter, isProviderIdFormat, PROVIDER_ID_PATTERN } from "@omni/providers";
 
 /**
  * What a plugin registered, joined into the two tables routing reads.
@@ -39,7 +39,11 @@ export function validateRegistration(
 
   const record = descriptor as Record<string, unknown>;
   const id = record.id;
-  if (typeof id !== "string" || !PROVIDER_ID_PATTERN.test(id)) {
+  // The shared predicate rather than the pattern open-coded. It narrows to
+  // `ProviderId`, which is what lets the rest of this function treat `id` as
+  // one — and it had no caller until now, which the design note said meant
+  // either this or deleting it.
+  if (!isProviderIdFormat(id)) {
     throw new Error(
       `provider id ${JSON.stringify(id)} is not a usable provider id; ` +
         `expected ${PROVIDER_ID_PATTERN.source}`,

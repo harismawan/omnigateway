@@ -184,8 +184,10 @@ live the moment a plugin provider exists:
   enforced is kept as a rule — a `custom` target carries an `endpointId`, and
   nothing else may — because a custom target with no endpoint matches no account
   and would fail at routing rather than at the point it was named.
-- **`isProviderIdFormat` has no caller.** Registration is where it belongs, or it
-  should be deleted.
+- ~~**`isProviderIdFormat` has no caller.**~~ **Closed.** `validateRegistration`
+  calls it, which is the site the note predicted: it narrows `unknown` to
+  `ProviderId`, which is what lets the rest of that function treat a
+  plugin-supplied id as one.
 - **Four unpinned copies of the provider-id grammar** validate plugin ids
   (`plugin-api/manifest.ts`, `gateway/plugins/routes.ts`, `control/plugins.ts`,
   `store/sqlite/plugins.ts`). A plugin provider's id is a plugin id *and* a
