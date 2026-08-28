@@ -256,11 +256,13 @@ export async function dispatch(
     now: startedAt,
     rand: deps.rand(),
     load: deps.loadRegistry.counts(),
-    // Threaded rather than left to the router's default, so routing and the
-    // adapter lookup below judge the same installation. A caller that injects
-    // one without the other is describing a gateway whose router admits a
-    // provider it has no adapter for, which is what `INTERNAL` reports.
-    ...(deps.providers === undefined ? {} : { providers: deps.providers }),
+    // Threaded rather than left to the router's default, so routing, the
+    // adapter lookup and pricing all judge the same installation. Every site in
+    // this function passes `deps.providers` the same way and `undefined`
+    // everywhere selects the same real registry — one spelling, because the
+    // round that added two threadings and forgot the third is what more than
+    // one costs.
+    providers: deps.providers,
   });
 
   logger.debug("routing candidates ranked", {
@@ -511,9 +513,14 @@ export async function dispatch(
                   log.cacheWriteTokens = event.usage.cacheWriteTokens;
                   // `deps.providers`, the same registry routing judged this
                   // candidate against. Reading the module-global here instead
-                  // let the two disagree: a provider the injected registry had
-                  // and the global did not routed, dispatched, and then priced
-                  // its cache writes at zero.
+                  // let the two disagree: a provider that the injected registry
+                  // held and the global one did not would route, dispatch, and
+                  // then have its cache writes priced at zero.
+                  //
+                  // Passing `undefined` is meaningful, not a gap — it selects
+                  // `priceOf`'s own default, which is that same module-global.
+                  // That is the production path, since `createApp` sets no
+                  // `providers`, and it has its own end-to-end test.
                   log.costUsd = priceOf(
                     candidate.target.costPerMTok,
                     event.usage,

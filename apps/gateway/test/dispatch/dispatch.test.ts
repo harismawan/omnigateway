@@ -2346,3 +2346,134 @@ test("a request routed on the injected registry is priced on it too", async () =
   expect(log.costUsd).toBeCloseTo(6.25, 10);
   store.close();
 });
+
+test("a request routed on the default registry is priced on it too", async () => {
+  // The production path, and the half the test above does not cover. That one
+  // passes `providers`, so both it and the unit tests exercise only the injected
+  // branch — `deps.providers ?? {}` at the call site breaks the default path and
+  // survives the whole dispatch suite, caught only incidentally by unrelated
+  // rate-limit assertions. Adding the new behaviour's test without its
+  // counterpart is how the coverage came out one-sided.
+  //
+  // Same shape as its sibling: a legacy target with no explicit `cacheWrite5m`,
+  // so the descriptor's multiplier is what decides the bill. `anthropic` is a
+  // real provider, so the default registry is what has to supply it.
+  const store = await seeded(1);
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25, cacheRead: 0.5 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const adapter = stubAdapter(() => cacheWriteStream(1_000_000));
+  // No `providers`, exactly as `createApp` builds these deps.
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), adapters: { anthropic: adapter } },
+    new AbortController().signal,
+    "req_default_priced",
+  );
+  await drain(outcome.events);
+
+  const log = outcome.log();
+  expect(log.status).toBe(200);
+  expect(log.cacheWriteTokens).toBe(1_000_000);
+  // Anthropic's real 1.25x write multiplier: 5 * 1.25 = 6.25 per million. Zero
+  // is what an empty or bypassed registry produces.
+  expect(log.costUsd).toBeCloseTo(6.25, 10);
+  store.close();
+});
+
+test("a bare model name is inferred against the injected registry", async () => {
+  // The third threading in this function, and the one no test reached. Every
+  // other dispatch test asks for a *configured* virtual model, so
+  // `resolveModel` returns from `snapshot.models.get(name)` before it ever
+  // consults a registry — which means `deps.providers ?? {}` at that call site
+  // survived the entire suite, not just this file.
+  //
+  // Found by extending the reviewer's own method to the sites they did not name
+  // rather than stopping at the one they did. All three threadings now have a
+  // test that fails if the registry stops reaching them.
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "la1",
+    provider: "late-arrival",
+    label: "la1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "k",
+    idToken: null,
+  });
+  // Deliberately no `putModel`: the name has to be inferred from its prefix,
+  // which is the only path that reads the registry.
+  await store.config.removeModel("fast");
+
+  const anthropic = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
+  const providers: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    "late-arrival": { ...anthropic, id: "late-arrival", modelPrefixes: ["latearr-"] },
+  };
+  const adapter = stubAdapter(() => textStream("ok"));
+  const outcome = await dispatch(
+    { ...req, model: "latearr-1" },
+    { ...deps(store, adapter), providers, adapters: { "late-arrival": adapter } },
+    new AbortController().signal,
+    "req_inferred",
+  );
+  await drain(outcome.events);
+
+  const log = outcome.log();
+  expect(log.status).toBe(200);
+  // Routed to the provider only the injected registry declares a prefix for.
+  expect(log.resolvedProvider).toBe("late-arrival");
+  expect(log.resolvedModel).toBe("latearr-1");
+  store.close();
+});
+
+test("a bare model name is inferred against the default registry", async () => {
+  // The production half of the test above, and the one that actually pins the
+  // threading. `deps.providers ?? {}` at the `resolveModel` call site only
+  // changes behaviour when `deps.providers` is *undefined*, so a test that
+  // injects a registry cannot catch it — every other dispatch test uses a
+  // configured virtual model, where `resolveModel` returns before consulting a
+  // registry at all. Both gaps had to close for the mutant to die.
+  //
+  // No `putModel`, so `claude-opus-4` has to be inferred from the `claude-`
+  // prefix the real registry declares for anthropic.
+  const store = await seeded(1);
+  await store.config.removeModel("fast");
+
+  const adapter = stubAdapter(() => textStream("ok"));
+  const outcome = await dispatch(
+    { ...req, model: "claude-opus-4" },
+    { ...deps(store, adapter), adapters: { anthropic: adapter } },
+    new AbortController().signal,
+    "req_inferred_default",
+  );
+  await drain(outcome.events);
+
+  const log = outcome.log();
+  expect(log.status).toBe(200);
+  expect(log.resolvedProvider).toBe("anthropic");
+  expect(log.resolvedModel).toBe("claude-opus-4");
+  store.close();
+});
