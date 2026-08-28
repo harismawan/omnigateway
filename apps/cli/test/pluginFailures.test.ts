@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
  * which reads the swap forwarder's source for the same reason.
  */
 
-const COMMANDS = join(dirname(fileURLToPath(import.meta.url)), "../src/commands");
+const CLI_SRC = join(dirname(fileURLToPath(import.meta.url)), "../src");
 
 /**
  * The unit is the **file**, not the function.
@@ -42,21 +42,41 @@ const COMMANDS = join(dirname(fileURLToPath(import.meta.url)), "../src/commands"
  * asks the question that actually matters, which is whether a command reading
  * the registry says anything at all about what it could not read.
  */
-const FILES = ["models.ts", "setup.ts", "credentials.ts", "plugins.ts", "service.ts"];
+
+/**
+ * Every `.ts` under `apps/cli/src`, walked — not a list.
+ *
+ * A second version named five files. `commands/` holds fourteen, and a caller
+ * anywhere else under `src/` was invisible too, so the docblock's "a discovery
+ * instrument, not a list of three commands" was describing a list of five. The
+ * defect it exists to catch is a *new* caller joining unchecked, which is
+ * exactly the one a filename list cannot see.
+ */
+function sources(dir: string): { file: string; source: string }[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) return sources(full);
+    if (!entry.name.endsWith(".ts")) return [];
+    return [{ file: relative(CLI_SRC, full), source: readFileSync(full, "utf8") }];
+  });
+}
 
 test("every command reading the plugin registry reports what it could not read", () => {
-  const reading = FILES.map((file) => ({
-    file,
-    source: readFileSync(join(COMMANDS, file), "utf8"),
-  })).filter(({ source, file }) =>
-    // `plugins.ts` defines `pluginProviders`; its callers are what this is about.
-    file === "plugins.ts" ? false : /pluginProviders\(/.test(source),
+  const reading = sources(CLI_SRC).filter(
+    ({ source, file }) =>
+      // `commands/plugins.ts` defines `pluginProviders`; its callers are what
+      // this is about.
+      file !== join("commands", "plugins.ts") && /pluginProviders\(/.test(source),
   );
 
   // The instrument has to have found something, or "every caller reports" is
   // vacuously true — which is how a discovery test goes quiet. Stated as the
   // exact set so a *new* caller fails here rather than joining unchecked.
-  expect(reading.map((r) => r.file).sort()).toEqual(["credentials.ts", "models.ts", "setup.ts"]);
+  expect(reading.map((r) => r.file).sort()).toEqual([
+    join("commands", "credentials.ts"),
+    join("commands", "models.ts"),
+    join("commands", "setup.ts"),
+  ]);
 
   /**
    * Comments are stripped before matching, and the reason is this file's own
@@ -80,8 +100,15 @@ test("every command reading the plugin registry reports what it could not read",
     // constrains the shape of a correct fix costs more than it catches; what
     // matters is that the value is taken and reported, not how it is spelled.
     const takes = /\bfailures\b/.test(source);
-    // On stderr, for a person reading a terminal.
-    const prints = /note\([\s\S]{0,200}?failure\.reason/.test(source);
+    // On stderr, for a person reading a terminal — by **any** route.
+    //
+    // This required `note(`, and the docblock above names `note()` as the trap:
+    // it is `if (!ctx.json) writer.err(message)`. So a command that fixed the
+    // `--json` silence by calling `writer.err` directly failed the test written
+    // about that silence. Pinning the spelling of a correct fix is the third
+    // time this file has done it, after the `takes` ternary and the parameter
+    // name below.
+    const prints = /(note|writer\.err|console\.error)\([\s\S]{0,200}?\breason\b/.test(source);
     // And in the payload, for a script. Matched **inside an `emit(` call**, not
     // anywhere in the file: a file-wide grep was satisfied by `finish`'s own
     // parameter declaration, so removing the field from what is emitted
