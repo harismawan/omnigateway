@@ -8,6 +8,7 @@ import {
   listPlugins,
   OAUTH_PROVIDERS,
   PROVIDER_IDS,
+  type ProviderExists,
   patchCredential,
   refreshCredential,
   removeCredential,
@@ -257,8 +258,20 @@ export const credentialsAddKey: Command = {
     // refused everything this guard had just admitted. A guard whose decision
     // the next call overturns is not a guard, and for one commit this one was
     // not: the widened check was the only mutant of fourteen that survived.
+    //
+    // The manifests are read **once** and closed over, rather than the
+    // predicate re-reading them. It ran two filesystem sweeps per invocation:
+    // one here, one inside control. Immaterial for a command an operator types,
+    // and the reason to fix it anyway is that the next reader has no way to tell
+    // from the call site that this predicate touches a disk.
+    //
+    // Annotated `ProviderExists` rather than `(id: string) => boolean`. The two
+    // are the same type — `ProviderId` is a validated string — so this buys
+    // nothing from the compiler and is exactly why it is worth writing: the
+    // exported type had no consumer at all, which made it documentation nothing
+    // pointed at.
     const plugins = listPlugins(doctorPluginDeps(), ctx.root.root);
-    const providerExists = (id: string): boolean => providerLoadable(id, plugins);
+    const providerExists: ProviderExists = (id) => providerLoadable(id, plugins);
     if (!providerExists(providerId)) {
       // The capability and the loading are both named, because those are the
       // two ways an operator who *has* installed the right plugin still lands

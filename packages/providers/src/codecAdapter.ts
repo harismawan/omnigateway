@@ -323,9 +323,14 @@ export function codecAdapter(
         // returning `"SessionSearch,ReadFile"` put client tool names in a log
         // line. Anything that is not a non-negative integer is dropped rather
         // than coerced: `Number("names")` is `NaN`, which renders as `NaN`.
-        ...(typeof built.cloakedTools === "number" &&
-        Number.isInteger(built.cloakedTools) &&
-        built.cloakedTools >= 0
+        //
+        // Two clauses, not three. `Number.isInteger` is false for every
+        // non-number and for `NaN` and the infinities, so the `typeof` test that
+        // preceded it was fully implied — it read as an independent check and
+        // deleting it changed nothing, which is how a reader comes to believe a
+        // guard is broader than it is. `>= 0` is the one that carries its own
+        // weight: zero is a count a codec may legitimately state.
+        ...(Number.isInteger(built.cloakedTools) && (built.cloakedTools ?? 0) >= 0
           ? { cloakedTools: built.cloakedTools }
           : {}),
       };

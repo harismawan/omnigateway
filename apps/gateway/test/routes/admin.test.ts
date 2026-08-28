@@ -257,6 +257,46 @@ test("custom API-key credentials are created behind admin auth", async () => {
   expect((await store.credentials.list())[0]?.providerData).toMatchObject({ endpointId: "local" });
 });
 
+test("the route refuses a provider this gateway does not have", async () => {
+  // At the route, not only at `createApiKeyCredential`. Existence is now an
+  // injectable `ProviderExists` predicate defaulting to `isProviderId`, because
+  // the CLI has to answer it from plugin manifests — it never loads plugins. The
+  // gateway does load them, so its own registry is the whole answer and it must
+  // keep passing nothing. Pinned here because the function-level test says
+  // nothing about which argument this call site supplies, and threading a
+  // fourth one through by mistake would silently let an operator mint an account
+  // for a provider that cannot serve it: stored, listed, and failing on first
+  // dispatch.
+  const { call, store } = await harness();
+
+  const rejected = await call("POST", "/api/credentials", {
+    provider: "nonesuch",
+    apiKey: "test-provider-key",
+  });
+  expect(rejected.status).toBe(400);
+  expect(await rejected.text()).toContain("no provider named");
+
+  // Format and existence are separate questions with separate messages, so an
+  // operator learns which one they got wrong.
+  const malformed = await call("POST", "/api/credentials", {
+    provider: "Acme Corp",
+    apiKey: "test-provider-key",
+  });
+  expect(malformed.status).toBe(400);
+
+  // Nothing stored by either — the failure being closed is what matters, not the
+  // status code, and a route that 400s while writing would pass the assertions
+  // above.
+  expect(await store.credentials.list()).toEqual([]);
+
+  // The positive control: a real provider still mints, so "refuses everything"
+  // cannot pass this test.
+  expect(
+    (await call("POST", "/api/credentials", { provider: "anthropic", apiKey: "test-provider-key" }))
+      .status,
+  ).toBe(200);
+});
+
 test("custom credential endpoint conflicts return 409", async () => {
   const { call } = await harness();
   const input = {

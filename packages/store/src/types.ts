@@ -473,6 +473,15 @@ export function servesTarget(target: TargetAddress, account: ServingAccount): bo
   // paragraph below closes for the other non-string values, missed because the
   // empty string is a string.
   //
+  // It is a **widening as well as a closure**, and both halves are worth
+  // stating. A *non-custom* account carrying `endpointId: ""` previously served
+  // ordinary targets of its provider and now serves nothing at all, and a pin to
+  // it dangles in `omni doctor`. That is the right direction — the router
+  // refuses the same row, and a credential whose stored endpoint is unreadable
+  // should not quietly act as one with no endpoint — but an operator whose
+  // database holds such a row sees an account stop working, and "it was only
+  // ever a malformed row" is a poor answer to arrive at from the outside.
+  //
   // No provider is named. A non-custom target that somehow carries an endpoint,
   // or an account that somehow holds one its target does not name, is refused
   // rather than ignored: unreachable through the schema, and failing closed is
