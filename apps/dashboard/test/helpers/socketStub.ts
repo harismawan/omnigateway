@@ -46,6 +46,8 @@ export type StubFrame = {
   seq?: number;
   sinceSeq?: number;
   payload?: unknown;
+  /** Carried by `error` frames, which a refused subscribe answers with. */
+  message?: string;
 };
 
 type StubState = {

@@ -1,11 +1,8 @@
 import { expect, test } from "bun:test";
-import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
 import { memoryStore, requestLog, seedApiKey, seedCredential } from "@omni/testkit";
-import { adminRoutes } from "../../src/routes/admin.ts";
-import { clientRoutes } from "../../src/routes/client.ts";
+import { createApp } from "../../src/app.ts";
 
 const NOW = 1_000_000;
-const SESSION_TTL_MS = 60_000;
 
 /**
  * Every surface mounted together, and one cookie per principal.
@@ -16,10 +13,6 @@ const SESSION_TTL_MS = 60_000;
  */
 async function matrix() {
   const store = await memoryStore();
-  const admin = createAdminAuth(store, { now: () => NOW, sessionTtlMs: SESSION_TTL_MS });
-
-  await admin.setPassword("hunter2hunter2");
-  await admin.setViewerPassword("read-only-pass-1");
   await seedCredential(store, { id: "c1", accessToken: "test-token-1", refreshToken: null });
   const mine = await seedApiKey(store, { label: "mine" });
   const theirs = await seedApiKey(store, { label: "theirs" });
@@ -31,45 +24,65 @@ async function matrix() {
     requestLog({ id: "t1", at: NOW - 1_000, apiKeyId: theirs.key.id, costUsd: 99 }),
   );
 
-  const deps = { store, admin, sessionTtlMs: SESSION_TTL_MS, now: () => NOW };
-  const app = adminRoutes({ ...deps, baseUrl: "http://localhost:9000" }).use(clientRoutes(deps));
+  // `createApp`, so the table is checked against every route group the gateway
+  // actually mounts — database, connect and plugins included — rather than the
+  // two this file used to compose by hand.
+  const app = createApp({ store, baseUrl: "http://localhost:9000", now: () => NOW });
+  const routes = (app as unknown as { routes: { method: string; path: string }[] }).routes;
 
-  const token = async (kind: "admin" | "viewer" | "client"): Promise<string> => {
-    const value =
-      kind === "admin"
-        ? await admin.login("hunter2hunter2")
-        : kind === "viewer"
-          ? await admin.loginViewer("read-only-pass-1")
-          : await admin.loginClient(mine.raw);
-    if (value === null) throw new Error(`could not open a ${kind} session`);
-    return value;
-  };
-
-  const cookies = {
-    admin: `${ADMIN_COOKIE}=${await token("admin")}`,
-    viewer: `${ADMIN_COOKIE}=${await token("viewer")}`,
-    client: `${ADMIN_COOKIE}=${await token("client")}`,
-    none: "",
-  };
-
-  const call = async (
-    method: string,
-    path: string,
-    as: keyof typeof cookies,
-    body?: unknown,
-  ): Promise<Response> =>
+  const send = (method: string, path: string, body?: unknown, cookie?: string) =>
     app.handle(
       new Request(`http://localhost${path}`, {
         method,
         headers: {
           "content-type": "application/json",
-          ...(cookies[as] === "" ? {} : { cookie: cookies[as] }),
+          ...(cookie === undefined || cookie === "" ? {} : { cookie }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
     );
 
-  return { call, store, mine, theirs };
+  /**
+   * Cookies minted through the app's own routes.
+   *
+   * `createApp` builds its own `AdminAuth`, and sessions live in memory on that
+   * instance — a token issued by a second `createAdminAuth` over the same store
+   * is unknown to it, and every request would 401 for a reason that has nothing
+   * to do with the guard under test.
+   */
+  const cookieFrom = async (path: string, body: unknown): Promise<string> => {
+    const res = await send("POST", path, body);
+    const header = res.headers.get("set-cookie");
+    if (header === null) throw new Error(`${path} set no cookie (${res.status})`);
+    return header.split(";")[0] ?? "";
+  };
+
+  const cookies = {
+    admin: await cookieFrom("/api/setup", { password: "hunter2hunter2" }),
+    viewer: "",
+    client: await cookieFrom("/api/client/login", { key: mine.raw }),
+    none: "",
+  };
+  // The viewer password is set by the operator, so that route runs first.
+  await send(
+    "PUT",
+    "/api/settings/viewer-password",
+    { password: "read-only-pass-1" },
+    cookies.admin,
+  );
+  cookies.viewer = await cookieFrom("/api/login", {
+    password: "read-only-pass-1",
+    mode: "viewer",
+  });
+
+  const call = (
+    method: string,
+    path: string,
+    as: keyof typeof cookies,
+    body?: unknown,
+  ): Promise<Response> => send(method, path, body, cookies[as]);
+
+  return { call, store, mine, theirs, routes };
 }
 
 type Who = "admin" | "viewer" | "client" | "none";
@@ -96,6 +109,15 @@ const ROUTES: ReadonlyArray<{
    * reason that has nothing to do with its guard.
    */
   isolate?: true;
+  /**
+   * Check the refusals, never the grant.
+   *
+   * For a route whose handler does something a test must not do — restore a
+   * database, restart the process, delete a snapshot. A 401 is decided by the
+   * guard before the handler runs, so the refusal rows are safe to drive; the
+   * grant row would execute it.
+   */
+  refusalOnly?: true;
 }> = [
   // Read routes an operator and a read-only administrator share.
   { method: "GET", path: "/api/credentials", allow: ["admin", "viewer"] },
@@ -128,7 +150,122 @@ const ROUTES: ReadonlyArray<{
   { method: "GET", path: "/api/client/usage", allow: ["client"] },
   { method: "GET", path: "/api/client/logs", allow: ["client"] },
   { method: "GET", path: "/api/client/quota", allow: ["client"] },
+
+  // The remaining reader widenings, which the hand-written table missed.
+  { method: "GET", path: "/api/credentials/health", allow: ["admin", "viewer"] },
+  { method: "GET", path: "/api/credentials/quota/history", allow: ["admin", "viewer"] },
+  { method: "GET", path: "/api/agent-setup", allow: ["admin", "viewer"] },
+  // Stdout is a diagnostic, and a viewer is the operator minus mutations and
+  // secrets. Argued for in the source; asserted here.
+  { method: "GET", path: "/api/console", allow: ["admin", "viewer"] },
+
+  // Operator-only reads. A snapshot carries encrypted credentials and API-key
+  // hashes, so it is the sharpest row in the table.
+  { method: "GET", path: "/api/database", allow: ["admin"] },
+  { method: "GET", path: "/api/database/snapshots", allow: ["admin"] },
+  { method: "GET", path: "/api/database/snapshots/nope/download", allow: ["admin"] },
+  { method: "GET", path: "/api/lifecycle", allow: ["admin"] },
+  { method: "GET", path: "/api/plugins", allow: ["admin"] },
+
+  // Operator-only mutations, refusals only.
+  { method: "POST", path: "/api/database/vacuum", allow: ["admin"], refusalOnly: true },
+  { method: "POST", path: "/api/database/snapshots", allow: ["admin"], refusalOnly: true },
+  { method: "DELETE", path: "/api/database/snapshots/nope", allow: ["admin"], refusalOnly: true },
+  {
+    method: "POST",
+    path: "/api/database/snapshots/nope/restore",
+    allow: ["admin"],
+    refusalOnly: true,
+  },
+  { method: "POST", path: "/api/database/import", allow: ["admin"], refusalOnly: true },
+  { method: "PUT", path: "/api/database/retention", allow: ["admin"], refusalOnly: true },
+  { method: "POST", path: "/api/lifecycle/restart", allow: ["admin"], refusalOnly: true },
+  { method: "POST", path: "/api/lifecycle/shutdown", allow: ["admin"], refusalOnly: true },
+  { method: "POST", path: "/api/connect/start", allow: ["admin"], refusalOnly: true },
+  { method: "POST", path: "/api/connect/finish", allow: ["admin"], refusalOnly: true },
+  { method: "POST", path: "/api/connect/poll", allow: ["admin"], refusalOnly: true },
+  { method: "PATCH", path: "/api/credentials/c1", allow: ["admin"], body: {} },
+  { method: "PUT", path: "/api/settings", allow: ["admin"], body: {} },
+  { method: "PUT", path: "/api/keys/nope/limits", allow: ["admin"], body: {} },
+  { method: "PUT", path: "/api/keys/nope/models", allow: ["admin"], body: {} },
+  { method: "POST", path: "/api/models/x/dry-run", allow: ["admin"] },
+  // Found by the completeness check below on its first run, along with
+  // `DELETE /api/models/:id` and the ws route — three rows a hand-written table
+  // had simply never listed.
+  { method: "POST", path: "/api/credentials", allow: ["admin"], body: {} },
+  { method: "DELETE", path: "/api/models/x", allow: ["admin"] },
 ];
+
+/**
+ * Routes that answer without a session, and why each one has to.
+ *
+ * Enumerated rather than pattern-matched: this is the list the completeness
+ * check subtracts, so a new unauthenticated route has to be added here by hand
+ * and defended in review. A regex over `/api/(status|login|...)` would swallow
+ * the next one silently.
+ */
+const UNAUTHENTICATED = new Set([
+  // The one route that answers before a session can exist, and the one that
+  // creates the first one.
+  "GET /api/status",
+  "POST /api/setup",
+  // Establish and end a session; they are how a cookie comes to exist.
+  "POST /api/login",
+  "POST /api/logout",
+  "POST /api/client/login",
+  "POST /api/client/logout",
+  // Guarded inside `beforeHandle` on the ws route rather than by a guard
+  // function, and covered by `test/stream/principals.test.ts`. The plain GET
+  // exists so a browser hitting it gets 426 instead of the static catch-all.
+  "GET /api/stream",
+  // The upgrade itself. Elysia registers the ws route under its own method, and
+  // it authenticates inside `beforeHandle` rather than through a guard
+  // function — driven per principal in `test/stream/principals.test.ts`.
+  "WS /api/stream",
+]);
+
+/**
+ * The guard that makes the table above worth having.
+ *
+ * Without it the table is a list somebody has to remember to extend, which is
+ * exactly the kind of list that stops being complete — it covered 17 of 51
+ * routes when this was written, and the four reader widenings it missed
+ * included the stdout tail. Elysia already holds the routing table the app
+ * registered, so the set of guarded routes is a fact to be read rather than one
+ * to be restated.
+ */
+test("every /api route is either in the table or named as unauthenticated", async () => {
+  const { routes } = await matrix();
+
+  const registered = routes
+    .filter((route) => route.path.startsWith("/api/"))
+    .map((route) => `${route.method} ${route.path}`)
+    .sort();
+
+  // Asserted first: zero registered routes is also what a broken accessor
+  // reports, and it would make the rest of this test vacuously pass.
+  expect(registered.length).toBeGreaterThan(40);
+
+  // The table's paths carry fixtures (`/api/keys/nope`), so they are matched
+  // back to the registered patterns by shape rather than by string equality.
+  const covered = new Set(
+    ROUTES.map((route) => {
+      const pattern = registered.find((entry) => {
+        const [method, path] = entry.split(" ");
+        if (method !== route.method || path === undefined) return false;
+        const rx = new RegExp(`^${path.replace(/:[^/]+/g, "[^/]+")}$`);
+        return rx.test(route.path);
+      });
+      return pattern ?? `UNMATCHED ${route.method} ${route.path}`;
+    }),
+  );
+
+  // A table row matching no registered route is a row testing nothing.
+  expect([...covered].filter((entry) => entry.startsWith("UNMATCHED"))).toEqual([]);
+
+  const missing = registered.filter((entry) => !covered.has(entry) && !UNAUTHENTICATED.has(entry));
+  expect(missing).toEqual([]);
+});
 
 test("every route admits exactly the principals it names, and refuses the rest", async () => {
   const refusals: string[] = [];
@@ -141,11 +278,17 @@ test("every route admits exactly the principals it names, and refuses the rest",
 
   for (const route of ROUTES) {
     for (const who of EVERYONE) {
+      const allowed = route.allow.includes(who);
+      // The grant is never driven for a destructive route. A 401 is decided by
+      // the guard before the handler runs, so refusals are safe; the grant row
+      // would vacuum the database, take a snapshot, or ask systemd to restart.
+      if (allowed && route.refusalOnly === true) continue;
+
       const { call } = route.isolate === true ? await matrix() : shared;
       const response = await call(route.method, route.path, who, route.body);
       const label = `${route.method} ${route.path} as ${who}`;
 
-      if (route.allow.includes(who)) {
+      if (allowed) {
         // Anything but 401 counts as admitted: a 400 or a 404 means the guard
         // let it through and the handler then had an opinion, which is the
         // question this table is asking.
