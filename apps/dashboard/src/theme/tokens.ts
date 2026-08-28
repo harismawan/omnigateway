@@ -86,6 +86,33 @@ export type AppTheme = typeof theme;
  * provider list of its own — there was one, derived from a build-time registry,
  * and it could not have seen a plugin's provider at all.
  */
+export const SAFE_PROVIDER_ID = /^[a-z][a-z0-9-]{0,31}$/;
+
 export function providerColor(provider: string): string {
-  return `var(--p-${provider})`;
+  // **Checked here, because this is where the string becomes CSS.**
+  //
+  // styled-components does not escape an interpolation, so this function is a
+  // direct path from a stored value into the stylesheet. Four call sites hand it
+  // `credential.provider`, `target.provider` and `log.resolvedProvider`, none of
+  // which pass through `/api/catalog` — `packages/control` withholds a provider
+  // whose id is not a usable custom-property name, and these never meet that
+  // check. `providerIdSchema` guards the write path, but not the read one:
+  // `sqlite/config.ts` parses `virtual_models.targets` with a bare `JSON.parse`,
+  // so a restored snapshot or a hand-edited database carries whatever it says.
+  // An id closing the declaration and opening its own would put
+  // attacker-authored rules in the console's stylesheet.
+  //
+  // The pattern is restated rather than imported: boundary rule 12 forbids the
+  // console importing `@omni/providers` at all, so this is the same move
+  // `heldAuths` makes for the null-prototype rule. `PROVIDER_ID_PATTERN` stays
+  // the source of truth and `apps/gateway/test/routes/providerIdMirror.test.ts`
+  // pins this copy to it, the one place that may import both.
+  if (!SAFE_PROVIDER_ID.test(provider)) return "var(--ink-faint)";
+  // The fallback is not decoration either. `var(--p-x)` with no second argument
+  // is invalid at computed-value time, so the property inherits — and for
+  // `color` and `border-left-color` that means the provider bar becomes the
+  // colour of the text beside it, which is the one element whose whole job is
+  // carrying identity by hue. Reachable without any hostile input: uninstall a
+  // plugin and its accounts and log rows outlive its palette entry.
+  return `var(--p-${provider}, var(--ink-faint))`;
 }

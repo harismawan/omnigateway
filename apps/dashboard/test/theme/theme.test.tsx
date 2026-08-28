@@ -108,7 +108,7 @@ describe("styled-components theme", () => {
       .map((node) => node.textContent ?? "")
       .join("");
     expect(injected).toContain("var(--ink)");
-    expect(injected).toContain("var(--p-kimi)");
+    expect(injected).toContain("var(--p-kimi, var(--ink-faint))");
   });
 
   test("nesting a provider is harmless", () => {
@@ -179,9 +179,16 @@ describe("provider palette", () => {
     // other by the compiler: `providerColor` builds a string, the palette
     // writes a declaration. `var(--p-typo)` resolves to nothing and renders
     // colourless with no error, so nothing but this would report a drift.
+    //
+    // The reference now carries a fallback — `var(--p-x, var(--ink-faint))` —
+    // because without one an unlisted provider inherits the colour of the text
+    // beside it rather than reading as neutral. The property name is parsed out
+    // rather than sliced at a fixed offset, which is what the fallback broke.
     for (const { id } of catalogFixture()) {
-      expect(providerColor(id)).toBe(`var(--p-${id})`);
-      expect(paletteCss(catalogFixture())).toContain(`${providerColor(id).slice(4, -1)}:`);
+      expect(providerColor(id)).toBe(`var(--p-${id}, var(--ink-faint))`);
+      const property = providerColor(id).match(/^var\((--[\w-]+)/)?.[1];
+      expect(property).toBe(`--p-${id}`);
+      expect(paletteCss(catalogFixture())).toContain(`${property}:`);
     }
   });
 
