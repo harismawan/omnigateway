@@ -48,7 +48,7 @@ async function described(ctx: Context, writer: Writer) {
   if (models.length === 0) {
     throw new CliError("no virtual models configured; add one with `omni models put`");
   }
-  return models;
+  return { models, failures };
 }
 
 /** The gateway's own origin, which is what a client has to be pointed at. */
@@ -64,11 +64,16 @@ function finish(
   dryRun: boolean,
   key: string | undefined,
   write: (path: string, contents: string) => void,
+  // In the payload, not only on stderr. `note()` is a no-op under `--json`, so
+  // a provisioning script saw a config with no `limit` and nothing saying why —
+  // which is the original bug exactly, on the path whose output outlives the
+  // command. `dry-run` was given this and `setup` was not, in the same commit.
+  pluginFailures: readonly { id: string; reason: string }[] = [],
 ): void {
   if (!dryRun) {
     for (const file of files) write(file.path, file.contents);
   }
-  emit(ctx, writer, { files }, () =>
+  emit(ctx, writer, { files, pluginFailures }, () =>
     dryRun
       ? files.map((f) => `--- ${f.path}\n${f.contents}`).join("\n")
       : files.map((f) => f.path).join("\n"),
@@ -84,7 +89,7 @@ function at(dir: string, file: SetupFile): { path: string; contents: string } {
 }
 
 async function promptMapping(
-  models: Awaited<ReturnType<typeof described>>,
+  models: Awaited<ReturnType<typeof described>>["models"],
   prompt: { input?: (question: string) => Promise<string> },
 ): Promise<AgentModelMapping> {
   const choices = models.map(({ model }) => model.id).join(", ");
@@ -119,7 +124,7 @@ export const setupClaude: Command = {
   summary: "Write Claude Code settings for this gateway",
   options: OPTIONS,
   async run(args, { ctx, writer, prompt, setupFs }) {
-    const models = await described(ctx, writer);
+    const { models, failures } = await described(ctx, writer);
     const dir = stringFlag(args.values, "dir") ?? join(setupFs.homeDir, ".claude");
     const key = stringFlag(args.values, "key");
     const dryRun = boolFlag(args.values, "dry-run");
@@ -136,7 +141,7 @@ export const setupClaude: Command = {
       setupFs.read(path) ?? undefined,
     );
 
-    finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write);
+    finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write, failures);
   },
 };
 
@@ -146,7 +151,7 @@ export const setupOpencode: Command = {
   summary: "Write an opencode.json provider entry for this gateway",
   options: OPTIONS,
   async run(args, { ctx, writer, prompt, setupFs }) {
-    const models = await described(ctx, writer);
+    const { models, failures } = await described(ctx, writer);
     const dir = stringFlag(args.values, "dir") ?? setupFs.cwd;
     const key = stringFlag(args.values, "key");
     const dryRun = boolFlag(args.values, "dry-run");
@@ -161,7 +166,7 @@ export const setupOpencode: Command = {
       mapping,
     );
 
-    finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write);
+    finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write, failures);
   },
 };
 

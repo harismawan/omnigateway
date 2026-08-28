@@ -120,6 +120,97 @@ describe("the packages a plugin author installs", () => {
     expect(manifest("packages/plugin-api").version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
+  test("a published package whose sources moved has moved its version", () => {
+    // The guard the one above is a special case of, and the one that was
+    // missing when it mattered.
+    //
+    // `PLUGIN_API_VERSION` went 1 → 2 for the removal of `ctx.provider.register`
+    // — a breaking change to a *published* type surface — and
+    // `packages/plugin-api/package.json` stayed at a version already on npm. The
+    // release step skips a package whose version already exists, so the next tag
+    // would have published nothing: every author running `bun add
+    // @omnigateway/plugin-api` keeps an artifact whose `PluginContext` still
+    // types `provider` and whose `PLUGIN_API_VERSION` is `1`, while the shipped
+    // gateway refuses `api: 1`. No published version would produce a loadable
+    // manifest.
+    //
+    // The test above catches exactly one shape of this — the API package
+    // trailing the SDK — and both were `0.1.2`, so it passed and said nothing.
+    // This asks the general question of every published package: did its source
+    // change since the last release, and if so did its version move?
+    //
+    // Skips rather than fails when there is no tag to compare against: a shallow
+    // CI clone has none, and a check that fails for lack of history teaches
+    // people to disable it.
+    const tags = Bun.spawnSync(["git", "tag", "--list", "v*", "--sort=-v:refname"], {
+      cwd: REPO,
+    });
+    const latest = new TextDecoder().decode(tags.stdout).split("\n")[0]?.trim();
+    if (latest === undefined || latest === "") return;
+
+    // Comments stripped before comparing. A published artifact is its code; a
+    // docblock that gained a paragraph is not a reason to make every plugin
+    // author take an update, and flagging it would train the next person to
+    // bump the version to silence this rather than because anything shipped.
+    //
+    // Found by the instrument itself on its first run: `dashboard-sdk/src`
+    // showed as drifted since `v0.5.0`, and the whole diff was fifteen lines of
+    // comment in `theme.ts`.
+    // Blank lines dropped after stripping, not merely blanked: a removed comment
+    // leaves whitespace behind, and comparing line-for-line then reports every
+    // file whose comments moved as a file whose code moved.
+    const code = (raw: string): string =>
+      raw
+        .replace(/\/\*[\s\S]*?\*\//g, "\n")
+        .replace(/^\s*\/\/.*$/gm, "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+        .join("\n");
+
+    const stale: string[] = [];
+    for (const dir of PUBLISHED) {
+      const changed = Bun.spawnSync(
+        ["git", "diff", "--name-only", `${latest}..HEAD`, "--", `${dir}/src`],
+        { cwd: REPO },
+      );
+      const touched = new TextDecoder()
+        .decode(changed.stdout)
+        .split("\n")
+        .filter((file) => file.trim() !== "");
+      const behaviourMoved = touched.some((file) => {
+        const at = Bun.spawnSync(["git", "show", `${latest}:${file}`], {
+          cwd: REPO,
+          stderr: "ignore",
+        });
+        const before = new TextDecoder().decode(at.stdout);
+        let after = "";
+        try {
+          after = readFileSync(join(REPO, file), "utf8");
+        } catch {
+          return true; // deleted outright
+        }
+        return code(before) !== code(after);
+      });
+      if (!behaviourMoved) continue;
+
+      const released = Bun.spawnSync(["git", "show", `${latest}:${dir}/package.json`], {
+        cwd: REPO,
+        stderr: "ignore",
+      });
+      const before = new TextDecoder().decode(released.stdout);
+      if (before.trim() === "") continue; // the package did not exist at that tag
+
+      const was = (JSON.parse(before) as Manifest).version;
+      const now = manifest(dir).version;
+      if (Bun.semver.order(now, was) <= 0) {
+        stale.push(`${dir}: sources changed since ${latest} but version is still ${now}`);
+      }
+    }
+
+    expect(stale).toEqual([]);
+  });
+
   test("the API package is never published behind the SDK it announces", () => {
     // `DASHBOARD_SDK_VERSION` is exported from `packages/plugin-api`, and the
     // SDK's own package version is pinned equal to it by the test below. So

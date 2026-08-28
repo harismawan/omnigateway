@@ -338,7 +338,10 @@ export const credentialsAddKey: Command = {
     emit(
       ctx,
       writer,
-      { id: created.id, provider: created.provider },
+      // `pluginFailures` here for the same reason `dry-run` and `setup` carry
+      // it: a plugin that failed to read is the likeliest reason a provider was
+      // refused, and `note()` prints nothing under `--json`.
+      { id: created.id, provider: created.provider, pluginFailures: failures },
       () => `stored ${created.provider} api key as ${created.id}`,
     );
   },
