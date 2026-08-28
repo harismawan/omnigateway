@@ -330,7 +330,15 @@ function supplier(id: string, plugins: readonly PluginSummary[]): PluginSummary 
 }
 
 /**
- * Whether anything on disk *claims* this provider. `doctor`'s question.
+ * Whether anything on disk *claims* this provider. `doctor`'s question, and now
+ * the only one asked from a manifest.
+ *
+ * There was a stricter sibling, `providerLoadable`, which added `loadable` and
+ * was meant for any command that *writes*. It is gone: `add-key` reads the real
+ * registry through `pluginProviders` instead, which answers the question a
+ * manifest cannot — whether the plugin actually declares a provider, rather than
+ * whether it is permitted to. The sibling survived that change as dead code with
+ * a docblock still describing its caller, which is how it was found.
  *
  * Deliberately not exact in one direction: a plugin that declares the capability
  * and fails to load supplies nothing, and this still counts it. That is the
@@ -340,30 +348,6 @@ function supplier(id: string, plugins: readonly PluginSummary[]): PluginSummary 
  */
 export function providerDeclared(id: string, plugins: readonly PluginSummary[]): boolean {
   return Object.hasOwn(PROVIDER_DESCRIPTORS, id) || supplier(id, plugins) !== undefined;
-}
-
-/**
- * Whether this provider can plausibly exist at runtime. The question any command
- * that *writes* must ask.
- *
- * The same predicate as `providerDeclared` plus `loadable`, and the split is the
- * whole point: the leniency above is harmless in a diagnostic and is not
- * harmless in front of a write. `omni credentials add-key` shipped for one
- * commit reading the lenient answer, and minted a live encrypted secret under a
- * provider id that could never exist — for a manifest whose id disagreed with
- * its directory, whose `api` the host refuses, or whose `server` file is absent.
- * `doctor`'s compensating line ("will not load") is adjacent to the diagnostic
- * and nowhere near the write.
- *
- * `loadable` closes three of the four ways this goes wrong. The fourth — a
- * plugin that loads cleanly, declares the capability and supplies nothing
- * — **cannot be closed by reading a manifest at all**, and is not closed here.
- * `danglingCredentials` in `doctor` is what carries that weight, the same way
- * `danglingPins` carries the pin the write path deliberately does not validate.
- */
-export function providerLoadable(id: string, plugins: readonly PluginSummary[]): boolean {
-  if (Object.hasOwn(PROVIDER_DESCRIPTORS, id)) return true;
-  return supplier(id, plugins)?.loadable === true;
 }
 
 /**

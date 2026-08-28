@@ -244,7 +244,7 @@ export const credentialsAddKey: Command = {
     // plugin declares no OAuth flow.
     //
     // The **real registry**, not a manifest guess. This asked
-    // `providerLoadable`, which reads a manifest's `provider` capability — and
+    // a manifest's `provider` capability — and
     // the comment beside it said, correctly, that the fourth way this goes
     // wrong (a plugin that loads cleanly, declares the capability, and never
     // supplies a provider) "cannot be closed by reading a manifest at all".

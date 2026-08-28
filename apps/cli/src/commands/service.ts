@@ -272,8 +272,8 @@ async function missingProviders(
  * Credentials naming a provider nothing on this installation supplies.
  *
  * The third sibling of `danglingPins` and `missingProviders`, and the one that
- * covers what no manifest read can. `providerLoadable` refuses to mint an
- * account for a plugin the host will not load, but a plugin that loads cleanly,
+ * covers what no manifest read can. `add-key` reads the real registry and so
+ * refuses a plugin that supplies no provider, but a plugin that loads cleanly,
  * declares the `provider` capability and supplies no provider
  * supplies nothing — and the capability is *permission* to register, not proof.
  * Nothing at write time can tell the two apart without running the plugin.
@@ -285,7 +285,7 @@ async function missingProviders(
  * credential sat encrypted under an id routing answers only with
  * `provider:missing`.
  *
- * `providerDeclared`, not `providerLoadable`: a plugin that fails to load is
+ * `providerDeclared`, the lenient question: a plugin that fails to load is
  * already reported on its own line above, and naming its credentials here too
  * would send the operator after the wrong thing.
  *
