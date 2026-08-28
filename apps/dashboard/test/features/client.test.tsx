@@ -235,3 +235,31 @@ describe("client board uses the shared primitives", () => {
     expect(meter.getAttribute("aria-valuenow")).toBe("100");
   });
 });
+
+/**
+ * A window can overshoot its ceiling.
+ *
+ * Spend and tokens are debited in `finishLog` after the request served, so
+ * `used > limit` is reachable rather than theoretical. The bar clamps; the
+ * label did not, so a screen reader announced "150% used" over a bar drawn at
+ * 100 and the two descriptions of one row disagreed.
+ */
+test("usage past the ceiling reads the same to a screen reader as it looks", async () => {
+  stub({
+    "GET /api/client/summary": () =>
+      apiKey({
+        limits: { requests: { "1m": 100 } },
+        limitUsage: [{ dimension: "requests", window: "1m", limit: 100, used: 150 }],
+      }),
+  });
+  renderWithProviders(<ClientBoard />);
+
+  const meter = await screen.findByRole("meter");
+  expect(meter.getAttribute("aria-valuenow")).toBe("100");
+  expect(meter.getAttribute("aria-label")).toContain("100% used");
+  expect(meter.getAttribute("aria-label")).not.toContain("150");
+
+  // The overage is not hidden — it is in the figures, where it belongs.
+  const row = (await screen.findByText("requests per minute")).closest("tr");
+  expect(within(row as HTMLElement).getByText("150")).toBeTruthy();
+});

@@ -4,9 +4,40 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveKey } from "../src/encryption.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import type { ApiKeyInput, Store } from "../src/types.ts";
+import type { ApiKeyInput, RequestLog, Store } from "../src/types.ts";
 
 const SECRET = "test-secret-value-for-unit-tests";
+
+/** A complete row, so a schema change breaks here once rather than in each test. */
+function logRow(id: string, at: number, apiKeyId: string | null): RequestLog {
+  return {
+    id,
+    state: "done",
+    at,
+    apiKeyId,
+    requestedModel: "fast",
+    resolvedProvider: "anthropic",
+    resolvedModel: "claude-opus-4",
+    credentialId: "c1",
+    attempts: 1,
+    status: 200,
+    errorCode: null,
+    inputTokens: 10,
+    outputTokens: 5,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: 100,
+    durationMs: 200,
+    costUsd: 0.001,
+    degradations: [],
+    rtkApplied: false,
+    rtkFilterHits: 0,
+    rtkOriginalCodeUnits: 0,
+    rtkCompressedCodeUnits: 0,
+    rtkEstimatedTokensSaved: 0,
+    rtkFilters: [],
+  };
+}
 
 /**
  * A store on disk, because a swap replaces a file and an in-memory database has
@@ -154,4 +185,49 @@ test("no repo forwarder drops an argument the source hands it", async () => {
   // a pass.
   expect(seen).toBeGreaterThan(30);
   expect(dropped).toEqual([]);
+});
+
+/**
+ * A scoped read still narrows after the database underneath it is replaced.
+ *
+ * The forwarder test above reads the source and proves no arrow drops an
+ * argument. This is the behavioural half: a repo captured before the swap must
+ * still pass the scope through to the handle that replaced it. The two failures
+ * look identical from outside — every row comes back — and only one of them is
+ * visible to a regex.
+ */
+test("a usage repo captured before reopen still scopes to one key after it", async () => {
+  const { store, root } = await tempStore();
+  const replacement = join(root, "replacement.sqlite");
+  try {
+    // Captured by value, as boot captures the store into its long-lived holders.
+    const usage = store.usage;
+    const now = Date.now();
+    await usage.append(logRow("before-mine", now - 3_000, "k1"));
+    await usage.append(logRow("before-theirs", now - 2_000, "k2"));
+    expect((await usage.recent(10, "k1")).map((r) => r.id)).toEqual(["before-mine"]);
+
+    // A different database at the same path, carrying both keys' traffic again.
+    const other = await createStore({
+      path: replacement,
+      encryptionKey: await deriveKey(SECRET),
+    });
+    await other.usage.append(logRow("after-mine", now - 1_000, "k1"));
+    await other.usage.append(logRow("after-theirs", now - 500, "k2"));
+    other.close();
+
+    await swapIn(store, replacement);
+
+    // The old reference, the new database, and still one key's rows.
+    expect((await usage.recent(10, "k1")).map((r) => r.id)).toEqual(["after-mine"]);
+    expect(await usage.recent(10, "nobody")).toEqual([]);
+    // Unscoped still reads everything, so this is not passing by reading none.
+    expect((await usage.recent(10)).map((r) => r.id).sort()).toEqual([
+      "after-mine",
+      "after-theirs",
+    ]);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });

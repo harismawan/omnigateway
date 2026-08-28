@@ -37,8 +37,21 @@ function renderLogin(initial = "/login") {
     path: "/",
     component: () => <div>rack</div>,
   });
+  // The two destinations a successful sign-in can reach. Without them in the
+  // tree, a navigation to either is a no-op the test cannot see — which is why
+  // deleting the whole client branch from `goOn` left this file green.
+  const clientHome = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/client",
+    component: () => <div>client board</div>,
+  });
+  const usage = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/usage",
+    component: () => <div>usage board</div>,
+  });
   const router = createRouter({
-    routeTree: rootRoute.addChildren([login, home]),
+    routeTree: rootRoute.addChildren([login, home, clientHome, usage]),
     history: createMemoryHistory({ initialEntries: [initial] }),
   });
 
@@ -326,5 +339,61 @@ describe("login modes", () => {
 
     expect(await screen.findByText(/API key was not accepted/i)).toBeTruthy();
     expect(screen.queryByText(/password does not match/i)).toBeNull();
+  });
+});
+
+/**
+ * Where a successful sign-in lands, which is not the same question as what it
+ * posted.
+ *
+ * The mode tests above assert the request body and stop. `goOn` has a branch
+ * that ignores `next` for a client and sends it to `/client`, and deleting that
+ * branch outright left every test in this file passing.
+ */
+describe("login navigation", () => {
+  test("a key holder lands on the client board, ignoring a saved console link", async () => {
+    const user = userEvent.setup();
+    createFetchStub({
+      "GET /api/status": () => ({
+        configured: true,
+        authenticated: false,
+        viewerConfigured: false,
+      }),
+      "POST /api/client/login": () => ({ ok: true }),
+    });
+    // A link saved from a console session. Honouring it would land the client
+    // on a screen its own gate immediately bounces off — a redirect loop the
+    // user sees as a flicker and a wrong page.
+    const router = renderLogin("/login?next=%2Fusage");
+
+    await user.click(await screen.findByRole("tab", { name: "API key" }));
+    await user.type(screen.getByLabelText("API key"), "omni_sk_secret");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/client");
+    });
+  });
+
+  test("an operator still lands on the link they were sent from", async () => {
+    const user = userEvent.setup();
+    createFetchStub({
+      "GET /api/status": () => ({
+        configured: true,
+        authenticated: false,
+        viewerConfigured: false,
+      }),
+      "POST /api/login": () => ({ ok: true }),
+    });
+    const router = renderLogin("/login?next=%2Fusage");
+
+    await user.type(await screen.findByLabelText("Password"), "hunter2hunter2");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    // `next` is suppressed for a client and honoured for everyone else, so this
+    // is the half that would break if the branch were made unconditional.
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/usage");
+    });
   });
 });

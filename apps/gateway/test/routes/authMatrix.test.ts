@@ -302,6 +302,50 @@ test("every route admits exactly the principals it names, and refuses the rest",
   expect({ wrongGrants, refusals }).toEqual({ wrongGrants: [], refusals: [] });
 });
 
+/**
+ * The field the whole dashboard gate routes on.
+ *
+ * `homeFor` picks a branch from `status.principal`, and nothing on the server
+ * side asserted the route emits it. A status body that stopped carrying the
+ * field would send every session to the login screen — or, before the gate was
+ * hardened, throw inside `beforeLoad` — with the guards all still correct.
+ */
+test("status names the principal behind each cookie, and nobody's when there is none", async () => {
+  const { call } = await matrix();
+
+  const statusAs = async (who: "admin" | "viewer" | "client" | "none") =>
+    (await (await call("GET", "/api/status", who)).json()) as {
+      authenticated: boolean;
+      principal: { kind: string; apiKeyId?: string } | null;
+      viewerConfigured: boolean;
+    };
+
+  expect((await statusAs("admin")).principal).toEqual({ kind: "admin" });
+  expect((await statusAs("viewer")).principal).toEqual({ kind: "viewer" });
+
+  const client = await statusAs("client");
+  expect(client.principal?.kind).toBe("client");
+  // Its own id, which is the one thing the client branch needs and the one
+  // thing a wrong answer here would make unnoticeable.
+  expect(typeof client.principal?.apiKeyId).toBe("string");
+
+  const anonymous = await statusAs("none");
+  expect(anonymous.authenticated).toBe(false);
+  expect(anonymous.principal).toBeNull();
+  // Reported unauthenticated on purpose: it is the login form that needs it.
+  expect(anonymous.viewerConfigured).toBe(true);
+});
+
+test("status carries no key material for a client session", async () => {
+  const { call, mine } = await matrix();
+  const body = await (await call("GET", "/api/status", "client")).text();
+
+  // The id, never the hash or the prefix: this route answers without a session,
+  // so anything it returns for one is returned on the least guarded surface.
+  expect(body).not.toContain(mine.key.hash);
+  expect(body).not.toContain(mine.key.prefix);
+});
+
 test("a client session reads its own rows through the client surface", async () => {
   const { call, mine } = await matrix();
 

@@ -96,7 +96,15 @@ function LimitRow({ reading }: { reading: LimitReading }) {
           // `ui/Meter` owns the amber-at-70 / red-at-90 thresholds, and owning
           // them in one place is the point: they are a reading of state, and a
           // second copy is one that gets tuned without this one.
-          <Meter fraction={fraction} label={`${label}, ${Math.round(fraction * 100)}% used`} />
+          // The label is clamped exactly as the bar is. A window can overshoot
+          // its ceiling — spend is debited after the request served — and an
+          // unclamped label announced "150% used" over a bar drawn at 100,
+          // so a screen reader and a pair of eyes disagreed about the same row.
+          // The raw figures are in the Used and Ceiling columns either way.
+          <Meter
+            fraction={fraction}
+            label={`${label}, ${Math.round(Math.min(1, fraction) * 100)}% used`}
+          />
         )}
       </Td>
     </Tr>
