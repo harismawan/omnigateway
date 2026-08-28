@@ -28,6 +28,7 @@ export const CAPABILITIES = [
   "events:request",
   "events:limit",
   "channels",
+  "provider",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

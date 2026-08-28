@@ -79,3 +79,37 @@ export const PROVIDERS: Readonly<Record<string, ProviderRegistryEntry>> = Object
 // `Object.fromEntries` returns an ordinary object, so this table would carry the
 // prototype keys the tables it is built from were just written to drop.
 Object.setPrototypeOf(PROVIDERS, null);
+
+/**
+ * Installs a provider that was not compiled in.
+ *
+ * The one supported mutation of the registry, and it exists for exactly one
+ * caller: boot, after `loadPlugins` and before `createApp`. Every registry read
+ * in the gateway is a call-time read — that was the point of widening
+ * `ProviderId` — so a provider added here is visible to routing, pricing, the
+ * console and `omni doctor` with no further wiring.
+ *
+ * Adding after `createApp` would be a different thing entirely: reads happen per
+ * request, so the provider would exist for later requests and not earlier ones.
+ * That is a race rather than a feature, which is why this is a plain function
+ * boot calls at a known point rather than a registry a plugin can write to
+ * whenever it likes.
+ *
+ * Refuses to replace an existing id. A plugin shadowing `anthropic` would take
+ * its traffic and its stored credentials, and the failure would be silent — the
+ * requests keep succeeding, against the wrong upstream.
+ *
+ * `PROVIDERS` is deliberately not updated. It is assembled at module scope from
+ * `PROFILES` and `BODY_ORDER`, which a codec-supplied provider has no entries
+ * in — it carries its own header order inside its codec instead. Nothing in
+ * production reads `PROVIDERS`; if that changes, this is the line that has to
+ * change with it.
+ */
+export function registerProvider(descriptor: ProviderDescriptor, adapter: ProviderAdapter): void {
+  const id = descriptor.id;
+  if (Object.hasOwn(PROVIDER_DESCRIPTORS, id)) {
+    throw new Error(`a provider named ${id} is already installed`);
+  }
+  (PROVIDER_DESCRIPTORS as Record<string, ProviderDescriptor>)[id] = descriptor;
+  (ADAPTERS as Record<string, ProviderAdapter>)[id] = adapter;
+}
