@@ -167,17 +167,18 @@ same treatment:
   was that `putModel` accept a target naming an uninstalled provider, for the
   reason it already accepts a dangling pin: removing a plugin must not make an
   unrelated edit unsavable. `providerIdSchema` does validate format only, as
-  designed — but it is not what guards this path. `putModel` opens with
-  `parseOrThrow(modelSchema, …)`, and `targetSchema`'s non-custom arm is still a
-  hand-written five-member enum, which this spec deliberately kept (see
-  *Schema*). So the two decisions collide: `PUT /api/models/:id` and
-  `omni models put -f` refuse such a target outright, and
-  `packages/control/test/schemas.test.ts` asserts it.
+  designed — but at the time this spec shipped it was not what guarded this path.
+  `putModel` opens with `parseOrThrow(modelSchema, …)`, and `targetSchema`'s
+  non-custom arm was a hand-written five-member enum which this spec deliberately
+  kept (see *Schema*). The two decisions collided, and `PUT /api/models/:id` and
+  `omni models put -f` refused such a target outright.
 
-  Nothing here is broken today, because the enum also refuses the providers this
-  sub-project cannot yet produce. It becomes load-bearing the moment the plugin
-  host exists: a plugin provider's target will be unsaveable through the console
-  and the CLI until that enum is widened, and doing so is the plugin host's work.
+  **Resolved in sub-project 4**, which had to: a plugin provider whose targets
+  cannot be saved is a provider nobody can configure. The union is gone and
+  `targetSchema` takes `providerIdSchema`, so the write path now matches what
+  this section always said it should. The enum's stated justification —
+  exhaustiveness over a closed `ProviderId` — had already been removed by this
+  very sub-project, and it outlived that by one release.
   Recorded rather than fixed here, because widening it now costs the
   exhaustiveness the union exists for while nothing yet needs the room.
 
@@ -210,11 +211,20 @@ of construction rather than of the type:
 `OAUTH_PROVIDERS`, `oauth/refresh.ts`, `quota/poll.ts`.
 
 **Schema.** `providerIdSchema` becomes a format-validated string.
-`targetSchema`'s non-custom arm keeps its hand-written five-member enum — it is
-already a documented core edit per provider, pinned rather than derived because
-deriving widens the arm's inferred type and costs the discriminated union its
-exhaustiveness. **That pin becomes more important, not less**: it is now the only
-compile-time check that a new provider was thought about at all.
+`targetSchema`'s non-custom arm keeps its hand-written five-member enum for the
+duration of this sub-project — pinned rather than derived, because deriving
+widens the arm's inferred type and costs the discriminated union its
+exhaustiveness. That pin was argued to become *more* important, as the last
+compile-time check that a new provider had been thought about.
+
+**That was wrong, and sub-project 4 reversed it.** The argument is for a
+compile-time check over a *closed* type — which is exactly what this sub-project
+removes. A check whose premise the same change deletes is not a check; what it
+did instead was refuse every target naming a plugin-supplied provider, which is
+a provider routing and pricing know about and no operator can configure. The
+union is now one schema over `providerIdSchema`, and the one thing it genuinely
+enforced — a `custom` target carries an `endpointId`, and nothing else may —
+survives as a named rule.
 
 **`ChatRequest.vendor`** becomes `Record<string, Record<string, unknown>>`. This
 is a published-shape change when publication happens, which is a reason to do it

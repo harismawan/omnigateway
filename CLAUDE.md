@@ -140,11 +140,11 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     `rtk` hold no per-provider data and, with two named exceptions, never branch on a provider id.
     `packages/store` and `packages/ir` are clean of both. The two that remain, and stay until the
     sub-project that owns them: `router/src/resolve.ts` excludes `custom` from prefix routing,
-    because a bare model name cannot carry an endpoint id; and `control/src/schemas.ts` keeps the
-    target union's arms hand-written, because deriving them widens the arm's inferred `provider`
-    back to `ProviderId` and costs the exhaustiveness the union exists for. That second one **is** a
-    core edit a seventh provider must make — `packages/control/test/providerCoverage.test.ts` fail
-    until it do, and `docs/adding-a-provider.md` say so. A
+    because a bare model name cannot carry an endpoint id; and `control/src/schemas.ts` name
+    `custom` in the one rule that survive its target union — a custom target carry an `endpointId`
+    and nothing else may. The union itself is **gone**: its arms were hand-written for
+    exhaustiveness over a closed `ProviderId`, that closed type no longer exist, and the enum
+    outlived the argument for it while refusing every target naming a plugin-supplied provider. A
     provider's data live in its own descriptor; core read the registry it is handed. Core cannot
     scan providers — `packages/providers` import `@omni/ir`, so reverse import is a cycle, and rules
     1 and 3 forbid it anyway. Injection is the only direction.
@@ -514,16 +514,19 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   `catalogModelAuths` answer "every way in" for an unknown provider, matching what it already answer
   for an unlisted model: empty would read as "no credential can reach this" and refuse every plugin
   provider's target.
-  **A target naming an uninstalled provider cannot be saved through any supported path today**, and
-  an earlier version of this bullet claimed the opposite. `putModel` open with
-  `parseOrThrow(modelSchema, …)`, and `targetSchema`'s non-custom arm is still
-  `z.enum(["anthropic","openai","kimi","kilo","grok"])` — so `PUT /api/models/:id` and
-  `omni models put -f` **refuse** it, and `packages/control/test/schemas.test.ts` assert exactly that.
-  The state is real anyway, because `sqlite/config.ts` read targets back with `JSON.parse` and no
-  validation, so a restored or hand-edited database produce it — which is why `provider:missing` and
-  `omni doctor`'s check exist and why the CLI test seeding one write through `store.config.putModel`
-  rather than control's. When the plugin host land, that enum is what stop a plugin provider's target
-  being saved at all; widening it is that sub-project's work, not a thing to assume already done.
+  **A target naming any well-formed provider id save**, including one no build contain. This bullet
+  has now said the opposite twice and both were wrong in their own direction, so state it once
+  plainly: `putModel` parse through `modelSchema`, `targetSchema` take `providerIdSchema` — format
+  only — and existence is checked nowhere on this path. That is the same exemption a dangling pin
+  already have, for the same reason: removing a provider must not make an unrelated model unsavable.
+  `provider:missing` at routing and `omni doctor` carry that weight.
+  Until the plugin capability landed, `targetSchema` held `z.enum(["anthropic",…,"grok"])`, which
+  refuse every target naming a plugin-supplied provider — a provider routing, pricing and the console
+  all knew about and no operator could configure. The enum was written for exhaustiveness over a
+  closed `ProviderId` and outlived it.
+  One rule survive the union it replaced, and losing it is the real risk: **a `custom` target require
+  an `endpointId` and nothing else may carry one**. A custom target with no endpoint match no account,
+  so it save clean and fail every request at routing rather than at the point it was named.
 - Nothing validate the pin at write time, same exemption `putModel` give stored targets: removing an
   account must not make unrelated edit unsavable. `omni doctor` carry that weight instead, and it
   must resolve through `resolvePin` — an existence check report "none" for the cross-provider and
