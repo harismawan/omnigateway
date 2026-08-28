@@ -33,9 +33,9 @@
  * Run: `bun run check:dead`. Exits non-zero with what to delete.
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveBase } from "./lib/history.ts";
+import { changedSources, readable } from "./lib/tree.ts";
 
 const ROOT = join(import.meta.dir, "..");
 const git = (...args: string[]): string =>
@@ -127,39 +127,13 @@ if (resolved.base === undefined) {
   process.exit(2);
 }
 const base = resolved.base;
-// `base` alone, not `base..HEAD`: the two-dot form compares commits, so a file
-// you have edited but not committed is absent from `touched` and never checked.
-// That made the check answer "no dead exports" for work in progress — and made
-// every probe of it silently vacuous, which is how this was found. Diffing the
-// base against the working tree covers what you are about to commit as well as
-// what you already did.
-const touched = new Set(
-  git("diff", "--name-only", base)
-    .split("\n")
-    .filter((f) => f.endsWith(".ts") || f.endsWith(".tsx")),
-);
+const touched = new Set(changedSources(ROOT, base));
 
 const files = git("ls-files", "*.ts", "*.tsx").split("\n").filter(Boolean);
-/**
- * A tracked file that is not on disk is skipped, not fatal.
- *
- * `git ls-files` lists the index, and the index outlives a deletion: mid-rebase,
- * after a manual `rm`, or with an intent-to-add entry whose file has gone, the
- * read throws and the whole check dies with a stack. Found by a probe that hit
- * exactly that state — and a check that crashes on an ordinary working-tree
- * condition is one that gets removed rather than fixed.
- */
-const readable = (file: string): string | undefined => {
-  try {
-    return readFileSync(join(ROOT, file), "utf8");
-  } catch {
-    return undefined;
-  }
-};
 
 const sources = new Map(
   files.flatMap((f) => {
-    const raw = readable(f);
+    const raw = readable(ROOT, f);
     return raw === undefined ? [] : [[f, code(raw)] as const];
   }),
 );

@@ -36,6 +36,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveBase } from "./lib/history.ts";
+import { changedSources, readable } from "./lib/tree.ts";
 
 const ROOT = join(import.meta.dir, "..");
 const git = (...args: string[]): string =>
@@ -89,11 +90,16 @@ if (resolved.base === undefined) {
   process.exit(2);
 }
 const base = resolved.base;
-const changed = git("diff", "--name-only", `${base}..HEAD`)
-  .split("\n")
-  .filter((f) => f.endsWith(".ts") || f.endsWith(".tsx"));
+const changed = changedSources(ROOT, base);
 
-// Declared at the merge base, gone at HEAD.
+// Declared at the base, gone in the working tree.
+//
+// **The working tree, not HEAD.** This read `${base}..HEAD` and `git show
+// HEAD:${file}`, so a symbol deleted and not yet committed was not in
+// `removed` — the check was blind to the change being reviewed, which is the
+// only moment it is free to act on. Its sibling was repaired for this and
+// carried the comment saying why; this one was not, so the two answered
+// differently about the same repository for two commits.
 const removed = new Set<string>();
 for (const file of changed) {
   let before = "";
@@ -102,12 +108,8 @@ for (const file of changed) {
   } catch {
     continue; // added on this branch; nothing was removed from it
   }
-  let after = "";
-  try {
-    after = git("show", `HEAD:${file}`);
-  } catch {
-    after = ""; // deleted outright: everything in it is removed
-  }
+  // Absent from disk is the deletion itself, so everything it declared is gone.
+  const after = readable(ROOT, file) ?? "";
   const now = declared(after);
   for (const name of declared(before)) if (!now.has(name)) removed.add(name);
 }
@@ -117,9 +119,17 @@ const tracked = git("ls-files", "*.ts", "*.tsx").split("\n").filter(Boolean);
 // Redeclared anywhere else at HEAD means it moved, not that it went.
 const alive = new Set<string>();
 for (const file of tracked) {
-  for (const name of declared(readFileSync(join(ROOT, file), "utf8"))) alive.add(name);
+  // Through `readable`, because `git ls-files` lists the index and the index
+  // outlives a deletion. An uncaught `ENOENT` here killed the whole check on an
+  // ordinary mid-rebase tree — the guard its sibling already had.
+  const source = readable(ROOT, file);
+  if (source === undefined) continue;
+  for (const name of declared(source)) alive.add(name);
 }
 
+// Raw, not `readable`: this is a fixed path the repository always has, so its
+// absence is a broken checkout rather than an ordinary working-tree state, and
+// swallowing that would make the provider-id skip list silently empty.
 const descriptors = readFileSync(join(ROOT, "packages/providers/src/descriptors.ts"), "utf8");
 const providerIds = new Set([...descriptors.matchAll(/^ {2}(\w+):\s/gm)].map(([, id]) => id ?? ""));
 
@@ -168,7 +178,15 @@ function sentenceAround(lines: string[], index: number, symbol: string): string 
 const flagged: string[] = [];
 for (const file of tracked) {
   if (file.startsWith("docs/")) continue;
-  const lines = readFileSync(join(ROOT, file), "utf8").split("\n");
+  // Through `readable` like every other read of a tracked path. Two sites in
+  // this loop were converted and this third was not, and the scratch repro of
+  // the very bug being fixed is what found it — a deleted-not-yet-committed
+  // file is listed by `git ls-files`, reaches here, and killed the check with
+  // an ENOENT stack. Converting the sites a finding named, rather than the
+  // reads, is the same mistake one layer down.
+  const source = readable(ROOT, file);
+  if (source === undefined) continue;
+  const lines = source.split("\n");
   lines.forEach((line, index) => {
     const trimmed = line.trimStart();
     if (!trimmed.startsWith("*") && !trimmed.startsWith("//")) return;
