@@ -499,6 +499,33 @@ describe("omni credentials add-key", () => {
     expect(JSON.parse(after.out).credentials).toEqual([]);
   });
 
+  test("the refusal names the plugin that failed, in both output modes", async () => {
+    // The refusal throws before any `emit`, and `note()` is
+    // `if (!ctx.json) writer.err(...)` — so under `--json` the failures reached
+    // neither stream and a script saw "provider must be one of …" with the
+    // cause deleted. That is the path the cause matters most on.
+    const root = await migrated();
+    place(
+      root,
+      "boomer",
+      { ...PROVIDER, id: "boomer" },
+      {
+        "server.js": 'throw new Error("top-level boom");',
+      },
+    );
+
+    const human = await cli(["credentials", "add-key", "ghost-ai"], { root, prompt: secret });
+    expect(human.code).not.toBe(0);
+    expect(human.err).toContain("plugin boomer: top-level boom");
+
+    const json = await cli(["credentials", "add-key", "ghost-ai", "--json"], {
+      root,
+      prompt: secret,
+    });
+    expect(json.code).not.toBe(0);
+    expect(json.err).toContain("plugin boomer: top-level boom");
+  });
+
   test("refuses a provider nothing supplies", async () => {
     const root = await migrated();
     // Nothing on disk at all — the other half of the pair above. Asserted, so
@@ -910,6 +937,87 @@ export default {
       // And it really is populated, so "no prototype" is not just "no object".
       expect(Object.keys(descriptors)).toContain("anthropic");
     });
+  });
+
+  test("a plugin the host will not load is named, not silently absent", async () => {
+    // The end-to-end half. `loadable` is false for the three fatal manifest
+    // problems — the *ordinary* way a plugin breaks — and that produced no
+    // failure line in any command, so the operator got `provider:missing` with
+    // no cause. `api: PLUGIN_API_VERSION - 1` is the realistic one: a plugin
+    // published against the previous generation.
+    const root = makeRoot();
+    expect((await cli(["db", "migrate"], { root })).code).toBe(0);
+    place(
+      root,
+      "acme-ai",
+      { ...PROVIDER, api: PLUGIN_API_VERSION - 1 },
+      { "server.js": SERVER(join(root, "imported"), join(root, "setup-ran")) },
+    );
+    const store = await openStore(root);
+    await store.config.putModel({
+      id: "fast",
+      strategy: "priority",
+      isAlias: false,
+      targets: [
+        {
+          provider: "acme-ai",
+          model: "acme-1",
+          tier: 1,
+          weight: 1,
+          costPerMTok: { input: 5, output: 25 },
+          capabilities: { tools: true, images: false, reasoning: false },
+        },
+      ],
+    });
+    store.close();
+
+    const human = await cli(["models", "dry-run", "fast"], { root });
+    expect(human.code).toBe(0);
+    expect(human.err).toContain("acme-ai");
+    expect(human.err).toContain("will not load");
+
+    const json = await cli(["models", "dry-run", "fast", "--json"], { root });
+    const body = JSON.parse(json.out) as {
+      pluginFailures: { id: string; reason: string }[];
+      excluded: { reason: string }[];
+    };
+    // The consequence and its cause travel together, which is the whole point.
+    expect(body.excluded.map((row) => row.reason)).toContain("provider:missing");
+    expect(body.pluginFailures).toHaveLength(1);
+    expect(body.pluginFailures[0]?.reason).toContain("will not load");
+  });
+
+  test("a key for a built-in provider runs nobody's plugin", async () => {
+    // The short-circuit's actual purpose, asserted rather than argued: minting a
+    // credential for a compiled-in provider must not evaluate a stranger's
+    // top-level code, which is a real side effect and not the CLI's to cause for
+    // a question that cannot depend on the answer.
+    //
+    // The first version asked `PROVIDER_IDS.includes(...)`, and CLAUDE.md says
+    // of that constant "it feed CLI usage messages and tests, never a gate".
+    // Swapping it for the call-time registry read left every test green — the
+    // mutant survived, because nothing pinned this. So does deleting the
+    // short-circuit outright, which is the more interesting one: without this
+    // test, the property the branch exists for was unowned.
+    const root = makeRoot();
+    expect((await cli(["db", "migrate"], { root })).code).toBe(0);
+    place(root, "acme-ai", PROVIDER, {
+      "server.js": SERVER(join(root, "imported"), join(root, "setup-ran")),
+    });
+
+    expect(
+      (
+        await cli(["credentials", "add-key", "anthropic"], {
+          root,
+          prompt: { isTty: false, secret: async () => "sk-secret", confirm: async () => true },
+        })
+      ).code,
+    ).toBe(0);
+    // Under this root nothing has imported that module yet, so absence is the
+    // module never having been evaluated rather than a per-process cache hit —
+    // which is why this cannot reuse `installed()`, whose own `add-key` names
+    // the plugin's provider and therefore must import it.
+    expect(existsSync(join(root, "imported"))).toBe(false);
   });
 
   test("both commands import the module and neither calls its setup", async () => {

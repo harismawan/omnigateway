@@ -445,6 +445,53 @@ test("a plugin without the capability is not imported at all", async () => {
   expect(read.failures).toEqual([]);
 });
 
+test("a plugin that declares a provider and will not load is reported", async () => {
+  // This was a bare `continue`, and `loadable` is false for exactly the three
+  // fatal manifest problems — id disagreeing with its directory, unsupported
+  // `api`, missing `server` file. So the *ordinary* breakage produced no
+  // failure line anywhere, and an operator saw `provider:missing` or an omitted
+  // context limit with the cause deleted.
+  const read = await readPluginProviders(
+    [
+      summary({
+        loadable: false,
+        problems: [
+          { reason: "plugin api 1 is not supported by this host (api 2)", fatal: true },
+          { reason: "ui bundle missing", fatal: false },
+        ],
+      }),
+    ],
+    async () => declaringModule,
+  );
+
+  expect(read.descriptors).toEqual({});
+  expect(read.failures).toHaveLength(1);
+  expect(read.failures[0]?.id).toBe("acme-ai");
+  // The reason it will not load, not merely that it will not: the first is
+  // something to fix, the second is something to wonder about.
+  expect(read.failures[0]?.reason).toContain("api 1 is not supported");
+  // Non-fatal problems stay out — they did not stop it loading.
+  expect(read.failures[0]?.reason).not.toContain("ui bundle");
+});
+
+test("a UI-only plugin that will not load is not reported as a provider failure", async () => {
+  // The other half, and why the capability is asked before `loadable`: a broken
+  // panel is the UI's problem, and naming it here would put a line on every
+  // command that reads this registry for something else entirely.
+  const read = await readPluginProviders(
+    [
+      summary({
+        loadable: false,
+        manifest: { capabilities: ["storage"], server: "server.js" },
+        problems: [{ reason: "ui entry must live under ui/", fatal: true }],
+      }),
+    ],
+    async () => declaringModule,
+  );
+
+  expect(read.failures).toEqual([]);
+});
+
 test("a plugin the host would refuse is not imported either", async () => {
   let imported = false;
   const read = await readPluginProviders([summary({ loadable: false })], async () => {

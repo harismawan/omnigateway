@@ -472,6 +472,26 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   went unnoticed once. `packages/plugin-api/test/bundleWeight.test.ts` build each entry point and
   assert zod appear only under root; first test assert zod *is* present there, because "absent" is
   also what broken harness report.
+- **The range one published package put on the other is never resolved in this repository**, so it
+  is the one dependency edge nothing here exercise. Workspace resolution use the local copy, and the
+  declared range only decide what arrive in a stranger's `node_modules`. `dashboard-sdk` carried
+  `@omnigateway/plugin-api: ^0.1.0` past that package's move to `0.2.0` — `^0.x` mean
+  `>=0.x.0 <0.(x+1).0` — so every `bun add` of the SDK resolved generation **1** against a gateway
+  that refuse `api: 1`, and no source file say so. Repairing the range fix nobody: release step skip
+  a package whose **version** not moved, so version bump is the only part of the repair a consumer
+  see. `publishable.test.ts` walk the pairs rather than assert the one range, and its drift check
+  watch `package.json` beside `src` — manifest is the part of published artifact deciding what
+  source *resolve*.
+- **A drift check reading repaired history cannot fail.** `publishable.test.ts` ask git what moved
+  since last tag, and once the fix land there is nothing to see — so both fixes to that query
+  survived mutation against real history while being plainly wrong. Query now live in
+  `packages/plugin-api/test/helpers/changed.ts` and `changed.test.ts` ask it of scratch repository it
+  build, with a no-edit case first because query reporting everything satisfy every other assertion.
+  Two properties it own: watched set include `package.json`, and diff take **one ref**, not
+  `${ref}..HEAD` — two-dot form compare commit to commit, so change contributor look at while
+  running suite is invisible, which is every change at moment it still free to fix. Third instrument
+  in this repo found reading `base..HEAD` where it meant "since base"; `scripts/dead-exports.ts` was
+  second.
 - `admit`/`consume` claim ring stamp and gauge **synchronously**, before any `await`, and roll back
   on refusal. Reading counters first and recording after let concurrent requests judge one pre-burst
   snapshot — ceiling of 3 admitted 10 parallel requests, and it need no I/O to fire.

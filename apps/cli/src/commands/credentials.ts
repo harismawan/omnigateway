@@ -281,28 +281,54 @@ export const credentialsAddKey: Command = {
     // succeed. A warning about something irrelevant is one an operator learns to
     // scroll past.
     //
-    // `PROVIDER_IDS` is a build-time snapshot and that is exactly right here: it
-    // is the set of providers compiled in, which cannot change at runtime. The
-    // registry read below is what answers for everything else.
-    const builtIn = PROVIDER_IDS.includes(providerId);
+    // Asked of the registry at call time, **not** of `PROVIDER_IDS`.
+    //
+    // The first version used the snapshot, on the reasoning that "what is
+    // compiled in cannot change at runtime" — which is true and is not the
+    // rule. CLAUDE.md says of that constant: "it feed CLI usage messages and
+    // tests, never a gate", and this is a gate. The two are behaviourally
+    // identical today, so the snapshot bought nothing and cost the one thing a
+    // reader checks a rule against; a mutant swapping them survived the whole
+    // suite, which is what "bought nothing" looks like from the outside.
+    //
+    // `Object.hasOwn` rather than an index read: `PROVIDER_DESCRIPTORS` is
+    // null-prototype so both answer alike, and the explicit form is what keeps
+    // that true if this is ever handed an ordinary object.
+    const builtIn = Object.hasOwn(PROVIDER_DESCRIPTORS, providerId);
     const { descriptors, failures } = builtIn
       ? { descriptors: PROVIDER_DESCRIPTORS, failures: [] as const }
       : await pluginProviders(ctx.root.root);
     // Named before the refusal, because a plugin that failed to read is the
     // likeliest reason the provider below is about to be reported as unknown.
-    for (const failure of failures) {
-      note(ctx, writer, paint(ctx, "yellow", `plugin ${failure.id}: ${failure.reason}`));
-    }
     const providerExists: ProviderExists = (id) => Object.hasOwn(descriptors, id);
     if (!providerExists(providerId)) {
+      // **Carried in the message, not printed above it.** The refusal throws
+      // before any `emit`, and `note()` is `if (!ctx.json) writer.err(...)` — so
+      // under `--json` the failures reached neither stream and a script got
+      // "provider must be one of …" with the cause deleted. That is the path
+      // the cause matters most on: a plugin that failed to read is the likeliest
+      // reason the id was refused, and it is the operator's actual next step.
+      //
+      // An error message rather than a payload because this is an error: a
+      // command that emitted a result *and* threw would be describing two
+      // different outcomes of one run.
+      //
       // The capability and the loading are both named, because those are the
       // two ways an operator who *has* installed the right plugin still lands
       // here, and "or an installed plugin that supplies one" sent them to look
       // at the one thing that was already true.
+      const because = failures.map((f) => `\n  plugin ${f.id}: ${f.reason}`).join("");
       throw new UsageError(
         `provider must be one of ${PROVIDER_IDS.join(", ")}, or a plugin that loads and ` +
-          `supplies one; omni plugin list shows which`,
+          `supplies one; omni plugin list shows which${because}`,
       );
+    }
+
+    // Only on the way through. On the refusal path they are in the message
+    // above; printing them here as well would say it twice in a terminal and
+    // still say it nowhere under `--json`.
+    for (const failure of failures) {
+      note(ctx, writer, paint(ctx, "yellow", `plugin ${failure.id}: ${failure.reason}`));
     }
 
     const protocolFlag = stringFlag(args.values, "protocol");

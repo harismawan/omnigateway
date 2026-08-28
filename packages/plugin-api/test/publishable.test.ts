@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Glob } from "bun";
 import { DASHBOARD_SDK_VERSION, PLUGIN_API_VERSION } from "../src/version.ts";
+import { changedSince, publishedPaths } from "./helpers/changed.ts";
 
 const REPO = join(import.meta.dir, "..", "..", "..");
 
@@ -102,6 +103,48 @@ describe("the packages a plugin author installs", () => {
     });
   }
 
+  test("a range one published package puts on another admits what that one is now", () => {
+    // The dependency graph inside this scope is the one nobody sees resolve.
+    // Both packages are published from the same tag, so `bun install` here uses
+    // the workspace copy and the declared range is never exercised — it means
+    // something only in a stranger's `node_modules`, where it decides which
+    // *published* version arrives.
+    //
+    // That went wrong: `dashboard-sdk` declared `@omnigateway/plugin-api:
+    // ^0.1.0`, which under 0.x is `>=0.1.0 <0.2.0` and therefore excludes the
+    // `0.2.0` sitting next to it in this repo. A plugin author installing the
+    // SDK got generation **1** transitively, against a gateway that refuses
+    // `api: 1` — the exact failure `PLUGIN_API_VERSION` was raised to 2 to make
+    // legible, arriving instead as an install nobody could make load.
+    //
+    // Discovered by walking the pairs rather than asserting the one range,
+    // because a second edge between these packages would need this written
+    // again and would not get it.
+    const versions = new Map(
+      PUBLISHED.map((dir) => [manifest(dir).name, manifest(dir).version] as const),
+    );
+    const bad: string[] = [];
+    let checked = 0;
+    for (const dir of PUBLISHED) {
+      const pkg = manifest(dir);
+      for (const [name, range] of Object.entries({
+        ...pkg.dependencies,
+        ...pkg.peerDependencies,
+      })) {
+        const sibling = versions.get(name);
+        if (sibling === undefined) continue;
+        checked += 1;
+        if (!Bun.semver.satisfies(sibling, range)) {
+          bad.push(`${pkg.name} wants ${name}@${range}, which excludes ${sibling}`);
+        }
+      }
+    }
+    expect(bad).toEqual([]);
+    // No edges is the same answer as no bad edges, and one of them means this
+    // test stopped watching anything.
+    expect(checked).toBeGreaterThan(0);
+  });
+
   test("the API package's generation is a counter, not its npm major", () => {
     // These were pinned to each other, and the pin was wrong. `PLUGIN_API_VERSION`
     // is a compatibility generation that only ever increases; an npm major is
@@ -170,14 +213,11 @@ describe("the packages a plugin author installs", () => {
 
     const stale: string[] = [];
     for (const dir of PUBLISHED) {
-      const changed = Bun.spawnSync(
-        ["git", "diff", "--name-only", `${latest}..HEAD`, "--", `${dir}/src`],
-        { cwd: REPO },
-      );
-      const touched = new TextDecoder()
-        .decode(changed.stdout)
-        .split("\n")
-        .filter((file) => file.trim() !== "");
+      // Both the watched set and the "since" semantics live in
+      // `helpers/changed.ts`, where a scratch repository can ask them the
+      // question this one cannot: reverting either fix leaves the answer here
+      // correctly unchanged, because the history it reads has been repaired.
+      const touched = changedSince(REPO, latest, publishedPaths(dir));
       const behaviourMoved = touched.some((file) => {
         const at = Bun.spawnSync(["git", "show", `${latest}:${file}`], {
           cwd: REPO,

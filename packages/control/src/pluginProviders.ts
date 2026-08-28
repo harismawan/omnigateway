@@ -400,11 +400,26 @@ export type PluginProviderRead = {
  * installation whose operator is running these commands, and a `doctor` that
  * exited non-zero over one would be useless at the moment it is needed.
  *
+ * A plugin the host will not load is reported here too, and only when it
+ * declares the `provider` capability — a broken UI-only plugin is the UI's
+ * problem and saying so here would be noise on every command that reads this.
+ *
  * Order follows the caller's list, and `listPlugins` sorts by id, so two
  * installs holding the same plugins build the same registry.
  */
 export async function readPluginProviders(
-  plugins: readonly { id: string; path: string; loadable: boolean; manifest: unknown }[],
+  plugins: readonly {
+    id: string;
+    path: string;
+    loadable: boolean;
+    manifest: unknown;
+    /**
+     * Carried so an unloadable plugin's failure can name the reason rather than
+     * repeat that it is unloadable. `PluginSummary` already holds these and
+     * every caller passes one whole.
+     */
+    problems?: readonly { reason: string; fatal: boolean }[];
+  }[],
   importer: PluginImporter,
   // Injected so a test can drive the timeout without waiting for it, and
   // defaulted so no caller has to know it exists. `setTimeout` rather than a
@@ -421,15 +436,37 @@ export async function readPluginProviders(
   const failures: { id: string; reason: string }[] = [];
 
   for (const plugin of plugins) {
-    // A plugin the host will refuse is a plugin whose provider will not exist.
-    // Reading it anyway would put a descriptor in this registry that no running
-    // gateway has — the same lie in the opposite direction.
-    if (!plugin.loadable) continue;
     const manifest = plugin.manifest;
     if (typeof manifest !== "object" || manifest === null) continue;
     const capabilities = (manifest as { capabilities?: unknown }).capabilities;
-    // Nothing to read and nothing to report: most plugins supply no provider.
+    // Nothing to read and nothing to report: most plugins supply no provider,
+    // and asked before `loadable` so a broken *UI-only* plugin stays the UI's
+    // problem rather than appearing as a missing provider.
     if (!Array.isArray(capabilities) || !capabilities.includes("provider")) continue;
+
+    // A plugin the host will refuse is a plugin whose provider will not exist.
+    // Reading it anyway would put a descriptor in this registry that no running
+    // gateway has — the same lie in the opposite direction.
+    //
+    // **Reported, not skipped.** This was a bare `continue`, and `loadable` is
+    // false for exactly the three fatal manifest problems — an id disagreeing
+    // with its directory, an unsupported `api`, a missing `server` file. So a
+    // plugin broken in the *ordinary* way was absent from `failures` in all
+    // three commands that report them, and an operator saw the consequence
+    // (`provider:missing`, an omitted context limit, a refused id) with the
+    // cause deleted. That is the exact bug those commands were given
+    // `pluginFailures` for.
+    if (!plugin.loadable) {
+      const fatal = (plugin.problems ?? []).filter((problem) => problem.fatal);
+      failures.push({
+        id: plugin.id,
+        reason:
+          fatal.length === 0
+            ? "declares a provider but will not load"
+            : `declares a provider but will not load: ${fatal.map((p) => p.reason).join("; ")}`,
+      });
+      continue;
+    }
     const server = (manifest as { server?: unknown }).server;
     if (typeof server !== "string") {
       failures.push({ id: plugin.id, reason: "declares a provider but has no server entry" });

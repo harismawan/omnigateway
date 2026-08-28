@@ -199,7 +199,7 @@ for (const file of tracked) {
       // The backtick must hold the symbol and nothing else, optionally with a
       // call or a member access. `kilo-auto/*` is not a mention of `kilo`.
       const exact = new RegExp(
-        "`" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?:\\(\\))?(?:\\.\\w+)*`",
+        `\`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\(\\))?(?:\\.\\w+)*\``,
       );
       if (!exact.test(line)) continue;
       // The **sentence** the symbol sits in, not three lines either side.
