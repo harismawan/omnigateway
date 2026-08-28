@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Usage } from "@omni/ir";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
+import { entryOf } from "@omni/testkit";
 import { priceOf } from "../../src/dispatch/price.ts";
 
 const PRICES = {
@@ -116,4 +118,50 @@ test("treats a partial ttl breakdown's shortfall as the other ttl, either way", 
     "anthropic",
   );
   expect(only1h).toBeCloseTo(6.25 + 10, 10);
+});
+
+test("prices against the registry it is handed, not the module-global one", () => {
+  // The disagreement this parameter exists to close. `dispatch` threads
+  // `deps.providers` into `resolveModel` and `rank`; for one round it did not
+  // thread it here, so a provider present in the injected registry and absent
+  // from the global one routed, dispatched, and then priced its cache writes at
+  // zero — silently, with no throw and no log line.
+  //
+  // A legacy target: no explicit write prices, so the fallback multiplier is
+  // what decides the bill. That is the only shape where this matters.
+  const legacy = { input: 5, output: 25, cacheRead: 0.5 };
+  const anthropic = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
+  const installed: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    "late-arrival": { ...anthropic, id: "late-arrival" },
+  };
+
+  // Against the real registry the provider is unknown, and the documented
+  // fallback prices its writes at zero.
+  expect(priceOf(legacy, usage({ cacheWriteTokens: M }), "late-arrival")).toBe(0);
+
+  // Handed the registry that has it, the same request is billed Anthropic's
+  // 1.25x write multiplier: 5 * 1.25 = 6.25 per million.
+  expect(priceOf(legacy, usage({ cacheWriteTokens: M }), "late-arrival", installed)).toBeCloseTo(
+    6.25,
+    10,
+  );
+});
+
+test("an explicit write price is used whatever registry is handed in", () => {
+  // The positive control, and the reason the case above is narrow: a target
+  // carrying its own `cacheWrite5m` never consults the descriptor at all, so
+  // the registry cannot change its bill. Every target created since write
+  // pricing existed is this shape.
+  const ordinary: ProviderDescriptors = { ...PROVIDER_DESCRIPTORS };
+  for (const providers of [undefined, ordinary, {} as ProviderDescriptors]) {
+    expect(
+      priceOf(
+        PRICES,
+        usage({ cacheWriteTokens: M, cacheWrite5mTokens: M }),
+        "anthropic",
+        providers,
+      ),
+    ).toBeCloseTo(6.25, 10);
+  }
 });

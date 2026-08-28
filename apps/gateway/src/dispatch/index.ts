@@ -420,11 +420,15 @@ export async function dispatch(
           // `Object.hasOwn`, and here rather than at whoever built the map.
           //
           // `candidate.target.provider` is a stored string, and `deps.adapters`
-          // is a public injection point: `createApp` normalises the map it
-          // passes, but `DispatchDeps` is constructed directly by callers and by
-          // tests, and an ordinary object literal answers the `Object`
+          // is a public injection point constructed directly by callers and by
+          // tests — an ordinary object literal, which answers the `Object`
           // constructor for `constructor`. The lookup would then succeed and
           // `adapter.send` would be called on a function that has no `send`.
+          //
+          // Nothing normalises the map upstream. An earlier version did so in
+          // `createApp`, which covered exactly one of the ways this object is
+          // built; that was deleted rather than kept, because a guard covering
+          // one construction path reads as if it covers all of them.
           //
           // Guarding at the read site rather than at construction is the whole
           // point: this is the one place always on the path, and it cannot be
@@ -505,10 +509,16 @@ export async function dispatch(
                   log.outputTokens = event.usage.outputTokens;
                   log.cacheReadTokens = event.usage.cacheReadTokens;
                   log.cacheWriteTokens = event.usage.cacheWriteTokens;
+                  // `deps.providers`, the same registry routing judged this
+                  // candidate against. Reading the module-global here instead
+                  // let the two disagree: a provider the injected registry had
+                  // and the global did not routed, dispatched, and then priced
+                  // its cache writes at zero.
                   log.costUsd = priceOf(
                     candidate.target.costPerMTok,
                     event.usage,
                     candidate.target.provider,
+                    deps.providers,
                   );
                 }
 
