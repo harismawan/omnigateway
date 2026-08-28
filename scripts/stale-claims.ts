@@ -51,8 +51,65 @@ const DECL = /\b(?:function|class|const|let|var|type|interface|enum)\s+([A-Za-z_
 const HISTORY =
   /\b(was|were|used to|before|previously|replaced|no longer|until|outlived|started as|had been|once|old|former|removed|renamed|deleted|shipped)\b/i;
 
+/**
+ * Comments removed, so prose never counts as a declaration.
+ *
+ * This ran over raw source at all three sites — the merge-base blob, the HEAD
+ * blob, and every tracked file when building `alive` — so any sentence
+ * containing `const NAME`, `type NAME` or `function NAME` marked the symbol
+ * alive and deleted it from the checked set. One incidental line anywhere in
+ * 594 files silently shrank the population, and the report went on printing a
+ * confident count. It was already live: `kilo` was alive solely because of a
+ * comment, harmless only because it is separately excluded as a provider id.
+ *
+ * `dead-exports.ts` states this as a general rule — "a source-reading
+ * instrument must strip comments before it counts anything" — and this file,
+ * the one whose entire subject is comments making false claims about code, was
+ * the one that did not follow it.
+ */
+const code = (raw: string): string =>
+  raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+
 const declared = (source: string): Set<string> =>
-  new Set([...source.matchAll(DECL)].map(([, name]) => name ?? ""));
+  new Set([...code(source).matchAll(DECL)].map(([, name]) => name ?? ""));
+
+const SCRIPT = "check:claims";
+
+/**
+ * Both checks compare against `main`, so a repository without it cannot answer.
+ *
+ * Refuses rather than skipping, and says what to do. A silent skip is what the
+ * publish-drift guard did, and the review found it inert in CI for exactly that
+ * reason — a skipped check and a passing check produce the same green. Failing
+ * with an instruction is recoverable in one command; failing with an uncaught
+ * `git merge-base` stack, which is what this did, reads as "the new check is
+ * broken" and is how a check gets deleted.
+ */
+function requireHistory(): void {
+  const shallow = git("rev-parse", "--is-shallow-repository").trim() === "true";
+  let hasMain = true;
+  try {
+    // `execFileSync` with stderr inherited would print git's own `fatal:` line
+    // just above the explanation below, which is the noise this replaces.
+    execFileSync("git", ["rev-parse", "--verify", "main"], {
+      cwd: ROOT,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch {
+    hasMain = false;
+  }
+  if (shallow || !hasMain) {
+    console.error(
+      `${SCRIPT}: needs full history and a \`main\` ref, and this checkout has ` +
+        `${shallow ? "a shallow clone" : "no `main`"}.\n` +
+        "  locally:  git fetch --unshallow origin main\n" +
+        "  in CI:    actions/checkout@v5 with fetch-depth: 0",
+    );
+    process.exit(2);
+  }
+}
+
+requireHistory();
 
 const base = git("merge-base", "main", "HEAD").trim();
 const changed = git("diff", "--name-only", `${base}..HEAD`)
@@ -91,6 +148,46 @@ const providerIds = new Set([...descriptors.matchAll(/^ {2}(\w+):\s/gm)].map(([,
 
 const gone = [...removed].filter((name) => !alive.has(name) && !providerIds.has(name));
 
+/**
+ * The sentence naming `symbol`, reassembled from the comment block it wraps
+ * across.
+ *
+ * Walks out from the matching line while the lines are still comments, strips
+ * the leaders, joins, then returns the sentences that mention the symbol. A
+ * symbol named twice in one block gets both, joined — if either mention is
+ * historical the block is a record, which is the reading that under-reports
+ * rather than the one that cries wolf.
+ */
+function sentenceAround(lines: string[], index: number, symbol: string): string {
+  const isComment = (line: string): boolean => {
+    const t = line.trimStart();
+    return t.startsWith("*") || t.startsWith("//") || t.startsWith("/*");
+  };
+  let start = index;
+  while (start > 0 && isComment(lines[start - 1] ?? "")) start--;
+  let end = index;
+  while (end < lines.length - 1 && isComment(lines[end + 1] ?? "")) end++;
+
+  const prose = lines
+    .slice(start, end + 1)
+    .map((line) =>
+      line
+        .trimStart()
+        .replace(/^\/\*+|^\*+\/?|^\/\//, "")
+        .trim(),
+    )
+    .join(" ");
+
+  // Split on sentence ends, keeping abbreviations and decimals intact enough:
+  // a period followed by whitespace and a capital or a backtick.
+  const sentences = prose.split(/(?<=[.!?])\s+(?=[A-Z`*_])/);
+  const naming = sentences.filter((sentence) => sentence.includes(`\`${symbol}\``));
+  // A symbol found by the line regex but not by the sentence split means the
+  // reassembly lost it; fall back to the whole block rather than reporting a
+  // claim whose context could not be read.
+  return naming.length > 0 ? naming.join(" ") : prose;
+}
+
 const flagged: string[] = [];
 for (const file of tracked) {
   if (file.startsWith("docs/")) continue;
@@ -105,12 +202,20 @@ for (const file of tracked) {
         "`" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?:\\(\\))?(?:\\.\\w+)*`",
       );
       if (!exact.test(line)) continue;
-      // Three lines either side. A docblock states its history in a sentence
-      // that often wraps well past the line naming the symbol — narrower, and
-      // "as it stood in … before the routing rule started reading" reads as a
-      // live claim.
-      const window = lines.slice(Math.max(0, index - 3), index + 4).join(" ");
-      if (HISTORY.test(window)) continue;
+      // The **sentence** the symbol sits in, not three lines either side.
+      //
+      // A line window is the wrong unit in a file of dense historical prose.
+      // Measured: over the 24,325 comment lines this check reads, a HISTORY
+      // word appeared within +/-3 lines of 8,029 of them — a third of the
+      // corpus suppressed, most of it by sentences with nothing to do with the
+      // symbol. "`PROVIDER_TONE` is the table the console reads." two lines
+      // below "Nothing here was ever cached." was silently dropped.
+      //
+      // A sentence is the unit the claim is actually made in. "`X` was the
+      // table" is history; "`X` is the table. Nothing was cached." is a live
+      // claim beside an unrelated past tense, and only the sentence scope tells
+      // them apart. Docblocks wrap, so the block is rejoined before splitting.
+      if (HISTORY.test(sentenceAround(lines, index, name))) continue;
       flagged.push(
         `${file}:${index + 1}  \`${name}\` was removed on this branch\n    ${trimmed.slice(0, 110)}`,
       );

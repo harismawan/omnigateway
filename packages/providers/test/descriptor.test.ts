@@ -236,7 +236,9 @@ describe("presentation and routing data match their pre-change fixtures", () => 
   };
 
   /**
-   * `PASTE_HINT` from `ConnectDialog.tsx:54`.
+   * The values as `PASTE_HINT` in `ConnectDialog.tsx:54` held them before the
+   * move onto the descriptor. That table no longer exists; this is the record of
+   * what it said.
    *
    * Added after review found this was the one moved field with no pin anywhere:
    * mutating anthropic's hint, and deleting custom's outright, both survived the

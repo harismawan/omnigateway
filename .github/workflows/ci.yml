@@ -14,7 +14,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Full history and tags, not the default depth-1 tagless checkout.
+      # Three checks compare against `main` or the newest `v*` tag:
+      # `check:claims`, `check:dead`, and the publish-drift guard inside
+      # `publishable.test.ts`. At the default depth the first two crash with an
+      # uncaught `git merge-base` failure and the third silently returns —
+      # and a check that skips and a check that passes are the same green,
+      # which is precisely how the drift it guards against shipped.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       # Exact version, not `canary` and not `latest`. `bun.lock` is
       # lockfileVersion 2, which needs Bun 1.4 — 1.3.x silently *downgrades*
@@ -92,3 +102,17 @@ jobs:
 
       - name: Lint
         run: bun run lint
+
+      # Separate steps rather than folded into `lint`, so a failure names which
+      # question was answered wrong. Both read git history, which is why the
+      # checkout above is not the default one.
+      #
+      # They were `package.json` scripts nothing invoked for two commits —
+      # present, documented, green when run by hand, and gating nothing. A check
+      # that reads as coverage without being it is worse than no check, because
+      # it is the one nobody thinks to add.
+      - name: Stale claims
+        run: bun run check:claims
+
+      - name: Dead exports
+        run: bun run check:dead

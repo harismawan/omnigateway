@@ -46,6 +46,44 @@ const code = (raw: string): string =>
 
 const EXPORT = /^export\s+(?:async\s+)?(?:function|const)\s+([A-Za-z_$][\w$]*)/gm;
 
+const SCRIPT = "check:dead";
+
+/**
+ * Both checks compare against `main`, so a repository without it cannot answer.
+ *
+ * Refuses rather than skipping, and says what to do. A silent skip is what the
+ * publish-drift guard did, and the review found it inert in CI for exactly that
+ * reason — a skipped check and a passing check produce the same green. Failing
+ * with an instruction is recoverable in one command; failing with an uncaught
+ * `git merge-base` stack, which is what this did, reads as "the new check is
+ * broken" and is how a check gets deleted.
+ */
+function requireHistory(): void {
+  const shallow = git("rev-parse", "--is-shallow-repository").trim() === "true";
+  let hasMain = true;
+  try {
+    // `execFileSync` with stderr inherited would print git's own `fatal:` line
+    // just above the explanation below, which is the noise this replaces.
+    execFileSync("git", ["rev-parse", "--verify", "main"], {
+      cwd: ROOT,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch {
+    hasMain = false;
+  }
+  if (shallow || !hasMain) {
+    console.error(
+      `${SCRIPT}: needs full history and a \`main\` ref, and this checkout has ` +
+        `${shallow ? "a shallow clone" : "no `main`"}.\n` +
+        "  locally:  git fetch --unshallow origin main\n" +
+        "  in CI:    actions/checkout@v5 with fetch-depth: 0",
+    );
+    process.exit(2);
+  }
+}
+
+requireHistory();
+
 const base = git("merge-base", "main", "HEAD").trim();
 const touched = new Set(
   git("diff", "--name-only", `${base}..HEAD`)
