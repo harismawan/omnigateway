@@ -27,6 +27,19 @@ async function* textStream(text: string): AsyncGenerator<StreamEvent> {
   };
 }
 
+/** A stream whose usage reports cache-creation tokens and nothing else. */
+async function* cacheWriteStream(cacheWriteTokens: number): AsyncGenerator<StreamEvent> {
+  yield { type: "start", id: "m", model: "m-1" };
+  yield { type: "blockStart", index: 0, block: { type: "text" } };
+  yield { type: "blockDelta", index: 0, delta: { type: "text", text: "ok" } };
+  yield { type: "blockEnd", index: 0 };
+  yield {
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens },
+  };
+}
+
 /** Records every call so a test can assert which credential was used. */
 function stubAdapter(
   behaviour: (call: number) => AsyncGenerator<StreamEvent> | Error,
@@ -2262,5 +2275,74 @@ test("an adapter map built by a caller cannot answer for an Object member", asyn
   expect((failure as Error).message).toMatch(/no adapter for provider constructor/);
   // Not a `TypeError` about `.send`, which is what the un-guarded lookup gave.
   expect((failure as Error).message).not.toMatch(/is not a function/);
+  store.close();
+});
+
+test("a request routed on the injected registry is priced on it too", async () => {
+  // The end-to-end shape of the disagreement. `dispatch` threads
+  // `deps.providers` into `resolveModel` and `rank`, so a provider that exists
+  // only in the injected registry routes and dispatches — and for one round
+  // `priceOf` still read the module-global one, so its cache writes were priced
+  // at zero. The request succeeded, the row was written, and the only evidence
+  // was a `costUsd` that was too low. No throw, no log line, no degradation.
+  //
+  // The target is deliberately legacy-shaped: no explicit `cacheWrite5m`, so the
+  // descriptor's multiplier is what decides the bill. A target carrying its own
+  // write price never consults the descriptor and could not show this.
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "la1",
+    provider: "late-arrival",
+    label: "la1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "k",
+    idToken: null,
+  });
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "late-arrival",
+        model: "m-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25, cacheRead: 0.5 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const anthropic = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
+  const providers: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    "late-arrival": { ...anthropic, id: "late-arrival" },
+  };
+  const adapter = stubAdapter(() => cacheWriteStream(1_000_000));
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), providers, adapters: { "late-arrival": adapter } },
+    new AbortController().signal,
+    "req_priced",
+  );
+  await drain(outcome.events);
+
+  const log = outcome.log();
+  expect(log.status).toBe(200);
+  expect(log.cacheWriteTokens).toBe(1_000_000);
+  // 5 * 1.25 = 6.25 per million, Anthropic's write multiplier, which is what the
+  // injected descriptor carries. Zero is what the bug produced.
+  expect(log.costUsd).toBeCloseTo(6.25, 10);
   store.close();
 });

@@ -1,5 +1,5 @@
 import type { ProviderId, Usage } from "@omni/ir";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
 import { cacheReadRate, type TargetPricing } from "@omni/store/types";
 
 /**
@@ -32,7 +32,21 @@ function splitWrites(usage: Usage): { fiveMinute: number; oneHour: number } {
  * `inputTokens` is the uncached remainder, so the token classes are disjoint
  * and each is priced once.
  */
-export function priceOf(prices: TargetPricing, usage: Usage, provider: ProviderId): number {
+export function priceOf(
+  prices: TargetPricing,
+  usage: Usage,
+  provider: ProviderId,
+  // The registry to price against, symmetric with `resolveModel`, `rank` and
+  // `providerCatalog`. Defaults to the real one, so production is unchanged.
+  //
+  // Added because threading `deps.providers` into routing and *not* into here
+  // made the two disagree: a provider present in the injected registry and
+  // absent from the module-global one routed, dispatched, and then priced its
+  // cache writes at zero — a $12.50 write billed $0.00, with no throw and no
+  // log line. The coupling this function's safety rests on is only a coupling
+  // if every party reads the same registry.
+  providers: ProviderDescriptors = PROVIDER_DESCRIPTORS,
+): number {
   // What this provider charges to create a cache entry, as a multiple of its
   // base input price. Only a fallback: a target saved before write pricing
   // existed carries `input`, `output` and `cacheRead` and nothing else, and the
@@ -49,9 +63,10 @@ export function priceOf(prices: TargetPricing, usage: Usage, provider: ProviderI
   // What keeps it from being partial in practice is a coupling between three
   // call sites, not anything this function does: the router excludes a target
   // whose provider has no descriptor (`provider:missing`), and dispatch throws
-  // `INTERNAL` on a missing adapter before the first byte. `rank()` and
-  // `resolveModel()` are handed the same registry this reads, so the three
-  // cannot disagree about which installation they are judging.
+  // `INTERNAL` on a missing adapter before the first byte. That coupling holds
+  // only while all three read the *same* registry, which is why `providers` is
+  // a parameter and why dispatch passes its own down — for one round it did not,
+  // and the two sources could disagree.
   //
   // Throwing instead is not available: `priceOf` runs inside `finishLog`, which
   // must run at most once per request id and is what writes usage — a throw
@@ -63,7 +78,7 @@ export function priceOf(prices: TargetPricing, usage: Usage, provider: ProviderI
   // fix then is to thread the descriptor down with the candidate — routing has
   // already resolved one — or to price from `Target.costPerMTok` alone. Recorded
   // in `docs/superpowers/specs/2026-08-27-widening-provider-id-design.md`.
-  const fallback = PROVIDER_DESCRIPTORS[provider]?.writeOverInput ?? {
+  const fallback = providers[provider]?.writeOverInput ?? {
     fiveMinute: 0,
     oneHour: 0,
   };

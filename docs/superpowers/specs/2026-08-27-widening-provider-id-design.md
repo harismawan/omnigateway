@@ -63,21 +63,33 @@ accounting for a request that already succeeded.
 What makes it safe today is a *coupling*, not a property of this function: the
 router excludes a target whose provider has no descriptor (`provider:missing`),
 and dispatch throws `INTERNAL` on a missing adapter before any attempt runs, so
-a priced request has an installed provider by the time it gets here. Both gates
-were verified by reading the path, and `rank()` and `resolveModel()` are now
-handed the same registry `price.ts` reads, so the three cannot disagree about
-which installation they are judging.
+a priced request has an installed provider by the time it gets here.
 
-**Known risk, to revisit when the plugin host lands.** That sub-project is
-expected to loosen exactly this coupling: a provider registered at boot, removed
-at runtime, or supplied through a different injection point than the router used
-would put a live request on this branch, and the failure is silent — cache
-writes priced at zero, no log line, no degradation, a `costUsd` that is simply
-too low. Nothing here would notice. When the host exists, the choices are to
-thread the descriptor down with the candidate (it is already resolved at
-routing), or to price from `Target.costPerMTok` alone and drop the fallback.
-Do not let this become the precedent that "the descriptor has no defaults"
-quietly means "except where it was inconvenient".
+**That coupling holds only while every party reads the same registry, and for
+one review round it did not.** Threading `deps.providers` into `resolveModel`
+and `rank` without threading it into `priceOf` split the sources in two: a
+provider present in the injected registry and absent from the module-global one
+routed, dispatched, and had its cache writes priced at zero. A $12.50 write
+billed $0.00, no throw, no log line, no degradation — the silent failure this
+section had called hypothetical, made reachable by the fix for something else.
+Review caught it; nothing in the suite did.
+
+`priceOf` now takes the registry as a fourth parameter, defaulting to the real
+one, and dispatch passes its own down — symmetric with `resolveModel`,
+`rank` and `providerCatalog`. Pinned at two levels: a unit test that prices the
+same legacy target differently against two registries, and an end-to-end
+dispatch test asserting `costUsd` on a request routed via the injected one.
+Three mutants covering the threading all die.
+
+**Known risk, still, to revisit when the plugin host lands.** The remaining
+exposure is the same shape: a provider registered at boot, removed at runtime,
+or reaching pricing through some future path the router did not judge would put
+a live request on this branch, and the failure stays silent. When the host
+exists, the choices are to thread the descriptor down with the candidate — it is
+already resolved at routing — or to price from `Target.costPerMTok` alone and
+drop the fallback. Do not let this become the precedent that "the descriptor has
+no defaults" quietly means "except where it was inconvenient"; the round
+described above is what that costs.
 
 So the replacement is **validation at registration**, not defaults at lookup:
 

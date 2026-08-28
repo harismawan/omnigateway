@@ -40,7 +40,9 @@ import type { ProviderModelCatalogEntry } from "./catalog-types.ts";
  * for a request that already succeeded. It is unreachable today only because the
  * router excludes a provider with no descriptor and dispatch throws `INTERNAL`
  * on a missing adapter first — a coupling between three call sites, not a
- * property of that function. Recorded as a known risk in
+ * property of that function, and one that broke the moment those sites read
+ * different registries. `priceOf` therefore takes the registry as a parameter
+ * like the router's entry points do. Recorded as a known risk in
  * `docs/superpowers/specs/2026-08-27-widening-provider-id-design.md`, to revisit
  * when the plugin host loosens it. Do not read it as licence for a second
  * default here.
