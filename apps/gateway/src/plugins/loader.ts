@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { type RegisteredProvider, readProviders } from "@omni/control";
 import { describeError, type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
 import {
@@ -12,7 +13,6 @@ import {
   type PluginLogger,
   type PluginManifest,
   type PluginMigration,
-  type PluginProviderRegistry,
   type PluginRoute,
   type PluginStorage,
   safeParseManifest,
@@ -20,7 +20,6 @@ import {
 import type { ChannelRegistry } from "../stream/channels.ts";
 import { createPluginFetch, createPluginFiles } from "./capabilities.ts";
 import type { PluginEventBus } from "./events.ts";
-import { createProviderRegistry, type RegisteredProvider } from "./providers.ts";
 
 export type PluginLoadFailure = { id: string; reason: string };
 
@@ -134,7 +133,6 @@ function buildContext(deps: {
   store: Store;
   events: PluginEventBus;
   channels: ChannelRegistry;
-  provider: PluginProviderRegistry;
   logger: Logger;
   now: () => number;
 }): PluginContext {
@@ -159,9 +157,6 @@ function buildContext(deps: {
     // `plugin:<id>:` half of every topic this plugin opens is the host's word
     // and not the plugin's — the same guarantee the storage prefix carries.
     ...(declared.includes("channels") ? { channels: deps.channels.for(manifest.id) } : {}),
-    // Collected during `setup` and applied by the caller once it returns
-    // without throwing; see `createProviderRegistry`.
-    ...(declared.includes("provider") ? { provider: deps.provider } : {}),
     config: manifest.defaults ?? {},
   };
 }
@@ -304,7 +299,22 @@ export async function loadPlugins(deps: {
         }
       }
 
-      const registry = createProviderRegistry(id);
+      // Read from the definition, **before** `setup` runs and independently of
+      // whether it succeeds. `readProviders` is the whole of what a non-gateway
+      // reader needs, which is why it is a field rather than a capability: the
+      // CLI calls the same function against the same import and never builds a
+      // context at all.
+      //
+      // A malformed provider still skips the plugin. `setup` has not run at this
+      // point, so nothing is half-applied — except the migrations above, which
+      // are committed and recorded on their own track by design.
+      try {
+        pending = readProviders(id, manifest, definition);
+      } catch (error) {
+        fail(reason(error));
+        continue;
+      }
+
       try {
         const context = buildContext({
           manifest,
@@ -312,21 +322,18 @@ export async function loadPlugins(deps: {
           store: deps.store,
           events: deps.events,
           channels: deps.channels,
-          provider: registry.capability,
           logger,
           now,
         });
         const result = await definition.setup(context);
         routes = result?.routes ?? [];
       } catch (error) {
+        // Held, not published — and this `continue` is why `pending` is not
+        // applied above. A provider whose plugin then failed `setup` would be
+        // routable while the thing serving it never initialised.
         fail(reason(error));
         continue;
       }
-
-      // Held, not published. `setup` returning without throwing is not the
-      // same as the plugin being accepted — the UI checks below still reject
-      // one, and each of those is a `continue`.
-      pending = registry.registered();
     }
 
     const loaded: LoadedPlugin = { id, manifest, routes, migrations };

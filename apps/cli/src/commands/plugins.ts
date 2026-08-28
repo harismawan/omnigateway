@@ -4,8 +4,10 @@ import {
   nodeFetchBytes,
   nodePluginFs,
   type PluginDeps,
+  type PluginProviderRead,
   type PluginSummary,
   pluginsDir,
+  readPluginProviders,
   removePlugin,
   verifyPlugin,
 } from "@omni/control";
@@ -248,6 +250,49 @@ export const pluginRemove: Command = {
  */
 export function doctorPluginDeps(): PluginDeps {
   return pluginDeps();
+}
+
+/**
+ * The provider registry this installation would have, built without running a
+ * plugin's `setup`.
+ *
+ * The CLI's answer to a question the gateway answers from its own boot-time
+ * registry: `omni setup` needs a model's context window (it writes that number
+ * into an agent's configuration file, where being wrong outlives the command)
+ * and `omni models dry-run` needs to know what would route. Both consulted the
+ * six compiled-in providers and were therefore wrong about every plugin-supplied
+ * one, contradicting `omni doctor` on the same installation.
+ *
+ * `import(…)` runs the plugin module's top-level code, and this comment is the
+ * place a reader will decide whether that is acceptable — so: it does. What it
+ * does not do is construct a `PluginContext` or call `setup`, so no store,
+ * channel, event bus, migration or route is reachable, and `omni doctor` remains
+ * a diagnostic that changes nothing. That is why `providers` is a declared field
+ * on `PluginDefinition` rather than the capability it started as.
+ *
+ * Failures are reported by the commands that ask for them rather than thrown
+ * here: a broken plugin is exactly the installation whose operator is running
+ * this.
+ */
+export async function pluginProviders(root: string): Promise<PluginProviderRead> {
+  const read = await readPluginProviders(
+    listPlugins(doctorPluginDeps(), root),
+    (entry) => import(entry),
+  );
+  // **Merged with the built-ins, not returned alone.** `readPluginProviders`
+  // answers "what did the plugins declare", which is the narrower question and
+  // the right one for it to answer — but every caller here wants "what does this
+  // installation have", and handing them the plugin half was measurably worse
+  // than the bug it was fixing: `omni setup` wrote no context limit for
+  // *anthropic*. Caught by an existing test rather than by review.
+  //
+  // `Object.create(null)` rather than a spread, because spreading a
+  // null-prototype object yields an ordinary one — `{...PROVIDER_DESCRIPTORS}`
+  // silently reverts the invariant that makes `table["constructor"]` answer
+  // `undefined`, and the gateway normalises injected adapter maps at `app.ts`
+  // for the same reason.
+  const descriptors = Object.assign(Object.create(null), PROVIDER_DESCRIPTORS, read.descriptors);
+  return { descriptors, failures: read.failures };
 }
 
 /**

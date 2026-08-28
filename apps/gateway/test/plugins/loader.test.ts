@@ -480,8 +480,8 @@ test("a relative plugin root still loads, because that is what the gateway passe
  * a file from disk and a fixture it imported would skip the part being tested.
  */
 const PROVIDER_PLUGIN = (id: string, over = "") => `export default {
-  setup(ctx) {
-    ctx.provider.register({
+  providers: [
+    {
       descriptor: {
         id: ${JSON.stringify(id)},
         capabilities: { tools: true, images: false, reasoning: false },
@@ -502,7 +502,9 @@ const PROVIDER_PLUGIN = (id: string, over = "") => `export default {
         }),
         decode: async function* () {},
       },
-    });
+    },
+  ],
+  setup() {
     return {};
   },
 };`;
@@ -528,11 +530,13 @@ test("a plugin declaring the provider capability registers one", async () => {
   });
 });
 
-test("a plugin that did not declare the capability has no way to register", async () => {
-  // The context member is absent, so the call throws — which skips the plugin
-  // and is reported, exactly as reaching any undeclared surface does. The
-  // manifest is the audit trail, so a provider arriving without one declared
-  // would make that trail wrong.
+test("a plugin that did not declare the capability is refused, not quietly ignored", async () => {
+  // The manifest is the audit trail, so a provider arriving without one declared
+  // would make that trail wrong. Under the old capability this was enforced by
+  // the context member simply being absent — the plugin's own call threw. A
+  // declared field is always readable, so the check has to be explicit now, and
+  // an explicit check is one that can be deleted: hence this test rather than
+  // the structural guarantee it replaced.
   await plugin({ id: "sneaky", server: PROVIDER_PLUGIN("sneaky") });
 
   const result = await load();
@@ -558,11 +562,14 @@ test("a plugin registering another provider's id is skipped, and says whose", as
   expect(result.failures[0]?.reason).toContain("anthropic");
 });
 
-test("a provider registered by a plugin that then throws is not returned", async () => {
-  // Registration is collected during `setup` and read only after it returns.
-  // A provider installed by a plugin the host went on to reject would be
-  // admitted by routing and then fail every request with INTERNAL — worse than
-  // one that never registered.
+test("a provider declared by a plugin whose setup then throws is not returned", async () => {
+  // The declaration is read *before* `setup` runs now, which reverses the
+  // ordering this property used to rest on — no longer "collected during setup
+  // and read after", but "read first and dropped by the `continue`". Same
+  // outcome, different reason, and the reason is worth pinning: a provider
+  // installed by a plugin the host went on to reject would be admitted by
+  // routing and then fail every request with INTERNAL, while the operator was
+  // told the plugin was unavailable.
   await plugin({
     id: "acme-ai",
     manifest: { capabilities: ["provider"] },

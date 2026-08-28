@@ -11,7 +11,8 @@ import type { Target, VirtualModel } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
-import { emit, fields, paint, table } from "../output.ts";
+import { emit, fields, note, paint, table } from "../output.ts";
+import { pluginProviders } from "./plugins.ts";
 
 export const modelsList: Command = {
   usage: "models list",
@@ -307,11 +308,28 @@ export const modelsDryRun: Command = {
   },
   async run(args, { ctx, writer }) {
     const id = requirePositional(args, 0, "model id");
-    const result = await dryRun({ store: await ctx.store(), now: ctx.now }, id, {
-      tools: boolFlag(args.values, "tools"),
-      images: boolFlag(args.values, "images"),
-      reasoning: boolFlag(args.values, "reasoning"),
-    });
+    // The plugin-supplied providers too, or this command answers
+    // `provider:missing` for a target the running gateway is serving — and does
+    // so in red, on the surface an operator reaches for when something looks
+    // wrong. `omni doctor` on the same installation already reads the manifests
+    // and calls that configuration healthy; a diagnostic that contradicts
+    // another diagnostic is worse than one that says nothing.
+    const { descriptors, failures } = await pluginProviders(ctx.root.root);
+    const result = await dryRun(
+      { store: await ctx.store(), now: ctx.now, providers: descriptors },
+      id,
+      {
+        tools: boolFlag(args.values, "tools"),
+        images: boolFlag(args.values, "images"),
+        reasoning: boolFlag(args.values, "reasoning"),
+      },
+    );
+
+    // Named before the result, because a plugin that failed to read is the
+    // likeliest reason a target below is about to be reported as missing.
+    for (const failure of failures) {
+      note(ctx, writer, paint(ctx, "yellow", `plugin ${failure.id}: ${failure.reason}`));
+    }
 
     emit(ctx, writer, result, () => {
       const header = fields([

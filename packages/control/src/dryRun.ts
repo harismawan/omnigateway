@@ -1,4 +1,5 @@
 import { type ChatRequest, GatewayError, type ProviderId } from "@omni/ir";
+import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import { buildSnapshot, rank } from "@omni/router";
 import type { Store } from "@omni/store";
 import { dryRunSchema, parseOrThrow } from "./schemas.ts";
@@ -30,7 +31,14 @@ export type DryRunResult = {
  * `deterministic` reports.
  */
 export async function dryRun(
-  deps: { store: Store; now: () => number },
+  // `providers` is a dependency and not a default, because the two callers see
+  // two different installations. The gateway's registry holds every plugin it
+  // loaded at boot; the CLI's is built by `readPluginProviders` from the
+  // manifests on disk. Defaulting it to `PROVIDER_DESCRIPTORS` here is what made
+  // `omni models dry-run` report `provider:missing` for a target the running
+  // gateway was serving — the wrong answer, and the more specific-looking one,
+  // against a `doctor` on the same install that called the configuration healthy.
+  deps: { store: Store; now: () => number; providers?: ProviderDescriptors },
   modelId: string,
   input: unknown,
 ): Promise<DryRunResult> {
@@ -65,7 +73,15 @@ export async function dryRun(
   // No load: this request is hypothetical, so it has no peers in flight. A
   // dry run answers "where would this go on an idle gateway", which is the
   // question an operator reading it is asking.
-  const result = rank({ request: probe, model, snapshot, now, rand: 0, load: new Map() });
+  const result = rank({
+    request: probe,
+    model,
+    snapshot,
+    now,
+    rand: 0,
+    load: new Map(),
+    ...(deps.providers === undefined ? {} : { providers: deps.providers }),
+  });
 
   return {
     modelId: model.id,

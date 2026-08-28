@@ -138,6 +138,14 @@ export type {
   UsageReport,
 } from "./oauth/types.ts";
 export {
+  type PluginImporter,
+  type PluginProviderRead,
+  type RegisteredProvider,
+  readPluginProviders,
+  readProviders,
+  validateRegistration,
+} from "./pluginProviders.ts";
+export {
   DEFAULT_NPM_REGISTRY,
   installPlugin,
   listPlugins,

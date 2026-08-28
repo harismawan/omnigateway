@@ -12,6 +12,7 @@ import type { Command } from "../command.ts";
 import { CliError, type Context } from "../context.ts";
 import type { Writer } from "../output.ts";
 import { emit, note } from "../output.ts";
+import { pluginProviders } from "./plugins.ts";
 
 /**
  * Writes the configuration an agent reads at startup.
@@ -28,7 +29,14 @@ const OPTIONS = {
 } as const;
 
 async function described(ctx: Context) {
-  const models = await describeModelsForSetup(await ctx.store());
+  // With the plugin-supplied providers, because the number this produces is
+  // written into an agent's own configuration file. Without them a
+  // plugin-supplied model resolved to no limits at all and
+  // `CLAUDE_CODE_MAX_CONTEXT_TOKENS` was simply omitted — the agent then used
+  // its own default while the gateway advertised the real window, and nothing
+  // said so.
+  const { descriptors } = await pluginProviders(ctx.root.root);
+  const models = await describeModelsForSetup(await ctx.store(), descriptors);
   if (models.length === 0) {
     throw new CliError("no virtual models configured; add one with `omni models put`");
   }

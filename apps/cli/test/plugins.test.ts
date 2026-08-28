@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Prompt } from "../src/prompt.ts";
@@ -512,5 +512,207 @@ describe("omni credentials add-key", () => {
 
     const result = await cli(["credentials", "add-key", "anthropic"], { root, prompt: secret });
     expect(result.code).toBe(0);
+  });
+});
+
+/**
+ * The CLI answering a question the descriptor owns, for a provider only a plugin
+ * supplies.
+ *
+ * Both commands below read the six compiled-in providers and nothing else before
+ * this. `omni setup` therefore wrote an agent configuration with **no context
+ * limit** for a plugin-supplied model — a file that outlives the command, where
+ * the agent silently falls back to its own default while the gateway advertises
+ * the real window — and `omni models dry-run` reported `provider:missing` in red
+ * for a target the running gateway was serving, contradicting `omni doctor` on
+ * the same installation.
+ *
+ * This is what `PluginDefinition.providers` exists for: a declared field can be
+ * read by importing the module, where a `ctx.provider.register` capability could
+ * only be read by running `setup` — which opens channels, applies migrations and
+ * mounts routes, none of which a diagnostic may do.
+ */
+describe("the CLI reads a plugin's declared provider", () => {
+  const PROVIDER = {
+    ...MANIFEST,
+    id: "acme-ai",
+    capabilities: ["provider"],
+    server: "server.js",
+  } as const;
+
+  /** A server entry that declares a provider and would notice if `setup` ran. */
+  const SERVER = `import { writeFileSync } from "node:fs";
+export default {
+  providers: [
+    {
+      descriptor: {
+        id: "acme-ai",
+        capabilities: { tools: true, images: false, reasoning: false },
+        writeOverInput: { fiveMinute: 1.25, oneHour: 2 },
+        catalog: {
+          defaultModel: "acme-1",
+          authTypes: ["apiKey"],
+          models: [
+            {
+              id: "acme-1",
+              label: "Acme One",
+              pricing: { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
+              limits: { contextWindow: 123000, maxOutputTokens: 4096 },
+            },
+          ],
+        },
+        modelPrefixes: ["acme-"],
+        presentation: {
+          label: "Acme",
+          order: 90,
+          tone: "cyan",
+          colour: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
+        },
+      },
+      codec: {
+        buildRequest: () => ({
+          request: { url: "https://acme.test/v1", method: "POST", headers: [], body: "{}" },
+        }),
+        decode: async function* () {},
+      },
+    },
+  ],
+  setup() {
+    writeFileSync(process.env.OMNI_TEST_SETUP_RAN, "yes");
+    return {};
+  },
+};`;
+
+  async function installed(): Promise<string> {
+    const root = makeRoot();
+    expect((await cli(["db", "migrate"], { root })).code).toBe(0);
+    place(root, "acme-ai", PROVIDER, { "server.js": SERVER });
+    expect(
+      (
+        await cli(["credentials", "add-key", "acme-ai"], {
+          root,
+          prompt: { isTty: false, secret: async () => "pk-secret", confirm: async () => true },
+        })
+      ).code,
+    ).toBe(0);
+    // Seeded through the store rather than `models put --from-catalog`, which
+    // reads `PROVIDER_MODEL_CATALOG` — a build-time table a plugin provider is
+    // not in, and deliberately so: the CLI's catalog *listing* omits plugin
+    // models by design. What these commands read is the stored target, and a
+    // target naming any well-formed provider saves.
+    const store = await openStore(root);
+    await store.config.putModel({
+      id: "fast",
+      strategy: "priority",
+      isAlias: false,
+      targets: [
+        {
+          provider: "acme-ai",
+          model: "acme-1",
+          tier: 1,
+          weight: 1,
+          costPerMTok: { input: 5, output: 25 },
+          capabilities: { tools: true, images: false, reasoning: false },
+        },
+      ],
+    });
+    store.close();
+    return root;
+  }
+
+  test("omni setup writes the window the plugin's descriptor states", async () => {
+    const root = await installed();
+
+    const result = await cli(["setup", "opencode", "--dir", root], {
+      root,
+      // opencode asks which pool serves each model class; answering the same
+      // pool throughout is the smallest configuration that writes a file.
+      prompt: {
+        isTty: true,
+        secret: async () => "",
+        confirm: async () => true,
+        input: async () => "fast",
+      },
+    });
+
+    expect(result.code).toBe(0);
+
+    // The descriptor's own figure, read from the file the command wrote. 123000
+    // is a number no built-in states, so it cannot have arrived from the
+    // compiled-in registry by coincidence — and before this it was absent
+    // entirely, since `limit` is omitted rather than zeroed when unknown, which
+    // is the silent half of the bug: the agent used its own default while the
+    // gateway advertised the real window.
+    const config = JSON.parse(readFileSync(join(root, "opencode.json"), "utf8")) as {
+      provider: { omnigateway: { models: Record<string, { limit?: { context: number } }> } };
+    };
+    expect(config.provider.omnigateway.models.fast?.limit?.context).toBe(123_000);
+  });
+
+  test("omni models dry-run routes to the plugin's provider rather than calling it missing", async () => {
+    const root = await installed();
+
+    const result = await cli(["models", "dry-run", "fast"], { root });
+
+    expect(result.code).toBe(0);
+    expect(result.out).not.toContain("provider:missing");
+    expect(result.out).toContain("acme-ai");
+  });
+
+  test("a plugin the host would refuse contributes no descriptor", async () => {
+    // The registry has to describe the installation a *running gateway* would
+    // have, not the one the manifests wish for. A plugin the loader will skip
+    // supplies nothing, so reading its descriptor anyway would put a provider in
+    // this registry that no gateway has — the same lie as omitting one, pointed
+    // the other way, and it would make `dry-run` report a route that cannot
+    // exist.
+    const root = makeRoot();
+    expect((await cli(["db", "migrate"], { root })).code).toBe(0);
+    place(root, "acme-ai", { ...PROVIDER, api: 99 }, { "server.js": SERVER });
+    const store = await openStore(root);
+    await store.config.putModel({
+      id: "fast",
+      strategy: "priority",
+      isAlias: false,
+      targets: [
+        {
+          provider: "acme-ai",
+          model: "acme-1",
+          tier: 1,
+          weight: 1,
+          costPerMTok: { input: 5, output: 25 },
+          capabilities: { tools: true, images: false, reasoning: false },
+        },
+      ],
+    });
+    store.close();
+
+    // The premise: the host says it will not load this one.
+    const listed = await cli(["plugin", "list", "--json"], { root });
+    expect(JSON.parse(listed.out).plugins).toMatchObject([{ loadable: false }]);
+
+    const result = await cli(["models", "dry-run", "fast"], { root });
+
+    expect(result.code).toBe(0);
+    // `provider:missing` is the honest answer here, and the same one the gateway
+    // gives: the plugin does not load, so the provider does not exist.
+    expect(result.out).toContain("provider:missing");
+  });
+
+  test("neither command runs the plugin's setup", async () => {
+    // The property the declared field buys, asserted rather than argued. The
+    // sentinel is written by `setup` and by nothing else, so its absence is the
+    // whole claim: `import()` ran the module, and `setup` was never called.
+    const root = await installed();
+    const sentinel = join(root, "setup-ran");
+
+    await cli(["models", "dry-run", "fast"], { root, env: { OMNI_TEST_SETUP_RAN: sentinel } });
+    await cli(["setup", "claude", "--dry-run"], {
+      root,
+      prompt: silentPrompt,
+      env: { OMNI_TEST_SETUP_RAN: sentinel },
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
   });
 });

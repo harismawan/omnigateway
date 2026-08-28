@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
-import { GatewayError } from "@omni/ir";
+import { ADAPTERS } from "@omni/providers";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { entryOf } from "@omni/testkit";
-import { createProviderRegistry, validateRegistration } from "../../src/plugins/providers.ts";
+import { readProviders, validateRegistration } from "../src/pluginProviders.ts";
 
 /**
  * What a plugin hands the host, and what the host refuses to take its word for.
  *
- * `PluginProviderRegistry` types its argument as `unknown` on both sides, since
+ * `PluginProvider` types both halves as `unknown`, since
  * `@omnigateway/plugin-api` is published and cannot import `@omni/ir` until a
  * later sub-project. That looseness is deliberate and it is paid for here: every
  * one of these cases would have typechecked on the plugin's side.
@@ -109,35 +109,93 @@ test("nothing that is not an object is accepted for either half", () => {
   }
 });
 
-test("a plugin registering twice is refused rather than silently keeping the last", () => {
-  const registry = createProviderRegistry("acme-ai");
-  registry.capability.register({ descriptor: descriptor(), codec });
-  expect(() => registry.capability.register({ descriptor: descriptor(), codec })).toThrow(
-    /more than one provider/,
-  );
-  // And the first survives, so the refusal costs nothing that already worked.
-  expect(registry.registered()).toHaveLength(1);
+/**
+ * What `readProviders` refuses, and what it lets through untouched.
+ *
+ * This replaced a `ctx.provider.register(…)` capability collected during
+ * `setup`. The move is the whole point of the field: a descriptor that exists
+ * only after arbitrary plugin code has run can be read by the gateway and by
+ * nothing else, and the CLI needs the same answer without running `setup` — it
+ * would open channels, apply migrations and register routes, which is a
+ * diagnostic with side effects.
+ */
+const declaring = (over: Record<string, unknown> = {}) => ({
+  providers: [{ descriptor: descriptor(), codec }],
+  ...over,
+});
+const withCapability = { capabilities: ["provider"] as readonly string[] };
+
+test("a declared provider becomes an adapter, and no plugin code runs to get it", () => {
+  let ran = false;
+  const definition = {
+    ...declaring(),
+    setup: () => {
+      ran = true;
+      return undefined;
+    },
+  };
+
+  const read = readProviders("acme-ai", withCapability, definition);
+
+  expect(read).toHaveLength(1);
+  expect(read[0]?.descriptor.id).toBe("acme-ai");
+  expect(read[0]?.adapter.id).toBe("acme-ai");
+  // The property the field exists for: `setup` is untouched. A capability could
+  // not have been read this way at all.
+  expect(ran).toBe(false);
 });
 
-test("a registration collected before a later failure is never applied", () => {
-  // The reason registrations are collected rather than written straight into the
-  // live tables: `setup` can register a provider and then throw, and a provider
-  // installed by a plugin the host went on to reject would be admitted by
-  // routing and then fail every request with INTERNAL.
+test("a plugin declaring no provider is not an error", () => {
+  // The ordinary case — most plugins supply none — and it must not require the
+  // capability either, or every UI-only plugin would fail to load.
+  expect(readProviders("acme-ai", { capabilities: [] }, { setup: () => undefined })).toEqual([]);
+  expect(
+    readProviders("acme-ai", withCapability, { providers: [], setup: () => undefined }),
+  ).toEqual([]);
+});
+
+test("a provider declared without the manifest capability is refused", () => {
+  // The capability is what keeps a plugin's reach auditable without reading its
+  // code. Losing that check would not break anything visibly — the provider
+  // would simply work — which is why it is asserted rather than assumed.
+  expect(() =>
+    readProviders(
+      "acme-ai",
+      { capabilities: ["storage"] },
+      { ...declaring(), setup: () => undefined },
+    ),
+  ).toThrow(/"provider" capability/);
+});
+
+test("a plugin declaring two providers is refused rather than silently keeping one", () => {
+  // `descriptor.id` must equal the plugin's own id, so two entries cannot both
+  // be valid. The field is an array so that rule can change without the
+  // published shape changing; until it does, the second would silently win.
+  const two = {
+    providers: [
+      { descriptor: descriptor(), codec },
+      { descriptor: descriptor(), codec },
+    ],
+    setup: () => undefined,
+  };
+  expect(() => readProviders("acme-ai", withCapability, two)).toThrow(/more than one provider/);
+});
+
+test("reading a declaration writes nothing global", () => {
+  // The reason the loader returns providers rather than installing them:
+  // `readProviders` runs before `setup`, and `setup` can still throw. A provider
+  // written into the live tables by a plugin the host went on to reject would be
+  // admitted by routing and then fail every request with INTERNAL, while the
+  // operator was told the plugin was unavailable.
   //
-  // Asserted at this boundary because it is a property of the registry object,
-  // not of the loader: the loader reads `registered()` only after `setup`
-  // returns, so a throw means nothing is ever read.
-  const registry = createProviderRegistry("acme-ai");
-  try {
-    registry.capability.register({ descriptor: descriptor(), codec });
-    throw new GatewayError("INTERNAL", "setup failed after registering");
-  } catch {
-    // Swallowed, exactly as the loader's own catch does.
-  }
-  // The registration is *held*, and it is the loader's `continue` that drops it.
-  // What matters is that nothing was written anywhere global.
+  // Asserted at this boundary because it is a property of this function — it
+  // returns a value and touches no table. `loader.test.ts` covers the other half,
+  // that the loader's `continue` drops what it returned.
+  const read = readProviders("acme-ai", withCapability, { ...declaring(), setup: () => undefined });
+
+  expect(read).toHaveLength(1);
   expect(Object.hasOwn(PROVIDER_DESCRIPTORS, "acme-ai")).toBe(false);
+  expect(Object.hasOwn(ADAPTERS, "acme-ai")).toBe(false);
 });
 
 /**
