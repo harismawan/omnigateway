@@ -1,12 +1,7 @@
 import { dryRun, getModel, listModels, putModel, removeModel } from "@omni/control";
 import type { ProviderId } from "@omni/ir";
-import {
-  catalogLimits,
-  catalogPricing,
-  PROVIDER_MODEL_CATALOG,
-  type ProviderModelChoice,
-} from "@omni/providers/catalog";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
+import { choiceLimits, entryPricing, type ProviderModelChoice } from "@omni/providers/catalog";
+import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import type { Target, VirtualModel } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
@@ -138,25 +133,37 @@ function capabilityList(target: Target): string {
  * written here is a copy the operator owns, and editing the catalog later
  * changes nothing about a model already saved.
  */
-function targetFromCatalog(spec: string): Target {
+function targetFromCatalog(spec: string, descriptors: ProviderDescriptors): Target {
   const separator = spec.indexOf(":");
   if (separator <= 0) {
     throw new UsageError(`--from-catalog expects <provider>:<model>, got "${spec}"`);
   }
   const providerId = spec.slice(0, separator);
   const model = spec.slice(separator + 1);
-  // Resolved once, from the descriptors, and reused below. The membership test
-  // this replaced read `PROVIDER_MODEL_CATALOG` while the capabilities came
-  // from `PROVIDER_DESCRIPTORS` — two derived tables answering one question, so
-  // a provider present in one and not the other would pass the check and then
-  // fail to index. They agree today because both are built from the same six
-  // literals; asking one of them twice is what keeps that from mattering.
-  const descriptor = PROVIDER_DESCRIPTORS[providerId];
+  // Resolved once, from **this installation's** registry, and reused below.
+  //
+  // It read the module-global `PROVIDER_DESCRIPTORS`, so this was the one CLI
+  // path still answering from the build. `omni credentials add-key acme` accepts
+  // a plugin provider, `omni models dry-run` ranks its candidates, `omni doctor`
+  // reports it present and the gateway routes and prices it — and this refused
+  // `unknown provider "acme"`, leaving no CLI route to the target at all. The
+  // operator had to hand-write the JSON, including pricing and capabilities the
+  // plugin already declares.
+  //
+  // The membership test this replaced read `PROVIDER_MODEL_CATALOG` while the
+  // capabilities came from `PROVIDER_DESCRIPTORS` — two derived tables answering
+  // one question. Asking one of them twice is what keeps them from disagreeing,
+  // and that one is now the registry rather than either snapshot.
+  const descriptor = descriptors[providerId];
   if (descriptor === undefined) {
     throw new UsageError(`unknown provider "${providerId}" in "${spec}"`);
   }
 
-  const pricing = catalogPricing(providerId, model);
+  // From the descriptor's own catalog, never `catalogPricing`: that reads the
+  // id-keyed global, which `registerProvider` does not touch, so a plugin
+  // provider priced through it comes back null and this refuses a model the
+  // descriptor lists.
+  const pricing = entryPricing(descriptor.catalog, model);
   if (pricing === null) {
     throw new UsageError(`no catalog entry for "${spec}"; see omni models catalog`);
   }
@@ -182,9 +189,14 @@ function targetFromCatalog(spec: string): Target {
  * Carries the prices and limits rather than just the names, so `--json` answers
  * the same question the table does.
  */
-function catalogRows(): Array<ProviderModelChoice & { provider: ProviderId }> {
-  return Object.entries(PROVIDER_MODEL_CATALOG).flatMap(([id, entry]) =>
-    entry.models.map((model) => ({ ...model, provider: id as ProviderId })),
+function catalogRows(
+  descriptors: ProviderDescriptors,
+): Array<ProviderModelChoice & { provider: ProviderId }> {
+  // The registry, for the same reason. Listing from `PROVIDER_MODEL_CATALOG`
+  // omitted every plugin-supplied model, so the command that exists to show an
+  // operator what they can name could not show them half of it.
+  return Object.entries(descriptors).flatMap(([id, descriptor]) =>
+    descriptor.catalog.models.map((model) => ({ ...model, provider: id as ProviderId })),
   );
 }
 
@@ -194,7 +206,10 @@ export const modelsCatalog: Command = {
   options: { provider: { type: "string" } },
   async run(args, { ctx, writer }) {
     const only = stringFlag(args.values, "provider");
-    const entries = catalogRows().filter((entry) => only === undefined || entry.provider === only);
+    const { descriptors } = await pluginProviders(ctx.root.root);
+    const entries = catalogRows(descriptors).filter(
+      (entry) => only === undefined || entry.provider === only,
+    );
 
     emit(ctx, writer, { models: entries }, () =>
       table(
@@ -212,12 +227,16 @@ export const modelsCatalog: Command = {
           { header: "MAX OUT", align: "right" },
         ],
         entries.map((entry) => {
-          const listed = catalogPricing(entry.provider, entry.id);
-          const limits = catalogLimits(entry.provider, entry.id);
+          // Read off the row rather than looked back up by id. The rows now come
+          // from the registry, so a second lookup through the id-keyed global
+          // would find nothing for exactly the plugin-supplied models this
+          // listing was widened to include, and print a table of dashes.
+          const listed = entry.pricing;
+          const limits = choiceLimits(entry);
           // What the same model holds when an OAuth credential serves it: the
           // OpenAI adapter routes those to Codex, which takes a smaller prompt
           // than the API does. A dash means the two ways in are the same.
-          const oauth = catalogLimits(entry.provider, entry.id, "oauth");
+          const oauth = choiceLimits(entry, "oauth");
           return [
             provider(ctx, entry.provider),
             entry.id,
@@ -268,11 +287,12 @@ export const modelsPut: Command = {
         throw new CliError(`${file} is not valid JSON`);
       }
     } else if (catalog !== undefined) {
+      const { descriptors } = await pluginProviders(ctx.root.root);
       const draft: VirtualModel = {
         id,
         strategy: (stringFlag(args.values, "strategy") ?? "score") as VirtualModel["strategy"],
         isAlias: boolFlag(args.values, "alias"),
-        targets: catalog.map(targetFromCatalog),
+        targets: catalog.map((spec) => targetFromCatalog(spec, descriptors)),
       };
       model = draft;
     } else {

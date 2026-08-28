@@ -3,6 +3,7 @@ import { ANTHROPIC_MODELS } from "./anthropic/models.ts";
 import type {
   CatalogAuth,
   ProviderModelCatalogEntry,
+  ProviderModelChoice,
   ProviderModelLimits,
   ProviderModelPricing,
 } from "./catalog-types.ts";
@@ -107,8 +108,42 @@ export function entryPricing(
 export function catalogModelAuths(provider: ProviderId, model: string): readonly CatalogAuth[] {
   const entry = PROVIDER_MODEL_CATALOG[provider];
   if (entry === undefined) return EVERY_AUTH;
+  return entryModelAuths(entry, model);
+}
+
+/**
+ * The same, from a catalog entry the caller already holds.
+ *
+ * The sibling `entryPricing` is to `catalogPricing`, and it exists for the same
+ * reason: `registerProvider` mutates `PROVIDER_DESCRIPTORS` and deliberately not
+ * `PROVIDER_MODEL_CATALOG`, so a provider from `<root>/plugins/` is in the first
+ * and never the second. Asking the id-keyed global about one yields the
+ * fail-open `EVERY_AUTH` — correct as a default, wrong as an answer when the
+ * descriptor is right there saying `auth: ["oauth"]`.
+ *
+ * What that cost: `putModel` accepted a target whose model the operator's only
+ * account cannot reach, while the console's picker — reading the same fact off
+ * `/api/catalog`, which does resolve descriptors — hid it. Two surfaces
+ * disagreeing about which account serves which model is the failure
+ * `packages/control/src/catalog.ts` names as its reason for resolving model auth
+ * server-side at all.
+ */
+export function entryModelAuths(
+  entry: ProviderModelCatalogEntry,
+  model: string,
+): readonly CatalogAuth[] {
   return entry.models.find((choice) => choice.id === model)?.auth ?? entry.authTypes;
 }
+
+/**
+ * What a provider the catalog cannot describe reaches with.
+ *
+ * Exported so a caller resolving its own descriptor answers an unknown provider
+ * exactly as `catalogModelAuths` does, rather than inventing a second default —
+ * `[]` there would read as "no credential can reach this" and refuse every
+ * target naming a plugin provider.
+ */
+export const UNKNOWN_PROVIDER_AUTHS: readonly CatalogAuth[] = EVERY_AUTH;
 
 /**
  * The catalog's context and output limits for one provider model, or null if it
@@ -134,6 +169,22 @@ export function entryLimits(
   auth: CatalogAuth = "apiKey",
 ): ProviderModelLimits | null {
   const choice = entry.models.find((c) => c.id === model);
-  if (choice === undefined) return null;
+  return choice === undefined ? null : choiceLimits(choice, auth);
+}
+
+/**
+ * The same again, from the model choice itself.
+ *
+ * The narrowest form, for a caller already holding the row — `omni models
+ * catalog` builds its table out of choices, and computing
+ * `oauthLimits ?? limits` there would be a third copy of a rule whose whole
+ * point is that OpenAI's OAuth leg is served by a narrower backend. A dash in
+ * that column means the two ways in agree, and a copy that drifted would print
+ * the API's window for a credential that cannot reach it.
+ */
+export function choiceLimits(
+  choice: ProviderModelChoice,
+  auth: CatalogAuth = "apiKey",
+): ProviderModelLimits {
   return (auth === "oauth" ? choice.oauthLimits : undefined) ?? choice.limits;
 }

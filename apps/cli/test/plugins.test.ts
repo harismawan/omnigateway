@@ -1070,6 +1070,52 @@ export default {
     expect(body.pluginFailures[0]?.reason).toContain("unknown");
   });
 
+  test("a plugin provider's models are nameable from the CLI", async () => {
+    // `--from-catalog` and `models catalog` were the last CLI paths answering
+    // from the build. `credentials add-key acme-ai` succeeded, `models dry-run`
+    // ranked its candidates, `doctor` reported it present and the gateway routed
+    // and priced it — and this refused `unknown provider "acme-ai"`, so there was
+    // no CLI route to the target at all. The operator had to hand-write the JSON,
+    // including the pricing and capabilities the plugin already declares.
+    const root = await installed();
+
+    const listed = await cli(["models", "catalog", "--provider", "acme-ai", "--json"], { root });
+    expect(listed.code).toBe(0);
+    const rows = (JSON.parse(listed.out) as { models: { id: string; provider: string }[] }).models;
+    expect(rows.map((row) => row.id)).toContain("acme-1");
+
+    const put = await cli(["models", "put", "viacatalog", "--from-catalog", "acme-ai:acme-1"], {
+      root,
+    });
+    expect(put.code).toBe(0);
+
+    // The saved target carries what the descriptor declared, which is the half a
+    // hand-written JSON file gets wrong: an exit code alone would pass if the
+    // command saved a target with zero prices.
+    const store = await openStore(root);
+    const saved = (await store.config.listModels()).find((row) => row.id === "viacatalog");
+    store.close();
+    expect(saved?.targets[0]?.provider).toBe("acme-ai");
+    expect(saved?.targets[0]?.model).toBe("acme-1");
+    // The whole pricing block the descriptor declared, cache rates included —
+    // which is more than the old `catalogPricing` path could have produced for
+    // this provider, since it read a table `registerProvider` never writes to.
+    expect(saved?.targets[0]?.costPerMTok).toEqual({
+      input: 5,
+      output: 25,
+      cacheRead: 0.5,
+      cacheWrite5m: 6.25,
+      cacheWrite1h: 10,
+    });
+    // And the capabilities, which come off the descriptor rather than the
+    // catalog entry.
+    expect(saved?.targets[0]?.capabilities).toEqual({
+      tools: true,
+      images: false,
+      reasoning: false,
+    });
+  });
+
   test("both commands import the module and neither calls its setup", async () => {
     // The property the declared field buys, asserted rather than argued — and
     // asserted from *both* ends, because each alone is satisfiable for the wrong

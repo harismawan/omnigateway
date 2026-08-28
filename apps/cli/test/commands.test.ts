@@ -263,6 +263,30 @@ test("models catalog lists the cache prices a new target would start at", async 
   expect(listed.out).toContain("CACHE W 1H");
 });
 
+test("the catalog's OAuth column shows the narrower window, not the API's", async () => {
+  // The column exists because OpenAI routes an OAuth credential to Codex, whose
+  // prompt window is smaller than the API's — and nothing asserted it. A mutant
+  // resolving that column with the default `apiKey` survived the whole suite,
+  // which would print the API's window beside a credential that cannot reach it.
+  //
+  // `gpt-5.6` declares both — 922k through the API, 272k through Codex. A dash
+  // in that column is the correct output for every model that does not declare
+  // one, so asserting "a dash appears somewhere" would pass with the resolution
+  // broken.
+  const root = await installation();
+  const listed = await cli(["models", "catalog", "--provider", "openai"], { root });
+  expect(listed.code).toBe(0);
+
+  const row = listed.out.split("\n").find((line) => /\bgpt-5\.6\s/.test(line));
+  expect(row).toBeDefined();
+  // Both numbers on one row: the API window and the narrower OAuth one. Grouping
+  // separators are locale-formatted, so the digits are matched loosely rather
+  // than reproduced.
+  const plain = (row ?? "").split(/\s+/).map((cell) => cell.replace(/[^0-9]/g, ""));
+  expect(plain).toContain("922000");
+  expect(plain).toContain("272000");
+});
+
 test("a model that is not in the catalog is refused before anything is written", async () => {
   const root = await installation();
 
