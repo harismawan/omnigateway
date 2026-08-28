@@ -301,8 +301,11 @@ export async function pluginProviders(root: string): Promise<PluginProviderRead>
   // `Object.create(null)` rather than a spread, because spreading a
   // null-prototype object yields an ordinary one — `{...PROVIDER_DESCRIPTORS}`
   // silently reverts the invariant that makes `table["constructor"]` answer
-  // `undefined`, and the gateway normalises injected adapter maps at `app.ts`
-  // for the same reason.
+  // `undefined`. The gateway does *not* normalise injected adapter maps at
+  // `app.ts` — an earlier version did, and it guarded `createApp` alone while
+  // the map dispatch reads may never have passed through it, so the guard moved
+  // to the read site. This line is the same rule applied where the table is
+  // built rather than where it is read.
   const descriptors: ProviderDescriptors = Object.assign(
     Object.create(null),
     PROVIDER_DESCRIPTORS,

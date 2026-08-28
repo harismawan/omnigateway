@@ -144,13 +144,27 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     `routes/stream.ts` decide who may hold it, so opening channel never widen plugin's own reach.
     Outbound frame reuse socket registry's own bounded per-connection queue — no second queue, and
     nothing here touch `Store`.
-16. **No provider-specific code in a core module.** `ir`, `router`, `store`, `control`, `ratelimit`,
-    `rtk` hold no per-provider data and, with two named exceptions, never branch on a provider id.
-    `packages/store` and `packages/ir` are clean of both. The two that remain, and stay until the
-    sub-project that owns them: `router/src/resolve.ts` excludes `custom` from prefix routing,
-    because a bare model name cannot carry an endpoint id; and `control/src/schemas.ts` name
-    `custom` in the one rule that survive its target union — a custom target carry an `endpointId`
-    and nothing else may. The union itself is **gone**: its arms were hand-written for
+16. **No provider-specific code in a core module.** Aim, not achieved state, and the difference is
+    stated here because an earlier version of this bullet claimed the clean version and a reader can
+    disprove it in one grep — after which the rest of this file reads as decoration.
+    Measured, package by package, because "clean" written from memory is how the last version got it
+    wrong — and this paragraph's first draft repeated the mistake inside the commit correcting it.
+    `ratelimit` and `rtk` are clean of both. `ir` hold no per-provider data and branch on no provider
+    id; its only mention in code is `LogFields.surface` (`"anthropic" | "openai"`), which this rule
+    name as permitted vocabulary. `store` branch on no provider id, but `bodies/mask.ts` **do** hold
+    per-provider data — the `xaiKey` rule and vendor key prefixes — which the redaction paragraph
+    below require stay in core, so it is a carve-out this rule make on purpose rather than a
+    violation. `router` has one branch: `resolve.ts` excludes `custom` from prefix routing, because a bare
+    model name cannot carry an endpoint id. `control` has three things and one of them is large.
+    Two branches — `schemas.ts` name `custom` in the one rule that survive its target union (a
+    custom target carry an `endpointId` and nothing else may), and `credentials.ts` plus `models.ts`
+    ask `=== "custom"` about endpoint metadata. And an **unmigrated per-provider OAuth subsystem**:
+    `control/src/oauth/` hold `OAUTH_PROVIDERS` keyed by five provider literals plus five modules of
+    vendor URLs, scopes and id literals. That last one violate the *first* clause, for which no
+    exception is carved at all, and no sub-project own it yet — say so rather than let the next
+    contributor discover it and conclude the rule is aspirational everywhere.
+    Nothing above is licence to add a fourth. New provider knowledge in core still go through the
+    three outcomes below. The union itself is **gone**: its arms were hand-written for
     exhaustiveness over a closed `ProviderId`, that closed type no longer exist, and the enum
     outlived the argument for it while refusing every target naming a plugin-supplied provider. A
     provider's data live in its own descriptor; core read the registry it is handed. Core cannot
@@ -256,6 +270,23 @@ reviewing one — it open with what plugin can reach, which decide whether rest 
   headers/metadata.
 - `LogFields` is closed allowlist + redaction boundary. Treat new free-text fields as security
   changes; never add index signature.
+- **`GatewayError.gatewayAuthored` is the second half of that boundary, and it is opt-in on
+  purpose.** `reasonField` withhold a failure's message from stdout unless debug is on, because
+  `httpError` fill one from up to 500 characters of an upstream body and a context-length refusal
+  echo prompt text into it. It used to infer that from `provider !== undefined`, on the premise that
+  `httpError` set that field and nothing else did — true when written, false the moment codec errors
+  named their provider, which is what make them actionable. So naming the provider **silenced the
+  sentence naming it**: a plugin codec throwing on every request logged `code=UPSTREAM` with no
+  reason, indistinguishable from an outage. Flag default **false** and each site opt in. The
+  opposite spelling — a `quotesUpstream` every upstream-quoting site must set — was written first
+  and abandoned: it need all ~180 construction sites audited correctly and one miss put a prompt on
+  stdout, and five tests immediately named real sites building messages from upstream bodies without
+  going through `httpError` (decoder terminal event, OAuth refresh, proxy refusal). Set it only for
+  a message built from literals and values this repository own. **Never** for one carrying an
+  upstream body, and never for one authored outside this repository — a plugin codec's own text is
+  unknown exactly the way a body is, which is why `rebound` not set it and `codecFailure` do. It
+  must survive re-wraps like `provider` do: `classify` and dispatch's `rewrap` both rebuild the
+  error, and dropping it there make the flag inert on the only path reaching an operator.
 - Return raw gateway API keys once; store only hashes.
 - Encrypt provider credentials with required `OMNI_ENCRYPTION_KEY`; never add default secrets or
   commit `.env` files/databases.
@@ -482,6 +513,30 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   see. `publishable.test.ts` walk the pairs rather than assert the one range, and its drift check
   watch `package.json` beside `src` — manifest is the part of published artifact deciding what
   source *resolve*.
+- **A check gated on `merge-base(main, HEAD)` fail on one CI trigger and is vacuous on the other.**
+  `actions/checkout` fetch `+refs/heads/*:refs/remotes/origin/*` and, on `pull_request`, detach at
+  `refs/remotes/pull/N/merge` — it never create `refs/heads/main`, not at `fetch-depth: 0` either.
+  So `rev-parse --verify main` exit 128 and `check:claims`/`check:dead` exit 2 on every PR, printing
+  an instruction (`actions/checkout@v5 with fetch-depth: 0`) that is the configuration already in
+  effect. On `push: branches: [main]`, `merge-base` **is** HEAD, so both report success over an
+  empty set — green and vacuous, the shape they exist to catch. Base now resolve through `main` or
+  `origin/main` and fall back to **first parent** when HEAD is the base; first parent specifically,
+  because `main` advance by merge commits and the second parent is the change-set itself. One copy
+  in `scripts/lib/history.ts`, tested against scratch repositories in `scripts/test/history.test.ts`
+  — the developing checkout have a local `main` behind HEAD, which is the one arrangement that
+  worked, so neither failure was observable from it.
+- **`SAFE_PROVIDER_ID` in `apps/dashboard/src/theme/tokens.ts` mirror `PROVIDER_ID_PATTERN`, and
+  `providerColor` is where a stored string become CSS.** styled-components not escape
+  interpolations, and the ids reaching it — `credential.provider`, `target.provider`,
+  `log.resolvedProvider` — never pass `/api/catalog`, where control already withhold an unusable id.
+  Write path is guarded by `providerIdSchema`; read path is not, because `sqlite/config.ts` parse
+  `virtual_models.targets` with bare `JSON.parse`. Check live in `providerColor` and not at the four
+  call sites, because a guard at callers is one a fifth caller join by not knowing. Restated not
+  imported (rule 12), pinned by `apps/gateway/test/routes/providerIdMirror.test.ts` from the one
+  place that may import both — same shape as `limitVocabulary.test.ts`, and the **first** of the
+  five copies of this expression that anything pin. Reference carry `var(--p-<id>, var(--ink-faint))`:
+  without the fallback an unlisted provider inherit, so the identity bar take the colour of the
+  label beside it.
 - **A drift check reading repaired history cannot fail.** `publishable.test.ts` ask git what moved
   since last tag, and once the fix land there is nothing to see — so both fixes to that query
   survived mutation against real history while being plainly wrong. Query now live in
@@ -586,9 +641,17 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   two or more registered provider ids as a table, and assert the walk found something before
   asserting anything about what it found. New table is covered the day it is exported.
   Two facts the idiom hide, both worth knowing before writing a new one: spreading a null-prototype
-  object give an **ordinary** object, so `{...ADAPTERS, x}` silently revert the invariant — the
-  gateway normalise injected adapter maps at `app.ts` for that reason — and `.hasOwnProperty()`
-  called as a **method** on one of these throw. Use `Object.hasOwn(table, key)`.
+  object give an **ordinary** object, so `{...ADAPTERS, x}` silently revert the invariant — use
+  `Object.assign(Object.create(null), …)` — and `.hasOwnProperty()` called as a **method** on one of
+  these throw. Use `Object.hasOwn(table, key)`.
+  This bullet used to say the gateway normalise injected adapter maps at `app.ts`. **It does not**,
+  and `app.ts` say so in as many words: an earlier version spread there, which guarded `createApp`
+  and nothing else, because `DispatchDeps` and `ProxyDeps` are public injection points a caller or
+  test construct directly — so the map dispatch actually read may never have passed through. The
+  guard live at the **read site**, `dispatch/index.ts`, which is on the path however the map was
+  built. That is the whole thing standing between a prototype-keyed provider id and `adapter.send`,
+  and `PROVIDER_ID_PATTERN` accept `constructor`, so a contributor who believe the old sentence and
+  simplify that read reopen a 500 carrying an internal source expression.
   Console cannot import `@omni/providers` (rule 12), so `heldAuths` restate the rule with
   `Object.create(null)` and carry its own test.
 - **A registry threaded into some of a call graph and not all is this repository's most repeated
