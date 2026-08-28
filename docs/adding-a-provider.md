@@ -32,11 +32,13 @@ shape and why the HTTP client is built on `node:http`.
    place: capabilities, `writeOverInput`, catalog, model prefixes, and the
    presentation block (label, display order, terminal tone, `--p-<id>` colour in **both** themes,
    paste hint). `callback` is optional and only for a provider using a loopback redirect.
-   **One core edit remains and the compiler will not find it**:
-   `packages/control/src/schemas.ts`'s target union keeps its arms hand-written, because deriving
-   them widens the arm's inferred `provider` back to `ProviderId` and costs the exhaustiveness the
-   union exists for. Add the id to the non-custom arm, or a credential creates fine and no target
-   using it can be saved. `packages/control/test/providerCoverage.test.ts` fails until you do.
+   **The core edit this step used to name is gone.**
+   `packages/control/src/schemas.ts` held a two-armed target union whose non-custom arm listed the
+   providers by hand, so adding one meant editing it or watching every target using the new provider
+   be refused. It is now one schema over `providerIdSchema`, which validates format and not
+   membership — so a target naming your provider saves with no edit here at all. What survives is a
+   named rule rather than an arm: a `custom` target requires an `endpointId` and nothing else may
+   carry one.
    Also runtime-only, measured by adding a seventh provider rather than recalled: hardcoded lists in
    `packages/providers/test/{kimi,custom,kilo,catalog}.test.ts` — three of which carry byte-identical
    copies of the same `Object.keys(ADAPTERS)` assertion — plus `apps/cli/test/commands.test.ts` and

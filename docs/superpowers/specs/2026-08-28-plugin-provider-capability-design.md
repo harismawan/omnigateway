@@ -175,10 +175,15 @@ paid for:
 Three items were deferred here explicitly rather than dropped, and each becomes
 live the moment a plugin provider exists:
 
-- **`targetSchema`'s non-custom arm is a hand-written five-member enum.** A
-  plugin provider's target cannot be saved through `PUT /api/models/:id` or
-  `omni models put -f` until it widens. This is the one that would otherwise ship
-  a provider nobody can configure.
+- ~~**`targetSchema`'s non-custom arm is a hand-written five-member enum.**~~
+  **Closed.** The union is gone and `targetSchema` takes `providerIdSchema`, so a
+  plugin provider's target saves through `PUT /api/models/:id` and
+  `omni models put -f`. The union's arms were hand-written for exhaustiveness
+  over a closed `ProviderId`; that type no longer exists, so the enum was
+  costing the sub-project its point and buying nothing. What it genuinely
+  enforced is kept as a rule — a `custom` target carries an `endpointId`, and
+  nothing else may — because a custom target with no endpoint matches no account
+  and would fail at routing rather than at the point it was named.
 - **`isProviderIdFormat` has no caller.** Registration is where it belongs, or it
   should be deleted.
 - **Four unpinned copies of the provider-id grammar** validate plugin ids

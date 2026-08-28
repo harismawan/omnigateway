@@ -251,5 +251,9 @@ test("requires an endpoint id only for custom targets", () => {
 
   const builtIn = target({ input: 5, output: 25 });
   builtIn.targets[0] = { ...builtIn.targets[0], endpointId: "not-allowed" };
-  expect(() => modelSchema.parse(builtIn)).toThrow(/unrecognized key/i);
+  // Named rather than zod's generic strict-mode rejection. The two arms became
+  // one schema plus this rule when the five-member provider enum widened, and
+  // the message is what tells an operator which of the two directions they got
+  // wrong — a custom target missing an endpoint, or a built-in carrying one.
+  expect(() => modelSchema.parse(builtIn)).toThrow(/only meaningful for a custom target/);
 });

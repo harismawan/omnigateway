@@ -73,97 +73,92 @@ export const dryRunSchema = z
   })
   .strict();
 
-const targetSchema = z.discriminatedUnion("provider", [
-  z
-    .object({
-      provider: z.enum(["anthropic", "openai", "kimi", "kilo", "grok"]),
-      model: z.string().min(1),
-      tier: z.number().int().min(1),
-      weight: z.number().positive(),
-      costPerMTok: z.object({
-        input: z.number().min(0),
-        output: z.number().min(0),
-        cacheRead: z.number().min(0).optional(),
-        cacheWrite5m: z.number().min(0).optional(),
-        cacheWrite1h: z.number().min(0).optional(),
-      }),
-      contextWindow: z.number().int().positive().optional(),
-      maxOutputTokens: z.number().int().positive().optional(),
-      // Pins this target to one account. Absent means any credential of the
-      // provider; there is deliberately no check that the id names a live
-      // credential, matching the rule that removing an account must not make an
-      // unrelated edit unsavable. An empty string is refused because it is not
-      // a third state — it is an id nothing can ever match.
-      //
-      // Bounded and charset-limited because a pin that matches nothing is
-      // reported as `pin:missing` carrying this string, and that row reaches
-      // `LogFields.credentialId` and `request_logs.degradations`. Unvalidated,
-      // it would be the one operator free-text field on a closed allowlist
-      // whose own documentation calls it a bounded identifier. Credential ids
-      // are `crypto.randomUUID()`, so nothing legitimate comes close to either
-      // bound; the format itself is deliberately not enforced, since pinning
-      // the schema to today's id generator would make every stored pin
-      // unreadable if it ever changed.
-      credentialId: z
-        .string()
-        .trim()
-        .min(1)
-        .max(64)
-        .regex(/^[A-Za-z0-9_-]+$/, "credentialId must be an account id")
-        .optional(),
-      capabilities: z.object({
-        tools: z.boolean(),
-        images: z.boolean(),
-        reasoning: z.boolean(),
-      }),
-    })
-    .strict(),
-  z
-    .object({
-      provider: z.literal("custom"),
-      endpointId: z.string().trim().min(1),
-      model: z.string().min(1),
-      tier: z.number().int().min(1),
-      weight: z.number().positive(),
-      costPerMTok: z.object({
-        input: z.number().min(0),
-        output: z.number().min(0),
-        cacheRead: z.number().min(0).optional(),
-        cacheWrite5m: z.number().min(0).optional(),
-        cacheWrite1h: z.number().min(0).optional(),
-      }),
-      contextWindow: z.number().int().positive().optional(),
-      maxOutputTokens: z.number().int().positive().optional(),
-      // Pins this target to one account. Absent means any credential of the
-      // provider; there is deliberately no check that the id names a live
-      // credential, matching the rule that removing an account must not make an
-      // unrelated edit unsavable. An empty string is refused because it is not
-      // a third state — it is an id nothing can ever match.
-      //
-      // Bounded and charset-limited because a pin that matches nothing is
-      // reported as `pin:missing` carrying this string, and that row reaches
-      // `LogFields.credentialId` and `request_logs.degradations`. Unvalidated,
-      // it would be the one operator free-text field on a closed allowlist
-      // whose own documentation calls it a bounded identifier. Credential ids
-      // are `crypto.randomUUID()`, so nothing legitimate comes close to either
-      // bound; the format itself is deliberately not enforced, since pinning
-      // the schema to today's id generator would make every stored pin
-      // unreadable if it ever changed.
-      credentialId: z
-        .string()
-        .trim()
-        .min(1)
-        .max(64)
-        .regex(/^[A-Za-z0-9_-]+$/, "credentialId must be an account id")
-        .optional(),
-      capabilities: z.object({
-        tools: z.boolean(),
-        images: z.boolean(),
-        reasoning: z.boolean(),
-      }),
-    })
-    .strict(),
-]);
+/**
+ * One target, for any provider this installation might have.
+ *
+ * **Was a two-armed discriminated union**, and the arms were hand-written on the
+ * argument that deriving them "widens the arm's inferred `provider` back to
+ * `ProviderId` and costs the exhaustiveness the union exists for". That argument
+ * died when `ProviderId` became a validated string: there is no longer a closed
+ * set to be exhaustive over, so the union was buying nothing and costing two
+ * things.
+ *
+ * The first was correctness. A provider loaded from `<root>/plugins/` has an id
+ * no five-member enum contains, so `PUT /api/models/:id` and `omni models put -f`
+ * refused every target naming one — a plugin could supply a provider that
+ * routing, pricing and the console all knew about and that no operator could
+ * configure. That is what this change fixes, and it is why the plugin capability
+ * is not shippable without it.
+ *
+ * The second was duplication. Forty lines were repeated across the two arms, and
+ * the repository already records what that cost: "the block is duplicated and
+ * the custom arm went untested once".
+ *
+ * What the union actually enforced is kept, as the rule it always was: a custom
+ * target carries an `endpointId`, and nothing else does. Losing that would let a
+ * custom target save with no endpoint, which no account can be matched to — it
+ * would then fail every request at routing rather than at the point it was
+ * named.
+ */
+const targetSchema = z
+  .object({
+    provider: providerIdSchema,
+    // Optional here and required by the rule below, because a schema cannot
+    // condition one field's presence on another's value without leaving the
+    // object shape open first.
+    endpointId: z.string().trim().min(1).optional(),
+    model: z.string().min(1),
+    tier: z.number().int().min(1),
+    weight: z.number().positive(),
+    costPerMTok: z.object({
+      input: z.number().min(0),
+      output: z.number().min(0),
+      cacheRead: z.number().min(0).optional(),
+      cacheWrite5m: z.number().min(0).optional(),
+      cacheWrite1h: z.number().min(0).optional(),
+    }),
+    contextWindow: z.number().int().positive().optional(),
+    maxOutputTokens: z.number().int().positive().optional(),
+    // Pins this target to one account. Absent means any credential of the
+    // provider; there is deliberately no check that the id names a live
+    // credential, matching the rule that removing an account must not make an
+    // unrelated edit unsavable. An empty string is refused because it is not
+    // a third state — it is an id nothing can ever match.
+    //
+    // Bounded and charset-limited because a pin that matches nothing is
+    // reported as `pin:missing` carrying this string, and that row reaches
+    // `LogFields.credentialId` and `request_logs.degradations`. Unvalidated,
+    // it would be the one operator free-text field on a closed allowlist
+    // whose own documentation calls it a bounded identifier. Credential ids
+    // are `crypto.randomUUID()`, so nothing legitimate comes close to either
+    // bound; the format itself is deliberately not enforced, since pinning
+    // the schema to today's id generator would make every stored pin
+    // unreadable if it ever changed.
+    //
+    // One copy now rather than two. The two arms carried identical blocks and
+    // the custom one went untested once.
+    credentialId: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9_-]+$/, "credentialId must be an account id")
+      .optional(),
+    capabilities: z.object({
+      tools: z.boolean(),
+      images: z.boolean(),
+      reasoning: z.boolean(),
+    }),
+  })
+  .strict()
+  .refine((t) => t.provider !== "custom" || t.endpointId !== undefined, {
+    message: "custom targets require an endpointId",
+    path: ["endpointId"],
+  })
+  .refine((t) => t.provider === "custom" || t.endpointId === undefined, {
+    message: "endpointId is only meaningful for a custom target",
+    path: ["endpointId"],
+  });
 
 export const modelSchema = z.object({
   id: z.string().min(1),
