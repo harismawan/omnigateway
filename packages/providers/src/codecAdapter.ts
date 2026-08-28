@@ -1,4 +1,4 @@
-import { GatewayError, type ProviderId } from "@omni/ir";
+import { GatewayError, type ProviderId, type StreamEvent } from "@omni/ir";
 import type { ProviderCodec } from "./codec.ts";
 import { httpError } from "./http.ts";
 import type { AdapterRequest, AdapterResult, Capabilities, ProviderAdapter } from "./types.ts";
@@ -28,9 +28,9 @@ function codecFailure(id: ProviderId, hook: string, what: string): GatewayError 
 /**
  * What a codec may write into `request_logs.degradations`.
  *
- * Sixteen entries of sixty-four characters, which is far above what any shipped
- * adapter produces (`anthropic:oauth-system-prefix` is the longest at 29) and
- * far below what would matter in a row. Non-strings are dropped rather than
+ * Sixteen entries of sixty-four characters, which is above what any shipped
+ * adapter produces (`anthropic:system-turn-cache-control-dropped`, 43, is the
+ * longest) and far below what would matter in a row. Non-strings are dropped rather than
  * coerced: `String(someObject)` produces `[object Object]`, which is a value
  * that looks like data and explains nothing.
  */
@@ -42,12 +42,52 @@ function boundedDegradations(entries: readonly string[] | undefined): string[] {
     .map((entry) => entry.slice(0, 64));
 }
 
-/** Runs one codec hook, turning anything it throws into a failover-able error. */
+/**
+ * Runs one codec hook, turning anything it throws into a failover-able error.
+ *
+ * A `GatewayError` passes through untouched, and that exception is the point.
+ * `kiloCodec.buildRequest` throws `AUTH` when the credential carries no token —
+ * a deliberate, correctly classified failure — and flattening it to `UPSTREAM`
+ * silently disabled a self-healing path: `dispatch` gates its OAuth
+ * credential-refresh retry on `code === "AUTH"`, so an expired token would fail
+ * over instead of being refreshed, and on a single-candidate pool the request
+ * would fail outright where it had succeeded. Only errors the contract has no
+ * classification for are rewritten.
+ */
 function guard<T>(id: ProviderId, hook: string, run: () => T): T {
   try {
     return run();
-  } catch {
+  } catch (error) {
+    if (error instanceof GatewayError) throw error;
     throw codecFailure(id, hook, "threw");
+  }
+}
+
+/**
+ * Wraps the *iteration* of a codec's stream, not the call that creates it.
+ *
+ * `guard` cannot do this job. An `async function*` returns its generator without
+ * running a line of the body, so guarding the call caught nothing for the shape
+ * `ProviderCodec.decode` actually declares — a plugin's `TypeError` escaped as
+ * itself, `classify` read it as `INTERNAL`, and `RETRYABLE.INTERNAL` is false,
+ * so the request ended after one attempt with a 500 while the rest of the pool
+ * sat unused. That is verbatim the failure the guard was added to remove, and
+ * the test that was supposed to prove otherwise used a plain throwing function,
+ * which passes whether or not any of this exists.
+ *
+ * Errors after the first event are dispatch's to handle — that is its commit
+ * point — but the classification is still worth fixing here, because a plugin
+ * bug mid-stream is no more `INTERNAL` than one before it.
+ */
+async function* guardStream(
+  id: ProviderId,
+  stream: AsyncGenerator<StreamEvent, void, undefined>,
+): AsyncGenerator<StreamEvent, void, undefined> {
+  try {
+    yield* stream;
+  } catch (error) {
+    if (error instanceof GatewayError) throw error;
+    throw codecFailure(id, "decode", "threw");
   }
 }
 
@@ -143,12 +183,17 @@ export function codecAdapter(
       }
 
       return {
-        events: guard(id, "decode", () =>
-          codec.decode({
-            body,
-            decodeState: built.decodeState,
-            headers: res.headers,
-          }),
+        events: guardStream(
+          id,
+          // The call itself is still guarded: `decode` may be an ordinary
+          // function that throws before returning anything iterable.
+          guard(id, "decode", () =>
+            codec.decode({
+              body,
+              decodeState: built.decodeState,
+              headers: res.headers,
+            }),
+          ),
         ),
         // Bounded, because a codec is third-party code and these strings land
         // in `request_logs.degradations`. The field beside this one is a
