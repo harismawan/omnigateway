@@ -15,3 +15,12 @@ graphify-out/
 # Copied in by the release workflow; the repository has one at the root.
 packages/plugin-api/LICENSE
 packages/dashboard-sdk/LICENSE
+
+# Database snapshots. An installation writes these beside its database, and a
+# test that exercises the snapshot route writes them into the working tree —
+# one reached a commit that way. They carry encrypted credentials and API-key
+# hashes even when a test's are synthetic, so they are never tracked.
+snapshots/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
