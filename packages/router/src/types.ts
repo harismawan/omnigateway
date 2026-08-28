@@ -93,8 +93,16 @@ export type RankInput = {
    * built from the store; the registry is fixed at boot and comes from code, so
    * folding one into the other would put a value with a different lifetime and
    * a different source behind the same cache.
+   *
+   * `| undefined` is explicit so that a caller holding an optional registry can
+   * write `providers: deps.providers` directly. Under
+   * `exactOptionalPropertyTypes` a bare `?:` refuses an explicit `undefined`,
+   * which forced callers into a conditional spread — a third spelling of "pass
+   * the registry down" in a function that already had two, and the round that
+   * added two threadings and forgot the third is what that inconsistency costs.
+   * Same convention `@omni/store`'s `TargetPricing` already uses.
    */
-  providers?: ProviderDescriptors;
+  providers?: ProviderDescriptors | undefined;
 };
 
 export type RankResult = {
