@@ -1742,6 +1742,61 @@ test("a provider whose colour had to be repaired is said out loud, once", async 
   expect(repaired[0]?.fields.reason).toContain("anthropic colour.light");
 });
 
+/**
+ * The wire boundary between this response and the console's mirror of it.
+ *
+ * Boundary rule 12 forbids the console importing `@omni/providers`, so
+ * `apps/dashboard/src/api/types.ts` restates `CatalogProvider` by hand and every
+ * console test builds fixtures from that restatement. Two independent
+ * declarations with no test between them: `packages/control/test/catalog.test.ts`
+ * pins the *server* half against the real descriptors, and the console's fixtures
+ * pin the *client* half against the mirror, so renaming or dropping a field
+ * leaves both suites green while production sends a shape the console cannot
+ * read.
+ *
+ * What that looks like: drop `colour` and `theme/GlobalStyle.ts` writes
+ * `--p-anthropic: undefined` into the stylesheet by string concatenation, in both
+ * themes; drop `defaultModel` and the model picker preselects nothing; drop
+ * `authTypes` and the credential dialog offers no way in. The shell gate does not
+ * help — the response still parses.
+ *
+ * The key set is written out here rather than derived, which is the point: it is
+ * the console's contract restated independently, so a change to either side has
+ * to come through this list. Same instrument as `packages/store/test/swap.test.ts`
+ * reading the forwarder's source, and for the same reason — a behavioural test
+ * covers the field it names and says nothing about the next one.
+ */
+test("the catalog response carries exactly the keys the console declares", async () => {
+  const { call } = await harness();
+
+  const body = (await (await call("GET", "/api/catalog")).json()) as {
+    providers: Record<string, unknown>[];
+  };
+  expect(body.providers.length).toBeGreaterThan(0);
+
+  // Optional in the console's type, so present on some providers and not others.
+  const OPTIONAL = new Set(["pasteHint", "callback"]);
+  const REQUIRED = ["id", "label", "order", "colour", "defaultModel", "authTypes", "models"];
+
+  for (const provider of body.providers) {
+    const keys = Object.keys(provider);
+    expect(keys.filter((key) => !OPTIONAL.has(key)).sort()).toEqual([...REQUIRED].sort());
+    expect(keys.every((key) => REQUIRED.includes(key) || OPTIONAL.has(key))).toBe(true);
+  }
+
+  // The model entries too, since the picker and the price display read them and
+  // a dropped `pricing` renders as a blank rather than as an error.
+  const MODEL_REQUIRED = ["id", "label", "pricing", "limits", "auth"];
+  const withModels = body.providers.find((provider) => (provider.models as unknown[]).length > 0) as
+    | { models: Record<string, unknown>[] }
+    | undefined;
+  expect(withModels).toBeDefined();
+  for (const model of withModels?.models ?? []) {
+    const keys = Object.keys(model).filter((key) => key !== "oauthLimits");
+    expect(keys.sort()).toEqual([...MODEL_REQUIRED].sort());
+  }
+});
+
 test("a catalog with nothing to repair says nothing", async () => {
   // The other half, and the one that keeps the assertion above honest: a route
   // that logged unconditionally would satisfy it too.

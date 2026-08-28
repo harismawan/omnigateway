@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
 import { credential, snapshot, target } from "@omni/testkit";
-import { eligible, requiredProvider } from "../src/filters.ts";
+import { eligible, requiredProviders } from "../src/filters.ts";
 
 const NOW = 1_000_000;
 
@@ -42,20 +42,72 @@ const model = (targets: ReturnType<typeof target>[]) => ({
 });
 
 test("a portable custom tool names no provider", () => {
-  expect(
-    requiredProvider({
+  expect([
+    ...requiredProviders({
       ...req,
       tools: [{ kind: "portable", name: "f", inputSchema: {} }],
     }),
-  ).toBeUndefined();
+  ]).toEqual([]);
 });
 
 test("a provider-defined tool names its provider", () => {
-  expect(requiredProvider({ ...req, tools: [webSearch] })).toBe("anthropic");
+  expect([...requiredProviders({ ...req, tools: [webSearch] })]).toEqual(["anthropic"]);
 });
 
 test("provider-native history names its producer", () => {
-  expect(requiredProvider({ ...req, messages: nativeHistory })).toBe("anthropic");
+  expect([...requiredProviders({ ...req, messages: nativeHistory })]).toEqual(["anthropic"]);
+});
+
+/**
+ * A request naming two providers, which the singular version could not express.
+ *
+ * It returned the *first* provider-owned item — `find` short-circuiting before
+ * the history scan — so this request was admitted to anthropic targets and the
+ * `acme` block was then handed to `anthropic/wire.ts`, whose `encodeBlock`
+ * spreads `data` verbatim. A payload one provider produced would have been
+ * transmitted to another, opaque contents and all.
+ *
+ * Unreachable through today's ingress: both construction sites write
+ * `provider: "anthropic"` as a literal, and a foreign block replayed by a client
+ * fails `ANTHROPIC_NATIVE_BLOCK_TYPES`. It becomes reachable the moment a plugin
+ * codec emits `providerNative` blocks, which is what this branch exists to make
+ * possible — and by then the two wire encoders that gave up their own
+ * self-checks will have been citing this rule for a release.
+ */
+const acmeNative: ChatRequest["messages"] = [
+  {
+    role: "assistant",
+    content: [
+      {
+        type: "providerNative",
+        provider: "acme",
+        blockType: "acme_lookup",
+        data: { id: "srv_1", secret_state: "acme-only" },
+      },
+    ],
+  },
+];
+
+test("a request owned by two providers names both", () => {
+  const both = { ...req, tools: [webSearch], messages: acmeNative };
+  expect([...requiredProviders(both)].sort()).toEqual(["acme", "anthropic"]);
+});
+
+test("a request owned by two providers can be served by neither", () => {
+  const { pairs, excluded } = eligible({
+    request: { ...req, tools: [webSearch], messages: acmeNative },
+    model: model([target({ provider: "anthropic", model: "claude" })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a1", provider: "anthropic" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+
+  // The anthropic target matched the first-found owner and was admitted before.
+  expect(pairs).toEqual([]);
+  // And it fails with a reason rather than an empty exclusion list, which is the
+  // whole distinction `provider:missing` and `pin:missing` exist to preserve.
+  expect(excluded).toMatchObject([{ kind: "target", reason: "capability:providerNative" }]);
 });
 
 test("a request naming Anthropic excludes OpenAI and Kimi targets", () => {

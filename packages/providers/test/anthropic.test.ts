@@ -1890,3 +1890,113 @@ test("a native block outside the allowlist is walked past, not marked", () => {
   expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[0]"]);
   expect(markedHistoryTypes(body)).toEqual(["text"]);
 });
+
+/**
+ * The self-checks this adapter gave up in the `kind` rename, restored.
+ *
+ * `providerNative.data` is opaque — whatever its producer put in it — and a
+ * provider-defined tool's `wire` bag likewise. Both were spread into an
+ * Anthropic request without looking at who produced them, so a foreign
+ * provider's payload would have been transmitted to Anthropic verbatim.
+ *
+ * Before the `anthropicNative` → `providerNative` rename the block carried no
+ * producer and the IR *type* was the check, total by construction. The rename
+ * gave it a `provider` field and the encoder went on ignoring it. `encodeTool`
+ * documented losing its equivalent and argued no guard was needed because
+ * `requiredProvider` admitted only the owning provider's targets; that function
+ * returned the *first* owner rather than every one, so the premise was false and
+ * the branch was reachable by a request naming two providers.
+ *
+ * `INTERNAL` and a throw, not a drop: reaching here means routing admitted a
+ * target it should have excluded, which is a gateway bug and must not read like
+ * an operator's misconfiguration — the same split dispatch makes for a missing
+ * adapter.
+ */
+test("a foreign provider-native block is refused rather than forwarded", () => {
+  const req: ChatRequest = {
+    ...base,
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "providerNative",
+            provider: "acme",
+            blockType: "acme_lookup",
+            data: { id: "srv_1", secret_state: "acme-only" },
+          },
+        ],
+      },
+    ],
+  };
+
+  let thrown: unknown;
+  try {
+    toWire(req, "m", { oauth: false, autoCache: false });
+  } catch (error) {
+    thrown = error;
+  }
+
+  expect(thrown).toBeInstanceOf(GatewayError);
+  expect((thrown as GatewayError).code).toBe("INTERNAL");
+  // The producer is named, because "a block was refused" sends a reader to look
+  // at the wrong provider's adapter.
+  expect((thrown as GatewayError).message).toContain("acme");
+  // And the payload is not in the message: `data` is a provider's own opaque
+  // state and this string reaches a log line.
+  expect((thrown as GatewayError).message).not.toContain("acme-only");
+});
+
+test("a foreign provider-defined tool is refused rather than encoded as Anthropic's", () => {
+  const req: ChatRequest = {
+    ...base,
+    tools: [
+      {
+        kind: "provider",
+        provider: "acme",
+        family: "webSearch",
+        type: "acme_search_v1",
+        name: "acme_search",
+        wire: { endpoint: "https://acme.example" },
+      } as ToolDef,
+    ],
+  };
+
+  expect(() => toWire(req, "m", { oauth: false, autoCache: false })).toThrow(/acme/);
+});
+
+test("this provider's own native block and tool still encode unchanged", () => {
+  // The positive control both guards need: "refuses everything" satisfies each
+  // assertion above.
+  const req: ChatRequest = {
+    ...base,
+    tools: [
+      {
+        kind: "provider",
+        provider: "anthropic",
+        family: "webSearch",
+        type: "web_search_20250305",
+        name: "web_search",
+        wire: { max_uses: 3 },
+      } as ToolDef,
+    ],
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "providerNative",
+            provider: "anthropic",
+            blockType: "web_search_tool_result",
+            data: { tool_use_id: "srvtoolu_1", content: [] },
+          },
+        ],
+      },
+    ],
+  };
+
+  const { body } = toWire(req, "m", { oauth: false, autoCache: false });
+  expect(body.tools).toEqual([{ type: "web_search_20250305", name: "web_search", max_uses: 3 }]);
+  const block = (body.messages[0] as { content: unknown[] }).content[0];
+  expect(block).toEqual({ type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] });
+});

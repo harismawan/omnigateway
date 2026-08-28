@@ -7,11 +7,14 @@ import type { Excluded, RankInput } from "./types.ts";
 export type Pair = { credential: CredentialView; target: Target };
 
 /**
- * The one provider that can serve this request, when the request names one.
+ * Every provider whose own dialect this request carries.
  *
  * A provider-defined tool or a provider-native block is owned end to end by the
- * adapter that produced it, so it routes only back to that adapter. `undefined`
- * means the request is portable and every target is a candidate.
+ * adapter that produced it, so it routes only back to that adapter. An empty set
+ * means the request is portable and every target is a candidate; a set of one is
+ * the ordinary case and names the only provider that may serve it. **A set of
+ * two or more means nothing can**, and that is the case the singular version of
+ * this function could not express.
  *
  * History counts, not just the tool list. A client that ran a web search on one
  * turn replays the `server_tool_use` and its result on the next, often without
@@ -20,15 +23,34 @@ export type Pair = { credential: CredentialView; target: Target };
  * turns "no target can do this" into one clear routing failure rather than an
  * adapter discovering it mid-encode.
  */
-export function requiredProvider(request: ChatRequest): ProviderId | undefined {
-  const tool = request.tools?.find((t) => t.kind === "provider");
-  if (tool !== undefined) return tool.provider;
+export function requiredProviders(request: ChatRequest): ReadonlySet<ProviderId> {
+  // **Every** owner, not the first. This returned the first provider-owned item
+  // it found — `find` short-circuiting before the history scan, and the history
+  // scan returning on its first hit — which turned a *requirement* into a
+  // *pick*: a request naming two providers was admitted to targets of one, and
+  // the other's blocks were then encoded by an adapter that does not own them.
+  // The correct answer for such a request is that nothing can serve it, which is
+  // what a set of size two produces at the call site below.
+  //
+  // Not reachable through today's ingress — `ingress/anthropicTools.ts` and
+  // `ingress/anthropic.ts` both write `provider: "anthropic"` as a literal, and
+  // a foreign block replayed by a client fails `ANTHROPIC_NATIVE_BLOCK_TYPES` —
+  // so first-match and all-match coincide for every live request. They stop
+  // coinciding the moment a plugin codec emits `providerNative` blocks, which is
+  // the capability this branch exists to enable. Fixed now because the two wire
+  // encoders that dropped their own self-checks name this function as the reason
+  // they are safe, and a rule three call sites depend on should be the rule they
+  // think it is.
+  const owners = new Set<ProviderId>();
+  for (const tool of request.tools ?? []) {
+    if (tool.kind === "provider") owners.add(tool.provider);
+  }
   for (const message of request.messages) {
     for (const block of message.content) {
-      if (block.type === "providerNative") return block.provider;
+      if (block.type === "providerNative") owners.add(block.provider);
     }
   }
-  return undefined;
+  return owners;
 }
 
 /** What the request actually needs, so targets can be filtered on it. */
@@ -58,7 +80,7 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
   const providers = input.providers ?? PROVIDER_DESCRIPTORS;
   const { breakerThreshold, breakerCooldownMs } = snapshot.settings;
   const need = requiredCapabilities(request);
-  const required = requiredProvider(request);
+  const required = requiredProviders(request);
 
   const pairs: Pair[] = [];
   const excluded: Excluded[] = [];
@@ -95,8 +117,13 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
     // provider that owns it. Read off the request's own data rather than from a
     // table of who accepts whose dialect: the block records its producer, so the
     // question is one comparison and needs no per-provider entry to stay correct.
+    // `size === 1 && !has` rather than `!has`, so a request naming *two*
+    // providers excludes every target rather than admitting the ones matching
+    // whichever was seen first. A request no single provider owns is a request
+    // nothing can serve, and the honest answer is an empty candidate list with a
+    // reason on every target — not a candidate that will mis-encode.
     const missing =
-      required !== undefined && target.provider !== required
+      required.size > 1 || (required.size === 1 && !required.has(target.provider))
         ? "providerNative"
         : (["tools", "images", "reasoning"] as const).find(
             (cap) => need[cap] && !target.capabilities[cap],

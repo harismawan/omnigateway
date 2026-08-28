@@ -1,5 +1,10 @@
 import type { CacheControl, ChatRequest, ContentBlock, ToolChoice, ToolDef } from "@omni/ir";
-import { cacheControlOf, estimateCachedInputTokens, estimateInputTokens } from "@omni/ir";
+import {
+  cacheControlOf,
+  estimateCachedInputTokens,
+  estimateInputTokens,
+  GatewayError,
+} from "@omni/ir";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { anthropicReasoningForm } from "./models.ts";
 
@@ -100,7 +105,28 @@ function encodeBlock(b: ContentBlock, cloak: ToolCloak | null): unknown {
     // caller metadata and error objects go back exactly as they arrived. The
     // discriminator is spread last so a stray `type` inside `data` cannot
     // rename the block on its way out.
+    //
+    // **Only this provider's own blocks.** `data` is opaque — whatever its
+    // producer put there — so spreading a foreign one transmits another
+    // provider's payload to Anthropic verbatim. Before the `anthropicNative` →
+    // `providerNative` rename the block carried no producer and the *type* was
+    // the check, total by construction; the rename gave the block a `provider`
+    // field and this encoder went on ignoring it. `encodeTool` above lost its
+    // equivalent self-check in the same commit and says so; this one lost it
+    // silently, which is the worse half.
+    //
+    // A guard rather than a fallthrough, unlike `encodeTool`'s deleted one:
+    // there is no portable form for a provider-native block, so there is nothing
+    // to degrade to. Reaching here means `requiredProviders` admitted a target
+    // it should have excluded — a gateway bug, not an operator one — so it is an
+    // `INTERNAL` throw for the same reason dispatch throws on a missing adapter.
     case "providerNative":
+      if (b.provider !== "anthropic") {
+        throw new GatewayError(
+          "INTERNAL",
+          `anthropic adapter received a ${b.provider} provider-native block`,
+        );
+      }
       return { ...b.data, type: b.blockType, ...cache };
   }
 }
@@ -157,17 +183,27 @@ function encodeTool(t: ToolDef, cloak: ToolCloak | null): Record<string, unknown
   // `kind === "provider"` and not `provider === "anthropic"`, and the difference
   // is a dependency worth naming. This branch encodes the tool as Anthropic's,
   // so it is correct only because a provider-defined tool never reaches another
-  // provider's adapter — `requiredProvider` in `packages/router/src/filters.ts`
-  // admits only targets of the provider that owns it, pinned there for all six.
+  // provider's adapter — `requiredProviders` in `packages/router/src/filters.ts`
+  // admits only targets of the provider that owns it.
   //
   // The old discriminant was `provider === "anthropic"`, which was self-checking:
   // a foreign provider-defined tool fell through to the portable branch. This one
-  // is not, so if that routing rule is ever weakened the failure moves here and
-  // becomes a silent mis-encode rather than an exclusion. No guard is added for
-  // it deliberately — a branch that cannot fire under correct routing would be
-  // decoration, and the repository has deleted such checks before once mutation
-  // showed the real decision was made elsewhere.
+  // is not, so the check is restated below rather than left to the router alone.
+  //
+  // **An earlier version of this comment declined to add that check**, on the
+  // grounds that a branch which cannot fire under correct routing is decoration.
+  // The argument was sound and the premise was not: review found
+  // `requiredProvider` returned the *first* provider-owned item rather than every
+  // one, so a request naming two providers was admitted to targets of one and
+  // this branch would have fired. Deleted checks are right when the real decision
+  // is provably made elsewhere; here it was not, and the proof was never run.
   if (t.kind === "provider") {
+    if (t.provider !== "anthropic") {
+      throw new GatewayError(
+        "INTERNAL",
+        `anthropic adapter received a ${t.provider} provider-defined tool`,
+      );
+    }
     return {
       type: t.type,
       ...(t.name === "" ? {} : { name: t.name }),
