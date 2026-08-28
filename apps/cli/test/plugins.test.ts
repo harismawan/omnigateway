@@ -1020,6 +1020,56 @@ export default {
     expect(existsSync(join(root, "imported"))).toBe(false);
   });
 
+  test("a plugin whose manifest is corrupt is named, not silently absent", async () => {
+    // The end-to-end half of the manifest:null gap. An interrupted install or a
+    // truncated download leaves `omni-plugin.json` unparseable; the host then
+    // knows nothing about the plugin at all, including whether it supplies the
+    // provider a stored target names. Before this the operator got
+    // `provider:missing` with an empty `pluginFailures` — consequence shown,
+    // cause deleted, which is the bug this command was given the field for.
+    const root = makeRoot();
+    expect((await cli(["db", "migrate"], { root })).code).toBe(0);
+    place(root, "acme-ai", PROVIDER, {
+      "server.js": SERVER(join(root, "imported"), join(root, "setup-ran")),
+    });
+    // Truncated mid-object, which is what a half-written file actually looks
+    // like — not a syntactically valid manifest with wrong contents.
+    writeFileSync(join(root, "plugins", "acme-ai", "omni-plugin.json"), '{"id":"acme-ai","ca');
+
+    const store = await openStore(root);
+    await store.config.putModel({
+      id: "fast",
+      strategy: "priority",
+      isAlias: false,
+      targets: [
+        {
+          provider: "acme-ai",
+          model: "acme-1",
+          tier: 1,
+          weight: 1,
+          costPerMTok: { input: 5, output: 25 },
+          capabilities: { tools: true, images: false, reasoning: false },
+        },
+      ],
+    });
+    store.close();
+
+    const human = await cli(["models", "dry-run", "fast"], { root });
+    expect(human.code).toBe(0);
+    expect(human.err).toContain("acme-ai");
+
+    const json = await cli(["models", "dry-run", "fast", "--json"], { root });
+    const body = JSON.parse(json.out) as {
+      pluginFailures: { id: string; reason: string }[];
+      excluded: { reason: string }[];
+    };
+    // Both halves, in one payload: what went wrong for the request, and why.
+    expect(body.excluded.map((row) => row.reason)).toContain("provider:missing");
+    expect(body.pluginFailures).toHaveLength(1);
+    expect(body.pluginFailures[0]?.id).toBe("acme-ai");
+    expect(body.pluginFailures[0]?.reason).toContain("unknown");
+  });
+
   test("both commands import the module and neither calls its setup", async () => {
     // The property the declared field buys, asserted rather than argued — and
     // asserted from *both* ends, because each alone is satisfiable for the wrong

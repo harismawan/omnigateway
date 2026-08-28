@@ -350,6 +350,10 @@ const summary = (over: Record<string, unknown> = {}) => ({
   path: "/plugins/acme-ai",
   loadable: true,
   manifest: { capabilities: ["provider"], server: "server.js" },
+  // Present in the default so a case that does not care carries an empty list
+  // rather than omitting the field. The field is required on the real type, and
+  // a helper that let it be absent would be the hole that requirement closes.
+  problems: [] as readonly { reason: string; fatal: boolean }[],
   ...over,
 });
 
@@ -443,6 +447,59 @@ test("a plugin without the capability is not imported at all", async () => {
   expect(imported).toBe(false);
   expect(read.descriptors).toEqual({});
   expect(read.failures).toEqual([]);
+});
+
+test("a plugin whose manifest could not be read is reported, not skipped", async () => {
+  // `reportFor` yields `manifest: null` for a missing, unreadable or invalid
+  // `omni-plugin.json` — a truncated download, an interrupted install, a
+  // hand-edit. All three hit a bare `continue` before the capability check, so
+  // the most ordinary breakage of all produced no failure line, which is the
+  // exact bug the previous fix was written to close.
+  const read = await readPluginProviders(
+    [
+      summary({
+        manifest: null,
+        loadable: false,
+        problems: [
+          { reason: "omni-plugin.json is not valid JSON", fatal: true },
+          { reason: "ui bundle missing", fatal: false },
+        ],
+      }),
+    ],
+    async () => declaringModule,
+  );
+
+  expect(read.descriptors).toEqual({});
+  expect(read.failures).toHaveLength(1);
+  expect(read.failures[0]?.id).toBe("acme-ai");
+  // "unknown", not "absent": with no manifest there is nothing to read the
+  // `provider` capability off, so claiming it supplies none is a guess in the
+  // direction that hides the cause.
+  expect(read.failures[0]?.reason).toContain("unknown");
+  // The parse failure itself, not merely that one happened. Fatal only — the
+  // missing UI bundle is a different subsystem's problem.
+  expect(read.failures[0]?.reason).toContain("not valid JSON");
+  expect(read.failures[0]?.reason).not.toContain("ui bundle");
+});
+
+test("an unreadable manifest is reported even though the capability is unknowable", async () => {
+  // The cost of the rule above, asserted so it is a decision rather than a
+  // side effect: a UI-only plugin with a corrupt manifest is reported here too.
+  // Nothing can tell it apart from a provider plugin with a corrupt manifest —
+  // that is what "unreadable" means — and of the two ways to be wrong, naming a
+  // plugin that turns out to be irrelevant costs a line of output, while
+  // staying silent costs the operator the cause of a failure they can see.
+  const read = await readPluginProviders(
+    [summary({ manifest: null, loadable: false, problems: [] })],
+    async () => declaringModule,
+  );
+
+  expect(read.failures).toHaveLength(1);
+  // No fatal problems to append, so the headline stands alone rather than
+  // trailing an empty colon.
+  expect(read.failures[0]?.reason).toBe(
+    "manifest could not be read, so whether it supplies a provider is unknown",
+  );
 });
 
 test("a plugin that declares a provider and will not load is reported", async () => {

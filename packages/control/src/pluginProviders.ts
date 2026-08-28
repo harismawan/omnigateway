@@ -418,7 +418,14 @@ export async function readPluginProviders(
      * repeat that it is unloadable. `PluginSummary` already holds these and
      * every caller passes one whole.
      */
-    problems?: readonly { reason: string; fatal: boolean }[];
+    /**
+     * Required, not optional. Optional let a caller construct a plugin record
+     * with no problems list and get "declares a provider but will not load"
+     * with no cause — the half-message this field was added to replace — with
+     * the compiler raising nothing. Every real caller passes a whole
+     * `PluginSummary`; making it required is what keeps that true.
+     */
+    problems: readonly { reason: string; fatal: boolean }[];
   }[],
   importer: PluginImporter,
   // Injected so a test can drive the timeout without waiting for it, and
@@ -435,9 +442,53 @@ export async function readPluginProviders(
   const descriptors: Record<string, ProviderDescriptor> = Object.create(null);
   const failures: { id: string; reason: string }[] = [];
 
+  /**
+   * `headline`, with the manifest's own fatal problems appended when there are
+   * any.
+   *
+   * One helper and not two inline copies: the two call sites below are the same
+   * sentence about different states, and this whole review round was mostly
+   * repairs that landed in one of a pair.
+   */
+  const because = (
+    plugin: { problems: readonly { reason: string; fatal: boolean }[] },
+    headline: string,
+  ): string => {
+    const fatal = plugin.problems.filter((problem) => problem.fatal);
+    return fatal.length === 0
+      ? headline
+      : `${headline}: ${fatal.map((problem) => problem.reason).join("; ")}`;
+  };
+
   for (const plugin of plugins) {
     const manifest = plugin.manifest;
-    if (typeof manifest !== "object" || manifest === null) continue;
+    // **Reported, not skipped, and reported *before* the capability check.**
+    //
+    // `reportFor` yields `manifest: null` for a plugin with no
+    // `omni-plugin.json`, an unreadable one, and an invalid one — a truncated
+    // download, an interrupted `plugin install`, a hand-edit. Those are the most
+    // ordinary ways a plugin breaks, and they all hit a bare `continue` here.
+    //
+    // The capability check below runs first for a reason — a broken UI-only
+    // plugin should stay the UI's problem rather than surface as a missing
+    // provider — but that ordering needs a manifest to read. With none, the
+    // question "does this declare a provider?" has no answer, and skipping
+    // silently answers it "no": the one reading that deletes the cause while
+    // `provider:missing` is shown to the operator. Unknown is not absent.
+    //
+    // The earlier fix here missed this because its own commit message said
+    // `loadable` is false for "exactly the three fatal manifest problems". It is
+    // false for six, and three of them arrive with no manifest at all.
+    if (typeof manifest !== "object" || manifest === null) {
+      failures.push({
+        id: plugin.id,
+        reason: because(
+          plugin,
+          "manifest could not be read, so whether it supplies a provider is unknown",
+        ),
+      });
+      continue;
+    }
     const capabilities = (manifest as { capabilities?: unknown }).capabilities;
     // Nothing to read and nothing to report: most plugins supply no provider,
     // and asked before `loadable` so a broken *UI-only* plugin stays the UI's
@@ -457,13 +508,9 @@ export async function readPluginProviders(
     // cause deleted. That is the exact bug those commands were given
     // `pluginFailures` for.
     if (!plugin.loadable) {
-      const fatal = (plugin.problems ?? []).filter((problem) => problem.fatal);
       failures.push({
         id: plugin.id,
-        reason:
-          fatal.length === 0
-            ? "declares a provider but will not load"
-            : `declares a provider but will not load: ${fatal.map((p) => p.reason).join("; ")}`,
+        reason: because(plugin, "declares a provider but will not load"),
       });
       continue;
     }
