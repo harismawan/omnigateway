@@ -2477,3 +2477,113 @@ test("a bare model name is inferred against the default registry", async () => {
   expect(log.resolvedModel).toBe("claude-opus-4");
   store.close();
 });
+
+test("a sentinel registry reaches every consumer dispatch has", async () => {
+  // The pattern test, rather than one more instance of it.
+  //
+  // Three review rounds each found the same defect in the previous round's fix:
+  // a registry threaded into some of the functions reachable from `dispatch` and
+  // not all. The prototype sweep stopped at one package; the injection work
+  // threaded `resolveModel` and `rank` but not `priceOf`; the tests pinning that
+  // covered the injected path but not the default. Each was found by hand, one
+  // at a time, by someone thinking to try that particular site.
+  //
+  // This asks the question of the whole call graph at once. `deps.providers`
+  // holds one synthetic provider and none of the six real ones, so a consumer
+  // reading the module-global instead sees a registry without `sentinel` and
+  // fails loudly rather than differently:
+  //
+  //   - `resolveModel` cannot infer `sent-1` from its prefix -> NO_CANDIDATES
+  //   - `eligible` excludes the target as `provider:missing` -> no candidates
+  //   - `priceOf` finds no `writeOverInput` -> cache writes billed at zero
+  //
+  // Two dispatches because one request cannot reach all three: a *configured*
+  // model short-circuits `resolveModel` before it consults any registry, while
+  // an *inferred* target is priced from `PROVIDER_MODEL_CATALOG` — a different
+  // global, not injected — so it carries zero prices and cannot show a
+  // multiplier. One sentinel registry, both paths.
+  const sentinel: ProviderDescriptors = {
+    sentinel: {
+      ...entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS"),
+      id: "sentinel",
+      modelPrefixes: ["sent-"],
+    },
+  };
+
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "s1",
+    provider: "sentinel",
+    label: "s1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "k",
+    idToken: null,
+  });
+  // A configured pool with legacy pricing: no explicit `cacheWrite5m`, so the
+  // bill is decided by the descriptor's multiplier, which only the sentinel
+  // registry supplies. This is the `eligible` + `priceOf` half.
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "sentinel",
+        model: "s-model",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25, cacheRead: 0.5 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const configured = {
+    ...deps(
+      store,
+      stubAdapter(() => cacheWriteStream(1_000_000)),
+    ),
+    providers: sentinel,
+    adapters: { sentinel: stubAdapter(() => cacheWriteStream(1_000_000)) },
+  };
+  const priced = await dispatch(req, configured, new AbortController().signal, "req_sentinel_a");
+  await drain(priced.events);
+  const pricedLog = priced.log();
+
+  expect(pricedLog.status).toBe(200);
+  expect(pricedLog.resolvedProvider).toBe("sentinel");
+  // 5 * 1.25 = 6.25 per million. Zero is what a fallback to the global gives.
+  expect(pricedLog.costUsd).toBeCloseTo(6.25, 10);
+
+  // And the `resolveModel` half: the same registry has to be what infers a bare
+  // name from its prefix.
+  await store.config.removeModel("fast");
+  const inferredAdapter = stubAdapter(() => textStream("ok"));
+  const inferred = await dispatch(
+    { ...req, model: "sent-1" },
+    {
+      ...deps(store, inferredAdapter),
+      providers: sentinel,
+      adapters: { sentinel: inferredAdapter },
+    },
+    new AbortController().signal,
+    "req_sentinel_b",
+  );
+  await drain(inferred.events);
+  const inferredLog = inferred.log();
+
+  expect(inferredLog.status).toBe(200);
+  expect(inferredLog.resolvedProvider).toBe("sentinel");
+  expect(inferredLog.resolvedModel).toBe("sent-1");
+  store.close();
+});
