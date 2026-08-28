@@ -12,6 +12,7 @@ import {
   type PluginLogger,
   type PluginManifest,
   type PluginMigration,
+  type PluginProviderRegistry,
   type PluginRoute,
   type PluginStorage,
   safeParseManifest,
@@ -19,6 +20,7 @@ import {
 import type { ChannelRegistry } from "../stream/channels.ts";
 import { createPluginFetch, createPluginFiles } from "./capabilities.ts";
 import type { PluginEventBus } from "./events.ts";
+import { createProviderRegistry, type RegisteredProvider } from "./providers.ts";
 
 export type PluginLoadFailure = { id: string; reason: string };
 
@@ -48,6 +50,14 @@ export type LoadedPlugin = {
 export type PluginLoadResult = {
   plugins: LoadedPlugin[];
   failures: PluginLoadFailure[];
+  /**
+   * Providers plugins supplied, in load order.
+   *
+   * Returned rather than written into `PROVIDER_DESCRIPTORS` here, because the
+   * loader reports and does not mutate global state — and because boot is the
+   * one place that knows registration must complete before `createApp`.
+   */
+  providers: RegisteredProvider[];
 };
 
 /**
@@ -124,6 +134,7 @@ function buildContext(deps: {
   store: Store;
   events: PluginEventBus;
   channels: ChannelRegistry;
+  provider: PluginProviderRegistry;
   logger: Logger;
   now: () => number;
 }): PluginContext {
@@ -148,6 +159,9 @@ function buildContext(deps: {
     // `plugin:<id>:` half of every topic this plugin opens is the host's word
     // and not the plugin's — the same guarantee the storage prefix carries.
     ...(declared.includes("channels") ? { channels: deps.channels.for(manifest.id) } : {}),
+    // Collected during `setup` and applied by the caller once it returns
+    // without throwing; see `createProviderRegistry`.
+    ...(declared.includes("provider") ? { provider: deps.provider } : {}),
     config: manifest.defaults ?? {},
   };
 }
@@ -190,6 +204,7 @@ export async function loadPlugins(deps: {
   const now = deps.now ?? Date.now;
   const plugins: LoadedPlugin[] = [];
   const failures: PluginLoadFailure[] = [];
+  const providers: RegisteredProvider[] = [];
 
   let entries: string[];
   try {
@@ -198,7 +213,7 @@ export async function loadPlugins(deps: {
   } catch {
     // Almost every install has no plugins and never creates the directory. A
     // warning here would appear in every boot log for a feature nobody uses.
-    return { plugins, failures };
+    return { plugins, failures, providers };
   }
 
   for (const id of entries.sort()) {
@@ -288,6 +303,7 @@ export async function loadPlugins(deps: {
         }
       }
 
+      const registry = createProviderRegistry(id);
       try {
         const context = buildContext({
           manifest,
@@ -295,6 +311,7 @@ export async function loadPlugins(deps: {
           store: deps.store,
           events: deps.events,
           channels: deps.channels,
+          provider: registry.capability,
           logger,
           now,
         });
@@ -304,6 +321,13 @@ export async function loadPlugins(deps: {
         fail(reason(error));
         continue;
       }
+
+      // Applied only now, because `setup` returned without throwing. A provider
+      // written into the live tables as it was registered would outlive a plugin
+      // the host went on to reject two lines later — and routing would then
+      // admit a target dispatch has no adapter for, which is the `INTERNAL`
+      // path, on every request rather than never.
+      providers.push(...registry.registered());
     }
 
     const loaded: LoadedPlugin = { id, manifest, routes, migrations };
@@ -343,5 +367,5 @@ export async function loadPlugins(deps: {
     logger.info("plugin loaded", { plugin: id });
   }
 
-  return { plugins, failures };
+  return { plugins, failures, providers };
 }

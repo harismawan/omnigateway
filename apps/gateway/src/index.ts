@@ -11,7 +11,8 @@ import {
   tailFile,
 } from "@omni/control";
 import { createLogger, describeError, type Logger } from "@omni/ir";
-import { nodeHttpClient } from "@omni/providers";
+import { nodeHttpClient, registerProvider } from "@omni/providers";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { createStore, deriveKey } from "@omni/store";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { createApp } from "./app.ts";
@@ -239,7 +240,36 @@ async function main(): Promise<void> {
     // the install rather than making an operator total up warnings.
     logger.warn("plugin unavailable", { plugin: failure.id, reason: failure.reason });
   }
-  logger.info("plugins resolved", { count: loadedPlugins.plugins.length, path: pluginRoot });
+  /**
+   * Providers plugins supplied, installed before anything can route.
+   *
+   * Here rather than inside the loader because this is the one place that knows
+   * the ordering constraint: every registry read is a call-time read, so a
+   * provider added after `createApp` would exist for later requests and not
+   * earlier ones. Registering before the app is built makes "installed" a
+   * property of boot rather than a race.
+   *
+   * A collision with a built-in is refused rather than allowed to win. A plugin
+   * shadowing `anthropic` would take its traffic and its stored credentials with
+   * nothing in the log saying so.
+   */
+  for (const provider of loadedPlugins.providers) {
+    const id = provider.descriptor.id;
+    if (Object.hasOwn(PROVIDER_DESCRIPTORS, id)) {
+      logger.warn("plugin provider ignored", {
+        plugin: id,
+        reason: `a provider named ${id} is already installed`,
+      });
+      continue;
+    }
+    registerProvider(provider.descriptor, provider.adapter);
+    logger.info("plugin provider registered", { plugin: id });
+  }
+
+  logger.info("plugins resolved", {
+    count: loadedPlugins.plugins.length,
+    path: pluginRoot,
+  });
 
   const streamRing = createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
   const broadcaster = createBroadcaster({

@@ -29,6 +29,7 @@ test("the capability vocabulary is the full set the host can construct", () => {
     "events:request",
     "events:limit",
     "channels",
+    "provider",
   ]);
 });
 

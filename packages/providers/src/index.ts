@@ -4,6 +4,8 @@ export { anthropicAdapter, decodeAnthropic, toWire as toAnthropicWire } from "./
 export * from "./anthropic/tools.ts";
 export * from "./body.ts";
 export * from "./catalog.ts";
+export * from "./codec.ts";
+export { codecAdapter } from "./codecAdapter.ts";
 export { customAdapter } from "./custom/index.ts";
 export * from "./descriptor.ts";
 export * from "./descriptors.ts";
@@ -17,6 +19,6 @@ export { decodeChat, kimiAdapter, toChatWire } from "./kimi/index.ts";
 export { decodeResponses, openaiAdapter, toResponsesWire } from "./openai/index.ts";
 export * from "./profile.ts";
 export type { ProviderRegistryEntry } from "./registry.ts";
-export { ADAPTERS, PROVIDERS } from "./registry.ts";
+export { ADAPTERS, PROVIDERS, registerProvider } from "./registry.ts";
 export * from "./sse.ts";
 export * from "./types.ts";

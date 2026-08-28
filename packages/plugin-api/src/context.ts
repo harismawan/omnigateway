@@ -100,6 +100,35 @@ export type PluginChannels = {
 };
 
 /**
+ * Registers the provider this plugin supplies.
+ *
+ * Called from `setup`, and only from there. The registry is read at call time by
+ * routing, pricing and the console, but `setup` runs before `createApp`, so a
+ * provider registered later than that would exist for some requests and not
+ * others — a shape this repository has already paid for once, in the three
+ * module-scope snapshots that served a build-time view of the world.
+ *
+ * `descriptor.id` must equal the plugin's own id. A plugin cannot register a
+ * provider named after another plugin, for the same reason it cannot open
+ * another plugin's channel topic or name another plugin's table: the id comes
+ * from the validated manifest and the host does not take the plugin's word for
+ * it. A mismatch throws, which skips the plugin and is reported like any other
+ * setup failure.
+ *
+ * **The types here are structural rather than the real ones**, and that is a
+ * consequence of ordering rather than a design choice. The descriptor and codec
+ * are defined in `@omni/providers`, in terms of `@omni/ir`, and this package is
+ * published with no `@omni/*` imports — a single one would put an unresolvable
+ * `workspace:*` into a stranger's dependency tree. `@omni/ir` is published in a
+ * later sub-project; until then an in-repo provider can be typed against the
+ * real contract and a third-party one cannot. The host validates the shape at
+ * call time, so nothing is trusted merely because this type is loose.
+ */
+export type PluginProviderRegistry = {
+  register(entry: { descriptor: unknown; codec: unknown }): void;
+};
+
+/**
  * A request as a plugin route handler sees it.
  *
  * Deliberately not Elysia's context, and deliberately not a raw `Request`. The
@@ -164,6 +193,7 @@ export type PluginContext = {
   net?: PluginFetch;
   events?: PluginEvents;
   channels?: PluginChannels;
+  provider?: PluginProviderRegistry;
   /** The plugin's own settings, seeded from the manifest's `defaults`. */
   config: Readonly<Record<string, unknown>>;
 };

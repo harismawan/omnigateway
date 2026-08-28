@@ -9,6 +9,7 @@ export type {
   PluginLogFields,
   PluginLogger,
   PluginMigration,
+  PluginProviderRegistry,
   PluginRequest,
   PluginResponse,
   PluginRoute,

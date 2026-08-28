@@ -101,7 +101,7 @@ test("an absent plugins directory is not an error", async () => {
   // for a feature nobody is using.
   await rm(root, { recursive: true, force: true });
   const result = await load();
-  expect(result).toEqual({ plugins: [], failures: [] });
+  expect(result).toEqual({ plugins: [], failures: [], providers: [] });
 });
 
 test("plugins load in a deterministic order regardless of filesystem enumeration", async () => {
@@ -469,4 +469,140 @@ test("a relative plugin root still loads, because that is what the gateway passe
   } finally {
     process.chdir(previous);
   }
+});
+
+// --- The provider capability -------------------------------------------------
+
+/**
+ * A plugin's server entry, as a string, that registers a provider.
+ *
+ * Written out rather than importing a fixture module, because the loader reads
+ * a file from disk and a fixture it imported would skip the part being tested.
+ */
+const PROVIDER_PLUGIN = (id: string, over = "") => `export default {
+  setup(ctx) {
+    ctx.provider.register({
+      descriptor: {
+        id: ${JSON.stringify(id)},
+        capabilities: { tools: true, images: false, reasoning: false },
+        writeOverInput: { fiveMinute: 1.25, oneHour: 2 },
+        catalog: { defaultModel: "m-1", models: [], authTypes: ["apiKey"] },
+        modelPrefixes: ["acme-"],
+        presentation: {
+          label: "Acme",
+          order: 90,
+          tone: "cyan",
+          colour: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
+        },
+        ${over}
+      },
+      codec: {
+        buildRequest: () => ({
+          request: { url: "https://acme.test/v1", method: "POST", headers: [], body: "{}" },
+        }),
+        decode: async function* () {},
+      },
+    });
+    return {};
+  },
+};`;
+
+test("a plugin declaring the provider capability registers one", async () => {
+  await plugin({
+    id: "acme-ai",
+    manifest: { capabilities: ["provider"] },
+    server: PROVIDER_PLUGIN("acme-ai"),
+  });
+
+  const result = await load();
+
+  expect(result.failures).toEqual([]);
+  expect(result.providers).toHaveLength(1);
+  expect(result.providers[0]?.descriptor.id).toBe("acme-ai");
+  // A working adapter, not a record of intent: this is what dispatch will call.
+  expect(result.providers[0]?.adapter.id).toBe("acme-ai");
+  expect(result.providers[0]?.adapter.capabilities).toEqual({
+    tools: true,
+    images: false,
+    reasoning: false,
+  });
+});
+
+test("a plugin that did not declare the capability has no way to register", async () => {
+  // The context member is absent, so the call throws — which skips the plugin
+  // and is reported, exactly as reaching any undeclared surface does. The
+  // manifest is the audit trail, so a provider arriving without one declared
+  // would make that trail wrong.
+  await plugin({ id: "sneaky", server: PROVIDER_PLUGIN("sneaky") });
+
+  const result = await load();
+
+  expect(result.providers).toEqual([]);
+  expect(result.plugins).toEqual([]);
+  expect(result.failures).toHaveLength(1);
+  expect(result.failures[0]?.id).toBe("sneaky");
+});
+
+test("a plugin registering another provider's id is skipped, and says whose", async () => {
+  await plugin({
+    id: "acme-ai",
+    manifest: { capabilities: ["provider"] },
+    server: PROVIDER_PLUGIN("anthropic"),
+  });
+
+  const result = await load();
+
+  expect(result.providers).toEqual([]);
+  expect(result.failures).toHaveLength(1);
+  expect(result.failures[0]?.reason).toContain("acme-ai");
+  expect(result.failures[0]?.reason).toContain("anthropic");
+});
+
+test("a provider registered by a plugin that then throws is not returned", async () => {
+  // Registration is collected during `setup` and read only after it returns.
+  // A provider installed by a plugin the host went on to reject would be
+  // admitted by routing and then fail every request with INTERNAL — worse than
+  // one that never registered.
+  await plugin({
+    id: "acme-ai",
+    manifest: { capabilities: ["provider"] },
+    server: PROVIDER_PLUGIN("acme-ai").replace("return {};", 'throw new Error("late failure");'),
+  });
+
+  const result = await load();
+
+  expect(result.providers).toEqual([]);
+  expect(result.failures).toHaveLength(1);
+  expect(result.failures[0]?.reason).toContain("late failure");
+});
+
+test("a malformed descriptor skips the plugin rather than the gateway", async () => {
+  // Rule 15 applied to this capability: every load failure is skipped and
+  // reported, never fatal. The proxy path depends on no plugin.
+  await plugin({
+    id: "acme-ai",
+    manifest: { capabilities: ["provider"] },
+    server: PROVIDER_PLUGIN("acme-ai").replace(
+      "writeOverInput: { fiveMinute: 1.25, oneHour: 2 },",
+      "",
+    ),
+  });
+
+  const result = await load();
+
+  expect(result.providers).toEqual([]);
+  expect(result.failures[0]?.reason).toContain("writeOverInput");
+});
+
+test("a plugin with no provider capability still loads normally", async () => {
+  // The positive control for this block. Every assertion above is about a
+  // provider *not* being registered, and a loader that returned no providers
+  // under any circumstances would satisfy all of them.
+  await plugin({ id: "ordinary" });
+
+  const result = await load();
+
+  expect(result.failures).toEqual([]);
+  expect(result.plugins).toHaveLength(1);
+  expect(result.providers).toEqual([]);
 });
