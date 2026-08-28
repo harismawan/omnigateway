@@ -49,6 +49,37 @@ adapter, built-in and plugin alike.** Converting the built-ins is out of scope
 here and belongs with the kilo and kimi extractions, but the contract is
 designed so that conversion is possible rather than assumed.
 
+## Where the contract lives, and why not where this spec first said
+
+An earlier draft of this section said the codec type goes into
+`@omnigateway/plugin-api`. **It cannot, yet, and the reason is worth stating
+because it decides the order of the remaining sub-projects.**
+
+That package is published and has zero `@omni/*` imports by rule: a single one
+would put an unresolvable `workspace:*` into a stranger's dependency tree, and
+`packages/plugin-api/test/bundleWeight.test.ts` pins it against a real build. The
+codec contract is defined in terms of `ChatRequest` and `StreamEvent`, which live
+in `@omni/ir` — unpublished until sub-project 7, which was deliberately ordered
+*after* the host so that kilo and kimi could prove the shape before it froze.
+
+Mirroring the IR types into `plugin-api` is not an option worth taking:
+`ChatRequest` is the largest type in the repository and a second copy of it is
+the drift this whole effort exists to remove.
+
+So `ProviderCodec` is declared in `packages/providers/src/codec.ts`, which
+already imports `@omni/ir` freely, and `plugin-api` gains only the capability
+*name* — a string, no type dependency. The consequence is precise and acceptable:
+**an in-repo plugin can be typed against the contract today, a third-party one
+cannot until sub-project 7 publishes `@omnigateway/ir`.** Every consumer this
+sub-project and the next two have — the fixture plugin, then kilo, then kimi —
+is in-repo, which is exactly the ordering that was chosen for other reasons.
+
+The registration hook on `PluginContext` is therefore typed against a structural
+interface `plugin-api` can express without the IR: `register` takes a descriptor
+and a codec whose functions the host validates at call time. Publication in 7
+replaces that with the real types and is a compile-time-only change for in-repo
+consumers.
+
 ## The contract
 
 Two things the plugin supplies, both pure:
@@ -192,11 +223,13 @@ it.
 
 ## Risks
 
-- **The codec contract is a published surface.** It goes into
-  `@omnigateway/plugin-api`, which is versioned and consumed outside this
-  repository, so getting it wrong is expensive in a way an internal shape is not.
-  Mitigation is that kilo and kimi are extracted onto it next, before publication
-  — the ordering decided at the start of this effort, for this reason.
+- **The codec contract becomes a published surface in sub-project 7**, even
+  though it is internal today. Getting it wrong is therefore expensive in a way
+  an ordinary internal shape is not, and the mitigation is the ordering already
+  chosen: kilo and kimi are extracted onto it before anything is published.
+  Until then, a third-party plugin cannot supply a provider at all — which is a
+  real limitation of this sub-project and should be said plainly rather than
+  discovered.
 - **`decodeState` is an escape hatch.** It exists for the Anthropic cloak and is
   typed as the codec's own concern, which means a plugin can put anything in it.
   That is acceptable — it never leaves the codec — but it must not become the
