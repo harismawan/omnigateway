@@ -409,7 +409,16 @@ test("a codec that throws fails over instead of ending the request", async () =>
   // `RETRYABLE.INTERNAL` is false, so an unguarded plugin `TypeError` ended the
   // request after one attempt with a 500 while the rest of the pool sat unused.
   // Rule 15: a plugin's failure is skipped and reported, never fatal.
-  for (const [hook, broken] of [
+  //
+  // **`decode` is declared here as an `async function*`, which is the shape the
+  // contract declares and the one that matters.** An earlier version of this
+  // test used a plain function that threw synchronously — a fixture that passes
+  // whether or not the guard works, because calling an `async function*` returns
+  // its generator without running a line of the body. The guard wrapped the call
+  // and caught nothing; the raw `TypeError` escaped, `classify` read it as
+  // `INTERNAL`, and the request died unretryably. The fixture shape *was* the
+  // bug's hiding place.
+  const cases: ReadonlyArray<readonly [string, Partial<ProviderCodec>]> = [
     [
       "buildRequest",
       {
@@ -418,6 +427,7 @@ test("a codec that throws fails over instead of ending the request", async () =>
         },
       },
     ],
+    // Throws when constructed.
     [
       "decode",
       {
@@ -426,20 +436,47 @@ test("a codec that throws fails over instead of ending the request", async () =>
         },
       },
     ],
-  ] as const) {
-    const { adapter } = recording(broken as Partial<ProviderCodec>);
-    const failure = await adapter
-      .send({
-        request,
-        model: "m",
-        credentials: credentials(),
-        http: ok,
-        signal: new AbortController().signal,
-      })
-      .then(
-        () => null,
-        (error: unknown) => error,
-      );
+    // Throws when iterated — the declared shape.
+    [
+      "decode",
+      {
+        // Throwing before the first yield is the shape under test: it is where
+        // the guard used to catch nothing.
+        // biome-ignore lint/correctness/useYield: intentional, see above
+        decode: async function* () {
+          throw new TypeError("plugin bug");
+        },
+      },
+    ],
+    // Throws mid-stream, after yielding.
+    [
+      "decode",
+      {
+        decode: async function* () {
+          yield { type: "start", id: "m", model: "m" } as StreamEvent;
+          throw new TypeError("plugin bug");
+        },
+      },
+    ],
+  ];
+
+  for (const [hook, broken] of cases) {
+    const { adapter } = recording(broken);
+    const failure = await (async () => {
+      try {
+        const result = await adapter.send({
+          request,
+          model: "m",
+          credentials: credentials(),
+          http: ok,
+          signal: new AbortController().signal,
+        });
+        await drain(result.events);
+        return null;
+      } catch (error) {
+        return error;
+      }
+    })();
 
     expect(failure).toBeInstanceOf(GatewayError);
     expect(failure).toMatchObject({ code: "UPSTREAM", provider: "kilo" });
@@ -449,6 +486,89 @@ test("a codec that throws fails over instead of ending the request", async () =>
     expect((failure as Error).message).not.toContain("plugin bug");
     expect(RETRYABLE[(failure as GatewayError).code]).toBe(true);
   }
+});
+
+test("a codec's own GatewayError keeps its classification", async () => {
+  // The other half, and the one the guard got wrong. `kiloCodec.buildRequest`
+  // throws `AUTH` when the credential carries no token — deliberate and
+  // correctly classified. Flattening it to `UPSTREAM` cost the request its
+  // self-healing path: `dispatch` gates the OAuth credential-refresh retry on
+  // `code === "AUTH"`, so an expired token would fail over rather than be
+  // refreshed, and on a single-candidate pool would fail outright.
+  const cases: ReadonlyArray<readonly [string, Partial<ProviderCodec>]> = [
+    [
+      "buildRequest",
+      {
+        buildRequest: () => {
+          throw new GatewayError("AUTH", "no token", { provider: "kilo" });
+        },
+      },
+    ],
+    [
+      "decode",
+      {
+        // A codec that classifies its own failure before yielding anything.
+        // biome-ignore lint/correctness/useYield: intentional, see above
+        decode: async function* () {
+          throw new GatewayError("CONTENT_FILTER", "refused", { provider: "kilo" });
+        },
+      },
+    ],
+  ];
+
+  for (const [, deliberate] of cases) {
+    const { adapter } = recording(deliberate);
+    const failure = await (async () => {
+      try {
+        const result = await adapter.send({
+          request,
+          model: "m",
+          credentials: credentials(),
+          http: ok,
+          signal: new AbortController().signal,
+        });
+        await drain(result.events);
+        return null;
+      } catch (error) {
+        return error;
+      }
+    })();
+
+    expect(failure).toBeInstanceOf(GatewayError);
+    // Its own code, not the guard's.
+    expect((failure as GatewayError).code).not.toBe("UPSTREAM");
+  }
+
+  // And the real codec: the adapter and the codec agree on the classification,
+  // which is the equivalence the whole sub-project rests on.
+  const noToken = { accessToken: null, apiKey: null, providerData: {} };
+  const viaAdapter = await kiloAdapter
+    .send({
+      request,
+      model: "m",
+      credentials: noToken,
+      http: ok,
+      signal: new AbortController().signal,
+    })
+    .then(
+      () => null,
+      (e: unknown) => e,
+    );
+  const viaCodec = await bridged
+    .send({
+      request,
+      model: "m",
+      credentials: noToken,
+      http: ok,
+      signal: new AbortController().signal,
+    })
+    .then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+  expect((viaCodec as GatewayError).code).toBe((viaAdapter as GatewayError).code);
+  expect((viaCodec as GatewayError).code).toBe("AUTH");
 });
 
 test("a codec returning a malformed request is refused before the transport", async () => {
