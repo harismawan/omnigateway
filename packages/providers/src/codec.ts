@@ -44,6 +44,15 @@ export type ProviderCodec = {
    * the host may build it once and send it on more than one attempt — a retry
    * against a second credential rebuilds with that credential, but nothing else
    * about the request may drift between attempts.
+   *
+   * **Never mutate `input.request`.** It is the same `ChatRequest` object
+   * dispatch reuses for every failover candidate, so a change made here follows
+   * the request into the *next provider* — the exact trap the Anthropic
+   * auto-cache rule is written against ("IR shared across attempt, so marker
+   * there follow failover into other provider"). It is not frozen: deep-freezing
+   * a request carrying a whole conversation on the hot path costs more than the
+   * bug does, and a codec is a guardrail case rather than a sandbox one. Copy
+   * what you need.
    */
   buildRequest(input: CodecInput): CodecRequest;
 
@@ -65,6 +74,16 @@ export type ProviderCodec = {
    * Returning `undefined` keeps the host's default classification, so a codec
    * that only wants to special-case one status says so by returning nothing for
    * every other.
+   *
+   * Receives `degradations` — what `buildRequest` already reported for this
+   * request — because the error is where they matter most. Anthropic's
+   * fingerprint refusal is thrown *carrying* them, and `dispatch` writes
+   * `error.degradations` into `request_logs`: a failure whose whole diagnosis is
+   * "the request was reduced in these ways and then refused" loses its diagnosis
+   * if the hook cannot see them. A first version of this contract omitted them
+   * and the conversion measurably dropped
+   * `["anthropic:oauth-system-prefix", "anthropic:context-1m-dropped"]` on the
+   * floor.
    */
   classifyError?(input: CodecErrorInput): GatewayError | undefined;
 };
@@ -156,7 +175,24 @@ export type CodecDecodeInput = {
 
 export type CodecErrorInput = {
   status: number;
-  /** The response body as text, already read by the host. */
+  /**
+   * The response body as text, already read by the host.
+   *
+   * A string rather than the response, so the hook cannot re-read the stream or
+   * reach the socket — and so the host can read it once and hand the same text
+   * to both this and its own `httpError`.
+   */
   body: string;
   headers: Headers;
+  /**
+   * What `buildRequest` reported for this request.
+   *
+   * Passed through so a codec can attach them to the error it returns.
+   * `dispatch` writes `error.degradations` into `request_logs`, and for a
+   * refusal caused by what the request had to give up, those two facts belong
+   * in one row.
+   */
+  degradations: readonly string[];
+  /** Exactly what `buildRequest` returned, unread by the host. */
+  decodeState: unknown;
 };

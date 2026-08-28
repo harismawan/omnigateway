@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { openDb } from "@omni/store";
 import { health, requestLog, seedCredential } from "@omni/testkit";
 import { serviceLogs } from "../src/service.ts";
@@ -586,7 +588,7 @@ test("credentials add-key names custom among the providers connect does not", as
   // omits `custom` because there is nothing to authorize, and this one carries
   // it because a custom endpoint is reached by key alone.
   expect(result.err.split("\n")[0]).toBe(
-    "provider must be one of anthropic, openai, kimi, kilo, grok, custom",
+    "provider must be one of anthropic, openai, kimi, kilo, grok, custom, or an installed plugin that supplies one",
   );
 });
 
@@ -1524,4 +1526,104 @@ test("console clamps -n 0 instead of printing the whole log", async () => {
 
   expect(result.code).toBe(0);
   expect((JSON.parse(result.out) as { lines: unknown[] }).lines).toHaveLength(1);
+});
+
+test("doctor does not report a target served by an installed plugin provider", async () => {
+  // The CLI never loads plugins and must not — a plugin's `setup` opens
+  // channels, runs migrations and registers a provider, none of which a
+  // diagnostic should do. So reading the built-in registry alone reported every
+  // plugin-supplied target as a missing provider: a red finding against healthy
+  // configuration, on the surface this repository made responsible for that
+  // question once `targetSchema` stopped refusing unknown providers.
+  //
+  // The manifest answers it without executing anything, and exactly rather than
+  // approximately: registration requires `descriptor.id` to equal the plugin's
+  // own id.
+  const root = await installation();
+  const service = fakeService({ root });
+  await mkdir(join(root, "plugins", "acme-ai"), { recursive: true });
+  await Bun.write(
+    join(root, "plugins", "acme-ai", "omni-plugin.json"),
+    JSON.stringify({
+      id: "acme-ai",
+      name: "Acme",
+      version: "1.0.0",
+      api: 1,
+      server: "server/index.js",
+      capabilities: ["provider"],
+    }),
+  );
+
+  const store = await openStore(root);
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "acme-ai",
+        model: "acme-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      // And one nothing supplies, so the check is still doing its job.
+      {
+        provider: "nonesuch",
+        model: "nonesuch-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const checks = JSON.parse(result.out) as { missingProviders: string[] };
+  expect(checks.missingProviders).toEqual(["billed/nonesuch-1 → nonesuch"]);
+});
+
+test("doctor still reports a target whose plugin does not supply a provider", async () => {
+  // The negative half. A plugin is installed under the same id but declares no
+  // `provider` capability, so it supplies nothing and the target really is
+  // dangling. Matching on id alone would call this healthy.
+  const root = await installation();
+  const service = fakeService({ root });
+  await mkdir(join(root, "plugins", "acme-ai"), { recursive: true });
+  await Bun.write(
+    join(root, "plugins", "acme-ai", "omni-plugin.json"),
+    JSON.stringify({
+      id: "acme-ai",
+      name: "Acme",
+      version: "1.0.0",
+      api: 1,
+      server: "server/index.js",
+      capabilities: ["storage"],
+    }),
+  );
+
+  const store = await openStore(root);
+  await store.config.putModel({
+    id: "billed",
+    strategy: "score",
+    isAlias: false,
+    targets: [
+      {
+        provider: "acme-ai",
+        model: "acme-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  store.close();
+
+  const result = await cli(["doctor", "--json"], { root, service });
+  const checks = JSON.parse(result.out) as { missingProviders: string[] };
+  expect(checks.missingProviders).toEqual(["billed/acme-1 → acme-ai"]);
 });

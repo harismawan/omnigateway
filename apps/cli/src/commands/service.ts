@@ -251,23 +251,50 @@ async function danglingPins(ctx: Context): Promise<string[] | null> {
  *
  * Same null-versus-empty rule as the checks above: `null` is "not checked".
  */
-async function missingProviders(ctx: Context): Promise<string[] | null> {
+async function missingProviders(
+  ctx: Context,
+  plugins: readonly PluginSummary[],
+): Promise<string[] | null> {
   if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
   try {
     const store = await ctx.store();
     return (await store.config.listModels()).flatMap((model) =>
       model.targets
-        // The same reading as the router's guard, and correct for the same
-        // reason: `PROVIDER_DESCRIPTORS` has no prototype. Against an ordinary
-        // object literal this reported "none" for a target naming `constructor`
-        // or `toString` — missing exactly the corrupt rows it is here to find.
-        .filter((target) => PROVIDER_DESCRIPTORS[target.provider] === undefined)
+        .filter((target) => !providerExists(target.provider, plugins))
         .map((target) => `${model.id}/${target.model} → ${target.provider}`),
     );
   } catch {
     // Already reported by `config` or `database` above.
     return null;
   }
+}
+
+/**
+ * Whether this installation has the named provider — compiled in, or supplied by
+ * an installed plugin.
+ *
+ * **The CLI does not load plugins**, and must not: a plugin's `setup` opens
+ * channels, runs migrations and registers a provider, and `omni doctor` running
+ * that is a diagnostic with side effects. So the built-in registry is only half
+ * the answer here, and reading it alone made `doctor` report every
+ * plugin-supplied target as a missing provider — a red finding against healthy
+ * configuration, on the surface this repository made responsible for exactly
+ * that question once `targetSchema` stopped refusing unknown providers.
+ *
+ * The manifest is enough to answer it without executing anything, because
+ * registration requires `descriptor.id` to equal the plugin's own id. A plugin
+ * declaring the `provider` capability therefore supplies *that* provider and no
+ * other, and the host enforces it — so matching on the id is not a guess.
+ *
+ * It is deliberately not exact in one direction: a plugin that declares the
+ * capability and fails to load supplies nothing, and this still counts it. That
+ * is the right way to be wrong — `doctor` already reports the failed plugin on
+ * its own line, and a false "missing provider" beside it would send the operator
+ * after the wrong thing.
+ */
+function providerExists(id: string, plugins: readonly PluginSummary[]): boolean {
+  if (Object.hasOwn(PROVIDER_DESCRIPTORS, id)) return true;
+  return plugins.some((plugin) => plugin.id === id && plugin.capabilities.includes("provider"));
 }
 
 export const doctor: Command = {
@@ -285,7 +312,7 @@ export const doctor: Command = {
     const plugins: PluginSummary[] = listPlugins(doctorPluginDeps(), deps.root);
     const orphans = await orphanTables(ctx);
     const pins = await danglingPins(ctx);
-    const uninstalled = await missingProviders(ctx);
+    const uninstalled = await missingProviders(ctx, plugins);
 
     const checks = {
       root: deps.root,

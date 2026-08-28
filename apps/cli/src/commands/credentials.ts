@@ -6,6 +6,7 @@ import {
   isProviderId,
   listCredentials,
   listModels,
+  listPlugins,
   OAUTH_PROVIDERS,
   PROVIDER_IDS,
   patchCredential,
@@ -17,6 +18,7 @@ import { boolFlag, numberFlag, requirePositional, stringFlag, UsageError } from 
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatTime, note, paint, table } from "../output.ts";
+import { doctorPluginDeps } from "./plugins.ts";
 
 /** One word for what the router would do with this credential right now. */
 function condition(credential: {
@@ -239,9 +241,24 @@ export const credentialsAddKey: Command = {
   async run(args, { ctx, writer, prompt }) {
     const providerId = requirePositional(args, 0, "provider");
     // Every provider, unlike `connect`: a key is the one way in that `custom`
-    // has.
-    if (!isProviderId(providerId)) {
-      throw new UsageError(`provider must be one of ${PROVIDER_IDS.join(", ")}`);
+    // has — and now the only way in a plugin-supplied provider has at all.
+    //
+    // The plugin's manifest, not the built-in registry alone. **This process
+    // does not load plugins** and must not: `setup` opens channels, runs
+    // migrations and registers a provider, none of which an `add-key` should
+    // do. So `isProviderId` answers only for the compiled-in six here, and
+    // asking it alone refused the API-key flow this capability exists to ship.
+    //
+    // Matching on the manifest id is exact rather than a guess: registration
+    // requires `descriptor.id` to equal the plugin's own id, and the host
+    // enforces it.
+    const supplied = listPlugins(doctorPluginDeps(), ctx.root.root).some(
+      (plugin) => plugin.id === providerId && plugin.capabilities.includes("provider"),
+    );
+    if (!isProviderId(providerId) && !supplied) {
+      throw new UsageError(
+        `provider must be one of ${PROVIDER_IDS.join(", ")}, or an installed plugin that supplies one`,
+      );
     }
 
     const protocolFlag = stringFlag(args.values, "protocol");

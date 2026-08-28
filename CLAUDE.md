@@ -123,10 +123,18 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     them, because that package published and this one not. This package stay source of truth; mirror
     pinned by `apps/gateway/test/plugins/limitVocabulary.test.ts`, only place that may import both.
 15. Plugins load from `<root>/plugins/` at boot, receive capability-scoped `PluginContext`: never
-    `Store`, `HttpClient`, `AdminAuth`, decrypted credentials, `process.env`. **It is a guardrail,
+    `Store`, `HttpClient`, `AdminAuth`, `process.env`. **It is a guardrail,
     not a sandbox** — plugin share gateway's process and can import past all of it. What it buy:
     accidental overreach impossible, plugin's intent auditable from manifest. Say that plainly
     wherever it come up; reader who believe otherwise make worse decisions than one who know.
+    **One exception, and it is real: a plugin supplying a provider receive the decrypted credential
+    for its own provider.** `codec.buildRequest` get `{accessToken, apiKey, providerData}` straight
+    from `credential.openForInference()`, because a codec that cannot authenticate cannot build a
+    request. Bounded two ways: router only produce candidates for that codec's own provider id, so a
+    plugin see its own provider's secrets and no other; and the codec never hold the client or the
+    store, so it cannot send them anywhere the host did not ask for. This list read as unconditional
+    for one release after that stopped being true — a rule stated wrong is one a contributor
+    preserve while breaking the real thing, so state the exception rather than the tidy version.
     `packages/plugin-api` stay pure like `ir`; loader, context, event bus, channel registry live in
     `apps/gateway`. Every load failure skipped and reported, never fatal: proxy path depend on no
     plugin and must not become able to. `channels` capability give plugin `open(name)` and nothing
