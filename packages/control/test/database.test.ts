@@ -53,6 +53,7 @@ function deps(
      * unless a test says otherwise.
      */
     adminHash?: { before: string | null; after: string | null };
+    viewerHash?: { before: string | null; after: string | null };
     /**
      * A rollup rebuild that throws, which is the one step of a restore that is
      * allowed to fail after the swap has already succeeded.
@@ -68,7 +69,9 @@ function deps(
     before: "argon2-of-the-same",
     after: "argon2-of-the-same",
   };
+  const viewerHash = input.viewerHash ?? { before: null, after: null };
   let liveAdminHash = adminHash.before;
+  let liveViewerHash = viewerHash.before;
 
   return {
     files,
@@ -82,6 +85,7 @@ function deps(
         getSettings: async () => settings,
         putSettings: async (patch) => Object.assign(settings, patch),
         getAdminPasswordHash: async () => liveAdminHash,
+        getViewerPasswordHash: async () => liveViewerHash,
       },
       maintenance: {
         stats: async () => ({
@@ -115,6 +119,7 @@ function deps(
         log.push("reopen");
         // The file underneath changed; so, possibly, did the credential in it.
         liveAdminHash = adminHash.after;
+        liveViewerHash = viewerHash.after;
       },
     },
     fs: {
@@ -629,6 +634,60 @@ describe("restoreSnapshot", () => {
 
     const lost = deps({ files, adminHash: { before: "argon2-of-old", after: null } });
     expect((await restoreSnapshot(lost, id)).adminPasswordChanged).toBe(true);
+  });
+
+  /**
+   * The read-only password is a second way into a read of the whole
+   * installation, and a restore can replace it without going through
+   * `setViewerPassword`.
+   *
+   * This shipped comparing the admin hash alone. A database restored with a
+   * different viewer password — or with none, which is every backup taken
+   * before the feature existed — left live viewer sessions reading the new
+   * database against a credential it does not contain. Withdrawing read-only
+   * access by restoring an older backup did not withdraw it.
+   */
+  test("reports a changed viewer password independently of the admin one", async () => {
+    const d = deps({
+      files,
+      adminHash: { before: "argon2-of-one", after: "argon2-of-one" },
+      viewerHash: { before: "argon2-of-viewer", after: "argon2-of-other" },
+    });
+    const result = await restoreSnapshot(d, id);
+
+    // Separate flags because the two invalidations are different sizes.
+    expect(result.viewerPasswordChanged).toBe(true);
+    expect(result.adminPasswordChanged).toBe(false);
+  });
+
+  test("losing the viewer password entirely is a change", async () => {
+    // The case an operator actually performs: restore a backup from before
+    // read-only access was granted, expecting that to revoke it.
+    const lost = deps({
+      files,
+      adminHash: { before: "argon2-of-one", after: "argon2-of-one" },
+      viewerHash: { before: "argon2-of-viewer", after: null },
+    });
+    expect((await restoreSnapshot(lost, id)).viewerPasswordChanged).toBe(true);
+
+    const gained = deps({
+      files,
+      adminHash: { before: "argon2-of-one", after: "argon2-of-one" },
+      viewerHash: { before: null, after: "argon2-of-viewer" },
+    });
+    expect((await restoreSnapshot(gained, id)).viewerPasswordChanged).toBe(true);
+  });
+
+  test("an unchanged viewer password reports no change", async () => {
+    // A snapshot of this same installation is the ordinary case; it must not
+    // end a read-only session that is still valid.
+    const d = deps({
+      files,
+      adminHash: { before: "argon2-of-one", after: "argon2-of-one" },
+      viewerHash: { before: "argon2-of-viewer", after: "argon2-of-viewer" },
+    });
+    const result = await restoreSnapshot(d, id);
+    expect(result.viewerPasswordChanged).toBe(false);
   });
 
   /**

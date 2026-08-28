@@ -36,8 +36,56 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # `pipefail` first, and it is the whole reason this is a `bash -c` block
+      # rather than a one-liner. A pipeline reports the exit status of its LAST
+      # command, so `bun test | tee` exits 0 whenever `tee` succeeds — which is
+      # always. Without this line every failing test run would report green,
+      # and the logging added to catch flakes would instead hide every failure.
       - name: Test
-        run: bun run test:all
+        shell: bash
+        run: |
+          set -o pipefail
+          bun run test:all 2>&1 | tee test.log
+
+      # Only on failure, and it is the one thing the job log does not give you.
+      # A full run prints ~25k assertion lines, so the handful of `(fail)` lines
+      # are somewhere in the middle of a page nobody scrolls. This pulls them
+      # and the lines above each one — which is where the diff and the stack
+      # are — into the run summary, so a flake is named the first time it fires
+      # rather than the second time somebody goes looking for it.
+      - name: Name the failures
+        if: failure()
+        shell: bash
+        run: |
+          # Captured to a variable first. Written as `grep ... || echo`, the
+          # `||` binds to the last command of the pipeline rather than to grep,
+          # so a run that died before reporting any `(fail)` line would print an
+          # empty code block and no explanation — the summary would look like
+          # "nothing failed" for the case where everything did.
+          failures="$(grep -B 20 '^(fail)' test.log | tail -c 60000)"
+          {
+            echo '## Failing tests'
+            echo
+            echo '```'
+            if [ -n "$failures" ]; then
+              printf '%s\n' "$failures"
+            else
+              echo 'No "(fail)" lines. The run died before the suite reported;'
+              echo 'read the end of the job log or the uploaded test.log artifact.'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The artifact rather than the log alone: job logs are retention-bound and
+      # truncated at 4 MB, and a flake is worth grepping offline against a
+      # re-run of the same commit.
+      - name: Keep the test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test.log
+          retention-days: 14
 
       - name: Typecheck
         run: bun run typecheck

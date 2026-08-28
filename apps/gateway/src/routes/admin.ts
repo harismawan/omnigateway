@@ -37,6 +37,7 @@ import {
   readJson,
   readJsonRecord,
   requireAdmin,
+  requireReader,
   sessionCookie,
 } from "./http.ts";
 
@@ -104,9 +105,19 @@ export function adminRoutes(deps: AdminDeps) {
       .onError(apiErrorHandler)
       .get("/api/status", async ({ request }) => {
         const token = readCookie(request, ADMIN_COOKIE);
+        const principal = token === null ? null : await deps.admin.verify(token);
         return {
           configured: await deps.admin.isConfigured(),
-          authenticated: token !== null && (await deps.admin.verify(token)),
+          authenticated: principal !== null,
+          // Which surface this session belongs to, so the dashboard's gate can
+          // land it on the right branch rather than rendering a console the
+          // session cannot populate. Null when unauthenticated.
+          principal,
+          // Whether a read-only password exists at all, so the login form knows
+          // whether to offer that mode. Unauthenticated on purpose: it is the
+          // login screen that needs it, and it reveals only that a feature is
+          // switched on.
+          viewerConfigured: await deps.admin.isViewerConfigured(),
         };
       })
 
@@ -149,8 +160,18 @@ export function adminRoutes(deps: AdminDeps) {
 
       .post("/api/login", async ({ request, set }) => {
         const body = await readJsonRecord(request);
+        // An explicit field, defaulting to admin. Never "try the admin password
+        // and fall back to the viewer one": a fallback would mint a viewer
+        // session for a mistyped admin password on the day the two collide, and
+        // it doubles the Argon2 cost of every failed login.
+        const viewer = body?.mode === "viewer";
+        const password = typeof body?.password === "string" ? body.password : null;
         const token =
-          typeof body?.password === "string" ? await deps.admin.login(body.password) : null;
+          password === null
+            ? null
+            : viewer
+              ? await deps.admin.loginViewer(password)
+              : await deps.admin.login(password);
         if (token === null) {
           logger.info("admin login failed", { reason: "invalid credentials" });
           throw new GatewayError("AUTH", "invalid password");
@@ -173,7 +194,7 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       .get("/api/credentials", async ({ request }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         return { credentials: await listCredentials(deps.store) };
       })
 
@@ -191,7 +212,7 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       .get("/api/credentials/health", async ({ request }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         return credentialHealth(deps);
       })
 
@@ -208,7 +229,7 @@ export function adminRoutes(deps: AdminDeps) {
        * handler's.
        */
       .get("/api/credentials/quota/history", async ({ request, query }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         return quotaHistory(deps, {
           since: query.since,
           until: query.until,
@@ -231,7 +252,7 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       .get("/api/models", async ({ request }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         return { models: await listModels(deps.store) };
       })
 
@@ -261,7 +282,7 @@ export function adminRoutes(deps: AdminDeps) {
        * every screenshot of this screen.
        */
       .get("/api/agent-setup", async ({ request, query }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         const client = query.client === "opencode" ? "opencode" : "claude";
         const defaultModel = query.defaultModel;
         if (!defaultModel) {
@@ -292,7 +313,7 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       .get("/api/keys", async ({ request }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         return { keys: await listKeys(deps.store) };
       })
 
@@ -356,11 +377,46 @@ export function adminRoutes(deps: AdminDeps) {
        * folded into it would look editable.
        */
       .get("/api/settings", async ({ request }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         return {
           settings: await getSettings(deps.store),
           bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
+          // Whether, not what. The hash never leaves the store and there is no
+          // route that reads it back.
+          viewerConfigured: await deps.admin.isViewerConfigured(),
         };
+      })
+
+      /**
+       * Sets or clears the read-only administrator's password.
+       *
+       * A mutation, so `requireAdmin` — a viewer must not be able to change the
+       * credential that admitted them, which would let one read-only holder lock
+       * out another and keep the access for themselves.
+       *
+       * `null` clears it and is how the access is withdrawn. An absent field is
+       * not `null`: it is a malformed request, because "leave it alone" and
+       * "remove it" must not share a spelling on a route whose whole job is to
+       * grant or revoke access.
+       */
+      .put("/api/settings/viewer-password", async ({ request }) => {
+        await requireAdmin(request, deps.admin);
+        const body = await readJsonRecord(request);
+        if (body === null || !("password" in body)) {
+          throw new GatewayError("BAD_REQUEST", "password is required, and may be null");
+        }
+        const password = body.password;
+        if (password !== null && typeof password !== "string") {
+          throw new GatewayError("BAD_REQUEST", "password must be a string or null");
+        }
+        try {
+          await deps.admin.setViewerPassword(password);
+        } catch (error) {
+          throw new GatewayError("BAD_REQUEST", describeError(error, "invalid password"));
+        }
+        logger.info(password === null ? "viewer access removed" : "viewer password set");
+        changed("res:settings");
+        return { ok: true };
       })
 
       .put("/api/settings", async ({ request }) => {
@@ -376,7 +432,7 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       .get("/api/usage", async ({ request, query }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         return {
           rows: await queryUsage(deps, {
             grain: query.grain,
@@ -389,7 +445,7 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       .get("/api/logs", async ({ request, query }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         return { logs: await recentLogs(deps.store, query.limit) };
       })
 
@@ -406,6 +462,18 @@ export function adminRoutes(deps: AdminDeps) {
        * was never captured at all. This handler adds no error mapping of its
        * own, so there is nothing here to leak a path, a digest, or a stack.
        */
+      /**
+       * The operator alone, not a reader.
+       *
+       * Every other GET on this surface widened to `requireReader`; this one did
+       * not, and the asymmetry is the point. A read-only administrator exists so
+       * somebody can diagnose an installation without being able to change it —
+       * that is a claim about *write* access, and it is not a reason to hand
+       * them every prompt and completion the gateway has stored. Body capture is
+       * also the one thing a key holder can be promised is never retained
+       * (`bodyLoggingOptOut`), and a promise that widens with the reader count
+       * is not one.
+       */
       .get("/api/requests/:id/body", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         return readRequestBody(deps.store, params.id);
@@ -421,7 +489,7 @@ export function adminRoutes(deps: AdminDeps) {
        * never spawns anything.
        */
       .get("/api/console", async ({ request, query }) => {
-        await requireAdmin(request, deps.admin);
+        await requireReader(request, deps.admin);
         if (deps.console === undefined) return { source: "none", lines: [] };
 
         const level = parseLogLevel(query.level);

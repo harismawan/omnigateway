@@ -7,7 +7,7 @@ import type { ChannelRegistry } from "../stream/channels.ts";
 import { parseClientFrame, type ServerFrame, topicClass } from "../stream/protocol.ts";
 import type { Credential, Principal, SocketRegistry } from "../stream/registry.ts";
 import type { Ring } from "../stream/ring.ts";
-import { apiErrorHandler, readCookie, requireAdmin } from "./http.ts";
+import { apiErrorHandler, readCookie } from "./http.ts";
 
 export type StreamDeps = {
   admin: AdminAuth;
@@ -34,18 +34,52 @@ export type StreamDeps = {
  * function says who may hold it. A plugin therefore cannot widen its own reach
  * by opening a channel.
  */
-function authorised(channels: ChannelRegistry, principal: Principal, topic: string): boolean {
+/**
+ * The `res:*` topics a client session may hold.
+ *
+ * Two, and an allowlist rather than a prefix test. A `res:*` frame carries only
+ * `{ keys }`, so holding one leaks no rows — the client refetches against its
+ * own scoped endpoint and the socket never transports another key's data. That
+ * argument is what makes this safe, and it is an argument about *these* topics:
+ * a future frame carrying a payload would break it, which is why the set is
+ * enumerated here rather than derived.
+ */
+const CLIENT_TOPICS: ReadonlySet<string> = new Set(["res:usage", "res:logs"]);
+
+export function authorised(
+  channels: ChannelRegistry,
+  principal: Principal,
+  topic: string,
+): boolean {
   const kind = topicClass(topic);
   if (kind === null) return false;
+
   if (kind === "plugin") {
     if (!channels.opened(topic)) return false;
     if (principal.kind === "admin") return true;
     // The machine arm is unreachable until `plugin_machine_tokens` exists. When
     // it does, a machine token reaches its own plugin's topics and nothing else.
-    return topic.startsWith(`plugin:${principal.pluginId}:`);
+    if (principal.kind === "machine") return topic.startsWith(`plugin:${principal.pluginId}:`);
+    // A viewer renders plugin panels but is not the operator, and a client does
+    // not render the console at all. Neither gets a plugin's channel.
+    return false;
   }
-  // Everything that is not a plugin channel belongs to the console alone.
-  return principal.kind === "admin";
+
+  if (principal.kind === "admin") return true;
+
+  if (principal.kind === "viewer") {
+    // A viewer is the operator minus mutations and minus secrets, so it holds
+    // every `res:*` and every declared `stream:*` — including the stdout tail,
+    // which is a diagnostic and is neither. That is the whole use for the role:
+    // somebody who can work out what is wrong without being able to change it.
+    // It stops at plugin channels, handled above, because those are opened by
+    // third-party code rather than declared by the host.
+    return kind === "res" || kind === "stream";
+  }
+
+  if (principal.kind === "client") return CLIENT_TOPICS.has(topic);
+
+  return false;
 }
 
 /**
@@ -106,15 +140,23 @@ export function streamRoutes(deps: StreamDeps) {
           throw new GatewayError("AUTH", "present one credential, not two");
         }
 
-        await requireAdmin(request, deps.admin);
-        if (cookie === null) throw new GatewayError("AUTH", "admin session required");
+        if (cookie === null) throw new GatewayError("AUTH", "a session is required");
+        // Any session opens a socket; `authorised` decides what it may then hold.
+        // Refusing the upgrade per kind would push the same rule into two places
+        // and give a client a different failure mode than a refused subscribe.
+        const principal = await deps.admin.verify(cookie);
+        if (principal === null) throw new GatewayError("AUTH", "a session is required");
 
         resolved.set(request, {
-          principal: { kind: "admin" },
+          principal,
           // A thunk over the token rather than the token itself: the registry
           // never learns what a cookie is, and the machine arm slots in later
           // as a different thunk with no registry change.
-          revalidate: () => deps.admin.verify(cookie),
+          // Still-verified is a narrower question than who-are-you: a session
+          // that changed kind mid-connection is impossible (kinds are fixed at
+          // issue), so the thunk collapses the principal to a boolean here and
+          // the registry stays ignorant of both cookies and kinds.
+          revalidate: async () => (await deps.admin.verify(cookie)) !== null,
         });
       },
 

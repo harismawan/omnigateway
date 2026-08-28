@@ -95,6 +95,14 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       return row ? toKey(row, logger) : null;
     },
 
+    async get(id: string) {
+      // `toKey` here as everywhere else, so a row with unparseable limits reads
+      // back as `limits: null` rather than throwing. A revocation check that
+      // threw on a broken row would lock a session out for the wrong reason.
+      const row = db.query<Row, [string]>("SELECT * FROM api_keys WHERE id = ?").get(id);
+      return row ? toKey(row, logger) : null;
+    },
+
     async create(input) {
       const now = Date.now();
       db.run(

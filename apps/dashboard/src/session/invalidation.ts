@@ -34,10 +34,30 @@ export const CONSOLE_TOPIC = "stream:console";
  * for a body that cannot have changed. The predicate excludes it by name.
  */
 export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
-  // `["usage", grain, groupBy, splitBy, since, until]` — prefix, six deep.
-  "res:usage": { queryKey: ["usage"] },
+  /**
+   * `["usage", grain, groupBy, splitBy, since, until]` — prefix, six deep — and
+   * the client surface's `["client", "usage", …]` alongside it.
+   *
+   * Both, because the topic describes the *resource* and both branches read it.
+   * A client session holds this topic (see `authorised` in the gateway's
+   * `stream.ts`), so an entry covering only the console's key would leave the
+   * client subscribed to a frame that does nothing — which is silence, and
+   * silence is indistinguishable from a quiet gateway.
+   */
+  "res:usage": {
+    predicate: (query) =>
+      query.queryKey[0] === "usage" ||
+      // `["client", "summary"]` rides this topic and not `res:keys`, because
+      // its `limitUsage` is computed from usage rows: this frame is exactly
+      // when the number moves, and a client is not subscribed to `res:keys`
+      // anyway, so an entry there would never reach it.
+      (query.queryKey[0] === "client" &&
+        (query.queryKey[1] === "usage" || query.queryKey[1] === "summary")),
+  },
   "res:logs": {
-    predicate: (query) => query.queryKey[0] === "logs" && query.queryKey[1] !== "body",
+    predicate: (query) =>
+      (query.queryKey[0] === "logs" && query.queryKey[1] !== "body") ||
+      (query.queryKey[0] === "client" && query.queryKey[1] === "logs"),
   },
   // `["credentials"]` covers `["credentials", "health"]`, which is the one that
   // actually moves: the health poller writes it every ten seconds today.

@@ -333,10 +333,21 @@ export function createUsageRepo(db: Database): UsageRepo {
       return stale.length;
     },
 
-    async recent(limit: number) {
+    async recent(limit: number, apiKeyId?: string) {
+      // `= ?` never matches NULL, so an anonymous row falls out of a scoped read
+      // on its own. That is the wanted answer and not an accident of SQL: an
+      // untagged request belongs to no key, so no key may read it.
+      if (apiKeyId === undefined) {
+        return db
+          .query<Row, [number]>("SELECT * FROM request_logs ORDER BY at DESC LIMIT ?")
+          .all(limit)
+          .map(toLog);
+      }
       return db
-        .query<Row, [number]>("SELECT * FROM request_logs ORDER BY at DESC LIMIT ?")
-        .all(limit)
+        .query<Row, [string, number]>(
+          "SELECT * FROM request_logs WHERE api_key_id = ? ORDER BY at DESC LIMIT ?",
+        )
+        .all(apiKeyId, limit)
         .map(toLog);
     },
 
@@ -424,8 +435,16 @@ export function createUsageRepo(db: Database): UsageRepo {
       const until = q.until ?? Number.MAX_SAFE_INTEGER;
       const timeColumn = daily ? "day" : "at";
 
+      // A WHERE, so it constrains the rows before grouping and therefore applies
+      // to every dimension — `groupBy: "apiKey"` under a scope reports the one
+      // key rather than announcing that others exist.
+      const scope = q.apiKeyId;
+      const scoped = scope !== undefined;
+      const bindings: SQLQueryBindings[] =
+        scope === undefined ? [since, until] : [since, until, scope];
+
       const rows = db
-        .query<Agg, [number, number]>(
+        .query<Agg, SQLQueryBindings[]>(
           `SELECT ${key} AS key,
                   ${split ?? "NULL"} AS split,
                   ${MEASURES[grain]},
@@ -437,11 +456,11 @@ export function createUsageRepo(db: Database): UsageRepo {
                   COALESCE(SUM(${daily ? "rtk_applied_requests" : "CASE WHEN rtk_applied = 1 THEN 1 ELSE 0 END"}), 0) AS rtk_applied_requests,
                   COALESCE(SUM(cost_usd), 0) AS cost_usd
              FROM ${daily ? "usage_daily" : "request_logs"}
-            WHERE ${daily ? "" : "state = 'done' AND "}${timeColumn} >= ? AND ${timeColumn} <= ?
+            WHERE ${daily ? "" : "state = 'done' AND "}${timeColumn} >= ? AND ${timeColumn} <= ?${scoped ? " AND api_key_id = ?" : ""}
             GROUP BY key${split === null ? "" : ", split"}
             ORDER BY requests DESC`,
         )
-        .all(since, until);
+        .all(...bindings);
 
       return rows.map((r): UsageBucket => {
         const bucket: UsageBucket = {

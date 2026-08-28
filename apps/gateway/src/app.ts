@@ -26,6 +26,7 @@ import { type MountedPlugin, pluginRoutes } from "./plugins/routes.ts";
 import { pluginUiRoutes } from "./plugins/ui.ts";
 import { createQuiesceLatch, type QuiesceLatch } from "./quiesce.ts";
 import { adminRoutes } from "./routes/admin.ts";
+import { clientRoutes } from "./routes/client.ts";
 import { connectRoutes } from "./routes/connect.ts";
 import { databaseRoutes } from "./routes/database.ts";
 import { proxyRoutes } from "./routes/proxy.ts";
@@ -282,168 +283,182 @@ export function createApp(deps: AppDeps) {
    * catch-all every plugin route would be a 404; mounted before `adminRoutes` a
    * plugin could claim `/api/keys`.
    */
-  return new Elysia()
-    .onRequest(({ request }) => {
-      const path = new URL(request.url).pathname;
-      if (!isClientTraffic(path)) return;
-      const release = latch.enter();
-      if (release === null) return quiesceResponse(path);
-      admitted.set(request, release);
-    })
-    .onAfterResponse(({ request }) => {
-      // Fires once the response has been handed back, which for a stream is
-      // before its body has finished. A quiesce therefore waits for requests to
-      // be answered rather than for streams to end — which is why its wait is
-      // bounded, and why `/v1` is refused for the whole operation rather than
-      // only until the count reaches zero.
-      admitted.get(request)?.();
-      admitted.delete(request);
-    })
-    .get("/health", () => ({ ok: true }))
-    .use(
-      proxyRoutes({
-        store: deps.store,
-        snapshots,
-        adapters,
-        http,
-        now,
-        rand,
-        refresh,
-        requestId,
-        rateLimiter,
-        logger,
-        ...(deps.loadRegistry === undefined ? {} : { loadRegistry: deps.loadRegistry }),
-        bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
-        ...(deps.emit === undefined ? {} : { emit: deps.emit }),
-        broadcaster,
-      }),
-    )
-    .use(
-      adminRoutes({
-        store: deps.store,
-        admin,
-        baseUrl: deps.baseUrl,
-        bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
-        now,
-        sessionTtlMs: ADMIN_SESSION_TTL_MS,
-        logger,
-        broadcaster,
-        ...(deps.console === undefined ? {} : { console: deps.console }),
-      }),
-    )
-    .use(
-      databaseRoutes({
-        store: deps.store,
-        ...(deps.reapplyPluginSchema === undefined
-          ? {}
-          : { reapplyPluginSchema: deps.reapplyPluginSchema }),
-        admin,
-        latch,
-        snapshots,
-        broadcaster,
-        fs: deps.databaseFs ?? nodeDatabaseFs(),
-        now,
-        logger,
-        lifecycle: deps.lifecycle ?? absentLifecycle(),
-      }),
-    )
-    .use(
-      connectRoutes({
-        store: deps.store,
-        admin,
-        providers: OAUTH_PROVIDERS,
-        http,
-        now,
-        logger,
-      }),
-    )
-    .use(
-      pluginRoutes({
-        admin,
-        plugins: deps.plugins ?? [],
-        logger,
-      }),
-    )
-    .use(
-      pluginUiRoutes({
-        admin,
-        plugins: deps.pluginUi ?? [],
-        logger,
-      }),
-    )
-    .use(
-      streamRoutes({
-        admin,
-        registry,
-        broadcaster,
-        ring,
-        channels,
-        logger,
-      }),
-    )
-    .get("/*", ({ path, request, set }) => {
-      const rawPath = new URL(request.url).pathname;
-      const error = () => {
-        set.status = 404;
-        return { error: { code: "NOT_FOUND", message: `no route for ${path}` } };
-      };
-      if (!staticRoot || /%2f|%5c/i.test(rawPath)) return error();
+  return (
+    new Elysia()
+      .onRequest(({ request }) => {
+        const path = new URL(request.url).pathname;
+        if (!isClientTraffic(path)) return;
+        const release = latch.enter();
+        if (release === null) return quiesceResponse(path);
+        admitted.set(request, release);
+      })
+      .onAfterResponse(({ request }) => {
+        // Fires once the response has been handed back, which for a stream is
+        // before its body has finished. A quiesce therefore waits for requests to
+        // be answered rather than for streams to end — which is why its wait is
+        // bounded, and why `/v1` is refused for the whole operation rather than
+        // only until the count reaches zero.
+        admitted.get(request)?.();
+        admitted.delete(request);
+      })
+      .get("/health", () => ({ ok: true }))
+      .use(
+        proxyRoutes({
+          store: deps.store,
+          snapshots,
+          adapters,
+          http,
+          now,
+          rand,
+          refresh,
+          requestId,
+          rateLimiter,
+          logger,
+          ...(deps.loadRegistry === undefined ? {} : { loadRegistry: deps.loadRegistry }),
+          bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
+          ...(deps.emit === undefined ? {} : { emit: deps.emit }),
+          broadcaster,
+        }),
+      )
+      .use(
+        adminRoutes({
+          store: deps.store,
+          admin,
+          baseUrl: deps.baseUrl,
+          bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
+          now,
+          sessionTtlMs: ADMIN_SESSION_TTL_MS,
+          logger,
+          broadcaster,
+          ...(deps.console === undefined ? {} : { console: deps.console }),
+        }),
+      )
+      // After the admin surface and well before the static catch-all, like every
+      // other `/api/*` group. Its paths are disjoint from the admin ones, so the
+      // position is about the catch-all rather than about precedence.
+      .use(
+        clientRoutes({
+          store: deps.store,
+          admin,
+          sessionTtlMs: ADMIN_SESSION_TTL_MS,
+          now,
+          logger,
+        }),
+      )
+      .use(
+        databaseRoutes({
+          store: deps.store,
+          ...(deps.reapplyPluginSchema === undefined
+            ? {}
+            : { reapplyPluginSchema: deps.reapplyPluginSchema }),
+          admin,
+          latch,
+          snapshots,
+          broadcaster,
+          fs: deps.databaseFs ?? nodeDatabaseFs(),
+          now,
+          logger,
+          lifecycle: deps.lifecycle ?? absentLifecycle(),
+        }),
+      )
+      .use(
+        connectRoutes({
+          store: deps.store,
+          admin,
+          providers: OAUTH_PROVIDERS,
+          http,
+          now,
+          logger,
+        }),
+      )
+      .use(
+        pluginRoutes({
+          admin,
+          plugins: deps.plugins ?? [],
+          logger,
+        }),
+      )
+      .use(
+        pluginUiRoutes({
+          admin,
+          plugins: deps.pluginUi ?? [],
+          logger,
+        }),
+      )
+      .use(
+        streamRoutes({
+          admin,
+          registry,
+          broadcaster,
+          ring,
+          channels,
+          logger,
+        }),
+      )
+      .get("/*", ({ path, request, set }) => {
+        const rawPath = new URL(request.url).pathname;
+        const error = () => {
+          set.status = 404;
+          return { error: { code: "NOT_FOUND", message: `no route for ${path}` } };
+        };
+        if (!staticRoot || /%2f|%5c/i.test(rawPath)) return error();
 
-      let decodedPath: string;
-      try {
-        decodedPath = decodeURIComponent(rawPath);
-      } catch {
-        return error();
-      }
+        let decodedPath: string;
+        try {
+          decodedPath = decodeURIComponent(rawPath);
+        } catch {
+          return error();
+        }
 
-      // The prefixes this catch-all must never answer for. `/oauth` was here
-      // until connect moved under `/api/connect/*`; nothing serves it now, so
-      // guarding it claimed a route that does not exist.
-      const protectedPrefix = ["/api", "/v1"].some(
-        (prefix) => decodedPath === prefix || decodedPath.startsWith(`${prefix}/`),
-      );
-      if (protectedPrefix) return error();
+        // The prefixes this catch-all must never answer for. `/oauth` was here
+        // until connect moved under `/api/connect/*`; nothing serves it now, so
+        // guarding it claimed a route that does not exist.
+        const protectedPrefix = ["/api", "/v1"].some(
+          (prefix) => decodedPath === prefix || decodedPath.startsWith(`${prefix}/`),
+        );
+        if (protectedPrefix) return error();
 
-      const requestedPath = decodedPath === "/" ? "/index.html" : decodedPath;
-      const filePath = resolve(staticRoot, `.${requestedPath}`);
-      if (filePath !== staticRoot && !filePath.startsWith(`${staticRoot}${sep}`)) return error();
+        const requestedPath = decodedPath === "/" ? "/index.html" : decodedPath;
+        const filePath = resolve(staticRoot, `.${requestedPath}`);
+        if (filePath !== staticRoot && !filePath.startsWith(`${staticRoot}${sep}`)) return error();
 
-      let resolvedFilePath: string | undefined;
-      try {
-        resolvedFilePath = realpathSync(filePath);
-      } catch {
-        // A missing file may be a client-side navigation below.
-      }
-      if (
-        resolvedFilePath &&
-        resolvedFilePath !== staticRoot &&
-        !resolvedFilePath.startsWith(`${staticRoot}${sep}`)
-      ) {
-        return error();
-      }
+        let resolvedFilePath: string | undefined;
+        try {
+          resolvedFilePath = realpathSync(filePath);
+        } catch {
+          // A missing file may be a client-side navigation below.
+        }
+        if (
+          resolvedFilePath &&
+          resolvedFilePath !== staticRoot &&
+          !resolvedFilePath.startsWith(`${staticRoot}${sep}`)
+        ) {
+          return error();
+        }
 
-      const file = resolvedFilePath ? Bun.file(resolvedFilePath) : undefined;
-      if (file && file.size > 0 && resolvedFilePath) {
-        const cacheControl = decodedPath.startsWith("/assets/")
-          ? "public, max-age=31536000, immutable"
-          : "no-cache";
-        return new Response(file, {
-          headers: {
-            "cache-control": cacheControl,
-            "content-type": resolvedFilePath.endsWith(".html") ? "text/html" : file.type,
-          },
+        const file = resolvedFilePath ? Bun.file(resolvedFilePath) : undefined;
+        if (file && file.size > 0 && resolvedFilePath) {
+          const cacheControl = decodedPath.startsWith("/assets/")
+            ? "public, max-age=31536000, immutable"
+            : "no-cache";
+          return new Response(file, {
+            headers: {
+              "cache-control": cacheControl,
+              "content-type": resolvedFilePath.endsWith(".html") ? "text/html" : file.type,
+            },
+          });
+        }
+
+        const isNavigation = request.headers.get("accept")?.includes("text/html") ?? false;
+        if (decodedPath.startsWith("/assets/") || !isNavigation) return error();
+
+        const indexPath = resolve(staticRoot, "index.html");
+        const index = Bun.file(indexPath);
+        if (index.size === 0) return error();
+
+        return new Response(index, {
+          headers: { "cache-control": "no-cache", "content-type": "text/html" },
         });
-      }
-
-      const isNavigation = request.headers.get("accept")?.includes("text/html") ?? false;
-      if (decodedPath.startsWith("/assets/") || !isNavigation) return error();
-
-      const indexPath = resolve(staticRoot, "index.html");
-      const index = Bun.file(indexPath);
-      if (index.size === 0) return error();
-
-      return new Response(index, {
-        headers: { "cache-control": "no-cache", "content-type": "text/html" },
-      });
-    });
+      })
+  );
 }

@@ -12,6 +12,11 @@ export {
   createAdminAuth,
 } from "./adminAuth.ts";
 export { type RequestBodyRead, readRequestBody } from "./bodies.ts";
+export {
+  type ClientRequestLog,
+  isClientVisibleDegradation,
+  toClientLog,
+} from "./clientLog.ts";
 export { type Config, loadConfig } from "./config.ts";
 export {
   type ConnectDeps,
@@ -82,6 +87,7 @@ export {
   createKey,
   type LimitReading,
   listKeys,
+  readOwnKey,
   revokeKey,
   setKeyLimits,
   setKeyModels,
@@ -144,7 +150,18 @@ export {
   removePlugin,
   verifyPlugin,
 } from "./plugins.ts";
+export {
+  ALL,
+  NONE,
+  type Principal,
+  type PrincipalKind,
+  readsNothing,
+  type Scope,
+  scopeKey,
+  scopeOf,
+} from "./principal.ts";
 export { type BurnEstimate, type BurnInput, burnEstimates, burnFor } from "./quota/burn.ts";
+export { type ProviderHeadroom, providerHeadroom } from "./quota/headroom.ts";
 export {
   type GatewayRate,
   type QuotaHistoryInput,

@@ -139,11 +139,14 @@ export async function createStore(opts: {
       getAdminPasswordHash: () => handle.config.getAdminPasswordHash(),
       setAdminPasswordHashIfAbsent: (hash) => handle.config.setAdminPasswordHashIfAbsent(hash),
       setAdminPasswordHash: (hash) => handle.config.setAdminPasswordHash(hash),
+      getViewerPasswordHash: () => handle.config.getViewerPasswordHash(),
+      setViewerPasswordHash: (hash) => handle.config.setViewerPasswordHash(hash),
     },
 
     keys: {
       list: () => handle.keys.list(),
       findByHash: (hash) => handle.keys.findByHash(hash),
+      get: (id) => handle.keys.get(id),
       create: (input) => handle.keys.create(input),
       setLimits: (id, limits) => handle.keys.setLimits(id, limits),
       setModelAllowlist: (id, modelAllowlist) => handle.keys.setModelAllowlist(id, modelAllowlist),
@@ -155,7 +158,11 @@ export async function createStore(opts: {
       route: (id, target) => handle.usage.route(id, target),
       append: (log) => handle.usage.append(log),
       sweepPending: () => handle.usage.sweepPending(),
-      recent: (limit) => handle.usage.recent(limit),
+      // Both arguments, spelled out. An optional parameter dropped here is not a
+      // type error — the forwarder still satisfies the interface — and this one
+      // carries the scope that keeps one API key's logs away from another's, so
+      // dropping it would serve every row and report no fault.
+      recent: (limit, apiKeyId) => handle.usage.recent(limit, apiKeyId),
       aggregate: (q) => handle.usage.aggregate(q),
       sumSince: (apiKeyId, sinceMs) => handle.usage.sumSince(apiKeyId, sinceMs),
       oldestSince: (apiKeyId, sinceMs) => handle.usage.oldestSince(apiKeyId, sinceMs),

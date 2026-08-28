@@ -148,6 +148,30 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     small. Design:
     [core/provider decoupling](docs/superpowers/specs/2026-08-27-core-provider-decoupling-design.md),
     [descriptor registry](docs/superpowers/specs/2026-08-26-provider-descriptor-registry-design.md).
+17. **`Principal` and `Scope` in `@omni/control` are the only copy of "who is asking" and "what may
+    they read".** Four principals — `admin`, `viewer`, `client`, `machine` — share **one cookie**,
+    so `AdminAuth.verify` return the principal, never a boolean: a caller that forget to check the
+    kind then hold a value it cannot mistake for permission. `stream/registry.ts` re-export the
+    union rather than declaring one. `scopeOf` is the single site turning a principal into a filter;
+    never narrow locally, however small the local question look — same rule `servesTarget` follow.
+    Guards are **opt-in per route**, never applied to a group: `requireAdmin` (operator alone, and
+    its meaning unchanged from when it guarded everything), `requireReader` (admin|viewer),
+    `requireClient`. A group guard is one a later route join by being written in the wrong place,
+    and that failure is silent in the widening direction. A GET nobody remember to widen stay
+    admin-only, which is the harmless way to be wrong. Mutations, snapshot download,
+    `/api/connect/*` and `/api/plugins` stay `requireAdmin` — a read-only administrator who could
+    add a credential is not read-only.
+    Trap this rule exist for: `scopeOf` mapped `machine` to `{kind:"key", apiKeyId:""}` meaning
+    "matches nothing". **`usage_daily.api_key_id` is `NOT NULL DEFAULT ''`**, so anonymous traffic
+    live under the empty string and that scope read every untagged row at the `daily` grain — while
+    reading, in source, exactly like a scope matching nothing. `request_logs.api_key_id` is NULL and
+    `= ?` never match it, so the `raw` grain hid the `daily` one. The test written beside it
+    asserted `scopeKey(scope) === ""` and called that fail-closed, so suite encoded same wrong
+    assumption as code and went green. `Scope` now carry a `none` arm and `readsNothing` gate both
+    readers **before** `scopeKey` — which collapse `all` and `none` to the same `undefined`, and one
+    of them mean every row. Client surface own no body route: **absent, not refusing**, because a
+    route that exist and refuse is one somebody later make conditional. Design:
+    [client dashboard surface](docs/superpowers/specs/2026-08-27-client-dashboard-surface-design.md).
 
 ## Adding a provider
 
@@ -207,6 +231,14 @@ Client surface:
 - `GET /v1/models`: authenticated, filtered by key model allowlist
 - `POST /v1/messages/count_tokens`: authenticated local estimate; no dispatch or usage row
 - `GET /health`: unauthenticated liveness
+
+`/api/client/*` is the key holder's own read surface: `login`, `logout`, `summary`, `usage`, `logs`,
+`quota`. Scope come from the verified session, never from a query parameter — the two arrive as
+separate arguments because they have separate provenance, and one door for both is how a client come
+to choose its own. Client session re-read its key row on **every** verify and refuse a revoked one;
+one checking at login alone outlive a revocation by the session TTL. Provider quota reach a client
+as `usedRatio` in `0..1` with credential identity stripped in `@omni/control` — a **ratio**, because
+`formatPercent` multiply by 100 and a 0..100 field render as `4200%`.
 
 Every `/v1/*` request accept Bearer or `x-api-key`; reject conflicts. `null` model allowlist mean
 unrestricted; empty array deny all models.
@@ -458,6 +490,14 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   enumerated key list. `["logs", limit]` and `["usage", …6]` are parameterised, so an enumerated
   table go stale silently. One exception is real: `res:logs` must exclude `["logs","body",…]`, a
   prefix collision on immutable data.
+- **A topic name a resource, and every branch reading that resource must be in its entry.** Console
+  and client surface hold different query keys for the same rows — `["usage",…]` and
+  `["client","usage",…]` — so `res:usage` and `res:logs` cover both. An entry covering one branch
+  leave the other subscribed to a frame that do nothing, and the symptom is silence, which look
+  exactly like a quiet gateway. Client's key summary ride `res:usage`, not `res:keys`: its
+  `limitUsage` is computed from usage rows, and a client cannot hold `res:keys` anyway. A panel
+  whose topic its principal cannot hold must poll with **no** topic — naming one switch polling off
+  in favour of a push that never arrive.
 - **A pushed topic replaces polling, so it must emit on *every* transition of what it covers, not
   only the interesting one.** `cadence(ms, topic)` return `false` once the socket declare that topic
   pushed, so the panel refetch on nothing else — an emitter set that miss a transition make that
@@ -490,6 +530,13 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
 - Quiesce latch gate `/v1/*` only; `/api/*` and `/health` stay live through swap.
 - `store.close()` idempotent and `reopen()` tolerate closed handle, so restore is close → swap →
   reopen. Repo methods forward per call: bind one to local and it die at next swap.
+- **The swap forwarder in `sqlite/store.ts` hand-write one arrow per repo method with its parameters
+  spelled out, and an arrow of lower arity still satisfy the interface.** A dropped optional
+  parameter is therefore **not a type error** — it silently become `undefined`. `usage.recent`
+  shipped that way while its second parameter carried the API-key scope: a scoped read returned
+  every key's rows and nothing raised. Adding a parameter to a repo method mean editing that arrow
+  too. `packages/store/test/swap.test.ts` read the forwarder source and assert no arrow drop an
+  argument, because a behavioural test cover the method it name and say nothing about the next one.
 - `vacuum()` must checkpoint, or page count fall while file keep every page.
 - Restore compare admin password hash across swap and invalidate sessions only when it differ.
   **Nothing may sit between the swap and that comparison** — swap already succeeded, so anything

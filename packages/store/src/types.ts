@@ -619,6 +619,13 @@ export interface ConfigRepo {
   setAdminPasswordHashIfAbsent(hash: string): Promise<boolean>;
   /** Replaces an existing password hash for the authenticated password-change path. */
   setAdminPasswordHash(hash: string): Promise<void>;
+  /**
+   * The read-only administrator's password hash, or null where the operator has
+   * not set one. Absent is the default: a fresh install has no viewer.
+   */
+  getViewerPasswordHash(): Promise<string | null>;
+  /** Sets the read-only password, or removes it entirely with `null`. */
+  setViewerPasswordHash(hash: string | null): Promise<void>;
 }
 
 /**
@@ -754,6 +761,15 @@ export interface KeyRepo {
    */
   list(): Promise<ApiKey[]>;
   findByHash(hash: string): Promise<ApiKey | null>;
+  /**
+   * One key by id, or null where there is none.
+   *
+   * Exists because a client dashboard session re-checks its own key's
+   * revocation on every request, and doing that through `list()` reads and
+   * parses every key in the installation to look at one of them — on a
+   * synchronous database, on a path a browser polls.
+   */
+  get(id: string): Promise<ApiKey | null>;
   /** Throws on a `limits` shape no reader could parse, rather than storing it. */
   create(input: ApiKeyInput): Promise<ApiKey>;
   /**
@@ -818,6 +834,17 @@ export type UsageQuery = {
    * `provider` — without asking the caller to issue a query per series.
    */
   splitBy?: UsageDimension;
+  /**
+   * Restricts every bucket to one API key.
+   *
+   * A filter, not a dimension: it constrains the rows before grouping, so it
+   * applies whatever `groupBy` and `splitBy` are — including `apiKey` itself,
+   * where an unscoped query would otherwise report that other keys exist.
+   *
+   * Served without a scan at either grain. `usage_daily` has `api_key_id` in
+   * its primary key, and `request_logs` has `idx_request_logs_key_at`.
+   */
+  apiKeyId?: string;
 };
 
 export type UsageBucket = {
@@ -879,7 +906,14 @@ export interface UsageRepo {
    * Returns how many were swept.
    */
   sweepPending(): Promise<number>;
-  recent(limit: number): Promise<RequestLog[]>;
+  /**
+   * The newest rows, newest first, optionally restricted to one API key.
+   *
+   * The limit applies after the filter, so a key whose rows are all older than
+   * another's still fills a page rather than being paged out by traffic it
+   * cannot see. Anonymous rows carry a NULL `api_key_id` and match no scope.
+   */
+  recent(limit: number, apiKeyId?: string): Promise<RequestLog[]>;
   aggregate(q: UsageQuery): Promise<UsageBucket[]>;
   /**
    * What one API key has consumed since an instant, for the sliding windows a

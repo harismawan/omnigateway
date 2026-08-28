@@ -1,5 +1,6 @@
 import { createAdminAuth } from "@omni/control";
-import { captureLogger, memoryStore } from "@omni/testkit";
+import type { Store } from "@omni/store";
+import { captureLogger, memoryStore, seedApiKey } from "@omni/testkit";
 import { createApp } from "../../src/app.ts";
 import type { Broadcaster } from "../../src/stream/broadcaster.ts";
 import {
@@ -24,7 +25,15 @@ import { createRing, type Ring } from "../../src/stream/ring.ts";
  */
 export type StreamHarness = {
   port: number;
+  /** An operator session. The three below are the other principals. */
   cookie: string;
+  /** A read-only administrator's session. */
+  viewerCookie: string;
+  /** A key holder's session, and the key it was opened with. */
+  clientCookie: string;
+  clientKeyId: string;
+  /** The store behind the app, for a test that has to revoke that key. */
+  store: Store;
   registry: SocketRegistry;
   broadcaster: Broadcaster;
   ring: Ring;
@@ -53,6 +62,7 @@ export type TestSocket = {
 };
 
 const PASSWORD = "correct-horse-battery-staple";
+const VIEWER_PASSWORD = "read-only-horse-battery";
 
 async function until<T>(poll: () => T | undefined, label: string, timeoutMs = 2_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -121,6 +131,9 @@ export async function streamHarness(
   // one over the same store rather than by reaching into the app.
   const admin = createAdminAuth(store, { now: () => Date.now(), sessionTtlMs: 12 * 3_600_000 });
   await admin.setInitialPassword(PASSWORD);
+  // The other two principals, minted over the same store for the same reason.
+  await admin.setViewerPassword(VIEWER_PASSWORD);
+  const key = await seedApiKey(store, { label: "socket" });
 
   const app = createApp({
     store,
@@ -152,11 +165,34 @@ export async function streamHarness(
   if (setCookie === null) throw new Error(`login did not set a cookie (${login.status})`);
   const cookie = setCookie.split(";")[0] ?? "";
 
+  /** A cookie for one of the other two principals, through their real routes. */
+  const sessionFor = async (path: string, body: unknown): Promise<string> => {
+    const res = await app.handle(
+      new Request(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+    const header = res.headers.get("set-cookie");
+    if (header === null) throw new Error(`${path} did not set a cookie (${res.status})`);
+    return header.split(";")[0] ?? "";
+  };
+  const viewerCookie = await sessionFor("/api/login", {
+    password: VIEWER_PASSWORD,
+    mode: "viewer",
+  });
+  const clientCookie = await sessionFor("/api/client/login", { key: key.raw });
+
   const open: TestSocket[] = [];
 
   return {
     port,
     cookie,
+    viewerCookie,
+    clientCookie,
+    clientKeyId: key.key.id,
+    store,
     registry,
     broadcaster,
     ring,

@@ -71,6 +71,7 @@ export type DatabaseStore = {
     getSettings(): Promise<Settings>;
     putSettings(patch: Partial<Settings>): Promise<Settings>;
     getAdminPasswordHash(): Promise<string | null>;
+    getViewerPasswordHash(): Promise<string | null>;
   };
   /** The one derived table a swap has to put back in step with its rows. */
   usage: { rebuildRollup(): Promise<void> };
@@ -481,6 +482,19 @@ export type RestoreResult = {
    * that neither of them has to travel.
    */
   adminPasswordChanged: boolean;
+  /**
+   * The same question for the read-only password, answered separately.
+   *
+   * Separate because the two invalidations are different sizes: an admin
+   * password that changed ends every session, while a viewer password that
+   * changed ends only the viewer ones — the operator's own window has nothing
+   * to do with who else may look. Folding them into one boolean would force the
+   * caller to pick one of those, and either choice is wrong half the time.
+   *
+   * Gaining or losing the password is a change, same `!==` on `string | null`.
+   * Restoring a backup taken before read-only access existed must withdraw it.
+   */
+  viewerPasswordChanged: boolean;
 };
 
 /** How many table names a refusal will name before it starts counting. */
@@ -537,6 +551,10 @@ async function swapIn(
   // it is never logged, never returned, and never named in an error; the two
   // values meet here and only the boolean leaves.
   const adminHashBefore = await deps.store.config.getAdminPasswordHash();
+  // Both credentials, because there are two. The viewer password is a second
+  // way into a read of this whole installation, and a restore can bring a
+  // different one — or none — without going through `setViewerPassword`.
+  const viewerHashBefore = await deps.store.config.getViewerPasswordHash();
 
   const live = deps.store.databasePath;
   const staged = `${live}.incoming`;
@@ -580,6 +598,7 @@ async function swapIn(
   // After the reopen rather than inside the try: the swap is over and succeeded,
   // and a read that fails here is not a half-swapped database.
   const adminHashAfter = await deps.store.config.getAdminPasswordHash();
+  const viewerHashAfter = await deps.store.config.getViewerPasswordHash();
 
   // The hourly usage rollup is rebuilt rather than trusted.
   //
@@ -630,6 +649,7 @@ async function swapIn(
     // `!==` on `string | null` is the whole rule, and it is why the null
     // transitions fall out: gaining or losing a password is a change.
     adminPasswordChanged: adminHashAfter !== adminHashBefore,
+    viewerPasswordChanged: viewerHashAfter !== viewerHashBefore,
   };
 }
 
