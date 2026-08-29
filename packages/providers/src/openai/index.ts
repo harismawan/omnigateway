@@ -1,60 +1,20 @@
-import { GatewayError } from "@omni/ir";
-import { orderFields } from "../body.ts";
-import { httpError } from "../http.ts";
-import { mergeHeaders, orderHeaders } from "../profile.ts";
-import { parseSse } from "../sse.ts";
-import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
+import { codecAdapter } from "../codecAdapter.ts";
+import type { ProviderAdapter } from "../types.ts";
+import { openaiCodec } from "./codec.ts";
 import { decodeResponses } from "./decode.ts";
 import { openaiDescriptor } from "./descriptor.ts";
-import { openaiBodyOrder, openaiProfile } from "./profile.ts";
 import { toResponsesWire } from "./wire.ts";
 
-const OAUTH_URL = "https://chatgpt.com/backend-api/codex/responses";
-const API_URL = "https://api.openai.com/v1/responses";
+/**
+ * OpenAI, served by its codec.
+ *
+ * Bytes pinned in `packages/providers/test/openaiCodec.test.ts` against a
+ * capture taken from the hand-written adapter before it was replaced.
+ */
+export const openaiAdapter: ProviderAdapter = codecAdapter(
+  "openai",
+  openaiDescriptor.capabilities,
+  openaiCodec,
+);
 
-export const openaiAdapter: ProviderAdapter = {
-  id: "openai",
-  capabilities: openaiDescriptor.capabilities,
-
-  async send(req: AdapterRequest): Promise<AdapterResult> {
-    const oauth = req.credentials.accessToken !== null;
-    const { body, degradations } = toResponsesWire(req.request, req.model, { oauth });
-
-    const protocol: HeaderPair[] = [["Content-Type", "application/json"]];
-
-    if (oauth) {
-      protocol.push(["Authorization", `Bearer ${req.credentials.accessToken}`]);
-      // Required by the Codex backend to select the billing account. Stored on
-      // the credential at OAuth time (Task 21).
-      const accountId = req.credentials.providerData.accountId;
-      if (typeof accountId === "string") protocol.push(["chatgpt-account-id", accountId]);
-    } else if (req.credentials.apiKey !== null) {
-      protocol.push(["Authorization", `Bearer ${req.credentials.apiKey}`]);
-    } else {
-      throw new GatewayError("AUTH", "openai credential has no token", { provider: "openai" });
-    }
-
-    // `originator` and `Accept: text/event-stream` come from the profile.
-    const profile = openaiProfile;
-    const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
-
-    // The Codex endpoint only streams. Non-streaming client requests are served
-    // by collecting the stream in dispatch, so always ask for SSE.
-    const res = await req.http({
-      provider: "openai",
-      url: oauth ? OAUTH_URL : API_URL,
-      method: "POST",
-      headers,
-      body: JSON.stringify(orderFields({ ...body, stream: true }, openaiBodyOrder)),
-      signal: req.signal,
-    });
-
-    if (res.status < 200 || res.status >= 300) throw await httpError(res, "openai");
-    if (res.body === null)
-      throw new GatewayError("UPSTREAM", "empty response body", { provider: "openai" });
-
-    return { events: decodeResponses(parseSse(res.body)), degradations };
-  },
-};
-
-export { decodeResponses, toResponsesWire };
+export { decodeResponses, openaiCodec, toResponsesWire };

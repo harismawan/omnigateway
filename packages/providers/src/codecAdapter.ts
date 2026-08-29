@@ -66,6 +66,19 @@ function boundedDegradations(entries: readonly string[] | undefined): string[] {
  * and it gates `reasonField` in `apps/gateway/src/logging.ts`, so a codec naming
  * another provider chooses whether the operator's reason line prints at all.
  *
+ * **`gatewayAuthored` is dropped unconditionally, and that now costs something
+ * it did not use to.** For a plugin codec it is exactly right: its text is
+ * authored outside this repository and is unknown in the way an upstream body
+ * is. But every built-in routes through here too since the conversion, so no
+ * in-repo codec can surface an operator-visible reason line either — `custom`'s
+ * "credential has invalid endpoint metadata" waits for debug like any upstream
+ * body. Nothing regressed: none of the six set the flag before the conversion.
+ * What changed is that setting it is now *inert*, so a contributor who adds it
+ * to a codec's error will watch it vanish with nothing saying why. Fixing that
+ * means the host distinguishing a registered built-in from a plugin, which it
+ * deliberately does not do anywhere else; this note is the cheaper half of the
+ * trade and the place to start if the trade stops being worth it.
+ *
  * `code` and `message` are deliberately *not* touched. Classifying its own
  * upstream's failure is the entire purpose of the hook — including `AUTH`, which
  * `dispatch` gates its credential refresh on, and which is bounded elsewhere: a
@@ -261,11 +274,58 @@ export function codecAdapter(
         // which is also why `classifyError` takes a string and cannot re-read
         // the stream or reach the socket.
         const text = await res.text().catch(() => "");
+        // Built before the hook rather than after it, because the hook is handed
+        // it. Anthropic's refusal is a *relabelling* of this error — same
+        // message, same status, different code — and a codec that had to
+        // reconstruct the message from `text` would be re-implementing
+        // `httpError`'s three extraction rules to arrive back here.
+        //
+        // Built field by field, never `{ ...res }`. On a captured request the
+        // response is `bodyCapture`'s wrapper, whose `body` is a *getter* that
+        // tees the upstream stream and starts a capture drain — and object
+        // spread reads getters. Spreading here invoked it on a response nothing
+        // was going to read: the error body was recorded twice, `asBody()` could
+        // no longer parse it as JSON, and an abandoned tee branch buffered the
+        // whole body with `settle()` waiting on a drain that existed for no
+        // reason. `httpError` never reads `body`, so `null` is the honest value.
+        const fallback = await httpError(
+          { status: res.status, headers: res.headers, body: null, text: async () => text },
+          id,
+        );
+        // **Frozen before the codec sees it, and this is load-bearing rather
+        // than defensive.** `readonly` on `GatewayError`'s fields is a
+        // compile-time claim and nothing else; a codec that mutates this object
+        // and then returns `undefined` has the host throw *its* object verbatim,
+        // below, without passing through `rebound`. Measured on the unfrozen
+        // version: `message` replaced with codec-authored text, `gatewayAuthored`
+        // flipped to `true` — so `reasonField` prints that text at default
+        // level, which is the exact leak that flag exists to prevent — and a
+        // 407-character entry into `request_logs.degradations`, the column
+        // `boundedDegradations` and `rebound` were written to cap against this
+        // same untrusted source. Two paths were bounded and the third was not.
+        //
+        // Freezing rather than cloning, because a mutation should be *loud*: an
+        // assignment to a frozen property throws in strict mode, `guard` turns
+        // that into `codecFailure`, and the request fails over. A clone would
+        // make a codec that attaches its own notes here silently lose them,
+        // which is the buggy case rather than the hostile one and the more
+        // likely of the two.
+        //
+        // `Object.freeze` is shallow, so this holds only while every field a
+        // codec can reach is a primitive or itself frozen. Today that is true:
+        // `degradations` is the one object field and it is frozen beside its
+        // owner. **A future field of object type needs freezing here too**, and
+        // it is a decision rather than a detail — rule 15 is a guardrail, not a
+        // sandbox, but the redaction bounds are enforced against plugin content
+        // regardless, which is the whole reason `rebound` exists.
+        Object.freeze(fallback.degradations);
+        Object.freeze(fallback);
         const classified = guard(id, "classifyError", () =>
           codec.classifyError?.({
             status: res.status,
             body: text,
             headers: res.headers,
+            fallback,
             // What the request gave up, so a refusal caused by exactly that can
             // say so. `dispatch` writes `error.degradations` into `request_logs`.
             // Bounded here as on the success path. Unbounded, a codec could
@@ -288,18 +348,7 @@ export function codecAdapter(
           }
           throw rebound(id, classified);
         }
-        // Built field by field, never `{ ...res }`. On a captured request the
-        // response is `bodyCapture`'s wrapper, whose `body` is a *getter* that
-        // tees the upstream stream and starts a capture drain — and object
-        // spread reads getters. Spreading here invoked it on a response nothing
-        // was going to read: the error body was recorded twice, `asBody()` could
-        // no longer parse it as JSON, and an abandoned tee branch buffered the
-        // whole body with `settle()` waiting on a drain that existed for no
-        // reason. `httpError` never reads `body`, so `null` is the honest value.
-        throw await httpError(
-          { status: res.status, headers: res.headers, body: null, text: async () => text },
-          id,
-        );
+        throw fallback;
       }
 
       const body = res.body;

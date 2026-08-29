@@ -3,8 +3,10 @@ import { type ChatRequest, GatewayError, RETRYABLE, type StreamEvent } from "@om
 import type { CodecErrorInput, CodecInput, ProviderCodec } from "../src/codec.ts";
 import { codecAdapter } from "../src/codecAdapter.ts";
 import { kiloCodec } from "../src/kilo/codec.ts";
+import { decodeKiloChat } from "../src/kilo/decode.ts";
 import { kiloDescriptor } from "../src/kilo/descriptor.ts";
 import { kiloAdapter } from "../src/kilo/index.ts";
+import { parseSse } from "../src/sse.ts";
 import type { AdapterCredentials, HttpRequest, HttpResponse } from "../src/types.ts";
 
 /**
@@ -75,70 +77,125 @@ async function drain(events: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]
 
 const bridged = codecAdapter("kilo", kiloDescriptor.capabilities, kiloCodec);
 
-/** Everything but the signal, which is an object identity and not wire bytes. */
-function wire(r: HttpRequest) {
-  return { provider: r.provider, url: r.url, method: r.method, headers: r.headers, body: r.body };
+/**
+ * The wire kilo puts on the socket, pinned against literals.
+ *
+ * **This replaced a parity test, and the reason it had to is worth stating.**
+ * While `kiloAdapter` was hand-written and `kiloCodec` was its conversion, the
+ * strongest assertion available was that the two produced identical bytes —
+ * across both credential shapes and both streaming shapes — because that
+ * answered the question the sub-project was actually asking: can the contract
+ * express a real adapter without loss. It could, so `kiloAdapter` *is*
+ * `codecAdapter(kiloCodec)` now, and that comparison became a comparison of one
+ * implementation with itself. It kept passing, which is exactly why it had to
+ * go rather than be left as reassurance.
+ *
+ * What survives the conversion is the property the comparison was protecting:
+ * these exact bytes, in this exact order. Header order is load-bearing for this
+ * provider — `kiloProfile.order` exists because the upstream fingerprints its
+ * clients — so a test comparing header *sets* would pass while the wire changed.
+ *
+ * `User-Agent`'s value is deliberately not pinned here. It is the one field an
+ * installation may override (`profileEnvOverride.test.ts`), and pinning a
+ * version string would make a profile bump fail a test about routing. Its
+ * *position* is pinned, because that is the half that is behaviour.
+ */
+
+const OAUTH_URL = "https://api.kilo.ai/api/openrouter/chat/completions";
+const API_URL = "https://api.kilo.ai/api/gateway/chat/completions";
+const BODY =
+  '{"model":"anthropic/claude-sonnet-5","messages":[{"role":"user","content":"hi"}],' +
+  '"stream":true,"stream_options":{"include_usage":true}}';
+
+async function sentFor(shape: ChatRequest, creds: AdapterCredentials): Promise<HttpRequest> {
+  const capture = capturing();
+  await kiloAdapter.send({
+    request: shape,
+    model: "anthropic/claude-sonnet-5",
+    credentials: creds,
+    http: capture.http,
+    signal: new AbortController().signal,
+  });
+  expect(capture.sent).toHaveLength(1);
+  return capture.sent[0] as HttpRequest;
 }
 
-test("the codec and the adapter put identical bytes on the wire", async () => {
-  // Both request shapes. With only `stream: true`, the codec's own
-  // `stream: true` override is a no-op — `toKiloWire` already emits it — so
-  // dropping that override survived every assertion here. The failure it guards
-  // is silent and total: a non-streaming upstream returns JSON, `parseSse`
-  // yields nothing, and the client gets an empty response.
-  for (const shape of [request, { ...request, stream: false }])
-    for (const creds of [
-      // Both credential shapes, because kilo picks its URL from them and crossing
-      // the two fails as a billing error rather than a routing one.
-      credentials(),
-      credentials({ accessToken: null, apiKey: "kilo-api-key" }),
-      // An organization header is added only when the credential carries one.
-      credentials({ providerData: { orgId: "org-42" } }),
-    ]) {
-      const direct = capturing();
-      const viaCodec = capturing();
+test("an OAuth credential goes to the OpenRouter path, with the editor identity behind it", async () => {
+  const sent = await sentFor(request, credentials());
 
-      await kiloAdapter.send({
-        request: shape,
-        model: "anthropic/claude-sonnet-5",
-        credentials: creds,
-        http: direct.http,
-        signal: new AbortController().signal,
-      });
-      await bridged.send({
-        request: shape,
-        model: "anthropic/claude-sonnet-5",
-        credentials: creds,
-        http: viaCodec.http,
-        signal: new AbortController().signal,
-      });
-
-      expect(viaCodec.sent).toHaveLength(1);
-      expect(wire(viaCodec.sent[0] as HttpRequest)).toEqual(wire(direct.sent[0] as HttpRequest));
-    }
+  expect(sent.provider).toBe("kilo");
+  expect(sent.method).toBe("POST");
+  expect(sent.url).toBe(OAUTH_URL);
+  expect(sent.body).toBe(BODY);
+  expect(sent.headers.map(([name]) => name)).toEqual([
+    "Content-Type",
+    "Authorization",
+    "X-KILOCODE-EDITORNAME",
+    "User-Agent",
+    "Accept",
+  ]);
+  expect(sent.headers.filter(([name]) => name !== "User-Agent")).toEqual([
+    ["Content-Type", "application/json"],
+    ["Authorization", "Bearer kilo-oauth-token"],
+    ["X-KILOCODE-EDITORNAME", "vscode"],
+    ["Accept", "text/event-stream"],
+  ]);
 });
 
-test("the codec and the adapter decode the same events", async () => {
-  const direct = capturing();
-  const viaCodec = capturing();
+test("an API key goes to the gateway path, and is sent as the same bearer", async () => {
+  // The URL is the *only* difference between the two credential types, and
+  // crossing them fails as a billing or entitlement error rather than a routing
+  // one — which reads as anything but a routing bug.
+  const sent = await sentFor(request, credentials({ accessToken: null, apiKey: "kilo-api-key" }));
 
-  const a = await kiloAdapter.send({
+  expect(sent.url).toBe(API_URL);
+  expect(sent.body).toBe(BODY);
+  expect(sent.headers).toContainEqual(["Authorization", "Bearer kilo-api-key"]);
+});
+
+test("an organization is named before the editor identity, never after it", async () => {
+  const sent = await sentFor(request, credentials({ providerData: { orgId: "org-42" } }));
+
+  // Position, not presence. The organization header is inserted with the
+  // protocol headers and ordered by the profile, so asserting only that it is
+  // somewhere in the list would pass with it appended to the end.
+  expect(sent.headers.map(([name]) => name)).toEqual([
+    "Content-Type",
+    "Authorization",
+    "X-Kilocode-OrganizationID",
+    "X-KILOCODE-EDITORNAME",
+    "User-Agent",
+    "Accept",
+  ]);
+  expect(sent.headers).toContainEqual(["X-Kilocode-OrganizationID", "org-42"]);
+});
+
+test("a non-streaming client request still asks the upstream to stream", async () => {
+  // The failure this guards is silent and total: a non-streaming upstream
+  // returns JSON, `parseSse` yields nothing, and the client gets an empty
+  // response. Dispatch serves a non-streaming client by collecting the stream,
+  // so the request going out is identical either way.
+  const sent = await sentFor({ ...request, stream: false }, credentials());
+
+  expect(sent.body).toBe(BODY);
+});
+
+test("the decoded stream is the decoder's own, reached through the bridge", async () => {
+  // Not a tautology, and this is the distinction the deleted parity test used
+  // to carry: it goes through `codecAdapter`'s stream guard and the codec's own
+  // `decode` wiring, and compares against the decoder called directly. A bridge
+  // that dropped, reordered or re-wrapped an event fails here.
+  const capture = capturing();
+  const result = await kiloAdapter.send({
     request,
     model: "anthropic/claude-sonnet-5",
     credentials: credentials(),
-    http: direct.http,
-    signal: new AbortController().signal,
-  });
-  const b = await bridged.send({
-    request,
-    model: "anthropic/claude-sonnet-5",
-    credentials: credentials(),
-    http: viaCodec.http,
+    http: capture.http,
     signal: new AbortController().signal,
   });
 
-  expect(await drain(b.events)).toEqual(await drain(a.events));
-  expect(b.degradations).toEqual(a.degradations);
+  expect(await drain(result.events)).toEqual(await drain(decodeKiloChat(parseSse(sseBody()))));
+  expect(result.degradations).toEqual([]);
 });
 
 test("the bridge reports the provider it was registered as, not one the codec names", async () => {
@@ -996,4 +1053,71 @@ test("degradations are bounded on the error path too", async () => {
 
   expect(seen[0]?.degradations).toHaveLength(16);
   expect(seen[0]?.degradations[0]).toHaveLength(64);
+});
+
+test("a codec cannot edit the error the host is about to throw", async () => {
+  // The third path. `rebound` bounds what a codec *returns* and
+  // `boundedDegradations` bounds what it reports on success; a codec that
+  // mutates the host's own fallback and then declines to classify used to have
+  // that object thrown verbatim, bypassing both.
+  //
+  // Two fields are asserted because they fail in different directions:
+  // `gatewayAuthored` decides whether `reasonField` prints the message at all,
+  // and `degradations` lands in `request_logs` uncapped.
+  const hostile: ProviderCodec = {
+    buildRequest: () => ({
+      request: { url: "https://x.test", method: "POST", headers: [], body: "{}" },
+    }),
+    decode: async function* () {},
+    classifyError: (input) => {
+      const error = input.fallback as unknown as {
+        message: string;
+        gatewayAuthored: boolean;
+        degradations: string[];
+      };
+      // Every one of these throws on a frozen object. The codec is written as a
+      // buggy one rather than a clever one: this is what "attach my own note"
+      // looks like from a plugin author who has not read the contract.
+      try {
+        error.message = "PROMPT LEAK";
+      } catch {
+        /* frozen */
+      }
+      try {
+        error.gatewayAuthored = true;
+      } catch {
+        /* frozen */
+      }
+      try {
+        error.degradations.push("x".repeat(400));
+      } catch {
+        /* frozen */
+      }
+      return undefined;
+    },
+  };
+
+  const adapter = codecAdapter("kilo", kiloDescriptor.capabilities, hostile);
+  const attempt = adapter.send({
+    request,
+    model: "m",
+    credentials: credentials(),
+    http: async () => ({
+      status: 500,
+      headers: new Headers(),
+      body: null,
+      text: async () => JSON.stringify({ error: { message: "upstream is unwell" } }),
+    }),
+    signal: new AbortController().signal,
+  });
+
+  await expect(attempt).rejects.toThrow(GatewayError);
+  await attempt.catch((error: unknown) => {
+    const thrown = error as GatewayError;
+    // The host's own message and classification, untouched.
+    expect(thrown.message).toBe("upstream is unwell");
+    // False, so the message waits for debug: it carries an upstream body.
+    expect(thrown.gatewayAuthored).toBe(false);
+    expect(thrown.degradations).toEqual([]);
+  });
 });

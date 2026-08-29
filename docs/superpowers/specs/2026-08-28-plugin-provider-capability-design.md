@@ -88,12 +88,20 @@ Two things the plugin supplies, both pure:
 type ProviderCodec = {
   /** IR plus credential to a single HTTP request. No I/O. */
   buildRequest(input: CodecInput): CodecRequest;
-  /** The response stream to canonical events. No I/O. */
-  decode(stream: AsyncIterable<SseEvent>, state: DecodeState): AsyncGenerator<StreamEvent>;
+  /** The response body to canonical events. No I/O. */
+  decode(input: CodecDecodeInput): AsyncGenerator<StreamEvent, void, undefined>;
   /** Optional. Reads a failed response and returns a better error than the default. */
-  classifyError?(status: number, body: string): GatewayError | undefined;
+  classifyError?(input: CodecErrorInput): GatewayError | undefined;
 };
 ```
+
+**Sketch, and the shipped signatures differ — read `packages/providers/src/codec.ts`
+for the contract itself.** Two of the three moved during implementation. `decode`
+takes a single input carrying the raw `ReadableStream` rather than a parsed SSE
+stream and a state argument, because SSE is one provider's framing rather than
+every provider's — a codec that speaks a different framing parses its own bytes.
+`classifyError` likewise takes one input, and it gained `fallback` when Anthropic
+converted; see the Risks section.
 
 Three details are load-bearing, and each comes from an existing adapter rather
 than from taste.
@@ -188,11 +196,20 @@ live the moment a plugin provider exists:
   calls it, which is the site the note predicted: it narrows `unknown` to
   `ProviderId`, which is what lets the rest of that function treat a
   plugin-supplied id as one.
-- **Four unpinned copies of the provider-id grammar** validate plugin ids
+- ~~**Four unpinned copies of the provider-id grammar** validate plugin ids
   (`plugin-api/manifest.ts`, `gateway/plugins/routes.ts`, `control/plugins.ts`,
-  `store/sqlite/plugins.ts`). A plugin provider's id is a plugin id *and* a
-  provider id at once, so the two grammars can no longer be allowed to drift
-  independently. One of them should be pinned to `PROVIDER_ID_PATTERN` by test.
+  `store/sqlite/plugins.ts`).~~ **Closed**, and all four rather than the one this
+  note asked for: a list of three remaining unpinned copies has exactly the
+  property the thing it describes lacks.
+  `apps/gateway/test/plugins/pluginIdGrammar.test.ts` drives each through the
+  public function that consults it and compares verdicts with
+  `PROVIDER_ID_PATTERN` over a shared corpus. The copies stay — a plugin id and a
+  provider id are different things that happen to share a grammar, and three of
+  the four sites validate ids with no provider near them — but they may no longer
+  drift, because a registered descriptor's `id` must equal the manifest id and so
+  a plugin provider's id is one string answering to both. Behaviour rather than
+  `.source` equality: the constants are module-private, and widening a published
+  package's surface so a test can read one is a worse trade than the weakening.
 
 ## Credentials and auth
 
@@ -211,22 +228,40 @@ it.
 
 ## Testing
 
-- **A fixture plugin registers a provider, and a request routes to it end to
+All five are now satisfied; each is marked with what satisfies it, because an
+unmarked requirement in a shipped design reads as outstanding and gets written
+twice.
+
+- ~~**A fixture plugin registers a provider, and a request routes to it end to
   end**: descriptor visible to routing, codec's request reaching a stub
   transport, its decoded events reaching the client. Anything less tests
-  registration rather than the provider working.
-- **The sentinel registry test already in `dispatch.test.ts` covers this
+  registration rather than the provider working.~~
+  `apps/gateway/test/e2e/pluginProvider.test.ts`. It injects no adapters, so
+  routing, pricing and dispatch each reach the global `registerProvider`
+  mutated, and the fixture's wire format is one it invented so no built-in
+  decoder can produce its output.
+- ~~**The sentinel registry test already in `dispatch.test.ts` covers this
   sub-project's riskiest property for free** — a plugin provider is exactly the
   synthetic provider it injects. It should be extended to route through a
-  registered codec rather than a stub adapter.
-- **A codec that throws, returns a malformed request, or yields a bad event is
-  skipped and reported, never fatal** — rule 15, and the proxy path must not
-  become able to depend on a plugin.
-- **A plugin registering a descriptor whose `id` differs from its manifest id is
-  refused**, and the refusal names both ids.
-- **The contract is I/O-free by shape**, asserted the way `leafSubpaths.test.ts`
+  registered codec rather than a stub adapter.~~ Done, with a stub transport
+  asserting the host performed the request the codec described.
+- ~~**A codec that throws, returns a malformed request, or yields a bad event is
+  skipped and reported, never fatal**~~ — `packages/providers/test/kiloCodec.test.ts`,
+  which is where the `codecAdapter` bounds live rather than kilo's own wire.
+- ~~**A plugin registering a descriptor whose `id` differs from its manifest id is
+  refused**, and the refusal names both ids.~~
+  `packages/control/test/pluginProviders.test.ts`.
+- ~~**The contract is I/O-free by shape**, asserted the way `leafSubpaths.test.ts`
   asserts a leaf: build the plugin-api entry point and check no transport symbol
-  is reachable.
+  is reachable.~~ `apps/gateway/test/plugins/codecIoFree.test.ts` — **but not by
+  the method this bullet prescribes, and the difference is the finding.** A
+  `target: "bun"` bundle of `packages/providers/src/index.ts` — a package that
+  genuinely reaches the transport — does not contain `node:http`: it is external
+  to that target, and tree-shaking moves the rest. So the control a bundle probe
+  needs does not fire, absence proves nothing, and that is failure mode 1
+  `leafSubpaths.test.ts` records. It uses `Bun.Transpiler.scanImports` for the
+  edges and a comment-stripped token scan for the globals a walk cannot see. Do
+  not "restore" the bundler here without re-measuring that control first.
 
 ## Risks
 
@@ -242,7 +277,42 @@ it.
   That is acceptable — it never leaves the codec — but it must not become the
   channel by which a plugin smuggles a client or a store handle into `decode`.
   The type should be `unknown` to the host and never inspected.
-- **Converting the built-ins is not free**, and this spec deliberately does not
+- ~~**Converting the built-ins is not free**, and this spec deliberately does not
   do it. Until they convert, `ProviderAdapter` and `ProviderCodec` coexist, which
-  is the two-shapes risk named above — bounded, because the conversion is
-  scheduled rather than hoped for, but real while it lasts.
+  is the two-shapes risk named above.~~ **Closed. All six have converted**, and
+  `codecAdapter` is now the only implementation of `ProviderAdapter` this
+  repository ships — so the sentence this spec opened with, that the contract "is
+  intended to become the shape of every adapter, built-in and plugin alike", is a
+  fact rather than an intention. `ProviderAdapter` remains as the injection point
+  dispatch and its tests construct; that is a seam, not a second shape.
+  Anthropic was pulled forward past the pair this spec named, and it earned its
+  place: it is the only provider using
+  `decodeState`, `cloakedTools` or `classifyError`, so until it converted those
+  three were designed rather than exercised. It found a gap — `CodecErrorInput`
+  carried the response body but not the host's own default error, and what
+  Anthropic reclassifies is `httpError`'s *parsed* message, so expressing the
+  fingerprint refusal meant re-implementing three extraction rules inside a codec
+  to arrive back at a value the host had already computed. `fallback` is now on
+  that input. **This is the argument for converting before publication rather
+  than after**: a hook nothing exercises is a hook nobody has checked.
+  The three that followed found nothing further, which is the outcome that makes
+  the contract publishable — and `custom` supplied the second independent user of
+  `decodeState` (its wire format is a property of the credential, so `decode`
+  cannot infer it), so that field is no longer justified by one provider alone.
+  One method note worth keeping: every conversion's parity was captured from the
+  hand-written adapter **before** it was replaced. Two of the six had a
+  `stream: true` override whose deletion survived every assertion, because the
+  wire encoder copies the client's own flag and every fixture was a streaming
+  request — the non-streaming case has to be written explicitly or the override
+  reads as covered when it is not. One consequence is worth recording because it
+  recurs with each: the byte-for-byte parity test that made kilo's conversion
+  safe *died with the adapter it compared against*, and kept passing as a
+  comparison of one implementation with itself. It was replaced by golden wire
+  assertions rather than deleted, because what parity was protecting — the exact
+  bytes in the exact header order the upstream expects — outlives the second
+  implementation that was proving it.
+  Kimi's conversion applied the lesson rather than repeating it: the wire was
+  captured from the adapter **before** it was replaced, so the literals in
+  `kimiCodec.test.ts` are evidence from two implementations and not a
+  restatement of the one that remains. Do that for each remaining conversion, and
+  expect the parity tautology to be green on the day it stops meaning anything.

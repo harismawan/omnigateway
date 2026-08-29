@@ -195,4 +195,25 @@ export type CodecErrorInput = {
   degradations: readonly string[];
   /** Exactly what `buildRequest` returned, unread by the host. */
   decodeState: unknown;
+  /**
+   * The error the host will throw if this hook returns `undefined`.
+   *
+   * **Added when Anthropic was converted, and the gap it closes is the reason
+   * this hook exists at all.** The docblock above says the hook is here because
+   * Anthropic reads its own 400 body to recognise a fingerprint refusal — and
+   * the first version of this type could not express that. What that adapter
+   * reclassifies is not the body but `httpError`'s *parsed message*: the
+   * `error.message` field, or `detail`, truncated at 500 characters. A codec
+   * given only `body` has to re-implement all three rules to produce the same
+   * message the host would have, which is six copies of twenty lines — the exact
+   * duplication this contract exists to remove — and a codec that got the
+   * truncation subtly wrong would answer differently from the host for the same
+   * response, silently.
+   *
+   * Discloses nothing new: it is derived from `status`, `headers` and `body`,
+   * all of which are already here. A codec that wants the host's classification
+   * for everything but one case returns `undefined` and never touches it; one
+   * that wants to relabel a case rebuilds from this and keeps the message.
+   */
+  fallback: GatewayError;
 };

@@ -1,55 +1,31 @@
-import { GatewayError } from "@omni/ir";
-import { orderFields } from "../body.ts";
-import { httpError } from "../http.ts";
-import { mergeHeaders, orderHeaders } from "../profile.ts";
-import { parseSse } from "../sse.ts";
-import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
+import { codecAdapter } from "../codecAdapter.ts";
+import type { ProviderAdapter } from "../types.ts";
+import { kimiCodec } from "./codec.ts";
 import { decodeChat } from "./decode.ts";
 import { kimiDescriptor } from "./descriptor.ts";
-import { kimiDeviceHeaders } from "./device.ts";
-import { kimiBodyOrder, kimiProfile } from "./profile.ts";
 import { toChatWire } from "./wire.ts";
 
-const BASE_URL = "https://api.kimi.com/coding/v1/chat/completions";
+/**
+ * Kimi, served by its codec.
+ *
+ * The second built-in on the codec contract, after kilo. Four hand-written
+ * `send()` implementations remain; each one that stays is a second provider
+ * shape in a repository whose plugin capability can only offer the first, and a
+ * rule that holds for a plugin and not a built-in is one a contributor is
+ * entitled to read as optional.
+ *
+ * **Nothing about the wire changed.** The bytes this provider puts on the socket
+ * — including the device identity read off the credential, and the position it
+ * takes in the header order — are pinned against literals in
+ * `packages/providers/test/kimiCodec.test.ts`, captured from the adapter this
+ * replaced *before* it was replaced. That ordering is the point: parity asserted
+ * against an implementation that still exists is evidence, and the same
+ * assertion after the conversion would compare the codec with itself.
+ */
+export const kimiAdapter: ProviderAdapter = codecAdapter(
+  "kimi",
+  kimiDescriptor.capabilities,
+  kimiCodec,
+);
 
-export const kimiAdapter: ProviderAdapter = {
-  id: "kimi",
-  capabilities: kimiDescriptor.capabilities,
-
-  async send(req: AdapterRequest): Promise<AdapterResult> {
-    const { body, degradations } = toChatWire(req.request, req.model);
-    const token = req.credentials.accessToken ?? req.credentials.apiKey;
-    if (token === null) {
-      throw new GatewayError("AUTH", "kimi credential has no token", { provider: "kimi" });
-    }
-
-    const protocol: HeaderPair[] = [
-      ["Content-Type", "application/json"],
-      ["Accept", "text/event-stream"],
-      ["Authorization", `Bearer ${token}`],
-      // Device identity is bound to the credential at OAuth time and must stay
-      // stable; a changing device id forces re-authentication upstream.
-      ...kimiDeviceHeaders(req.credentials.providerData),
-    ];
-
-    const profile = kimiProfile;
-    const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
-
-    const res = await req.http({
-      provider: "kimi",
-      url: BASE_URL,
-      method: "POST",
-      headers,
-      body: JSON.stringify(orderFields({ ...body, stream: true }, kimiBodyOrder)),
-      signal: req.signal,
-    });
-
-    if (res.status < 200 || res.status >= 300) throw await httpError(res, "kimi");
-    if (res.body === null)
-      throw new GatewayError("UPSTREAM", "empty response body", { provider: "kimi" });
-
-    return { events: decodeChat(parseSse(res.body)), degradations };
-  },
-};
-
-export { decodeChat, toChatWire };
+export { decodeChat, kimiCodec, toChatWire };

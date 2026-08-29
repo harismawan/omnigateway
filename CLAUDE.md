@@ -388,7 +388,7 @@ Preserve these translation invariants:
   `anthropic/decode.ts` — never at egress. Anthropic fingerprint some name sets and refuse them
   through a billing placeholder; `FINGERPRINT_REFUSED` name that. Restore site load-bearing: RTK
   normalize by case and separator alone, so `SessionSearch` never match `session_search` and an
-  egress-side restore silently degrade every shell classification. Cloak live in `send()` frame,
+  egress-side restore silently degrade every shell classification. Cloak live in `buildRequest` frame,
   never on `dispatchRequest` — that object shared across attempt, so storing it leak alias into
   next provider. Exempt name (already PascalCase, or `mcp__*`) reach wire unrenamed and therefore
   **claim its spelling**, else derived alias land on live tool's real name.
@@ -650,9 +650,16 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   provider; `packages/control/src/catalog.ts` read it rather than restating it. Four other copies of
   the same expression validate a **plugin** id — `packages/plugin-api/src/manifest.ts` (published, so
   justified), `apps/gateway/src/plugins/routes.ts`, `packages/control/src/plugins.ts`,
-  `packages/store/src/sqlite/plugins.ts` — and **no test pin any of them to this one**. A plugin
-  provider's id is both kinds at once, so that is a real gap, not a technicality; do not describe it
-  as mirror-and-pin, which is what `@omni/ratelimit/catalog` have and this not.
+  `packages/store/src/sqlite/plugins.ts`. A plugin provider's id is both kinds at once — a registered
+  descriptor's `id` must equal the manifest id — so the two grammar cannot drift independently, and
+  `apps/gateway/test/plugins/pluginIdGrammar.test.ts` now pin all four from the one place that may
+  import every one of them. Direction is one way: `PROVIDER_ID_PATTERN` is truth, a failure mean a
+  mirror stale, never that the pattern should widen. It pin **behaviour, not `.source`**, and that is
+  weaker than what `providerIdMirror.test.ts` do — the four constant are module-private, and
+  exporting one from a published package so a test may read it is a worse trade than the gap. It is
+  stronger in one direction the source comparison miss: a site that stop consulting its own pattern
+  fail here. Do not describe this as mirror-and-pin in the `@omni/ratelimit/catalog` sense; that one
+  compare the values themselves.
 - **Every provider-keyed table drop its prototype, and that is one invariant standing in for a guard
   at each reader.** Reason: a provider id arrive from a client's `model` name and from unvalidated
   JSON in `virtual_models.targets`, and on ordinary object literal `table["constructor"]` answer the

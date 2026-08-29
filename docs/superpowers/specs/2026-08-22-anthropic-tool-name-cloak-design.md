@@ -193,23 +193,27 @@ deterministic.
 
 ### Integration
 
-`send()` in `packages/providers/src/anthropic/index.ts` derives the cloak once, gated on the OAuth
-signal that already exists at `index.ts:20` (`req.credentials.accessToken !== null`), and threads it
-into both directions:
+`buildRequest` in `packages/providers/src/anthropic/codec.ts` derives the cloak once, gated on the
+OAuth signal (`input.credentials.accessToken !== null`), and threads it into both directions:
 
 ```ts
-const cloak = oauth ? buildToolCloak(req.request) : null;
-// toWire(req.request, model, { oauth, cloak })   -> wire.ts:83, :155, :172
-// decodeAnthropic(stream, { cloak })             -> decode.ts:161
+const cloak = oauth ? buildToolCloak(input.request) : null;
+// toWire(input.request, model, { oauth, cloak })  -> wire.ts
+// decodeState: { cloak }  ->  decode({ decodeState })  ->  decodeAnthropic(stream, { cloak })
 ```
 
-The cloak lives in the `send()` call frame and nowhere else. It is never attached to
-`dispatchRequest`.
+**This said `send()` in `anthropic/index.ts` until every provider moved onto the codec contract.**
+The frame is now `buildRequest`, and the hand-off to `decode` is `decodeState` rather than a
+closure, because a codec's two halves are separate functions the host calls at different times.
+Nothing else about this design changed — which is the point of recording it here rather than
+letting the next reader find the old sentence and conclude the rule moved with it.
+
+The cloak lives in that call frame and nowhere else. It is never attached to `dispatchRequest`.
 
 That last point is the load-bearing one. `dispatchRequest` is a single shared IR object across every
-attempt (`apps/gateway/src/dispatch/index.ts:86`), and `adapter.send` rebuilds the whole wire body
-from it on each call (`wire.ts:297`, then `JSON.stringify` at `index.ts:86`). So a cloak derived
-inside `send()` is idempotent by construction: failover, the AUTH-refresh inner retry, and a second
+attempt (`apps/gateway/src/dispatch/index.ts:86`), and `buildRequest` rebuilds the whole wire body
+from it on each call. The contract requires that purity outright — the host may build the request
+once per attempt — so a cloak derived inside it is idempotent by construction: failover, the AUTH-refresh inner retry, and a second
 Anthropic credential each re-derive it from pristine IR. A cloak that mutated `dispatchRequest` in
 place would instead persist across failover and leak aliases into a non-Anthropic second candidate —
 the OpenAI, Kimi, Grok and Kilo encoders all read the same `.name` field — and would corrupt RTK's

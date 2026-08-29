@@ -334,8 +334,21 @@ const codec = {
     // `buildRequest` returned under that key, which is how a decoder learns what
     // the request it is decoding did. Yield StreamEvents.
   },
-  classifyError({ status, body }) {
-    // optional: return a GatewayError, or undefined to accept the default
+  classifyError({ status, body, headers, degradations, fallback }) {
+    // Optional: return a GatewayError, or undefined to accept the host's default.
+    //
+    // `fallback` is that default, already built. Relabel from it rather than
+    // re-deriving a message from `body`: the host has pulled `error.message`
+    // out of the document (falling back to `detail`) and truncated it to 500
+    // characters, and a codec redoing those three rules slightly differently
+    // answers differently from the host for the same response, silently.
+    // Matching `body` also matches a document that merely quotes a phrase
+    // somewhere other than in its message.
+    //
+    // It is frozen. Build a new GatewayError; do not edit this one.
+    //
+    // `degradations` is what your `buildRequest` reported for this request —
+    // attach them when the refusal is explained by what the request gave up.
   },
 };
 ```

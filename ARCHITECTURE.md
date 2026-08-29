@@ -180,7 +180,9 @@ Circuit-breaker state and latency written back on every terminal outcome, so nex
 
 ## Providers
 
-Six adapters, each a directory of roughly same files — `descriptor.ts`, `wire.ts`, `decode.ts`, `models.ts`, `profile.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types, `kimi` and `grok` carry `device.ts` for device-code flows.
+Six providers, each a directory of roughly same files — `descriptor.ts`, `codec.ts`, `wire.ts`, `decode.ts`, `models.ts`, `profile.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types and `cloak.ts` for the OAuth tool rename, `kimi` and `grok` carry `device.ts` for device-code flows.
+
+`codec.ts` is the provider; `index.ts` is four lines joining it to its descriptor through `codecAdapter`. A `ProviderCodec` describes a request and reads a stream back, and the host performs it — one `http()` call, the status check, the deadline, the empty-body refusal — once for every provider rather than once per provider. That split exists because boundary rule 15 says a plugin never holds the `HttpClient`, and a provider whose whole job is talking upstream cannot be handed nothing; **all six built-ins are on it**, so `codecAdapter` is the only implementation of `ProviderAdapter` this repository ships and a plugin-supplied provider takes exactly the shape a built-in does. `ProviderAdapter` survives as the injection point dispatch and its tests construct — a seam, not a second shape.
 
 `descriptor.ts` is what core reads. Adding a provider used to mean editing sixteen tables spread across `ir`, `router`, `store`, `control`, the gateway, the CLI and the console; eight were compiler-checked `Record<ProviderId, …>` and eight were hand-written arrays, zod enums and CSS blocks that went stale in silence — five of them independent copies of the same six names. One record per provider replaced them.
 
@@ -201,11 +203,11 @@ flowchart LR
   dec --> ev(["StreamEvent<br/>(IR)"])
   cat["models.ts → catalog<br/><i>pricing + limits, defaults only</i>"] -.-> wire
 
-  custom["<b>custom</b><br/><i>index.ts only — 62 lines</i>"] -. "borrows kimi's codec<br/>or openai's Responses codec" .-> wire
+  custom["<b>custom</b><br/><i>own chat + responses codecs</i>"] -. "protocol chosen by the credential" .-> wire
   custom -. "operator-supplied origin" .-> http
 ```
 
-`custom` is the operator-supplied one: a credential names the origin and the wire protocol, and the adapter points its own codecs at it. It shipped importing kimi's encoder and kilo's decoder and now forks both, which is what rule 2 asks of every provider — the fork is why it has the same file set as the other five rather than being the exception this paragraph once described.
+`custom` is the operator-supplied one: a credential names the origin and the wire protocol, and the codec points its own encoders at it. Because the protocol is a property of the *credential* rather than of the provider, `decode` cannot infer it from the response — it travels in `decodeState`, the same field Anthropic's tool cloak uses, and those two are its only users. It shipped importing kimi's encoder and kilo's decoder and now forks both, which is what rule 2 asks of every provider — the fork is why it has the same file set as the other five rather than being the exception this paragraph once described.
 
 All outbound HTTP goes through one client, built on `node:http` rather than `fetch` for specific reason: Bun's `fetch` alphabetizes request headers, destroying header order and casing providers use to recognize first-party CLI. Client preserves both verbatim, logs only host, path, status, duration.
 
