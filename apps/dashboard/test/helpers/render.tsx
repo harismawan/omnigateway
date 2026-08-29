@@ -8,20 +8,37 @@ import {
 } from "@tanstack/react-router";
 import { type RenderResult, render } from "@testing-library/react";
 import type { ReactElement, ReactNode } from "react";
+import { queryKeys } from "../../src/api/queries.ts";
 import {
   StreamedLiveProvider,
   StreamProvider,
   type StreamTimer,
 } from "../../src/session/stream.tsx";
 import { ThemeProvider } from "../../src/theme/ThemeProvider.tsx";
+import { catalogFixture } from "./fixtures.ts";
 
+/**
+ * A client with the provider catalog already in it.
+ *
+ * Seeded rather than stubbed because that is what production does: `_app`'s
+ * `beforeLoad` resolves `/api/catalog` before any screen mounts, so no board
+ * ever fetches it and no board test should have to route it. A test about the
+ * gate itself builds its own client instead.
+ *
+ * `gcTime` is `Infinity` for this key alone. The suite collects unobserved
+ * queries immediately, which would drop the seed in the gap between here and
+ * the first component that reads it.
+ */
 export function makeQueryClient(): QueryClient {
-  return new QueryClient({
+  const client = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
       mutations: { retry: false },
     },
   });
+  client.setQueryDefaults(queryKeys.catalog, { gcTime: Number.POSITIVE_INFINITY });
+  client.setQueryData(queryKeys.catalog, catalogFixture());
+  return client;
 }
 
 /**
@@ -62,6 +79,17 @@ function Providers({
 }) {
   return (
     <ThemeProvider>
+      {/*
+        `_app` also mounts `ProviderPalette` here, and this harness deliberately
+        does not. It used to, with a comment claiming a bare-rendered board got
+        the same `--p-<id>` set it would have inside the shell — which was never
+        true in this environment: `createGlobalStyle` injects nothing under
+        happy-dom, so the mount produced zero style elements and zero reads of
+        the values it was handed. It was also outside `QueryClientProvider`,
+        where the catalog it claimed to reflect does not exist. The palette is
+        asserted where it can be observed, against a server-rendered sheet, in
+        `test/theme/theme.test.tsx` and `test/routes/appGate.test.tsx`.
+      */}
       <QueryClientProvider client={client}>
         <StreamProvider
           enabled={stream?.enabled ?? false}

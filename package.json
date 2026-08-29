@@ -15,6 +15,8 @@
     "test:dashboard": "bun run --cwd apps/dashboard test",
     "test:all": "bun test && bun run test:dashboard",
     "lint": "biome check .",
+    "check:claims": "bun run scripts/stale-claims.ts",
+    "check:dead": "bun run scripts/dead-exports.ts",
     "fmt": "biome format --write .",
     "typecheck:core": "tsc --noEmit --pretty false -p tsconfig.json",
     "typecheck:dashboard": "bun run --cwd apps/dashboard typecheck",

@@ -1,5 +1,5 @@
 import { GatewayError } from "@omni/ir";
-import { ANTHROPIC_CLI_VERSION, PROFILES } from "@omni/providers";
+import { ANTHROPIC_CLI_VERSION, anthropicProfile } from "@omni/providers";
 import { createPkce, randomState } from "./pkce.ts";
 import {
   type FlowResult,
@@ -33,7 +33,7 @@ type TokenResponse = {
 };
 
 async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise<TokenResponse> {
-  const { status, parsed } = await postJson(deps, "anthropic", TOKEN_URL, PROFILES.anthropic, {
+  const { status, parsed } = await postJson(deps, "anthropic", TOKEN_URL, anthropicProfile, {
     contentType: "application/json",
     body: JSON.stringify({ ...body, client_id: CLIENT_ID }),
   });
@@ -149,7 +149,7 @@ export const anthropicOAuth: OAuthProvider = {
 
   async usage(secrets, deps) {
     if (secrets.accessToken === null) return null;
-    const { status, parsed } = await getJson(deps, "anthropic", USAGE_URL, PROFILES.anthropic, {
+    const { status, parsed } = await getJson(deps, "anthropic", USAGE_URL, anthropicProfile, {
       accessToken: secrets.accessToken,
       extraHeaders: [
         ["anthropic-beta", "oauth-2025-04-20"],

@@ -1,4 +1,3 @@
-import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import {
   Area,
   AreaChart,
@@ -8,8 +7,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { UsageBucket } from "../../api/types.ts";
-import { PROVIDER_IDS, type ProviderId, providerColor } from "../../theme/tokens.ts";
+import { findProvider, useProviderCatalog } from "../../api/queries.ts";
+import type { CatalogProvider, UsageBucket } from "../../api/types.ts";
+import { type ProviderId, providerColor } from "../../theme/tokens.ts";
 import { Stack, Truncate } from "../../ui/primitives.ts";
 import {
   addTotals,
@@ -39,6 +39,9 @@ const UNKNOWN = "unknown";
 
 type Band = { name: string; label: string; color: string; totals: Totals };
 
+/** A provider id, or null for traffic no provider could be attributed to. */
+type Attributed = string | null;
+
 export type ModelTrafficPanelProps = {
   /** Time buckets split by upstream model. */
   buckets: readonly UsageBucket[];
@@ -56,13 +59,15 @@ export type ModelTrafficPanelProps = {
  * a model that used to be configured and no longer is. Anything neither knows
  * stays unattributed rather than being guessed at from its name.
  */
-function providerOf(model: string, configured: ReadonlyMap<string, ProviderId>): ProviderId | null {
+function providerOf(
+  catalog: readonly CatalogProvider[],
+  model: string,
+  configured: ReadonlyMap<string, ProviderId>,
+): Attributed {
   const routed = configured.get(model);
   if (routed !== undefined) return routed;
   return (
-    PROVIDER_IDS.find((id) =>
-      PROVIDER_MODEL_CATALOG[id].models.some((entry) => entry.id === model),
-    ) ?? null
+    catalog.find((provider) => provider.models.some((entry) => entry.id === model))?.id ?? null
   );
 }
 
@@ -72,7 +77,7 @@ function providerOf(model: string, configured: ReadonlyMap<string, ProviderId>):
  * provider carried the traffic, and — by weight rather than by a new hue —
  * which of that provider's models carried it.
  */
-function shadeOf(provider: ProviderId | null, step: number): string {
+function shadeOf(provider: Attributed, step: number): string {
   if (provider === null) return "var(--ink-faint)";
   return `color-mix(in oklch, ${providerColor(provider)} ${Math.max(30, 100 - step * 22)}%, var(--panel))`;
 }
@@ -91,6 +96,8 @@ export function ModelTrafficPanel({
   metric,
   providers,
 }: ModelTrafficPanelProps) {
+  // Loaded before this screen mounts, by the gate in `routes/_app.tsx`.
+  const catalog = useProviderCatalog().data ?? [];
   const ranked = [...bySplit(buckets, metric).entries()];
   const kept = ranked.slice(0, SHOWN);
   const rest = ranked.slice(SHOWN);
@@ -98,10 +105,19 @@ export function ModelTrafficPanel({
   // Grouped by provider so the shade ramp reads as one hue stepping down, and
   // walked in the fixed provider order so a model going quiet never recolours
   // the ones that stayed.
+  //
+  // The walk covers the providers the *targets* name as well as the ones the
+  // catalog lists, for the reason `ProviderPanel` does: a model routed to a
+  // provider the catalog no longer carries matches no pass of this loop, so it
+  // is not folded into a band — it is left out of the chart and the legend with
+  // its tokens still counted in every total beside them.
+  const unlisted = [...new Set(kept.map(([name]) => providerOf(catalog, name, providers)))]
+    .filter((id): id is string => id !== null && findProvider(catalog, id) === undefined)
+    .sort();
   const bands: Band[] = [];
-  for (const provider of [...PROVIDER_IDS, null]) {
+  for (const provider of [...catalog.map((entry) => entry.id), ...unlisted, null]) {
     kept
-      .filter(([name]) => providerOf(name, providers) === provider)
+      .filter(([name]) => providerOf(catalog, name, providers) === provider)
       .forEach(([name, totals], index) => {
         bands.push({
           name,

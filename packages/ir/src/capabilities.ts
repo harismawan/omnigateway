@@ -1,59 +1,16 @@
-import type { ProviderId } from "./request.ts";
-
 /**
- * Structural shape only — `packages/providers` still owns the `Capabilities`
- * type used on `ProviderAdapter` (see `packages/providers/src/types.ts`).
- * This type exists so the canonical values below have a home that both
- * `providers` (imports only `ir`) and the gateway's `router` (imports `ir`
- * and `store`, never `providers`) can legally read from.
+ * Structural shape only — `packages/providers` owns both the `Capabilities`
+ * type used on `ProviderAdapter` (see `packages/providers/src/types.ts`) and the
+ * per-provider values themselves (see `@omni/providers/descriptors`).
+ *
+ * The values used to live here, in two `Record<ProviderId, …>` tables, so that
+ * `providers` (imports only `ir`) and the router (imports `ir` and `store`)
+ * could both read them. They moved to the provider descriptors once
+ * `@omni/providers/descriptors` existed as a leaf subpath the router can read on
+ * the same terms it already reads `@omni/providers/catalog` — which is what lets
+ * `ir` hold no provider-specific data at all, per architectural boundary 16.
+ *
+ * The type stays because the router and the store both describe a target's
+ * capabilities with it and neither should have to import `providers` for a shape.
  */
 export type ProviderCapabilities = { tools: boolean; images: boolean; reasoning: boolean };
-
-/**
- * Whether a provider can accept Anthropic-defined tools and Anthropic-native
- * content blocks.
- *
- * Separate from the operator-editable `tools` capability on a stored target,
- * and deliberately not stored: a target either speaks Anthropic's wire format
- * or it does not, and that is decided by which adapter serves it, not by a
- * setting an operator could turn on. Keeping it here — rather than having the
- * router ask `target.provider === "anthropic"` — is what stops a provider name
- * from becoming routing logic.
- */
-export const ANTHROPIC_NATIVE_TOOLS: Readonly<Record<ProviderId, boolean>> = {
-  anthropic: true,
-  openai: false,
-  kimi: false,
-  // Kilo speaks the OpenAI chat completions wire even for the Anthropic models
-  // it fronts, so an Anthropic-defined tool or native block excludes it.
-  kilo: false,
-  grok: false,
-  custom: false,
-};
-
-/**
- * One canonical capabilities value per provider.
- *
- * Each adapter in `packages/providers` sets its `capabilities` from this
- * table instead of restating the object literal, and the gateway router
- * reads the same table when synthesising a single-target virtual model for
- * a prefix-inferred (non-configured) model name. A provider's capabilities
- * change in exactly one place.
- */
-export const PROVIDER_CAPABILITIES: Readonly<Record<ProviderId, ProviderCapabilities>> = {
-  anthropic: { tools: true, images: true, reasoning: true },
-  openai: { tools: true, images: true, reasoning: true },
-  kimi: { tools: true, images: false, reasoning: false },
-  // Kilo fronts Claude, GPT and Gemini, all of which accept images and emit
-  // reasoning. The same argument recorded against grok below applies: the
-  // router drops a target whose provider lacks `images` from any request
-  // carrying an image block, so an under-claim makes kilo targets vanish the
-  // moment a client pastes a screenshot.
-  kilo: { tools: true, images: true, reasoning: true },
-  // Every current xAI text model is documented `text, image -> text`. Claiming
-  // `images: false` would not be the safe direction: the router drops a target
-  // whose provider lacks `images` from any request carrying an image block, so
-  // an under-claim makes grok targets vanish the moment a client pastes one.
-  grok: { tools: true, images: true, reasoning: true },
-  custom: { tools: true, images: true, reasoning: true },
-};

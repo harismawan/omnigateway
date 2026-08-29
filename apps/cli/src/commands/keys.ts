@@ -313,6 +313,22 @@ export const keysLimits: Command = {
     if (existing === undefined) throw new CliError(`no api key "${id}"`);
 
     let key = existing;
+    /**
+     * Whether this edit threw away limits nobody could read.
+     *
+     * Carried into the payload, not only onto stderr. `note()` is
+     * `if (!ctx.json) writer.err(...)`, so under `--json` the warning reached
+     * neither stream and a provisioning script adding one limit to a key whose
+     * column had gone bad discarded every other limit, with output
+     * indistinguishable from an ordinary edit. Same `--json` silence this branch
+     * already fixed in `credentials add-key`, on a path that destroys data
+     * rather than refusing.
+     *
+     * Present only when it happened: absence means "not replaced", which is what
+     * every other run reports, and a permanent `false` would change the shape of
+     * every existing response for one rare case.
+     */
+    let replaced = false;
     if (sets.length > 0 || unsets.length > 0) {
       // An unreadable matrix cannot be edited into: merging onto a value no
       // reader can parse would drop whatever the operator meant without saying
@@ -325,6 +341,10 @@ export const keysLimits: Command = {
               "replace them with --set instead",
           );
         }
+        // Set here and not above the throw: on that path nothing is replaced,
+        // and a flag meaning "unreadable" where the name says "replaced" is the
+        // kind of drift this file has already paid for elsewhere.
+        replaced = true;
         note(
           ctx,
           writer,
@@ -338,7 +358,7 @@ export const keysLimits: Command = {
       key = await setKeyLimits(store, id, { limits: next });
     }
 
-    emit(ctx, writer, key, () => {
+    emit(ctx, writer, replaced ? { ...key, limitsReplaced: true } : key, () => {
       const head = fields([
         ["id", key.id],
         ["label", key.label],

@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
 import { anthropicAdapter, type HttpClient, type ProviderAdapter } from "@omni/providers";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
 import { buildSnapshot, healthKey } from "@omni/router";
 import type { CredentialSecrets, Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
-import { captureLogger } from "@omni/testkit";
+import { captureLogger, entryOf } from "@omni/testkit";
 import { dispatch } from "../../src/dispatch/index.ts";
 import { createLoadRegistry } from "../../src/dispatch/loadRegistry.ts";
 
@@ -23,6 +24,19 @@ async function* textStream(text: string): AsyncGenerator<StreamEvent> {
     type: "end",
     stopReason: "endTurn",
     usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  };
+}
+
+/** A stream whose usage reports cache-creation tokens and nothing else. */
+async function* cacheWriteStream(cacheWriteTokens: number): AsyncGenerator<StreamEvent> {
+  yield { type: "start", id: "m", model: "m-1" };
+  yield { type: "blockStart", index: 0, block: { type: "text" } };
+  yield { type: "blockDelta", index: 0, delta: { type: "text", text: "ok" } };
+  yield { type: "blockEnd", index: 0 };
+  yield {
+    type: "end",
+    stopReason: "endTurn",
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens },
   };
 }
 
@@ -761,6 +775,112 @@ test("collects the stream for a non-streaming request", async () => {
   store.close();
 });
 
+/**
+ * `request_logs.degradations` is a **set**, asserted on the column rather than on
+ * any one reason.
+ *
+ * `noteDegradations` says so in its own docstring and one writer did not use it:
+ * the routing-exclusion loop pushed directly, and `eligible` emits
+ * `capability:providerNative` from inside its *credential* loop. So a pool of N
+ * targets across M accounts wrote N×M identical strings — on an ordinary
+ * web-search request that succeeded. The column is unbounded `TEXT`, nothing
+ * truncates on write or read, and the console renders one chip per entry keyed
+ * on the string: 24 duplicates and a React duplicate-key warning on the happy
+ * path.
+ *
+ * Written as an invariant over whatever the run produced, not as a count for
+ * this fixture. A test asserting "3 entries" would pass while a fourth writer
+ * started repeating itself; this one fails for any duplicate from any source,
+ * which is the property the docstring already claimed.
+ */
+test("a request never records the same degradation twice, however many accounts it skipped", async () => {
+  const store = await seeded(1);
+  // Three Anthropic accounts and three OpenAI ones, so the exclusion loop runs
+  // six times against two targets. Under a direct push this produced one row per
+  // (target, credential) pair rather than one per distinct reason.
+  for (const [id, provider] of [
+    ["a2", "anthropic"],
+    ["a3", "anthropic"],
+    ["o1", "openai"],
+    ["o2", "openai"],
+    ["o3", "openai"],
+  ] as const) {
+    await store.credentials.create({
+      id,
+      provider,
+      label: id,
+      authType: "apiKey",
+      enabled: true,
+      tier: 1,
+      weight: 1,
+      expiresAt: null,
+      accountEmail: null,
+      providerData: {},
+      disabledReason: null,
+      disabledAt: null,
+      accessToken: null,
+      refreshToken: null,
+      apiKey: "synthetic-key",
+      idToken: null,
+    });
+  }
+  await store.config.putModel({
+    id: "native",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "openai",
+        model: "gpt-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const adapter = stubAdapter(() => textStream("ok"));
+  const outcome = await dispatch(
+    {
+      ...req,
+      model: "native",
+      // An Anthropic-defined tool, which is the ordinary Claude-Code shape. It
+      // excludes every OpenAI account — the `size === 1` arm, on a request that
+      // then succeeds against Anthropic.
+      tools: [
+        {
+          kind: "provider",
+          provider: "anthropic",
+          family: "webSearch",
+          type: "web_search_20250305",
+          name: "web_search",
+          wire: {},
+        },
+      ],
+    },
+    { ...deps(store, adapter), adapters: { anthropic: adapter, openai: adapter } },
+    new AbortController().signal,
+    "req_dedupe",
+  );
+  await drain(outcome.events);
+  const { degradations } = outcome.log();
+
+  // The request succeeded, which is the point: this is not an error path.
+  expect(outcome.log().status).toBe(200);
+  // Three OpenAI accounts were skipped for one reason.
+  expect(degradations).toContain("excluded:capability:providerNative");
+  expect(new Set(degradations).size).toBe(degradations.length);
+});
+
 test("Anthropic-native capability exclusions omit credential IDs from degradations", async () => {
   const store = await seeded(1);
   await store.credentials.create({
@@ -810,6 +930,7 @@ test("Anthropic-native capability exclusions omit credential IDs from degradatio
       model: "native",
       tools: [
         {
+          kind: "provider",
           provider: "anthropic",
           family: "webSearch",
           type: "web_search_20260318",
@@ -827,7 +948,7 @@ test("Anthropic-native capability exclusions omit credential IDs from degradatio
   );
   await drain(outcome.events);
 
-  expect(outcome.log().degradations).toContain("excluded:capability:anthropicTools");
+  expect(outcome.log().degradations).toContain("excluded:capability:providerNative");
   expect(outcome.log().degradations.join(" ")).not.toContain("sensitive-openai-id");
   store.close();
 });
@@ -977,7 +1098,7 @@ test("failover hands the second provider the client's own tool names, not Anthro
     id: "openai",
     capabilities: { tools: true, images: true, reasoning: true },
     async send(r) {
-      for (const t of r.request.tools ?? []) if (t.provider === "custom") second.push(t.name);
+      for (const t of r.request.tools ?? []) if (t.kind === "portable") second.push(t.name);
       for (const m of r.request.messages) {
         for (const b of m.content) if (b.type === "toolUse") second.push(b.name);
       }
@@ -996,7 +1117,7 @@ test("failover hands the second provider the client's own tool names, not Anthro
       },
       { role: "user", content: [{ type: "toolResult", toolUseId: "tu_1", content: "done" }] },
     ],
-    tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+    tools: [{ kind: "portable", name: "session_search", inputSchema: { type: "object" } }],
   };
 
   const outcome = await dispatch(
@@ -1026,7 +1147,7 @@ const CLOAKED: ChatRequest = {
   model: "fast",
   stream: true,
   messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+  tools: [{ kind: "portable", name: "session_search", inputSchema: { type: "object" } }],
 };
 
 /** Answers the Anthropic leg with one canned HTTP response. */
@@ -1852,6 +1973,43 @@ test("prints a rejection line for a request that never reached a candidate", asy
   store.close();
 });
 
+test("prints a codec's own failure at the default level, provider and all", async () => {
+  // The other half of the same gate, and the regression that prompted it.
+  //
+  // `codecFailure` names the provider because that is what makes the line
+  // actionable — and naming it is precisely what used to suppress the line,
+  // since the gate inferred "came from upstream" from that field. A plugin codec
+  // throwing on every request logged `code=UPSTREAM` with no reason, which reads
+  // exactly like a provider outage, while the sentence naming the plugin and the
+  // hook existed and was withheld.
+  //
+  // Asserted at `info`, not `debug`: the whole claim is that it does not wait.
+  const store = await seeded(1);
+  const logger = captureLogger("info");
+  const adapter = stubAdapter(
+    () =>
+      new GatewayError("UPSTREAM", "acme-ai codec buildRequest threw", {
+        provider: "anthropic",
+        gatewayAuthored: true,
+      }),
+  );
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(rejections(logger)).toHaveLength(1);
+  const fields = rejections(logger)[0]?.fields;
+  // Both, together: which provider, and what actually happened to it.
+  expect(fields?.provider).toBe("anthropic");
+  expect(fields?.reason).toBe("acme-ai codec buildRequest threw");
+  store.close();
+});
+
 test("prints the upstream message only where debug output was asked for", async () => {
   const upstreamBody = "REJECTION_BODY_SENTINEL";
   for (const [level, expected] of [
@@ -1860,9 +2018,11 @@ test("prints the upstream message only where debug output was asked for", async 
   ] as const) {
     const store = await seeded(1);
     const logger = captureLogger(level);
-    // `provider` is what marks a message as the upstream's own, and `httpError`
-    // — the only constructor that copies a response body into one — always sets
-    // it. An error built without it is a different case, not a looser fixture.
+    // `provider` with no `gatewayAuthored` is what an upstream body looks like:
+    // `httpError` — the constructor that copies a response body into a message —
+    // sets the first and not the second, and the flag defaults off so every
+    // unaudited site reads this way too. An error built without a provider is a
+    // different case, not a looser fixture.
     const adapter = stubAdapter(
       () => new GatewayError("BAD_REQUEST", upstreamBody, { provider: "anthropic" }),
     );
@@ -2062,7 +2222,7 @@ const UNMARKED_PREFIX: ChatRequest = {
   stream: true,
   system: [{ type: "text", text: "You are a careful assistant. ".repeat(400) }],
   messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+  tools: [{ kind: "portable", name: "session_search", inputSchema: { type: "object" } }],
 };
 
 /** Runs the real Anthropic adapter and returns the bytes it put on the wire. */
@@ -2106,4 +2266,503 @@ test("the auto-cache setting reaches the wire, on and off", async () => {
   await off.config.putSettings({ autoCacheEnabled: false });
   expect(await wireBodyFor(off)).not.toContain("cache_control");
   off.close();
+});
+
+test("a candidate whose adapter is not injected fails INTERNAL, not silently", async () => {
+  // Dead code until `ProviderId` widened: with a closed union of six and
+  // `ADAPTERS` total over it, `deps.adapters[provider]` could not miss. It can
+  // now, because `deps.adapters` is a separate injection point from
+  // `PROVIDER_DESCRIPTORS` and the two can disagree — grok has a descriptor, so
+  // the router admits the target, and the map handed to dispatch has no adapter
+  // for it.
+  //
+  // `INTERNAL` and a throw, deliberately. Reaching here means the router
+  // admitted a candidate it should have excluded, which is a gateway bug rather
+  // than an operator one; a target naming a provider that is genuinely not
+  // installed is excluded upstream as `provider:missing` and never arrives.
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "g1",
+    provider: "grok",
+    label: "g1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "grok-key",
+    idToken: null,
+  });
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "grok",
+        model: "grok-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const configured = {
+    ...deps(
+      store,
+      stubAdapter(() => textStream("unreachable")),
+    ),
+    adapters: { anthropic: stubAdapter(() => textStream("unreachable")) },
+  };
+
+  // Thrown while draining, not from `dispatch` itself: the attempt loop runs
+  // inside the returned generator, so nothing fails until the first pull. That
+  // is worth pinning — a caller awaiting `dispatch` and never draining would see
+  // a clean resolve.
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_no_adapter");
+  // One drain, not two: a generator that has thrown is done, and a second pull
+  // resolves empty rather than throwing again.
+  const failure = await drain(outcome.events).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  expect(failure).toMatchObject({
+    code: "INTERNAL",
+    // Not retryable, so it ends the request rather than burning every remaining
+    // candidate on a bug none of them can fix.
+    retryable: false,
+  });
+  expect((failure as Error).message).toMatch(/no adapter for provider grok/);
+  store.close();
+});
+
+test("an adapter map built by a caller cannot answer for an Object member", async () => {
+  // `DispatchDeps.adapters` is a public injection point — this file, the proxy
+  // routes, and any embedder construct it as an ordinary object literal, so
+  // `adapters["constructor"]` answers the `Object` constructor. Before the read
+  // site asked `Object.hasOwn`, the lookup succeeded and dispatch called `.send`
+  // on a function that has no `send`: a raw `TypeError` where `INTERNAL` was
+  // intended, and `classify` turns that into a 500 blaming the gateway.
+  //
+  // Normalising the map inside `createApp` did not cover this, which is the
+  // whole point — this test deliberately does not go through `createApp`, and
+  // that is the path the earlier fix missed.
+  //
+  // Both injection points are supplied, because the router excludes an
+  // unregistered provider before dispatch ever looks: `providers` says the
+  // installation has `constructor`, `adapters` does not, and their disagreeing
+  // is exactly what `INTERNAL` reports.
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "p1",
+    provider: "constructor",
+    label: "p1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "k",
+    idToken: null,
+  });
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "constructor",
+        model: "m-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 1, output: 1 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const anthropic = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
+  const providers: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    constructor: { ...anthropic, id: "constructor" },
+  };
+  const configured = {
+    ...deps(
+      store,
+      stubAdapter(() => textStream("unreachable")),
+    ),
+    providers,
+    // A plain literal with a prototype, exactly as every caller writes one.
+    adapters: { anthropic: stubAdapter(() => textStream("unreachable")) },
+  };
+
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_proto");
+  const failure = await drain(outcome.events).then(
+    () => null,
+    (error: unknown) => error,
+  );
+
+  expect(failure).toMatchObject({ code: "INTERNAL", retryable: false });
+  expect((failure as Error).message).toMatch(/no adapter for provider constructor/);
+  // Not a `TypeError` about `.send`, which is what the un-guarded lookup gave.
+  expect((failure as Error).message).not.toMatch(/is not a function/);
+  store.close();
+});
+
+test("a request routed on the injected registry is priced on it too", async () => {
+  // The end-to-end shape of the disagreement. `dispatch` threads
+  // `deps.providers` into `resolveModel` and `rank`, so a provider that exists
+  // only in the injected registry routes and dispatches — and for one round
+  // `priceOf` still read the module-global one, so its cache writes were priced
+  // at zero. The request succeeded, the row was written, and the only evidence
+  // was a `costUsd` that was too low. No throw, no log line, no degradation.
+  //
+  // The target is deliberately legacy-shaped: no explicit `cacheWrite5m`, so the
+  // descriptor's multiplier is what decides the bill. A target carrying its own
+  // write price never consults the descriptor and could not show this.
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "la1",
+    provider: "late-arrival",
+    label: "la1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "k",
+    idToken: null,
+  });
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "late-arrival",
+        model: "m-1",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25, cacheRead: 0.5 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const anthropic = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
+  const providers: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    "late-arrival": { ...anthropic, id: "late-arrival" },
+  };
+  const adapter = stubAdapter(() => cacheWriteStream(1_000_000));
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), providers, adapters: { "late-arrival": adapter } },
+    new AbortController().signal,
+    "req_priced",
+  );
+  await drain(outcome.events);
+
+  const log = outcome.log();
+  expect(log.status).toBe(200);
+  expect(log.cacheWriteTokens).toBe(1_000_000);
+  // 5 * 1.25 = 6.25 per million, Anthropic's write multiplier, which is what the
+  // injected descriptor carries. Zero is what the bug produced.
+  expect(log.costUsd).toBeCloseTo(6.25, 10);
+  store.close();
+});
+
+test("a request routed on the default registry is priced on it too", async () => {
+  // The production path, and the half the test above does not cover. That one
+  // passes `providers`, so both it and the unit tests exercise only the injected
+  // branch — `deps.providers ?? {}` at the call site breaks the default path and
+  // survives the whole dispatch suite, caught only incidentally by unrelated
+  // rate-limit assertions. Adding the new behaviour's test without its
+  // counterpart is how the coverage came out one-sided.
+  //
+  // Same shape as its sibling: a legacy target with no explicit `cacheWrite5m`,
+  // so the descriptor's multiplier is what decides the bill. `anthropic` is a
+  // real provider, so the default registry is what has to supply it.
+  const store = await seeded(1);
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25, cacheRead: 0.5 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const adapter = stubAdapter(() => cacheWriteStream(1_000_000));
+  // No `providers`, exactly as `createApp` builds these deps.
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), adapters: { anthropic: adapter } },
+    new AbortController().signal,
+    "req_default_priced",
+  );
+  await drain(outcome.events);
+
+  const log = outcome.log();
+  expect(log.status).toBe(200);
+  expect(log.cacheWriteTokens).toBe(1_000_000);
+  // Anthropic's real 1.25x write multiplier: 5 * 1.25 = 6.25 per million. Zero
+  // is what an empty or bypassed registry produces.
+  expect(log.costUsd).toBeCloseTo(6.25, 10);
+  store.close();
+});
+
+test("a bare model name is inferred against the injected registry", async () => {
+  // The third threading in this function, and the one no test reached. Every
+  // other dispatch test asks for a *configured* virtual model, so
+  // `resolveModel` returns from `snapshot.models.get(name)` before it ever
+  // consults a registry — which means `deps.providers ?? {}` at that call site
+  // survived the entire suite, not just this file.
+  //
+  // Found by extending the reviewer's own method to the sites they did not name
+  // rather than stopping at the one they did. All three threadings now have a
+  // test that fails if the registry stops reaching them.
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "la1",
+    provider: "late-arrival",
+    label: "la1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "k",
+    idToken: null,
+  });
+  // Deliberately no `putModel`: the name has to be inferred from its prefix,
+  // which is the only path that reads the registry.
+  await store.config.removeModel("fast");
+
+  const anthropic = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS");
+  const providers: ProviderDescriptors = {
+    ...PROVIDER_DESCRIPTORS,
+    "late-arrival": { ...anthropic, id: "late-arrival", modelPrefixes: ["latearr-"] },
+  };
+  const adapter = stubAdapter(() => textStream("ok"));
+  const outcome = await dispatch(
+    { ...req, model: "latearr-1" },
+    { ...deps(store, adapter), providers, adapters: { "late-arrival": adapter } },
+    new AbortController().signal,
+    "req_inferred",
+  );
+  await drain(outcome.events);
+
+  const log = outcome.log();
+  expect(log.status).toBe(200);
+  // Routed to the provider only the injected registry declares a prefix for.
+  expect(log.resolvedProvider).toBe("late-arrival");
+  expect(log.resolvedModel).toBe("latearr-1");
+  store.close();
+});
+
+test("a bare model name is inferred against the default registry", async () => {
+  // The production half of the test above, and the one that actually pins the
+  // threading. `deps.providers ?? {}` at the `resolveModel` call site only
+  // changes behaviour when `deps.providers` is *undefined*, so a test that
+  // injects a registry cannot catch it — every other dispatch test uses a
+  // configured virtual model, where `resolveModel` returns before consulting a
+  // registry at all. Both gaps had to close for the mutant to die.
+  //
+  // No `putModel`, so `claude-opus-4` has to be inferred from the `claude-`
+  // prefix the real registry declares for anthropic.
+  const store = await seeded(1);
+  await store.config.removeModel("fast");
+
+  const adapter = stubAdapter(() => textStream("ok"));
+  const outcome = await dispatch(
+    { ...req, model: "claude-opus-4" },
+    { ...deps(store, adapter), adapters: { anthropic: adapter } },
+    new AbortController().signal,
+    "req_inferred_default",
+  );
+  await drain(outcome.events);
+
+  const log = outcome.log();
+  expect(log.status).toBe(200);
+  expect(log.resolvedProvider).toBe("anthropic");
+  expect(log.resolvedModel).toBe("claude-opus-4");
+  store.close();
+});
+
+test("a sentinel registry reaches every consumer dispatch has", async () => {
+  // The pattern test, rather than one more instance of it.
+  //
+  // Three review rounds each found the same defect in the previous round's fix:
+  // a registry threaded into some of the functions reachable from `dispatch` and
+  // not all. The prototype sweep stopped at one package; the injection work
+  // threaded `resolveModel` and `rank` but not `priceOf`; the tests pinning that
+  // covered the injected path but not the default. Each was found by hand, one
+  // at a time, by someone thinking to try that particular site.
+  //
+  // This asks the question of the whole call graph at once. `deps.providers`
+  // holds one synthetic provider and none of the six real ones, so a consumer
+  // reading the module-global instead sees a registry without `sentinel` and
+  // fails loudly rather than differently:
+  //
+  //   - `resolveModel` cannot infer `sent-1` from its prefix -> NO_CANDIDATES
+  //   - `eligible` excludes the target as `provider:missing` -> no candidates
+  //   - `priceOf` finds no `writeOverInput` -> cache writes billed at zero
+  //
+  // Two dispatches because one request cannot reach all three: a *configured*
+  // model short-circuits `resolveModel` before it consults any registry, while
+  // an *inferred* one goes through `synthesize`. One sentinel registry, both
+  // paths, and **both assert `costUsd`**.
+  //
+  // The inferred leg did not, and the comment here explained why: an inferred
+  // target was priced from `PROVIDER_MODEL_CATALOG`, a different global that is
+  // not injected, so it carried zero prices and could show no multiplier. That
+  // stopped being true when `synthesize` moved onto `descriptor.catalog` — and
+  // this comment went on telling the next reader not to bother, one assertion
+  // away from covering the fix. A stale reason not to test something is worse
+  // than no comment: it is the previous round's defect wearing the previous
+  // round's justification, which is exactly how three rounds in a row went.
+  const sentinel: ProviderDescriptors = {
+    sentinel: {
+      ...entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS"),
+      id: "sentinel",
+      modelPrefixes: ["sent-"],
+      // Its own catalog, listing only the inferred model, at prices no built-in
+      // charges. A fallback to the global cannot produce these numbers by
+      // coincidence — the global has no `sentinel` key at all.
+      catalog: {
+        defaultModel: "sent-1",
+        authTypes: ["apiKey"],
+        models: [
+          {
+            id: "sent-1",
+            label: "Sentinel One",
+            pricing: {
+              input: 7,
+              output: 33,
+              cacheRead: 0.7,
+              cacheWrite5m: 11,
+              cacheWrite1h: 21,
+            },
+            limits: { contextWindow: 123_000, maxOutputTokens: 4_096 },
+          },
+        ],
+      },
+    },
+  };
+
+  const store = await seeded(1);
+  await store.credentials.create({
+    id: "s1",
+    provider: "sentinel",
+    label: "s1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "k",
+    idToken: null,
+  });
+  // A configured pool with legacy pricing: no explicit `cacheWrite5m`, so the
+  // bill is decided by the descriptor's multiplier, which only the sentinel
+  // registry supplies. This is the `eligible` + `priceOf` half.
+  await store.config.putModel({
+    id: "fast",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      {
+        provider: "sentinel",
+        model: "s-model",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 5, output: 25, cacheRead: 0.5 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+
+  const configured = {
+    ...deps(
+      store,
+      stubAdapter(() => cacheWriteStream(1_000_000)),
+    ),
+    providers: sentinel,
+    adapters: { sentinel: stubAdapter(() => cacheWriteStream(1_000_000)) },
+  };
+  const priced = await dispatch(req, configured, new AbortController().signal, "req_sentinel_a");
+  await drain(priced.events);
+  const pricedLog = priced.log();
+
+  expect(pricedLog.status).toBe(200);
+  expect(pricedLog.resolvedProvider).toBe("sentinel");
+  // 5 * 1.25 = 6.25 per million. Zero is what a fallback to the global gives.
+  expect(pricedLog.costUsd).toBeCloseTo(6.25, 10);
+
+  // And the `resolveModel` half: the same registry has to be what infers a bare
+  // name from its prefix, *and* what prices what it inferred.
+  await store.config.removeModel("fast");
+  const inferredAdapter = stubAdapter(() => cacheWriteStream(1_000_000));
+  const inferred = await dispatch(
+    { ...req, model: "sent-1" },
+    {
+      ...deps(store, inferredAdapter),
+      providers: sentinel,
+      adapters: { sentinel: inferredAdapter },
+    },
+    new AbortController().signal,
+    "req_sentinel_b",
+  );
+  await drain(inferred.events);
+  const inferredLog = inferred.log();
+
+  expect(inferredLog.status).toBe(200);
+  expect(inferredLog.resolvedProvider).toBe("sentinel");
+  expect(inferredLog.resolvedModel).toBe("sent-1");
+  // One million cache-write tokens at the descriptor's own `cacheWrite5m` of 11.
+  // Zero is what pricing from the un-injected global gives, and 6.25 is what the
+  // configured leg above produces — so neither a fallback nor a copy of the
+  // other half can pass this by accident.
+  expect(inferredLog.costUsd).toBeCloseTo(11, 10);
+  store.close();
 });

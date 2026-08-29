@@ -1,4 +1,5 @@
 import { describeError } from "@omni/ir";
+import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import type { Store, VirtualModel } from "@omni/store";
 import { listCredentials } from "./credentials.ts";
 import { type ModelLimits, modelDisplayName, resolveModelLimits } from "./modelLimits.ts";
@@ -43,7 +44,16 @@ export type SetupInput = {
 type Described = { model: VirtualModel; limits: ModelLimits; label: string };
 
 /** Every model, with the limits the `/v1/models` listing would report for it. */
-export async function describeModelsForSetup(store: Store): Promise<Described[]> {
+export async function describeModelsForSetup(
+  store: Store,
+  // Same split as `dryRun`, and the more expensive one to get wrong: this figure
+  // is persisted as `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and into opencode's config,
+  // where it outlives the command that wrote it. Without the registry a
+  // plugin-supplied model resolved to `{}` and the limit was simply omitted, so
+  // the agent fell back to its own default while `GET /v1/models` on the same
+  // gateway reported the real window.
+  providers?: ProviderDescriptors,
+): Promise<Described[]> {
   const models = await listModels(store);
   const credentials = (await listCredentials(store)).map((credential) => ({
     // `id` carries the pin: a target pinned to one account is described by that
@@ -59,8 +69,8 @@ export async function describeModelsForSetup(store: Store): Promise<Described[]>
   }));
   return models.map((model) => ({
     model,
-    limits: resolveModelLimits(model, credentials),
-    label: modelDisplayName(model),
+    limits: resolveModelLimits(model, credentials, providers),
+    label: modelDisplayName(model, providers),
   }));
 }
 

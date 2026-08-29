@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { type RegisteredProvider, readProviders } from "@omni/control";
 import { describeError, type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
 import {
@@ -48,6 +49,14 @@ export type LoadedPlugin = {
 export type PluginLoadResult = {
   plugins: LoadedPlugin[];
   failures: PluginLoadFailure[];
+  /**
+   * Providers plugins supplied, in load order.
+   *
+   * Returned rather than written into `PROVIDER_DESCRIPTORS` here, because the
+   * loader reports and does not mutate global state — and because boot is the
+   * one place that knows registration must complete before `createApp`.
+   */
+  providers: RegisteredProvider[];
 };
 
 /**
@@ -190,6 +199,7 @@ export async function loadPlugins(deps: {
   const now = deps.now ?? Date.now;
   const plugins: LoadedPlugin[] = [];
   const failures: PluginLoadFailure[] = [];
+  const providers: RegisteredProvider[] = [];
 
   let entries: string[];
   try {
@@ -198,7 +208,7 @@ export async function loadPlugins(deps: {
   } catch {
     // Almost every install has no plugins and never creates the directory. A
     // warning here would appear in every boot log for a feature nobody uses.
-    return { plugins, failures };
+    return { plugins, failures, providers };
   }
 
   for (const id of entries.sort()) {
@@ -244,6 +254,7 @@ export async function loadPlugins(deps: {
     }
 
     let routes: readonly PluginRoute[] = [];
+    let pending: readonly RegisteredProvider[] = [];
     let migrations: readonly PluginMigration[] = [];
     if (manifest.server !== undefined) {
       const entry = resolve(home, manifest.server);
@@ -288,6 +299,22 @@ export async function loadPlugins(deps: {
         }
       }
 
+      // Read from the definition, **before** `setup` runs and independently of
+      // whether it succeeds. `readProviders` is the whole of what a non-gateway
+      // reader needs, which is why it is a field rather than a capability: the
+      // CLI calls the same function against the same import and never builds a
+      // context at all.
+      //
+      // A malformed provider still skips the plugin. `setup` has not run at this
+      // point, so nothing is half-applied — except the migrations above, which
+      // are committed and recorded on their own track by design.
+      try {
+        pending = readProviders(id, manifest, definition);
+      } catch (error) {
+        fail(reason(error));
+        continue;
+      }
+
       try {
         const context = buildContext({
           manifest,
@@ -301,6 +328,9 @@ export async function loadPlugins(deps: {
         const result = await definition.setup(context);
         routes = result?.routes ?? [];
       } catch (error) {
+        // Held, not published — and this `continue` is why `pending` is not
+        // applied above. A provider whose plugin then failed `setup` would be
+        // routable while the thing serving it never initialised.
         fail(reason(error));
         continue;
       }
@@ -339,9 +369,20 @@ export async function loadPlugins(deps: {
           : { reason: `requires dashboard sdk ${manifest.sdk}, host ships ${deps.sdkVersion}` }),
       };
     }
+    // Past every `continue`, which is the whole point of it being here.
+    //
+    // An earlier version pushed as soon as `setup` returned, and a plugin
+    // rejected nineteen lines later for a bad `ui` path still had its provider
+    // installed: it routed traffic, held credentials and priced requests while
+    // the operator saw only `plugin unavailable` and found it in neither
+    // `/api/plugins` nor its own routes. The comment there claimed to prevent
+    // exactly that. **A registration is published where the plugin is
+    // accepted, not where `setup` returns** — the two are different lines and
+    // reviewers should keep them that way.
+    providers.push(...pending);
     plugins.push(loaded);
     logger.info("plugin loaded", { plugin: id });
   }
 
-  return { plugins, failures };
+  return { plugins, failures, providers };
 }

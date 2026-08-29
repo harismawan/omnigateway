@@ -1,18 +1,20 @@
-import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
-import { BODY_ORDER, orderFields } from "../body.ts";
+import { GatewayError } from "@omni/ir";
+import { orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
-import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
+import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeChat } from "./decode.ts";
+import { kimiDescriptor } from "./descriptor.ts";
 import { kimiDeviceHeaders } from "./device.ts";
+import { kimiBodyOrder, kimiProfile } from "./profile.ts";
 import { toChatWire } from "./wire.ts";
 
 const BASE_URL = "https://api.kimi.com/coding/v1/chat/completions";
 
 export const kimiAdapter: ProviderAdapter = {
   id: "kimi",
-  capabilities: PROVIDER_CAPABILITIES.kimi,
+  capabilities: kimiDescriptor.capabilities,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const { body, degradations } = toChatWire(req.request, req.model);
@@ -30,7 +32,7 @@ export const kimiAdapter: ProviderAdapter = {
       ...kimiDeviceHeaders(req.credentials.providerData),
     ];
 
-    const profile = PROFILES.kimi;
+    const profile = kimiProfile;
     const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
 
     const res = await req.http({
@@ -38,7 +40,7 @@ export const kimiAdapter: ProviderAdapter = {
       url: BASE_URL,
       method: "POST",
       headers,
-      body: JSON.stringify(orderFields({ ...body, stream: true }, BODY_ORDER.kimi)),
+      body: JSON.stringify(orderFields({ ...body, stream: true }, kimiBodyOrder)),
       signal: req.signal,
     });
 

@@ -1,4 +1,34 @@
-export type ProviderId = "anthropic" | "openai" | "kimi" | "kilo" | "grok" | "custom";
+/**
+ * Which provider serves a request.
+ *
+ * A string, not a union of the six that ship in the box. A provider loaded from
+ * `<root>/plugins/` at boot has an id that no compiled-in union could contain,
+ * and this type appears in the request shape itself — `vendor` is keyed by it —
+ * so a closed union here is a closed door there.
+ *
+ * The exhaustiveness this gave up was real and is not replaced by anything
+ * equally strong. Stated exactly, because an earlier version of this comment
+ * claimed more than holds and outlived the retraction in four other files:
+ *
+ * - Every field on `ProviderDescriptor` is required with no defaults, so a
+ *   descriptor that *exists* but is incomplete does not compile. That much the
+ *   compiler still does.
+ * - A provider **missing** from one of the id-keyed tables is not a compile
+ *   error. Five of them are hand-written literals typed `Record<string, …>`,
+ *   which accepts any subset; only `PROVIDERS` is assembled by walking another.
+ *   Deleting a built-in's line from any of the five typechecks cleanly —
+ *   measured. The unused-import lint and
+ *   `packages/providers/test/descriptor.test.ts` are what catch it.
+ * - A lookup keyed on a *stored* id — a target read back from SQLite naming a
+ *   provider no longer installed — is genuinely partial, and
+ *   `noUncheckedIndexedAccess` makes each of those a compile error at the point
+ *   of use. Lean on that rather than casting it away.
+ *
+ * The format rule lives in `@omni/providers`, next to the registry that enforces
+ * it. It is not expressed here because `@omni/ir` must not know what a provider
+ * is, only that a request names one.
+ */
+export type ProviderId = string;
 
 /**
  * A caller-placed cache breakpoint, in the only shape providers accept.
@@ -50,26 +80,36 @@ export type ToolResultBlock = {
 };
 
 /**
- * A content block Anthropic owns end to end, carried through unread.
+ * A content block one provider owns end to end, carried through unread.
  *
  * Server tool use, web-search and web-fetch results, code-execution output,
  * tool-search references, advisor results and MCP server-tool blocks are all
- * produced by Anthropic and replayed to Anthropic. Their payloads carry
- * citations, container state, caller metadata and signatures the gateway has no
- * business rewriting, and no other provider in this set can express them — so
- * the canonical form holds the discriminator it needs to route on and keeps the
- * rest of the payload byte-identical.
+ * produced by one provider and replayed to it. Their payloads carry citations,
+ * container state, caller metadata and signatures the gateway has no business
+ * rewriting, and no other provider can express them — so the canonical form
+ * holds the discriminator it needs to route on and keeps the rest of the payload
+ * byte-identical.
+ *
+ * **`provider` is what makes the routing rule generic.** A block records who
+ * produced it, and the router admits only targets of that provider. That is one
+ * comparison against the block's own data, and it replaced both a
+ * `target.provider === "anthropic"` test inside the pure router and a
+ * `Record<ProviderId, boolean>` table in this file listing who could accept
+ * Anthropic's dialect. Today Anthropic is the only producer; nothing about the
+ * shape says so.
  *
  * Deliberately *not* a `toolUse`/`toolResult` pair: those two are the portable
  * shape, and they are the ones that enter tool-id correlation, orphan removal,
  * cross-provider translation and RTK compression. A native block does none of
  * that. Folding the two together would mean the gateway invents an `id` for a
- * block Anthropic already identified, or drops a result whose matching use it
+ * block the provider already identified, or drops a result whose matching use it
  * never registered.
  */
-export type AnthropicNativeBlock = {
-  type: "anthropicNative";
-  /** Anthropic's own `type` string, e.g. `server_tool_use`. Never normalized. */
+export type ProviderNativeBlock = {
+  type: "providerNative";
+  /** Which provider produced it, and therefore the only one that may receive it. */
+  provider: ProviderId;
+  /** The provider's own `type` string, e.g. `server_tool_use`. Never normalized. */
   blockType: string;
   /** The whole wire object minus `type`, structurally intact. */
   data: Record<string, unknown>;
@@ -82,7 +122,7 @@ export type ContentBlock =
   | ThinkingBlock
   | ToolUseBlock
   | ToolResultBlock
-  | AnthropicNativeBlock;
+  | ProviderNativeBlock;
 
 /**
  * Reads a block's cache breakpoint without every caller narrowing the union.
@@ -114,9 +154,17 @@ export type Message = { role: "user" | "assistant" | "system"; content: ContentB
 /**
  * A portable tool: a name, a description and a JSON Schema every provider in
  * this set can express. Unchanged in meaning from when it was the only shape.
+ *
+ * The discriminant is `kind`, and it used to be `provider: "custom"` — the same
+ * string as the `custom` **provider id**, meaning something else entirely. Two
+ * core sites wrote `provider: "custom"` as this tool-kind tag
+ * (`apps/gateway/src/ingress/openai.ts`, `packages/control/src/dryRun.ts`), so a
+ * grep for the custom provider found both and was wrong about both. Once
+ * `ProviderDefinedToolDef` below carries a real `ProviderId`, that collision
+ * stops being merely confusing and starts being ambiguous, so the tag moved.
  */
 export type CustomToolDef = {
-  provider: "custom";
+  kind: "portable";
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
@@ -159,7 +207,9 @@ export type AnthropicToolFamily =
  * mismatched pair is a request the client got wrong, not one to repair.
  */
 export type AnthropicToolDef = {
-  provider: "anthropic";
+  kind: "provider";
+  /** Whose schema this is, and therefore the only provider that may receive it. */
+  provider: ProviderId;
   family: AnthropicToolFamily;
   /** Exact versioned wire `type`. */
   type: string;
@@ -235,7 +285,7 @@ export type ChatRequest = {
   stopSequences?: string[];
   stream: boolean;
   reasoning?: ReasoningConfig;
-  vendor?: Partial<Record<ProviderId, Record<string, unknown>>>;
+  vendor?: Record<string, Record<string, unknown>>;
   /**
    * Beta feature names the client opted into, verbatim.
    *

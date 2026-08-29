@@ -55,12 +55,14 @@ test("replayed server tool use and its result survive ingress intact", () => {
   expect(req.messages[1]?.content).toEqual([
     { type: "text", text: "looking" },
     {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       blockType: "server_tool_use",
       data: { id: "srvtoolu_1", name: "web_search", input: { query: "bun" } },
     },
     {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       blockType: "web_search_tool_result",
       data: {
         tool_use_id: "srvtoolu_1",
@@ -95,7 +97,8 @@ test("a server tool error result is carried, not rejected", () => {
     ],
   });
   expect(req.messages[0]?.content[0]).toEqual({
-    type: "anthropicNative",
+    type: "providerNative",
+    provider: "anthropic",
     blockType: "web_search_tool_result",
     data: {
       tool_use_id: "srvtoolu_1",
@@ -137,7 +140,8 @@ test("redacted thinking survives instead of being flattened to empty text", () =
     ],
   });
   expect(req.messages[0]?.content[0]).toEqual({
-    type: "anthropicNative",
+    type: "providerNative",
+    provider: "anthropic",
     blockType: "redacted_thinking",
     data: { data: "EncryptedBlob" },
   });
@@ -600,7 +604,8 @@ test("a native block keeps its cache breakpoint as a canonical field", () => {
     ],
   });
   expect(req.messages[0]?.content[0]).toEqual({
-    type: "anthropicNative",
+    type: "providerNative",
+    provider: "anthropic",
     blockType: "search_result",
     data: { source: "s", title: "t", content: [{ type: "text", text: "x" }] },
     cacheControl: { type: "ephemeral", ttl: "1h" },
@@ -909,7 +914,8 @@ test("required unknown inputs preserve explicit null", () => {
       messages: [{ role: "assistant", content: [block] }],
     });
     expect(request.messages[0]?.content[0]).toMatchObject({
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       data: { input: null },
     });
   }
@@ -954,7 +960,8 @@ test("native block validation preserves nested provider payloads", () => {
     ],
   });
   expect(req.messages[0]?.content[0]).toMatchObject({
-    type: "anthropicNative",
+    type: "providerNative",
+    provider: "anthropic",
     data: {
       content: [{ type: "future_nested_result", opaque: { x: 1 } }],
       caller: { type: "code_execution_20260521", tool_id: "srvtoolu_2" },

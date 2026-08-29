@@ -235,7 +235,7 @@ export async function* decodeAnthropic(
           yield {
             type: "blockStart",
             index,
-            block: { type: "anthropicNative", blockType: cb.type, data },
+            block: { type: "providerNative", provider: "anthropic", blockType: cb.type, data },
           };
         } else {
           yield protocolError(`unrecognized Anthropic content block type "${String(cb.type)}"`);
@@ -269,7 +269,11 @@ export async function* decodeAnthropic(
             type: "blockDelta",
             index,
             delta: nativeBlocks.has(index)
-              ? { type: "anthropicNativeJson", partial: delta.partial_json ?? "" }
+              ? {
+                  type: "providerNativeJson",
+                  provider: "anthropic",
+                  partial: delta.partial_json ?? "",
+                }
               : { type: "toolJson", partial: delta.partial_json ?? "" },
           };
         else if (delta.type === "citations_delta")
@@ -277,8 +281,13 @@ export async function* decodeAnthropic(
             type: "blockDelta",
             index,
             delta: {
-              type: "anthropicNative",
+              type: "providerNative",
+              provider: "anthropic",
               deltaType: delta.type,
+              // A citation delta lands on the *text* block it annotates, not on
+              // a native block. Stating the fold here is what lets `collect()`
+              // do that without knowing Anthropic's name for it.
+              fold: "citation",
               data: { citation: delta.citation },
             },
           };
@@ -287,8 +296,12 @@ export async function* decodeAnthropic(
             type: "blockDelta",
             index,
             delta: {
-              type: "anthropicNative",
+              type: "providerNative",
+              provider: "anthropic",
               deltaType: delta.type,
+              // Merged into the block's data when the block completes, rather
+              // than replayed as a separate delta.
+              fold: "merge",
               data: {
                 ...(delta.content === undefined ? {} : { content: delta.content }),
                 ...(delta.encrypted_content === undefined

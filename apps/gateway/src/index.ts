@@ -19,6 +19,7 @@ import { createDeferredStop, createShutdown, type Shutdown } from "./lifecycle.t
 import { startMaintenance } from "./maintenance.ts";
 import { startRefreshScheduler } from "./oauth/scheduler.ts";
 import { createPluginEventBus } from "./plugins/events.ts";
+import { installPluginProviders } from "./plugins/install.ts";
 import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
 import { createBroadcaster, DEFAULT_FLOOR_MS, INVALIDATION_FLOORS } from "./stream/broadcaster.ts";
@@ -239,7 +240,14 @@ async function main(): Promise<void> {
     // the install rather than making an operator total up warnings.
     logger.warn("plugin unavailable", { plugin: failure.id, reason: failure.reason });
   }
-  logger.info("plugins resolved", { count: loadedPlugins.plugins.length, path: pluginRoot });
+  // Before `createApp`, which is the ordering constraint this call site owns.
+  // See `installPluginProviders` for why it is a function rather than a loop.
+  installPluginProviders(loadedPlugins.providers, logger);
+
+  logger.info("plugins resolved", {
+    count: loadedPlugins.plugins.length,
+    path: pluginRoot,
+  });
 
   const streamRing = createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
   const broadcaster = createBroadcaster({

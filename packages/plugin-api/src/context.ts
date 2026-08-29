@@ -100,6 +100,50 @@ export type PluginChannels = {
 };
 
 /**
+ * A provider this plugin supplies, declared rather than registered.
+ *
+ * **Declared, and that is the whole point.** The first version was a
+ * `ctx.provider.register(…)` capability called from `setup`, which meant a
+ * descriptor existed only after arbitrary plugin code had run. That is fine for
+ * the gateway, which runs `setup` anyway — and impossible for every other reader.
+ * The CLI answers "what does this model advertise" (`omni setup`, whose figure is
+ * written into an agent's configuration file and outlives the command) and "what
+ * would route" (`omni models dry-run`), and it must not run `setup`: that opens
+ * channels, applies migrations and registers routes, none of which a diagnostic
+ * should do. With the capability, both answered from the six compiled-in
+ * providers and silently omitted every plugin one.
+ *
+ * `migrations` below is the precedent and the reason this shape is not new: it
+ * is static for exactly the same reason, that the host needs it before and
+ * without running `setup`.
+ *
+ * **The CLI still imports the module**, and this comment is the wrong place to
+ * imply otherwise. Reading this field means `await import(entry)`, which runs
+ * the module's top-level code. What it does *not* do is construct a
+ * `PluginContext` or call `setup`, so no store, channel, event bus or migration
+ * is reachable from it. Narrower than before, not zero.
+ *
+ * `descriptor.id` must equal the plugin's own id. A plugin cannot supply a
+ * provider named after another plugin, for the same reason it cannot open
+ * another plugin's channel topic or name another plugin's table: the id comes
+ * from the validated manifest and the host does not take the plugin's word for
+ * it. A mismatch skips the plugin and is reported like any other load failure.
+ *
+ * **The types here are structural rather than the real ones**, and that is a
+ * consequence of ordering rather than a design choice. The descriptor and codec
+ * are defined in `@omni/providers`, in terms of `@omni/ir`, and this package is
+ * published with no `@omni/*` imports — a single one would put an unresolvable
+ * `workspace:*` into a stranger's dependency tree. `@omni/ir` is published in a
+ * later sub-project; until then an in-repo provider can be typed against the
+ * real contract and a third-party one cannot. The host validates the shape when
+ * it reads this, so nothing is trusted merely because this type is loose.
+ */
+export type PluginProvider = {
+  descriptor: unknown;
+  codec: unknown;
+};
+
+/**
  * A request as a plugin route handler sees it.
  *
  * Deliberately not Elysia's context, and deliberately not a raw `Request`. The
@@ -164,6 +208,13 @@ export type PluginContext = {
   net?: PluginFetch;
   events?: PluginEvents;
   channels?: PluginChannels;
+  /**
+   * No `provider` member, and its absence is deliberate. Supplying a provider is
+   * a `providers` field on `PluginDefinition` below, not a capability handed to
+   * `setup` — see `PluginProvider` for why. The `provider` capability in the
+   * manifest still gates it: intent stays auditable from the manifest, the
+   * declaration just is not reached through here.
+   */
   /** The plugin's own settings, seeded from the manifest's `defaults`. */
   config: Readonly<Record<string, unknown>>;
 };
@@ -177,6 +228,20 @@ export type PluginSetupResult =
 
 export type PluginDefinition = {
   migrations?: readonly PluginMigration[];
+  /**
+   * The providers this plugin supplies, if any.
+   *
+   * Beside `migrations` rather than inside `setup`, and for the same reason: a
+   * reader that is not the gateway needs this without running the plugin. See
+   * `PluginProvider`.
+   *
+   * An array rather than one entry, because a plugin fronting several upstreams
+   * is the obvious next request and a single-valued field would be widened by
+   * whoever asked. Each `descriptor.id` must still equal the plugin's own id, so
+   * today an array of more than one is refused — the shape is the room, not the
+   * permission.
+   */
+  providers?: readonly PluginProvider[];
   setup(context: PluginContext): PluginSetupResult | Promise<PluginSetupResult>;
 };
 

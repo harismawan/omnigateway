@@ -99,7 +99,7 @@ export async function* anthropicStream(
             ? { type: "text", text: "" }
             : b.type === "thinking"
               ? { type: "thinking", thinking: "" }
-              : b.type === "anthropicNative"
+              : b.type === "providerNative"
                 ? // Emitted whole: a result block arrives complete in its start
                   // frame, and a client that reconstructs the message from the
                   // stream needs the payload, not a placeholder.
@@ -128,7 +128,7 @@ export async function* anthropicStream(
               ? { type: "thinking_delta", thinking: d.text }
               : d.type === "thinkingSignature"
                 ? { type: "signature_delta", signature: d.signature }
-                : d.type === "anthropicNative"
+                : d.type === "providerNative"
                   ? { type: d.deltaType, ...d.data }
                   : { type: "input_json_delta", partial_json: d.partial };
         yield frame("content_block_delta", {
@@ -197,7 +197,7 @@ export function anthropicResponse(collected: CollectedResponse, requestId: strin
             return { type: "thinking", thinking: b.text, signature: b.signature };
           case "toolUse":
             return { type: "tool_use", id: b.id, name: b.name, input: b.input };
-          case "anthropicNative":
+          case "providerNative":
             return { ...b.data, type: b.blockType };
           default:
             return { type: "text", text: "" };

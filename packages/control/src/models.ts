@@ -1,5 +1,6 @@
 import { GatewayError, type ProviderId } from "@omni/ir";
-import { type CatalogAuth, catalogModelAuths } from "@omni/providers/catalog";
+import { type CatalogAuth, entryModelAuths, UNKNOWN_PROVIDER_AUTHS } from "@omni/providers/catalog";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import {
   type Credential,
   resolvePin,
@@ -121,7 +122,31 @@ function unreachable(
     if (pinned === undefined && grandfathered.has(pairOf(target))) continue;
     const have = pinned === undefined ? held.get(target.provider) : new Set([pinned.authType]);
     if (have === undefined) continue;
-    const reach = catalogModelAuths(target.provider, target.model);
+    // The **descriptor registry** at call time, not `PROVIDER_MODEL_CATALOG`.
+    // `registerProvider` mutates the first and never the second, so a provider
+    // loaded from `<root>/plugins/` is only ever in the first — and asking the
+    // second about one returned the fail-open default while its descriptor sat
+    // there declaring `auth: ["oauth"]`. `putModel` then saved a target whose
+    // model the operator's only account cannot reach, while the console's
+    // picker, reading the same fact off `/api/catalog`, hid it.
+    //
+    // A plain index read, deliberately. `target.provider` is unvalidated input —
+    // `sqlite/config.ts` parses stored targets with no schema — so `constructor`
+    // can arrive here, and on an ordinary object literal that answers the `Object`
+    // constructor rather than `undefined`. What makes this safe is that
+    // `PROVIDER_DESCRIPTORS` has a null prototype, which is the invariant
+    // `packages/control/test/providerTables.test.ts` discovers and enforces.
+    //
+    // An `Object.hasOwn` here was written first and removed: every mutant of it
+    // survived, because the invariant already decides the case. CLAUDE.md names
+    // that exact move — a guard at the reader covers only the readers that ask
+    // existence, and partial protection reading as total is worse than none.
+    const entry = PROVIDER_DESCRIPTORS[target.provider]?.catalog;
+    // Unknown provider keeps the shared default rather than a local one: an
+    // empty set here would read as "no credential can reach this" and refuse
+    // every target naming a provider this build does not contain.
+    const reach =
+      entry === undefined ? UNKNOWN_PROVIDER_AUTHS : entryModelAuths(entry, target.model);
     if (reach.some((auth) => have.has(auth))) continue;
     // The pinned case names the account rather than the provider's whole set:
     // told "every kilo credential here is OAuth" while holding an API key, an

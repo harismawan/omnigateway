@@ -2,9 +2,13 @@ import { expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { CatalogProvider as ServerCatalogProvider } from "@omni/control";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type BodyArtifact, createStore, deriveKey, type Store } from "@omni/store";
 import {
+  captureLogger,
+  entryOf,
   memoryStore,
   requestLog,
   seedApiKey,
@@ -12,7 +16,31 @@ import {
   target,
   virtualModel,
 } from "@omni/testkit";
+import type { CatalogProvider as ConsoleCatalogProvider } from "../../../dashboard/src/api/types.ts";
 import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
+
+/**
+ * The console's mirror, pinned to the server's own type.
+ *
+ * Both directions, because each catches what the other cannot: a server field
+ * the console never declared, and a console rename the server knows nothing
+ * about. The runtime key list below catches neither on its own — it is a third
+ * independent restatement, and renaming `colour` to `color` in the console plus
+ * its fixtures left every suite green while production painted
+ * `--p-<id>: undefined`.
+ *
+ * A `satisfies`-style assignment rather than a runtime assertion, because these
+ * are types: the check runs under `bun run typecheck` and reports there. Written
+ * as two declarations rather than a conditional type so the compiler names the
+ * offending field instead of collapsing the answer to `false`.
+ *
+ * Deliberately **not** `toEqual` on a sample response. Optional fields are
+ * absent on most providers, so a value-level comparison would pass while the
+ * types disagreed about everything optional — which is where a mirror actually
+ * drifts.
+ */
+const _consoleAcceptsServer: ConsoleCatalogProvider = {} as ServerCatalogProvider;
+const _serverAcceptsConsole: ServerCatalogProvider = {} as ConsoleCatalogProvider;
 
 const NOW = 1_000_000;
 const SESSION_TTL_MS = 60_000;
@@ -29,6 +57,8 @@ type HarnessOptions = {
   store?: Store;
   /** Whether `OMNI_BODY_LOGGING_ALLOWED` was set at boot. */
   bodyLoggingAllowed?: boolean;
+  /** For the routes whose only visible effect is a line on stdout. */
+  logger?: AdminDeps["logger"];
 };
 
 async function harness({
@@ -37,6 +67,7 @@ async function harness({
   now = NOW,
   store: provided,
   bodyLoggingAllowed,
+  logger,
 }: HarnessOptions = {}) {
   const store = provided ?? (await memoryStore());
   const admin = createAdminAuth(store, { now: () => now, sessionTtlMs: SESSION_TTL_MS });
@@ -67,6 +98,7 @@ async function harness({
     broadcaster: { invalidate: (topic) => void topics.push(topic) },
     ...(consoleDeps === undefined ? {} : { console: consoleDeps }),
     ...(bodyLoggingAllowed === undefined ? {} : { bodyLoggingAllowed }),
+    ...(logger === undefined ? {} : { logger }),
   });
 
   const call = (
@@ -219,6 +251,7 @@ test("every data route requires a session", async () => {
     "/api/credentials/health",
     "/api/credentials/quota/history",
     "/api/models",
+    "/api/catalog",
     "/api/keys",
     "/api/settings",
     "/api/usage",
@@ -247,6 +280,46 @@ test("custom API-key credentials are created behind admin auth", async () => {
   expect(response.status).toBe(200);
   expect(await response.text()).not.toContain("test-provider-key");
   expect((await store.credentials.list())[0]?.providerData).toMatchObject({ endpointId: "local" });
+});
+
+test("the route refuses a provider this gateway does not have", async () => {
+  // At the route, not only at `createApiKeyCredential`. Existence is now an
+  // injectable `ProviderExists` predicate defaulting to `isProviderId`, because
+  // the CLI has to answer it from plugin manifests — it never loads plugins. The
+  // gateway does load them, so its own registry is the whole answer and it must
+  // keep passing nothing. Pinned here because the function-level test says
+  // nothing about which argument this call site supplies, and threading a
+  // fourth one through by mistake would silently let an operator mint an account
+  // for a provider that cannot serve it: stored, listed, and failing on first
+  // dispatch.
+  const { call, store } = await harness();
+
+  const rejected = await call("POST", "/api/credentials", {
+    provider: "nonesuch",
+    apiKey: "test-provider-key",
+  });
+  expect(rejected.status).toBe(400);
+  expect(await rejected.text()).toContain("no provider named");
+
+  // Format and existence are separate questions with separate messages, so an
+  // operator learns which one they got wrong.
+  const malformed = await call("POST", "/api/credentials", {
+    provider: "Acme Corp",
+    apiKey: "test-provider-key",
+  });
+  expect(malformed.status).toBe(400);
+
+  // Nothing stored by either — the failure being closed is what matters, not the
+  // status code, and a route that 400s while writing would pass the assertions
+  // above.
+  expect(await store.credentials.list()).toEqual([]);
+
+  // The positive control: a real provider still mints, so "refuses everything"
+  // cannot pass this test.
+  expect(
+    (await call("POST", "/api/credentials", { provider: "anthropic", apiKey: "test-provider-key" }))
+      .status,
+  ).toBe(200);
 });
 
 test("custom credential endpoint conflicts return 409", async () => {
@@ -1607,4 +1680,191 @@ test("a wrong current password is indistinguishable from a short new one", async
   expect(await rightCurrent.text()).toBe(await wrongCurrent.text());
   // And neither attempt moved anything.
   expect(await admin.login("hunter2hunter2")).not.toBeNull();
+});
+
+/**
+ * The guard that makes the table above worth having.
+ *
+ * Without it the table is a list someone has to remember to extend, which is
+ * exactly the kind of list that stops being complete. Elysia already holds the
+ * routing table this surface registered, so the set of mutating routes is a
+ * fact to be read rather than one to be restated.
+ */
+test("the mutation table covers every mutating route this surface registers", async () => {
+  const { app } = await harness();
+  const registered = (app as unknown as { routes: { method: string; path: string }[] }).routes
+    .filter((route) => route.method !== "GET")
+    .map((route) => `${route.method} ${route.path}`)
+    .sort();
+
+  const covered = MUTATIONS.map((mutation) => `${mutation.method} ${mutation.route}`).sort();
+
+  expect(covered).toEqual(registered);
+});
+
+/**
+ * The companion to the mutation table, and the same argument.
+ *
+ * The session list above is hand-maintained, so a new unguarded GET simply is
+ * not in it — which is how `/api/catalog` shipped with the guard written
+ * correctly and nothing that would have noticed if it had not been. Rather than
+ * reconcile two lists, this drives every GET the surface actually registers.
+ */
+test("every GET route this surface registers refuses an anonymous caller", async () => {
+  const { app } = await harness();
+  const registered = (app as unknown as { routes: { method: string; path: string }[] }).routes
+    .filter((route) => route.method === "GET")
+    // `/api/status` answers without a session by design: it is what the login
+    // screen asks *before* there is one.
+    .filter((route) => route.path !== "/api/status")
+    .map((route) => route.path);
+
+  expect(registered.length).toBeGreaterThan(5);
+
+  const refused: string[] = [];
+  for (const path of registered) {
+    // A concrete instance of a parameterised path. The value need not exist —
+    // the session check runs before anything looks it up.
+    const concrete = path.replace(/:[^/]+/g, "probe");
+    const response = await app.handle(new Request(`http://localhost${concrete}`));
+    if (response.status !== 401) refused.push(`${concrete} -> ${response.status}`);
+  }
+
+  expect(refused).toEqual([]);
+});
+
+test("a provider whose colour had to be repaired is said out loud, once", async () => {
+  // `providerCatalog` refuses a value that would close the declaration it is
+  // written into and serves a neutral instead. Substituting quietly is the
+  // other failure — grey is a colour somebody might have chosen — so the route
+  // is what turns the substitution into a line an operator can find.
+  //
+  // Once, not once per request: the catalog is assembled from a registry fixed
+  // at boot, so the same repair would otherwise be announced every time a
+  // console loads.
+  const logger = captureLogger();
+  const { call } = await harness({ logger });
+  const presentation = entryOf(PROVIDER_DESCRIPTORS, "anthropic", "PROVIDER_DESCRIPTORS")
+    .presentation as {
+    colour: { light: string; dark: string };
+  };
+  const original = presentation.colour;
+  try {
+    presentation.colour = { light: "red; } body { display: none; ", dark: original.dark };
+    const first = (await (await call("GET", "/api/catalog")).json()) as {
+      providers: Array<{ id: string; colour: { light: string } }>;
+    };
+    await call("GET", "/api/catalog");
+
+    expect(first.providers.find((p) => p.id === "anthropic")?.colour.light).not.toContain(";");
+  } finally {
+    presentation.colour = original;
+  }
+
+  const repaired = logger.records.filter((line) => line.msg === "provider catalog repaired");
+  expect(repaired).toHaveLength(1);
+  expect(repaired[0]?.level).toBe("warn");
+  expect(repaired[0]?.fields.reason).toContain("anthropic colour.light");
+});
+
+/**
+ * The wire boundary between this response and the console's mirror of it.
+ *
+ * Boundary rule 12 forbids the console importing `@omni/providers`, so
+ * `apps/dashboard/src/api/types.ts` restates `CatalogProvider` by hand and every
+ * console test builds fixtures from that restatement. Two independent
+ * declarations with no test between them: `packages/control/test/catalog.test.ts`
+ * pins the *server* half against the real descriptors, and the console's fixtures
+ * pin the *client* half against the mirror, so renaming or dropping a field
+ * leaves both suites green while production sends a shape the console cannot
+ * read.
+ *
+ * What that looks like: drop `colour` and `theme/GlobalStyle.ts` writes
+ * `--p-anthropic: undefined` into the stylesheet by string concatenation, in both
+ * themes; drop `defaultModel` and the model picker preselects nothing; drop
+ * `authTypes` and the credential dialog offers no way in. The shell gate does not
+ * help — the response still parses.
+ *
+ * The key set is written out here rather than derived, which is the point: it is
+ * the console's contract restated independently. Same instrument as
+ * `packages/store/test/swap.test.ts` reading the forwarder's source, and for the
+ * same reason — a behavioural test covers the field it names and says nothing
+ * about the next one.
+ *
+ * **But a restatement pins one side only, and this docstring used to claim both.**
+ * "A change to either side has to come through this list" was false for the
+ * console: renaming `colour` to `color` in `apps/dashboard/src/api/types.ts` and
+ * in its fixtures left the dashboard typechecking, both suites green, and
+ * production painting `--p-<id>: undefined` in both themes. The list is a third
+ * independent copy pinned to the server, not a bridge between the two.
+ *
+ * So the response is also assigned to the console's own type below. That is a
+ * compile-time check and it runs under `bun run typecheck`, not `bun test` — a
+ * drift shows up there rather than here, which is why the runtime list stays as
+ * well. The two catch different things: the assignment catches a console-side
+ * rename, the list catches a server-side field the console never declared.
+ */
+test("the catalog response carries exactly the keys the console declares", async () => {
+  const { call } = await harness();
+
+  const raw = (await (await call("GET", "/api/catalog")).json()) as {
+    providers: Record<string, unknown>[];
+  };
+  expect(raw.providers.length).toBeGreaterThan(0);
+
+  const body = raw;
+
+  // Optional in the console's type, so present on some providers and not others.
+  const OPTIONAL = new Set(["pasteHint", "callback"]);
+  const REQUIRED = ["id", "label", "order", "colour", "defaultModel", "authTypes", "models"];
+
+  for (const provider of body.providers) {
+    const keys = Object.keys(provider);
+    expect(keys.filter((key) => !OPTIONAL.has(key)).sort()).toEqual([...REQUIRED].sort());
+    expect(keys.every((key) => REQUIRED.includes(key) || OPTIONAL.has(key))).toBe(true);
+  }
+
+  // The model entries too, since the picker and the price display read them and
+  // a dropped `pricing` renders as a blank rather than as an error.
+  //
+  // Across **every** provider, not the first one holding models. Checking one
+  // let an unmirrored key on every other provider through — and per-provider
+  // divergence is exactly where a plugin-supplied catalog would differ.
+  //
+  // `oauthLimits` is optional-and-asserted rather than filtered out. Filtering
+  // it unconditionally meant the server could stop sending it entirely and this
+  // test — whose whole purpose is pinning the wire shape — stayed green.
+  const MODEL_REQUIRED = ["id", "label", "pricing", "limits", "auth"];
+  const MODEL_OPTIONAL = new Set(["oauthLimits"]);
+  let modelsSeen = 0;
+  for (const provider of body.providers) {
+    for (const model of provider.models as Record<string, unknown>[]) {
+      modelsSeen += 1;
+      const keys = Object.keys(model);
+      expect(keys.filter((key) => !MODEL_OPTIONAL.has(key)).sort()).toEqual(
+        [...MODEL_REQUIRED].sort(),
+      );
+      expect(keys.every((key) => MODEL_REQUIRED.includes(key) || MODEL_OPTIONAL.has(key))).toBe(
+        true,
+      );
+    }
+  }
+  expect(modelsSeen).toBeGreaterThan(0);
+
+  // And `oauthLimits` really does reach the wire where a model states one, so
+  // "optional" above cannot quietly become "never sent".
+  const withOauth = body.providers
+    .flatMap((provider) => provider.models as Record<string, unknown>[])
+    .filter((model) => model.oauthLimits !== undefined);
+  expect(withOauth.length).toBeGreaterThan(0);
+});
+
+test("a catalog with nothing to repair says nothing", async () => {
+  // The other half, and the one that keeps the assertion above honest: a route
+  // that logged unconditionally would satisfy it too.
+  const logger = captureLogger();
+  const { call } = await harness({ logger });
+  await call("GET", "/api/catalog");
+
+  expect(logger.records.filter((line) => line.msg === "provider catalog repaired")).toEqual([]);
 });

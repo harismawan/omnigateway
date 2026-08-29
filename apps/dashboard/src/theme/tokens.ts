@@ -1,3 +1,16 @@
+import type { ProviderId } from "@omni/ir";
+
+/**
+ * The gateway's own provider id, not a second spelling of it.
+ *
+ * This file used to declare its own union off a hand-written list, which meant
+ * the console held two `ProviderId` types that were structurally identical
+ * until the day they were not. Re-exported rather than redeclared so that
+ * everything importing it from here keeps working while there stays exactly one
+ * definition, in `@omni/ir`.
+ */
+export type { ProviderId };
+
 /**
  * The console reads as an instrument rack: a graphite chassis, panel modules
  * with silkscreened legends, and colour that is never decorative. Hue carries
@@ -38,14 +51,6 @@ export const theme = {
 
     shadow: "var(--shadow)",
   },
-  provider: {
-    anthropic: "var(--p-anthropic)",
-    openai: "var(--p-openai)",
-    kimi: "var(--p-kimi)",
-    kilo: "var(--p-kilo)",
-    grok: "var(--p-grok)",
-    custom: "var(--p-custom)",
-  },
   font: {
     sans: '"Archivo Variable", ui-sans-serif, system-ui, sans-serif',
     mono: '"Spline Sans Mono Variable", ui-monospace, "SF Mono", Menlo, monospace',
@@ -68,19 +73,46 @@ export const theme = {
 
 export type AppTheme = typeof theme;
 
-/** Provider ids the gateway can hold credentials for. */
-export const PROVIDER_IDS = ["anthropic", "openai", "kimi", "kilo", "grok", "custom"] as const;
-export type ProviderId = (typeof PROVIDER_IDS)[number];
+/**
+ * The custom property carrying one provider's hue.
+ *
+ * A name, not a value: `ProviderPalette` in `GlobalStyle.ts` writes what is
+ * behind it, from the catalog the shell gate has already loaded. Takes a bare
+ * string rather than a `ProviderId` because a provider supplied by a plugin is
+ * not in that union and is coloured the same way as any other.
+ *
+ * Which display name and which order go with that id are catalog questions now,
+ * and answered through `useProviderCatalog()`. This file no longer holds a
+ * provider list of its own — there was one, derived from a build-time registry,
+ * and it could not have seen a plugin's provider at all.
+ */
+export const SAFE_PROVIDER_ID = /^[a-z][a-z0-9-]{0,31}$/;
 
-export const PROVIDER_LABEL: Record<ProviderId, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  kimi: "Kimi",
-  kilo: "Kilo",
-  grok: "Grok",
-  custom: "OpenAI Compatible",
-};
-
-export function providerColor(provider: ProviderId): string {
-  return theme.provider[provider];
+export function providerColor(provider: string): string {
+  // **Checked here, because this is where the string becomes CSS.**
+  //
+  // styled-components does not escape an interpolation, so this function is a
+  // direct path from a stored value into the stylesheet. Four call sites hand it
+  // `credential.provider`, `target.provider` and `log.resolvedProvider`, none of
+  // which pass through `/api/catalog` — `packages/control` withholds a provider
+  // whose id is not a usable custom-property name, and these never meet that
+  // check. `providerIdSchema` guards the write path, but not the read one:
+  // `sqlite/config.ts` parses `virtual_models.targets` with a bare `JSON.parse`,
+  // so a restored snapshot or a hand-edited database carries whatever it says.
+  // An id closing the declaration and opening its own would put
+  // attacker-authored rules in the console's stylesheet.
+  //
+  // The pattern is restated rather than imported: boundary rule 12 forbids the
+  // console importing `@omni/providers` at all, so this is the same move
+  // `heldAuths` makes for the null-prototype rule. `PROVIDER_ID_PATTERN` stays
+  // the source of truth and `apps/gateway/test/routes/providerIdMirror.test.ts`
+  // pins this copy to it, the one place that may import both.
+  if (!SAFE_PROVIDER_ID.test(provider)) return "var(--ink-faint)";
+  // The fallback is not decoration either. `var(--p-x)` with no second argument
+  // is invalid at computed-value time, so the property inherits — and for
+  // `color` and `border-left-color` that means the provider bar becomes the
+  // colour of the text beside it, which is the one element whose whole job is
+  // carrying identity by hue. Reachable without any hostile input: uninstall a
+  // plugin and its accounts and log rows outlive its palette entry.
+  return `var(--p-${provider}, var(--ink-faint))`;
 }

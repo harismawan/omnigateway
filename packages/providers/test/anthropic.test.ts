@@ -96,7 +96,7 @@ test("translates tools and tool choice", () => {
       ...base,
       tools: [
         {
-          provider: "custom",
+          kind: "portable",
           name: "get_weather",
           description: "d",
           inputSchema: { type: "object" },
@@ -442,7 +442,7 @@ test("renders a cache breakpoint on a tool definition", () => {
       ...base,
       tools: [
         {
-          provider: "custom",
+          kind: "portable",
           name: "f",
           inputSchema: { type: "object" },
           cacheControl: { type: "ephemeral", ttl: "1h" },
@@ -1085,7 +1085,7 @@ const WITH_SIGNATURES: ChatRequest = deepFreeze({
     { role: "user", content: [{ type: "toolResult", toolUseId: "tu_1", content: "ok" }] },
   ],
   tools: MEASURED_SIGNATURES.map((name) => ({
-    provider: "custom" as const,
+    kind: "portable" as const,
     name,
     inputSchema: { type: "object" },
   })),
@@ -1265,7 +1265,7 @@ function textOfTokens(tokens: number): string {
 
 /** A tool whose description alone clears the gate. */
 const BIG_TOOL: ToolDef = deepFreeze({
-  provider: "custom",
+  kind: "portable",
   name: "session_search",
   description: BIG_SYSTEM,
   inputSchema: { type: "object" },
@@ -1279,7 +1279,7 @@ const BIG_TOOL: ToolDef = deepFreeze({
 const UNMARKED: ChatRequest = deepFreeze({
   ...base,
   system: [{ type: "text", text: BIG_SYSTEM }],
-  tools: [{ provider: "custom", name: "session_search", inputSchema: { type: "object" } }],
+  tools: [{ kind: "portable", name: "session_search", inputSchema: { type: "object" } }],
 });
 
 /** Tools, system and history all present, and each clearing the increment. */
@@ -1289,7 +1289,7 @@ const EVERYTHING: ChatRequest = deepFreeze({
     { type: "text", text: "first" },
     { type: "text", text: BIG_SYSTEM },
   ],
-  tools: [BIG_TOOL, { provider: "custom", name: "b", inputSchema: { type: "object" } }],
+  tools: [BIG_TOOL, { kind: "portable", name: "b", inputSchema: { type: "object" } }],
   messages: [{ role: "user", content: [{ type: "text", text: BIG_HISTORY }] }],
 });
 
@@ -1400,7 +1400,7 @@ test("each tier is measured against the last marker placed, not against the tier
     ...base,
     tools: [
       {
-        provider: "custom",
+        kind: "portable",
         name: "t",
         description: textOfTokens(1990),
         inputSchema: { type: "object" },
@@ -1480,7 +1480,7 @@ test("the oauth identity line is never the block a marker lands on", () => {
   // increment closes it as an ordinary case: fifteen is not a thousand.
   const toolsOnly: ChatRequest = {
     ...base,
-    tools: [BIG_TOOL, { provider: "custom", name: "b", inputSchema: { type: "object" } }],
+    tools: [BIG_TOOL, { kind: "portable", name: "b", inputSchema: { type: "object" } }],
   };
   const { body } = toWire(toolsOnly, "m", { oauth: true, autoCache: true });
   expect(body.system).toEqual([{ type: "text", text: OAUTH_IDENTITY }]);
@@ -1570,7 +1570,7 @@ test("skips a prompt too small for Anthropic to cache", () => {
 test("marks the last tool when the request carries no system prompt", () => {
   const toolsOnly: ChatRequest = {
     ...base,
-    tools: [BIG_TOOL, { provider: "custom", name: "b", inputSchema: { type: "object" } }],
+    tools: [BIG_TOOL, { kind: "portable", name: "b", inputSchema: { type: "object" } }],
   };
   const { body } = toWire(toolsOnly, "m", { oauth: false, autoCache: true });
   expect(body.system).toBeUndefined();
@@ -1850,11 +1850,12 @@ test("the history marker lands on a trailing tool_result block", () => {
 });
 
 test("the history marker lands on a trailing document block", () => {
-  // `document` reaches the wire only as an `anthropicNative` block — the IR has
+  // `document` reaches the wire only as a `providerNative` block — the IR has
   // no document variant, and the encoder re-emits the payload under the
   // `blockType` the decoder recorded.
   const req = historyEndingWith("user", {
-    type: "anthropicNative",
+    type: "providerNative",
+    provider: "anthropic",
     blockType: "document",
     data: { source: { type: "text", media_type: "text/plain", data: "notes" } },
   });
@@ -1864,7 +1865,7 @@ test("the history marker lands on a trailing document block", () => {
 });
 
 test("a native block outside the allowlist is walked past, not marked", () => {
-  // The other half of the guard. A `web_search_result` is `anthropicNative`
+  // The other half of the guard. A `web_search_result` is `providerNative`
   // like the document above, and Anthropic takes no `cache_control` on it, so
   // the walk has to keep going rather than mark the last block it finds.
   const req: ChatRequest = {
@@ -1875,7 +1876,12 @@ test("a native block outside the allowlist is walked past, not marked", () => {
         role: "assistant",
         content: [
           { type: "text", text: "found it" },
-          { type: "anthropicNative", blockType: "web_search_result", data: { url: "https://x" } },
+          {
+            type: "providerNative",
+            provider: "anthropic",
+            blockType: "web_search_result",
+            data: { url: "https://x" },
+          },
         ],
       },
     ],
@@ -1883,4 +1889,114 @@ test("a native block outside the allowlist is walked past, not marked", () => {
   const { body } = toWire(req, "m", { oauth: false, autoCache: true });
   expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[0]"]);
   expect(markedHistoryTypes(body)).toEqual(["text"]);
+});
+
+/**
+ * The self-checks this adapter gave up in the `kind` rename, restored.
+ *
+ * `providerNative.data` is opaque — whatever its producer put in it — and a
+ * provider-defined tool's `wire` bag likewise. Both were spread into an
+ * Anthropic request without looking at who produced them, so a foreign
+ * provider's payload would have been transmitted to Anthropic verbatim.
+ *
+ * Before the `anthropicNative` → `providerNative` rename the block carried no
+ * producer and the IR *type* was the check, total by construction. The rename
+ * gave it a `provider` field and the encoder went on ignoring it. `encodeTool`
+ * documented losing its equivalent and argued no guard was needed because
+ * `requiredProvider` admitted only the owning provider's targets; that function
+ * returned the *first* owner rather than every one, so the premise was false and
+ * the branch was reachable by a request naming two providers.
+ *
+ * `INTERNAL` and a throw, not a drop: reaching here means routing admitted a
+ * target it should have excluded, which is a gateway bug and must not read like
+ * an operator's misconfiguration — the same split dispatch makes for a missing
+ * adapter.
+ */
+test("a foreign provider-native block is refused rather than forwarded", () => {
+  const req: ChatRequest = {
+    ...base,
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "providerNative",
+            provider: "acme",
+            blockType: "acme_lookup",
+            data: { id: "srv_1", secret_state: "acme-only" },
+          },
+        ],
+      },
+    ],
+  };
+
+  let thrown: unknown;
+  try {
+    toWire(req, "m", { oauth: false, autoCache: false });
+  } catch (error) {
+    thrown = error;
+  }
+
+  expect(thrown).toBeInstanceOf(GatewayError);
+  expect((thrown as GatewayError).code).toBe("INTERNAL");
+  // The producer is named, because "a block was refused" sends a reader to look
+  // at the wrong provider's adapter.
+  expect((thrown as GatewayError).message).toContain("acme");
+  // And the payload is not in the message: `data` is a provider's own opaque
+  // state and this string reaches a log line.
+  expect((thrown as GatewayError).message).not.toContain("acme-only");
+});
+
+test("a foreign provider-defined tool is refused rather than encoded as Anthropic's", () => {
+  const req: ChatRequest = {
+    ...base,
+    tools: [
+      {
+        kind: "provider",
+        provider: "acme",
+        family: "webSearch",
+        type: "acme_search_v1",
+        name: "acme_search",
+        wire: { endpoint: "https://acme.example" },
+      } as ToolDef,
+    ],
+  };
+
+  expect(() => toWire(req, "m", { oauth: false, autoCache: false })).toThrow(/acme/);
+});
+
+test("this provider's own native block and tool still encode unchanged", () => {
+  // The positive control both guards need: "refuses everything" satisfies each
+  // assertion above.
+  const req: ChatRequest = {
+    ...base,
+    tools: [
+      {
+        kind: "provider",
+        provider: "anthropic",
+        family: "webSearch",
+        type: "web_search_20250305",
+        name: "web_search",
+        wire: { max_uses: 3 },
+      } as ToolDef,
+    ],
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "providerNative",
+            provider: "anthropic",
+            blockType: "web_search_tool_result",
+            data: { tool_use_id: "srvtoolu_1", content: [] },
+          },
+        ],
+      },
+    ],
+  };
+
+  const { body } = toWire(req, "m", { oauth: false, autoCache: false });
+  expect(body.tools).toEqual([{ type: "web_search_20250305", name: "web_search", max_uses: 3 }]);
+  const block = (body.messages[0] as { content: unknown[] }).content[0];
+  expect(block).toEqual({ type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] });
 });

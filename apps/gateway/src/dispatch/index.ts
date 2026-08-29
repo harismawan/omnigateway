@@ -11,6 +11,7 @@ import {
   type StreamEvent,
 } from "@omni/ir";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
+import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import {
   blankHealth,
   type Candidate,
@@ -39,6 +40,15 @@ export type DispatchDeps = {
   store: Store;
   snapshots: RoutingSnapshotSource;
   adapters: Readonly<Partial<Record<ProviderId, ProviderAdapter>>>;
+  /**
+   * Which providers this installation has. Defaults to the real registry.
+   *
+   * A separate injection point from `adapters`, and the two can disagree —
+   * that disagreement is exactly what the `INTERNAL "no adapter for provider"`
+   * throw below reports. Threaded into `resolveModel` and `rank` so routing
+   * judges the same installation this lookup does.
+   */
+  providers?: ProviderDescriptors;
   /** Order-preserving transport. Never globalThis.fetch — see Global Constraints. */
   http: HttpClient;
   now: () => number;
@@ -156,13 +166,18 @@ export async function dispatch(
   /**
    * Re-wraps a classified error, keeping who wrote the message.
    *
-   * `provider` is the redaction gate's only input; dropping it here is what
-   * made every re-wrapped upstream error read as gateway-authored.
+   * `provider` and `gatewayAuthored` are the redaction gate's two inputs, and
+   * dropping either here reverses the answer in its own direction: without the
+   * first every re-wrapped upstream error read as gateway-authored, and without
+   * the second a codec's own failure — the case the flag exists for — arrived
+   * with its reason withheld anyway. The second was live for exactly as long as
+   * it took a test to ask.
    */
   const rewrap = (classified: ReturnType<typeof classify>, message: string): GatewayError =>
     new GatewayError(classified.code, message, {
       ...(classified.retryAfterMs === undefined ? {} : { retryAfterMs: classified.retryAfterMs }),
       ...(classified.provider === undefined ? {} : { provider: classified.provider }),
+      ...(classified.gatewayAuthored ? { gatewayAuthored: true } : {}),
     });
 
   /**
@@ -231,7 +246,7 @@ export async function dispatch(
     log.rtkEstimatedTokensSaved = transformed.report.estimatedTokensSaved;
     log.rtkFilters = transformed.report.filters;
     checkCancellation();
-    model = resolveModel(dispatchRequest.model, snapshot);
+    model = resolveModel(dispatchRequest.model, snapshot, deps.providers);
   } catch (error) {
     clearDeadline();
     if (isClientAbort(error)) return fail("TIMEOUT", "client disconnected", true);
@@ -246,6 +261,13 @@ export async function dispatch(
     now: startedAt,
     rand: deps.rand(),
     load: deps.loadRegistry.counts(),
+    // Threaded rather than left to the router's default, so routing, the
+    // adapter lookup and pricing all judge the same installation. Every site in
+    // this function passes `deps.providers` the same way and `undefined`
+    // everywhere selects the same real registry — one spelling, because the
+    // round that added two threadings and forgot the third is what more than
+    // one costs.
+    providers: deps.providers,
   });
 
   logger.debug("routing candidates ranked", {
@@ -257,13 +279,31 @@ export async function dispatch(
   });
 
   for (const e of excluded) {
-    const capabilityOnly = e.reason === "capability:anthropicTools";
-    log.degradations.push(
-      capabilityOnly ? `excluded:${e.reason}` : `excluded:${e.credentialId}:${e.reason}`,
-    );
+    // A capability exclusion is a fact about the target's provider, not about
+    // the account, so naming an account there would blame one that is fine.
+    // Read off the router's own discriminator rather than off the reason
+    // string: that string is persisted, and matching it made renaming the
+    // concept a silent change to what gets redacted.
+    const aboutTheTarget = e.kind === "target";
+    // Through `noteDegradations`, not a bare push. This was the one writer in
+    // the file that bypassed it, and it is the one that can repeat: `eligible`
+    // emits `capability:providerNative` from inside its credential loop, so a
+    // pool of 5 targets across 6 accounts produced 24 identical rows — on an
+    // ordinary web-search request that *succeeded*. `request_logs.degradations`
+    // is unbounded text, and the console renders one chip per entry keyed on the
+    // string, so the logs panel showed 24 duplicates and a React duplicate-key
+    // warning on the happy path.
+    //
+    // Deduping here rather than moving `drop()` out of that loop, because the
+    // per-credential emission is what makes the *other* reasons name the account
+    // they are about. The set semantics `noteDegradations` documents twenty
+    // lines above is the invariant; this was the site that did not hold it.
+    noteDegradations([
+      aboutTheTarget ? `excluded:${e.reason}` : `excluded:${e.credentialId}:${e.reason}`,
+    ]);
     logger.debug("routing candidate excluded", {
       requestId,
-      ...(capabilityOnly ? {} : { credentialId: e.credentialId }),
+      ...(aboutTheTarget ? {} : { credentialId: e.credentialId }),
       reason: e.reason,
     });
   }
@@ -397,7 +437,28 @@ export async function dispatch(
             candidate.credential.expiresAt !== null &&
             candidate.credential.expiresAt - DISPATCH_REFRESH_LEAD_MS <= attemptNow;
 
-          const adapter = deps.adapters[candidate.target.provider];
+          // `Object.hasOwn`, and here rather than at whoever built the map.
+          //
+          // `candidate.target.provider` is a stored string, and `deps.adapters`
+          // is a public injection point constructed directly by callers and by
+          // tests — an ordinary object literal, which answers the `Object`
+          // constructor for `constructor`. The lookup would then succeed and
+          // `adapter.send` would be called on a function that has no `send`.
+          //
+          // Nothing normalises the map upstream. An earlier version did so in
+          // `createApp`, which covered exactly one of the ways this object is
+          // built; that was deleted rather than kept, because a guard covering
+          // one construction path reads as if it covers all of them.
+          //
+          // Guarding at the read site rather than at construction is the whole
+          // point: this is the one place always on the path, and it cannot be
+          // bypassed by a caller who builds the map some other way. The
+          // `@omni/providers` tables drop their prototypes for the same reason
+          // — one invariant where the value is read, not a rule every producer
+          // has to remember.
+          const adapter = Object.hasOwn(deps.adapters, candidate.target.provider)
+            ? deps.adapters[candidate.target.provider]
+            : undefined;
           if (adapter === undefined) {
             throw new GatewayError(
               "INTERNAL",
@@ -468,10 +529,21 @@ export async function dispatch(
                   log.outputTokens = event.usage.outputTokens;
                   log.cacheReadTokens = event.usage.cacheReadTokens;
                   log.cacheWriteTokens = event.usage.cacheWriteTokens;
+                  // `deps.providers`, the same registry routing judged this
+                  // candidate against. Reading the module-global here instead
+                  // let the two disagree: a provider that the injected registry
+                  // held and the global one did not would route, dispatch, and
+                  // then have its cache writes priced at zero.
+                  //
+                  // Passing `undefined` is meaningful, not a gap — it selects
+                  // `priceOf`'s own default, which is that same module-global.
+                  // That is the production path, since `createApp` sets no
+                  // `providers`, and it has its own end-to-end test.
                   log.costUsd = priceOf(
                     candidate.target.costPerMTok,
                     event.usage,
                     candidate.target.provider,
+                    deps.providers,
                   );
                 }
 
@@ -698,7 +770,11 @@ export async function dispatch(
       reject(
         lastError?.provider === undefined
           ? new GatewayError(code, message)
-          : new GatewayError(code, message, { provider: lastError.provider }),
+          : new GatewayError(code, message, {
+              provider: lastError.provider,
+              // The message is `lastError`'s verbatim, so its provenance is too.
+              ...(lastError.gatewayAuthored ? { gatewayAuthored: true } : {}),
+            }),
       );
       yield {
         type: "error",

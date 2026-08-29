@@ -437,10 +437,93 @@ export type TargetAddress = {
  */
 export function servesTarget(target: TargetAddress, account: ServingAccount): boolean {
   if (account.provider !== target.provider) return false;
-  // Read from the account rather than trusting a saved string: a custom
-  // endpoint is the credential's own property, and the router compares it the
-  // same way.
-  if (target.provider === "custom" && account.providerData.endpointId !== target.endpointId) {
+  // The endpoint an account is bound to and the endpoint a target names must be
+  // the same, including when neither names one. Read from the account rather
+  // than trusting a saved string: an endpoint is the credential's own property.
+  //
+  // Stated as an equality in both directions, which is the correction to a
+  // first version that asked only "does the target name an endpoint the account
+  // fails to match". That version failed **open** on the case it did not test: a
+  // `custom` target whose `endpointId` was absent or `""` skipped the check
+  // entirely and was then served by *every* custom account, at any endpoint. The
+  // rule it replaced compared `"endpoint-a" !== undefined`, refused, and left the
+  // target unroutable — the safe answer for a row that cannot say where it goes.
+  //
+  // Read paths reach that row even though write paths cannot mint it:
+  // `sqlite/config.ts` parses stored targets with no validation, so a restore, a
+  // hand edit or a foreign database supplies one. The consequence was not a
+  // failed request but a request sent to an arbitrary endpoint's origin with
+  // that endpoint's key, and an `omni doctor` that called the pin healthy —
+  // which is the inverse of the bug this function was made the single copy for.
+  //
+  // `""` means naming none **on the target side only**, and the asymmetry is the
+  // point. The console's `TargetDraft.endpointId` is a non-optional string
+  // carrying `""` for every non-custom target, and the control schema refuses
+  // `""` on the way in for the same reason: it is an id nothing matches, not a
+  // third state. Treating it as a value there would make this function disagree
+  // with the callers it exists to be the only copy for — the pin picker would
+  // offer no account for any non-custom target.
+  //
+  // An account is the other way round. Nothing legitimate writes `""` there:
+  // `customProviderData` in `packages/control/src/credentials.ts` reads it
+  // through `requiredString`, which refuses empty, and a non-custom account
+  // holds no `endpointId` key at all. So an account carrying `""` is a malformed
+  // row exactly as one carrying `42` is, and mapping it to "names none" made it
+  // serve every target that names none — the same fail-open direction the
+  // paragraph below closes for the other non-string values, missed because the
+  // empty string is a string.
+  //
+  // It is a **widening as well as a closure**, and both halves are worth
+  // stating. A *non-custom* account carrying `endpointId: ""` previously served
+  // ordinary targets of its provider and now serves nothing at all, and a pin to
+  // it dangles in `omni doctor`. That is the right direction — the router
+  // refuses the same row, and a credential whose stored endpoint is unreadable
+  // should not quietly act as one with no endpoint — but an operator whose
+  // database holds such a row sees an account stop working, and "it was only
+  // ever a malformed row" is a poor answer to arrive at from the outside.
+  //
+  // No provider is named. A non-custom target that somehow carries an endpoint,
+  // or an account that somehow holds one its target does not name, is refused
+  // rather than ignored: unreachable through the schema, and failing closed is
+  // the right direction for a constraint a row states and cannot honour.
+  // `providerData` is `Record<string, unknown>` and `sqlite/credentials.ts` reads
+  // it back with a bare `JSON.parse`, so `endpointId` can be any JSON value at
+  // all. A first version mapped every non-string to `undefined`, which made a
+  // corrupt id read as *no* id — so a custom target naming no endpoint was
+  // served by any account whose `endpointId` was a number, `null`, `false` or an
+  // object. That is the same fail-open this rule was written to close, one layer
+  // down, and it was looser than the rule it replaced: comparing raw values,
+  // `42 !== undefined` refused.
+  //
+  // Present-but-unusable therefore becomes a value that matches nothing, rather
+  // than a synonym for absent.
+  //
+  // On the **account** side alone, and that is sufficient rather than lazy:
+  // `UNUSABLE` is a symbol, and no target-side value is one, so an account whose
+  // id is unusable matches nothing whatever the target holds — including a
+  // target read back from `sqlite/config.ts`'s unvalidated `JSON.parse` carrying
+  // the same corrupt value. A version that symbolised both sides was written and
+  // deleted: every mutant of the target half survived, because the account half
+  // already decided every case it could have.
+  //
+  // For the same reason `UNUSABLE` is one shared symbol rather than a fresh one
+  // per call. An earlier revision minted one each time, on the stated grounds
+  // that two identically corrupt ids must not match each other — but the compare
+  // is always target-against-account, never account-against-account, so no input
+  // can distinguish the two. That claim also had a test asserting it, which
+  // passed under a hoisted sentinel and was therefore proving nothing. Keeping a
+  // refinement no input can observe is how a reader comes to believe something
+  // is being defended that is not.
+  const UNUSABLE = Symbol("unusable-endpoint");
+  const namedByTarget = (value: string | undefined): string | undefined =>
+    value === undefined || value === "" ? undefined : value;
+  // The one asymmetry, and the whole fix: `""` is "names none" for a target and
+  // a malformed row for an account.
+  const namedByAccount = (value: unknown): string | symbol | undefined => {
+    if (value === undefined) return undefined;
+    return typeof value === "string" && value !== "" ? value : UNUSABLE;
+  };
+  if (namedByTarget(target.endpointId) !== namedByAccount(account.providerData.endpointId)) {
     return false;
   }
   return target.credentialId === undefined || account.id === target.credentialId;

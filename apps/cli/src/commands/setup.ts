@@ -11,7 +11,8 @@ import { boolFlag, stringFlag } from "../args.ts";
 import type { Command } from "../command.ts";
 import { CliError, type Context } from "../context.ts";
 import type { Writer } from "../output.ts";
-import { emit, note } from "../output.ts";
+import { emit, note, paint } from "../output.ts";
+import { pluginProviders } from "./plugins.ts";
 
 /**
  * Writes the configuration an agent reads at startup.
@@ -27,12 +28,27 @@ const OPTIONS = {
   "dry-run": { type: "boolean" },
 } as const;
 
-async function described(ctx: Context) {
-  const models = await describeModelsForSetup(await ctx.store());
+async function described(ctx: Context, writer: Writer) {
+  // With the plugin-supplied providers, because the number this produces is
+  // written into an agent's own configuration file. Without them a
+  // plugin-supplied model resolved to no limits at all and
+  // `CLAUDE_CODE_MAX_CONTEXT_TOKENS` was simply omitted — the agent then used
+  // its own default while the gateway advertised the real window, and nothing
+  // said so.
+  const { descriptors, failures } = await pluginProviders(ctx.root.root);
+  // Reported, not discarded. A plugin that failed to read is the likeliest
+  // reason a limit below is about to be missing, and this command writes a file
+  // that outlives it — so a silent omission is the original bug one step
+  // earlier: the agent falls back to its own default while the gateway
+  // advertises the real window, and nothing anywhere says why.
+  for (const failure of failures) {
+    note(ctx, writer, paint(ctx, "yellow", `plugin ${failure.id}: ${failure.reason}`));
+  }
+  const models = await describeModelsForSetup(await ctx.store(), descriptors);
   if (models.length === 0) {
     throw new CliError("no virtual models configured; add one with `omni models put`");
   }
-  return models;
+  return { models, failures };
 }
 
 /** The gateway's own origin, which is what a client has to be pointed at. */
@@ -48,11 +64,16 @@ function finish(
   dryRun: boolean,
   key: string | undefined,
   write: (path: string, contents: string) => void,
+  // In the payload, not only on stderr. `note()` is a no-op under `--json`, so
+  // a provisioning script saw a config with no `limit` and nothing saying why —
+  // which is the original bug exactly, on the path whose output outlives the
+  // command. `dry-run` was given this and `setup` was not, in the same commit.
+  pluginFailures: readonly { id: string; reason: string }[] = [],
 ): void {
   if (!dryRun) {
     for (const file of files) write(file.path, file.contents);
   }
-  emit(ctx, writer, { files }, () =>
+  emit(ctx, writer, { files, pluginFailures }, () =>
     dryRun
       ? files.map((f) => `--- ${f.path}\n${f.contents}`).join("\n")
       : files.map((f) => f.path).join("\n"),
@@ -68,7 +89,7 @@ function at(dir: string, file: SetupFile): { path: string; contents: string } {
 }
 
 async function promptMapping(
-  models: Awaited<ReturnType<typeof described>>,
+  models: Awaited<ReturnType<typeof described>>["models"],
   prompt: { input?: (question: string) => Promise<string> },
 ): Promise<AgentModelMapping> {
   const choices = models.map(({ model }) => model.id).join(", ");
@@ -103,7 +124,7 @@ export const setupClaude: Command = {
   summary: "Write Claude Code settings for this gateway",
   options: OPTIONS,
   async run(args, { ctx, writer, prompt, setupFs }) {
-    const models = await described(ctx);
+    const { models, failures } = await described(ctx, writer);
     const dir = stringFlag(args.values, "dir") ?? join(setupFs.homeDir, ".claude");
     const key = stringFlag(args.values, "key");
     const dryRun = boolFlag(args.values, "dry-run");
@@ -120,7 +141,7 @@ export const setupClaude: Command = {
       setupFs.read(path) ?? undefined,
     );
 
-    finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write);
+    finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write, failures);
   },
 };
 
@@ -130,7 +151,7 @@ export const setupOpencode: Command = {
   summary: "Write an opencode.json provider entry for this gateway",
   options: OPTIONS,
   async run(args, { ctx, writer, prompt, setupFs }) {
-    const models = await described(ctx);
+    const { models, failures } = await described(ctx, writer);
     const dir = stringFlag(args.values, "dir") ?? setupFs.cwd;
     const key = stringFlag(args.values, "key");
     const dryRun = boolFlag(args.values, "dry-run");
@@ -145,7 +166,7 @@ export const setupOpencode: Command = {
       mapping,
     );
 
-    finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write);
+    finish(ctx, writer, [at(dir, file)], dryRun, key, setupFs.write, failures);
   },
 };
 

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { systemText } from "../system.ts";
 
 /**
  * Above this the proxy answers `Maximum tools limit reached` and the whole
@@ -130,11 +131,11 @@ export function toGrokWire(
             output: block.content,
           });
           break;
-        case "anthropicNative":
+        case "providerNative":
           // Unreachable in practice: the router excludes this provider from any
-          // request carrying Anthropic-native history. Recorded rather than
-          // ignored so that if it ever does arrive, the request log says what
-          // was lost instead of the client seeing a turn quietly rewritten.
+          // request carrying another provider's native history. Recorded rather
+          // than ignored so that if it ever does arrive, the request log says
+          // what was lost instead of the client seeing a turn quietly rewritten.
           note("grok:anthropic-native-block-dropped");
           break;
       }
@@ -142,7 +143,7 @@ export function toGrokWire(
     flush();
   }
 
-  const instructions = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const instructions = systemText(req.system, "grok", note);
 
   const body: GrokResponsesBody = {
     model,
@@ -165,9 +166,9 @@ export function toGrokWire(
   if (req.temperature !== undefined) body.temperature = req.temperature;
 
   if (req.tools !== undefined) {
-    // An Anthropic-defined tool has no function schema to send, and the router
+    // A provider-defined tool has no function schema to send, and the router
     // never routes one here.
-    const custom = req.tools.filter((t) => t.provider === "custom");
+    const custom = req.tools.filter((t) => t.kind === "portable");
     if (custom.length !== req.tools.length) note("grok:anthropic-tool-dropped");
     if (custom.length > MAX_TOOLS) note("grok:tools-truncated");
     body.tools = custom.slice(0, MAX_TOOLS).map((t) => ({

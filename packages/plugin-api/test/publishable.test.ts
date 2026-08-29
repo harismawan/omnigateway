@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Glob } from "bun";
 import { DASHBOARD_SDK_VERSION, PLUGIN_API_VERSION } from "../src/version.ts";
+import { changedSince, publishedPaths } from "./helpers/changed.ts";
 
 const REPO = join(import.meta.dir, "..", "..", "..");
 
@@ -102,6 +103,48 @@ describe("the packages a plugin author installs", () => {
     });
   }
 
+  test("a range one published package puts on another admits what that one is now", () => {
+    // The dependency graph inside this scope is the one nobody sees resolve.
+    // Both packages are published from the same tag, so `bun install` here uses
+    // the workspace copy and the declared range is never exercised — it means
+    // something only in a stranger's `node_modules`, where it decides which
+    // *published* version arrives.
+    //
+    // That went wrong: `dashboard-sdk` declared `@omnigateway/plugin-api:
+    // ^0.1.0`, which under 0.x is `>=0.1.0 <0.2.0` and therefore excludes the
+    // `0.2.0` sitting next to it in this repo. A plugin author installing the
+    // SDK got generation **1** transitively, against a gateway that refuses
+    // `api: 1` — the exact failure `PLUGIN_API_VERSION` was raised to 2 to make
+    // legible, arriving instead as an install nobody could make load.
+    //
+    // Discovered by walking the pairs rather than asserting the one range,
+    // because a second edge between these packages would need this written
+    // again and would not get it.
+    const versions = new Map(
+      PUBLISHED.map((dir) => [manifest(dir).name, manifest(dir).version] as const),
+    );
+    const bad: string[] = [];
+    let checked = 0;
+    for (const dir of PUBLISHED) {
+      const pkg = manifest(dir);
+      for (const [name, range] of Object.entries({
+        ...pkg.dependencies,
+        ...pkg.peerDependencies,
+      })) {
+        const sibling = versions.get(name);
+        if (sibling === undefined) continue;
+        checked += 1;
+        if (!Bun.semver.satisfies(sibling, range)) {
+          bad.push(`${pkg.name} wants ${name}@${range}, which excludes ${sibling}`);
+        }
+      }
+    }
+    expect(bad).toEqual([]);
+    // No edges is the same answer as no bad edges, and one of them means this
+    // test stopped watching anything.
+    expect(checked).toBeGreaterThan(0);
+  });
+
   test("the API package's generation is a counter, not its npm major", () => {
     // These were pinned to each other, and the pin was wrong. `PLUGIN_API_VERSION`
     // is a compatibility generation that only ever increases; an npm major is
@@ -118,6 +161,94 @@ describe("the packages a plugin author installs", () => {
 
     // And the npm version is semver, so a range in a manifest means something.
     expect(manifest("packages/plugin-api").version).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  test("a published package whose sources moved has moved its version", () => {
+    // The guard the one above is a special case of, and the one that was
+    // missing when it mattered.
+    //
+    // `PLUGIN_API_VERSION` went 1 → 2 for the removal of `ctx.provider.register`
+    // — a breaking change to a *published* type surface — and
+    // `packages/plugin-api/package.json` stayed at a version already on npm. The
+    // release step skips a package whose version already exists, so the next tag
+    // would have published nothing: every author running `bun add
+    // @omnigateway/plugin-api` keeps an artifact whose `PluginContext` still
+    // types `provider` and whose `PLUGIN_API_VERSION` is `1`, while the shipped
+    // gateway refuses `api: 1`. No published version would produce a loadable
+    // manifest.
+    //
+    // The test above catches exactly one shape of this — the API package
+    // trailing the SDK — and both were `0.1.2`, so it passed and said nothing.
+    // This asks the general question of every published package: did its source
+    // change since the last release, and if so did its version move?
+    //
+    // Skips rather than fails when there is no tag to compare against: a shallow
+    // CI clone has none, and a check that fails for lack of history teaches
+    // people to disable it.
+    const tags = Bun.spawnSync(["git", "tag", "--list", "v*", "--sort=-v:refname"], {
+      cwd: REPO,
+    });
+    const latest = new TextDecoder().decode(tags.stdout).split("\n")[0]?.trim();
+    if (latest === undefined || latest === "") return;
+
+    // Comments stripped before comparing. A published artifact is its code; a
+    // docblock that gained a paragraph is not a reason to make every plugin
+    // author take an update, and flagging it would train the next person to
+    // bump the version to silence this rather than because anything shipped.
+    //
+    // Found by the instrument itself on its first run: `dashboard-sdk/src`
+    // showed as drifted since `v0.5.0`, and the whole diff was fifteen lines of
+    // comment in `theme.ts`.
+    // Blank lines dropped after stripping, not merely blanked: a removed comment
+    // leaves whitespace behind, and comparing line-for-line then reports every
+    // file whose comments moved as a file whose code moved.
+    const code = (raw: string): string =>
+      raw
+        .replace(/\/\*[\s\S]*?\*\//g, "\n")
+        .replace(/^\s*\/\/.*$/gm, "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+        .join("\n");
+
+    const stale: string[] = [];
+    for (const dir of PUBLISHED) {
+      // Both the watched set and the "since" semantics live in
+      // `helpers/changed.ts`, where a scratch repository can ask them the
+      // question this one cannot: reverting either fix leaves the answer here
+      // correctly unchanged, because the history it reads has been repaired.
+      const touched = changedSince(REPO, latest, publishedPaths(dir));
+      const behaviourMoved = touched.some((file) => {
+        const at = Bun.spawnSync(["git", "show", `${latest}:${file}`], {
+          cwd: REPO,
+          stderr: "ignore",
+        });
+        const before = new TextDecoder().decode(at.stdout);
+        let after = "";
+        try {
+          after = readFileSync(join(REPO, file), "utf8");
+        } catch {
+          return true; // deleted outright
+        }
+        return code(before) !== code(after);
+      });
+      if (!behaviourMoved) continue;
+
+      const released = Bun.spawnSync(["git", "show", `${latest}:${dir}/package.json`], {
+        cwd: REPO,
+        stderr: "ignore",
+      });
+      const before = new TextDecoder().decode(released.stdout);
+      if (before.trim() === "") continue; // the package did not exist at that tag
+
+      const was = (JSON.parse(before) as Manifest).version;
+      const now = manifest(dir).version;
+      if (Bun.semver.order(now, was) <= 0) {
+        stale.push(`${dir}: sources changed since ${latest} but version is still ${now}`);
+      }
+    }
+
+    expect(stale).toEqual([]);
   });
 
   test("the API package is never published behind the SDK it announces", () => {

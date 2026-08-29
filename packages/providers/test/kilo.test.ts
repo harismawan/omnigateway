@@ -11,6 +11,7 @@ import { kiloAdapter } from "../src/kilo/index.ts";
 import { toKiloWire } from "../src/kilo/wire.ts";
 import { ADAPTERS } from "../src/registry.ts";
 import type { SseMessage } from "../src/sse.ts";
+import { entry } from "./entry.ts";
 
 const OAUTH_URL = "https://api.kilo.ai/api/openrouter/chat/completions";
 const API_URL = "https://api.kilo.ai/api/gateway/chat/completions";
@@ -248,7 +249,7 @@ test("emits assistant tool_calls and a tool role result", () => {
       ],
       tools: [
         {
-          provider: "custom",
+          kind: "portable",
           name: "f",
           description: "does f",
           inputSchema: { type: "object", properties: {} },
@@ -474,7 +475,12 @@ test("records a degradation for an Anthropic-native history block", () => {
         {
           role: "assistant",
           content: [
-            { type: "anthropicNative", blockType: "server_tool_use", data: { id: "srvtoolu_1" } },
+            {
+              type: "providerNative",
+              provider: "anthropic",
+              blockType: "server_tool_use",
+              data: { id: "srvtoolu_1" },
+            },
             { type: "text", text: "ok" },
           ],
         },
@@ -483,9 +489,9 @@ test("records a degradation for an Anthropic-native history block", () => {
     "anthropic/claude-sonnet-5",
   );
 
-  // Routing should keep such a request off kilo entirely
-  // (`ANTHROPIC_NATIVE_TOOLS.kilo` is false), so this is defence in depth — but
-  // it must never be forwarded as if this wire understood it.
+  // Routing should keep such a request off kilo entirely (the block names
+  // Anthropic as its producer, and kilo is not it), so this is defence in
+  // depth — but it must never be forwarded as if this wire understood it.
   expect(degradations).toContain("kilo:anthropic-native-block-dropped");
   expect(body.messages).toEqual([{ role: "assistant", content: "ok" }]);
 });
@@ -496,12 +502,13 @@ test("drops an Anthropic-defined tool rather than forwarding a malformed functio
       ...base,
       tools: [
         {
-          provider: "custom",
+          kind: "portable",
           name: "f",
           description: "does f",
           inputSchema: { type: "object", properties: {} },
         },
         {
+          kind: "provider",
           provider: "anthropic",
           family: "webSearch",
           type: "web_search_20250305",
@@ -533,7 +540,7 @@ test("records no tool degradation when every tool is portable", () => {
   const { degradations } = toKiloWire(
     {
       ...base,
-      tools: [{ provider: "custom", name: "f", inputSchema: { type: "object" } }],
+      tools: [{ kind: "portable", name: "f", inputSchema: { type: "object" } }],
     },
     "anthropic/claude-sonnet-5",
   );
@@ -542,7 +549,7 @@ test("records no tool degradation when every tool is portable", () => {
 });
 
 // --- Reasoning request -------------------------------------------------------
-// `PROVIDER_CAPABILITIES.kilo.reasoning` is true, so the router actively sends
+// The kilo descriptor declares `reasoning: true`, so the router actively sends
 // reasoning requests here. What the encoder puts on the wire is therefore
 // load-bearing, not incidental.
 
@@ -863,10 +870,14 @@ test("the registry serves kilo with its canonical capabilities", () => {
     "kimi",
     "openai",
   ]);
-  expect(ADAPTERS.kilo.id).toBe("kilo");
+  expect(entry(ADAPTERS, "kilo", "ADAPTERS").id).toBe("kilo");
   // Kilo fronts Claude, GPT and Gemini: an under-claimed `images` would drop
   // every kilo target from a request carrying a screenshot.
-  expect(ADAPTERS.kilo.capabilities).toEqual({ tools: true, images: true, reasoning: true });
+  expect(entry(ADAPTERS, "kilo", "ADAPTERS").capabilities).toEqual({
+    tools: true,
+    images: true,
+    reasoning: true,
+  });
 });
 
 // --- Block sequencing, text and tool calls ------------------------------------

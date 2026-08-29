@@ -122,6 +122,9 @@ const ROUTES: ReadonlyArray<{
   // Read routes an operator and a read-only administrator share.
   { method: "GET", path: "/api/credentials", allow: ["admin", "viewer"] },
   { method: "GET", path: "/api/models", allow: ["admin", "viewer"] },
+  // The console shell awaits this on every screen and admits a viewer, so
+  // admin-only here means a viewer sees "Console unavailable" everywhere.
+  { method: "GET", path: "/api/catalog", allow: ["admin", "viewer"] },
   { method: "GET", path: "/api/keys", allow: ["admin", "viewer"] },
   { method: "GET", path: "/api/settings", allow: ["admin", "viewer"] },
   { method: "GET", path: "/api/usage", allow: ["admin", "viewer"] },

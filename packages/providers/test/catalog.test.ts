@@ -3,8 +3,16 @@ import type { ProviderId } from "@omni/ir";
 import { catalogLimits, catalogPricing, PROVIDER_MODEL_CATALOG } from "../src/catalog.ts";
 import type { HttpRequest, HttpResponse } from "../src/index.ts";
 import { ADAPTERS } from "../src/registry.ts";
+import { entry as tableEntry } from "./entry.ts";
 
-const PROVIDERS: readonly ProviderId[] = ["anthropic", "openai", "kimi", "kilo", "grok", "custom"];
+const PROVIDERS = [
+  "anthropic",
+  "openai",
+  "kimi",
+  "kilo",
+  "grok",
+  "custom",
+] as const satisfies readonly ProviderId[];
 
 const EXPECTED = {
   anthropic: {
@@ -69,7 +77,7 @@ test("catalog covers every provider with ordered curated IDs", () => {
   expect(Object.keys(PROVIDER_MODEL_CATALOG).sort()).toEqual([...PROVIDERS].sort());
 
   for (const provider of PROVIDERS) {
-    const entry = PROVIDER_MODEL_CATALOG[provider];
+    const entry = tableEntry(PROVIDER_MODEL_CATALOG, provider, "PROVIDER_MODEL_CATALOG");
     expect(entry.defaultModel).toBe(EXPECTED[provider].defaultModel);
     expect(entry.models.map((model) => model.id)).toEqual([...EXPECTED[provider].ids]);
   }
@@ -77,7 +85,7 @@ test("catalog covers every provider with ordered curated IDs", () => {
 
 test("catalog entries have non-empty unique values and exactly one default", () => {
   for (const provider of PROVIDERS) {
-    const entry = PROVIDER_MODEL_CATALOG[provider];
+    const entry = tableEntry(PROVIDER_MODEL_CATALOG, provider, "PROVIDER_MODEL_CATALOG");
     const ids = entry.models.map((model) => model.id);
 
     if (provider === "custom") {
@@ -124,7 +132,8 @@ const KILO_UNPRICED: readonly string[] = [
 
 test("every model carries a usable price", () => {
   for (const provider of PROVIDERS) {
-    for (const model of PROVIDER_MODEL_CATALOG[provider].models) {
+    for (const model of tableEntry(PROVIDER_MODEL_CATALOG, provider, "PROVIDER_MODEL_CATALOG")
+      .models) {
       if (provider === "kilo" && KILO_UNPRICED.includes(model.id)) continue;
       const { input, output, cacheRead } = model.pricing;
       // A zero price is read by the router as "unpriced", which would silently
@@ -141,8 +150,8 @@ test("every model carries a usable price", () => {
 });
 
 test("kilo states a price for everything except its free tier and its routers", () => {
-  const free = PROVIDER_MODEL_CATALOG.kilo.models
-    .filter((model) => model.pricing.input === 0 && model.pricing.output === 0)
+  const free = tableEntry(PROVIDER_MODEL_CATALOG, "kilo", "PROVIDER_MODEL_CATALOG")
+    .models.filter((model) => model.pricing.input === 0 && model.pricing.output === 0)
     .map((model) => model.id);
 
   expect(free).toEqual([...KILO_UNPRICED]);
@@ -198,6 +207,36 @@ test("kilo advertises the exact windows its upstreams report", () => {
   });
 });
 
+test("the auth a credential uses selects which window is advertised", () => {
+  // `oauthLimits` is the Codex backend, which an OAuth credential is routed to
+  // and an API key never sees — a genuinely narrower surface for the same model
+  // id. Two callers pass an explicit `auth`: `anthropic/index.ts` and
+  // `resolveModelLimits`, whose number `setup.ts` writes into
+  // `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, where being wrong outlives the request
+  // that would expose it.
+  //
+  // Both arms and the default, because the branch is one line and every mutant
+  // of it — dropping `oauthLimits`, flipping the default — was surviving the
+  // whole suite. `synthesize` is the only caller reaching the default, and it
+  // has no credential to ask, so `"apiKey"` is the wider and honest answer.
+  expect(catalogLimits("openai", "gpt-5.6", "oauth")).toEqual({
+    contextWindow: 272_000,
+    maxOutputTokens: 128_000,
+  });
+  expect(catalogLimits("openai", "gpt-5.6", "apiKey")).toEqual({
+    contextWindow: 922_000,
+    maxOutputTokens: 128_000,
+  });
+  expect(catalogLimits("openai", "gpt-5.6")).toEqual(catalogLimits("openai", "gpt-5.6", "apiKey"));
+
+  // A model stating no `oauthLimits` answers the same either way: absence means
+  // one set covers both ways in, never "no limits over OAuth".
+  expect(catalogLimits("anthropic", "claude-opus-5", "oauth")).toEqual(
+    catalogLimits("anthropic", "claude-opus-5", "apiKey"),
+  );
+  expect(catalogLimits("anthropic", "claude-opus-5", "oauth")).not.toBeNull();
+});
+
 test("kilo records the cache-write price its upstreams report", () => {
   // Every row that states a write price, exhaustively: a sampled assertion
   // leaves the unsampled rows free to be silently zeroed. A row missing here
@@ -218,15 +257,17 @@ test("kilo records the cache-write price its upstreams report", () => {
   };
 
   const priced = Object.fromEntries(
-    PROVIDER_MODEL_CATALOG.kilo.models
-      .filter((model) => model.pricing.cacheWrite5m !== 0 || model.pricing.cacheWrite1h !== 0)
+    tableEntry(PROVIDER_MODEL_CATALOG, "kilo", "PROVIDER_MODEL_CATALOG")
+      .models.filter(
+        (model) => model.pricing.cacheWrite5m !== 0 || model.pricing.cacheWrite1h !== 0,
+      )
       .map((model) => [model.id, model.pricing.cacheWrite5m]),
   );
   expect(priced).toEqual(WRITE);
 
   // One figure repeated across both TTLs: Kilo reports a single
   // `input_cache_write` price, and this wire cannot express a TTL at all.
-  for (const model of PROVIDER_MODEL_CATALOG.kilo.models) {
+  for (const model of tableEntry(PROVIDER_MODEL_CATALOG, "kilo", "PROVIDER_MODEL_CATALOG").models) {
     expect({ id: model.id, oneHour: model.pricing.cacheWrite1h }).toEqual({
       id: model.id,
       oneHour: model.pricing.cacheWrite5m,
@@ -235,7 +276,7 @@ test("kilo records the cache-write price its upstreams report", () => {
 });
 
 test("kilo's free tier and routers are gateway-only", () => {
-  for (const model of PROVIDER_MODEL_CATALOG.kilo.models) {
+  for (const model of tableEntry(PROVIDER_MODEL_CATALOG, "kilo", "PROVIDER_MODEL_CATALOG").models) {
     const gatewayOnly = model.id.endsWith(":free") || model.id.startsWith("kilo-auto/");
     // An absent `auth` means both ways in, which is what the vendor-namespaced
     // models are: only the gateway backend serves the free tier and the
@@ -248,7 +289,11 @@ test("kilo's free tier and routers are gateway-only", () => {
 });
 
 test("Kimi labels describe coding endpoint aliases", () => {
-  expect(PROVIDER_MODEL_CATALOG.kimi.models.map((model) => model.label)).toEqual([
+  expect(
+    tableEntry(PROVIDER_MODEL_CATALOG, "kimi", "PROVIDER_MODEL_CATALOG").models.map(
+      (model) => model.label,
+    ),
+  ).toEqual([
     "Kimi K3 — 256K",
     "Kimi K3 — up to 1M",
     "Kimi K2.7 Code",
@@ -293,7 +338,10 @@ test("catalogPricing reports an unlisted model rather than guessing", () => {
 test("every provider states which credentials it can hold", () => {
   expect(
     Object.fromEntries(
-      PROVIDERS.map((id) => [id, [...PROVIDER_MODEL_CATALOG[id].authTypes].sort()]),
+      PROVIDERS.map((id) => [
+        id,
+        [...tableEntry(PROVIDER_MODEL_CATALOG, id, "PROVIDER_MODEL_CATALOG").authTypes].sort(),
+      ]),
     ),
   ).toEqual({
     anthropic: ["apiKey", "oauth"],
@@ -308,16 +356,21 @@ test("every provider states which credentials it can hold", () => {
 
 test("an apiKey claim means the adapter really authenticates with a raw key", async () => {
   for (const id of PROVIDERS) {
-    if (!PROVIDER_MODEL_CATALOG[id].authTypes.includes("apiKey")) continue;
+    if (
+      !tableEntry(PROVIDER_MODEL_CATALOG, id, "PROVIDER_MODEL_CATALOG").authTypes.includes("apiKey")
+    )
+      continue;
 
     let sent: HttpRequest | null = null;
-    const result = await ADAPTERS[id].send({
+    const result = await tableEntry(ADAPTERS, id, "ADAPTERS").send({
       request: {
         model: "cheap",
         messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
         stream: true,
       },
-      model: PROVIDER_MODEL_CATALOG[id].defaultModel || "some-model",
+      model:
+        tableEntry(PROVIDER_MODEL_CATALOG, id, "PROVIDER_MODEL_CATALOG").defaultModel ||
+        "some-model",
       // No access token. An adapter that only understands OAuth raises AUTH
       // here, which fails this test rather than reaching the assertion.
       credentials: {

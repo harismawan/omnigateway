@@ -24,8 +24,21 @@
  * may never do.
  *
  * So they are independent, and only this one decides whether a plugin loads.
+ *
+ * **`2` because `ctx.provider.register` was removed.** A plugin supplying a
+ * provider now declares it as `PluginDefinition.providers`; one written against
+ * generation 1 calls a member of `PluginContext` that no longer exists. That is
+ * exactly what this counter is for, and the commit that removed the capability
+ * left it at `1` — so `omni plugin verify`, the command whose entire purpose is
+ * confidence before a restart, answered "this plugin would load", and the
+ * gateway then reported `undefined is not an object (evaluating
+ * 'ctx.provider.register')`. A raw TypeError where a version mismatch belongs.
+ *
+ * The rule above is easy to read as being about *additions* to the context and
+ * to skip for a removal. Both directions break an existing plugin; a removal
+ * breaks it louder.
  */
-export const PLUGIN_API_VERSION = 1;
+export const PLUGIN_API_VERSION = 2;
 
 /**
  * The dashboard SDK version the shipped console provides.
@@ -54,6 +67,18 @@ export const PLUGIN_API_VERSION = 1;
  * version mismatch. That is the cheaper of the two costs. Reserve the minor for
  * the first genuine narrowing, with a deprecation window.
  *
+ * `0.1.3` changed no API at all. It exists because `package.json` did: this
+ * package's own dependency range on `@omnigateway/plugin-api` was `^0.1.0`,
+ * which under 0.x means `>=0.1.0 <0.2.0` and so excluded the `0.2.0` published
+ * beside it. Every `bun add @omnigateway/dashboard-sdk` therefore resolved
+ * generation **1** transitively, against a gateway that refuses `api: 1` — an
+ * install that could not produce a loadable plugin, with nothing in either
+ * package's source to show for it. Correcting the range in the repository fixes
+ * nobody's `node_modules`, because the release step skips a package whose
+ * version has not moved; the version is the only part of the repair a consumer
+ * can see. A patch, since the surface a plugin compiles against is unchanged and
+ * every published `sdk: "^0.1.0"` range should go on matching.
+ *
  * **Changing this line means republishing _this_ package, not just the SDK.**
  * It reads as an SDK fact and it lives here, so the obvious move — bump
  * `packages/dashboard-sdk`, tag, done — leaves the registry with a
@@ -66,4 +91,4 @@ export const PLUGIN_API_VERSION = 1;
  * advertised. `publishable.test.ts` now refuses a state where this package
  * trails the SDK.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.2";
+export const DASHBOARD_SDK_VERSION = "0.1.3";

@@ -8,6 +8,7 @@ import {
 } from "@omni/providers";
 import {
   captureLogger,
+  entryOf,
   memoryStore,
   seedApiKey,
   seedCredential,
@@ -955,7 +956,8 @@ test("completes the row once when serialising the response throws after it is wr
       type: "blockStart",
       index: 0,
       block: {
-        type: "anthropicNative",
+        type: "providerNative",
+        provider: "anthropic",
         blockType: "web_search_tool_result",
         // A BigInt is the one JSON type there is no encoding for, so this throws
         // in `JSON.stringify` and nowhere earlier.
@@ -1428,7 +1430,7 @@ test("enforces exact model allowlists before dispatch", async () => {
   );
   let sends = 0;
   const adapters = stubAdapters(EVENTS);
-  const anthropic = adapters.anthropic;
+  const anthropic = entryOf(adapters, "anthropic", "stubAdapters");
   const counting: ProviderAdapter = {
     ...anthropic,
     async send(request) {
@@ -1506,7 +1508,7 @@ test("rate limits are atomic, per-key, and refuse a burst across the minute boun
   let sends = 0;
   const logger = captureLogger();
   const adapters = stubAdapters(EVENTS);
-  const anthropic = adapters.anthropic;
+  const anthropic = entryOf(adapters, "anthropic", "stubAdapters");
   const app = proxyRoutes({
     store,
     adapters: {
@@ -1814,4 +1816,63 @@ test("a request that failed before dispatch invalidates from the terminal catch"
     expect.objectContaining({ state: "done", attempts: 0, resolvedProvider: null }),
   );
   expect(stream.topics).toEqual(["res:usage", "res:logs"]);
+});
+
+// --- Model names that name a JavaScript builtin ------------------------------
+
+test("a model naming an Object.prototype key is refused, not answered with a 500", async () => {
+  // The provider tables are looked up by a prefix sliced out of the client's own
+  // `model` string. When they were ordinary object literals,
+  // `PROVIDER_DESCRIPTORS["constructor"]` answered the `Object` constructor, so
+  // the existence check passed and the next property access threw a raw
+  // `TypeError` — which `classify` reads as `INTERNAL`, so the client got a 500
+  // whose body carried an internal source expression. That is a 503
+  // `NO_CANDIDATES` about an unknown provider, and nothing else.
+  //
+  // Driven through the real route rather than through `resolveModel`, because
+  // the part that made this worth fixing is what reached the client.
+  const { call } = await harness();
+
+  for (const model of [
+    "constructor/foo",
+    "toString/foo",
+    "valueOf:foo",
+    "hasOwnProperty/foo",
+    "__proto__/foo",
+  ]) {
+    const response = await call("/v1/messages", {
+      model,
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const body = (await response.json()) as { error?: { message?: string } };
+
+    expect({ model, status: response.status }).toEqual({ model, status: 503 });
+    expect(body.error?.message).toContain(`unknown provider`);
+    // Nothing from inside the gateway. A `TypeError` here rendered as
+    // "undefined is not an object (evaluating 'PROVIDER_MODEL_CATALOG[...]')".
+    expect(body.error?.message).not.toContain("undefined is not an object");
+    expect(body.error?.message).not.toContain("PROVIDER_MODEL_CATALOG");
+  }
+});
+
+test("an ordinary unknown provider is refused the same way, and a real one still routes", async () => {
+  // The positive control on both sides. Without the first assertion a route that
+  // 503'd everything would pass the test above; without the second, one that
+  // 503'd every request would.
+  const { call } = await harness();
+
+  const unknown = await call("/v1/messages", {
+    model: "nope/foo",
+    max_tokens: 16,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(unknown.status).toBe(503);
+
+  const real = await call("/v1/messages", {
+    model: "fast",
+    max_tokens: 16,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(real.status).toBe(200);
 });

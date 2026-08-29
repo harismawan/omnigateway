@@ -1,4 +1,5 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { systemText } from "../system.ts";
 
 export type ChatBody = {
   model: string;
@@ -42,7 +43,7 @@ export function toChatWire(
 
   const messages: unknown[] = [];
 
-  const system = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const system = systemText(req.system, "kimi", note);
   if (system !== undefined && system.length > 0) messages.push({ role: "system", content: system });
 
   for (const message of req.messages) {
@@ -75,9 +76,9 @@ export function toChatWire(
             content: block.content,
           });
           break;
-        case "anthropicNative":
+        case "providerNative":
           // Unreachable: the router excludes this provider from any request
-          // carrying Anthropic-native history. Recorded, not ignored.
+          // carrying another provider's native history. Recorded, not ignored.
           note("kimi:anthropic-native-block-dropped");
           break;
       }
@@ -107,7 +108,7 @@ export function toChatWire(
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.stopSequences !== undefined) body.stop = req.stopSequences;
   if (req.tools !== undefined) {
-    const custom = req.tools.filter((t) => t.provider === "custom");
+    const custom = req.tools.filter((t) => t.kind === "portable");
     if (custom.length !== req.tools.length) note("kimi:anthropic-tool-dropped");
     body.tools = custom.map((t) => ({
       type: "function",

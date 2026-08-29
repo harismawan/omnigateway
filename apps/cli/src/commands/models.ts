@@ -1,16 +1,13 @@
 import { dryRun, getModel, listModels, putModel, removeModel } from "@omni/control";
-import { PROVIDER_CAPABILITIES, type ProviderId } from "@omni/ir";
-import {
-  catalogLimits,
-  catalogPricing,
-  PROVIDER_MODEL_CATALOG,
-  type ProviderModelChoice,
-} from "@omni/providers/catalog";
+import type { ProviderId } from "@omni/ir";
+import { choiceLimits, entryPricing, type ProviderModelChoice } from "@omni/providers/catalog";
+import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import type { Target, VirtualModel } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
-import { emit, fields, paint, table } from "../output.ts";
+import { emit, fields, note, paint, table } from "../output.ts";
+import { pluginProviders } from "./plugins.ts";
 
 export const modelsList: Command = {
   usage: "models list",
@@ -136,18 +133,37 @@ function capabilityList(target: Target): string {
  * written here is a copy the operator owns, and editing the catalog later
  * changes nothing about a model already saved.
  */
-function targetFromCatalog(spec: string): Target {
+function targetFromCatalog(spec: string, descriptors: ProviderDescriptors): Target {
   const separator = spec.indexOf(":");
   if (separator <= 0) {
     throw new UsageError(`--from-catalog expects <provider>:<model>, got "${spec}"`);
   }
   const providerId = spec.slice(0, separator);
   const model = spec.slice(separator + 1);
-  if (!isCatalogProvider(providerId)) {
+  // Resolved once, from **this installation's** registry, and reused below.
+  //
+  // It read the module-global `PROVIDER_DESCRIPTORS`, so this was the one CLI
+  // path still answering from the build. `omni credentials add-key acme` accepts
+  // a plugin provider, `omni models dry-run` ranks its candidates, `omni doctor`
+  // reports it present and the gateway routes and prices it — and this refused
+  // `unknown provider "acme"`, leaving no CLI route to the target at all. The
+  // operator had to hand-write the JSON, including pricing and capabilities the
+  // plugin already declares.
+  //
+  // The membership test this replaced read `PROVIDER_MODEL_CATALOG` while the
+  // capabilities came from `PROVIDER_DESCRIPTORS` — two derived tables answering
+  // one question. Asking one of them twice is what keeps them from disagreeing,
+  // and that one is now the registry rather than either snapshot.
+  const descriptor = descriptors[providerId];
+  if (descriptor === undefined) {
     throw new UsageError(`unknown provider "${providerId}" in "${spec}"`);
   }
 
-  const pricing = catalogPricing(providerId, model);
+  // From the descriptor's own catalog, never `catalogPricing`: that reads the
+  // id-keyed global, which `registerProvider` does not touch, so a plugin
+  // provider priced through it comes back null and this refuses a model the
+  // descriptor lists.
+  const pricing = entryPricing(descriptor.catalog, model);
   if (pricing === null) {
     throw new UsageError(`no catalog entry for "${spec}"; see omni models catalog`);
   }
@@ -163,12 +179,8 @@ function targetFromCatalog(spec: string): Target {
     // target an OAuth credential serves through a narrower backend.
     // Capabilities are a property of the provider, not of the catalog entry;
     // the operator narrows them afterwards if a particular model is narrower.
-    capabilities: PROVIDER_CAPABILITIES[providerId],
+    capabilities: descriptor.capabilities,
   };
-}
-
-function isCatalogProvider(value: string): value is ProviderId {
-  return value in PROVIDER_MODEL_CATALOG;
 }
 
 /**
@@ -177,9 +189,14 @@ function isCatalogProvider(value: string): value is ProviderId {
  * Carries the prices and limits rather than just the names, so `--json` answers
  * the same question the table does.
  */
-function catalogRows(): Array<ProviderModelChoice & { provider: ProviderId }> {
-  return Object.entries(PROVIDER_MODEL_CATALOG).flatMap(([id, entry]) =>
-    entry.models.map((model) => ({ ...model, provider: id as ProviderId })),
+function catalogRows(
+  descriptors: ProviderDescriptors,
+): Array<ProviderModelChoice & { provider: ProviderId }> {
+  // The registry, for the same reason. Listing from `PROVIDER_MODEL_CATALOG`
+  // omitted every plugin-supplied model, so the command that exists to show an
+  // operator what they can name could not show them half of it.
+  return Object.entries(descriptors).flatMap(([id, descriptor]) =>
+    descriptor.catalog.models.map((model) => ({ ...model, provider: id as ProviderId })),
   );
 }
 
@@ -189,7 +206,10 @@ export const modelsCatalog: Command = {
   options: { provider: { type: "string" } },
   async run(args, { ctx, writer }) {
     const only = stringFlag(args.values, "provider");
-    const entries = catalogRows().filter((entry) => only === undefined || entry.provider === only);
+    const { descriptors } = await pluginProviders(ctx.root.root);
+    const entries = catalogRows(descriptors).filter(
+      (entry) => only === undefined || entry.provider === only,
+    );
 
     emit(ctx, writer, { models: entries }, () =>
       table(
@@ -207,12 +227,16 @@ export const modelsCatalog: Command = {
           { header: "MAX OUT", align: "right" },
         ],
         entries.map((entry) => {
-          const listed = catalogPricing(entry.provider, entry.id);
-          const limits = catalogLimits(entry.provider, entry.id);
+          // Read off the row rather than looked back up by id. The rows now come
+          // from the registry, so a second lookup through the id-keyed global
+          // would find nothing for exactly the plugin-supplied models this
+          // listing was widened to include, and print a table of dashes.
+          const listed = entry.pricing;
+          const limits = choiceLimits(entry);
           // What the same model holds when an OAuth credential serves it: the
           // OpenAI adapter routes those to Codex, which takes a smaller prompt
           // than the API does. A dash means the two ways in are the same.
-          const oauth = catalogLimits(entry.provider, entry.id, "oauth");
+          const oauth = choiceLimits(entry, "oauth");
           return [
             provider(ctx, entry.provider),
             entry.id,
@@ -263,11 +287,12 @@ export const modelsPut: Command = {
         throw new CliError(`${file} is not valid JSON`);
       }
     } else if (catalog !== undefined) {
+      const { descriptors } = await pluginProviders(ctx.root.root);
       const draft: VirtualModel = {
         id,
         strategy: (stringFlag(args.values, "strategy") ?? "score") as VirtualModel["strategy"],
         isAlias: boolFlag(args.values, "alias"),
-        targets: catalog.map(targetFromCatalog),
+        targets: catalog.map((spec) => targetFromCatalog(spec, descriptors)),
       };
       model = draft;
     } else {
@@ -303,13 +328,34 @@ export const modelsDryRun: Command = {
   },
   async run(args, { ctx, writer }) {
     const id = requirePositional(args, 0, "model id");
-    const result = await dryRun({ store: await ctx.store(), now: ctx.now }, id, {
-      tools: boolFlag(args.values, "tools"),
-      images: boolFlag(args.values, "images"),
-      reasoning: boolFlag(args.values, "reasoning"),
-    });
+    // The plugin-supplied providers too, or this command answers
+    // `provider:missing` for a target the running gateway is serving — and does
+    // so in red, on the surface an operator reaches for when something looks
+    // wrong. `omni doctor` on the same installation already reads the manifests
+    // and calls that configuration healthy; a diagnostic that contradicts
+    // another diagnostic is worse than one that says nothing.
+    const { descriptors, failures } = await pluginProviders(ctx.root.root);
+    const result = await dryRun(
+      { store: await ctx.store(), now: ctx.now, providers: descriptors },
+      id,
+      {
+        tools: boolFlag(args.values, "tools"),
+        images: boolFlag(args.values, "images"),
+        reasoning: boolFlag(args.values, "reasoning"),
+      },
+    );
 
-    emit(ctx, writer, result, () => {
+    // Named before the result, because a plugin that failed to read is the
+    // likeliest reason a target below is about to be reported as missing.
+    for (const failure of failures) {
+      note(ctx, writer, paint(ctx, "yellow", `plugin ${failure.id}: ${failure.reason}`));
+    }
+
+    // Carried in the payload, not only on stderr. `note()` is a no-op under
+    // `--json`, so a script or a support ticket built on it saw
+    // `provider:missing` with the cause deleted — and the cause is the whole
+    // reason these lines are printed before the result.
+    emit(ctx, writer, { ...result, pluginFailures: failures }, () => {
       const header = fields([
         ["model", result.modelId],
         ["strategy", result.strategy],

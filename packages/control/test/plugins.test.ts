@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GatewayError } from "@omni/ir";
+import { PLUGIN_API_VERSION } from "@omnigateway/plugin-api";
 import { nodeFetchBytes, nodePluginFs } from "../src/nodeFs.ts";
 import {
   installPlugin,
@@ -49,7 +50,7 @@ const MANIFEST = {
   id: "poke-dex",
   name: "Poke Dex",
   version: "1.4.2",
-  api: 1,
+  api: PLUGIN_API_VERSION,
   server: "server.js",
 } as const;
 
@@ -385,7 +386,7 @@ describe("listPlugins", () => {
     const good = plugins.find((p) => p.id === "poke-dex");
     expect(good?.loadable).toBe(true);
     expect(good?.version).toBe("1.4.2");
-    expect(good?.api).toBe(1);
+    expect(good?.api).toBe(PLUGIN_API_VERSION);
   });
 
   test("a directory whose name could never be a plugin id is reported", () => {

@@ -1,5 +1,5 @@
 import type { ErrorCode } from "./errors.ts";
-import type { ContentBlock } from "./request.ts";
+import type { ContentBlock, ProviderId } from "./request.ts";
 
 /**
  * `pauseTurn` is its own reason, not a flavour of `endTurn` or `toolUse`.
@@ -94,8 +94,17 @@ export type ContentBlockStart =
    * `data` is the block's opening payload, which for a result block is the
    * whole block: Anthropic sends those complete in `content_block_start` and
    * never deltas them.
+   *
+   * `provider` is the adapter decoding the stream, and it is what the collected
+   * `ProviderNativeBlock` carries onward — so the block the fold produces is
+   * routable by the same rule as one that arrived from a client.
    */
-  | { type: "anthropicNative"; blockType: string; data: Record<string, unknown> };
+  | {
+      type: "providerNative";
+      provider: ProviderId;
+      blockType: string;
+      data: Record<string, unknown>;
+    };
 
 export type Delta =
   | { type: "text"; text: string }
@@ -107,8 +116,32 @@ export type Delta =
    * portable `toolUse` accumulator, which is what would send its input onward
    * as a custom function call.
    */
-  | { type: "anthropicNativeJson"; partial: string }
-  | { type: "anthropicNative"; deltaType: string; data: Record<string, unknown> };
+  | { type: "providerNativeJson"; provider: ProviderId; partial: string }
+  | {
+      type: "providerNative";
+      provider: ProviderId;
+      deltaType: string;
+      /**
+       * What this delta does to the block it belongs to, in IR terms.
+       *
+       * The decoder states it, because the decoder is the only thing that knows
+       * what its own delta names mean. Core used to switch on those names
+       * directly — `citations_delta` and `compaction_delta`, two Anthropic wire
+       * strings sitting inside `collect()` — which made stream folding
+       * un-extendable without editing `packages/ir`.
+       *
+       * `"merge"` folds `data` into the block's own data at completion.
+       * `"citation"` appends `data.citation` to the containing text block, which
+       * is the one case where a native delta lands on a block of another kind.
+       * Absent is the default and means "no effect on the assembled block": the
+       * streaming egress path still replays the delta verbatim, and `collect()`
+       * — which builds the buffered form — keeps the block's own data and drops
+       * the delta's. That is what the code did before this field existed, and
+       * `a native delta stating no fold leaves the assembled block alone` asserts it.
+       */
+      fold?: "merge" | "citation";
+      data: Record<string, unknown>;
+    };
 
 /**
  * Usage rides on `end` rather than being its own event.
@@ -140,11 +173,16 @@ type Accum =
   | { kind: "thinking"; text: string; signature?: string }
   | { kind: "toolUse"; id: string; name: string; json: string }
   | {
-      kind: "anthropicNative";
+      kind: "providerNative";
+      provider: ProviderId;
       blockType: string;
       data: Record<string, unknown>;
       json: string;
-      deltas: Array<{ deltaType: string; data: Record<string, unknown> }>;
+      deltas: Array<{
+        deltaType: string;
+        fold?: "merge" | "citation";
+        data: Record<string, unknown>;
+      }>;
     };
 
 /**
@@ -177,9 +215,10 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
             ? { kind: "toolUse", id: ev.block.id, name: ev.block.name, json: "" }
             : ev.block.type === "thinking"
               ? { kind: "thinking", text: "" }
-              : ev.block.type === "anthropicNative"
+              : ev.block.type === "providerNative"
                 ? {
-                    kind: "anthropicNative",
+                    kind: "providerNative",
+                    provider: ev.block.provider,
                     blockType: ev.block.blockType,
                     data: ev.block.data,
                     json: "",
@@ -200,11 +239,11 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
           acc.signature = (acc.signature ?? "") + ev.delta.signature;
         else if (ev.delta.type === "toolJson" && acc.kind === "toolUse")
           acc.json += ev.delta.partial;
-        else if (ev.delta.type === "anthropicNativeJson" && acc.kind === "anthropicNative")
+        else if (ev.delta.type === "providerNativeJson" && acc.kind === "providerNative")
           acc.json += ev.delta.partial;
-        else if (ev.delta.type === "anthropicNative") {
-          if (acc.kind === "anthropicNative") acc.deltas.push(ev.delta);
-          else if (acc.kind === "text" && ev.delta.deltaType === "citations_delta")
+        else if (ev.delta.type === "providerNative") {
+          if (acc.kind === "providerNative") acc.deltas.push(ev.delta);
+          else if (acc.kind === "text" && ev.delta.fold === "citation")
             acc.citations.push(ev.delta.data.citation);
         }
         break;
@@ -233,12 +272,12 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
           text: acc.text,
           ...(acc.signature === undefined ? {} : { signature: acc.signature }),
         };
-      if (acc.kind === "anthropicNative") {
+      if (acc.kind === "providerNative") {
         let data = acc.json === "" ? acc.data : { ...acc.data, input: parseJson(acc.json) };
         for (const delta of acc.deltas) {
-          if (delta.deltaType === "compaction_delta") data = { ...data, ...delta.data };
+          if (delta.fold === "merge") data = { ...data, ...delta.data };
         }
-        return { type: "anthropicNative", blockType: acc.blockType, data };
+        return { type: "providerNative", provider: acc.provider, blockType: acc.blockType, data };
       }
       return { type: "toolUse", id: acc.id, name: acc.name, input: parseJson(acc.json) };
     });

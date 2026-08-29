@@ -83,7 +83,7 @@ test("flattens tool definitions and maps tool choice", () => {
   const { body } = toResponsesWire(
     {
       ...base,
-      tools: [{ provider: "custom", name: "f", description: "d", inputSchema: { type: "object" } }],
+      tools: [{ kind: "portable", name: "f", description: "d", inputSchema: { type: "object" } }],
       toolChoice: { type: "tool", name: "f" },
     },
     "gpt-5",

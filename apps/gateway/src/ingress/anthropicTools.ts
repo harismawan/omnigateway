@@ -152,6 +152,7 @@ function parseAnthropicTool(
   }
 
   return {
+    kind: "provider",
     provider: "anthropic",
     family: spec.family,
     type,
@@ -182,7 +183,7 @@ function parseCustomTool(raw: Record<string, unknown>, path: string): CustomTool
   }
 
   return {
-    provider: "custom",
+    kind: "portable",
     name: parsed.data.name,
     ...(parsed.data.description === undefined ? {} : { description: parsed.data.description }),
     inputSchema: parsed.data.input_schema,

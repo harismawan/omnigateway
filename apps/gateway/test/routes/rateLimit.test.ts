@@ -296,7 +296,8 @@ test("does not debit twice when a request fails after its row was completed", as
       type: "blockStart",
       index: 0,
       block: {
-        type: "anthropicNative",
+        type: "providerNative",
+        provider: "anthropic",
         blockType: "web_search_tool_result",
         // The one JSON type there is no encoding for, so this throws in
         // `JSON.stringify` and nowhere earlier.

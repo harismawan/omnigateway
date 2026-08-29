@@ -43,7 +43,8 @@ test("decodes server tool use as a native block with streamed input", async () =
     type: "blockStart",
     index: 0,
     block: {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       blockType: "server_tool_use",
       data: { id: "srvtoolu_1", name: "web_search", input: {} },
     },
@@ -51,7 +52,7 @@ test("decodes server tool use as a native block with streamed input", async () =
   expect(events[2]).toEqual({
     type: "blockDelta",
     index: 0,
-    delta: { type: "anthropicNativeJson", partial: '{"query":"bun"}' },
+    delta: { type: "providerNativeJson", provider: "anthropic", partial: '{"query":"bun"}' },
   });
 });
 
@@ -104,7 +105,8 @@ test("a server tool result arrives complete and keeps its payload", async () => 
     type: "blockStart",
     index: 1,
     block: {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       blockType: "web_search_tool_result",
       data: {
         tool_use_id: "srvtoolu_1",
@@ -243,14 +245,22 @@ test("citation and compaction deltas preserve their canonical payloads", async (
   expect(events).toContainEqual({
     type: "blockDelta",
     index: 0,
-    delta: { type: "anthropicNative", deltaType: "citations_delta", data: { citation } },
+    delta: {
+      type: "providerNative",
+      provider: "anthropic",
+      deltaType: "citations_delta",
+      fold: "citation",
+      data: { citation },
+    },
   });
   expect(events).toContainEqual({
     type: "blockDelta",
     index: 1,
     delta: {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       deltaType: "compaction_delta",
+      fold: "merge",
       data: { content: "summary", encrypted_content: "opaque" },
     },
   });
@@ -296,7 +306,8 @@ test("redacted thinking survives as a native block", async () => {
     type: "blockStart",
     index: 0,
     block: {
-      type: "anthropicNative",
+      type: "providerNative",
+      provider: "anthropic",
       blockType: "redacted_thinking",
       data: { data: "EncryptedBlob" },
     },

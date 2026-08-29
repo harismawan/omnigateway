@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { PROVIDER_MODEL_CATALOG } from "@omni/providers/catalog";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Target } from "../../src/api/types.ts";
@@ -12,6 +11,7 @@ import {
   parseDraft,
   pinChoices,
   pinNote,
+  reachable,
   reachableChoices,
   reEndpointDraft,
   retargetDraft,
@@ -20,12 +20,22 @@ import {
 } from "../../src/features/models/draft.ts";
 import { ModelsBoard } from "../../src/features/models/ModelsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { credential, model, settings } from "../helpers/fixtures.ts";
+import { catalogFixture, credential, model, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+
+/**
+ * The catalog these helpers are asked about.
+ *
+ * The fixture, never the shipped one. Every price and limit asserted below is
+ * stated in `catalogFixture()`, so a test here fails when the draft logic
+ * changes and not when a provider republishes its rate card — which is what a
+ * test importing `PROVIDER_MODEL_CATALOG` used to do.
+ */
+const CATALOG = catalogFixture();
 
 describe("catalog pricing defaults", () => {
   test("a new target starts at the provider's list price, not at zero", () => {
-    const target = blankTarget("anthropic");
+    const target = blankTarget(CATALOG, "anthropic");
     // A zero price reads as "unpriced" in the router and drops the target out
     // of cost ranking, so the default must be a real number.
     expect(target.model).toBe("claude-opus-5");
@@ -35,12 +45,12 @@ describe("catalog pricing defaults", () => {
   });
 
   test("each provider's default target is priced for that provider", () => {
-    expect(blankTarget("openai").costInput).toBe("5");
-    expect(blankTarget("kimi").costInput).toBe("3");
+    expect(blankTarget(CATALOG, "openai").costInput).toBe("5");
+    expect(blankTarget(CATALOG, "kimi").costInput).toBe("3");
   });
 
   test("catalogPrices reports an unlisted model instead of guessing", () => {
-    expect(catalogPrices("anthropic", "claude-haiku-4-5")).toEqual({
+    expect(catalogPrices(CATALOG, "anthropic", "claude-haiku-4-5")).toEqual({
       costInput: "1",
       costOutput: "5",
       costCacheRead: "0.1",
@@ -49,11 +59,11 @@ describe("catalog pricing defaults", () => {
       costCacheWrite5m: "1.25",
       costCacheWrite1h: "2",
     });
-    expect(catalogPrices("anthropic", "not-a-real-model")).toBeNull();
+    expect(catalogPrices(CATALOG, "anthropic", "not-a-real-model")).toBeNull();
   });
 
   test("the defaults survive a round trip through the parser", () => {
-    const parsed = parseDraft({ ...blankModel(), id: "fast" });
+    const parsed = parseDraft({ ...blankModel(CATALOG), id: "fast" });
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
       expect(parsed.model.targets[0]?.costPerMTok).toEqual({
@@ -72,7 +82,7 @@ describe("catalog token limits", () => {
     // Saving a figure here pins it. Left blank, the gateway works the limits
     // out when it lists the model, which is the only place that can account for
     // an OpenAI target being served through the narrower Codex backend.
-    const target = blankTarget("anthropic");
+    const target = blankTarget(CATALOG, "anthropic");
     expect(target.contextWindow).toBe("");
     expect(target.maxOutputTokens).toBe("");
   });
@@ -83,11 +93,11 @@ describe("catalog token limits", () => {
     // 922K across would pin it, and an OAuth account is served through Codex
     // at 272K — the narrowing this whole field exists for.
     const edited = {
-      ...blankTarget("anthropic"),
+      ...blankTarget(CATALOG, "anthropic"),
       contextWindow: "500000",
       maxOutputTokens: "8000",
     };
-    const retargeted = retargetDraft(edited, { provider: "openai", model: "gpt-5.6-sol" });
+    const retargeted = retargetDraft(CATALOG, edited, { provider: "openai", model: "gpt-5.6-sol" });
 
     expect(retargeted.contextWindow).toBe("");
     expect(retargeted.maxOutputTokens).toBe("");
@@ -97,15 +107,15 @@ describe("catalog token limits", () => {
   });
 
   test("catalogTokenLimits reports an unlisted model instead of guessing", () => {
-    expect(catalogTokenLimits("anthropic", "claude-haiku-4-5")).toEqual({
+    expect(catalogTokenLimits(CATALOG, "anthropic", "claude-haiku-4-5")).toEqual({
       contextWindow: "200000",
       maxOutputTokens: "64000",
     });
-    expect(catalogTokenLimits("anthropic", "not-a-real-model")).toBeNull();
+    expect(catalogTokenLimits(CATALOG, "anthropic", "not-a-real-model")).toBeNull();
   });
 
   test("an unedited target is saved without limits, not with zeroes", () => {
-    const parsed = parseDraft({ ...blankModel(), id: "fast" });
+    const parsed = parseDraft({ ...blankModel(CATALOG), id: "fast" });
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
       expect(parsed.model.targets[0]).not.toHaveProperty("contextWindow");
@@ -114,7 +124,7 @@ describe("catalog token limits", () => {
   });
 
   test("an edited limit survives a round trip through the parser", () => {
-    const draft = blankModel();
+    const draft = blankModel(CATALOG);
     const target = draft.targets[0];
     if (target === undefined) throw new Error("a blank model has one target");
     const parsed = parseDraft({
@@ -130,7 +140,7 @@ describe("catalog token limits", () => {
   });
 
   test("refuses a window that is not a whole number of tokens", () => {
-    const draft = blankModel();
+    const draft = blankModel(CATALOG);
     const target = draft.targets[0];
     if (target === undefined) throw new Error("a blank model has one target");
     const parsed = parseDraft({
@@ -144,12 +154,12 @@ describe("catalog token limits", () => {
 
 describe("parseDraft", () => {
   test("requires and preserves endpoint id for custom targets", () => {
-    const custom = { ...blankTarget("custom"), model: "local-model" };
-    const missing = parseDraft({ ...blankModel(), id: "local", targets: [custom] });
+    const custom = { ...blankTarget(CATALOG, "custom"), model: "local-model" };
+    const missing = parseDraft({ ...blankModel(CATALOG), id: "local", targets: [custom] });
     expect(missing).toEqual({ ok: false, problem: "Target 1 needs a custom endpoint." });
 
     const parsed = parseDraft({
-      ...blankModel(),
+      ...blankModel(CATALOG),
       id: "local",
       targets: [{ ...custom, endpointId: "local-vllm" }],
     });
@@ -180,7 +190,7 @@ describe("parseDraft", () => {
   });
 
   test("refuses a model with no name", () => {
-    const parsed = parseDraft({ ...blankModel(), id: "   " });
+    const parsed = parseDraft({ ...blankModel(CATALOG), id: "   " });
     expect(parsed).toEqual({
       ok: false,
       problem: "Give the model a name clients will ask for.",
@@ -188,7 +198,7 @@ describe("parseDraft", () => {
   });
 
   test("refuses a model with no targets", () => {
-    const parsed = parseDraft({ ...blankModel(), id: "fast", targets: [] });
+    const parsed = parseDraft({ ...blankModel(CATALOG), id: "fast", targets: [] });
     expect(parsed).toEqual({
       ok: false,
       problem: "A model needs at least one target to route to.",
@@ -196,7 +206,11 @@ describe("parseDraft", () => {
   });
 
   test("names the offending target and the rule it broke", () => {
-    const draft = { ...blankModel(), id: "fast", targets: [blankTarget(), blankTarget()] };
+    const draft = {
+      ...blankModel(CATALOG),
+      id: "fast",
+      targets: [blankTarget(CATALOG), blankTarget(CATALOG)],
+    };
     const second = draft.targets[1];
     if (second === undefined) throw new Error("expected two targets");
     second.weight = "0";
@@ -209,16 +223,20 @@ describe("parseDraft", () => {
   });
 
   test("rejects a fractional tier and a negative price", () => {
-    const fractional = { ...blankModel(), id: "a", targets: [{ ...blankTarget(), tier: "1.5" }] };
+    const fractional = {
+      ...blankModel(CATALOG),
+      id: "a",
+      targets: [{ ...blankTarget(CATALOG), tier: "1.5" }],
+    };
     expect(parseDraft(fractional)).toEqual({
       ok: false,
       problem: "Target 1: tier must be a whole number of 1 or more.",
     });
 
     const negative = {
-      ...blankModel(),
+      ...blankModel(CATALOG),
       id: "a",
-      targets: [{ ...blankTarget(), costOutput: "-1" }],
+      targets: [{ ...blankTarget(CATALOG), costOutput: "-1" }],
     };
     expect(parseDraft(negative)).toEqual({
       ok: false,
@@ -231,7 +249,7 @@ describe("per-model auth", () => {
   const oauthOnly = heldAuths([credential({ provider: "kilo", authType: "oauth" })]);
 
   test("a gateway-only model is not offered to an OAuth-only installation", () => {
-    const ids = reachableChoices("kilo", oauthOnly).map((choice) => choice.id);
+    const ids = reachableChoices(CATALOG, "kilo", oauthOnly).map((choice) => choice.id);
     // Present, so the filter is not simply emptying the list.
     expect(ids).toContain("anthropic/claude-sonnet-5");
     expect(ids).not.toContain("kilo-auto/frontier");
@@ -243,16 +261,36 @@ describe("per-model auth", () => {
       credential({ id: "c1", provider: "kilo", authType: "oauth" }),
       credential({ id: "c2", provider: "kilo", authType: "apiKey" }),
     ]);
-    expect(reachableChoices("kilo", both).map((choice) => choice.id)).toEqual(
-      PROVIDER_MODEL_CATALOG.kilo.models.map((choice) => choice.id),
-    );
+    expect(reachableChoices(CATALOG, "kilo", both).map((choice) => choice.id)).toEqual([
+      "anthropic/claude-sonnet-5",
+      "kilo-auto/frontier",
+      "cohere/north-mini-code:free",
+    ]);
   });
 
   test("a provider with no account is unknown, not blocked", () => {
     const other = heldAuths([credential({ provider: "anthropic", authType: "oauth" })]);
-    expect(reachableChoices("kilo", other).map((choice) => choice.id)).toContain(
+    expect(reachableChoices(CATALOG, "kilo", other).map((choice) => choice.id)).toContain(
       "kilo-auto/frontier",
     );
+  });
+
+  test("a provider named after an Object member is unknown too, not a crash", () => {
+    // `credential.provider` is a stored string arriving from `/api/credentials`,
+    // and a provider id may be any `[a-z][a-z0-9-]{0,31}` — `constructor`
+    // included. Built on an ordinary `{}`, `held["constructor"]` answers the
+    // `Object` constructor: `heldAuths` throws on `ways.includes`, and
+    // `reachable` gets past its `have.length === 0` early return because that
+    // length is 1, then throws on `have.includes`. The models board white-screens
+    // rather than degrading, which is the opposite of the rule the test above
+    // states — unknown is not blocked, and it must not be fatal either.
+    for (const provider of ["constructor", "toString", "valueof"]) {
+      const held = heldAuths([credential({ provider, authType: "oauth" })]);
+      expect(reachable(CATALOG, "kilo", "kilo-auto/frontier", held)).toBe(true);
+      // And the id it actually names still records its own way in, so the map is
+      // not merely answering `undefined` to everything.
+      expect(held[provider]).toEqual(["oauth"]);
+    }
   });
 
   test("a disabled credential still counts, so one bad token hides nothing", () => {
@@ -260,21 +298,37 @@ describe("per-model auth", () => {
       credential({ id: "c1", provider: "kilo", authType: "oauth" }),
       credential({ id: "c2", provider: "kilo", authType: "apiKey", enabled: false }),
     ]);
-    expect(reachableChoices("kilo", disabled).map((choice) => choice.id)).toContain(
+    expect(reachableChoices(CATALOG, "kilo", disabled).map((choice) => choice.id)).toContain(
       "kilo-auto/frontier",
     );
   });
 
   test("the note names both sides, and says nothing about a reachable model", () => {
-    expect(unreachableNote("kilo", "anthropic/claude-sonnet-5", oauthOnly)).toBeNull();
+    expect(unreachableNote(CATALOG, "kilo", "anthropic/claude-sonnet-5", oauthOnly)).toBeNull();
     // Unlisted is unknown, not forbidden: Kilo proxies several hundred models
     // and the catalog curates a few dozen.
-    expect(unreachableNote("kilo", "qwen/qwen4-max", oauthOnly)).toBeNull();
-    expect(unreachableNote("kilo", "", oauthOnly)).toBeNull();
-    expect(unreachableNote("kilo", "kilo-auto/frontier", oauthOnly)).toBe(
+    expect(unreachableNote(CATALOG, "kilo", "qwen/qwen4-max", oauthOnly)).toBeNull();
+    expect(unreachableNote(CATALOG, "kilo", "", oauthOnly)).toBeNull();
+    expect(unreachableNote(CATALOG, "kilo", "kilo-auto/frontier", oauthOnly)).toBe(
       "kilo serves this model to an API key only, and every kilo account here is OAuth. " +
         "Requests routed here will fail.",
     );
+  });
+
+  test("a provider the catalog does not carry is silent, not accused", () => {
+    // What `modelAuths` returning `null` for an unknown provider actually buys.
+    // It does *not* keep such a provider's models in the picker — that list is
+    // empty either way, because `reachableChoices` returns `[]` before
+    // `reachable` is ever asked — so a comment claiming it prevents "hiding
+    // every model" was describing an effect it does not have. What it prevents
+    // is this note: an accusation in red, on the screen an operator opens to
+    // find out whether their configuration is sound, about a target that is
+    // fine and a provider that merely is not listed here.
+    const shrunk = CATALOG.filter((provider) => provider.id !== "anthropic");
+    const held = heldAuths([credential({ provider: "anthropic", authType: "oauth" })]);
+
+    expect(reachableChoices(shrunk, "anthropic", held)).toEqual([]);
+    expect(unreachableNote(shrunk, "anthropic", "claude-opus-5", held)).toBeNull();
   });
 });
 
@@ -282,11 +336,11 @@ describe("pinning a target to one account", () => {
   test("a new target is unpinned", () => {
     // The normal state. Any account of the provider may serve it, which is what
     // every model saved before pinning existed already means.
-    expect(blankTarget("anthropic").credentialId).toBe("");
+    expect(blankTarget(CATALOG, "anthropic").credentialId).toBe("");
   });
 
   test("an empty pin parses to no field rather than to an unmatchable id", () => {
-    const parsed = parseDraft({ ...blankModel(), id: "fast" });
+    const parsed = parseDraft({ ...blankModel(CATALOG), id: "fast" });
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect("credentialId" in (parsed.model.targets[0] ?? {})).toBe(false);
   });
@@ -303,18 +357,19 @@ describe("pinning a target to one account", () => {
   test("changing the provider drops the pin", () => {
     // An Anthropic account cannot serve an OpenAI target, so carrying the id
     // across would leave a pin the router can only report as `pin:missing`.
-    const pinned = { ...blankTarget("anthropic"), credentialId: "cred-1" };
-    expect(retargetDraft(pinned, { provider: "openai", model: "gpt-5.6-sol" }).credentialId).toBe(
-      "",
-    );
+    const pinned = { ...blankTarget(CATALOG, "anthropic"), credentialId: "cred-1" };
+    expect(
+      retargetDraft(CATALOG, pinned, { provider: "openai", model: "gpt-5.6-sol" }).credentialId,
+    ).toBe("");
   });
 
   test("changing only the model keeps the pin", () => {
     // Same provider, same account. Clearing here would silently undo the
     // operator's choice on every keystroke in the model field.
-    const pinned = { ...blankTarget("anthropic"), credentialId: "cred-1" };
+    const pinned = { ...blankTarget(CATALOG, "anthropic"), credentialId: "cred-1" };
     expect(
-      retargetDraft(pinned, { provider: "anthropic", model: "claude-haiku-4-5" }).credentialId,
+      retargetDraft(CATALOG, pinned, { provider: "anthropic", model: "claude-haiku-4-5" })
+        .credentialId,
     ).toBe("cred-1");
   });
 
@@ -354,7 +409,7 @@ describe("pinning a target to one account", () => {
 
   test("changing the endpoint drops the pin", () => {
     // An account belongs to one endpoint as firmly as to one provider.
-    const pinned = { ...blankTarget("custom"), endpointId: "local", credentialId: "here" };
+    const pinned = { ...blankTarget(CATALOG, "custom"), endpointId: "local", credentialId: "here" };
     expect(reEndpointDraft(pinned, "remote").credentialId).toBe("");
     expect(reEndpointDraft(pinned, "local").credentialId).toBe("here");
   });
@@ -372,9 +427,9 @@ describe("pinning a target to one account", () => {
     // credential and reports `pin:missing`, which reads as a deleted account —
     // and the control schema would refuse the save outright on charset.
     const parsed = parseDraft({
-      ...blankModel(),
+      ...blankModel(CATALOG),
       id: "fast",
-      targets: [{ ...blankTarget("anthropic"), credentialId: "  cred-1  " }],
+      targets: [{ ...blankTarget(CATALOG, "anthropic"), credentialId: "  cred-1  " }],
     });
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.model.targets[0]?.credentialId).toBe("cred-1");

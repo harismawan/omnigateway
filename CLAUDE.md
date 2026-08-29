@@ -78,7 +78,10 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
    Long-lived schedulers stay in `apps/gateway`.
 7. Store rows + secrets stay behind `@omni/store`; never expose encrypted or raw provider secrets.
 8. All outbound provider HTTP use `HttpClient`; no direct production `fetch`.
-9. `@omni/providers/catalog` browser-imported, must stay leaf: model lists plus types only.
+9. `@omni/providers/catalog` and `/descriptors` must stay leaves: model lists, presentation, types.
+   No longer because a browser import them — console read provider data over `GET /api/catalog`
+   now — but because pure `packages/router` import `descriptors`, and leaf property is what let it.
+   `packages/providers/test/leafSubpaths.test.ts` still pin both.
 10. Catalog pricing give defaults. Router price from saved targets; catalog edits hit new targets
     only.
 11. CLI administer local installs through `@omni/control`, never `/api/*`. Inject every side effect
@@ -86,9 +89,22 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
 12. Dashboard call `/api/*` only — which now include the one WebSocket, `/api/stream`. One
     exception: `/health`, polled to watch gateway leave and return
     across restart. During restart no session and no authenticated surface to probe, so liveness is
-    the one question `/api/*` cannot answer. May import `@omni/store/types`, `@omni/ir`, catalog
-    subpath, `@omnigateway/dashboard-sdk`, but not provider adapters, HTTP client, runtime store
-    code. SDK permitted because alternative was second copy of rule about what may leave plugin's
+    the one question `/api/*` cannot answer. May import `@omni/store/types`, `@omni/ir`,
+    `@omnigateway/dashboard-sdk`, but **not** `@omni/providers` — neither subpath, not even the leaf
+    ones — nor provider adapters, HTTP client, runtime store code. Allowlist once held `catalog` and
+    `descriptors`, and lost both when provider data moved onto `GET /api/catalog`: a provider loaded
+    from `<root>/plugins/` at boot exist only at runtime, so **no build-time import can reach it**,
+    and a console that import its providers can route to a plugin provider while showing it nowhere.
+    Mirror wire shape in `api/types.ts` like `PluginCatalogEntry` already do; never import it back.
+    `ProviderId` still come from `@omni/ir` — one definition — but provider **list, order, label,
+    colour, models** now all come from the response, and `theme/tokens.ts` hold no provider list.
+    Shell gate in `routes/_app.tsx` make that safe: `beforeLoad` resolve catalog **after** session
+    check (admin-gated route, so unauthenticated path must never ask) and before any screen mount, so
+    `--p-<id>` exist at first paint and no board need a loading state for provider data.
+    Gate is all-or-nothing, so its `errorComponent` must render error **with retry** — never spinner,
+    never blank — and must not swallow `redirect` an expired session throw. Pinned by
+    `apps/dashboard/test/routes/appGate.test.tsx`. SDK permitted because alternative was second copy
+    of rule about what may leave plugin's
     own API prefix — rule held in two places is one that end up true in one. Same argument later
     moved LIVE switch there: which control pause polling is a rule too. SDK **no longer** leaf with
     no imports — `live.ts` import React — so it now in `SHARED_IMPORTS`, one copy served to console
@@ -107,10 +123,18 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     them, because that package published and this one not. This package stay source of truth; mirror
     pinned by `apps/gateway/test/plugins/limitVocabulary.test.ts`, only place that may import both.
 15. Plugins load from `<root>/plugins/` at boot, receive capability-scoped `PluginContext`: never
-    `Store`, `HttpClient`, `AdminAuth`, decrypted credentials, `process.env`. **It is a guardrail,
+    `Store`, `HttpClient`, `AdminAuth`, `process.env`. **It is a guardrail,
     not a sandbox** — plugin share gateway's process and can import past all of it. What it buy:
     accidental overreach impossible, plugin's intent auditable from manifest. Say that plainly
     wherever it come up; reader who believe otherwise make worse decisions than one who know.
+    **One exception, and it is real: a plugin supplying a provider receive the decrypted credential
+    for its own provider.** `codec.buildRequest` get `{accessToken, apiKey, providerData}` straight
+    from `credential.openForInference()`, because a codec that cannot authenticate cannot build a
+    request. Bounded two ways: router only produce candidates for that codec's own provider id, so a
+    plugin see its own provider's secrets and no other; and the codec never hold the client or the
+    store, so it cannot send them anywhere the host did not ask for. This list read as unconditional
+    for one release after that stopped being true — a rule stated wrong is one a contributor
+    preserve while breaking the real thing, so state the exception rather than the tidy version.
     `packages/plugin-api` stay pure like `ir`; loader, context, event bus, channel registry live in
     `apps/gateway`. Every load failure skipped and reported, never fatal: proxy path depend on no
     plugin and must not become able to. `channels` capability give plugin `open(name)` and nothing
@@ -120,8 +144,29 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     `routes/stream.ts` decide who may hold it, so opening channel never widen plugin's own reach.
     Outbound frame reuse socket registry's own bounded per-connection queue — no second queue, and
     nothing here touch `Store`.
-16. **No provider-specific code in a core module.** `ir`, `router`, `store`, `control`, `ratelimit`,
-    `rtk` never name a provider, never branch on a provider id, never hold a table keyed by one. A
+16. **No provider-specific code in a core module.** Aim, not achieved state, and the difference is
+    stated here because an earlier version of this bullet claimed the clean version and a reader can
+    disprove it in one grep — after which the rest of this file reads as decoration.
+    Measured, package by package, because "clean" written from memory is how the last version got it
+    wrong — and this paragraph's first draft repeated the mistake inside the commit correcting it.
+    `ratelimit` and `rtk` are clean of both. `ir` hold no per-provider data and branch on no provider
+    id; its only mention in code is `LogFields.surface` (`"anthropic" | "openai"`), which this rule
+    name as permitted vocabulary. `store` branch on no provider id, but `bodies/mask.ts` **do** hold
+    per-provider data — the `xaiKey` rule and vendor key prefixes — which the redaction paragraph
+    below require stay in core, so it is a carve-out this rule make on purpose rather than a
+    violation. `router` has one branch: `resolve.ts` excludes `custom` from prefix routing, because a bare
+    model name cannot carry an endpoint id. `control` has three things and one of them is large.
+    Two branches — `schemas.ts` name `custom` in the one rule that survive its target union (a
+    custom target carry an `endpointId` and nothing else may), and `credentials.ts` plus `models.ts`
+    ask `=== "custom"` about endpoint metadata. And an **unmigrated per-provider OAuth subsystem**:
+    `control/src/oauth/` hold `OAUTH_PROVIDERS` keyed by five provider literals plus five modules of
+    vendor URLs, scopes and id literals. That last one violate the *first* clause, for which no
+    exception is carved at all, and no sub-project own it yet — say so rather than let the next
+    contributor discover it and conclude the rule is aspirational everywhere.
+    Nothing above is licence to add a fourth. New provider knowledge in core still go through the
+    three outcomes below. The union itself is **gone**: its arms were hand-written for
+    exhaustiveness over a closed `ProviderId`, that closed type no longer exist, and the enum
+    outlived the argument for it while refusing every target naming a plugin-supplied provider. A
     provider's data live in its own descriptor; core read the registry it is handed. Core cannot
     scan providers — `packages/providers` import `@omni/ir`, so reverse import is a cycle, and rules
     1 and 3 forbid it anyway. Injection is the only direction.
@@ -133,9 +178,18 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     data and delete `needsAnthropicNative`, `ANTHROPIC_NATIVE_TOOLS` and the table read inside pure
     router. Hook set is **closed**; growing it need a specific core site, a provider that cannot work
     without it, and no self-describing alternative. `LogFields` never extensible — closed allowlist
-    and redaction boundary. `servesTarget` stay one rule with **one** call site consulting descriptor
-    from inside itself, because five sites once asked that question separately and three asked less
-    than the router did.
+    and redaction boundary. `servesTarget` stay one rule in `@omni/store/types`, because five sites once
+    asked that question separately and three asked less than the router did. It consult **no**
+    descriptor and import nothing from `@omni/providers` — that would be the cycle rules 1 and 3
+    forbid. It name no provider either: rule is "target naming an endpoint is served only by account
+    at it", which cover `custom` without saying so.
+    **Redaction never becomes extensible**, same family as `LogFields` and for the same reason.
+    `MASK_RULES` in `packages/store/src/bodies/mask.ts` keep its `xaiKey` rule and its vendor
+    prefixes in core, and a provider **not** supply its own pattern: a descriptor-supplied regex is a
+    provider deciding how much of its own secret survive into captured bodies, and the direction that
+    go wrong is silent. Gap is narrow by construction — `PREFIXED_KEY` and `OPAQUE` already catch
+    ordinary `xyz-…` key shapes, so new provider is covered, only not optimally. Adding a vendor rule
+    is a core edit and should read as one.
     What core keep is provider-shaped **vocabulary**, not provider **logic**: `ErrorCode`,
     `LogFields`, `StopReason`, `CacheControl.ttl`, `AuthType`, `WindowType`, `surface`,
     `AnthropicToolFamily`. Provider needing new member of those edit core, by design — that is a
@@ -216,6 +270,23 @@ reviewing one — it open with what plugin can reach, which decide whether rest 
   headers/metadata.
 - `LogFields` is closed allowlist + redaction boundary. Treat new free-text fields as security
   changes; never add index signature.
+- **`GatewayError.gatewayAuthored` is the second half of that boundary, and it is opt-in on
+  purpose.** `reasonField` withhold a failure's message from stdout unless debug is on, because
+  `httpError` fill one from up to 500 characters of an upstream body and a context-length refusal
+  echo prompt text into it. It used to infer that from `provider !== undefined`, on the premise that
+  `httpError` set that field and nothing else did — true when written, false the moment codec errors
+  named their provider, which is what make them actionable. So naming the provider **silenced the
+  sentence naming it**: a plugin codec throwing on every request logged `code=UPSTREAM` with no
+  reason, indistinguishable from an outage. Flag default **false** and each site opt in. The
+  opposite spelling — a `quotesUpstream` every upstream-quoting site must set — was written first
+  and abandoned: it need all ~180 construction sites audited correctly and one miss put a prompt on
+  stdout, and five tests immediately named real sites building messages from upstream bodies without
+  going through `httpError` (decoder terminal event, OAuth refresh, proxy refusal). Set it only for
+  a message built from literals and values this repository own. **Never** for one carrying an
+  upstream body, and never for one authored outside this repository — a plugin codec's own text is
+  unknown exactly the way a body is, which is why `rebound` not set it and `codecFailure` do. It
+  must survive re-wraps like `provider` do: `classify` and dispatch's `rewrap` both rebuild the
+  error, and dropping it there make the flag inert on the only path reaching an operator.
 - Return raw gateway API keys once; store only hashes.
 - Encrypt provider credentials with required `OMNI_ENCRYPTION_KEY`; never add default secrets or
   commit `.env` files/databases.
@@ -293,10 +364,17 @@ Preserve these translation invariants:
 - `ToolDef` is union. `CustomToolDef` stay portable; `AnthropicToolDef` carry exact versioned `type`
   never normalized or upgraded. Versions in `packages/providers/src/anthropic/tools.ts`; unknown
   dated types rejected, not prefix-matched.
-- Anthropic-native content blocks use `anthropicNative` IR variant, keep payload verbatim, stay out
-  of tool-id correlation, orphan removal, cross-provider translation, RTK.
-- `AnthropicToolDef` or `anthropicNative` history block exclude every provider whose
-  `ANTHROPIC_NATIVE_TOOLS` entry false at routing — currently everything except Anthropic.
+- Provider-native content blocks use `providerNative` IR variant, keep payload verbatim, stay out
+  of tool-id correlation, orphan removal, cross-provider translation, RTK. Block carry `provider` —
+  who produced it — and that field is what routing read.
+- `ToolDef` discriminant is `kind`: `"portable"` (was `provider: "custom"`, colliding with the
+  `custom` **provider id** and meaning something else) or `"provider"` plus a real `ProviderId`.
+- Provider-defined tool or `providerNative` history block admit **only** that provider's targets at
+  routing — today only Anthropic produce either. Replaced "exclude every provider whose
+  `ANTHROPIC_NATIVE_TOOLS` entry false", which selected the same targets and needed a table.
+  Degradation spelled `excluded:capability:providerNative`; rows written before the rename carry
+  `excluded:capability:anthropicTools` and stay readable, because degradations are forensic text
+  never parsed on read. Redaction of `credentialId` there read `Excluded.kind`, never the string.
 - `pauseTurn` is own stop reason; never fold into `endTurn` or `toolUse`.
 - Client tool names renamed to PascalCase on Anthropic **OAuth** leg only, restored in
   `anthropic/decode.ts` — never at egress. Anthropic fingerprint some name sets and refuse them
@@ -425,6 +503,50 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   went unnoticed once. `packages/plugin-api/test/bundleWeight.test.ts` build each entry point and
   assert zod appear only under root; first test assert zod *is* present there, because "absent" is
   also what broken harness report.
+- **The range one published package put on the other is never resolved in this repository**, so it
+  is the one dependency edge nothing here exercise. Workspace resolution use the local copy, and the
+  declared range only decide what arrive in a stranger's `node_modules`. `dashboard-sdk` carried
+  `@omnigateway/plugin-api: ^0.1.0` past that package's move to `0.2.0` — `^0.x` mean
+  `>=0.x.0 <0.(x+1).0` — so every `bun add` of the SDK resolved generation **1** against a gateway
+  that refuse `api: 1`, and no source file say so. Repairing the range fix nobody: release step skip
+  a package whose **version** not moved, so version bump is the only part of the repair a consumer
+  see. `publishable.test.ts` walk the pairs rather than assert the one range, and its drift check
+  watch `package.json` beside `src` — manifest is the part of published artifact deciding what
+  source *resolve*.
+- **A check gated on `merge-base(main, HEAD)` fail on one CI trigger and is vacuous on the other.**
+  `actions/checkout` fetch `+refs/heads/*:refs/remotes/origin/*` and, on `pull_request`, detach at
+  `refs/remotes/pull/N/merge` — it never create `refs/heads/main`, not at `fetch-depth: 0` either.
+  So `rev-parse --verify main` exit 128 and `check:claims`/`check:dead` exit 2 on every PR, printing
+  an instruction (`actions/checkout@v5 with fetch-depth: 0`) that is the configuration already in
+  effect. On `push: branches: [main]`, `merge-base` **is** HEAD, so both report success over an
+  empty set — green and vacuous, the shape they exist to catch. Base now resolve through `main` or
+  `origin/main` and fall back to **first parent** when HEAD is the base; first parent specifically,
+  because `main` advance by merge commits and the second parent is the change-set itself. One copy
+  in `scripts/lib/history.ts`, tested against scratch repositories in `scripts/test/history.test.ts`
+  — the developing checkout have a local `main` behind HEAD, which is the one arrangement that
+  worked, so neither failure was observable from it.
+- **`SAFE_PROVIDER_ID` in `apps/dashboard/src/theme/tokens.ts` mirror `PROVIDER_ID_PATTERN`, and
+  `providerColor` is where a stored string become CSS.** styled-components not escape
+  interpolations, and the ids reaching it — `credential.provider`, `target.provider`,
+  `log.resolvedProvider` — never pass `/api/catalog`, where control already withhold an unusable id.
+  Write path is guarded by `providerIdSchema`; read path is not, because `sqlite/config.ts` parse
+  `virtual_models.targets` with bare `JSON.parse`. Check live in `providerColor` and not at the four
+  call sites, because a guard at callers is one a fifth caller join by not knowing. Restated not
+  imported (rule 12), pinned by `apps/gateway/test/routes/providerIdMirror.test.ts` from the one
+  place that may import both — same shape as `limitVocabulary.test.ts`, and the **first** of the
+  five copies of this expression that anything pin. Reference carry `var(--p-<id>, var(--ink-faint))`:
+  without the fallback an unlisted provider inherit, so the identity bar take the colour of the
+  label beside it.
+- **A drift check reading repaired history cannot fail.** `publishable.test.ts` ask git what moved
+  since last tag, and once the fix land there is nothing to see — so both fixes to that query
+  survived mutation against real history while being plainly wrong. Query now live in
+  `packages/plugin-api/test/helpers/changed.ts` and `changed.test.ts` ask it of scratch repository it
+  build, with a no-edit case first because query reporting everything satisfy every other assertion.
+  Two properties it own: watched set include `package.json`, and diff take **one ref**, not
+  `${ref}..HEAD` — two-dot form compare commit to commit, so change contributor look at while
+  running suite is invisible, which is every change at moment it still free to fix. Third instrument
+  in this repo found reading `base..HEAD` where it meant "since base"; `scripts/dead-exports.ts` was
+  second.
 - `admit`/`consume` claim ring stamp and gauge **synchronously**, before any `await`, and roll back
   on refusal. Reading counters first and recording after let concurrent requests judge one pre-burst
   snapshot — ceiling of 3 admitted 10 parallel requests, and it need no I/O to fire.
@@ -475,6 +597,123 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   widen membership is making an earlier guard conditional on the pin. An early version of this bullet
   named the wrong property, which is exactly the trap: a rule stated wrong is one a contributor
   preserve while breaking the real thing.
+- **`ProviderId` is a validated string, not a union of six.** A provider loaded from
+  `<root>/plugins/` has an id no compiled-in union could hold, so a closed type there is a closed
+  door here.
+  **What this cost, stated exactly, because the first version of this bullet overstated it and a
+  rule stated wrong is one a contributor preserve while breaking the real thing.** Five tables key
+  on a provider id — `PROVIDER_DESCRIPTORS`, `ADAPTERS`, `PROFILES`, `BODY_ORDER`,
+  `PROVIDER_MODEL_CATALOG` — and each is a hand-written six-key literal. Only `PROVIDERS` is derived
+  by walking one. Delete a built-in's line from any of the five and **typecheck pass**: measured, all
+  five. `Record<string, X>` accept any subset, so writing the ids as literals constrain nothing once
+  the key type open. What catch it is **lint** (the import go unused) and
+  `packages/providers/test/descriptor.test.ts` (key-set equality against a literal `IDS`) — never the
+  compiler. Do not write "compile error" here again; if the guarantee need to be stronger, the
+  honest move is a derived table, not a stronger sentence.
+  Lookups keyed on a **stored** id are genuinely partial and `noUncheckedIndexedAccess` make each a
+  compile error at the point of use. Do not cast that away; each site owe a decision, and the
+  decisions differ. `PROVIDER_ID_PATTERN` in `packages/providers` is the source of what may name a
+  provider; `packages/control/src/catalog.ts` read it rather than restating it. Four other copies of
+  the same expression validate a **plugin** id — `packages/plugin-api/src/manifest.ts` (published, so
+  justified), `apps/gateway/src/plugins/routes.ts`, `packages/control/src/plugins.ts`,
+  `packages/store/src/sqlite/plugins.ts` — and **no test pin any of them to this one**. A plugin
+  provider's id is both kinds at once, so that is a real gap, not a technicality; do not describe it
+  as mirror-and-pin, which is what `@omni/ratelimit/catalog` have and this not.
+- **Every provider-keyed table drop its prototype, and that is one invariant standing in for a guard
+  at each reader.** Reason: a provider id arrive from a client's `model` name and from unvalidated
+  JSON in `virtual_models.targets`, and on ordinary object literal `table["constructor"]` answer the
+  `Object` constructor. So `!== undefined` and `?.` both read "installed", then throw on next
+  property access. Shipped once: `resolveModel` replaced a `Set.has` — which never consult a
+  prototype — with an index check, and `model: "constructor/foo"` returned **500 carrying an internal
+  source expression** where `nope/foo` correctly returned 503. Same keys defeated four more readers
+  including the `provider:missing` guard and `omni doctor`'s check, each going silent in the exact
+  case it exist for. `PROVIDER_ID_PATTERN` accept `constructor`, so nothing upstream stop such an id
+  being stored. **`noUncheckedIndexedAccess` cannot see any of it** — it force a guard, and the guard
+  it force is the one a prototype key defeat. Do not add `Object.hasOwn` at the readers instead: it
+  cover only those asking existence, not `catalogPricing`'s `?.`, and partial protection that read as
+  total is worse than none. That version was written, and every one of its mutants survived removal.
+  **Do not enumerate the tables here.** An earlier version did, listing the six in
+  `@omni/providers`, and `OAUTH_PROVIDERS` in `@omni/control` went on leaking for another review
+  round — a raw `TypeError` out of `refresh.ts` with the same signature as the bug the rule was
+  written for, plus `CALLBACKS` and the console's `heldAuths` map. A list of what to check have
+  exactly the property the thing it check lack. `packages/control/test/providerTables.test.ts`
+  **discover** them instead: it walk the exported surface of both packages, treat anything holding
+  two or more registered provider ids as a table, and assert the walk found something before
+  asserting anything about what it found. New table is covered the day it is exported.
+  Two facts the idiom hide, both worth knowing before writing a new one: spreading a null-prototype
+  object give an **ordinary** object, so `{...ADAPTERS, x}` silently revert the invariant — use
+  `Object.assign(Object.create(null), …)` — and `.hasOwnProperty()` called as a **method** on one of
+  these throw. Use `Object.hasOwn(table, key)`.
+  This bullet used to say the gateway normalise injected adapter maps at `app.ts`. **It does not**,
+  and `app.ts` say so in as many words: an earlier version spread there, which guarded `createApp`
+  and nothing else, because `DispatchDeps` and `ProxyDeps` are public injection points a caller or
+  test construct directly — so the map dispatch actually read may never have passed through. The
+  guard live at the **read site**, `dispatch/index.ts`, which is on the path however the map was
+  built. That is the whole thing standing between a prototype-keyed provider id and `adapter.send`,
+  and `PROVIDER_ID_PATTERN` accept `constructor`, so a contributor who believe the old sentence and
+  simplify that read reopen a 500 carrying an internal source expression.
+  Console cannot import `@omni/providers` (rule 12), so `heldAuths` restate the rule with
+  `Object.create(null)` and carry its own test.
+- **A registry threaded into some of a call graph and not all is this repository's most repeated
+  bug, and it is the *sweep* that keep failing, not the fix.** Three review round in a row each
+  found it in the previous round's fix: prototype sweep covered `@omni/providers` and left
+  `OAUTH_PROVIDERS`, `CALLBACKS` and console's `heldAuths`; injection covered `resolveModel` and
+  `rank` and left `priceOf`, so a $12.50 cache write bill $0.00 with no throw and no log; then the
+  test pinning *that* covered injected path and not default, because `??` only fire on `undefined`.
+  Every one found by hand, by someone thinking to try that one site.
+  So do not add one test per site — they go stale the day a fourth site appear. **Inject a sentinel
+  registry holding one synthetic provider and none of the six**, and assert a real request end to
+  end. Any consumer reading module-global instead see a registry without it and fail loudly:
+  `resolveModel` cannot infer the prefix, `eligible` exclude `provider:missing`, `priceOf` bill
+  writes at zero. `apps/gateway/test/dispatch/dispatch.test.ts` hold it, and it kill all four
+  threading mutants **alone**, with every per-site test deselected. Same instrument as
+  `providerTables.test.ts`, which discover leaking table instead of listing them, and for same
+  reason: a list of what to check have exactly the property the thing it check lack.
+  Two shapes it need two dispatches for, and both are traps: a **configured** model short-circuit
+  `resolveModel` before any registry is read, and an **inferred** target is priced from
+  `PROVIDER_MODEL_CATALOG` — a different global, not injected — so it carry zero prices and can show
+  no multiplier.
+- **A module-scope `Object.keys`/`Object.entries` over `PROVIDER_DESCRIPTORS` is a build-time
+  snapshot**, and `loadPlugins()` run long after import. **Five** sites read one and were wrong the
+  same way — the count went three, then five, because each sweep stopped at the sites the previous
+  bug had made visible: `providerCatalog` served a console missing every plugin provider,
+  `providerIdSchema` was `z.enum(PROVIDER_IDS)` and would have refused their credentials,
+  `isProviderId` reported them as not existing, `PREFIX_PROVIDER` made a provider's own
+  `modelPrefixes` unreachable while `provider/model` for the same provider resolved — an asymmetry
+  *inside one function* — and `CALLBACKS` redirected nowhere. All five ask the registry **at call
+  time** now; `CALLBACKS` was deleted outright, since a second table derived from the first is a
+  thing to keep in step rather than a thing to have. Assume a sixth exist until you have grepped for
+  the pattern rather than for the names above.
+  `PROVIDER_IDS` still exist and is still a snapshot — it feed CLI usage messages and tests, never a
+  gate. `descriptors.ts` say so at the definition, which is where a reader meet it.
+- `provider:missing` is the pin rule applied to the provider, and follow it exactly: emitted **once
+  per target**, `kind: "target"` with `credentialId: ""`, because no account is at fault. It is the
+  **first** guard in the target loop, so a target that is also pinned report the provider rather than
+  `pin:missing` about an account that could not have served it either way. `credentialId` must stay
+  `""` — a mutant carrying the pin there survive a `reason`-only assertion and put the string into
+  `LogFields.credentialId`, contradicting `kind`. Dispatch's `INTERNAL "no adapter for provider …"`
+  is the *other* half and stay a throw: reaching it mean the router admitted a candidate it should
+  have excluded, which is a gateway bug, and `deps.adapters` is a separate injection point from the
+  descriptors, so the two can disagree.
+- **Format and existence are two questions.** `providerIdSchema` check format alone, and it is the
+  gate on **credentials**, not on targets: `createApiKeyCredential` parse it, then ask `isProviderId`
+  and refuse to mint an account for a provider that does not exist — no history to preserve.
+  `catalogModelAuths` answer "every way in" for an unknown provider, matching what it already answer
+  for an unlisted model: empty would read as "no credential can reach this" and refuse every plugin
+  provider's target.
+  **A target naming any well-formed provider id save**, including one no build contain. This bullet
+  has now said the opposite twice and both were wrong in their own direction, so state it once
+  plainly: `putModel` parse through `modelSchema`, `targetSchema` take `providerIdSchema` — format
+  only — and existence is checked nowhere on this path. That is the same exemption a dangling pin
+  already have, for the same reason: removing a provider must not make an unrelated model unsavable.
+  `provider:missing` at routing and `omni doctor` carry that weight.
+  Until the plugin capability landed, `targetSchema` held `z.enum(["anthropic",…,"grok"])`, which
+  refuse every target naming a plugin-supplied provider — a provider routing, pricing and the console
+  all knew about and no operator could configure. The enum was written for exhaustiveness over a
+  closed `ProviderId` and outlived it.
+  One rule survive the union it replaced, and losing it is the real risk: **a `custom` target require
+  an `endpointId` and nothing else may carry one**. A custom target with no endpoint match no account,
+  so it save clean and fail every request at routing rather than at the point it was named.
 - Nothing validate the pin at write time, same exemption `putModel` give stored targets: removing an
   account must not make unrelated edit unsavable. `omni doctor` carry that weight instead, and it
   must resolve through `resolvePin` — an existence check report "none" for the cross-provider and

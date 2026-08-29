@@ -77,7 +77,7 @@ graph TD
   gateway --> rtk
   gateway --> ratelimit
   cli --> control
-  dashboard -. "types + catalog only" .-> providers
+  dashboard -. "types only" .-> ir
   dashboard -. "types only" .-> store
   control --> router
   control --> ratelimit
@@ -103,9 +103,14 @@ even `@omni/ir`. The rings and the in-flight gauge live in the gateway, because
 state is not the package's job, and that split is what lets sliding-window
 arithmetic be tested without a gateway, a store, or a clock.
 
-The dashboard's edges are dotted because they are type-level only.
-`@omni/providers/catalog` is deliberately kept import-free so model lists can be
-bundled into the browser without dragging in the HTTP client.
+The dashboard's edges are dotted because they are type-level only. It has no edge
+to `@omni/providers` at all: provider names, colours, order and model lists reach
+the console over `GET /api/catalog`, because a provider loaded from
+`<root>/plugins/` exists only at runtime and no build-time import could see one.
+
+`@omni/providers/catalog` and `/descriptors` are still deliberately import-free,
+for a different reason than they used to be: the pure router imports
+`descriptors`, and the leaf property is what lets it.
 
 The router's dotted edge into `@omni/store` is nearly the same story: its
 package-root imports are all `import type`. Two pure arithmetic helpers,
@@ -685,7 +690,8 @@ Worth knowing before you deploy it:
 
 ## Plugins
 
-A plugin adds routes, storage, and a screen in the console to one installation,
+A plugin adds routes, storage, a provider, and a screen in the console to one
+installation,
 without being part of OmniGateway. Most installations run none.
 
 ```bash

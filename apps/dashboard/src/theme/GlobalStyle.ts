@@ -1,6 +1,79 @@
 import { createGlobalStyle } from "styled-components";
 
 /**
+ * Everything the palette needs of a provider: an id and both its hues.
+ *
+ * Both halves are optional, and that is a statement about the wire rather than
+ * about the design. This arrives as JSON from `/api/catalog`, so the compiler
+ * has checked nothing about it — the type describes what a *correct* payload
+ * looks like, and this component has to survive an incorrect one.
+ */
+export type PaletteProvider = {
+  id: string;
+  colour?: { light?: string | undefined; dark?: string | undefined } | undefined;
+};
+
+/**
+ * The `--p-<id>` half of one palette, written from the loaded catalog.
+ *
+ * Both modes are generated from the same list, so a provider is normally
+ * written into both. It is **not** unrepresentable for one half to be missing —
+ * an earlier version of this comment said it was, which was true of a
+ * compiled-in `Record<ProviderId, …>` and stopped being true the moment these
+ * values started arriving over the wire. What happens now is that the half is
+ * left out: `--p-x: undefined;` is dropped by the CSS parser without a word,
+ * and `--p-x: ;` is worse, so a value that is not a string is not written at
+ * all. The provider then paints colourless in that one mode, which is the same
+ * outcome as before and reached without the sheet carrying a lie.
+ *
+ * Nothing here validates the *content* of a hue. `packages/control/src/catalog.ts`
+ * does that, and it is the only place that should: this template concatenates,
+ * and a second check on this side of the wire would be a guard against a server
+ * that also serves the script running it.
+ *
+ * The reasoning behind each hue lives in that provider's `descriptor.ts`,
+ * beside the value it explains — generated CSS cannot carry a comment, and a
+ * comment kept away from its value is one that goes stale unnoticed.
+ */
+function providerPalette(providers: readonly PaletteProvider[], mode: "light" | "dark"): string {
+  return providers
+    .flatMap(({ id, colour }) => {
+      const value = colour?.[mode];
+      // Only "is there a string here", not "is it a good one". An empty one is
+      // refused by `packages/control/src/catalog.ts` and, if it ever got past,
+      // is stripped by the minifier on the way into the sheet — a check for it
+      // here would be a branch no test could tell from its absence.
+      return typeof value === "string" ? [`--p-${id}: ${value};`] : [];
+    })
+    .join("\n    ");
+}
+
+/**
+ * The provider hues, as the custom properties `theme.provider` points at.
+ *
+ * Separate from `GlobalStyle` because the two have different lifetimes now that
+ * the values arrive over `/api/catalog`. The chassis palette is known at module
+ * scope and the login screen needs it before there is a session; these are
+ * gateway state, so this is mounted inside the shell gate — `_app`'s
+ * `beforeLoad` resolves the catalog before the shell renders, and the styles go
+ * in during the same commit as the first provider-coloured element.
+ *
+ * That ordering is the point rather than an optimisation. `var(--p-unknown)`
+ * resolves to nothing and renders colourless *with no error*, so a palette that
+ * arrived one paint late would be a silent failure, and a permanent one if the
+ * fetch had failed.
+ */
+export const ProviderPalette = createGlobalStyle<{ $providers: readonly PaletteProvider[] }>`
+  :root {
+    ${({ $providers }) => providerPalette($providers, "light")}
+  }
+
+  .dark {
+    ${({ $providers }) => providerPalette($providers, "dark")}
+  }
+`;
+
+/**
  * Palette values live here as custom properties rather than in the theme object
  * so that `.dark` on <html> is the single switch, applied by the pre-paint
  * script before React mounts. `theme` in tokens.ts points at these names.
@@ -31,23 +104,6 @@ export const GlobalStyle = createGlobalStyle`
     --warn-wash: oklch(0.58 0.13 72 / 0.14);
     --down-wash: oklch(0.53 0.2 27 / 0.11);
 
-    --p-anthropic: oklch(0.56 0.13 45);
-    --p-openai: oklch(0.5 0.09 190);
-    --p-kimi: oklch(0.53 0.17 330);
-    /* Kilo takes the arc between openai and the accent: 224 is ~34deg from
-       openai and ~38 from the accent blue, and — the point — 106 from kimi.
-       Kimi and kilo are one letter apart and sit next to each other in every
-       list the console draws, so they are the one pair that must not also be
-       neighbours in hue. The other free arc, ~296, is 34 from kimi and would
-       have done the opposite. */
-    --p-kilo: oklch(0.52 0.14 224);
-    /* xAI's own identity is achromatic, and the neutral slot is already
-       custom's, so grok takes the widest free arc of the wheel instead: 125 is
-       ~70deg from both anthropic and openai and ~145 from kimi, which is what
-       keeps five series apart in the usage charts. */
-    --p-grok: oklch(0.52 0.14 125);
-    --p-custom: oklch(0.5 0.03 258);
-
     --grid-line: oklch(0.22 0.017 258 / 0.055);
     --shadow: 0 1px 2px oklch(0.22 0.017 258 / 0.06);
   }
@@ -76,13 +132,6 @@ export const GlobalStyle = createGlobalStyle`
     --ok-wash: oklch(0.75 0.14 162 / 0.16);
     --warn-wash: oklch(0.82 0.14 80 / 0.16);
     --down-wash: oklch(0.68 0.19 25 / 0.16);
-
-    --p-anthropic: oklch(0.74 0.12 48);
-    --p-openai: oklch(0.76 0.1 190);
-    --p-kimi: oklch(0.72 0.16 330);
-    --p-kilo: oklch(0.74 0.14 224);
-    --p-grok: oklch(0.74 0.14 125);
-    --p-custom: oklch(0.72 0.03 258);
 
     --grid-line: oklch(0.94 0.006 250 / 0.045);
     --shadow: 0 1px 2px oklch(0 0 0 / 0.3);

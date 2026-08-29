@@ -426,3 +426,61 @@ test("keys models refuses conflicting flags and an unknown key id", async () => 
     "fast",
   ]);
 });
+
+test("a --json edit onto unreadable limits says the old ones were discarded", async () => {
+  // `keys limits --set` replaces the whole column when the stored matrix cannot
+  // be parsed, and said so only through `note()` — which is
+  // `if (!ctx.json) writer.err(...)`. So under `--json` the warning reached
+  // neither stream, and a provisioning script adding one limit to a key whose
+  // column had gone bad silently discarded every other limit while getting
+  // output indistinguishable from an ordinary edit. The same `--json` silence
+  // this branch fixed in `credentials add-key`, on a path that destroys data
+  // rather than refusing one.
+  const root = makeRoot();
+  const created = await cli(
+    [
+      "keys",
+      "create",
+      "--label",
+      "app",
+      "--limit",
+      "requests:1m=100",
+      "--limit",
+      "spend:1w=25",
+      "--json",
+    ],
+    { root },
+  );
+  const { id } = JSON.parse(created.out) as { id: string };
+
+  // Corrupted directly, because no command can write a matrix no reader parses —
+  // which is the point: this state arrives from a restore or a hand-edit.
+  const db = new Database(join(root, "omnigateway.db"));
+  db.run("UPDATE api_keys SET limits = ? WHERE id = ?", ["{{{not json", id]);
+  db.close();
+
+  const edited = await cli(["keys", "limits", id, "--set", "requests:1m=7", "--json"], { root });
+  expect(edited.code).toBe(0);
+  const body = JSON.parse(edited.out) as { limitsReplaced?: boolean; limits: LimitConfig | null };
+  expect(body.limitsReplaced).toBe(true);
+  // And the consequence the flag is reporting: the spend ceiling is gone.
+  expect(body.limits?.spend).toBeUndefined();
+  expect(body.limits?.requests).toEqual({ "1m": 7 });
+});
+
+test("an ordinary --json edit carries no such flag", async () => {
+  // The control. A payload that always said `limitsReplaced` would satisfy the
+  // test above while telling every caller their limits had been thrown away.
+  const root = makeRoot();
+  const created = await cli(
+    ["keys", "create", "--label", "app", "--limit", "requests:1m=100", "--json"],
+    { root },
+  );
+  const { id } = JSON.parse(created.out) as { id: string };
+
+  const edited = await cli(["keys", "limits", id, "--set", "requests:5h=9", "--json"], { root });
+  const body = JSON.parse(edited.out) as { limitsReplaced?: boolean; limits: LimitConfig | null };
+  expect(body.limitsReplaced).toBeUndefined();
+  // The pre-existing limit survives, which is what "not replaced" means.
+  expect(body.limits?.requests).toEqual({ "1m": 100, "5h": 9 });
+});

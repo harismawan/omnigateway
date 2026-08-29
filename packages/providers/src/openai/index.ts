@@ -1,10 +1,12 @@
-import { GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
-import { BODY_ORDER, orderFields } from "../body.ts";
+import { GatewayError } from "@omni/ir";
+import { orderFields } from "../body.ts";
 import { httpError } from "../http.ts";
-import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
+import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { decodeResponses } from "./decode.ts";
+import { openaiDescriptor } from "./descriptor.ts";
+import { openaiBodyOrder, openaiProfile } from "./profile.ts";
 import { toResponsesWire } from "./wire.ts";
 
 const OAUTH_URL = "https://chatgpt.com/backend-api/codex/responses";
@@ -12,7 +14,7 @@ const API_URL = "https://api.openai.com/v1/responses";
 
 export const openaiAdapter: ProviderAdapter = {
   id: "openai",
-  capabilities: PROVIDER_CAPABILITIES.openai,
+  capabilities: openaiDescriptor.capabilities,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const oauth = req.credentials.accessToken !== null;
@@ -33,7 +35,7 @@ export const openaiAdapter: ProviderAdapter = {
     }
 
     // `originator` and `Accept: text/event-stream` come from the profile.
-    const profile = PROFILES.openai;
+    const profile = openaiProfile;
     const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
 
     // The Codex endpoint only streams. Non-streaming client requests are served
@@ -43,7 +45,7 @@ export const openaiAdapter: ProviderAdapter = {
       url: oauth ? OAUTH_URL : API_URL,
       method: "POST",
       headers,
-      body: JSON.stringify(orderFields({ ...body, stream: true }, BODY_ORDER.openai)),
+      body: JSON.stringify(orderFields({ ...body, stream: true }, openaiBodyOrder)),
       signal: req.signal,
     });
 

@@ -1,10 +1,9 @@
 import { expect, test } from "bun:test";
-import type { ProviderId } from "@omni/ir";
 import { DEFAULT_SETTINGS } from "@omni/store";
 import { isProviderId } from "../src/connect.ts";
 import { keyCreateSchema, modelSchema, providerIdSchema, settingsSchema } from "../src/schemas.ts";
 
-const target = (provider: string) => ({
+const target = (provider: string): Record<string, unknown> => ({
   provider,
   model: "anthropic/claude-sonnet-5",
   tier: 1,
@@ -33,24 +32,89 @@ test("a kilo credential can be created and a kilo target can be configured", () 
   expect(isProviderId("kilo")).toBe(true);
 });
 
-test("every provider id but custom can back a plain target", () => {
-  const ids: ProviderId[] = ["anthropic", "openai", "kimi", "kilo", "grok"];
-  for (const id of ids) {
-    expect(providerIdSchema.parse(id)).toBe(id);
-    expect(isProviderId(id)).toBe(true);
+test("every provider id can back a target, including one no build knows about", () => {
+  // `targetSchema` used to restrict this to a hand-written five-member enum, on
+  // the argument that the narrowing was the last compile-time check a new
+  // provider had been thought about. That argument died with the closed
+  // `ProviderId`, and the enum outlived it — refusing every target naming a
+  // provider supplied by a plugin, which is to say every provider this whole
+  // effort exists to make possible.
+  for (const id of ["anthropic", "openai", "kimi", "kilo", "grok"]) {
     expect(modelSchema.parse(model(id)).targets[0]?.provider).toBe(id);
   }
 
-  // `custom` is its own arm of the union: it carries an endpoint id and would
-  // be rejected by the shape above.
-  expect(providerIdSchema.parse("custom")).toBe("custom");
-  expect(() => modelSchema.parse(model("custom"))).toThrow();
+  // The one that matters: an id no build contains, arriving from a plugin.
+  expect(modelSchema.parse(model("acme-ai")).targets[0]?.provider).toBe("acme-ai");
 });
 
-test("a provider that does not exist is refused everywhere", () => {
-  expect(() => providerIdSchema.parse("kilocode")).toThrow();
+test("a custom target still requires its endpoint, and only custom may carry one", () => {
+  // What the discriminated union actually enforced, kept as the rule it always
+  // was. A custom target with no endpoint matches no account, so it would save
+  // clean and fail every request at routing rather than at the point it was
+  // named.
+  expect(() => modelSchema.parse(model("custom"))).toThrow(/endpointId/);
+
+  const withEndpoint = model("custom");
+  withEndpoint.targets[0] = { ...withEndpoint.targets[0], endpointId: "local-vllm" };
+  expect(modelSchema.parse(withEndpoint).targets[0]).toMatchObject({
+    provider: "custom",
+    endpointId: "local-vllm",
+  });
+
+  // And the other direction, which the union got for free from `.strict()` and
+  // this gets from a named rule.
+  const builtIn = model("anthropic");
+  builtIn.targets[0] = { ...builtIn.targets[0], endpointId: "not-allowed" };
+  expect(() => modelSchema.parse(builtIn)).toThrow(/only meaningful for a custom target/);
+});
+
+test("a target still refuses an unknown key", () => {
+  // `.strict()` survived the union collapse but stopped being asserted: the one
+  // test that covered it was rewritten to assert the new endpointId refine's
+  // message, and deleting `.strict()` then passed the whole suite.
+  //
+  // What it protects: `virtual_models.targets` is written whole as JSON and read
+  // back by `sqlite/config.ts` with `JSON.parse` and no validation, so a
+  // misspelled `contexWindow` or `costPerMtok` would save silently and read back
+  // absent forever — a pool priced from a field nothing set.
+  for (const key of ["contexWindow", "costPerMtok", "endpiontId", "provider2"]) {
+    const typo = model("anthropic");
+    typo.targets[0] = { ...typo.targets[0], [key]: 1 };
+    expect(() => modelSchema.parse(typo)).toThrow(/unrecognized key/i);
+  }
+});
+
+test("a provider that does not exist is refused where it can be", () => {
+  // Three questions that used to have one answer, and now have two.
+  //
+  // `providerIdSchema` checks format alone: it was an enum over a module-scope
+  // key list, which is a snapshot taken before any plugin provider is
+  // registered, so keeping it would refuse exactly the ids this work exists to
+  // allow. `isProviderId` is the existence check, read from the registry at call
+  // time, and `createApiKeyCredential` is what calls it.
+  //
+  // `targetSchema` no longer refuses an unknown provider at all, and that is
+  // deliberate: it is the same exemption a dangling pin already had, because
+  // removing a provider must not make an unrelated model unsavable. `omni
+  // doctor` and the router's `provider:missing` carry that weight instead.
+  expect(providerIdSchema.parse("kilocode")).toBe("kilocode");
   expect(isProviderId("kilocode")).toBe(false);
-  expect(() => modelSchema.parse(model("kilocode"))).toThrow();
+  expect(modelSchema.parse(model("kilocode")).targets[0]?.provider).toBe("kilocode");
+});
+
+test("providerIdSchema still refuses an id that cannot name a provider", () => {
+  // Restored after the schema stopped being an enum. Without it, this file
+  // asserted only that ids *parse*, so loosening the pattern to `/^.+$/` — which
+  // makes format and existence the same question — passed the whole suite.
+  //
+  // Format is a real gate: the id becomes a `--p-<id>` custom property, a
+  // `plugin_<id>_*` table prefix and a `plugin:<id>:*` topic, so an id that
+  // cannot be all three has to fail here rather than wherever notices first.
+  for (const bad of ["", "Anthropic", "1kilo", "kilo_code", "kilo.code", "-kilo", "a".repeat(33)]) {
+    expect(providerIdSchema.safeParse(bad).success).toBe(false);
+  }
+  // The positive control: a pattern refusing everything would satisfy the loop.
+  expect(providerIdSchema.safeParse("well-formed-plugin-id").success).toBe(true);
 });
 
 /**

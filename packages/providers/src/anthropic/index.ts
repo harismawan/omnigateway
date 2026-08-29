@@ -1,12 +1,14 @@
-import { CONTEXT_1M_BETA, CONTEXT_1M_TOKENS, GatewayError, PROVIDER_CAPABILITIES } from "@omni/ir";
-import { applyAnthropicSystem, BODY_ORDER, orderFields, signAnthropicBody } from "../body.ts";
+import { CONTEXT_1M_BETA, CONTEXT_1M_TOKENS, GatewayError } from "@omni/ir";
+import { applyAnthropicSystem, orderFields, signAnthropicBody } from "../body.ts";
 import { catalogLimits } from "../catalog.ts";
 import { httpError } from "../http.ts";
-import { mergeHeaders, orderHeaders, PROFILES } from "../profile.ts";
+import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { AdapterRequest, AdapterResult, HeaderPair, ProviderAdapter } from "../types.ts";
 import { buildToolCloak } from "./cloak.ts";
 import { decodeAnthropic, isFingerprintMessage } from "./decode.ts";
+import { anthropicDescriptor } from "./descriptor.ts";
+import { anthropicBodyOrder, anthropicProfile } from "./profile.ts";
 import { toWire } from "./wire.ts";
 
 const BASE_URL = "https://api.anthropic.com/v1/messages";
@@ -15,7 +17,7 @@ const OAUTH_BETA = "oauth-2025-04-20";
 
 export const anthropicAdapter: ProviderAdapter = {
   id: "anthropic",
-  capabilities: PROVIDER_CAPABILITIES.anthropic,
+  capabilities: anthropicDescriptor.capabilities,
 
   async send(req: AdapterRequest): Promise<AdapterResult> {
     const oauth = req.credentials.accessToken !== null;
@@ -96,13 +98,13 @@ export const anthropicAdapter: ProviderAdapter = {
 
     if (betas.size > 0) protocol.push(["anthropic-beta", [...betas].join(",")]);
 
-    const profile = PROFILES.anthropic;
+    const profile = anthropicProfile;
     const headers = orderHeaders(mergeHeaders(profile.headers, protocol), profile.order);
 
     // Order the fields, serialize, then swap the cch placeholder for a token
     // over those exact bytes. Substitution is length-preserving.
     const bodyString = signAnthropicBody(
-      JSON.stringify(orderFields(withSystem, BODY_ORDER.anthropic)),
+      JSON.stringify(orderFields(withSystem, anthropicBodyOrder)),
     );
 
     const res = await req.http({

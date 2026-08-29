@@ -13,6 +13,14 @@ export {
 } from "./adminAuth.ts";
 export { type RequestBodyRead, readRequestBody } from "./bodies.ts";
 export {
+  type CatalogProblem,
+  type CatalogProvider,
+  isPaletteSafeColour,
+  isPaletteSafeProviderId,
+  NEUTRAL_COLOUR,
+  providerCatalog,
+} from "./catalog.ts";
+export {
   type ClientRequestLog,
   isClientVisibleDegradation,
   toClientLog,
@@ -50,6 +58,7 @@ export {
   credentialStatus,
   getCredential,
   listCredentials,
+  type ProviderExists,
   patchCredential,
   refreshCredential,
   removeCredential,
@@ -128,6 +137,14 @@ export type {
   PkceOAuthProvider,
   UsageReport,
 } from "./oauth/types.ts";
+export {
+  type PluginImporter,
+  type PluginProviderRead,
+  type RegisteredProvider,
+  readPluginProviders,
+  readProviders,
+  validateRegistration,
+} from "./pluginProviders.ts";
 export {
   DEFAULT_NPM_REGISTRY,
   installPlugin,

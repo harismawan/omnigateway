@@ -177,7 +177,17 @@ Circuit-breaker state and latency written back on every terminal outcome, so nex
 
 ## Providers
 
-Six adapters. Five are directories of roughly same four files — `wire.ts`, `decode.ts`, `models.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types, `kimi` and `grok` carry `device.ts` for device-code flows.
+Six adapters, each a directory of roughly same files — `descriptor.ts`, `wire.ts`, `decode.ts`, `models.ts`, `profile.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types, `kimi` and `grok` carry `device.ts` for device-code flows.
+
+`descriptor.ts` is what core reads. Adding a provider used to mean editing sixteen tables spread across `ir`, `router`, `store`, `control`, the gateway, the CLI and the console; eight were compiler-checked `Record<ProviderId, …>` and eight were hand-written arrays, zod enums and CSS blocks that went stale in silence — five of them independent copies of the same six names. One record per provider replaced them.
+
+The exhaustiveness did **not** survive, and saying it did would be the more comfortable of two claims rather than the true one. `ProviderId` is now a validated string — it has to be, because a provider loaded from `<root>/plugins/` has an id no compiled-in union could contain — so `PROVIDER_DESCRIPTORS` is `Readonly<Record<string, ProviderDescriptor>>`, and a `Record<string, …>` accepts any subset of keys. Five tables still list the six built-ins by hand: the descriptor table, the adapter map, and the profile, body-order and catalog assemblies. Deleting a provider's line from any of them typechecks cleanly. Measured, all five.
+
+What catches it instead is `bun run lint`, because the provider's import goes unused, and `packages/providers/test/descriptor.test.ts`, which holds every one of those tables to a literal list of ids written out in the test itself. That is a real net — it fails loudly and names the table — but it is lint and tests, not the compiler, and a contributor who believes otherwise will trust a green `tsc` that is not checking what they think.
+
+What the type system *does* still enforce is the shape of one descriptor: every field on `ProviderDescriptor` is required, so a descriptor that exists but is incomplete does not compile. And `noUncheckedIndexedAccess` makes every lookup keyed on a *stored* id a compile error at the point of use, which is where the genuinely partial reads are. `docs/adding-a-provider.md` lists what none of this can find.
+
+Two subpaths, and the split is load-bearing. `@omni/providers/descriptors` is a **leaf** — capabilities, pricing fallbacks, catalog, model prefixes, presentation — which is how `packages/router` reads per-provider data while staying pure, and how the console reads labels and colours without an adapter reaching a browser bundle. `registry.ts` joins those to the adapter, the client profile and the body key order, for anything needing a provider whole. Dispatch itself reads `ADAPTERS`. Adapters import `BODY_ORDER` and profiles read `Bun.env`, so neither may sit upstream of the leaf. `packages/providers/test/leafSubpaths.test.ts` asserts it with **two instruments, because neither is sufficient alone**: it walks each entry point's import graph using `Bun.Transpiler.scanImports` — the same parser that builds the code, so dynamic `import()` and type-only imports are classified correctly — and it also builds the browser bundle and checks for `Bun.env`. The walk catches an adapter or profile import that no marker reveals, since adapters take `HttpClient` by injection. The bundle catches a global, which has no import edge for a walk to find. Two hand-written versions of this test, one of each kind, each missed exactly what the other now covers.
 
 ```mermaid
 flowchart LR
@@ -192,7 +202,7 @@ flowchart LR
   custom -. "operator-supplied origin" .-> http
 ```
 
-Sixth, `custom`, has no `wire.ts` and no `decode.ts` of its own: existing codec pointed at operator-supplied origin, and that whole adapter.
+`custom` is the operator-supplied one: a credential names the origin and the wire protocol, and the adapter points its own codecs at it. It shipped importing kimi's encoder and kilo's decoder and now forks both, which is what rule 2 asks of every provider — the fork is why it has the same file set as the other five rather than being the exception this paragraph once described.
 
 All outbound HTTP goes through one client, built on `node:http` rather than `fetch` for specific reason: Bun's `fetch` alphabetizes request headers, destroying header order and casing providers use to recognize first-party CLI. Client preserves both verbatim, logs only host, path, status, duration.
 

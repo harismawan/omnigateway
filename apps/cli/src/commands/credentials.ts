@@ -3,20 +3,22 @@ import {
   createRefresher,
   credentialHealth,
   getCredential,
-  isProviderId,
   listCredentials,
   listModels,
   OAUTH_PROVIDERS,
   PROVIDER_IDS,
+  type ProviderExists,
   patchCredential,
   refreshCredential,
   removeCredential,
 } from "@omni/control";
 import { nodeHttpClient } from "@omni/providers";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { boolFlag, numberFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatTime, note, paint, table } from "../output.ts";
+import { pluginProviders } from "./plugins.ts";
 
 /** One word for what the router would do with this credential right now. */
 function condition(credential: {
@@ -239,9 +241,94 @@ export const credentialsAddKey: Command = {
   async run(args, { ctx, writer, prompt }) {
     const providerId = requirePositional(args, 0, "provider");
     // Every provider, unlike `connect`: a key is the one way in that `custom`
-    // has.
-    if (!isProviderId(providerId)) {
-      throw new UsageError(`provider must be one of ${PROVIDER_IDS.join(", ")}`);
+    // has — and the only way in a plugin-supplied provider has at all, since a
+    // plugin declares no OAuth flow.
+    //
+    // The **real registry**, not a manifest guess. This asked
+    // a manifest's `provider` capability — and
+    // the comment beside it said, correctly, that the fourth way this goes
+    // wrong (a plugin that loads cleanly, declares the capability, and never
+    // supplies a provider) "cannot be closed by reading a manifest at all".
+    // `readPluginProviders` closes it exactly, by reading the declaration, and
+    // it was written in the same commit and not threaded here. Confirmed by
+    // review: `omni credentials add-key ghost-ai` stored a live encrypted
+    // secret under a provider id that could never exist.
+    //
+    // So `doctor`'s `stranded credentials` line is now the safety net for a
+    // plugin that stops supplying a provider *after* the account was minted —
+    // not for one that never did.
+    //
+    // The same predicate is handed to `createApiKeyCredential` below rather than
+    // being checked only here. Control asks the existence question again on its
+    // own — it is the one place that can refuse an unreachable credential before
+    // it is stored — and with the built-in registry as its only answer it
+    // refused everything this guard had just admitted. A guard whose decision
+    // the next call overturns is not a guard, and for one commit this one was
+    // not: the widened check was the only mutant of fourteen that survived.
+    //
+    // Annotated `ProviderExists` rather than `(id: string) => boolean`. The two
+    // are the same type — `ProviderId` is a validated string — so this buys
+    // nothing from the compiler and is exactly why it is worth writing: the
+    // exported type had no consumer at all, which made it documentation nothing
+    // pointed at.
+    // **The built-ins first, so a key for `anthropic` runs nobody's plugin.**
+    // `pluginProviders` imports every provider-declaring plugin's module, which
+    // executes its top-level code — and this command stores a secret. Calling it
+    // unconditionally meant `omni credentials add-key anthropic` evaluated
+    // third-party code that had nothing to do with the account being created,
+    // took five seconds per hanging plugin before the prompt appeared, and then
+    // printed yellow warnings about plugins on a command that went on to
+    // succeed. A warning about something irrelevant is one an operator learns to
+    // scroll past.
+    //
+    // Asked of the registry at call time, **not** of `PROVIDER_IDS`.
+    //
+    // The first version used the snapshot, on the reasoning that "what is
+    // compiled in cannot change at runtime" — which is true and is not the
+    // rule. CLAUDE.md says of that constant: "it feed CLI usage messages and
+    // tests, never a gate", and this is a gate. The two are behaviourally
+    // identical today, so the snapshot bought nothing and cost the one thing a
+    // reader checks a rule against; a mutant swapping them survived the whole
+    // suite, which is what "bought nothing" looks like from the outside.
+    //
+    // `Object.hasOwn` rather than an index read: `PROVIDER_DESCRIPTORS` is
+    // null-prototype so both answer alike, and the explicit form is what keeps
+    // that true if this is ever handed an ordinary object.
+    const builtIn = Object.hasOwn(PROVIDER_DESCRIPTORS, providerId);
+    const { descriptors, failures } = builtIn
+      ? { descriptors: PROVIDER_DESCRIPTORS, failures: [] as const }
+      : await pluginProviders(ctx.root.root);
+    // Named before the refusal, because a plugin that failed to read is the
+    // likeliest reason the provider below is about to be reported as unknown.
+    const providerExists: ProviderExists = (id) => Object.hasOwn(descriptors, id);
+    if (!providerExists(providerId)) {
+      // **Carried in the message, not printed above it.** The refusal throws
+      // before any `emit`, and `note()` is `if (!ctx.json) writer.err(...)` — so
+      // under `--json` the failures reached neither stream and a script got
+      // "provider must be one of …" with the cause deleted. That is the path
+      // the cause matters most on: a plugin that failed to read is the likeliest
+      // reason the id was refused, and it is the operator's actual next step.
+      //
+      // An error message rather than a payload because this is an error: a
+      // command that emitted a result *and* threw would be describing two
+      // different outcomes of one run.
+      //
+      // The capability and the loading are both named, because those are the
+      // two ways an operator who *has* installed the right plugin still lands
+      // here, and "or an installed plugin that supplies one" sent them to look
+      // at the one thing that was already true.
+      const because = failures.map((f) => `\n  plugin ${f.id}: ${f.reason}`).join("");
+      throw new UsageError(
+        `provider must be one of ${PROVIDER_IDS.join(", ")}, or a plugin that loads and ` +
+          `supplies one; omni plugin list shows which${because}`,
+      );
+    }
+
+    // Only on the way through. On the refusal path they are in the message
+    // above; printing them here as well would say it twice in a terminal and
+    // still say it nowhere under `--json`.
+    for (const failure of failures) {
+      note(ctx, writer, paint(ctx, "yellow", `plugin ${failure.id}: ${failure.reason}`));
     }
 
     const protocolFlag = stringFlag(args.values, "protocol");
@@ -275,21 +362,29 @@ export const credentialsAddKey: Command = {
               ? existingEndpoint.providerData.basePath
               : ""
           }`;
-    const created = await createApiKeyCredential(store, {
-      provider: providerId,
-      apiKey: key,
-      label: stringFlag(args.values, "label"),
-      endpointId,
-      endpointLabel:
-        stringFlag(args.values, "endpoint-label") ?? existingEndpoint?.providerData.endpointLabel,
-      origin: stringFlag(args.values, "origin") ?? existingOrigin,
-      protocol: protocol ?? existingEndpoint?.providerData.protocol,
-    });
+    const created = await createApiKeyCredential(
+      store,
+      {
+        provider: providerId,
+        apiKey: key,
+        label: stringFlag(args.values, "label"),
+        endpointId,
+        endpointLabel:
+          stringFlag(args.values, "endpoint-label") ?? existingEndpoint?.providerData.endpointLabel,
+        origin: stringFlag(args.values, "origin") ?? existingOrigin,
+        protocol: protocol ?? existingEndpoint?.providerData.protocol,
+      },
+      undefined,
+      providerExists,
+    );
 
     emit(
       ctx,
       writer,
-      { id: created.id, provider: created.provider },
+      // `pluginFailures` here for the same reason `dry-run` and `setup` carry
+      // it: a plugin that failed to read is the likeliest reason a provider was
+      // refused, and `note()` prints nothing under `--json`.
+      { id: created.id, provider: created.provider, pluginFailures: failures },
       () => `stored ${created.provider} api key as ${created.id}`,
     );
   },

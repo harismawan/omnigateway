@@ -1,4 +1,5 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { systemText } from "../system.ts";
 
 /**
  * Custom's own wire codecs, one per protocol.
@@ -100,7 +101,7 @@ export function toCustomChatWire(
 
   const messages: unknown[] = [];
 
-  const system = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const system = systemText(req.system, "custom", note);
   if (system !== undefined && system.length > 0) messages.push({ role: "system", content: system });
 
   for (const message of req.messages) {
@@ -133,9 +134,9 @@ export function toCustomChatWire(
             content: block.content,
           });
           break;
-        case "anthropicNative":
+        case "providerNative":
           // Unreachable: the router excludes this provider from any request
-          // carrying Anthropic-native history. Recorded, not ignored.
+          // carrying another provider's native history. Recorded, not ignored.
           note("custom:anthropic-native-block-dropped");
           break;
       }
@@ -165,7 +166,7 @@ export function toCustomChatWire(
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.stopSequences !== undefined) body.stop = req.stopSequences;
   if (req.tools !== undefined) {
-    const portable = req.tools.filter((t) => t.provider === "custom");
+    const portable = req.tools.filter((t) => t.kind === "portable");
     if (portable.length !== req.tools.length) note("custom:anthropic-tool-dropped");
     body.tools = portable.map((t) => ({
       type: "function",
@@ -249,11 +250,11 @@ export function toCustomResponsesWire(
             output: block.content,
           });
           break;
-        case "anthropicNative":
+        case "providerNative":
           // Unreachable in practice: the router excludes this provider from any
-          // request carrying Anthropic-native history. Recorded rather than
-          // ignored so that if it ever does arrive, the request log says what
-          // was lost instead of the client seeing a turn quietly rewritten.
+          // request carrying another provider's native history. Recorded rather
+          // than ignored so that if it ever does arrive, the request log says
+          // what was lost instead of the client seeing a turn quietly rewritten.
           note("custom:anthropic-native-block-dropped");
           break;
       }
@@ -264,13 +265,13 @@ export function toCustomResponsesWire(
 
   const body: CustomResponsesBody = { model, input, stream: req.stream, store: false };
 
-  const instructions = req.system?.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n");
+  const instructions = systemText(req.system, "custom", note);
   if (instructions !== undefined && instructions.length > 0) body.instructions = instructions;
 
   if (req.maxTokens !== undefined) body.max_output_tokens = req.maxTokens;
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.tools !== undefined) {
-    const portable = req.tools.filter((t) => t.provider === "custom");
+    const portable = req.tools.filter((t) => t.kind === "portable");
     if (portable.length !== req.tools.length) note("custom:anthropic-tool-dropped");
     body.tools = portable.map((t) => ({
       type: "function",

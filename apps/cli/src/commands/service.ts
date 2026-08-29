@@ -17,7 +17,7 @@ import {
   unitInstalled,
 } from "../service.ts";
 import { sourceHint } from "./console.ts";
-import { doctorPluginDeps, pluginDoctorLines } from "./plugins.ts";
+import { doctorPluginDeps, pluginDoctorLines, providerDeclared } from "./plugins.ts";
 
 /** The command line that runs the gateway from this installation. */
 function gatewayArgv(root: string): string[] {
@@ -234,6 +234,79 @@ async function danglingPins(ctx: Context): Promise<string[] | null> {
   }
 }
 
+/**
+ * Targets naming a provider this installation does not have.
+ *
+ * The sibling of `danglingPins`, and it exists for the same reason. `Target` is
+ * read back from `virtual_models.targets` as unvalidated JSON and `putModel`
+ * accepts a provider it cannot resolve — removing a provider must not make an
+ * unrelated edit unsavable — so this state is allowed by design and nothing
+ * cleans it up. The router excludes such a target with `provider:missing`, which
+ * an operator sees only after a request has already failed.
+ *
+ * Reads the registry at call time rather than a module-scope id list: the CLI
+ * has no plugins loaded, but the list is a snapshot either way and a check that
+ * asks a stale question is worse than no check.
+ *
+ * Same null-versus-empty rule as the checks above: `null` is "not checked".
+ */
+async function missingProviders(
+  ctx: Context,
+  plugins: readonly PluginSummary[],
+): Promise<string[] | null> {
+  if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
+  try {
+    const store = await ctx.store();
+    return (await store.config.listModels()).flatMap((model) =>
+      model.targets
+        .filter((target) => !providerDeclared(target.provider, plugins))
+        .map((target) => `${model.id}/${target.model} → ${target.provider}`),
+    );
+  } catch {
+    // Already reported by `config` or `database` above.
+    return null;
+  }
+}
+
+/**
+ * Credentials naming a provider nothing on this installation supplies.
+ *
+ * The third sibling of `danglingPins` and `missingProviders`, and the one that
+ * covers what no manifest read can. `add-key` reads the real registry and so
+ * refuses a plugin that supplies no provider, but a plugin that loads cleanly,
+ * declares the `provider` capability and supplies no provider
+ * supplies nothing — and the capability is *permission* to register, not proof.
+ * Nothing at write time can tell the two apart without running the plugin.
+ *
+ * So this is the surface that finds out, exactly as it is for a pin the write
+ * path deliberately does not validate. Without it the failure was silent in
+ * every direction at once: `plugin list` said `ok`, `doctor` said
+ * `missing providers  none` because that check reads *targets*, and the
+ * credential sat encrypted under an id routing answers only with
+ * `provider:missing`.
+ *
+ * `providerDeclared`, the lenient question: a plugin that fails to load is
+ * already reported on its own line above, and naming its credentials here too
+ * would send the operator after the wrong thing.
+ *
+ * Same null-versus-empty rule as the checks above: `null` is "not checked".
+ */
+async function danglingCredentials(
+  ctx: Context,
+  plugins: readonly PluginSummary[],
+): Promise<string[] | null> {
+  if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
+  try {
+    const store = await ctx.store();
+    return (await store.credentials.list())
+      .filter((credential) => !providerDeclared(credential.provider, plugins))
+      .map((credential) => `${credential.label} → ${credential.provider}`);
+  } catch {
+    // Already reported by `config` or `database` above.
+    return null;
+  }
+}
+
 export const doctor: Command = {
   usage: "doctor",
   summary: "Check what this CLI resolved, and whether it can do anything with it",
@@ -249,6 +322,8 @@ export const doctor: Command = {
     const plugins: PluginSummary[] = listPlugins(doctorPluginDeps(), deps.root);
     const orphans = await orphanTables(ctx);
     const pins = await danglingPins(ctx);
+    const uninstalled = await missingProviders(ctx, plugins);
+    const strandedKeys = await danglingCredentials(ctx, plugins);
 
     const checks = {
       root: deps.root,
@@ -270,6 +345,8 @@ export const doctor: Command = {
       plugins,
       orphanPluginTables: orphans,
       danglingPins: pins,
+      missingProviders: uninstalled,
+      danglingCredentials: strandedKeys,
       // Repeated from stderr on purpose: `doctor` is the command an operator
       // runs to find out why the paths above are what they are, and `--json`
       // is read by scripts that never see stderr.
@@ -324,6 +401,29 @@ export const doctor: Command = {
               : // Named, like the orphans above: the fix is to repoint or clear
                 // the target in the model editor, and that needs to know which.
                 paint(ctx, "yellow", `${pins.length}: ${pins.join(", ")}`),
+        ],
+        [
+          "missing providers",
+          uninstalled === null
+            ? paint(ctx, "dim", "not checked")
+            : uninstalled.length === 0
+              ? ok(true, "none")
+              : // Named for the same reason the pins are: the fix is to repoint
+                // the target or reinstall the provider, and either needs to know
+                // which target and which provider.
+                paint(ctx, "yellow", `${uninstalled.length}: ${uninstalled.join(", ")}`),
+        ],
+        [
+          "stranded credentials",
+          strandedKeys === null
+            ? paint(ctx, "dim", "not checked")
+            : strandedKeys.length === 0
+              ? ok(true, "none")
+              : // The account is a stored secret for a provider that does not
+                // exist, so every request naming it is `provider:missing`. The
+                // fix is to install the plugin that was meant to supply it or to
+                // remove the account, and both need to know which.
+                paint(ctx, "yellow", `${strandedKeys.length}: ${strandedKeys.join(", ")}`),
         ],
         ...checks.warnings.map(
           (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],
