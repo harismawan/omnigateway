@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import styled from "styled-components";
 import { useBodyLoggingAllowed, useSaveSettings, useSettings } from "../../api/queries.ts";
-import type { Settings } from "../../api/types.ts";
+import type { PonytailMode, Settings } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { Button } from "../../ui/Button.tsx";
-import { Field, Input } from "../../ui/Field.tsx";
+import { Field, Input, Select } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
@@ -12,6 +12,19 @@ import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { AccessPanel } from "./AccessPanel.tsx";
 import { AgentSetup } from "./AgentSetup.tsx";
+
+/**
+ * The ponytail levels, in the order an operator escalates through them.
+ *
+ * A `Record` over the union rather than a list: adding a level upstream then
+ * fails this build instead of quietly offering one fewer option than exists.
+ */
+const PONYTAIL_LEVELS: Record<PonytailMode, string> = {
+  off: "Off",
+  lite: "Lite — names the lazier option",
+  full: "Full — the ladder enforced",
+  ultra: "Ultra — challenges the requirement",
+};
 
 type WeightKey = keyof Settings["weights"];
 
@@ -45,6 +58,7 @@ type LimitKey = Exclude<
   | "weights"
   | "rtkEnabled"
   | "autoCacheEnabled"
+  | "ponytailMode"
   | "bodyLoggingEnabled"
   | "bodyLoggingCaptureStreamChunks"
 >;
@@ -152,6 +166,7 @@ const Blocked = styled.p`
 type Draft = Record<string, string> & {
   rtkEnabled?: string;
   autoCacheEnabled?: string;
+  ponytailMode?: string;
   bodyLoggingEnabled?: string;
   bodyLoggingCaptureStreamChunks?: string;
 };
@@ -162,6 +177,7 @@ function toDraft(settings: Settings): Draft {
   for (const limit of LIMITS) draft[limit.id] = String(settings[limit.id]);
   draft.rtkEnabled = String(settings.rtkEnabled);
   draft.autoCacheEnabled = String(settings.autoCacheEnabled);
+  draft.ponytailMode = settings.ponytailMode;
   draft.bodyLoggingEnabled = String(settings.bodyLoggingEnabled);
   draft.bodyLoggingCaptureStreamChunks = String(settings.bodyLoggingCaptureStreamChunks);
   return draft;
@@ -205,6 +221,13 @@ function parseDraft(
       ...limits,
       rtkEnabled: draft.rtkEnabled === "true",
       autoCacheEnabled: draft.autoCacheEnabled === "true",
+      // The control offers the four names and nothing else, so the draft can
+      // only hold one of them; `off` is what an absent draft field means, the
+      // same answer the store gives a value it does not recognise.
+      ponytailMode:
+        draft.ponytailMode !== undefined && draft.ponytailMode in PONYTAIL_LEVELS
+          ? (draft.ponytailMode as PonytailMode)
+          : "off",
       bodyLoggingEnabled: draft.bodyLoggingEnabled === "true",
       bodyLoggingCaptureStreamChunks: draft.bodyLoggingCaptureStreamChunks === "true",
     },
@@ -381,6 +404,32 @@ export function SettingsBoard() {
                 system prompt on Anthropic requests that carry no breakpoint of their own. Requests
                 that already mark one are left exactly as they arrived, and prompts too short to be
                 cacheable are skipped. Enabled by default.
+              </Blurb>
+            </Row>
+          </Module>
+
+          <Module legend="Coding style">
+            <Row $gap={3} $align="start">
+              <Field label="Lazy senior dev mode">
+                {(props) => (
+                  <Select
+                    {...props}
+                    value={draft.ponytailMode ?? "off"}
+                    onChange={(event) => setDraft({ ...draft, ponytailMode: event.target.value })}
+                  >
+                    {Object.entries(PONYTAIL_LEVELS).map(([mode, label]) => (
+                      <option key={mode} value={mode}>
+                        {label}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+              <Blurb>
+                Appends the ponytail ruleset to the system prompt of every request, so a coding
+                agent builds the smallest thing that works whether or not it has the skill installed
+                locally. Roughly 1,100 tokens, cached with the prompt it joins. A request that
+                already carries the ruleset is left alone. Off by default.
               </Blurb>
             </Row>
           </Module>

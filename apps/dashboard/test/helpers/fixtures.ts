@@ -304,6 +304,7 @@ export const settings: Settings = {
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,
   autoCacheEnabled: true,
+  ponytailMode: "off",
   bodyLoggingEnabled: false,
   bodyLoggingCaptureStreamChunks: false,
   snapshotKeepLatest: 5,

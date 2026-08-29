@@ -1,4 +1,5 @@
 import type { ProviderId } from "@omni/ir";
+import type { PonytailMode } from "@omni/ponytail/catalog";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
 import type { RtkFilterId } from "@omni/rtk/catalog";
 
@@ -8,6 +9,7 @@ import type { RtkFilterId } from "@omni/rtk/catalog";
  * The dashboard is permitted `@omni/store/types` and not runtime store code, and
  * this keeps that the one import it needs rather than a second permitted path.
  */
+export type { PonytailMode } from "@omni/ponytail/catalog";
 export type { Dimension, LimitConfig, Window } from "@omni/ratelimit/catalog";
 
 export type BreakerState = "closed" | "open" | "halfOpen";
@@ -667,6 +669,22 @@ export type Settings = {
    * cacheable at all.
    */
   autoCacheEnabled: boolean;
+  /**
+   * Which ponytail ruleset, if any, the gateway appends to system prompts.
+   *
+   * The third request-rewriting flag, and the only one that is not a boolean:
+   * upstream ships three intensities, so the union is what an operator picks
+   * between. `off` is the default and injects nothing at all.
+   *
+   * A malformed stored value reads as `off`, like every neighbour here. This
+   * deliberately does not follow the fail-closed-by-throwing rule that
+   * `DIMENSIONS` and `WINDOWS` follow: those decide whether a request is
+   * *refused*, so a value nobody typed must not be guessed at, while this only
+   * decides whether the gateway rewrites a prompt — and returning the
+   * installation to its pre-feature behaviour costs an operator nothing they
+   * did not already have.
+   */
+  ponytailMode: PonytailMode;
   /**
    * Whether request and response bodies are captured at all.
    *
@@ -1340,6 +1358,7 @@ export const DEFAULT_SETTINGS: Settings = {
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,
   autoCacheEnabled: true,
+  ponytailMode: "off",
   bodyLoggingEnabled: false,
   bodyLoggingCaptureStreamChunks: false,
   snapshotKeepLatest: 5,

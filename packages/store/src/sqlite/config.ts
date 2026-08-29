@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { isPonytailMode } from "@omni/ponytail/catalog";
 import type {
   ConfigRepo,
   ScoringWeights,
@@ -118,6 +119,9 @@ export function createConfigRepo(
           // already have.
           autoCacheEnabled:
             stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
+          // The same question its neighbours ask, put to a union instead of a
+          // boolean: anything that is not one of the four names means off.
+          ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
           bodyLoggingEnabled: stored.bodyLoggingEnabled === true,
           bodyLoggingCaptureStreamChunks: stored.bodyLoggingCaptureStreamChunks === true,
           weights: knownWeights(stored.weights),

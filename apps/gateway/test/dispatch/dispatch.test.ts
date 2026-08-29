@@ -2764,5 +2764,92 @@ test("a sentinel registry reaches every consumer dispatch has", async () => {
   // configured leg above produces — so neither a fallback nor a copy of the
   // other half can pass this by accident.
   expect(inferredLog.costUsd).toBeCloseTo(11, 10);
+});
+
+/** Records the system prompt each attempt actually sent, flattened to compare. */
+function systemSent(adapter: ProviderAdapter, seen: string[]): void {
+  const original = adapter.send.bind(adapter);
+  adapter.send = async (input) => {
+    seen.push((input.request.system ?? []).map((b) => (b.type === "text" ? b.text : "")).join("|"));
+    return original(input);
+  };
+}
+
+test("appends the ponytail ruleset once and sends identical system content on failover", async () => {
+  const store = await seeded(2);
+  await store.config.putSettings({ ponytailMode: "full" });
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("UPSTREAM", "retry") : textStream("ok"),
+  );
+  const seen: string[] = [];
+  systemSent(adapter, seen);
+  const input: ChatRequest = {
+    model: "fast",
+    stream: false,
+    system: [{ type: "text", text: "you are helpful" }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  };
+
+  const outcome = await dispatch(
+    input,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_p",
+  );
+  await drain(outcome.events);
+
+  expect(seen).toHaveLength(2);
+  expect(seen[0]).toBe(seen[1]);
+  expect(seen[0]).toContain("You are a lazy senior developer.");
+  expect(outcome.log().degradations).toContain("ponytail:full");
+  store.close();
+});
+
+test("leaves the request alone and records nothing when ponytail is off", async () => {
+  const store = await seeded(1);
+  const adapter = stubAdapter(() => textStream("ok"));
+  const seen: string[] = [];
+  systemSent(adapter, seen);
+  const input: ChatRequest = {
+    model: "fast",
+    stream: false,
+    system: [{ type: "text", text: "you are helpful" }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  };
+
+  const outcome = await dispatch(
+    input,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_o",
+  );
+  await drain(outcome.events);
+
+  expect(seen[0]).toBe("you are helpful");
+  expect(outcome.log().degradations.some((d) => d.startsWith("ponytail:"))).toBe(false);
+  store.close();
+});
+
+test("records a moved cache breakpoint separately from the level", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ ponytailMode: "lite" });
+  const adapter = stubAdapter(() => textStream("ok"));
+  const input: ChatRequest = {
+    model: "fast",
+    stream: false,
+    system: [{ type: "text", text: "prefix", cacheControl: { type: "ephemeral" } }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  };
+
+  const outcome = await dispatch(
+    input,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_m",
+  );
+  await drain(outcome.events);
+
+  expect(outcome.log().degradations).toContain("ponytail:lite");
+  expect(outcome.log().degradations).toContain("ponytail:cache-marker-moved");
   store.close();
 });

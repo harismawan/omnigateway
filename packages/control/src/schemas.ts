@@ -1,4 +1,5 @@
 import { GatewayError } from "@omni/ir";
+import { PONYTAIL_MODES } from "@omni/ponytail/catalog";
 import { PROVIDER_ID_PATTERN } from "@omni/providers/descriptors";
 import { limitConfigSchema } from "@omni/ratelimit/catalog";
 import type { UsageDimension, UsageGrain } from "@omni/store";
@@ -261,6 +262,13 @@ export const settingsSchema = z.object({
   rtkEnabled: z.boolean(),
   /** Adds a cache breakpoint to Anthropic requests that arrive carrying none. */
   autoCacheEnabled: z.boolean(),
+  /**
+   * Which ponytail ruleset the gateway appends to system prompts, or `off`.
+   *
+   * The union comes from `@omni/ponytail/catalog`, which is also what the store
+   * persists, so an operator cannot save a level the injector does not know.
+   */
+  ponytailMode: z.enum(PONYTAIL_MODES),
   /**
    * One half of the capture contract. `OMNI_BODY_LOGGING_ALLOWED` is the other,
    * and it is read at boot, so nothing this schema accepts can start recording

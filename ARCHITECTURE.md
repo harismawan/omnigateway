@@ -30,6 +30,7 @@ sequenceDiagram
   participant Route as routes/proxy
   participant In as ingress
   participant RTK as @omni/rtk
+  participant Pony as @omni/ponytail
   participant Router as @omni/router
   participant Disp as dispatch
   participant Cred as @omni/store
@@ -46,6 +47,8 @@ sequenceDiagram
   Route->>Disp: dispatch(request, signal)
   Disp->>RTK: filter tool results (off by default)
   RTK-->>Disp: rewritten request + savings report
+  Disp->>Pony: append ponytail ruleset (off by default)
+  Pony-->>Disp: request with ruleset last in system
   Disp->>Router: rank(snapshot, load)
   Router-->>Disp: ordered candidates + exclusion reasons
   Disp->>Log: pending row

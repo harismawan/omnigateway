@@ -85,6 +85,20 @@ function asBoolean(path: string, raw: string): boolean {
   throw new UsageError(`${path} must be true or false, got "${raw}"`);
 }
 
+/**
+ * A non-blank string, left for the schema to judge.
+ *
+ * Deliberately does not know the ponytail levels: the settings schema already
+ * rejects a name that is not one of them, and a second copy of that list here
+ * would be one to keep in step. Blank is caught for the same reason
+ * `asNumber` catches it — a quoted space is a typo, not an edit.
+ */
+function asString(path: string, raw: string): string {
+  const value = raw.trim();
+  if (value.length === 0) throw new UsageError(`${path} must not be blank`);
+  return value;
+}
+
 export const settingsSet: Command = {
   usage: "settings set <path> <value>",
   summary: "Change one setting, e.g. weights.cost 0.4 or rtkEnabled true",
@@ -101,13 +115,20 @@ export const settingsSet: Command = {
       throw new UsageError(`"${head}" has no sub-settings`);
     }
 
-    // The stored value's type picks the parse, rather than a list of boolean
-    // paths kept in step by hand. Every setting is a number or a boolean today,
-    // and a new one of either kind is editable the day it is added — which is the
-    // bug this replaces: `rtkEnabled` shipped unreachable from here because the
-    // parse was `Number(raw)` and nothing told anyone.
+    // The stored value's type picks the parse, rather than a list of paths kept
+    // in step by hand, so a new setting of a type handled here is editable the
+    // day it is added — which is the bug this replaces: `rtkEnabled` shipped
+    // unreachable because the parse was `Number(raw)` and nothing told anyone.
+    // `ponytailMode` was the same bug waiting to happen for strings, so the
+    // reachability test now asks the question of every key at once rather than
+    // of the one somebody remembered.
     const existing = currentValue(current, head, tail);
-    const value = typeof existing === "boolean" ? asBoolean(path, raw) : asNumber(path, raw);
+    const value =
+      typeof existing === "boolean"
+        ? asBoolean(path, raw)
+        : typeof existing === "string"
+          ? asString(path, raw)
+          : asNumber(path, raw);
 
     // Validation lives in the settings schema, which the write goes through:
     // this only has to place the value, not judge it.

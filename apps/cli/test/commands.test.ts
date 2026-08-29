@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { openDb } from "@omni/store";
+import { DEFAULT_SETTINGS, openDb } from "@omni/store";
 import { health, requestLog, seedCredential } from "@omni/testkit";
 import { serviceLogs } from "../src/service.ts";
 import { cli, fakeService, makeRoot, openStore, TEST_KEY } from "./helpers/harness.ts";
@@ -1651,4 +1651,45 @@ test("doctor still reports a target whose plugin does not supply a provider", as
   const result = await cli(["doctor", "--json"], { root, service });
   const checks = JSON.parse(result.out) as { missingProviders: string[] };
   expect(checks.missingProviders).toEqual(["billed/acme-1 → acme-ai"]);
+});
+
+test("settings set writes a string setting the type-driven parse could not reach", async () => {
+  const root = await installation();
+
+  const result = await cli(["settings", "set", "ponytailMode", "ultra"], { root });
+
+  expect(result.code).toBe(0);
+  expect(await setting(root, "ponytailMode")).toBe("ultra");
+});
+
+test("settings set refuses a ponytail level that is not one of the four", async () => {
+  const root = await installation();
+
+  const result = await cli(["settings", "set", "ponytailMode", "extreme"], { root });
+
+  expect(result.code).toBe(1);
+  expect(await setting(root, "ponytailMode")).toBe("off");
+});
+
+/**
+ * The generalisation of the `rtkEnabled` regression above.
+ *
+ * That bug was one setting the parse could not reach, and it was found by hand
+ * a release late. This asks the question of every key at once, so the next
+ * setting whose type the parse does not handle fails here instead of shipping
+ * silently uneditable.
+ */
+test("every settings key is reachable from settings set", async () => {
+  const root = await installation();
+  const sample: Record<string, string> = { ponytailMode: "lite" };
+
+  for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+    if (value !== null && typeof value === "object") continue;
+    const raw =
+      sample[key] ?? (typeof value === "boolean" ? String(!value) : String(Number(value) + 1));
+
+    const result = await cli(["settings", "set", key, raw], { root });
+
+    expect({ key, code: result.code, err: result.err }).toMatchObject({ key, code: 0 });
+  }
 });

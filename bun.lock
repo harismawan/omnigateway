@@ -69,6 +69,7 @@
         "@node-rs/argon2": "2.0.2",
         "@omni/control": "workspace:*",
         "@omni/ir": "workspace:*",
+        "@omni/ponytail": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
@@ -86,6 +87,7 @@
       "dependencies": {
         "@node-rs/argon2": "2.0.2",
         "@omni/ir": "workspace:*",
+        "@omni/ponytail": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
@@ -122,6 +124,13 @@
       "version": "0.2.0",
       "dependencies": {
         "zod": "4.4.3",
+      },
+    },
+    "packages/ponytail": {
+      "name": "@omni/ponytail",
+      "version": "0.0.0",
+      "dependencies": {
+        "@omni/ir": "workspace:*",
       },
     },
     "packages/providers": {
@@ -162,6 +171,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@omni/ir": "workspace:*",
+        "@omni/ponytail": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/rtk": "workspace:*",
       },
@@ -321,6 +331,8 @@
     "@omni/gateway": ["@omni/gateway@workspace:apps/gateway"],
 
     "@omni/ir": ["@omni/ir@workspace:packages/ir"],
+
+    "@omni/ponytail": ["@omni/ponytail@workspace:packages/ponytail"],
 
     "@omni/providers": ["@omni/providers@workspace:packages/providers"],
 

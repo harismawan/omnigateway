@@ -537,3 +537,17 @@ test("setModelAllowlist replaces the column whole and keeps null and [] distinct
   expect((await s.keys.findByHash(hash))?.modelAllowlist).toBeNull();
   s.close();
 });
+test("settings normalize a malformed persisted ponytail mode to off", async () => {
+  const s = await store();
+  expect((await s.config.getSettings()).ponytailMode).toBe("off");
+
+  await s.config.putSettings({ ponytailMode: "ultra" });
+  expect((await s.config.getSettings()).ponytailMode).toBe("ultra");
+
+  // A hand-edited or restored row is the way in that no schema guards. This
+  // setting rewrites outbound prompts, so a value nobody typed with that
+  // meaning must read as off rather than be guessed at.
+  await s.config.putSettings({ ponytailMode: "FULL" as Settings["ponytailMode"] });
+  expect((await s.config.getSettings()).ponytailMode).toBe("off");
+  s.close();
+});

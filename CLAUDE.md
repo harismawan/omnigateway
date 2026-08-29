@@ -19,6 +19,7 @@ OmniGateway = Bun/TypeScript monorepo for self-hosted AI gateway:
 - `packages/router`: pure routing
 - `packages/ratelimit`: pure API-key limit eval + sliding-window counting
 - `packages/rtk`: tool-result filters, applied in dispatch before routing
+- `packages/ponytail`: vendored lazy-senior-dev ruleset, appended to system prompt in dispatch
 - `packages/store`: persistence + encryption
 - `packages/testkit`: shared test fixtures
 
@@ -114,6 +115,13 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
 13. `packages/rtk` stay pure like `ir` and `router`: no I/O, clocks, randomness. Rewrite tool-result
     content only, preserve errors + non-tool-result blocks. `@omni/rtk/catalog` is leaf holding
     filter-id union; `@omni/store` import that subpath alone.
+    `packages/ponytail` sit beside it under this same rule and **is deliberately not a fourteenth
+    number** — it is the other pure dispatch-time request transform, so it live where a contributor
+    changing one already read the other. Same purity, and it **return a new request** rather than
+    edit the one it is handed. `@omni/ponytail/catalog` is leaf holding the mode union; `@omni/store`
+    import that subpath alone and re-export `PonytailMode` from `@omni/store/types`, the import
+    dashboard already permitted. Ruleset text **vendored and pinned**, never fetched: a prompt that
+    change under an installation is one no operator can reproduce a bill from.
 14. `packages/ratelimit` stay pure same way; `now` always a parameter, counters supplied by caller,
     so package never learn where they came from. `@omni/ratelimit/catalog` is leaf holding dimension
     + window unions, `LimitConfig`, its zod schema; `@omni/store` import that subpath alone and
@@ -387,7 +395,8 @@ Preserve these translation invariants:
 - Unknown Anthropic block types + SSE events fail visibly, not skipped.
 - Preserve cache-control breakpoint block, TTL, order when target can express them. Record
   degradations for requested features provider cannot express.
-- **One exception, and only one**: `autoCacheEnabled` (default **on**) let Anthropic adapter add
+- **Two exceptions, and only two.** Second is `ponytailMode` in `@omni/ponytail`, below; first is
+  this: `autoCacheEnabled` (default **on**) let Anthropic adapter add
   breakpoints to request carrying **none**. Anthropic caching opt-in, so unmarked request pay full
   input price forever however stable its prefix. Trigger narrow and load-bearing — fire only when
   `estimateCachedInputTokens` is 0 *and* no `cache_control` in vendor bag, so client's own placement
@@ -415,6 +424,24 @@ Preserve these translation invariants:
   (marker 1 or 2) and `anthropic:history-cache-breakpoint-added` (marker 3), each only when its
   marker placed. Design:
   `docs/superpowers/specs/2026-08-23-anthropic-auto-cache-full-prefix-design.md`.
+- **Second exception**: `ponytailMode` (default **off**) let dispatch append the vendored ponytail
+  ruleset to `system`, and **move** a breakpoint the client put on its own last system block onto
+  that appended block. Invariant is one sentence — marker meant "cache through the end of system",
+  and after injection it still do — so count unchanged, TTL unchanged, no marker invented, prefix
+  grow by a constant and hit rate unaffected. Narrower than autoCache in every direction: it edit a
+  marker's *position* alone, never place one, and it run in dispatch on IR rather than at wire time,
+  so `estimateCachedInputTokens` stay non-zero and autoCache still decline. Moving a marker must
+  never become way to switch autoCache **on** for request that had own placement. Injection **return
+  a new request**, never edit in place: IR shared across attempt, same trap autoCache fell into, and
+  it pinned by deep-frozen fixture in `packages/ponytail/test/inject.test.ts`. Dedupe on
+  `PONYTAIL_MARKER` — opening line of every upstream wrapper, and of our own body, so injection
+  idempotent. `count_tokens` apply same function by hand: it never dispatch, so a count omitting the
+  ruleset under-report by whole prompt on every call while real request pay for it. Recorded on
+  `request_logs.degradations` as `ponytail:<level>`, `ponytail:already-present`,
+  `ponytail:cache-marker-moved` — constants only, never request data, same bar as `LogFields`. Text
+  vendored from upstream **v4.8.2**, MIT, adapted only where it would lie server-side (the
+  `/ponytail` switch and "stop ponytail" cannot reach an installation setting). Design:
+  `docs/superpowers/specs/2026-08-29-ponytail-prompt-injection-design.md`.
 - `Usage.inputTokens` is uncached input. Cache reads and 5m/1h writes are disjoint classes priced
   once. Use `promptTokens()` when client surface need total prompt tokens.
 - Adapters stream upstream. OpenAI chat usage need `stream_options.include_usage`; Responses API
