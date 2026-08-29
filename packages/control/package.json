@@ -9,6 +9,7 @@
   "dependencies": {
     "@node-rs/argon2": "2.0.2",
     "@omni/ir": "workspace:*",
+    "@omni/ponytail": "workspace:*",
     "@omnigateway/plugin-api": "workspace:*",
     "@omni/providers": "workspace:*",
     "@omni/ratelimit": "workspace:*",

@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@omni/ir": "workspace:*",
+    "@omni/ponytail": "workspace:*",
     "@omni/ratelimit": "workspace:*",
     "@omni/rtk": "workspace:*"
   }

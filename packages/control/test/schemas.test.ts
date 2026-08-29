@@ -162,3 +162,13 @@ test("a key opts out of body capture only when it asks to", () => {
   expect(keyCreateSchema.parse({ bodyLoggingOptOut: true }).bodyLoggingOptOut).toBe(true);
   expect(() => keyCreateSchema.parse({ bodyLoggingOptOut: "yes" })).toThrow();
 });
+test("settings accept the four ponytail modes and reject anything else", () => {
+  for (const mode of ["off", "lite", "full", "ultra"] as const) {
+    expect(settingsSchema.parse({ ...DEFAULT_SETTINGS, ponytailMode: mode }).ponytailMode).toBe(
+      mode,
+    );
+  }
+
+  expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, ponytailMode: "FULL" })).toThrow();
+  expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, ponytailMode: "" })).toThrow();
+});

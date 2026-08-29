@@ -1876,3 +1876,20 @@ test("an ordinary unknown provider is refused the same way, and a real one still
   });
   expect(real.status).toBe(200);
 });
+
+// The count is what Claude Code paces compaction with, so it has to describe
+// the request the gateway will actually send — ruleset included.
+test("counts the ponytail ruleset the gateway will append", async () => {
+  const { call, store } = await harness();
+  const body = { model: "fast", messages: [{ role: "user", content: "hi" }] };
+
+  const before = (await (await call("/v1/messages/count_tokens", body)).json()) as {
+    input_tokens: number;
+  };
+  await store.config.putSettings({ ponytailMode: "full" });
+  const after = (await (await call("/v1/messages/count_tokens", body)).json()) as {
+    input_tokens: number;
+  };
+
+  expect(after.input_tokens).toBeGreaterThan(before.input_tokens + 500);
+});

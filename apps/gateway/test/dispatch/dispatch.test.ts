@@ -2226,10 +2226,13 @@ const UNMARKED_PREFIX: ChatRequest = {
 };
 
 /** Runs the real Anthropic adapter and returns the bytes it put on the wire. */
-async function wireBodyFor(store: Store): Promise<string> {
+async function wireFor(
+  store: Store,
+  request: ChatRequest = UNMARKED_PREFIX,
+): Promise<{ body: string; degradations: string[] }> {
   let sent = "";
   const outcome = await dispatch(
-    UNMARKED_PREFIX,
+    request,
     {
       ...deps(
         store,
@@ -2250,8 +2253,83 @@ async function wireBodyFor(store: Store): Promise<string> {
     "req_autocache",
   );
   await drain(outcome.events);
-  return sent;
+  return { body: sent, degradations: outcome.log().degradations };
 }
+
+/** Just the bytes, for the tests that only ask what reached the wire. */
+async function wireBodyFor(store: Store): Promise<string> {
+  return (await wireFor(store)).body;
+}
+
+/** The same prefix, but with the caller's own breakpoint on its last block. */
+const MARKED_PREFIX: ChatRequest = {
+  ...UNMARKED_PREFIX,
+  system: [
+    {
+      type: "text",
+      text: "You are a careful assistant. ".repeat(400),
+      cacheControl: { type: "ephemeral", ttl: "1h" },
+    },
+  ],
+};
+
+/**
+ * The system blocks of an Anthropic wire body, as text plus breakpoint.
+ *
+ * Read by position from the end, never by a fixed length: the OAuth leg
+ * prepends a billing header and two identity lines, so the caller's own first
+ * block is not index 0 and the count is a property of the credential rather
+ * than of anything these tests assert.
+ */
+function wireSystem(body: string): Array<{ text: string; marker: unknown }> {
+  const parsed = JSON.parse(body) as { system?: Array<{ text?: string; cache_control?: unknown }> };
+  return (parsed.system ?? []).map((block) => ({
+    text: block.text ?? "",
+    marker: block.cache_control,
+  }));
+}
+
+// The one interaction this feature can get silently and expensively wrong. Both
+// halves are asserted against the real `toWire`, because the claim is about what
+// Anthropic is billed for, and every hop before the wire looked right while the
+// bug that motivated `autoCacheEnabled`'s own test was live.
+test("auto-cache marks the ponytail block when the client marked nothing", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ ponytailMode: "full" });
+
+  const { body, degradations } = await wireFor(store);
+
+  // The ruleset is last, so the system-tier breakpoint lands on it and the
+  // ruleset is inside the cached prefix rather than trailing it.
+  const system = wireSystem(body);
+  const last = system.at(-1);
+  expect(last?.text).toContain("You are a lazy senior developer.");
+  expect(last?.marker).toEqual({ type: "ephemeral" });
+  // Nothing earlier in system is marked, so this is the tier's one breakpoint.
+  expect(system.slice(0, -1).every((block) => block.marker === undefined)).toBe(true);
+  expect(degradations).toContain("anthropic:cache-breakpoint-added");
+  store.close();
+});
+
+test("auto-cache still declines when the client marked its own prompt", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ ponytailMode: "full" });
+
+  const { body, degradations } = await wireFor(store, MARKED_PREFIX);
+
+  // The caller's own marker moved onto the ruleset, TTL intact, and the count
+  // is unchanged — so `estimateCachedInputTokens` stays non-zero and auto-cache
+  // adds nothing. Moving a marker must never become a way to switch it on.
+  const system = wireSystem(body);
+  const last = system.at(-1);
+  expect(last?.text).toContain("You are a lazy senior developer.");
+  expect(last?.marker).toEqual({ type: "ephemeral", ttl: "1h" });
+  // One breakpoint in, one breakpoint out — the caller's, relocated.
+  expect(system.filter((block) => block.marker !== undefined)).toHaveLength(1);
+  expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+  expect(degradations).toContain("ponytail:cache-marker-moved");
+  store.close();
+});
 
 test("the auto-cache setting reaches the wire, on and off", async () => {
   // The setting travels store -> snapshot -> dispatch -> attempt -> adapter ->
@@ -2764,5 +2842,92 @@ test("a sentinel registry reaches every consumer dispatch has", async () => {
   // configured leg above produces — so neither a fallback nor a copy of the
   // other half can pass this by accident.
   expect(inferredLog.costUsd).toBeCloseTo(11, 10);
+});
+
+/** Records the system prompt each attempt actually sent, flattened to compare. */
+function systemSent(adapter: ProviderAdapter, seen: string[]): void {
+  const original = adapter.send.bind(adapter);
+  adapter.send = async (input) => {
+    seen.push((input.request.system ?? []).map((b) => (b.type === "text" ? b.text : "")).join("|"));
+    return original(input);
+  };
+}
+
+test("appends the ponytail ruleset once and sends identical system content on failover", async () => {
+  const store = await seeded(2);
+  await store.config.putSettings({ ponytailMode: "full" });
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("UPSTREAM", "retry") : textStream("ok"),
+  );
+  const seen: string[] = [];
+  systemSent(adapter, seen);
+  const input: ChatRequest = {
+    model: "fast",
+    stream: false,
+    system: [{ type: "text", text: "you are helpful" }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  };
+
+  const outcome = await dispatch(
+    input,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_p",
+  );
+  await drain(outcome.events);
+
+  expect(seen).toHaveLength(2);
+  expect(seen[0]).toBe(seen[1]);
+  expect(seen[0]).toContain("You are a lazy senior developer.");
+  expect(outcome.log().degradations).toContain("ponytail:full");
+  store.close();
+});
+
+test("leaves the request alone and records nothing when ponytail is off", async () => {
+  const store = await seeded(1);
+  const adapter = stubAdapter(() => textStream("ok"));
+  const seen: string[] = [];
+  systemSent(adapter, seen);
+  const input: ChatRequest = {
+    model: "fast",
+    stream: false,
+    system: [{ type: "text", text: "you are helpful" }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  };
+
+  const outcome = await dispatch(
+    input,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_o",
+  );
+  await drain(outcome.events);
+
+  expect(seen[0]).toBe("you are helpful");
+  expect(outcome.log().degradations.some((d) => d.startsWith("ponytail:"))).toBe(false);
+  store.close();
+});
+
+test("records a moved cache breakpoint separately from the level", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ ponytailMode: "lite" });
+  const adapter = stubAdapter(() => textStream("ok"));
+  const input: ChatRequest = {
+    model: "fast",
+    stream: false,
+    system: [{ type: "text", text: "prefix", cacheControl: { type: "ephemeral" } }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  };
+
+  const outcome = await dispatch(
+    input,
+    deps(store, adapter),
+    new AbortController().signal,
+    "req_m",
+  );
+  await drain(outcome.events);
+
+  expect(outcome.log().degradations).toContain("ponytail:lite");
+  expect(outcome.log().degradations).toContain("ponytail:cache-marker-moved");
   store.close();
 });

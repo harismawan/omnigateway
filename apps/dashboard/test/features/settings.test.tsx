@@ -270,4 +270,21 @@ describe("SettingsBoard", () => {
     expect(await screen.findByText("internal error")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
+
+  test("picks a ponytail level and sends the setting", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });
+    renderWithProviders(<SettingsBoard />);
+
+    const select = (await screen.findByLabelText("Lazy senior dev mode")) as HTMLSelectElement;
+    expect(select.value).toBe("off");
+    await user.selectOptions(select, "ultra");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      const body = JSON.parse(String(put?.init?.body)) as { ponytailMode: string };
+      expect(body.ponytailMode).toBe("ultra");
+    });
+  });
 });

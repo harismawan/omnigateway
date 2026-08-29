@@ -10,6 +10,7 @@ import {
   RETRYABLE,
   type StreamEvent,
 } from "@omni/ir";
+import { injectPonytail, ponytailNotes } from "@omni/ponytail";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import {
@@ -238,7 +239,15 @@ export async function dispatch(
   try {
     checkCancellation();
     const transformed = transformRequest(request, { enabled: snapshot.settings.rtkEnabled });
-    dispatchRequest = transformed.request;
+    // Both transforms run once here, ahead of routing, so every attempt of a
+    // failover sends the same bytes. Their order is not load-bearing — RTK
+    // rewrites tool results and ponytail appends to the system prompt — and is
+    // fixed only so the recorded degradations read the same way every time.
+    const lazy = injectPonytail(transformed.request, {
+      mode: snapshot.settings.ponytailMode,
+    });
+    dispatchRequest = lazy.request;
+    noteDegradations(ponytailNotes(lazy.report));
     log.rtkApplied = transformed.report.applied;
     log.rtkFilterHits = transformed.report.filterHits;
     log.rtkOriginalCodeUnits = transformed.report.originalCodeUnits;

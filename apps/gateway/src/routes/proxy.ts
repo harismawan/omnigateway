@@ -9,6 +9,7 @@ import {
   noopLogger,
   type StreamEvent,
 } from "@omni/ir";
+import { injectPonytail } from "@omni/ponytail";
 import type { HeadroomByDimension } from "@omni/ratelimit";
 import { type ApiKey, ARTIFACT_SCHEMA_VERSION } from "@omni/store";
 import { Elysia } from "elysia";
@@ -842,9 +843,17 @@ export function proxyRoutes(deps: ProxyDeps) {
               `model "${chatRequest.model}" is not allowed for this API key`,
             );
           }
+          // Counted against the request the gateway will actually send. This
+          // route never dispatches, so it is the one place the ruleset has to
+          // be added by hand — a count that omitted it would under-report by
+          // the whole prompt on every call while the real request paid for it,
+          // and this number is what a client paces its compaction with.
+          const { settings } = await dispatchDeps.snapshots.get(deps.now());
+          const counted = injectPonytail(chatRequest, { mode: settings.ponytailMode }).request;
           // No request-log row: nothing was dispatched and no tokens were spent,
-          // so a row here would be counted by every usage aggregate.
-          return Response.json({ input_tokens: estimateInputTokens(chatRequest) });
+          // so a row here would be counted by every usage aggregate. That is
+          // also why no degradation is recorded for the injection above.
+          return Response.json({ input_tokens: estimateInputTokens(counted) });
         } catch (error) {
           const gatewayError = asGatewayError(error);
           logger.warn("token count failed", {
