@@ -550,11 +550,13 @@ test("writes an artifact for a stream the client hung up on", async () => {
  * asserted it.
  */
 test("writes a truncated artifact for a non-streaming request the client hung up on", async () => {
+  // The stub's own call log is kept, because it is the barrier below.
+  const sent = upstream({ deliver: 0 });
   const { store, root, app, keys } = await harness({
     allowed: true,
     settings: CAPTURE_ON,
     // Nothing ever arrives, so only the hang-up ends the attempt.
-    http: upstream({ deliver: 0 }).http,
+    http: sent.http,
   });
 
   const controller = new AbortController();
@@ -569,12 +571,18 @@ test("writes a truncated artifact for a non-streaming request the client hung up
       signal: controller.signal,
     }),
   );
-  // The pending row proves routing picked a target, so the hang-up lands
-  // mid-attempt rather than before the request was anything.
-  await until(
-    "the pending row routing writes",
-    async () => (await store.usage.recent(1))[0] !== undefined,
-  );
+  // **The outbound call, not the pending row.** The row is written by `routeLog`
+  // when routing resolves, which is strictly earlier than the attempt being
+  // recorded — so aborting on it left a window where the hang-up landed after a
+  // target was picked and before anything was attempted, and `artifact.attempts`
+  // came back empty. Green on an idle machine, flaky under load: it failed once
+  // in CI and never in six consecutive local runs of the full suite.
+  //
+  // `bodyCapture` pushes the attempt entry *before* it awaits `http(req)`, and
+  // this stub is what `http(req)` reaches, so one recorded call implies one
+  // recorded attempt. That is the same event the assertions below are about,
+  // which is the property a barrier should have and the pending row never did.
+  await until("the request to reach the upstream stub", async () => sent.calls.length === 1);
   controller.abort();
   await pending.catch(() => undefined);
   await waitForBody(store, "req_1");
