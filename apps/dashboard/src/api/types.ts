@@ -61,6 +61,60 @@ export type {
 export type ApiErrorBody = { error: { code: ErrorCode | string; message: string } };
 
 /**
+ * A request row as `/api/client/logs` returns it.
+ *
+ * Hand-mirrored from `ClientRequestLog` in `@omni/control`, which the console
+ * may not import. It is an enumerated projection there rather than `RequestLog`
+ * minus three keys, so it is enumerated here too: typing this as the store's own
+ * row is what let a component read `rtkFilters` off a payload that has never
+ * carried it, and TypeScript agreed because the fetch is an unchecked cast.
+ */
+export type ClientRequestLog = {
+  id: string;
+  state: RequestLog["state"];
+  at: number;
+  requestedModel: string;
+  /** Which provider served it. The *account* is deliberately not here. */
+  resolvedProvider: RequestLog["resolvedProvider"];
+  resolvedModel: string | null;
+  attempts: number;
+  status: number;
+  errorCode: RequestLog["errorCode"];
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  ttftMs: number | null;
+  durationMs: number;
+  costUsd: number;
+  degradations: string[];
+  rtkApplied: boolean;
+  rtkEstimatedTokensSaved: number;
+};
+
+/**
+ * What a shared request component may assume it has been handed.
+ *
+ * The fields both surfaces carry, plus the operator's own as optional. A
+ * component renders an optional field only where it has checked for it, so the
+ * client's narrower row is a value the same table can draw rather than a second
+ * table — and a column the client has no data for cannot be reached by
+ * forgetting a guard.
+ */
+export type RequestRow = ClientRequestLog &
+  Partial<
+    Pick<
+      RequestLog,
+      | "apiKeyId"
+      | "credentialId"
+      | "rtkFilters"
+      | "rtkFilterHits"
+      | "rtkOriginalCodeUnits"
+      | "rtkCompressedCodeUnits"
+    >
+  >;
+
+/**
  * Which surface a session belongs to.
  *
  * Mirrored rather than imported: `Principal` is declared in `@omni/control`,
@@ -359,6 +413,9 @@ export type UsageQuery = {
 export type UsageResponse = { rows: UsageBucket[] };
 
 export type LogsResponse = { logs: RequestLog[] };
+
+/** The client's own tail, which is a narrower row than the operator's. */
+export type ClientLogsResponse = { logs: ClientRequestLog[] };
 
 /**
  * One line of the gateway's own output.

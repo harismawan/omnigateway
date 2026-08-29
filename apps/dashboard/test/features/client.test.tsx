@@ -7,6 +7,7 @@ import { createFetchStub } from "../helpers/fetchStub.ts";
 import {
   accountQuotaSample,
   apiKey,
+  clientLog,
   headroom,
   log,
   NOW,
@@ -18,7 +19,7 @@ function stub(over: Record<string, () => unknown> = {}) {
   return createFetchStub({
     "GET /api/client/summary": () => apiKey(),
     "GET /api/client/usage": () => [usageBucket({ key: "fast" })],
-    "GET /api/client/logs": () => ({ logs: [log()] }),
+    "GET /api/client/logs": () => ({ logs: [clientLog()] }),
     "GET /api/client/quota": () => ({ accounts: [] }),
     ...over,
   });
@@ -128,8 +129,17 @@ describe("client board", () => {
     // comparison and the figure is the reading.
     expect(meter.getAttribute("aria-valuenow")).toBe("42");
     expect(within(row as HTMLElement).getByText("42%")).toBeTruthy();
-    // The provider's own counters are still not rendered.
-    expect(container.textContent).not.toContain("of 1,000");
+    // What the ratio is *of* is never named. Scoped to the row, because the
+    // page at large carries token counts in the thousands; the old check looked
+    // for "of 1,000" across the whole container, a string no payload could
+    // produce and no mutation could make appear, so it read as a disclosure
+    // check while testing nothing.
+    const rowText = (row as HTMLElement).textContent ?? "";
+    // `formatCount` writes a ceiling with a thousands separator and the console
+    // phrases the pair as "250 of 1,000", so neither shape may appear here.
+    expect(rowText).not.toMatch(/\d,\d{3}/);
+    expect(rowText).not.toMatch(/\bof\b/);
+    expect(container.textContent).toContain("claude-main");
   });
 
   /**

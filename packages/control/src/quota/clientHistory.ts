@@ -31,6 +31,20 @@ export type AccountQuotaHistoryInput = {
 export type AccountQuotaHistoryResult = { samples: AccountQuotaSample[] };
 
 /**
+ * The furthest back a client may reach, whatever retention allows.
+ *
+ * This route is reachable by every key holder and, unlike the operator's, is
+ * scoped to no credential: it reads every account's samples in the span. With
+ * no ceiling, a parameterless GET fell back to the retention window — thirty
+ * days by default — and `bun:sqlite` is synchronous, so that scan blocks the
+ * whole event loop rather than one request.
+ *
+ * Sixteen days covers what the screen asks for: the widest window a provider
+ * reports is a week, and the chart plots that window plus the one before it.
+ */
+const MAX_SPAN_MS = 16 * 24 * 60 * 60 * 1_000;
+
+/**
  * The retained readings behind the client screen's quota charts.
  *
  * One series per account and window, which is what lets a key holder see which
@@ -50,7 +64,7 @@ export async function accountQuotaHistory(
   deps: { store: Store; now: () => number },
   input: AccountQuotaHistoryInput,
 ): Promise<AccountQuotaHistoryResult> {
-  const { since, until } = await retainedSpan(deps, input);
+  const { since, until } = await retainedSpan(deps, input, MAX_SPAN_MS);
 
   const [samples, credentials] = await Promise.all([
     deps.store.credentials.listQuotaSamples({ since, until }),

@@ -22,6 +22,24 @@ function stubAccess(
   });
 }
 
+/**
+ * Records where the console tries to send the browser.
+ *
+ * A full navigation rather than a router hop is the behaviour under test — the
+ * session it was built around no longer exists — so it is captured at the one
+ * place that performs one instead of being mocked away.
+ */
+function captureNavigation(): { to: string[]; restore: () => void } {
+  const to: string[] = [];
+  Object.defineProperty(window.location, "assign", {
+    configurable: true,
+    value: (url: string) => {
+      to.push(url);
+    },
+  });
+  return { to, restore: () => void Reflect.deleteProperty(window.location, "assign") };
+}
+
 /** Both new-password boxes, filled with the same value. */
 async function typeNewPassword(user: ReturnType<typeof userEvent.setup>, value: string) {
   await user.type(screen.getByLabelText("New password"), value);
@@ -78,6 +96,57 @@ describe("admin password", () => {
 
     expect((await screen.findByRole("alert")).textContent).toMatch(/at least 12/i);
     expect(stub.calls.some((entry) => entry.url === "/api/settings/password")).toBe(false);
+  });
+
+  /**
+   * Where the console goes once the password has changed.
+   *
+   * The gateway ends every session on success, this browser's included, so the
+   * cookie is dead before the response is read. Staying put would fail on the
+   * next query with a 401 the operator cannot connect to what they just did —
+   * and no assertion on the request body can tell the two cases apart.
+   */
+  test("a successful change leaves for the login screen with the reason", async () => {
+    const user = userEvent.setup();
+    const nav = captureNavigation();
+    try {
+      stubAccess(false);
+      renderWithProviders(<AccessPanel />);
+
+      await user.type(screen.getByLabelText("Current password"), "hunter2hunter2");
+      await typeNewPassword(user, "a-longer-new-password");
+      await user.click(screen.getByRole("button", { name: "Change password" }));
+
+      await waitFor(() => {
+        expect(nav.to).toEqual(["/login?reason=password-changed"]);
+      });
+    } finally {
+      nav.restore();
+    }
+  });
+
+  test("a refused change stays put rather than signing the operator out", async () => {
+    const user = userEvent.setup();
+    const nav = captureNavigation();
+    try {
+      stubAccess(false, {
+        "PUT /api/settings/password": () => ({
+          status: 401,
+          body: { error: { code: "AUTH", message: "current password is incorrect" } },
+        }),
+      });
+      renderWithProviders(<AccessPanel />);
+
+      await user.type(screen.getByLabelText("Current password"), "wrong-password-x");
+      await typeNewPassword(user, "a-longer-new-password");
+      await user.click(screen.getByRole("button", { name: "Change password" }));
+
+      expect((await screen.findByRole("alert")).textContent).toMatch(/incorrect/i);
+      // Nothing changed, so nothing ended: the session is still good.
+      expect(nav.to).toEqual([]);
+    } finally {
+      nav.restore();
+    }
   });
 
   test("a wrong current password is reported rather than swallowed", async () => {

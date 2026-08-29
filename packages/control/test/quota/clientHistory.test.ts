@@ -185,3 +185,36 @@ test("an install with no readings reports nothing rather than an empty window", 
   expect(await historyOf(store)).toEqual([]);
   store.close();
 });
+
+/**
+ * A parameterless request is bounded, whatever retention allows.
+ *
+ * This route is reachable by every key holder and is scoped to no credential,
+ * so an unbounded default meant one GET read every account's samples across the
+ * whole retention window — a synchronous scan that blocks the event loop rather
+ * than one request. The operator's own history route keeps no such ceiling: it
+ * is admin-gated and scoped to one account.
+ */
+test("a request with no span reads days, not the whole retention window", async () => {
+  const store = await seeded();
+  const settings = await store.config.getSettings();
+  // Inside retention and well outside what any chart on the client screen asks
+  // for: 30 days of retention against a 16-day ceiling.
+  expect(settings.logRetentionDays).toBeGreaterThan(17);
+  await reading(store, { credentialId: "cred-alpha", observedAt: NOW - 25 * DAY, used: 10 });
+  await reading(store, { credentialId: "cred-alpha", observedAt: NOW - HOUR, used: 20 });
+
+  expect((await historyOf(store)).map((s) => s.observedAt)).toEqual([NOW - HOUR]);
+  store.close();
+});
+
+test("an explicit span cannot reach past that ceiling either", async () => {
+  const store = await seeded();
+  await reading(store, { credentialId: "cred-alpha", observedAt: NOW - 25 * DAY, used: 10 });
+  await reading(store, { credentialId: "cred-alpha", observedAt: NOW - HOUR, used: 20 });
+
+  // Asking for everything is not a way around it.
+  const result = await accountQuotaHistory({ store, now: () => NOW }, { since: 0 });
+  expect(result.samples.map((s) => s.observedAt)).toEqual([NOW - HOUR]);
+  store.close();
+});

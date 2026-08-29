@@ -8,7 +8,7 @@ import type {
   CredentialHealth,
   DisabledReason,
   QuotaWindow,
-  RequestLog,
+  RequestRow,
 } from "../api/types.ts";
 import { formatDuration } from "./format.ts";
 
@@ -41,7 +41,7 @@ export function percentile(values: readonly number[], p: number): number | null 
 }
 
 /** A request the gateway is still serving. Its zeros are placeholders. */
-export function isPending(log: RequestLog): boolean {
+export function isPending(log: RequestRow): boolean {
   return log.state === "pending";
 }
 
@@ -53,12 +53,12 @@ export function isPending(log: RequestLog): boolean {
  * rate toward zero exactly when traffic picks up — the health strip would dip
  * for being busy.
  */
-export function completed(logs: readonly RequestLog[]): RequestLog[] {
+export function completed(logs: readonly RequestRow[]): RequestRow[] {
   return logs.filter((log) => !isPending(log));
 }
 
 /** A log row counts as an error on any non-2xx status the gateway recorded. */
-export function isError(log: RequestLog): boolean {
+export function isError(log: RequestRow): boolean {
   // A request in flight has not failed yet. Its status is a placeholder zero,
   // so this would read as success anyway; saying so makes that intent.
   if (isPending(log)) return false;
@@ -83,17 +83,17 @@ export const LAMP_GLYPH: Record<LampState, string> = {
  * The label is the lamp's accessible name, and for a live row it is the whole
  * signal: the animation says nothing to a screen reader.
  */
-export function lampState(log: RequestLog): LampState {
+export function lampState(log: RequestRow): LampState {
   if (isPending(log)) return "live";
   return isError(log) ? "down" : "ok";
 }
 
-export function lampLabel(log: RequestLog): string {
+export function lampLabel(log: RequestRow): string {
   if (isPending(log)) return "in flight";
   return isError(log) ? `failed with ${log.status}` : "succeeded";
 }
 
-export function summarize(all: readonly RequestLog[], windowMs: number): Vitals {
+export function summarize(all: readonly RequestRow[], windowMs: number): Vitals {
   const logs = completed(all);
   const ttfts: number[] = [];
   let errors = 0;
@@ -145,7 +145,7 @@ export type Bucket = {
  * gateway draws a flat line rather than an empty box.
  */
 export function bucketLogs(
-  all: readonly RequestLog[],
+  all: readonly RequestRow[],
   options: { now: number; spanMs: number; count: number },
 ): Bucket[] {
   const logs = completed(all);
@@ -450,8 +450,13 @@ export function readingOf(row: {
     windowType: row.windowType,
     windowMs: row.windowMs,
     resetsAt: row.resetsAt,
+    // `<= 0`, not `=== 0`: the guards this replaced were `limit > 0`, and
+    // nothing validates what a provider reports on its way into
+    // `quota_windows`. A negative ceiling clamps to a ratio of zero and would
+    // be *drawn at 0%* — an account reported as untouched — where it used to be
+    // dropped as the non-reading it is.
     usedRatio:
-      row.limit === null || row.limit === 0 ? null : Math.min(1, Math.max(0, row.used / row.limit)),
+      row.limit === null || row.limit <= 0 ? null : Math.min(1, Math.max(0, row.used / row.limit)),
   };
 }
 

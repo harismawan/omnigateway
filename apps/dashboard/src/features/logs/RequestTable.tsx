@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import styled from "styled-components";
-import type { RequestLog } from "../../api/types.ts";
+import type { RequestRow } from "../../api/types.ts";
 import {
   formatClock,
   formatCount,
@@ -61,7 +61,7 @@ export function useCurrentTime(active: boolean): number {
  * no account name for the term to match, and pretending otherwise would be a
  * search over fields it cannot see.
  */
-export function matchesTerm(log: RequestLog, needle: string, names?: RequestNames): boolean {
+export function matchesTerm(log: RequestRow, needle: string, names?: RequestNames): boolean {
   if (needle.length === 0) return true;
   if (
     log.requestedModel.toLowerCase().includes(needle) ||
@@ -71,30 +71,27 @@ export function matchesTerm(log: RequestLog, needle: string, names?: RequestName
     return true;
   }
   if (names === undefined) return false;
-  return (
-    (log.credentialId === null ? "" : (names.accounts.get(log.credentialId) ?? ""))
-      .toLowerCase()
-      .includes(needle) ||
-    (log.apiKeyId === null ? "" : (names.keys.get(log.apiKeyId) ?? log.apiKeyId))
-      .toLowerCase()
-      .includes(needle)
-  );
+  // Both ids are optional on the row, not merely nullable: the client's
+  // projection omits them entirely. Absent and null match the same nothing.
+  const account = log.credentialId == null ? "" : (names.accounts.get(log.credentialId) ?? "");
+  const key = log.apiKeyId == null ? "" : (names.keys.get(log.apiKeyId) ?? log.apiKeyId);
+  return account.toLowerCase().includes(needle) || key.toLowerCase().includes(needle);
 }
 
 /** Rows in this window, filtered exactly as the table renders them. */
 export function filterLogs(
-  logs: readonly RequestLog[],
+  logs: readonly RequestRow[],
   filter: "all" | "failed",
   term: string,
   names?: RequestNames,
-): RequestLog[] {
+): RequestRow[] {
   const needle = term.trim().toLowerCase();
   return logs.filter(
     (log) => (filter !== "failed" || isError(log)) && matchesTerm(log, needle, names),
   );
 }
 
-function TokenCell({ log }: { log: RequestLog }) {
+function TokenCell({ log }: { log: RequestRow }) {
   return (
     <Td
       $align="right"
@@ -107,11 +104,11 @@ function TokenCell({ log }: { log: RequestLog }) {
 }
 
 export type RequestTableProps = {
-  rows: readonly RequestLog[];
+  rows: readonly RequestRow[];
   /** Ticks only while a row is still running; see `useCurrentTime`. */
   now: number;
   names?: RequestNames;
-  onOpen: (log: RequestLog) => void;
+  onOpen: (log: RequestRow) => void;
 };
 
 /**
@@ -179,7 +176,7 @@ export function RequestTable({ rows, now, names, onOpen }: RequestTableProps) {
               <>
                 <Td>
                   <Truncate style={{ display: "block", maxWidth: "18ch" }}>
-                    {log.credentialId === null
+                    {log.credentialId == null
                       ? "—"
                       : (names.accounts.get(log.credentialId) ?? shortId(log.credentialId))}
                   </Truncate>
@@ -193,7 +190,7 @@ export function RequestTable({ rows, now, names, onOpen }: RequestTableProps) {
                     style={{ display: "block", maxWidth: "16ch" }}
                     title={log.apiKeyId ?? undefined}
                   >
-                    {log.apiKeyId === null
+                    {log.apiKeyId == null
                       ? "—"
                       : (names.keys.get(log.apiKeyId) ?? shortId(log.apiKeyId))}
                   </Truncate>
@@ -246,7 +243,7 @@ const Value = styled.dd`
 `;
 
 export type RequestDetailProps = {
-  log: RequestLog;
+  log: RequestRow;
   names?: RequestNames;
   /**
    * What the surface has to add below the metadata.
@@ -281,13 +278,13 @@ export function RequestDetail({ log, names, children }: RequestDetailProps) {
           <>
             <Legend as="dt">Account</Legend>
             <Value>
-              {log.credentialId === null
+              {log.credentialId == null
                 ? "—"
                 : (names.accounts.get(log.credentialId) ?? log.credentialId)}
             </Value>
             <Legend as="dt">Key</Legend>
             <Value>
-              {log.apiKeyId === null ? "—" : (names.keys.get(log.apiKeyId) ?? log.apiKeyId)}
+              {log.apiKeyId == null ? "—" : (names.keys.get(log.apiKeyId) ?? log.apiKeyId)}
             </Value>
           </>
         )}
@@ -323,16 +320,32 @@ export function RequestDetail({ log, names, children }: RequestDetailProps) {
         </Value>
         <Legend as="dt">Cost</Legend>
         <Value>{isPending(log) ? "—" : formatUsd(log.costUsd)}</Value>
+        {/*
+          The compression figures and the filter list are on the operator's row
+          and not on the client's: `toClientLog` enumerates what a key holder may
+          see, and these four columns are not in it. Guarded on the field rather
+          than on which surface is rendering, for the reason the Account and Key
+          columns are — a component that asked "am I the console?" would answer
+          it once and be wrong the next time a projection changed.
+        */}
         <Legend as="dt">RTK compression</Legend>
         <Value>
           {isPending(log)
             ? "—"
-            : log.rtkApplied
-              ? `${formatCount(log.rtkFilterHits)} hits · ${formatCount(log.rtkOriginalCodeUnits)} → ${formatCount(log.rtkCompressedCodeUnits)} code units · ~${formatCount(log.rtkEstimatedTokensSaved)} tokens saved`
-              : "not applied"}
+            : !log.rtkApplied
+              ? "not applied"
+              : log.rtkFilterHits === undefined
+                ? // What the client's row carries: the saving, without the
+                  // code-unit accounting behind it.
+                  `~${formatCount(log.rtkEstimatedTokensSaved)} tokens saved`
+                : `${formatCount(log.rtkFilterHits)} hits · ${formatCount(log.rtkOriginalCodeUnits ?? 0)} → ${formatCount(log.rtkCompressedCodeUnits ?? 0)} code units · ~${formatCount(log.rtkEstimatedTokensSaved)} tokens saved`}
         </Value>
-        <Legend as="dt">RTK filters</Legend>
-        <Value>{log.rtkFilters.length === 0 ? "—" : log.rtkFilters.join(", ")}</Value>
+        {log.rtkFilters === undefined ? null : (
+          <>
+            <Legend as="dt">RTK filters</Legend>
+            <Value>{log.rtkFilters.length === 0 ? "—" : log.rtkFilters.join(", ")}</Value>
+          </>
+        )}
       </Detail>
 
       {log.degradations.length === 0 ? null : (

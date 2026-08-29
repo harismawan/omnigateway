@@ -9,7 +9,7 @@ import {
   useClientSummary,
   useClientUsage,
 } from "../../api/queries.ts";
-import type { AccountQuota, LimitReading, RequestLog } from "../../api/types.ts";
+import type { AccountQuota, LimitReading, RequestRow } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount, formatPercent, formatRelative, formatUsd } from "../../lib/format.ts";
 import {
@@ -227,7 +227,7 @@ export function ClientBoard() {
   const [filter, setFilter] = useState<Filter>("all");
   const [term, setTerm] = useState("");
   const [limit, setLimit] = useState<number>(LIMITS[0]);
-  const [open, setOpen] = useState<RequestLog | null>(null);
+  const [open, setOpen] = useState<RequestRow | null>(null);
   const [openAccount, setOpenAccount] = useState<string | null>(null);
 
   const range = rangeOf(rangeId);

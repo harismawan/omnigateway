@@ -388,18 +388,6 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       /**
-       * Sets or clears the read-only administrator's password.
-       *
-       * A mutation, so `requireAdmin` — a viewer must not be able to change the
-       * credential that admitted them, which would let one read-only holder lock
-       * out another and keep the access for themselves.
-       *
-       * `null` clears it and is how the access is withdrawn. An absent field is
-       * not `null`: it is a malformed request, because "leave it alone" and
-       * "remove it" must not share a spelling on a route whose whole job is to
-       * grant or revoke access.
-       */
-      /**
        * Replaces the admin password, having been shown the current one.
        *
        * The session cookie is not enough on its own: it may be an unattended
@@ -437,6 +425,18 @@ export function adminRoutes(deps: AdminDeps) {
         return { ok: true };
       })
 
+      /**
+       * Sets or clears the read-only administrator's password.
+       *
+       * A mutation, so `requireAdmin` — a viewer must not be able to change the
+       * credential that admitted them, which would let one read-only holder lock
+       * out another and keep the access for themselves.
+       *
+       * `null` clears it and is how the access is withdrawn. An absent field is
+       * not `null`: it is a malformed request, because "leave it alone" and
+       * "remove it" must not share a spelling on a route whose whole job is to
+       * grant or revoke access.
+       */
       .put("/api/settings/viewer-password", async ({ request }) => {
         await requireAdmin(request, deps.admin);
         const body = await readJsonRecord(request);

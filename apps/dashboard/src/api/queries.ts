@@ -13,9 +13,11 @@ import type {
   AgentModelMapping,
   ApiKeySummary,
   BurnEstimate,
+  ClientLogsResponse,
   ClientQuotaHistoryQuery,
   ClientQuotaHistoryResponse,
   ClientQuotaResponse,
+  ClientRequestLog,
   ConnectPollResult,
   ConnectStart,
   ConsoleResponse,
@@ -611,14 +613,23 @@ export function useClientUsage(
   });
 }
 
+/**
+ * The key holder's own tail.
+ *
+ * Typed as `ClientRequestLog`, not `RequestLog`: `/api/client/logs` projects the
+ * row through `toClientLog`, so four RTK columns and both identity columns are
+ * absent from the payload. Claiming the operator's shape here is what let a
+ * shared component read a field the wire has never carried — the fetch is an
+ * unchecked cast, so the type is the only thing saying what arrives.
+ */
 export function useClientLogs(
   limit = 100,
   cadence: Cadence = LOG_CADENCE_MS,
-): UseQueryResult<RequestLog[]> {
+): UseQueryResult<ClientRequestLog[]> {
   return useQuery({
     queryKey: queryKeys.clientLogs(limit),
     queryFn: async ({ signal }) =>
-      (await get<LogsResponse>(withQuery("/api/client/logs", { limit }), signal)).logs,
+      (await get<ClientLogsResponse>(withQuery("/api/client/logs", { limit }), signal)).logs,
     refetchInterval: cadence,
   });
 }

@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { ClientShell } from "../../src/components/ClientShell.tsx";
 import { ClientBoard } from "../../src/features/client/ClientBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { apiKey, log, usageBucket } from "../helpers/fixtures.ts";
+import { apiKey, clientLog, usageBucket } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 import { createStubTimer, installSocketStub, restoreSocketStub } from "../helpers/socketStub.ts";
 
@@ -17,8 +17,8 @@ function boardStub(over: Record<string, () => unknown> = {}) {
   return createFetchStub({
     "GET /api/client/summary": () => apiKey(),
     "GET /api/client/usage": () => [usageBucket({ key: "fast" })],
-    "GET /api/client/logs": () => ({ logs: [log()] }),
-    "GET /api/client/quota": () => ({ headroom: [] }),
+    "GET /api/client/logs": () => ({ logs: [clientLog()] }),
+    "GET /api/client/quota": () => ({ accounts: [] }),
     ...over,
   });
 }

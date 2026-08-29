@@ -173,10 +173,24 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
     },
 
     async changePassword(current, next) {
+      // The length rule is checked **before** the current password, and the
+      // order is the whole security property.
+      //
+      // Reversed, the two failures answer differently — a wrong current
+      // password with a short new one is refused as unauthorised, a *correct*
+      // one with the same short new password is refused as a bad request — so
+      // `{current: guess, password: "x"}` becomes a free, unlimited,
+      // non-destructive oracle for the admin password against a stolen cookie.
+      // Rejecting the new password first collapses both to the same answer.
+      //
+      // It also equalises the work: the verify below is the only Argon2 either
+      // path runs, so a wrong guess and a right one take the same time. Leaving
+      // the length check after the verify would keep a ~2x latency split even
+      // once both returned the same status.
+      if (next.length < MIN_PASSWORD_LENGTH) {
+        throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+      }
       const stored = await store.config.getAdminPasswordHash();
-      // Checked before the length rule, so a wrong current password and a short
-      // new one report the first problem rather than telling whoever is asking
-      // which half of the form they got right.
       if (!(await passwordMatches(stored, current))) return false;
       await applyPassword(next);
       return true;

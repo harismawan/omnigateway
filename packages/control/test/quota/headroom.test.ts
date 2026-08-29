@@ -306,3 +306,84 @@ test("each row carries its own account's instants", async () => {
   expect(idle?.observedAt).toBe(NOW - 60_000);
   store.close();
 });
+
+/**
+ * The ratio is rounded on the way out, and that is a disclosure control.
+ *
+ * A full-precision float64 of `used / limit` is a ratio of two integers, and a
+ * ratio of coprime integers comes back in lowest terms through continued
+ * fractions — so the exact quotient publishes the ceiling this surface exists
+ * not to publish. The history endpoint makes it certain by handing out many
+ * readings against one denominator.
+ *
+ * Asserted by running the recovery: an assertion on the rounded value alone
+ * would pass against a change that rounded to twelve decimals.
+ */
+test("the exact quotient never reaches the wire, so the ceiling cannot be recovered", async () => {
+  const store = await withQuota([
+    { id: "a1", provider: "anthropic", used: 137, limit: 88_000, resetsAt: NOW + HOUR_MS },
+  ]);
+
+  const [row] = await accountQuota({ store, now: () => NOW });
+  const published = row?.usedRatio as number;
+  expect(published).not.toBe(137 / 88_000);
+
+  // The smallest denominator that explains the published figure. With the exact
+  // quotient this returns 88000; rounded to a thousandth it cannot.
+  const denominatorOf = (value: number): number => {
+    for (let d = 1; d <= 100_000; d += 1) {
+      if (Math.abs(value * d - Math.round(value * d)) < 1e-12) return d;
+    }
+    return Number.POSITIVE_INFINITY;
+  };
+  expect(denominatorOf(137 / 88_000)).toBe(88_000);
+  expect(denominatorOf(published)).toBeLessThanOrEqual(1_000);
+  store.close();
+});
+
+test("a negative ceiling is unknown rather than a fraction of nothing", async () => {
+  // Nothing validates what a provider reports on its way into `quota_windows`,
+  // and a percentage of a negative allowance is not a reading. Dropped, exactly
+  // as an unstated one is.
+  const store = await withQuota([{ id: "a1", provider: "anthropic", used: 5, limit: -100 }]);
+  expect((await accountQuota({ store, now: () => NOW }))[0]?.usedRatio).toBeNull();
+  store.close();
+});
+
+/**
+ * Both true at once, which neither of the two tests above reaches.
+ *
+ * `burnFor` sets one flag on either count and checks age first, so deriving
+ * `stale` from it reported false for a reading that is old *and* past its
+ * reset — a probe down for hours against a window that has since rolled. The
+ * panel then said "rolled over, waiting for the next reading" and stayed quiet
+ * about the probe, which is the half an operator can fix.
+ */
+test("a reading that is both stale and rolled over reports both", async () => {
+  const store = await withQuota([
+    {
+      id: "a1",
+      provider: "anthropic",
+      used: 400,
+      limit: 1000,
+      // Read six hours ago, counting a window that ended five hours ago.
+      resetsAt: NOW - 5 * HOUR_MS,
+      observedAt: NOW - 6 * HOUR_MS,
+    },
+  ]);
+
+  const [row] = await accountQuota({ store, now: () => NOW });
+  expect(row?.stale).toBe(true);
+  expect(row?.rolledOver).toBe(true);
+  store.close();
+});
+
+test("a reading never taken is stale rather than merely rateless", async () => {
+  // `observedAt: 0` is a row written before snapshots existed, or a probe that
+  // has never succeeded. There is nothing to age, and nothing to believe.
+  const store = await withQuota([
+    { id: "a1", provider: "anthropic", used: 0, limit: 1000, observedAt: 0 },
+  ]);
+  expect((await accountQuota({ store, now: () => NOW }))[0]?.stale).toBe(true);
+  store.close();
+});

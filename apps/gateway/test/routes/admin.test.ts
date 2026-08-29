@@ -1580,3 +1580,31 @@ test("withdrawing viewer access leaves the operator signed in", async () => {
   // Someone else's access was withdrawn; the operator's own was not touched.
   expect(await admin.verify(mine)).toEqual({ kind: "admin" });
 });
+
+/**
+ * The discriminating pair, which the two tests above miss between them.
+ *
+ * A wrong current password and a short new one, against a correct current
+ * password and the same short new one. If those answer differently, then
+ * `{current: guess, password: "x"}` is a free, unlimited, non-destructive
+ * oracle for the admin password — and the caller already holds a session, so
+ * "they are authenticated anyway" is not an answer: the whole point of asking
+ * for the current password is that a cookie is not proof of knowing it.
+ */
+test("a wrong current password is indistinguishable from a short new one", async () => {
+  const { call, admin } = await harness();
+
+  const wrongCurrent = await call("PUT", "/api/settings/password", {
+    current: "not-the-password",
+    password: "short",
+  });
+  const rightCurrent = await call("PUT", "/api/settings/password", {
+    current: "hunter2hunter2",
+    password: "short",
+  });
+
+  expect(rightCurrent.status).toBe(wrongCurrent.status);
+  expect(await rightCurrent.text()).toBe(await wrongCurrent.text());
+  // And neither attempt moved anything.
+  expect(await admin.login("hunter2hunter2")).not.toBeNull();
+});

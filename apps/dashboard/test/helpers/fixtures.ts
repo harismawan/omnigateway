@@ -4,6 +4,7 @@ import type {
   ApiKeySummary,
   BodyArtifact,
   BurnEstimate,
+  ClientRequestLog,
   Credential,
   CredentialHealth,
   DatabaseOverview,
@@ -232,6 +233,27 @@ export function log(patch: Partial<RequestLog> = {}): RequestLog {
     rtkFilters: [],
     ...patch,
   };
+}
+
+/**
+ * A row as `/api/client/logs` actually returns it.
+ *
+ * Built by dropping exactly what `toClientLog` drops, rather than by handing a
+ * client test the operator's row: a full `log()` fixture is what let a shared
+ * component read `rtkFilters` off a payload that has never carried it and kept
+ * every modal test green while the modal threw in a browser.
+ */
+export function clientLog(patch: Partial<ClientRequestLog> = {}): ClientRequestLog {
+  const {
+    apiKeyId: _apiKeyId,
+    credentialId: _credentialId,
+    rtkFilters: _rtkFilters,
+    rtkFilterHits: _rtkFilterHits,
+    rtkOriginalCodeUnits: _rtkOriginalCodeUnits,
+    rtkCompressedCodeUnits: _rtkCompressedCodeUnits,
+    ...client
+  } = log();
+  return { ...client, ...patch };
 }
 
 export function usageBucket(patch: Partial<UsageBucket> = {}): UsageBucket {

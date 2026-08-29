@@ -3,7 +3,7 @@ import { LogOut, MonitorCog, Moon, Sun } from "lucide-react";
 import { useMemo } from "react";
 import styled from "styled-components";
 import { useLogout, useLogs } from "../api/queries.ts";
-import type { RequestLog } from "../api/types.ts";
+import type { RequestRow } from "../api/types.ts";
 import { formatMs, formatPercent, formatUsd } from "../lib/format.ts";
 import { bucketLogs, summarize } from "../lib/vitals.ts";
 import { useLive } from "../session/live.tsx";
@@ -144,7 +144,7 @@ const WINDOW_MS = 600_000;
 
 export type ChassisProps = {
   /** The request tail the pulse is read from, already scoped to the caller. */
-  logs: readonly RequestLog[];
+  logs: readonly RequestRow[];
   /** True when that read failed, which the mark lamp reports as unreachable. */
   logsFailed: boolean;
   signOut: { pending: boolean; run: () => void };

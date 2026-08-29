@@ -269,12 +269,29 @@ test("the quota routes name accounts and still withhold their size", async () =>
   ]);
 
   const cookie = await login(mine.raw);
+
+  // Both routes, because both carry the same disclosure and only one of them
+  // was checked here: a change that put `used` back on the *sample* would have
+  // been invisible at this boundary.
+  for (const path of ["/api/client/quota", "/api/client/quota/history"]) {
+    const each = await (await api(path, cookie)).text();
+    expect({ path, hasUsed: each.includes('"used"') }).toEqual({ path, hasUsed: false });
+    expect({ path, hasLimit: each.includes('"limit"') }).toEqual({ path, hasLimit: false });
+    expect({ path, hasRate: each.includes('"ratePerHour"') }).toEqual({ path, hasRate: false });
+    // The account is named on both, which is the half that is meant to be here.
+    expect({ path, hasLabel: each.includes('"label"') }).toEqual({ path, hasLabel: true });
+  }
+
   const body = await (await api("/api/client/quota", cookie)).text();
 
   // `seedCredential` labels an account after its id, so this is the operator's
   // own name for it reaching a key holder.
   expect(body).toContain("cred-OPERATOR-ACCOUNT");
   expect(body).toContain("usedRatio");
+  // A quarter, at the precision this surface publishes. The exact quotient of
+  // two of the provider's integers gives the ceiling back through continued
+  // fractions, which is why it is rounded in `@omni/control` rather than here.
+  expect(body).toContain("0.25");
   // The provider's own counters are what stay behind: a fraction says how full
   // an account is, and these would say how large it is.
   expect(body).not.toContain('"used"');

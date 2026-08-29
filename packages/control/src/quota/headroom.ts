@@ -1,4 +1,5 @@
 import type { ProviderId } from "@omni/ir";
+import { quotaStaleAfterMs } from "@omni/router";
 import { quotaRolledOver, type Store, type WindowType } from "@omni/store";
 import { burnFor } from "./burn.ts";
 
@@ -76,15 +77,41 @@ export type AccountQuota = {
 };
 
 /**
+ * How much of a ratio survives onto the wire: three decimals, a tenth of a
+ * percent.
+ *
+ * This is a disclosure control, not a formatting preference. A full-precision
+ * float64 of `used / limit` is a ratio of two integers, and a ratio of coprime
+ * integers is recoverable in lowest terms by continued fractions — `137/88000`
+ * comes back exactly from `0.0015568181818181818`. The history endpoint hands
+ * out dozens of readings sharing one denominator, so the ceiling this surface
+ * exists not to publish was reconstructible from the numbers that replaced it.
+ *
+ * Rounding here bounds any recovered denominator at 1000, and the surfaces lose
+ * nothing: the bars render whole percent and the chart plots a percentage.
+ */
+const RATIO_PRECISION = 1_000;
+
+/** A ratio at the precision this surface publishes, or null if there is none. */
+export function publishedRatio(ratio: number | null): number | null {
+  return ratio === null ? null : Math.round(ratio * RATIO_PRECISION) / RATIO_PRECISION;
+}
+
+/**
  * The one place a used/limit pair becomes a ratio.
  *
- * A ceiling of zero is unknown rather than a division: `used / 0` renders as
- * `NaN%`, and a limit nobody stated is not a limit of nothing. Overshoot clamps
- * to fully spent, because spend is debited after the request served and a meter
- * reading "150%" is not a reading.
+ * A ceiling of zero or below is unknown rather than a division: `used / 0`
+ * renders as `NaN%`, a negative ceiling is not a quantity anything can be a
+ * fraction of, and a limit nobody stated is not a limit of nothing. Overshoot
+ * clamps to fully spent, because spend is debited after the request served and
+ * a meter reading "150%" is not a reading.
+ *
+ * Rounded through `publishedRatio`, so the exact quotient never leaves this
+ * package. See the note there — the unrounded figure gives the ceiling back.
  */
 export function usedRatioOf(used: number, limit: number | null): number | null {
-  return limit === null || limit === 0 ? null : Math.min(1, Math.max(0, used / limit));
+  if (limit === null || limit <= 0) return null;
+  return publishedRatio(Math.min(1, Math.max(0, used / limit)));
 }
 
 /**
@@ -131,15 +158,26 @@ export async function accountQuota(deps: {
       resetsAt: window.resetsAt,
       observedAt: window.observedAt,
       windowMs: window.windowMs,
+      // Rounded like `usedRatio`, and for the same reason: an exact quotient of
+      // two of the provider's integers is the ceiling in disguise.
       ratePerHourRatio:
-        estimate.ratePerHour === null || window.limit === null || window.limit === 0
+        estimate.ratePerHour === null || window.limit === null || window.limit <= 0
           ? null
-          : estimate.ratePerHour / window.limit,
+          : publishedRatio(estimate.ratePerHour / window.limit),
       exhaustsAt: estimate.exhaustsAt,
       survives: estimate.survives,
-      // `burnFor` suppresses on either count, so the age test is what is left
-      // once the rollover is taken out. Asked of the same reading it judged.
-      stale: estimate.stale && !rolledOver,
+      // Asked directly rather than subtracted out of `estimate.stale`.
+      //
+      // `burnFor` sets that flag on either count and checks age first, so
+      // `estimate.stale && !rolledOver` reported `stale: false` for a reading
+      // that was *both* — a probe down for hours against a window that has
+      // since reset. The panel then printed "rolled over, waiting for the next
+      // reading" and said nothing about the probe, which is the half an
+      // operator can actually fix. Staleness is said first, the rule the
+      // console's own legend follows.
+      stale:
+        window.observedAt <= 0 ||
+        now - window.observedAt > quotaStaleAfterMs(settings.quotaPollIntervalMs),
       rolledOver,
     });
   }

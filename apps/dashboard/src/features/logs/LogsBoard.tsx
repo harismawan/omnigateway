@@ -7,7 +7,7 @@ import {
   useKeys,
   useLogs,
 } from "../../api/queries.ts";
-import type { RequestLog } from "../../api/types.ts";
+import type { RequestRow } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount } from "../../lib/format.ts";
 import { isError, isPending } from "../../lib/vitals.ts";
@@ -67,7 +67,7 @@ export function LogsBoard() {
   const [limit, setLimit] = useState<number>(100);
   const [filter, setFilter] = useState<Filter>("all");
   const [term, setTerm] = useState("");
-  const [open, setOpen] = useState<RequestLog | null>(null);
+  const [open, setOpen] = useState<RequestRow | null>(null);
 
   const logs = useLogs(limit, cadence(LOG_CADENCE_MS, "res:logs"));
   const credentials = useCredentials();

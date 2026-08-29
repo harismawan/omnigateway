@@ -44,10 +44,18 @@ export type QuotaHistoryResult = {
 export async function retainedSpan(
   deps: { store: Store; now: () => number },
   input: { since?: string | number | undefined; until?: string | number | undefined },
+  /**
+   * The furthest back this caller may reach, where it is narrower than
+   * retention. The operator's route has no ceiling — an account's history is
+   * theirs to read — but the client route is reachable by every key holder and
+   * reads every credential at once, so it names one. See `accountQuotaHistory`.
+   */
+  maxSpanMs?: number,
 ): Promise<{ since: number; until: number }> {
   const now = deps.now();
   const settings = await deps.store.config.getSettings();
-  const oldest = now - settings.logRetentionDays * DAY_MS;
+  const retained = now - settings.logRetentionDays * DAY_MS;
+  const oldest = maxSpanMs === undefined ? retained : Math.max(retained, now - maxSpanMs);
 
   return {
     since: Math.max(optionalNumber(input.since, oldest), oldest),
