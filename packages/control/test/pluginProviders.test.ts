@@ -127,7 +127,10 @@ const declaring = (over: Record<string, unknown> = {}) => ({
   providers: [{ descriptor: descriptor(), codec }],
   ...over,
 });
-const withCapability = { capabilities: ["provider"] as readonly string[] };
+const withCapability = {
+  capabilities: ["provider"],
+  origins: ["https://upstream.test"] as readonly string[],
+};
 
 test("a declared provider becomes an adapter, and no plugin code runs to get it", () => {
   let ran = false;
@@ -349,7 +352,7 @@ const summary = (over: Record<string, unknown> = {}) => ({
   id: "acme-ai",
   path: "/plugins/acme-ai",
   loadable: true,
-  manifest: { capabilities: ["provider"], server: "server.js" },
+  manifest: { capabilities: ["provider"], origins: ["https://upstream.test"], server: "server.js" },
   // Present in the default so a case that does not care carries an empty list
   // rather than omitting the field. The field is required on the real type, and
   // a helper that let it be absent would be the hole that requirement closes.
@@ -416,7 +419,7 @@ test("a plugin whose module never settles is given up on rather than waited for"
 
 test("a plugin declaring a provider with no server entry is named, not skipped silently", async () => {
   const read = await readPluginProviders(
-    [summary({ manifest: { capabilities: ["provider"] } })],
+    [summary({ manifest: { capabilities: ["provider"], origins: ["https://upstream.test"] } })],
     async () => declaringModule,
   );
 

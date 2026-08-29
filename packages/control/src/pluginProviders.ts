@@ -170,6 +170,16 @@ function checkDescriptor(id: string, record: Record<string, unknown>): void {
 export function validateRegistration(
   pluginId: string,
   entry: { descriptor: unknown; codec: unknown },
+  /**
+   * The origins the plugin's manifest declared, so the adapter can refuse a
+   * request the manifest never admitted.
+   *
+   * Optional, and absent means unrestricted — which is right for the one caller
+   * that has no manifest in hand and wrong to rely on anywhere else. Every path
+   * that reaches a running plugin goes through \`readProviders\`, which always
+   * has one.
+   */
+  origins?: readonly string[],
 ): RegisteredProvider {
   const descriptor = entry.descriptor;
   if (typeof descriptor !== "object" || descriptor === null) {
@@ -238,7 +248,7 @@ export function validateRegistration(
   const typed = descriptor as ProviderDescriptor;
   return {
     descriptor: typed,
-    adapter: codecAdapter(id, typed.capabilities, codec as ProviderCodec),
+    adapter: codecAdapter(id, typed.capabilities, codec as ProviderCodec, origins),
   };
 }
 
@@ -261,7 +271,7 @@ export function validateRegistration(
  */
 export function readProviders(
   pluginId: string,
-  manifest: { capabilities: readonly string[] },
+  manifest: { capabilities: readonly string[]; origins?: readonly string[] | undefined },
   // The whole definition, not `Pick<…, "providers">`. Narrowing it would make
   // every caller's object literal fail TypeScript's excess-property check for
   // carrying the `setup` it is required to have — a type that refuses its only
@@ -313,7 +323,10 @@ export function readProviders(
     }
   }
 
-  return declared.map((entry) => validateRegistration(pluginId, entry));
+  // The manifest's own origins, not the plugin's word for them: this is the
+  // path both the loader and the CLI go through, so it is where the audit
+  // surface and the enforcement meet.
+  return declared.map((entry) => validateRegistration(pluginId, entry, manifest.origins));
 }
 
 /**

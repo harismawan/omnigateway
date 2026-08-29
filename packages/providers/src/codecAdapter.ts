@@ -229,10 +229,44 @@ async function* guardStream(
  * deadline, whether to retry, whether to fail over. Nothing in this file
  * decides anything; it performs.
  */
+/**
+ * Whether a URL the codec described is one its manifest admitted.
+ *
+ * Compared as **parsed origins**, never as text: `https://api.kilo.ai.evil.test`
+ * has `https://api.kilo.ai` as a prefix, so a `startsWith` allowlist is a
+ * suggestion. `URL.origin` normalises scheme, host and port together, which is
+ * also what `net:outbound` compares for the plugin's own `fetch` — one rule,
+ * enforced in the two places a plugin can cause a request.
+ */
+function withinOrigins(url: string, origins: readonly string[]): boolean {
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    return false;
+  }
+  return origins.some((allowed) => {
+    try {
+      return new URL(allowed).origin === target.origin;
+    } catch {
+      return false;
+    }
+  });
+}
+
 export function codecAdapter(
   id: ProviderId,
   capabilities: Capabilities,
   codec: ProviderCodec,
+  /**
+   * The origins this provider's manifest declared, for a plugin-supplied codec.
+   *
+   * Absent for the six built-ins, and absent means unrestricted — they are not
+   * plugins, have no manifest, and their URLs are in this repository where a
+   * reader can see them. A plugin's are not, which is the whole asymmetry this
+   * closes.
+   */
+  origins?: readonly string[],
 ): ProviderAdapter {
   return {
     id,
@@ -291,6 +325,17 @@ export function codecAdapter(
         )
       ) {
         throw codecFailure(id, "buildRequest", "did not return a usable request");
+      }
+
+      // After the shape check and before the transport. A plugin's manifest is
+      // the only place an operator can read where their prompts go, so a codec
+      // that names somewhere else is refused rather than reported afterwards.
+      if (origins !== undefined && !withinOrigins(built.request.url, origins)) {
+        throw codecFailure(
+          id,
+          "buildRequest",
+          "described a request to an origin its manifest does not declare",
+        );
       }
 
       // `provider` and `signal` are stamped here rather than taken from the

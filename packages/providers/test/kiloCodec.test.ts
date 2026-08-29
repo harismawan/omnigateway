@@ -1264,3 +1264,100 @@ test("a foreign GatewayError is reported as one, not silently reclassified", asy
   });
   await expect(attempt).rejects.toThrow(GatewayError);
 });
+
+test("a codec cannot send outside the origins its manifest declared", async () => {
+  // The manifest is the audit surface, and it only tells the truth if the host
+  // enforces it. A provider plugin never holds a client — it directs the host's
+  // — so nothing about the codec path passed through the `net:outbound` check
+  // that bounds a plugin's own `fetch`.
+  const wandering: ProviderCodec = {
+    buildRequest: () => ({
+      request: {
+        url: "https://exfiltrate.test/v1/messages",
+        method: "POST",
+        headers: [],
+        body: "{}",
+      },
+    }),
+    decode: async function* () {},
+  };
+  const adapter = codecAdapter("kilo", kiloDescriptor.capabilities, wandering, [
+    "https://api.kilo.ai",
+  ]);
+
+  let reached = false;
+  const attempt = adapter.send({
+    request,
+    model: "m",
+    credentials: credentials(),
+    http: async () => {
+      reached = true;
+      throw new Error("unreachable");
+    },
+    signal: new AbortController().signal,
+  });
+
+  await expect(attempt).rejects.toThrow(GatewayError);
+  await attempt.catch((error: unknown) => {
+    expect((error as GatewayError).message).toContain("origin");
+  });
+  // Refused before the transport, not after: the point is that the request is
+  // never made, not that it is reported.
+  expect(reached).toBe(false);
+});
+
+test("a declared origin is matched by origin, not by prefix", async () => {
+  // `https://api.kilo.ai.evil.test` starts with the declared string. Comparing
+  // text rather than parsed origins is how an allowlist becomes a suggestion.
+  const lookalike: ProviderCodec = {
+    buildRequest: () => ({
+      request: {
+        url: "https://api.kilo.ai.evil.test/v1/chat",
+        method: "POST",
+        headers: [],
+        body: "{}",
+      },
+    }),
+    decode: async function* () {},
+  };
+  const adapter = codecAdapter("kilo", kiloDescriptor.capabilities, lookalike, [
+    "https://api.kilo.ai",
+  ]);
+  await expect(
+    adapter.send({
+      request,
+      model: "m",
+      credentials: credentials(),
+      http: async () => {
+        throw new Error("unreachable");
+      },
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow(GatewayError);
+});
+
+test("a codec inside its origins is sent, and a built-in is unrestricted", async () => {
+  // The positive control, both ways. Every assertion above is a refusal, which
+  // is also what a check that refuses everything produces — and the six
+  // built-ins pass no origins at all, so an over-eager check would break every
+  // one of them rather than only a plugin.
+  const capture = capturing();
+  await codecAdapter("kilo", kiloDescriptor.capabilities, kiloCodec, ["https://api.kilo.ai"]).send({
+    request,
+    model: "m",
+    credentials: credentials(),
+    http: capture.http,
+    signal: new AbortController().signal,
+  });
+  expect(capture.sent).toHaveLength(1);
+
+  const unrestricted = capturing();
+  await bridged.send({
+    request,
+    model: "m",
+    credentials: credentials(),
+    http: unrestricted.http,
+    signal: new AbortController().signal,
+  });
+  expect(unrestricted.sent).toHaveLength(1);
+});

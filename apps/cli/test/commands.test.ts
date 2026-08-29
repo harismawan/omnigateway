@@ -1576,6 +1576,7 @@ test("doctor does not report a target served by an installed plugin provider", a
       api: 1,
       server: "server/index.js",
       capabilities: ["provider"],
+      origins: ["https://upstream.test"],
     }),
   );
 

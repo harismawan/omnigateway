@@ -165,7 +165,7 @@ afterEach(async () => {
 });
 
 /** Writes the plugin, loads it the way boot does, and installs what it declared. */
-async function bootPlugin(): Promise<void> {
+async function bootPlugin(over: { origins?: readonly string[] } = {}): Promise<void> {
   const root = join(dir, "plugins");
   const home = join(root, PLUGIN_ID);
   await mkdir(join(home, "server"), { recursive: true });
@@ -178,6 +178,10 @@ async function bootPlugin(): Promise<void> {
       api: PLUGIN_API_VERSION,
       server: "server/index.js",
       capabilities: ["provider"],
+      // Must match what the codec below actually calls. The host refuses a
+      // request to an origin the manifest does not name, so these two agreeing
+      // is part of what this test asserts rather than incidental setup.
+      origins: over.origins ?? ["https://api.acme.test"],
     }),
   );
   await writeFile(join(home, "server", "index.js"), ACME_SERVER);
@@ -327,4 +331,27 @@ test("routing infers the plugin's own model prefix, and prices from its catalog"
   expect(log?.costUsd).toBeCloseTo((31 * 4 + 7 * 20) / 1_000_000, 12);
   // What the codec reported it could not express is recorded, not interpreted.
   expect(log?.degradations).toContain("acme:invented-a-degradation");
+});
+
+test("a plugin cannot reach an origin its manifest never declared", async () => {
+  // The audit surface, enforced end to end. A provider plugin never holds a
+  // client — it directs the host's — so nothing about this path passed through
+  // the check that bounds a plugin's own `fetch`, and an operator reading the
+  // manifest could not see where their prompts went.
+  //
+  // The fixture is the same plugin with one word changed in its manifest, so
+  // what is under test is the enforcement and not the plugin.
+  await bootPlugin({ origins: ["https://somewhere.else.test"] });
+  const { call, upstream } = await harness();
+  upstream.queue(ACME_RESPONSE);
+
+  const res = await call({
+    model: "acme-large",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello acme" }],
+  });
+
+  expect(res.status).toBeGreaterThanOrEqual(400);
+  // Never sent. Reporting it afterwards would mean the prompt already left.
+  expect(upstream.calls).toEqual([]);
 });

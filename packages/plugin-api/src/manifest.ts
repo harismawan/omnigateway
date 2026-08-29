@@ -108,6 +108,24 @@ const navSchema = z
   .strict();
 
 /**
+ * The capabilities whose reach `origins` bounds.
+ *
+ * `net:outbound` was the first: a plugin holding a scoped `fetch` may only call
+ * what its manifest names. `provider` joined it because a provider plugin
+ * directs the **host's** client at an upstream — it never holds a client at all,
+ * which is why the connection was missed — and the destination appeared nowhere
+ * in the manifest. Rule 15 is a guardrail rather than a sandbox, so a determined
+ * plugin was never contained; what was broken is the guardrail's stated value,
+ * that a plugin's intent is auditable from its manifest. An operator could not
+ * see where their prompts would be sent.
+ *
+ * Both directions are enforced below, and the second is why this is a list
+ * rather than two checks: origins declared for a provider must not be refused
+ * for not naming `net:outbound`.
+ */
+const ORIGIN_CAPABILITIES = ["net:outbound", "provider"] as const;
+
+/**
  * `.strict()` throughout, for the reason `limits` uses it: a misspelled key is
  * otherwise a capability or an entry point that silently does not exist, and the
  * plugin author's next hour goes into debugging the wrong thing.
@@ -138,14 +156,20 @@ const manifestSchema = z
     // nav entry at load.
     message: "a ui entry requires an sdk range",
   })
-  .refine((m) => !m.capabilities.includes("net:outbound") || m.origins !== undefined, {
-    message: "net:outbound requires origins",
-  })
-  .refine((m) => m.capabilities.includes("net:outbound") || m.origins === undefined, {
-    // The reverse direction matters as much. Origins that nothing enforces read
-    // to an operator as a promise the host never made.
-    message: "origins requires the net:outbound capability",
-  });
+  .refine(
+    (m) => !ORIGIN_CAPABILITIES.some((c) => m.capabilities.includes(c)) || m.origins !== undefined,
+    {
+      message: "net:outbound and provider each require origins",
+    },
+  )
+  .refine(
+    (m) => ORIGIN_CAPABILITIES.some((c) => m.capabilities.includes(c)) || m.origins === undefined,
+    {
+      // The reverse direction matters as much. Origins that nothing enforces read
+      // to an operator as a promise the host never made.
+      message: "origins requires the net:outbound or provider capability",
+    },
+  );
 
 export type PluginManifest = z.infer<typeof manifestSchema>;
 
