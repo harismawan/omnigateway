@@ -288,6 +288,16 @@ reviewing one — it open with what plugin can reach, which decide whether rest 
 
 - Never log prompt/response bodies, OAuth tokens, API keys, passwords, encryption keys, or arbitrary
   headers/metadata.
+- **`fields?: LogFields` did not enforce the allowlist, and the gap was not theoretical.** A closed
+  object type is enforced by *excess property checking*, which apply only to a fresh object literal —
+  so `{ plugin, ...(cond ? {} : { detail }) }` and `logger.info("m", wider)` both compile clean,
+  measured against `tsc`. The conditional spread is how it was found: it is the natural way to write
+  an optional field and the compiler agree with it. `Logger` method now take
+  `<T extends LogFields>(msg, fields?: OnlyLogFields<T>)`, which make every key outside the
+  allowlist `never`, so both spelling fail. Pinned by `packages/ir/test/logFields.test.ts` with
+  `@ts-expect-error` — relaxing the signature make those directive unused, which is a *typecheck*
+  failure, and a runtime test could not see this at all because the field would simply print. This
+  do **not** make `LogFields` extensible; it move enforcement from review to compiler.
 - `LogFields` is closed allowlist + redaction boundary. Treat new free-text fields as security
   changes; never add index signature.
 - **`GatewayError.gatewayAuthored` is the second half of that boundary, and it is opt-in on

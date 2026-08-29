@@ -279,11 +279,46 @@ export function parseLine(raw: string): ParsedLine {
   return { raw, at, level: label.toLowerCase() as LogLevel, msg };
 }
 
+/**
+ * `LogFields`, with every key it does not declare made unsatisfiable.
+ *
+ * **`fields?: LogFields` was not enough, and the gap is not theoretical.**
+ * A closed object type is enforced by *excess property checking*, which applies
+ * only to a fresh object literal. Two ordinary spellings walk past it, both
+ * measured against `tsc` rather than reasoned about:
+ *
+ * ```ts
+ * logger.info("m", { plugin: "p", detail: "leak" });                 // TS2353
+ * logger.info("m", { plugin: "p", ...(cond ? {} : { detail: x }) }); // accepted
+ * logger.info("m", wider);                                          // accepted
+ * ```
+ *
+ * The second is how this was found — a conditional spread is the natural way to
+ * write an optional field, and the compiler agreed with it. The third never had
+ * a check at all: passing a variable of a wider type has always been legal.
+ *
+ * That matters more here than in an ordinary type. `LogFields` is the redaction
+ * boundary, and its members are an allowlist precisely so arbitrary strings —
+ * prompt text, upstream bodies, operator input — cannot reach stdout by being
+ * attached to a log line. A hole in the *enforcement* is a hole in the boundary,
+ * however carefully the allowlist itself is curated.
+ *
+ * The generic captures the caller's actual object, so every key outside
+ * `LogFields` is required to be `never` and nothing satisfies it. Legitimate
+ * calls are unaffected, literal or spread, because they introduce no key the
+ * allowlist does not name.
+ *
+ * This does **not** make `LogFields` extensible and must not be read as
+ * softening that rule. Adding a member is still a security change; this only
+ * moves enforcement from review to the compiler.
+ */
+export type OnlyLogFields<T> = T & Record<Exclude<keyof T, keyof LogFields>, never>;
+
 export type Logger = {
-  debug(msg: string, fields?: LogFields): void;
-  info(msg: string, fields?: LogFields): void;
-  warn(msg: string, fields?: LogFields): void;
-  error(msg: string, fields?: LogFields): void;
+  debug<T extends LogFields>(msg: string, fields?: OnlyLogFields<T>): void;
+  info<T extends LogFields>(msg: string, fields?: OnlyLogFields<T>): void;
+  warn<T extends LogFields>(msg: string, fields?: OnlyLogFields<T>): void;
+  error<T extends LogFields>(msg: string, fields?: OnlyLogFields<T>): void;
   /** Guard for the few paths where building `fields` is not free. */
   enabled(level: LogLevel): boolean;
 };
