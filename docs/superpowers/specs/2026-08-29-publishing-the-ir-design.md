@@ -1,5 +1,23 @@
 # Publishing the IR, and moving the codec contract onto it
 
+> **Deferred, not cancelled, and nothing here has been built.** This design was
+> written for a third-party provider author. The providers this installation
+> actually needs are authored **inside this repository** and shipped as built
+> artifacts, so their types resolve locally and nothing has to be published —
+> which leaves the whole cost below unpaid: no permanent public surface on the
+> repository's most-churned shared type, no `LogFields` on npm, no manual npm
+> bootstrap. It becomes live only if a provider is ever authored outside this
+> repository.
+>
+> Two of its conclusions were kept and moved into
+> `2026-08-29-plugin-oauth-capability-design.md`, because they were never about
+> publishing: `fail()` — which fixes a defect that is **already live**, since a
+> bundled plugin's `GatewayError` fails the host's `instanceof` check — and the
+> finding that a plugin install resolves no dependencies, which is what makes
+> that true.
+>
+> Read this as the record of a decision, not as queued work.
+
 Sub-project 7. The last one the `provider` capability deferred, and the one that
 makes a third-party provider plugin possible at all.
 
