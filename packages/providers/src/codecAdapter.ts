@@ -261,11 +261,30 @@ export function codecAdapter(
         // which is also why `classifyError` takes a string and cannot re-read
         // the stream or reach the socket.
         const text = await res.text().catch(() => "");
+        // Built before the hook rather than after it, because the hook is handed
+        // it. Anthropic's refusal is a *relabelling* of this error — same
+        // message, same status, different code — and a codec that had to
+        // reconstruct the message from `text` would be re-implementing
+        // `httpError`'s three extraction rules to arrive back here.
+        //
+        // Built field by field, never `{ ...res }`. On a captured request the
+        // response is `bodyCapture`'s wrapper, whose `body` is a *getter* that
+        // tees the upstream stream and starts a capture drain — and object
+        // spread reads getters. Spreading here invoked it on a response nothing
+        // was going to read: the error body was recorded twice, `asBody()` could
+        // no longer parse it as JSON, and an abandoned tee branch buffered the
+        // whole body with `settle()` waiting on a drain that existed for no
+        // reason. `httpError` never reads `body`, so `null` is the honest value.
+        const fallback = await httpError(
+          { status: res.status, headers: res.headers, body: null, text: async () => text },
+          id,
+        );
         const classified = guard(id, "classifyError", () =>
           codec.classifyError?.({
             status: res.status,
             body: text,
             headers: res.headers,
+            fallback,
             // What the request gave up, so a refusal caused by exactly that can
             // say so. `dispatch` writes `error.degradations` into `request_logs`.
             // Bounded here as on the success path. Unbounded, a codec could
@@ -288,18 +307,7 @@ export function codecAdapter(
           }
           throw rebound(id, classified);
         }
-        // Built field by field, never `{ ...res }`. On a captured request the
-        // response is `bodyCapture`'s wrapper, whose `body` is a *getter* that
-        // tees the upstream stream and starts a capture drain — and object
-        // spread reads getters. Spreading here invoked it on a response nothing
-        // was going to read: the error body was recorded twice, `asBody()` could
-        // no longer parse it as JSON, and an abandoned tee branch buffered the
-        // whole body with `settle()` waiting on a drain that existed for no
-        // reason. `httpError` never reads `body`, so `null` is the honest value.
-        throw await httpError(
-          { status: res.status, headers: res.headers, body: null, text: async () => text },
-          id,
-        );
+        throw fallback;
       }
 
       const body = res.body;
