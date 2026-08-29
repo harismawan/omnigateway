@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
-import { anthropicAdapter, type HttpClient, type ProviderAdapter } from "@omni/providers";
+import {
+  anthropicAdapter,
+  codecAdapter,
+  type HttpClient,
+  type ProviderAdapter,
+  type ProviderCodec,
+} from "@omni/providers";
 import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
 import { buildSnapshot, healthKey } from "@omni/router";
 import type { CredentialSecrets, Store } from "@omni/store";
@@ -38,6 +44,62 @@ async function* cacheWriteStream(cacheWriteTokens: number): AsyncGenerator<Strea
     stopReason: "endTurn",
     usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens },
   };
+}
+
+/**
+ * The sentinel provider as a *codec*, which is the shape a plugin supplies one in.
+ *
+ * The registry test below used a stub adapter, and the design that added the
+ * `provider` capability asked for this instead: "a plugin provider is exactly the
+ * synthetic provider it injects", so routing it through `codecAdapter` buys the
+ * codec contract the same call-graph coverage the registry already had, for the
+ * cost of a stub transport
+ * (`docs/superpowers/specs/2026-08-28-plugin-provider-capability-design.md`).
+ *
+ * It reads its own response body rather than ignoring it. A decode that yielded a
+ * fixed stream would pass whether or not the host performed the request the codec
+ * described, which is half of what the contract is.
+ */
+const sentinelCodec: ProviderCodec = {
+  buildRequest(input) {
+    return {
+      request: {
+        url: SENTINEL_URL,
+        method: "POST",
+        headers: [
+          ["content-type", "application/json"],
+          ["x-sentinel-key", input.credentials.apiKey ?? ""],
+        ],
+        body: JSON.stringify({ model: input.model }),
+      },
+    };
+  },
+  async *decode(input) {
+    const payload: unknown = JSON.parse(await new Response(input.body).text());
+    const written =
+      typeof payload === "object" && payload !== null && "cacheWrite" in payload
+        ? Number((payload as { cacheWrite: unknown }).cacheWrite)
+        : 0;
+    yield* cacheWriteStream(written);
+  },
+};
+
+const SENTINEL_URL = "https://sentinel.test/v1/send";
+
+/** A transport that answers only what `sentinelCodec` knows how to read. */
+function sentinelUpstream(): { http: HttpClient; urls: string[] } {
+  const urls: string[] = [];
+  const http: HttpClient = async (request) => {
+    urls.push(request.url);
+    const body = JSON.stringify({ cacheWrite: 1_000_000 });
+    return {
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: new Response(body).body,
+      text: async () => body,
+    };
+  };
+  return { http, urls };
 }
 
 /** Records every call so a test can assert which credential was used. */
@@ -2725,6 +2787,13 @@ test("a sentinel registry reaches every consumer dispatch has", async () => {
   // an *inferred* one goes through `synthesize`. One sentinel registry, both
   // paths, and **both assert `costUsd`**.
   //
+  // The adapter behind it is `codecAdapter` rather than a stub, so the same two
+  // dispatches also cross the contract a plugin supplies its provider through.
+  // That is not a second test wearing this one's clothes: a plugin provider *is*
+  // the synthetic provider injected here, so the registry question and the codec
+  // question have the same subject, and giving them separate fixtures would mean
+  // the registry was proved against something no plugin can supply.
+  //
   // The inferred leg did not, and the comment here explained why: an inferred
   // target was priced from `PROVIDER_MODEL_CATALOG`, a different global that is
   // not injected, so it carried zero prices and could show no multiplier. That
@@ -2800,13 +2869,20 @@ test("a sentinel registry reaches every consumer dispatch has", async () => {
     ],
   });
 
+  // The adapter is `codecAdapter`, not a stub: this test injects exactly what a
+  // plugin supplies, so the codec contract crosses the same call graph the
+  // registry does and the host is the only thing performing a request.
+  const sentinelAdapter = codecAdapter(
+    "sentinel",
+    { tools: true, images: true, reasoning: true },
+    sentinelCodec,
+  );
+  const upstream = sentinelUpstream();
   const configured = {
-    ...deps(
-      store,
-      stubAdapter(() => cacheWriteStream(1_000_000)),
-    ),
+    ...deps(store, sentinelAdapter),
+    http: upstream.http,
     providers: sentinel,
-    adapters: { sentinel: stubAdapter(() => cacheWriteStream(1_000_000)) },
+    adapters: { sentinel: sentinelAdapter },
   };
   const priced = await dispatch(req, configured, new AbortController().signal, "req_sentinel_a");
   await drain(priced.events);
@@ -2816,17 +2892,21 @@ test("a sentinel registry reaches every consumer dispatch has", async () => {
   expect(pricedLog.resolvedProvider).toBe("sentinel");
   // 5 * 1.25 = 6.25 per million. Zero is what a fallback to the global gives.
   expect(pricedLog.costUsd).toBeCloseTo(6.25, 10);
+  // The host sent the request the codec described. Without this the cost
+  // assertions above would hold for a codec whose `buildRequest` was never read.
+  expect(upstream.urls).toEqual([SENTINEL_URL]);
 
   // And the `resolveModel` half: the same registry has to be what infers a bare
   // name from its prefix, *and* what prices what it inferred.
   await store.config.removeModel("fast");
-  const inferredAdapter = stubAdapter(() => cacheWriteStream(1_000_000));
+  const inferredUpstream = sentinelUpstream();
   const inferred = await dispatch(
     { ...req, model: "sent-1" },
     {
-      ...deps(store, inferredAdapter),
+      ...deps(store, sentinelAdapter),
+      http: inferredUpstream.http,
       providers: sentinel,
-      adapters: { sentinel: inferredAdapter },
+      adapters: { sentinel: sentinelAdapter },
     },
     new AbortController().signal,
     "req_sentinel_b",
