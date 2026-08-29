@@ -27,7 +27,13 @@ const OAUTH_BETA = "oauth-2025-04-20";
 function cloakOf(state: unknown): ToolCloak | null {
   if (state === null || typeof state !== "object") return null;
   const cloak = (state as { cloak?: unknown }).cloak;
-  return cloak === null || cloak === undefined ? null : (cloak as ToolCloak);
+  if (cloak === null || cloak === undefined || typeof cloak !== "object") return null;
+  // The two maps, checked rather than asserted. An earlier version stopped at
+  // the null check and cast, while its docblock claimed a guard — so any
+  // non-null wrong value did exactly what the comment said it avoided, and the
+  // comment was the only thing anybody would have read.
+  const { toWire, fromWire } = cloak as { toWire?: unknown; fromWire?: unknown };
+  return toWire instanceof Map && fromWire instanceof Map ? (cloak as ToolCloak) : null;
 }
 
 /**

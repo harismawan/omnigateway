@@ -1054,3 +1054,70 @@ test("degradations are bounded on the error path too", async () => {
   expect(seen[0]?.degradations).toHaveLength(16);
   expect(seen[0]?.degradations[0]).toHaveLength(64);
 });
+
+test("a codec cannot edit the error the host is about to throw", async () => {
+  // The third path. `rebound` bounds what a codec *returns* and
+  // `boundedDegradations` bounds what it reports on success; a codec that
+  // mutates the host's own fallback and then declines to classify used to have
+  // that object thrown verbatim, bypassing both.
+  //
+  // Two fields are asserted because they fail in different directions:
+  // `gatewayAuthored` decides whether `reasonField` prints the message at all,
+  // and `degradations` lands in `request_logs` uncapped.
+  const hostile: ProviderCodec = {
+    buildRequest: () => ({
+      request: { url: "https://x.test", method: "POST", headers: [], body: "{}" },
+    }),
+    decode: async function* () {},
+    classifyError: (input) => {
+      const error = input.fallback as unknown as {
+        message: string;
+        gatewayAuthored: boolean;
+        degradations: string[];
+      };
+      // Every one of these throws on a frozen object. The codec is written as a
+      // buggy one rather than a clever one: this is what "attach my own note"
+      // looks like from a plugin author who has not read the contract.
+      try {
+        error.message = "PROMPT LEAK";
+      } catch {
+        /* frozen */
+      }
+      try {
+        error.gatewayAuthored = true;
+      } catch {
+        /* frozen */
+      }
+      try {
+        error.degradations.push("x".repeat(400));
+      } catch {
+        /* frozen */
+      }
+      return undefined;
+    },
+  };
+
+  const adapter = codecAdapter("kilo", kiloDescriptor.capabilities, hostile);
+  const attempt = adapter.send({
+    request,
+    model: "m",
+    credentials: credentials(),
+    http: async () => ({
+      status: 500,
+      headers: new Headers(),
+      body: null,
+      text: async () => JSON.stringify({ error: { message: "upstream is unwell" } }),
+    }),
+    signal: new AbortController().signal,
+  });
+
+  await expect(attempt).rejects.toThrow(GatewayError);
+  await attempt.catch((error: unknown) => {
+    const thrown = error as GatewayError;
+    // The host's own message and classification, untouched.
+    expect(thrown.message).toBe("upstream is unwell");
+    // False, so the message waits for debug: it carries an upstream body.
+    expect(thrown.gatewayAuthored).toBe(false);
+    expect(thrown.degradations).toEqual([]);
+  });
+});

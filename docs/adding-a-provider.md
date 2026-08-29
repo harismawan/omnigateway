@@ -64,8 +64,10 @@ shape and why the HTTP client is built on `node:http`.
 4. Fork `wire.ts` and `decode.ts` per provider. Never import another provider's directory: vendors
    look alike on paper and diverge in practice, a shared encoder collects a branch per quirk, and a
    cross-provider import is exactly what stops an adapter becoming a standalone plugin later.
-   Shared infrastructure stays shared: `parseSse`, `httpError` and `orderHeaders` from the package
-   root, `usageFromPromptTotal` from `@omni/ir`. `custom/` is the worked example: it shipped importing kimi's encoder, kilo's
+   Shared infrastructure stays shared: `parseSse` and `orderHeaders` from the package root,
+   `usageFromPromptTotal` from `@omni/ir`. **Not `httpError`** — it takes a response, a codec never
+   sees one, and it now has exactly one production caller: `codecAdapter`, which calls it for you
+   and hands the result to `classifyError` as `fallback`. `custom/` is the worked example: it shipped importing kimi's encoder, kilo's
    decoder and openai's responses codec, and paid with a regex rewriting degradation prefixes
    afterwards; it now forks both codecs into its own directory, emits `custom:*` degradations
    natively, and needs no other provider to build.

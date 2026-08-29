@@ -55,11 +55,21 @@ function endpointUrl(origin: string, basePath: string, protocol: Protocol): stri
 function protocolOf(state: unknown): Protocol {
   if (state !== null && typeof state === "object") {
     const protocol = (state as { protocol?: unknown }).protocol;
-    if (protocol === "responses") return "responses";
+    if (protocol === "responses" || protocol === "chat_completions") return protocol;
   }
-  // `chat_completions` is the default in the same direction the encoder treats
-  // it: it is the shape an unconfigured OpenAI-compatible endpoint speaks.
-  return "chat_completions";
+  // **Refused, not defaulted.** Defaulting to `chat_completions` was the first
+  // version, and it fails in the worst available direction: a `responses`
+  // endpoint decoded by the chat reader yields *nothing* — the two dialects
+  // share no event names — so the client gets an empty 200 for a request the
+  // upstream answered in full. Reaching here means the host handed back
+  // something other than what `buildRequest` returned, which is a gateway bug,
+  // and a gateway bug should read as one.
+  throw new GatewayError("INTERNAL", "custom codec lost its endpoint protocol", {
+    provider: "custom",
+    // Built from a literal this repository owns; it carries nothing an upstream
+    // or an operator supplied.
+    gatewayAuthored: true,
+  });
 }
 
 /**

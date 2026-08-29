@@ -60,6 +60,8 @@ async function* cacheWriteStream(cacheWriteTokens: number): AsyncGenerator<Strea
  * fixed stream would pass whether or not the host performed the request the codec
  * described, which is half of what the contract is.
  */
+const SENTINEL_URL = "https://sentinel.test/v1/send";
+
 const sentinelCodec: ProviderCodec = {
   buildRequest(input) {
     return {
@@ -83,8 +85,6 @@ const sentinelCodec: ProviderCodec = {
     yield* cacheWriteStream(written);
   },
 };
-
-const SENTINEL_URL = "https://sentinel.test/v1/send";
 
 /** A transport that answers only what `sentinelCodec` knows how to read. */
 function sentinelUpstream(): { http: HttpClient; urls: string[] } {

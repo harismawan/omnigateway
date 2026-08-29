@@ -331,6 +331,24 @@ test("an ordinary 400 is left exactly as the host classified it", async () => {
   await expect(attempt).rejects.toThrow(GatewayError);
 });
 
+test("a non-streaming client request still asks the upstream to stream", async () => {
+  // The failure this guards is silent and total: a non-streaming upstream
+  // answers JSON, `parseSse` yields nothing, and the client gets an empty
+  // response. Dispatch serves a non-streaming client by collecting the stream,
+  // so the request going out is identical either way.
+  //
+  // **This file was the one of the six that lacked this case**, and the gap was
+  // invisible from inside this package: deleting `stream: true` from the codec
+  // leaves `bun test packages/providers` entirely green, because `toWire`
+  // copies the client's own flag and every other fixture here is a streaming
+  // request. The mutant dies only in `apps/gateway`, a package away from the
+  // file a contributor edits. A guard that lives somewhere else is one they
+  // will not see fail.
+  const { sent } = await send({ ...base, stream: false }, apiKey());
+
+  expect(sent.body).toContain('"stream":true');
+});
+
 test("a credential with neither token is an AUTH failure, and sends nothing", async () => {
   const capture = capturing();
   const attempt = anthropicAdapter.send({

@@ -66,6 +66,19 @@ function boundedDegradations(entries: readonly string[] | undefined): string[] {
  * and it gates `reasonField` in `apps/gateway/src/logging.ts`, so a codec naming
  * another provider chooses whether the operator's reason line prints at all.
  *
+ * **`gatewayAuthored` is dropped unconditionally, and that now costs something
+ * it did not use to.** For a plugin codec it is exactly right: its text is
+ * authored outside this repository and is unknown in the way an upstream body
+ * is. But every built-in routes through here too since the conversion, so no
+ * in-repo codec can surface an operator-visible reason line either — `custom`'s
+ * "credential has invalid endpoint metadata" waits for debug like any upstream
+ * body. Nothing regressed: none of the six set the flag before the conversion.
+ * What changed is that setting it is now *inert*, so a contributor who adds it
+ * to a codec's error will watch it vanish with nothing saying why. Fixing that
+ * means the host distinguishing a registered built-in from a plugin, which it
+ * deliberately does not do anywhere else; this note is the cheaper half of the
+ * trade and the place to start if the trade stops being worth it.
+ *
  * `code` and `message` are deliberately *not* touched. Classifying its own
  * upstream's failure is the entire purpose of the hook — including `AUTH`, which
  * `dispatch` gates its credential refresh on, and which is bounded elsewhere: a
@@ -279,6 +292,34 @@ export function codecAdapter(
           { status: res.status, headers: res.headers, body: null, text: async () => text },
           id,
         );
+        // **Frozen before the codec sees it, and this is load-bearing rather
+        // than defensive.** `readonly` on `GatewayError`'s fields is a
+        // compile-time claim and nothing else; a codec that mutates this object
+        // and then returns `undefined` has the host throw *its* object verbatim,
+        // below, without passing through `rebound`. Measured on the unfrozen
+        // version: `message` replaced with codec-authored text, `gatewayAuthored`
+        // flipped to `true` — so `reasonField` prints that text at default
+        // level, which is the exact leak that flag exists to prevent — and a
+        // 407-character entry into `request_logs.degradations`, the column
+        // `boundedDegradations` and `rebound` were written to cap against this
+        // same untrusted source. Two paths were bounded and the third was not.
+        //
+        // Freezing rather than cloning, because a mutation should be *loud*: an
+        // assignment to a frozen property throws in strict mode, `guard` turns
+        // that into `codecFailure`, and the request fails over. A clone would
+        // make a codec that attaches its own notes here silently lose them,
+        // which is the buggy case rather than the hostile one and the more
+        // likely of the two.
+        //
+        // `Object.freeze` is shallow, so this holds only while every field a
+        // codec can reach is a primitive or itself frozen. Today that is true:
+        // `degradations` is the one object field and it is frozen beside its
+        // owner. **A future field of object type needs freezing here too**, and
+        // it is a decision rather than a detail — rule 15 is a guardrail, not a
+        // sandbox, but the redaction bounds are enforced against plugin content
+        // regardless, which is the whole reason `rebound` exists.
+        Object.freeze(fallback.degradations);
+        Object.freeze(fallback);
         const classified = guard(id, "classifyError", () =>
           codec.classifyError?.({
             status: res.status,

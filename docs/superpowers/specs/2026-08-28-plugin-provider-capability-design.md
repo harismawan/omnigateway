@@ -88,12 +88,20 @@ Two things the plugin supplies, both pure:
 type ProviderCodec = {
   /** IR plus credential to a single HTTP request. No I/O. */
   buildRequest(input: CodecInput): CodecRequest;
-  /** The response stream to canonical events. No I/O. */
-  decode(stream: AsyncIterable<SseEvent>, state: DecodeState): AsyncGenerator<StreamEvent>;
+  /** The response body to canonical events. No I/O. */
+  decode(input: CodecDecodeInput): AsyncGenerator<StreamEvent, void, undefined>;
   /** Optional. Reads a failed response and returns a better error than the default. */
-  classifyError?(status: number, body: string): GatewayError | undefined;
+  classifyError?(input: CodecErrorInput): GatewayError | undefined;
 };
 ```
+
+**Sketch, and the shipped signatures differ — read `packages/providers/src/codec.ts`
+for the contract itself.** Two of the three moved during implementation. `decode`
+takes a single input carrying the raw `ReadableStream` rather than a parsed SSE
+stream and a state argument, because SSE is one provider's framing rather than
+every provider's — a codec that speaks a different framing parses its own bytes.
+`classifyError` likewise takes one input, and it gained `fallback` when Anthropic
+converted; see the Risks section.
 
 Three details are load-bearing, and each comes from an existing adapter rather
 than from taste.
@@ -220,22 +228,40 @@ it.
 
 ## Testing
 
-- **A fixture plugin registers a provider, and a request routes to it end to
+All five are now satisfied; each is marked with what satisfies it, because an
+unmarked requirement in a shipped design reads as outstanding and gets written
+twice.
+
+- ~~**A fixture plugin registers a provider, and a request routes to it end to
   end**: descriptor visible to routing, codec's request reaching a stub
   transport, its decoded events reaching the client. Anything less tests
-  registration rather than the provider working.
-- **The sentinel registry test already in `dispatch.test.ts` covers this
+  registration rather than the provider working.~~
+  `apps/gateway/test/e2e/pluginProvider.test.ts`. It injects no adapters, so
+  routing, pricing and dispatch each reach the global `registerProvider`
+  mutated, and the fixture's wire format is one it invented so no built-in
+  decoder can produce its output.
+- ~~**The sentinel registry test already in `dispatch.test.ts` covers this
   sub-project's riskiest property for free** — a plugin provider is exactly the
   synthetic provider it injects. It should be extended to route through a
-  registered codec rather than a stub adapter.
-- **A codec that throws, returns a malformed request, or yields a bad event is
-  skipped and reported, never fatal** — rule 15, and the proxy path must not
-  become able to depend on a plugin.
-- **A plugin registering a descriptor whose `id` differs from its manifest id is
-  refused**, and the refusal names both ids.
-- **The contract is I/O-free by shape**, asserted the way `leafSubpaths.test.ts`
+  registered codec rather than a stub adapter.~~ Done, with a stub transport
+  asserting the host performed the request the codec described.
+- ~~**A codec that throws, returns a malformed request, or yields a bad event is
+  skipped and reported, never fatal**~~ — `packages/providers/test/kiloCodec.test.ts`,
+  which is where the `codecAdapter` bounds live rather than kilo's own wire.
+- ~~**A plugin registering a descriptor whose `id` differs from its manifest id is
+  refused**, and the refusal names both ids.~~
+  `packages/control/test/pluginProviders.test.ts`.
+- ~~**The contract is I/O-free by shape**, asserted the way `leafSubpaths.test.ts`
   asserts a leaf: build the plugin-api entry point and check no transport symbol
-  is reachable.
+  is reachable.~~ `apps/gateway/test/plugins/codecIoFree.test.ts` — **but not by
+  the method this bullet prescribes, and the difference is the finding.** A
+  `target: "bun"` bundle of `packages/providers/src/index.ts` — a package that
+  genuinely reaches the transport — does not contain `node:http`: it is external
+  to that target, and tree-shaking moves the rest. So the control a bundle probe
+  needs does not fire, absence proves nothing, and that is failure mode 1
+  `leafSubpaths.test.ts` records. It uses `Bun.Transpiler.scanImports` for the
+  edges and a comment-stripped token scan for the globals a walk cannot see. Do
+  not "restore" the bundler here without re-measuring that control first.
 
 ## Risks
 

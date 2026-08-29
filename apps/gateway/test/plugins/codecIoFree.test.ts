@@ -22,18 +22,29 @@
  * `@omnigateway/plugin-api` *and* about `@omni/providers`, and this is the only
  * place that may import both.
  *
- * **No bundler here, and that is a harness limitation worth stating.**
- * `leafSubpaths.test.ts` and `bundleWeight.test.ts` both probe a real
- * `Bun.build`, which is the stronger instrument. Measured: under `bun test` from
- * the repository root, `Bun.build` cannot resolve a workspace dependency of a
- * package whose entry is given as an absolute path — `zod` from
- * `packages/plugin-api`, `@omni/ir` from `packages/providers` — and it fails the
- * same way whether or not the property under test holds. `bundleWeight.test.ts`
- * escapes that only by writing its scratch entry *inside* the package it
- * bundles, which this file cannot do for two packages at once. A green bundle
- * check that cannot resolve the thing it is checking is the failure mode both
- * those files were written against, so the walk is used instead and the gap is
- * recorded rather than papered over.
+ * **No bundler here, and the reason is about what a bundle can show rather than
+ * about what Bun can resolve.** An earlier version of this paragraph claimed, as
+ * a measurement, that `Bun.build` could not resolve a workspace dependency of a
+ * package given an absolute entry path. **That was false** — review re-ran it and
+ * so did its author: `packages/plugin-api/src/manifest.ts` builds under
+ * `bun test` with `zod` present in the output. The claim came from a different
+ * failing shape — a scratch entry re-exporting a bare specifier — generalised
+ * into one that was never measured, in a file whose whole premise is measuring a
+ * claim rather than restating it. It is recorded rather than quietly deleted,
+ * because that mistake is the kind this file exists to catch.
+ *
+ * The real reason is the *control*. Bundle a `target: "bun"` build of
+ * `packages/providers/src/index.ts` — a package that genuinely does reach the
+ * transport — and `node:http` does **not** appear in the output: it is external
+ * to that target, and tree-shaking moves what survives besides. A probe for
+ * transport markers therefore reports "absent" for a package that has one, which
+ * makes absence uninformative — failure mode 1 that `leafSubpaths.test.ts`
+ * records at length. The import walk answers that question exactly.
+ * `bundleWeight.test.ts` keeps the bundler for the question a bundle *can*
+ * answer: how many bytes a plugin pays.
+ *
+ * What the walk cannot see is a global, which is why the token scan below sits
+ * beside it rather than instead of it.
  */
 
 import { expect, test } from "bun:test";
@@ -166,12 +177,31 @@ test("the walk sees a real edge, so an empty one is a fact", () => {
   expect(providers.bare.filter(isTransportSpecifier).length).toBeGreaterThan(0);
 });
 
-test("the scanner sees a real global, so an empty list is a fact", () => {
+test("the scanner sees every global it looks for, so an empty list is a fact", () => {
   // `fetch(` appears nowhere in production here — rule 8 sends every outbound
   // request through `HttpClient` — so the control cannot come from this
   // repository's own source and needs a fixture that deliberately contains one.
   // Without it, "no plugin entry reaches a global" would pass against a scanner
   // that never fires.
-  const fixture = join(REPO, "packages/providers/test/fixtures/dynamicImportProbe.ts");
-  expect(tokensIn("/", [fixture])).toContain("import(");
+  //
+  // Every token, not one of them. Proving `import(` and arguing the rest share
+  // a loop is a claim about the implementation rather than a measurement of it,
+  // and it leaves `fetch(` and `new Request(` — the two the list above exists
+  // for — resting on that argument.
+  const fixture = join(import.meta.dir, "fixtures/transportProbe.ts");
+  expect(tokensIn("/", [fixture]).sort()).toEqual([...TRANSPORT_TOKENS].sort());
+});
+
+test("and it does not count a token that only appears in prose", () => {
+  // The other half of the control, and it needs its own fixture rather than this
+  // file: the token list above is *code* here, so scanning this file can never
+  // come back empty however correct the stripping is. Measured — the first
+  // version of this test asserted exactly that and failed.
+  //
+  // The direction it guards is the quiet one. A scanner that never matched shows
+  // up as a green suite over an empty set; a scanner that matched prose would
+  // report the repository's own docblocks as leaks, which is loud. What is left
+  // is a *reader* believing the stripping claim without it being measured.
+  const fixture = join(import.meta.dir, "fixtures/commentProbe.ts");
+  expect(tokensIn("/", [fixture])).toEqual([]);
 });
