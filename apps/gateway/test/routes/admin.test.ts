@@ -1391,6 +1391,15 @@ const MUTATIONS: ReadonlyArray<{
     body: { password: "read-only-pass-1" },
     topics: ["res:settings"],
   },
+  // The operator's own credential. Announces nothing: no board renders it, and
+  // every session is gone by the time a client could act on a frame anyway.
+  {
+    route: "/api/settings/password",
+    method: "PUT",
+    path: "/api/settings/password",
+    body: { current: "hunter2hunter2", password: "a-longer-new-password" },
+    topics: [],
+  },
   // A POST that writes nothing: it ranks the targets a model already has.
   {
     route: "/api/models/:id/dry-run",
@@ -1468,4 +1477,106 @@ test("the mutation table covers every mutating route this surface registers", as
   const covered = MUTATIONS.map((mutation) => `${mutation.method} ${mutation.route}`).sort();
 
   expect(covered).toEqual(registered);
+});
+
+/**
+ * Changing the operator's own password.
+ *
+ * The session cookie alone must not be enough: an admin session is a cookie in
+ * a browser that may be sitting unattended, and one that could rewrite the
+ * credential behind it turns "left the tab open" into "locked out".
+ */
+test("changing the admin password requires the current one", async () => {
+  const { call, admin } = await harness();
+
+  const wrong = await call("PUT", "/api/settings/password", {
+    current: "not-the-password",
+    password: "a-longer-new-password",
+  });
+  expect(wrong.status).toBe(401);
+  // Nothing moved: the old password still opens a session and the new one does
+  // not. Asserted through `login`, which is the only thing that can tell.
+  expect(await admin.login("hunter2hunter2")).not.toBeNull();
+  expect(await admin.login("a-longer-new-password")).toBeNull();
+});
+
+test("a correct current password replaces it and ends every session", async () => {
+  const { call, admin } = await harness();
+  const before = await admin.login("hunter2hunter2");
+  if (before === null) throw new Error("expected a session to end");
+
+  const response = await call("PUT", "/api/settings/password", {
+    current: "hunter2hunter2",
+    password: "a-longer-new-password",
+  });
+  expect(response.status).toBe(200);
+
+  expect(await admin.login("a-longer-new-password")).not.toBeNull();
+  expect(await admin.login("hunter2hunter2")).toBeNull();
+  // Including the one that asked for the change: a password change is a "log
+  // everyone out" event, and the caller is not exempt from it.
+  expect(await admin.verify(before)).toBeNull();
+});
+
+test("a new password too short to be one is refused, and changes nothing", async () => {
+  const { call, admin } = await harness();
+
+  const response = await call("PUT", "/api/settings/password", {
+    current: "hunter2hunter2",
+    password: "short",
+  });
+  expect(response.status).toBe(400);
+  expect(await admin.login("hunter2hunter2")).not.toBeNull();
+});
+
+test("the password change route needs both fields, and says so", async () => {
+  const { call } = await harness();
+
+  expect((await call("PUT", "/api/settings/password", { password: "a-longer-one" })).status).toBe(
+    400,
+  );
+  expect((await call("PUT", "/api/settings/password", { current: "hunter2hunter2" })).status).toBe(
+    400,
+  );
+});
+
+/**
+ * The read-only password, which is optional and therefore has an "off".
+ *
+ * `null` removes it; an absent field is a malformed request rather than a
+ * quieter spelling of removal.
+ */
+test("the viewer password can be set, replaced, and withdrawn", async () => {
+  const { call, admin } = await harness();
+  expect(await admin.isViewerConfigured()).toBe(false);
+  // Nothing to guess at: with no password set, no password works.
+  expect(await admin.loginViewer("")).toBeNull();
+
+  expect(
+    (await call("PUT", "/api/settings/viewer-password", { password: "read-only-pass-1" })).status,
+  ).toBe(200);
+  expect(await admin.isViewerConfigured()).toBe(true);
+  expect(await admin.loginViewer("read-only-pass-1")).not.toBeNull();
+
+  expect(
+    (await call("PUT", "/api/settings/viewer-password", { password: "read-only-pass-2" })).status,
+  ).toBe(200);
+  expect(await admin.loginViewer("read-only-pass-1")).toBeNull();
+  expect(await admin.loginViewer("read-only-pass-2")).not.toBeNull();
+
+  expect((await call("PUT", "/api/settings/viewer-password", { password: null })).status).toBe(200);
+  expect(await admin.isViewerConfigured()).toBe(false);
+  expect(await admin.loginViewer("read-only-pass-2")).toBeNull();
+});
+
+test("withdrawing viewer access leaves the operator signed in", async () => {
+  const { call, admin } = await harness();
+  await call("PUT", "/api/settings/viewer-password", { password: "read-only-pass-1" });
+  const mine = await admin.login("hunter2hunter2");
+  if (mine === null) throw new Error("expected an admin session");
+
+  await call("PUT", "/api/settings/viewer-password", { password: null });
+
+  // Someone else's access was withdrawn; the operator's own was not touched.
+  expect(await admin.verify(mine)).toEqual({ kind: "admin" });
 });

@@ -10,6 +10,8 @@
 const LOGIN_REASONS = {
   "admin-password-changed":
     "The restored database carries a different admin password, so every session ended. Sign in with the password that database was saved with.",
+  "password-changed":
+    "The admin password was changed, so every session ended. Sign in with the new password.",
 } as const;
 
 export type LoginReason = keyof typeof LOGIN_REASONS;

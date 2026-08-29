@@ -1,7 +1,6 @@
 import styled from "styled-components";
 import type { UsageBucket, UsageDimension, UsageGrain } from "../../api/types.ts";
 import { formatCount, formatUsd } from "../../lib/format.ts";
-import { Button } from "../../ui/Button.tsx";
 import { Row } from "../../ui/primitives.ts";
 
 /**
@@ -235,18 +234,6 @@ export function splitSeries(
     return row;
   });
 }
-
-/** A pressed-state control. Buttons rather than a select: the state is visible. */
-export const Segment = styled(Button)<{ $on: boolean }>`
-  border-color: ${({ theme, $on }) => ($on ? theme.color.accent : theme.color.ruleStrong)};
-  color: ${({ theme, $on }) => ($on ? theme.color.accent : theme.color.inkDim)};
-  background: ${({ theme, $on }) => ($on ? theme.color.accentWash : theme.color.panelRaised)};
-`;
-
-export const Controls = styled(Row)`
-  gap: ${({ theme }) => theme.space(1)};
-  flex-wrap: wrap;
-`;
 
 export const ChartBox = styled.div<{ $height?: number }>`
   height: ${({ $height }) => $height ?? 240}px;

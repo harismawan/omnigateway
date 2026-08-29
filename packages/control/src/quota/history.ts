@@ -32,6 +32,30 @@ export type QuotaHistoryResult = {
 };
 
 /**
+ * The span a retained-reading request actually covers.
+ *
+ * Clamped to what pruning leaves readable, so a request for "everything" cannot
+ * read further back than the rows go, and forward to the clock, so a span
+ * cannot reach into the future. Both surfaces that read samples go through
+ * this: two copies of the clamp would be two answers to "how far back does this
+ * install remember", and the one that drifted would be silently wrong rather
+ * than broken.
+ */
+export async function retainedSpan(
+  deps: { store: Store; now: () => number },
+  input: { since?: string | number | undefined; until?: string | number | undefined },
+): Promise<{ since: number; until: number }> {
+  const now = deps.now();
+  const settings = await deps.store.config.getSettings();
+  const oldest = now - settings.logRetentionDays * DAY_MS;
+
+  return {
+    since: Math.max(optionalNumber(input.since, oldest), oldest),
+    until: Math.min(optionalNumber(input.until, now), now),
+  };
+}
+
+/**
  * The gateway's own rate for each snapshot window, over that window's span.
  *
  * One aggregate per window rather than one per distinct span: spans are keyed
@@ -106,12 +130,7 @@ export async function quotaHistory(
   deps: { store: Store; now: () => number },
   input: QuotaHistoryInput,
 ): Promise<QuotaHistoryResult> {
-  const now = deps.now();
-  const settings = await deps.store.config.getSettings();
-  const oldest = now - settings.logRetentionDays * DAY_MS;
-
-  const since = Math.max(optionalNumber(input.since, oldest), oldest);
-  const until = Math.min(optionalNumber(input.until, now), now);
+  const { since, until } = await retainedSpan(deps, input);
   const raw = input.credentialId?.trim();
   const credentialId = raw === undefined || raw.length === 0 ? undefined : raw;
 

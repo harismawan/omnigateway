@@ -1,8 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ClientBoard } from "../../src/features/client/ClientBoard.tsx";
+import { measureCharts } from "../helpers/chart.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { apiKey, log, usageBucket } from "../helpers/fixtures.ts";
+import {
+  accountQuotaSample,
+  apiKey,
+  headroom,
+  log,
+  NOW,
+  usageBucket,
+} from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 function stub(over: Record<string, () => unknown> = {}) {
@@ -10,7 +19,7 @@ function stub(over: Record<string, () => unknown> = {}) {
     "GET /api/client/summary": () => apiKey(),
     "GET /api/client/usage": () => [usageBucket({ key: "fast" })],
     "GET /api/client/logs": () => ({ logs: [log()] }),
-    "GET /api/client/quota": () => ({ headroom: [] }),
+    "GET /api/client/quota": () => ({ accounts: [] }),
     ...over,
   });
 }
@@ -97,52 +106,153 @@ describe("client board", () => {
     expect(await screen.findByText("This key is not rate limited.")).toBeTruthy();
   });
 
-  test("provider headroom renders without naming an account", async () => {
-    stub({
-      "GET /api/client/quota": () => ({
-        headroom: [
-          { provider: "anthropic", windowType: "fiveHour", usedRatio: 0.42, resetsAt: null },
-        ],
-      }),
-    });
+  /**
+   * The disclosure this surface makes, stated as a test.
+   *
+   * Account names reach a key holder by the operator's decision — a screen that
+   * collapsed a provider's accounts could not say which one was filling up. The
+   * ceilings behind the fractions are the half that stays withheld.
+   */
+  test("provider headroom names the account and not its ceiling", async () => {
+    stub({ "GET /api/client/quota": () => ({ accounts: [headroom()] }) });
     const { container } = renderWithProviders(<ClientBoard />);
 
-    // Anchored on the percentage, not on the provider name: "anthropic" is also
-    // the provider of the seeded log row, so a bare text query matches two
-    // tables and says nothing about which one rendered.
-    const row = (await screen.findByText("42%")).closest("tr");
+    const meter = await screen.findByRole("meter", { name: /claude-main fiveHour/ });
+    const row = meter.closest("tr");
     expect(row).not.toBeNull();
-    expect(within(row as HTMLElement).getByText("anthropic")).toBeTruthy();
-    expect(within(row as HTMLElement).getByText("fiveHour")).toBeTruthy();
+    expect(within(row as HTMLElement).getByText("claude-main")).toBeTruthy();
+    // Grouped under its provider, which is the heading rather than a column.
+    expect(screen.getAllByText("anthropic").length).toBeGreaterThan(0);
 
-    // No credential id reaches the DOM, which is the property the redaction is
-    // for. Asserted on rendered text rather than on the fixture.
-    expect(container.textContent).not.toContain("cred-");
+    // A fraction is drawn, and printed beside the bar: the bar is the
+    // comparison and the figure is the reading.
+    expect(meter.getAttribute("aria-valuenow")).toBe("42");
+    expect(within(row as HTMLElement).getByText("42%")).toBeTruthy();
+    // The provider's own counters are still not rendered.
+    expect(container.textContent).not.toContain("of 1,000");
+  });
+
+  /**
+   * Two accounts of one provider are two rows, which is the whole point of
+   * naming them: the collapsed version reported one row and could not say which
+   * account was the one filling up.
+   */
+  test("every account of a provider gets its own row under one heading", async () => {
+    stub({
+      "GET /api/client/quota": () => ({
+        accounts: [
+          headroom({ credentialId: "cred-1", label: "claude-main", usedRatio: 0.9 }),
+          headroom({ credentialId: "cred-2", label: "claude-spare", usedRatio: 0.1 }),
+        ],
+      }),
+      "GET /api/client/quota/history": () => ({ samples: [] }),
+    });
+    renderWithProviders(<ClientBoard />);
+
+    expect(await screen.findByText("claude-main")).toBeTruthy();
+    expect(screen.getByText("claude-spare")).toBeTruthy();
+    // One heading for the provider, one control per account.
+    expect(screen.getAllByRole("button", { name: /quota history/ })).toHaveLength(2);
+    expect(screen.getAllByRole("meter", { name: /claude-(main|spare) fiveHour/ }).length).toBe(2);
+  });
+
+  /**
+   * One row per account, its windows stacked — the accounts page's own shape.
+   *
+   * A five-hour window at 90% and a weekly one at 20% mean "pause for an hour";
+   * the reverse means "this account is done for the week". Split across two
+   * rows, that pair is two readings a reader has to join up by hand.
+   */
+  test("an account's windows share one row and one disclosure", async () => {
+    const user = userEvent.setup();
+    stub({
+      "GET /api/client/quota": () => ({
+        accounts: [
+          headroom({ windowType: "weekly", usedRatio: 0.2 }),
+          headroom({ windowType: "fiveHour", usedRatio: 0.9 }),
+        ],
+      }),
+      "GET /api/client/quota/history": () => ({ samples: [] }),
+    });
+    renderWithProviders(<ClientBoard />);
+
+    const meter = await screen.findByRole("meter", { name: /claude-main fiveHour/ });
+    const row = meter.closest("tr") as HTMLElement;
+    // Both windows in the same row, shortest first.
+    expect(within(row).getByRole("meter", { name: /claude-main weekly/ })).toBeTruthy();
+    const labels = within(row)
+      .getAllByRole("meter")
+      .map((node) => node.getAttribute("aria-label"));
+    expect(labels[0]).toContain("fiveHour");
+    expect(labels[1]).toContain("weekly");
+
+    // And one control, opening both charts rather than one per window.
+    const toggles = screen.getAllByRole("button", { name: /quota history/ });
+    expect(toggles).toHaveLength(1);
+    const restore = measureCharts();
+    try {
+      await user.click(toggles[0] as HTMLElement);
+      expect(
+        (await screen.findAllByText(/^\d+[hd] window$/)).map((node) => node.textContent),
+      ).toEqual(["5h window", "7d window"]);
+    } finally {
+      restore();
+    }
   });
 
   test("headroom with no ceiling reads unknown, not zero", async () => {
     stub({
       "GET /api/client/quota": () => ({
-        headroom: [{ provider: "openai", windowType: "weekly", usedRatio: null, resetsAt: null }],
+        accounts: [
+          headroom({ provider: "openai", label: "codex", windowType: "weekly", usedRatio: null }),
+        ],
       }),
     });
     renderWithProviders(<ClientBoard />);
 
-    const row = (await screen.findByText("openai")).closest("tr");
+    const row = (await screen.findByText("codex")).closest("tr");
     expect(within(row as HTMLElement).getByText("unknown")).toBeTruthy();
   });
 
+  /**
+   * Twenty rows, because that is what the panel is read for.
+   *
+   * The default is the fetch, not a slice of a larger one: asking for a hundred
+   * and rendering twenty would make the gateway do work nobody reads.
+   */
+  test("the request log asks for twenty rows by default", async () => {
+    const fetches = stub();
+    renderWithProviders(<ClientBoard />);
+    await screen.findByText("laptop");
+
+    const logCalls = fetches.calls.filter((call) => call.url.startsWith("/api/client/logs"));
+    expect(logCalls.length).toBeGreaterThan(0);
+    expect(logCalls.every((call) => call.url.includes("limit=20"))).toBe(true);
+  });
+
   test("request rows carry metadata and no way to open a body", async () => {
-    stub();
-    const { container } = renderWithProviders(<ClientBoard />);
+    const user = userEvent.setup();
+    const fetches = stub();
+    renderWithProviders(<ClientBoard />);
     await screen.findByText("laptop");
     // Both tables render the model name, so this waits for all of them rather
     // than asserting a uniqueness the fixtures do not have.
     expect((await screen.findAllByText("fast")).length).toBeGreaterThan(0);
 
-    // There is no body route on this surface, so there must be nothing offering
-    // to reach one.
-    expect(container.textContent).not.toMatch(/body|prompt|payload/i);
+    // Asserted on the request detail and on the wire, not by banning the word
+    // "prompt" from the page: the usage deck legends a token class "Prompt
+    // input", and a text match that broad reported a leak where there is only
+    // a count. What must not exist is the affordance and the fetch.
+    const row = (await screen.findAllByRole("row")).find((candidate) =>
+      candidate.textContent?.includes("claude-haiku-4-5"),
+    );
+    if (row === undefined) throw new Error("expected a request row");
+    await user.click(row);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Request id")).toBeTruthy();
+    expect(within(dialog).queryByText(/request body|response body|captured/i)).toBeNull();
+    expect(fetches.calls.some((call) => call.url.includes("/body"))).toBe(false);
   });
 
   test("an empty window says so rather than rendering an empty table", async () => {
@@ -198,14 +308,12 @@ describe("client board uses the shared primitives", () => {
   test("provider headroom carries a meter naming its provider and window", async () => {
     stub({
       "GET /api/client/quota": () => ({
-        headroom: [
-          { provider: "anthropic", windowType: "fiveHour", usedRatio: 0.62, resetsAt: null },
-        ],
+        accounts: [headroom({ usedRatio: 0.62, resetsAt: null })],
       }),
     });
     renderWithProviders(<ClientBoard />);
 
-    const meter = await screen.findByRole("meter", { name: /anthropic fiveHour/i });
+    const meter = await screen.findByRole("meter", { name: /claude-main fiveHour/i });
     expect(meter.getAttribute("aria-valuenow")).toBe("62");
   });
 
@@ -262,4 +370,202 @@ test("usage past the ceiling reads the same to a screen reader as it looks", asy
   // The overage is not hidden — it is in the figures, where it belongs.
   const row = (await screen.findByText("requests per minute")).closest("tr");
   expect(within(row as HTMLElement).getByText("150")).toBeTruthy();
+});
+
+/**
+ * The client screen is the console's own instruments over one key's rows.
+ *
+ * Each of these is anchored on something a shared component provides and a
+ * hand-rolled reduction did not, so a regression that quietly forked the two
+ * surfaces fails here rather than merely looking different.
+ */
+describe("client board renders the console's own views", () => {
+  test("requests are the operator's table minus the columns a client may not see", async () => {
+    stub();
+    renderWithProviders(<ClientBoard />);
+    await screen.findByText("laptop");
+
+    // From the shared table: the token breakdown carries an accessible
+    // description, and the outcome is a chip rather than a bare number.
+    const row = (await screen.findAllByRole("row")).find((candidate) =>
+      candidate.textContent?.includes("claude-haiku-4-5"),
+    );
+    if (row === undefined) throw new Error("expected a request row");
+    expect(within(row as HTMLElement).getByText("240ms")).toBeTruthy();
+    // The breakdown's own hover text, which a plain "in + out" sum did not have.
+    // Two nodes carry it — the cell and the bar inside it — so the assertion is
+    // that it is there at all, not that it is unique.
+    expect(within(row as HTMLElement).getAllByTitle(/1,000 in/).length).toBeGreaterThan(0);
+
+    // The two columns that name the operator's infrastructure are absent, not
+    // rendered as dashes: a dash invites "whose account was it", which is the
+    // question this surface exists not to answer.
+    const headers = (await screen.findAllByRole("columnheader")).map((cell) => cell.textContent);
+    expect(headers).toContain("Routed to");
+    expect(headers).not.toContain("Account");
+    expect(headers).not.toContain("Key");
+    // And the account behind the request is nowhere in the row either.
+    expect(row.textContent).not.toContain("cred-1");
+  });
+
+  test("the filter reads models and errors, and never an account it cannot resolve", async () => {
+    const user = userEvent.setup();
+    stub({
+      "GET /api/client/logs": () => ({
+        logs: [
+          log({ id: "req-ok", requestedModel: "fast" }),
+          log({ id: "req-bad", requestedModel: "slow", status: 502, errorCode: "UPSTREAM" }),
+        ],
+      }),
+    });
+    renderWithProviders(<ClientBoard />);
+    await screen.findByText("laptop");
+
+    await user.type(screen.getByLabelText("Filter requests"), "slow");
+    await waitFor(() => {
+      expect(screen.queryByText("UPSTREAM")).toBeTruthy();
+    });
+    const rows = screen.getAllByRole("row").filter((row) => row.textContent?.includes("ms"));
+    expect(rows).toHaveLength(1);
+  });
+
+  test("the deck reports every class the usage board does, from one scoped read", async () => {
+    const fetches = stub({
+      "GET /api/client/usage": () => [
+        usageBucket({ key: "fast", requests: 4, inputTokens: 1_000, cacheReadTokens: 500 }),
+      ],
+    });
+    renderWithProviders(<ClientBoard />);
+    await screen.findByText("laptop");
+
+    // The classes a bare four-card summary did not report at all.
+    for (const legend of [
+      "Prompt input",
+      "Cache reads",
+      "Cache writes",
+      "RTK saved",
+      "Error rate",
+    ]) {
+      expect(screen.getByText(legend)).toBeTruthy();
+    }
+    // Still only this key's own surface, whatever the deck asks for.
+    expect(
+      fetches.calls.every((call) => (call.url.split("?")[0] ?? "").startsWith("/api/client/")),
+    ).toBe(true);
+  });
+
+  /**
+   * The chart is fetched only while a row is open.
+   *
+   * The history read folds every retained reading in the span, so a panel that
+   * loaded it on arrival would pay for a chart nobody asked to see — the same
+   * reason the operator's disclosure is lazy.
+   */
+  test("provider headroom charts its history, and only once a row is expanded", async () => {
+    const user = userEvent.setup();
+    const fetches = stub({
+      "GET /api/client/quota": () => ({
+        accounts: [headroom({ usedRatio: 0.4 })],
+      }),
+      "GET /api/client/quota/history": () => ({
+        samples: [
+          accountQuotaSample({ observedAt: NOW - 3_600_000, usedRatio: 0.2 }),
+          accountQuotaSample({ observedAt: NOW - 60_000, usedRatio: 0.4 }),
+        ],
+      }),
+    });
+    const restore = measureCharts();
+    try {
+      renderWithProviders(<ClientBoard />);
+      const toggle = await screen.findByRole("button", {
+        name: "Show quota history for claude-main",
+      });
+      expect(fetches.calls.some((call) => call.url.startsWith("/api/client/quota/history"))).toBe(
+        false,
+      );
+
+      await user.click(toggle);
+      await waitFor(() => {
+        expect(fetches.calls.some((call) => call.url.startsWith("/api/client/quota/history"))).toBe(
+          true,
+        );
+      });
+
+      // The shared chart's own facts row, drawn from the readings.
+      expect(await screen.findByText("Window average")).toBeTruthy();
+      // A percentage per hour, never the provider's units: the ceiling those
+      // would be counted against is the operator's account.
+      expect(screen.getByText("10.0%/h")).toBeTruthy();
+    } finally {
+      restore();
+    }
+  });
+
+  test("a rolled-over window keeps its measured readings and drops only the inferences", async () => {
+    const user = userEvent.setup();
+    stub({
+      "GET /api/client/quota": () => ({
+        accounts: [
+          headroom({
+            usedRatio: 0.4,
+            // Its own reset is behind us; the reading itself is a minute old.
+            resetsAt: NOW - 3_600_000,
+            observedAt: NOW - 60_000,
+            ratePerHourRatio: null,
+            exhaustsAt: null,
+            survives: null,
+            rolledOver: true,
+          }),
+        ],
+      }),
+      "GET /api/client/quota/history": () => ({ samples: [] }),
+    });
+    const restore = measureCharts();
+    try {
+      renderWithProviders(<ClientBoard />);
+      await user.click(
+        await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+      );
+
+      // Said in both places it is read — the row's legend and the chart's own
+      // note — rather than blanked: the panel is not stale, and blanking it
+      // would throw away real history for up to a poll interval after every
+      // rollover.
+      expect((await screen.findAllByText(/rolled over/)).length).toBeGreaterThan(1);
+      expect(screen.queryByText("reading is stale")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  test("a stale reading says so instead of charting from it", async () => {
+    const user = userEvent.setup();
+    stub({
+      "GET /api/client/quota": () => ({
+        accounts: [
+          headroom({
+            usedRatio: 0.4,
+            observedAt: NOW - 6 * 3_600_000,
+            ratePerHourRatio: null,
+            exhaustsAt: null,
+            survives: null,
+            stale: true,
+          }),
+        ],
+      }),
+      "GET /api/client/quota/history": () => ({ samples: [] }),
+    });
+    const restore = measureCharts();
+    try {
+      renderWithProviders(<ClientBoard />);
+      await user.click(
+        await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+      );
+
+      expect(await screen.findByText("reading is stale")).toBeTruthy();
+      expect(screen.queryByText("Window average")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
 });

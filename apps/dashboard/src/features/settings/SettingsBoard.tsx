@@ -10,6 +10,7 @@ import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
+import { AccessPanel } from "./AccessPanel.tsx";
 import { AgentSetup } from "./AgentSetup.tsx";
 
 type WeightKey = keyof Settings["weights"];
@@ -443,6 +444,8 @@ export function SettingsBoard() {
           {saved && problem === null ? <Saved role="status">Settings saved.</Saved> : null}
 
           <AgentSetup />
+
+          <AccessPanel />
 
           <Module legend="Known limits">
             <Stack $gap={2}>

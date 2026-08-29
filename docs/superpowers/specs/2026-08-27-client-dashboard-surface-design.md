@@ -231,7 +231,26 @@ GET  /api/client/summary    own key: label, prefix, model allowlist, limits, lim
 GET  /api/client/usage      scoped queryUsage
 GET  /api/client/logs       scoped recentLogs, metadata only
 GET  /api/client/quota      redacted provider headroom
+GET  /api/client/quota/history  the same headroom, per retained reading
 ```
+
+`quota/history` was added later, when the client screen took the console's own
+quota chart.
+
+**Both quota routes were widened after this design shipped, by the operator's
+decision.** They first reported one folded row per provider — the best account's
+headroom, with the account unnamed — and that could answer "am I about to be
+throttled" but not "which account is the one filling up". They now report one row
+per account carrying the operator's own label, so a key holder learns the fleet
+size and the account names.
+
+What did not change is the other half: `used`, `limit` and units-per-hour stay in
+`@omni/control`. Every figure on the wire is a fraction of the window it belongs
+to, so a client can see how full an account is and not how large it is, and the
+gateway rate on the operator's history route is still absent here because it is
+an aggregate over every key on the installation. The redaction test above now
+covers `logs`, `usage` and `summary`, with a second test asserting exactly what
+the quota routes do and do not publish.
 
 Existing admin GETs gain `requireReader`, with three exceptions that stay
 `requireAdmin`:

@@ -82,16 +82,83 @@ export type StatusResponse = {
   viewerConfigured: boolean;
 };
 
-/** Provider room as a client sees it: no credential ids, no account labels. */
-export type ProviderHeadroom = {
+/**
+ * One provider account's window as a client sees it.
+ *
+ * Named accounts, unnamed ceilings. The label is a deliberate disclosure by the
+ * operator — a screen that collapsed a provider's accounts could not say which
+ * one was filling up — while every figure stays a fraction of the window it
+ * belongs to, so the size of an account is still the operator's own business.
+ */
+export type AccountQuota = {
+  /** Stable per account, and what a chart joins its retained readings on. */
+  credentialId: string;
+  /** The operator's own name for the account. */
+  label: string;
   provider: ProviderId;
   windowType: "fiveHour" | "daily" | "weekly";
-  /** Null where no account reported a ceiling. Unknown, never unlimited. */
+  /** Null where the account reported no ceiling. Unknown, never unlimited. */
   usedRatio: number | null;
   resetsAt: number | null;
+  /** When the account behind the ratio was last read; where the chart places it. */
+  observedAt: number;
+  windowMs: number | null;
+  /**
+   * Burn as a fraction of the window's own ceiling per hour.
+   *
+   * Scaled for the reason `usedRatio` is: provider units are the size of an
+   * account a client is not entitled to know. Null where suppressed.
+   */
+  ratePerHourRatio: number | null;
+  /** When this window runs out at that rate; null when it will not or cannot be said. */
+  exhaustsAt: number | null;
+  /** Whether the window outlives its own reset. Null when the estimate is suppressed. */
+  survives: boolean | null;
+  /**
+   * True when the reading is too old to believe. Decided in `@omni/control`,
+   * because the test needs `quotaPollIntervalMs` and that setting lives on a
+   * route no client may read.
+   */
+  stale: boolean;
+  /**
+   * True when the reading counts a window whose reset is already behind us.
+   *
+   * Apart from `stale` because the panel treats them differently: a rolled-over
+   * reading is minutes old and its measured history stays on the chart, with
+   * only the inferences suppressed.
+   */
+  rolledOver: boolean;
 };
 
-export type ClientQuotaResponse = { headroom: ProviderHeadroom[] };
+export type ClientQuotaResponse = { accounts: AccountQuota[] };
+
+/**
+ * One retained reading of one account's window, as the client surface charts it.
+ *
+ * `usedRatio` is never null: a reading against an unstated ceiling is not a
+ * percentage of anything and is dropped in `@omni/control`, the same rule
+ * `quotaSegments` applies to the operator's readings.
+ */
+export type AccountQuotaSample = {
+  credentialId: string;
+  label: string;
+  provider: ProviderId;
+  windowType: "fiveHour" | "daily" | "weekly";
+  observedAt: number;
+  usedRatio: number;
+  resetsAt: number | null;
+  windowMs: number | null;
+};
+
+/** Both bounds are epoch milliseconds; the route clamps them to retention. */
+export type ClientQuotaHistoryQuery = { since: number; until?: number };
+
+/**
+ * No gateway rate here, unlike the operator's history response: that aggregate
+ * covers every key on the installation, so it answers a question about the
+ * operator's traffic rather than this client's.
+ */
+export type ClientQuotaHistoryResponse = { samples: AccountQuotaSample[] };
 
 export type CredentialsResponse = { credentials: Credential[] };
 

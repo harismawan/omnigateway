@@ -1,4 +1,6 @@
 import type {
+  AccountQuota,
+  AccountQuotaSample,
   ApiKeySummary,
   BodyArtifact,
   BurnEstimate,
@@ -81,6 +83,43 @@ export function burn(patch: Partial<BurnEstimate> = {}): BurnEstimate {
     exhaustsAt: NOW + 1_800_000,
     survives: false,
     stale: false,
+    ...patch,
+  };
+}
+
+/**
+ * One account's window as the client surface receives it: a named account, and
+ * fractions rather than the ceilings behind them.
+ */
+export function headroom(patch: Partial<AccountQuota> = {}): AccountQuota {
+  return {
+    credentialId: "cred-1",
+    label: "claude-main",
+    provider: "anthropic",
+    windowType: "fiveHour",
+    usedRatio: 0.42,
+    resetsAt: NOW + 3_600_000,
+    observedAt: NOW - 60_000,
+    windowMs: null,
+    ratePerHourRatio: 0.1,
+    exhaustsAt: NOW + 5 * 3_600_000,
+    survives: true,
+    stale: false,
+    rolledOver: false,
+    ...patch,
+  };
+}
+
+export function accountQuotaSample(patch: Partial<AccountQuotaSample> = {}): AccountQuotaSample {
+  return {
+    credentialId: "cred-1",
+    label: "claude-main",
+    provider: "anthropic",
+    windowType: "fiveHour",
+    observedAt: NOW - 3_600_000,
+    usedRatio: 0.2,
+    resetsAt: NOW + 3_600_000,
+    windowMs: null,
     ...patch,
   };
 }

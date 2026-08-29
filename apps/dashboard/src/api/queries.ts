@@ -8,9 +8,13 @@ import {
 } from "@tanstack/react-query";
 import { del, get, patch, post, put, request, withQuery } from "./client.ts";
 import type {
+  AccountQuota,
+  AccountQuotaSample,
   AgentModelMapping,
   ApiKeySummary,
   BurnEstimate,
+  ClientQuotaHistoryQuery,
+  ClientQuotaHistoryResponse,
   ClientQuotaResponse,
   ConnectPollResult,
   ConnectStart,
@@ -33,7 +37,6 @@ import type {
   ModelsResponse,
   PluginCatalogEntry,
   PluginsResponse,
-  ProviderHeadroom,
   ProviderId,
   QuotaHistoryQuery,
   QuotaHistoryResponse,
@@ -100,6 +103,8 @@ export const queryKeys = {
     ] as const,
   clientLogs: (limit: number) => ["client", "logs", limit] as const,
   clientQuota: ["client", "quota"] as const,
+  clientQuotaHistory: (query: ClientQuotaHistoryQuery) =>
+    ["client", "quota-history", query.since, query.until ?? null] as const,
   console: (lines: number, level: string) => ["console", lines, level] as const,
   database: ["database"] as const,
   snapshots: ["database", "snapshots"] as const,
@@ -618,12 +623,43 @@ export function useClientLogs(
   });
 }
 
-export function useClientQuota(cadence: Cadence = 60_000): UseQueryResult<ProviderHeadroom[]> {
+export function useClientQuota(cadence: Cadence = 60_000): UseQueryResult<AccountQuota[]> {
   return useQuery({
     queryKey: queryKeys.clientQuota,
     queryFn: async ({ signal }) =>
-      (await get<ClientQuotaResponse>("/api/client/quota", signal)).headroom,
+      (await get<ClientQuotaResponse>("/api/client/quota", signal)).accounts,
     refetchInterval: cadence,
+  });
+}
+
+/**
+ * The retained readings behind one provider window, fetched only while a row is
+ * expanded — the same shape `useQuotaHistory` has on the operator's side.
+ *
+ * Never refetches on its own: the readings move at the provider poll interval,
+ * and the live figure beside the chart is what carries the panel between
+ * probes. It also names no topic, because a client may hold only `res:usage`
+ * and `res:logs`; naming one it cannot hold would switch polling off in favour
+ * of a push that never arrives.
+ */
+export function useClientQuotaHistory(
+  query: ClientQuotaHistoryQuery,
+  enabled = true,
+): UseQueryResult<AccountQuotaSample[]> {
+  return useQuery({
+    queryKey: queryKeys.clientQuotaHistory(query),
+    enabled,
+    queryFn: async ({ signal }) =>
+      (
+        await get<ClientQuotaHistoryResponse>(
+          withQuery("/api/client/quota/history", {
+            since: query.since,
+            ...(query.until === undefined ? {} : { until: query.until }),
+          }),
+          signal,
+        )
+      ).samples,
+    refetchInterval: false,
   });
 }
 
@@ -748,6 +784,43 @@ export function useSaveSettings(): UseMutationResult<{ ok: true }, Error, Settin
   return useMutation({
     mutationFn: (settings: Settings) => put<{ ok: true }>("/api/settings", settings),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.settings }),
+  });
+}
+
+/**
+ * Replaces the operator's own password.
+ *
+ * Nothing is invalidated on success, because there is nothing left to read: the
+ * gateway ends every session, this browser's included, so the caller sends the
+ * operator to the login screen rather than refetching against a dead cookie.
+ */
+export function useChangePassword(): UseMutationResult<
+  { ok: true },
+  Error,
+  { current: string; password: string }
+> {
+  return useMutation({
+    mutationFn: (body) => put<{ ok: true }>("/api/settings/password", body),
+  });
+}
+
+/**
+ * Sets, replaces, or withdraws the read-only password.
+ *
+ * `null` is the withdrawal and is a value this hook must be able to send — an
+ * omitted field is a malformed request on that route by design, so "leave it
+ * alone" and "remove it" cannot be confused for one another.
+ *
+ * Invalidates `status`, which is where `viewerConfigured` lives: the login
+ * screen offers the read-only mode from that flag, and a console that had just
+ * granted access while still reporting none would be describing the gateway it
+ * had a moment ago.
+ */
+export function useSetViewerPassword(): UseMutationResult<{ ok: true }, Error, string | null> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (password) => put<{ ok: true }>("/api/settings/viewer-password", { password }),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.status }),
   });
 }
 

@@ -218,11 +218,13 @@ test("no operator identity reaches the wire on the client surface", async () => 
 
   const cookie = await login(mine.raw);
 
+  // The two quota routes are excluded on purpose and are covered by the test
+  // below: the operator chose to publish account names there, and a route that
+  // is allowed to name accounts is not evidence about the routes that are not.
   for (const path of [
     "/api/client/logs",
     "/api/client/usage?groupBy=model",
     "/api/client/usage?groupBy=provider",
-    "/api/client/quota",
     "/api/client/summary",
   ]) {
     const body = await (await api(path, cookie)).text();
@@ -234,6 +236,51 @@ test("no operator identity reaches the wire on the client surface", async () => 
     // The key's own hash is never published either.
     expect({ path, hasHash: body.includes(mine.key.hash) }).toEqual({ path, hasHash: false });
   }
+  store.close();
+});
+
+/**
+ * What the quota routes do disclose, stated as a test rather than left implied.
+ *
+ * Account labels reach every key holder here by the operator's decision — a
+ * screen that collapsed a provider's accounts could not say which one was
+ * filling up. The ceilings behind the fractions are still withheld, and that
+ * half is the part a future change could quietly lose: `used` and `limit` are
+ * one property spread away from the payload.
+ */
+test("the quota routes name accounts and still withhold their size", async () => {
+  const { store, upstream, serve, api, login } = await harness();
+  const mine = await seedApiKey(store, { label: "mine" });
+  upstream.queue(ANTHROPIC_STREAM);
+  expect((await serve(mine.raw)).status).toBe(200);
+
+  // A window the provider reported, since only a probed account has quota.
+  await store.credentials.saveQuota([
+    {
+      credentialId: "cred-OPERATOR-ACCOUNT",
+      windowType: "fiveHour",
+      startsAt: NOW - 3_600_000,
+      used: 250,
+      limit: 1_000,
+      resetsAt: NOW + 3_600_000,
+      observedAt: NOW,
+      windowMs: null,
+    },
+  ]);
+
+  const cookie = await login(mine.raw);
+  const body = await (await api("/api/client/quota", cookie)).text();
+
+  // `seedCredential` labels an account after its id, so this is the operator's
+  // own name for it reaching a key holder.
+  expect(body).toContain("cred-OPERATOR-ACCOUNT");
+  expect(body).toContain("usedRatio");
+  // The provider's own counters are what stay behind: a fraction says how full
+  // an account is, and these would say how large it is.
+  expect(body).not.toContain('"used"');
+  expect(body).not.toContain('"limit"');
+  expect(body).not.toContain('"ratePerHour"');
+  expect(body).not.toContain(mine.key.hash);
   store.close();
 });
 
@@ -309,6 +356,7 @@ test("the client surface refuses a session that is not a client", async () => {
     "/api/client/usage",
     "/api/client/logs",
     "/api/client/quota",
+    "/api/client/quota/history",
   ];
 
   const wrong: string[] = [];
