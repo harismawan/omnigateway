@@ -241,8 +241,9 @@ export const credentialsAddKey: Command = {
   async run(args, { ctx, writer, prompt }) {
     const providerId = requirePositional(args, 0, "provider");
     // Every provider, unlike `connect`: a key is the one way in that `custom`
-    // has — and the only way in a plugin-supplied provider has at all, since a
-    // plugin declares no OAuth flow.
+    // has, and one of two a plugin-supplied provider may have — a plugin can
+    // declare an OAuth flow now, and `omni connect` reaches it through the same
+    // `readPluginProviders` read this command uses.
     //
     // The **real registry**, not a manifest guess. This asked
     // a manifest's `provider` capability — and

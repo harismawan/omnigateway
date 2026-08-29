@@ -8,12 +8,18 @@ function stubFlows(input: {
   start: Partial<ConnectStart>;
   polls?: ConnectPoll[];
   finish?: (flowId: unknown, code: unknown) => Promise<{ id: string }>;
+  connectable?: readonly string[];
 }): { flows: ConnectFlows; finished: Array<{ flowId: unknown; code: unknown }>; polls: number } {
   const finished: Array<{ flowId: unknown; code: unknown }> = [];
   const remaining = [...(input.polls ?? [])];
   const record = { polls: 0 };
 
   const flows = {
+    // The command asks the flows which providers are connectable rather than a
+    // module constant, so the stub has to answer. `custom` is deliberately not
+    // here: it is a provider with no authorization to start, and the command
+    // refusing it is one of the cases below.
+    connectableIds: () => input.connectable ?? ["anthropic", "openai", "kimi", "kilo", "grok"],
     async start(): Promise<ConnectStart> {
       return {
         flowId: "flow-1",

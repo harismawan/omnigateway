@@ -211,6 +211,24 @@ export function createConnectFlows(deps: ConnectDeps) {
   }
 
   return {
+    /**
+     * The providers this installation can start an authorization for.
+     *
+     * Read from `deps.providers` at call time, which is the whole point: the
+     * map is assembled per caller — the gateway merges what plugins registered
+     * at boot, the CLI merges what `readPluginProviders` read — so a
+     * module-scope snapshot of the built-in table answers for neither.
+     * `OAUTH_PROVIDER_IDS` was exactly that snapshot and it gated
+     * `omni connect`, so a plugin's provider would have been refused by a list
+     * compiled before it could exist.
+     *
+     * That is the sixth site in this repository to read a registry at import
+     * time and be wrong the same way; CLAUDE.md names the other five.
+     */
+    connectableIds(): readonly string[] {
+      return Object.keys(deps.providers);
+    },
+
     /** Begins an authorization and returns what the operator must act on. */
     async start(providerInput: unknown, labelInput?: unknown): Promise<ConnectStart> {
       flows.sweep();

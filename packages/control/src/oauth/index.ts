@@ -35,9 +35,36 @@ Object.setPrototypeOf(OAUTH_PROVIDERS, null);
  * CLI's usage — were free to disagree with it and with each other, and did:
  * both enumerated five providers while the guard in front of them accepted six.
  */
-export const OAUTH_PROVIDER_IDS: readonly ProviderId[] = Object.keys(
-  OAUTH_PROVIDERS,
-) as ProviderId[];
+export function oauthProviderIds(
+  providers: Readonly<Record<string, OAuthProvider>> = OAUTH_PROVIDERS,
+): readonly ProviderId[] {
+  return Object.keys(providers) as ProviderId[];
+}
+
+/**
+ * Installs an OAuth flow a plugin supplied.
+ *
+ * The parallel of `registerProvider`, and it obeys the same ordering rule for
+ * the same reason: every consumer reads its providers at call time from a map
+ * it was handed, so a flow added before `createApp` is visible to connect,
+ * refresh and the usage poller with no further wiring — and one added after
+ * would exist for some requests and not others, which is a race rather than a
+ * feature.
+ *
+ * **Not for the CLI.** It never calls `loadPlugins` and must not; it merges what
+ * `readPluginProviders` read instead, which is the same declaration without
+ * running the plugin's `setup`.
+ *
+ * Refuses to replace an existing id. A plugin shadowing `anthropic` would take
+ * its authorization flow and its stored credentials, and the failure would be
+ * silent.
+ */
+export function registerOAuthProvider(id: ProviderId, provider: OAuthProvider): void {
+  if (Object.hasOwn(OAUTH_PROVIDERS, id)) {
+    throw new Error(`an oauth flow for ${id} is already installed`);
+  }
+  (OAUTH_PROVIDERS as Record<string, OAuthProvider>)[id] = provider;
+}
 
 export type {
   AuthorizeStart,

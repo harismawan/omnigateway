@@ -123,7 +123,7 @@ export {
   nodeFetchBytes,
   nodePluginFs,
 } from "./nodeFs.ts";
-export { OAUTH_PROVIDER_IDS, OAUTH_PROVIDERS } from "./oauth/index.ts";
+export { OAUTH_PROVIDERS, oauthProviderIds, registerOAuthProvider } from "./oauth/index.ts";
 export { DISPATCH_REFRESH_LEAD_MS, SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
 export { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
 export { createRefresher, type Refresher } from "./oauth/refresh.ts";

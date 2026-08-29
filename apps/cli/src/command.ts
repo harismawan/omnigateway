@@ -27,6 +27,14 @@ export type CommandEnv = {
   service: () => ServiceDeps;
   /** Built on demand, and injected by tests so no test ever reaches a provider. */
   connect: (store: Store) => ConnectFlows;
+  /**
+   * Which providers an authorization can be started for.
+   *
+   * Separate from `connect` because it is asked **before** a store is opened:
+   * an unknown provider is refused without touching a database, which is
+   * asserted and easy to lose by reading the set off the flows instead.
+   */
+  connectable: () => Promise<readonly string[]>;
   /** Runs the gateway attached to this terminal, returning its exit code. */
   foreground: (input: {
     argv: readonly string[];

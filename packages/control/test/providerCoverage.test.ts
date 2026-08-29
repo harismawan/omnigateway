@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { PROVIDER_IDS } from "@omni/providers/descriptors";
 import { PROVIDER_IDS as CONNECT_PROVIDER_IDS } from "../src/connect.ts";
-import { OAUTH_PROVIDER_IDS } from "../src/oauth/index.ts";
+import { oauthProviderIds } from "../src/oauth/index.ts";
 import { modelSchema, providerIdSchema } from "../src/schemas.ts";
 
 test("the connect surface knows every provider the registry describes", () => {
@@ -42,7 +42,7 @@ test("providerIdSchema refuses an id that cannot name a provider", () => {
 test("every OAuth provider is a provider the registry describes", () => {
   // The reverse does not hold and must not be asserted: `custom` has no
   // authorization to start, and a provider may legitimately be key-only.
-  for (const id of OAUTH_PROVIDER_IDS) {
+  for (const id of oauthProviderIds()) {
     expect(PROVIDER_IDS).toContain(id);
   }
 });

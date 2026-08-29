@@ -141,6 +141,16 @@ export type PluginChannels = {
 export type PluginProvider = {
   descriptor: unknown;
   codec: unknown;
+  /**
+   * The provider's OAuth flow, when it has one.
+   *
+   * Optional because an API key is a complete way in — that is what the
+   * capability shipped with, and a provider needing nothing else declares
+   * nothing else. Typed `unknown` for the same reason `codec` is: the real type
+   * is written in terms of the host's own, and nothing is trusted here because
+   * it typechecked on the plugin's side.
+   */
+  oauth?: unknown;
 };
 
 /**

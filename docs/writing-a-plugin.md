@@ -360,8 +360,74 @@ two ways: routing only produces candidates for your own provider id, so you see
 your provider's secrets and no other; and the codec never holds the HTTP client
 or the store, so it cannot send them anywhere the host did not ask for.
 
+## Authorizing it
+
+An API key is a complete way in and needs nothing more. If your provider uses
+OAuth, declare a flow beside the codec:
+
+```js
+const oauth = {
+  kind: "pkce",                 // or "device", which also needs begin() and needsDeviceId
+  supportsManualPaste: true,
+
+  async *start(input) {
+    // The host mints PKCE and the CSRF state, so you need no crypto.
+    const { verifier, challenge } = input.pkce();
+    return {
+      authorizeUrl: `https://acme.example/authorize?code_challenge=${challenge}`,
+      pending: { verifier, challenge, state: input.randomState(), redirectUri: input.redirectUri },
+    };
+  },
+
+  async *exchange(input) {
+    // `yield` a request; the host performs it and hands back the response.
+    const res = yield {
+      url: "https://acme.example/token",
+      method: "POST",
+      headers: [["content-type", "application/json"]],
+      body: JSON.stringify({ code: input.code, verifier: input.pending.verifier }),
+    };
+    if (res.status === 202) throw input.keepPolling("not_yet"); // device flows
+    if (res.status !== 200) throw input.fail("AUTH", "acme refused the code");
+
+    const parsed = JSON.parse(res.body);
+    // You may yield again — a second request can carry a value from the first.
+    return {
+      secrets: { accessToken: parsed.access_token, refreshToken: parsed.refresh_token, apiKey: null, idToken: null },
+      expiresAt: null,
+      accountEmail: parsed.email,
+      providerData: {},
+    };
+  },
+
+  async *refresh(input) { /* same shape */ },
+  async *usage(input) { /* optional; omit and accounts read as unknown */ },
+};
+```
+
+**Each step is a generator that describes requests rather than making them**, the
+same inversion the codec uses: you never hold an HTTP client, so nothing you
+write can reach the network on its own. The host applies the timeout, reads the
+body, and counts the round trips — **capped per step**, so a flow that loops is
+stopped rather than holding an operator's connect open.
+
+The helpers exist because you cannot do them safely yourself:
+
+| helper | why the host supplies it |
+|---|---|
+| `fail(code, message)` | Your bundled `GatewayError` is a different class from the host's, so one you construct is not recognised as classified — and an `AUTH` that is not recognised stops credential refresh silently. |
+| `keepPolling(reason)` | A device poll's "not approved yet" carries a private marker you have no way to set. Without it you can only fail, and the operator is told they were refused while still looking at the approval screen. |
+| `pkce()`, `randomState()` | So you need no crypto, and your `start` is testable. |
+| `now()` | So an expiry check can be driven in a test. |
+
+The host stores what you return, encrypted. You never see the store.
+
 Some rules the host enforces, so you find out at load rather than in production:
 
+- **Every URL you name — in the codec and in every yielded auth request — must be
+  inside your manifest's `origins`.** The `provider` capability requires them for
+  that reason: a provider plugin directs the *host's* client, so without this an
+  operator reading your manifest could not see where their prompts go.
 - Your `descriptor.id` must equal your plugin id. You cannot supply a provider
   under another plugin's name, for the same reason you cannot open its channel
   topic or name its tables.

@@ -1,4 +1,4 @@
-import type { RegisteredProvider } from "@omni/control";
+import { type RegisteredProvider, registerOAuthProvider } from "@omni/control";
 import type { Logger } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS, registerProvider } from "@omni/providers";
 
@@ -56,6 +56,20 @@ export function installPluginProviders(
       continue;
     }
     registerProvider(provider.descriptor, provider.adapter);
+    // The flow, when the plugin declared one. Registered here rather than at a
+    // second call site because the ordering constraint is the same and having
+    // one place obey it is what keeps a provider from being routable while its
+    // authorization is not installed.
+    if (provider.oauth !== undefined) {
+      registerOAuthProvider(provider.descriptor.id, provider.oauth);
+    }
     logger.info("plugin provider registered", { plugin: id });
+    // A separate line rather than a field on the one above. `LogFields` is a
+    // closed allowlist and has no member for this — and a conditional spread
+    // would have added one without the compiler objecting, because excess
+    // property checking does not see through a spread. Measured.
+    if (provider.oauth !== undefined) {
+      logger.info("plugin oauth flow registered", { plugin: id });
+    }
   }
 }

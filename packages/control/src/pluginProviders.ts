@@ -8,6 +8,8 @@ import {
   PROVIDER_ID_PATTERN,
 } from "@omni/providers";
 import type { PluginDefinition } from "@omnigateway/plugin-api";
+import { oauthAdapter, type PluginOAuthFlow } from "./oauth/pluginFlow.ts";
+import type { OAuthProvider } from "./oauth/types.ts";
 
 /**
  * Reading the providers a plugin declares, and refusing the ones it should not.
@@ -34,6 +36,8 @@ import type { PluginDefinition } from "@omnigateway/plugin-api";
 export type RegisteredProvider = {
   descriptor: ProviderDescriptor;
   adapter: ProviderAdapter;
+  /** Present when the plugin declared a flow; absent means API key only. */
+  oauth?: OAuthProvider;
 };
 
 /**
@@ -167,9 +171,50 @@ function checkDescriptor(id: string, record: Record<string, unknown>): void {
  * refusing a malformed provider is one plugin missing, never a gateway that will
  * not boot.
  */
+/**
+ * The structural checks behind a declared OAuth flow.
+ *
+ * The same rule the codec follows — check exactly what a consumer dereferences
+ * and nothing beyond it. The consumers are `createConnectFlows` (`start`,
+ * `begin`, `exchange`, `kind`, `supportsManualPaste`, `needsDeviceId`),
+ * `createRefresher` (`refresh`) and the usage poller (`usage`, optional).
+ *
+ * `kind` is checked against the two arms rather than for being a string: it
+ * selects which of two shapes the host builds, and an unrecognised value would
+ * otherwise fall through to the device arm and demand a `begin` the author was
+ * never told to write.
+ */
+function validateOAuthFlow(id: string, value: unknown): PluginOAuthFlow | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new Error(`provider ${id} oauth must be an object`);
+
+  const kind = value.kind;
+  if (kind !== "pkce" && kind !== "device") {
+    throw new Error(`provider ${id} oauth kind must be "pkce" or "device"`);
+  }
+  checkAt(
+    typeof value.supportsManualPaste === "boolean",
+    id,
+    "oauth.supportsManualPaste",
+    "a boolean",
+  );
+
+  for (const fn of ["start", "exchange", "refresh"] as const) {
+    checkAt(typeof value[fn] === "function", id, `oauth.${fn}`, "a function");
+  }
+  if (value.usage !== undefined) {
+    checkAt(typeof value.usage === "function", id, "oauth.usage", "a function");
+  }
+  if (kind === "device") {
+    checkAt(typeof value.begin === "function", id, "oauth.begin", "a function");
+    checkAt(typeof value.needsDeviceId === "boolean", id, "oauth.needsDeviceId", "a boolean");
+  }
+  return value as unknown as PluginOAuthFlow;
+}
+
 export function validateRegistration(
   pluginId: string,
-  entry: { descriptor: unknown; codec: unknown },
+  entry: { descriptor: unknown; codec: unknown; oauth?: unknown },
   /**
    * The origins the plugin's manifest declared, so the adapter can refuse a
    * request the manifest never admitted.
@@ -245,10 +290,17 @@ export function validateRegistration(
     throw new Error(`provider ${id} codec has a non-callable classifyError`);
   }
 
+  // Optional, because an API key is a complete way in and that is what this
+  // capability shipped with. Present-and-malformed is still refused: the cost
+  // of accepting one is an operator clicking connect and being told nothing
+  // useful, which is the worst place to discover it.
+  const oauthFlow = validateOAuthFlow(id, entry.oauth);
+
   const typed = descriptor as ProviderDescriptor;
   return {
     descriptor: typed,
     adapter: codecAdapter(id, typed.capabilities, codec as ProviderCodec, origins),
+    ...(oauthFlow === undefined ? {} : { oauth: oauthAdapter(id, oauthFlow, origins) }),
   };
 }
 
@@ -387,6 +439,14 @@ async function withTimeout<T>(work: Promise<T>, ms: number, reason: string): Pro
 export type PluginProviderRead = {
   /** Every provider read, keyed by id, ready to hand to a router or a pricer. */
   descriptors: Readonly<Record<string, ProviderDescriptor>>;
+  /**
+   * The OAuth flows those providers declared, keyed by id.
+   *
+   * Beside the descriptors rather than in a second read, because the caller
+   * that wants one usually wants the other and two reads of a plugin directory
+   * can disagree if it changed between them.
+   */
+  oauth: Readonly<Record<string, OAuthProvider>>;
   /** One entry per plugin that declared a provider and did not yield one. */
   failures: readonly { id: string; reason: string }[];
 };
@@ -453,6 +513,10 @@ export async function readPluginProviders(
   // answers the `Object` constructor — which reads as "installed" and then
   // throws on the next property access.
   const descriptors: Record<string, ProviderDescriptor> = Object.create(null);
+  // Same null prototype, and the same reason: this one is read by a *stored*
+  // credential's provider id in refresh, where an `undefined` is what raises a
+  // clean refusal rather than a `TypeError` one layer down.
+  const oauth: Record<string, OAuthProvider> = Object.create(null);
   const failures: { id: string; reason: string }[] = [];
 
   /**
@@ -554,11 +618,12 @@ export async function readPluginProviders(
         definition as PluginDefinition,
       )) {
         descriptors[read.descriptor.id] = read.descriptor;
+        if (read.oauth !== undefined) oauth[read.descriptor.id] = read.oauth;
       }
     } catch (error) {
       failures.push({ id: plugin.id, reason: describeError(error, String(error)) });
     }
   }
 
-  return { descriptors, failures };
+  return { descriptors, oauth, failures };
 }

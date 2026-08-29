@@ -1,11 +1,18 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { type ConnectFlows, createConnectFlows, OAUTH_PROVIDERS } from "@omni/control";
+import {
+  type ConnectFlows,
+  createConnectFlows,
+  OAUTH_PROVIDERS,
+  type OAuthProvider,
+  oauthProviderIds,
+} from "@omni/control";
 import { describeError, GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { boolFlag, parse, UsageError } from "./args.ts";
 import type { CommandEnv } from "./command.ts";
+import { connectableProviders } from "./commands/plugins.ts";
 import { CliError, type ContextOptions, createContext } from "./context.ts";
 import { commandHelp, helpText } from "./help.ts";
 import type { Writer } from "./output.ts";
@@ -47,6 +54,9 @@ export async function run(
     writer.out(VERSION);
     return 0;
   }
+
+  // Built once, on demand, and shared by the gate and the flows below.
+  let connectRegistry: Readonly<Record<string, OAuthProvider>> | undefined;
 
   const resolved = resolveCommand(argv);
   if (resolved === null) {
@@ -108,10 +118,21 @@ export async function run(
       options.connect?.(store) ??
       createConnectFlows({
         store,
-        providers: OAUTH_PROVIDERS,
+        // Merged, not the built-in table: a plugin's provider is connectable
+        // too, and this command never calls `loadPlugins`, so the declaration
+        // `readPluginProviders` read is where its flow comes from.
+        providers: connectRegistry ?? OAUTH_PROVIDERS,
         http: nodeHttpClient(),
         now: ctx.now,
       }),
+    connectable: async () => {
+      // Cached onto the closure so `connect` reuses exactly what the gate
+      // judged. Reading the plugin directory twice could answer differently if
+      // it changed in between, and the operator would be refused a provider the
+      // flow then had, or offered one it did not.
+      connectRegistry ??= await connectableProviders(ctx.root.root);
+      return oauthProviderIds(connectRegistry);
+    },
   };
 
   try {

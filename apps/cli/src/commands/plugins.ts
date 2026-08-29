@@ -3,6 +3,8 @@ import {
   listPlugins,
   nodeFetchBytes,
   nodePluginFs,
+  OAUTH_PROVIDERS,
+  type OAuthProvider,
   type PluginDeps,
   type PluginProviderRead,
   type PluginSummary,
@@ -311,7 +313,7 @@ export async function pluginProviders(root: string): Promise<PluginProviderRead>
     PROVIDER_DESCRIPTORS,
     read.descriptors,
   );
-  return { descriptors, failures: read.failures };
+  return { descriptors, oauth: read.oauth, failures: read.failures };
 }
 
 /**
@@ -381,4 +383,27 @@ export function pluginDoctorLines(ctx: Context, plugins: readonly PluginSummary[
           : state(ctx, true, "ok");
     return `${plugin.id}${version} (${api}, ${sdk}) ${verdict}`;
   });
+}
+
+/**
+ * The OAuth flows this installation can start, built-ins and plugins together.
+ *
+ * Separate from `pluginProviders` above because the caller is different in the
+ * way that matters: `connect` asks *before* opening a store, so that an unknown
+ * provider is refused without a database being touched. That property is
+ * asserted, and folding this into anything that needs a `Store` would lose it.
+ *
+ * The two halves are disjoint — `readProviders` refuses a plugin declaring a
+ * built-in's id, which is the one place that rule lives — so the merge order
+ * decides nothing.
+ */
+export async function connectableProviders(
+  root: string,
+): Promise<Readonly<Record<string, OAuthProvider>>> {
+  const read = await readPluginProviders(
+    listPlugins(doctorPluginDeps(), root),
+    (entry) => import(entry),
+  );
+  const merged: Record<string, OAuthProvider> = Object.assign(Object.create(null), OAUTH_PROVIDERS);
+  return Object.assign(merged, read.oauth);
 }
