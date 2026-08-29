@@ -1,7 +1,25 @@
 # Ponytail prompt injection
 
 Date: 2026-08-29
-Status: approved, not implemented
+Status: implemented
+
+Corrections applied after review, recorded rather than rewritten away — the wrong
+version of each was load-bearing enough that someone will meet it again:
+
+- **The pin was wrong.** This document said upstream **v4.8.2**, taken from a
+  release page rather than the repository. The vendored text is byte-identical
+  to **v4.9.0** (blob `a3e4d94b…`); v4.8.2 carries a different blob. The header
+  in `text.ts` now pins the blob, which is checkable, and treats the tag as the
+  weaker human-readable claim.
+- **The cost was understated.** "≈1,100 tokens" measured the body before the
+  level directive was appended. Measured through `estimateInputTokens`: 1,229
+  (lite), 1,232 (full), 1,243 (ultra).
+- **`settingsSchema` is not top-level `.strict()`** — only `weights`, the
+  retention schema and the key schemas are. The conclusion below is unchanged
+  (the field is required like its neighbours), but the reason given for it was
+  not the real one.
+- **A case was missing entirely**: a breakpoint on a system block that is *not*
+  the last one. See *Placement*.
 
 ## What this is
 
@@ -114,8 +132,10 @@ export function injectPonytail(
 3. Build one `TextBlock` holding `BODY + LEVEL[mode]` and append it, creating `system` if absent.
 4. **Cache-marker move.** If the previously-last `system` block carried `cacheControl`, remove
    it from that block's copy and put the identical value — same `type`, same `ttl` — on the
-   appended block.
-5. Report.
+   appended block. Read the breakpoint with `cacheControlOf` from `@omni/ir`, which is already
+   the single site answering "what marker does this block carry"; a local union-narrowing helper
+   would be a second copy that diverges the day a block type stops carrying one.
+5. Report, including `cacheMarkerNotLast` — see below.
 
 The injected block itself opens with the marker, so a request that somehow arrives carrying a
 previous injection is treated as already-present. That is the wanted behaviour, and it makes the
@@ -135,6 +155,14 @@ Appending alone would leave it *outside* the cached prefix whenever the client m
 system prompt, which Claude Code, the primary client, does. At roughly 1,100 tokens that is
 full-price input on every request from exactly the clients most likely to want the feature.
 So the marker moves with the boundary.
+
+**Only a marker on the *final* system block moves, and the other shape is reported, not repaired.**
+If the client marked an earlier block, relocating that marker would enlarge what the caller chose
+to cache by their own trailing blocks and not merely by our constant — so it stays where it is,
+the ruleset lands outside the cached prefix, and roughly 1,240 tokens are billed fresh every
+request. That reads identically to the cheap case from the outside, which is why it emits
+`ponytail:cache-marker-not-last` rather than being absorbed silently. Repairing it would mean a
+second breakpoint, which costs one of Anthropic's four.
 
 **This is a named exception to "never second-guess a client's cache placement", and the second
 one in this repo after `autoCacheEnabled`.** It is narrower than that one. The invariant is:
@@ -203,8 +231,10 @@ rewrite flag answers a malformed value with off: returning the installation to i
 behaviour costs an operator nothing they did not already have.
 
 **Control** (`packages/control/src/schemas.ts`): `ponytailMode: z.enum(PONYTAIL_MODES)`,
-required like its neighbours — the settings schema is `.strict()` and only the retention pair
-may be omitted. `@omni/store/types` re-exports `PonytailMode` so the dashboard imports it from
+required like `rtkEnabled` and `autoCacheEnabled` rather than optional like the retention pair.
+An older caller omitting it therefore gets a loud `BAD_REQUEST` instead of a silent reset to
+`off` — the same reasoning the retention comment already works through. A restored older
+database has no such problem: it reads `off` through the config boundary, which is tested. `@omni/store/types` re-exports `PonytailMode` so the dashboard imports it from
 a path it is already permitted, exactly as it does for `LimitConfig`.
 
 **CLI, and a trap already documented as having happened once.**
@@ -239,6 +269,7 @@ vocabulary and the ruleset version stay in one place:
 | `ponytail:lite` / `ponytail:full` / `ponytail:ultra` | Applied at that level |
 | `ponytail:already-present` | Dedupe skipped it |
 | `ponytail:cache-marker-moved` | A client marker was moved onto our block |
+| `ponytail:cache-marker-not-last` | A client marker sat earlier, so the ruleset is uncached |
 
 Nothing is recorded when the mode is off. Absence is off, and a row per disabled request is
 noise. `LogFields` is not widened: it carries no RTK fields either, and this needs no stdout line.
@@ -275,7 +306,8 @@ a PCA9685 running fast). It does not lie, so the "adapt only what would lie" rul
 is ~40 tokens of servo advice on every request through the gateway. Cutting it is a one-line
 change if that trade reads wrong later.
 
-**Cost, measured.** Body ≈ 4,400 characters ≈ **1,100 tokens per request**. With the marker move
+**Cost, measured.** Body ≈ 4,900 characters ≈ **1,229–1,243 tokens per request** by
+`estimateInputTokens`, depending on level. With the marker move
 working as designed that is one cache write and roughly a tenth of that on each subsequent
 request — which is what makes the exception in *Placement* worth its cost.
 
@@ -301,6 +333,11 @@ line in `docs/`, and the ceiling is named there.
 - the degradation entries land on the request-log row, and none do when off
 - auto-cache marks the ponytail block when the client marked nothing
 - auto-cache still declines when the client marked its own prompt
+
+  Both assert against the real Anthropic `toWire` through `wireFor`, reading system blocks from
+  the **end** rather than by index: the OAuth leg prepends a billing header and two identity
+  lines, so a fixed-length assertion fails for a reason that has nothing to do with this feature.
+  Both were confirmed to fail when the marker move is removed.
 - a failover sees identical system content on both attempts
 - `count_tokens` includes the ruleset when on and excludes it when off
 

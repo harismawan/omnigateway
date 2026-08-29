@@ -2226,10 +2226,13 @@ const UNMARKED_PREFIX: ChatRequest = {
 };
 
 /** Runs the real Anthropic adapter and returns the bytes it put on the wire. */
-async function wireBodyFor(store: Store): Promise<string> {
+async function wireFor(
+  store: Store,
+  request: ChatRequest = UNMARKED_PREFIX,
+): Promise<{ body: string; degradations: string[] }> {
   let sent = "";
   const outcome = await dispatch(
-    UNMARKED_PREFIX,
+    request,
     {
       ...deps(
         store,
@@ -2250,8 +2253,83 @@ async function wireBodyFor(store: Store): Promise<string> {
     "req_autocache",
   );
   await drain(outcome.events);
-  return sent;
+  return { body: sent, degradations: outcome.log().degradations };
 }
+
+/** Just the bytes, for the tests that only ask what reached the wire. */
+async function wireBodyFor(store: Store): Promise<string> {
+  return (await wireFor(store)).body;
+}
+
+/** The same prefix, but with the caller's own breakpoint on its last block. */
+const MARKED_PREFIX: ChatRequest = {
+  ...UNMARKED_PREFIX,
+  system: [
+    {
+      type: "text",
+      text: "You are a careful assistant. ".repeat(400),
+      cacheControl: { type: "ephemeral", ttl: "1h" },
+    },
+  ],
+};
+
+/**
+ * The system blocks of an Anthropic wire body, as text plus breakpoint.
+ *
+ * Read by position from the end, never by a fixed length: the OAuth leg
+ * prepends a billing header and two identity lines, so the caller's own first
+ * block is not index 0 and the count is a property of the credential rather
+ * than of anything these tests assert.
+ */
+function wireSystem(body: string): Array<{ text: string; marker: unknown }> {
+  const parsed = JSON.parse(body) as { system?: Array<{ text?: string; cache_control?: unknown }> };
+  return (parsed.system ?? []).map((block) => ({
+    text: block.text ?? "",
+    marker: block.cache_control,
+  }));
+}
+
+// The one interaction this feature can get silently and expensively wrong. Both
+// halves are asserted against the real `toWire`, because the claim is about what
+// Anthropic is billed for, and every hop before the wire looked right while the
+// bug that motivated `autoCacheEnabled`'s own test was live.
+test("auto-cache marks the ponytail block when the client marked nothing", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ ponytailMode: "full" });
+
+  const { body, degradations } = await wireFor(store);
+
+  // The ruleset is last, so the system-tier breakpoint lands on it and the
+  // ruleset is inside the cached prefix rather than trailing it.
+  const system = wireSystem(body);
+  const last = system.at(-1);
+  expect(last?.text).toContain("You are a lazy senior developer.");
+  expect(last?.marker).toEqual({ type: "ephemeral" });
+  // Nothing earlier in system is marked, so this is the tier's one breakpoint.
+  expect(system.slice(0, -1).every((block) => block.marker === undefined)).toBe(true);
+  expect(degradations).toContain("anthropic:cache-breakpoint-added");
+  store.close();
+});
+
+test("auto-cache still declines when the client marked its own prompt", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ ponytailMode: "full" });
+
+  const { body, degradations } = await wireFor(store, MARKED_PREFIX);
+
+  // The caller's own marker moved onto the ruleset, TTL intact, and the count
+  // is unchanged — so `estimateCachedInputTokens` stays non-zero and auto-cache
+  // adds nothing. Moving a marker must never become a way to switch it on.
+  const system = wireSystem(body);
+  const last = system.at(-1);
+  expect(last?.text).toContain("You are a lazy senior developer.");
+  expect(last?.marker).toEqual({ type: "ephemeral", ttl: "1h" });
+  // One breakpoint in, one breakpoint out — the caller's, relocated.
+  expect(system.filter((block) => block.marker !== undefined)).toHaveLength(1);
+  expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
+  expect(degradations).toContain("ponytail:cache-marker-moved");
+  store.close();
+});
 
 test("the auto-cache setting reaches the wire, on and off", async () => {
   // The setting travels store -> snapshot -> dispatch -> attempt -> adapter ->

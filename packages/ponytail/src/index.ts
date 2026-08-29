@@ -1,4 +1,4 @@
-import type { CacheControl, ChatRequest, ContentBlock, TextBlock } from "@omni/ir";
+import { type ChatRequest, type ContentBlock, cacheControlOf, type TextBlock } from "@omni/ir";
 import type { PonytailMode } from "./catalog.ts";
 import { PONYTAIL_MARKER, rulesetFor } from "./text.ts";
 
@@ -10,6 +10,16 @@ export type PonytailReport = {
   mode: PonytailMode;
   applied: boolean;
   cacheMarkerMoved: boolean;
+  /**
+   * The client marked a system block, but not its last one.
+   *
+   * Only a breakpoint on the final block can move without changing what the
+   * caller chose to cache, so in this shape the ruleset lands outside the
+   * cached prefix and is billed as fresh input every request. Reported rather
+   * than silently absorbed: it reads identically to the cheap case otherwise,
+   * and the difference is roughly 1,240 tokens a request.
+   */
+  cacheMarkerNotLast: boolean;
   reason?: "disabled" | "already-present";
 };
 
@@ -28,11 +38,17 @@ export type PonytailReport = {
  * exists. Add a real column when someone needs to filter or aggregate by it.
  */
 export function ponytailNotes(report: PonytailReport): readonly string[] {
-  if (report.reason === "disabled") return [];
-  if (report.reason === "already-present") return ["ponytail:already-present"];
-  return report.cacheMarkerMoved
-    ? [`ponytail:${report.mode}`, "ponytail:cache-marker-moved"]
-    : [`ponytail:${report.mode}`];
+  // Keyed on what happened, not on why: a report that applied nothing and named
+  // no reason would otherwise emit `ponytail:off`, a word outside this
+  // vocabulary. Only `injectPonytail` builds these, so that shape is
+  // unreachable today — this keeps it unreachable by construction.
+  if (!report.applied) {
+    return report.reason === "already-present" ? ["ponytail:already-present"] : [];
+  }
+  const notes = [`ponytail:${report.mode}`];
+  if (report.cacheMarkerMoved) notes.push("ponytail:cache-marker-moved");
+  if (report.cacheMarkerNotLast) notes.push("ponytail:cache-marker-not-last");
+  return notes;
 }
 
 const holdsMarker = (blocks: readonly ContentBlock[]): boolean =>
@@ -49,16 +65,6 @@ const holdsMarker = (blocks: readonly ContentBlock[]): boolean =>
 function carriesRuleset(request: ChatRequest): boolean {
   if (request.system !== undefined && holdsMarker(request.system)) return true;
   return request.messages.some((m) => m.role === "system" && holdsMarker(m.content));
-}
-
-/**
- * The breakpoint a block carries, if its kind can carry one at all.
- *
- * `ContentBlock` is a union and thinking blocks have no `cacheControl`, so the
- * property has to be narrowed to rather than read off the union.
- */
-function markerOf(block: ContentBlock | undefined): CacheControl | undefined {
-  return block !== undefined && "cacheControl" in block ? block.cacheControl : undefined;
 }
 
 /** The same block without its cache breakpoint. A copy: the input is shared. */
@@ -92,19 +98,39 @@ export function injectPonytail(
   if (mode === "off") {
     return {
       request,
-      report: { mode, applied: false, cacheMarkerMoved: false, reason: "disabled" },
+      report: {
+        mode,
+        applied: false,
+        cacheMarkerMoved: false,
+        cacheMarkerNotLast: false,
+        reason: "disabled",
+      },
     };
   }
   if (carriesRuleset(request)) {
     return {
       request,
-      report: { mode, applied: false, cacheMarkerMoved: false, reason: "already-present" },
+      report: {
+        mode,
+        applied: false,
+        cacheMarkerMoved: false,
+        cacheMarkerNotLast: false,
+        reason: "already-present",
+      },
     };
   }
 
   const existing = request.system ?? [];
   const last = existing[existing.length - 1];
-  const moved = markerOf(last);
+  const moved = last === undefined ? undefined : cacheControlOf(last);
+  // ponytail: only a marker on the *final* system block moves. One placed
+  // earlier is left alone — relocating it would enlarge what the caller chose
+  // to cache by their own trailing blocks, not just by ours — so the ruleset
+  // sits outside that prefix and is billed fresh every request. Reported, never
+  // repaired; if this shape turns up in practice the fix is a second marker,
+  // which costs one of Anthropic's four.
+  const notLast =
+    moved === undefined && existing.some((block) => cacheControlOf(block) !== undefined);
 
   const block: TextBlock = {
     type: "text",
@@ -118,6 +144,11 @@ export function injectPonytail(
 
   return {
     request: { ...request, system: [...head, block] },
-    report: { mode, applied: true, cacheMarkerMoved: moved !== undefined },
+    report: {
+      mode,
+      applied: true,
+      cacheMarkerMoved: moved !== undefined,
+      cacheMarkerNotLast: notLast,
+    },
   };
 }

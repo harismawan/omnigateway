@@ -157,8 +157,8 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     disprove it in one grep — after which the rest of this file reads as decoration.
     Measured, package by package, because "clean" written from memory is how the last version got it
     wrong — and this paragraph's first draft repeated the mistake inside the commit correcting it.
-    `ratelimit` and `rtk` are clean of both. `ir` hold no per-provider data and branch on no provider
-    id; its only mention in code is `LogFields.surface` (`"anthropic" | "openai"`), which this rule
+    `ratelimit`, `rtk` and `ponytail` are clean of both. `ir` hold no per-provider data and branch
+    on no provider id; its only mention in code is `LogFields.surface` (`"anthropic" | "openai"`), which this rule
     name as permitted vocabulary. `store` branch on no provider id, but `bodies/mask.ts` **do** hold
     per-provider data — the `xaiKey` rule and vendor key prefixes — which the redaction paragraph
     below require stay in core, so it is a carve-out this rule make on purpose rather than a
@@ -438,9 +438,16 @@ Preserve these translation invariants:
   idempotent. `count_tokens` apply same function by hand: it never dispatch, so a count omitting the
   ruleset under-report by whole prompt on every call while real request pay for it. Recorded on
   `request_logs.degradations` as `ponytail:<level>`, `ponytail:already-present`,
-  `ponytail:cache-marker-moved` — constants only, never request data, same bar as `LogFields`. Text
-  vendored from upstream **v4.8.2**, MIT, adapted only where it would lie server-side (the
-  `/ponytail` switch and "stop ponytail" cannot reach an installation setting). Design:
+  `ponytail:cache-marker-moved`, `ponytail:cache-marker-not-last` — constants only, never request
+  data, same bar as `LogFields`. That last one is the shape the move **cannot** help: a breakpoint
+  the client put on a system block that is not the final one stay where it is, because relocating it
+  would enlarge what the caller chose to cache by their own trailing blocks and not only by ours — so
+  ruleset land outside the prefix and get billed fresh, ~1,240 token every request, and it reported
+  rather than absorbed because it otherwise read exactly like the cheap case. Text vendored from
+  upstream tag **v4.9.0**, blob `a3e4d94b…`, MIT with permission notice, adapted only where it would
+  lie server-side (the `/ponytail` switch and "stop ponytail" cannot reach an installation setting).
+  Pin the **blob**, not the release note: header first said v4.8.2, read off a release page rather
+  than the repository, and that tag carry a different blob. Design:
   `docs/superpowers/specs/2026-08-29-ponytail-prompt-injection-design.md`.
 - `Usage.inputTokens` is uncached input. Cache reads and 5m/1h writes are disjoint classes priced
   once. Use `promptTokens()` when client surface need total prompt tokens.

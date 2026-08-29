@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { ChatRequest, ContentBlock } from "@omni/ir";
+import { type ChatRequest, type ContentBlock, cacheControlOf } from "@omni/ir";
+
+/** `cacheControlOf` over a possibly-absent block, which is what indexing gives. */
+const cacheControlOfMaybe = (block: ContentBlock | undefined) =>
+  block === undefined ? undefined : cacheControlOf(block);
+
 import { isPonytailMode, PONYTAIL_MODES } from "../src/catalog.ts";
 import { injectPonytail, PONYTAIL_MARKER, ponytailNotes } from "../src/index.ts";
 
@@ -11,10 +16,6 @@ function request(system?: ContentBlock[]): ChatRequest {
     messages: [{ role: "user", content: [{ type: "text", text: "add a cache" }] }],
   };
 }
-
-/** `ContentBlock` is a union and not every member can carry a breakpoint. */
-const marker = (block: ContentBlock | undefined) =>
-  block !== undefined && "cacheControl" in block ? block.cacheControl : undefined;
 
 const text = (block: ContentBlock | undefined): string =>
   block !== undefined && block.type === "text" ? block.text : "";
@@ -45,6 +46,8 @@ describe("injectPonytail", () => {
     expect(out.system).toHaveLength(2);
     expect(text(out.system?.[0])).toBe("you are a helpful assistant");
     expect(text(out.system?.[1])).toContain("You are a lazy senior developer.");
+    // Exactly once: the assertion above passes on a doubled block too.
+    expect(text(out.system?.[1]).split("You are a lazy senior developer.")).toHaveLength(2);
     expect(report.applied).toBe(true);
   });
 
@@ -77,7 +80,7 @@ describe("injectPonytail", () => {
 });
 describe("dedupe", () => {
   test("skips when a system block already carries the ruleset", () => {
-    const req = request([{ type: "text", text: "prelude " + PONYTAIL_MARKER + " ladder" }]);
+    const req = request([{ type: "text", text: `prelude ${PONYTAIL_MARKER} ladder` }]);
     const { request: out, report } = injectPonytail(req, { mode: "full" });
 
     expect(out).toBe(req);
@@ -124,8 +127,8 @@ describe("cache marker", () => {
     ]);
     const { request: out, report } = injectPonytail(req, { mode: "full" });
 
-    expect(marker(out.system?.[0])).toBeUndefined();
-    expect(marker(out.system?.[1])).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(cacheControlOfMaybe(out.system?.[0])).toBeUndefined();
+    expect(cacheControlOfMaybe(out.system?.[1])).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(report.cacheMarkerMoved).toBe(true);
   });
 
@@ -134,7 +137,8 @@ describe("cache marker", () => {
       { type: "text", text: "tools", cacheControl: { type: "ephemeral" } },
       { type: "text", text: "prompt", cacheControl: { type: "ephemeral" } },
     ]);
-    const marked = (r: ChatRequest) => (r.system ?? []).filter((b) => marker(b) !== undefined);
+    const marked = (r: ChatRequest) =>
+      (r.system ?? []).filter((b) => cacheControlOfMaybe(b) !== undefined);
 
     expect(marked(injectPonytail(req, { mode: "full" }).request)).toHaveLength(marked(req).length);
   });
@@ -146,15 +150,15 @@ describe("cache marker", () => {
     ]);
     const { request: out, report } = injectPonytail(req, { mode: "full" });
 
-    expect(marker(out.system?.[0])).toEqual({ type: "ephemeral" });
-    expect(marker(out.system?.[2])).toBeUndefined();
+    expect(cacheControlOfMaybe(out.system?.[0])).toEqual({ type: "ephemeral" });
+    expect(cacheControlOfMaybe(out.system?.[2])).toBeUndefined();
     expect(report.cacheMarkerMoved).toBe(false);
   });
 
   test("invents no marker when the client placed none", () => {
     const { request: out, report } = injectPonytail(request(), { mode: "full" });
 
-    expect(marker(out.system?.[0])).toBeUndefined();
+    expect(cacheControlOfMaybe(out.system?.[0])).toBeUndefined();
     expect(report.cacheMarkerMoved).toBe(false);
   });
 });
@@ -179,7 +183,7 @@ describe("purity", () => {
 
     expect(out).not.toBe(req);
     expect(req.system).toHaveLength(1);
-    expect(marker(req.system?.[0])).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(cacheControlOfMaybe(req.system?.[0])).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(out.system?.[0]).not.toBe(block);
   });
 });
@@ -214,6 +218,7 @@ describe("degradation notes", () => {
       "ponytail:ultra",
       "ponytail:already-present",
       "ponytail:cache-marker-moved",
+      "ponytail:cache-marker-not-last",
     ]);
     const marked = request([
       { type: "text", text: "secret prompt", cacheControl: { type: "ephemeral" } },
@@ -224,5 +229,34 @@ describe("degradation notes", () => {
         expect(known.has(note)).toBe(true);
       }
     }
+  });
+});
+describe("a breakpoint that is not on the last system block", () => {
+  const marked = (): ChatRequest =>
+    request([
+      { type: "text", text: "marked", cacheControl: { type: "ephemeral" } },
+      { type: "text", text: "trailing" },
+    ]);
+
+  test("is left where the client put it", () => {
+    const { request: out, report } = injectPonytail(marked(), { mode: "full" });
+
+    expect(cacheControlOfMaybe(out.system?.[0])).toEqual({ type: "ephemeral" });
+    expect(cacheControlOfMaybe(out.system?.[2])).toBeUndefined();
+    expect(report.cacheMarkerMoved).toBe(false);
+  });
+
+  test("is reported, because the ruleset is then billed fresh every request", () => {
+    const { report } = injectPonytail(marked(), { mode: "full" });
+
+    expect(report.cacheMarkerNotLast).toBe(true);
+    expect(ponytailNotes(report)).toEqual(["ponytail:full", "ponytail:cache-marker-not-last"]);
+  });
+
+  test("is not reported when the client marked nothing at all", () => {
+    const { report } = injectPonytail(request([{ type: "text", text: "plain" }]), { mode: "full" });
+
+    expect(report.cacheMarkerNotLast).toBe(false);
+    expect(ponytailNotes(report)).toEqual(["ponytail:full"]);
   });
 });

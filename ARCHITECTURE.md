@@ -63,7 +63,7 @@ sequenceDiagram
 
 Two details diagram flattens. Credentials decrypt at step 13, not sooner — ranking ten candidates costs zero decryptions. Log row opens before first attempt, closes exactly once — client hanging up mid-stream recorded as such, not success.
 
-`GET /v1/models` answered from routing snapshot, no provider call. `POST /v1/messages/count_tokens` estimated locally — deliberately writes no usage row.
+`GET /v1/models` answered from routing snapshot, no provider call. `POST /v1/messages/count_tokens` estimated locally — deliberately writes no usage row. It reads the routing snapshot too, and applies the ponytail injection by hand before estimating: it never dispatches, so a count that skipped it would under-report by the whole ruleset on every call while the real request paid for it. No degradation is recorded there, because there is no row to record it on.
 
 ## Rate limiting
 

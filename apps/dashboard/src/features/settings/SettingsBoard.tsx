@@ -224,8 +224,13 @@ function parseDraft(
       // The control offers the four names and nothing else, so the draft can
       // only hold one of them; `off` is what an absent draft field means, the
       // same answer the store gives a value it does not recognise.
+      // `hasOwn`, not `in`: `in` walks the prototype chain, so "toString" would
+      // pass the guard and then be cast to a mode nothing can render. The
+      // console cannot import `isPonytailMode` — rule 12 permits it
+      // `@omni/store/types` and not the catalog subpath — so this is the local
+      // answer, and the `Record` below is what keeps the option list honest.
       ponytailMode:
-        draft.ponytailMode !== undefined && draft.ponytailMode in PONYTAIL_LEVELS
+        draft.ponytailMode !== undefined && Object.hasOwn(PONYTAIL_LEVELS, draft.ponytailMode)
           ? (draft.ponytailMode as PonytailMode)
           : "off",
       bodyLoggingEnabled: draft.bodyLoggingEnabled === "true",
@@ -428,8 +433,9 @@ export function SettingsBoard() {
               <Blurb>
                 Appends the ponytail ruleset to the system prompt of every request, so a coding
                 agent builds the smallest thing that works whether or not it has the skill installed
-                locally. Roughly 1,100 tokens, cached with the prompt it joins. A request that
-                already carries the ruleset is left alone. Off by default.
+                locally. About 1,240 tokens, cached along with the prompt it joins when the request
+                marks a breakpoint at the end of its system prompt or marks none at all. A request
+                that already carries the ruleset is left alone. Off by default.
               </Blurb>
             </Row>
           </Module>

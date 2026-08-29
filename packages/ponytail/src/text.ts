@@ -1,8 +1,39 @@
 /**
  * The ponytail ruleset, vendored.
  *
- * Source: https://github.com/DietrichGebert/ponytail — `.openclaw/skills/ponytail/SKILL.md`
- * at upstream **v4.8.2**, MIT licensed, Copyright (c) Dietrich Gebert.
+ * Source: https://github.com/DietrichGebert/ponytail, `.openclaw/skills/ponytail/SKILL.md`
+ * at tag **v4.9.0**, blob `a3e4d94b791e6eafa6646035d704909b88a7bce2`.
+ *
+ * The blob hash is the pin that means anything: `git rev-parse` it against a
+ * clone and the answer is yes or no. The tag is here to be human-readable and
+ * is the weaker claim of the two — an earlier version of this header said
+ * v4.8.2, taken from a release note rather than from the repository, and that
+ * was simply wrong: v4.8.2 carries a different blob (`2375da21…`). Upstream
+ * also ships a second copy at `skills/ponytail/SKILL.md` which is *not* the
+ * same file, so the path above is part of the pin, not decoration.
+ *
+ * MIT licensed, Copyright (c) Dietrich Gebert:
+ *
+ *   Permission is hereby granted, free of charge, to any person obtaining a
+ *   copy of this software and associated documentation files (the "Software"),
+ *   to deal in the Software without restriction, including without limitation
+ *   the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ *   and/or sell copies of the Software, and to permit persons to whom the
+ *   Software is furnished to do so, subject to the following conditions:
+ *
+ *   The above copyright notice and this permission notice shall be included in
+ *   all copies or substantial portions of the Software.
+ *
+ *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ *   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ *   DEALINGS IN THE SOFTWARE.
+ *
+ * The ruleset is ~4,900 characters and reaches the npm package and the Docker
+ * image, which is a substantial portion, so the notice above ships with it.
  *
  * Adapted in exactly the places where upstream's text would lie once the
  * ruleset is applied by a gateway rather than installed beside an agent:
@@ -22,9 +53,12 @@
  * Everything else is verbatim. Upgrading the pin means re-reading upstream for
  * new text that assumes a local install, not just diffing the body.
  *
- * ponytail: the version is pinned by this comment and nothing enforces it — a
- * drift test would need network access from the test suite. Re-check on upgrade.
+ * ponytail: the pin is this comment and nothing enforces it — a drift test
+ * would need network access from the test suite. Re-check the blob on upgrade,
+ * and re-read upstream for new text that assumes a local install rather than
+ * only diffing the body.
  */
+import type { PonytailLevel } from "./catalog.ts";
 
 /**
  * The sentence every upstream wrapper opens with.
@@ -121,7 +155,7 @@ The shortest path to done is the right path.`;
  * Upstream models intensity as one ruleset plus a level, not as three
  * documents, so a wording fix to the ladder lands once for all three.
  */
-export const LEVEL: Record<"lite" | "full" | "ultra", string> = {
+export const LEVEL: Record<PonytailLevel, string> = {
   lite: `## Level: lite
 
 Build what's asked, but name the lazier alternative in one line. The user picks.
@@ -144,6 +178,6 @@ When it does: \`@lru_cache\`. A hand-rolled TTL cache class is a bug farm with a
 };
 
 /** The full text injected at one level. */
-export function rulesetFor(level: "lite" | "full" | "ultra"): string {
+export function rulesetFor(level: PonytailLevel): string {
   return `# Ponytail\n\n${BODY}\n\n${LEVEL[level]}\n`;
 }
