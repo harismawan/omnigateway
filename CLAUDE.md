@@ -737,16 +737,20 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   `PROVIDER_MODEL_CATALOG` — a different global, not injected — so it carry zero prices and can show
   no multiplier.
 - **A module-scope `Object.keys`/`Object.entries` over `PROVIDER_DESCRIPTORS` is a build-time
-  snapshot**, and `loadPlugins()` run long after import. **Five** sites read one and were wrong the
-  same way — the count went three, then five, because each sweep stopped at the sites the previous
+  snapshot**, and `loadPlugins()` run long after import. **Six** sites read one and were wrong the
+  same way — the count went three, then five, then six, because each sweep stopped at the sites the previous
   bug had made visible: `providerCatalog` served a console missing every plugin provider,
   `providerIdSchema` was `z.enum(PROVIDER_IDS)` and would have refused their credentials,
   `isProviderId` reported them as not existing, `PREFIX_PROVIDER` made a provider's own
   `modelPrefixes` unreachable while `provider/model` for the same provider resolved — an asymmetry
-  *inside one function* — and `CALLBACKS` redirected nowhere. All five ask the registry **at call
-  time** now; `CALLBACKS` was deleted outright, since a second table derived from the first is a
-  thing to keep in step rather than a thing to have. Assume a sixth exist until you have grepped for
-  the pattern rather than for the names above.
+  *inside one function* — and `CALLBACKS` redirected nowhere. The sixth was `OAUTH_PROVIDER_IDS`,
+  a module-scope `Object.keys` of the built-in OAuth table that **gated `omni connect`**, so a
+  plugin's provider was refused by a list compiled before it could exist; it is `oauthProviderIds()`
+  now, and `ConnectFlows` answer from the map it was handed. All six ask the registry **at call
+  time**; `CALLBACKS` was deleted outright, since a second table derived from the first is a thing
+  to keep in step rather than a thing to have. Assume a **seventh** exist until you have grepped for
+  the pattern rather than for the names above — six sweeps have each stopped at the sites the
+  previous bug made visible.
   `PROVIDER_IDS` still exist and is still a snapshot — it feed CLI usage messages and tests, never a
   gate. `descriptors.ts` say so at the definition, which is where a reader meet it.
 - `provider:missing` is the pin rule applied to the provider, and follow it exactly: emitted **once

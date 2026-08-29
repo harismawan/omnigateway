@@ -1,25 +1,43 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ConnectFlows, ConnectPoll, ConnectStart } from "@omni/control";
 import { GatewayError } from "@omni/ir";
+import { PLUGIN_API_VERSION } from "@omnigateway/plugin-api";
 import { cli, makeRoot } from "./helpers/harness.ts";
+
+/** Writes a plugin into an installation's own `plugins/` directory. */
+function writePluginDir(
+  root: string,
+  id: string,
+  manifest: unknown,
+  files: Record<string, string>,
+): void {
+  const home = join(root, "plugins", id);
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "omni-plugin.json"), JSON.stringify(manifest));
+  for (const [name, contents] of Object.entries(files)) {
+    writeFileSync(join(home, name), contents);
+  }
+}
 
 /** A flow that answers exactly as a provider would, without one being there. */
 function stubFlows(input: {
   start: Partial<ConnectStart>;
   polls?: ConnectPoll[];
   finish?: (flowId: unknown, code: unknown) => Promise<{ id: string }>;
-  connectable?: readonly string[];
 }): { flows: ConnectFlows; finished: Array<{ flowId: unknown; code: unknown }>; polls: number } {
   const finished: Array<{ flowId: unknown; code: unknown }> = [];
   const remaining = [...(input.polls ?? [])];
   const record = { polls: 0 };
 
   const flows = {
-    // The command asks the flows which providers are connectable rather than a
-    // module constant, so the stub has to answer. `custom` is deliberately not
-    // here: it is a provider with no authorization to start, and the command
-    // refusing it is one of the cases below.
-    connectableIds: () => input.connectable ?? ["anthropic", "openai", "kimi", "kilo", "grok"],
+    // Present because `ConnectFlows` has it, not because this stub's answer is
+    // consulted: the command asks `env.connectable` — a separate dependency, so
+    // that the gate runs before a store is opened — and the harness overrides
+    // only `connect`. The tests below that assert a refusal are therefore
+    // exercising the **real** `connectableProviders`.
+    connectableIds: () => ["anthropic", "openai", "kimi", "kilo", "grok"],
     async start(): Promise<ConnectStart> {
       return {
         flowId: "flow-1",
@@ -192,4 +210,135 @@ test("a provider that repudiates the code fails the command rather than half-con
 
   const listed = await cli(["credentials", "list", "--json"], { root });
   expect(JSON.parse(listed.out)).toEqual({ credentials: [] });
+});
+
+/** A plugin whose provider authorizes by PKCE, for the real-flows test below. */
+const ACME_OAUTH_PLUGIN = `
+const DESCRIPTOR = {
+  id: "acme-ai",
+  capabilities: { tools: false, images: false, reasoning: false },
+  writeOverInput: { fiveMinute: 1.25, oneHour: 2 },
+  catalog: {
+    defaultModel: "acme-large",
+    authTypes: ["oauth"],
+    models: [{
+      id: "acme-large",
+      label: "Acme Large",
+      pricing: { input: 1, output: 1, cacheRead: 1, cacheWrite5m: 1, cacheWrite1h: 1 },
+      limits: { contextWindow: 1000, maxOutputTokens: 100 },
+    }],
+  },
+  modelPrefixes: ["acme-"],
+  presentation: { label: "Acme", tone: "warm", order: 90, colour: { light: "#a36", dark: "#f8b" } },
+};
+const codec = {
+  buildRequest: (input) => ({
+    request: { url: "https://api.acme.test/v1/x", method: "POST", headers: [], body: "{}" },
+  }),
+  decode: async function* () {},
+};
+const oauth = {
+  kind: "pkce",
+  supportsManualPaste: true,
+  async *start(input) {
+    const { verifier, challenge } = input.pkce();
+    return {
+      authorizeUrl: "https://api.acme.test/authorize?c=" + challenge,
+      pending: { verifier, challenge, state: input.randomState(), redirectUri: input.redirectUri },
+    };
+  },
+  async *exchange(input) {
+    const res = yield { url: "https://api.acme.test/token", method: "POST", headers: [], body: "{}" };
+    if (res.status !== 200) throw input.fail("AUTH", "refused");
+    return {
+      secrets: { accessToken: "a", refreshToken: null, apiKey: null, idToken: null },
+      expiresAt: null,
+      accountEmail: null,
+      providerData: {},
+    };
+  },
+  async *refresh(input) {
+    const res = yield { url: "https://api.acme.test/token", method: "POST", headers: [], body: "{}" };
+    if (res.status !== 200) throw input.fail("AUTH", "refused");
+    return {
+      secrets: { accessToken: "b", refreshToken: null, apiKey: null, idToken: null },
+      expiresAt: null,
+      accountEmail: null,
+      providerData: {},
+    };
+  },
+};
+export default { providers: [{ descriptor: DESCRIPTOR, codec, oauth }], setup() { return {}; } };
+`;
+
+/**
+ * `omni connect` against the **real** `createConnectFlows`, not a stub.
+ *
+ * Every other test in this file replaces `connect:` with a fake `ConnectFlows`,
+ * which is the right shape for asserting what the command prints — and
+ * structurally unable to see the bug this file exists for.
+ *
+ * That bug: the command's gate read the merged registry while
+ * `createConnectFlows.start` read the module-global `PROVIDER_DESCRIPTORS`. The
+ * gateway populates that global at boot; this process never does and must not,
+ * because `loadPlugins` runs migrations and registers routes. So a plugin's
+ * provider was admitted by one gate and refused by the next — with a message
+ * naming the provider it had just refused, because `unconnectable()` builds its
+ * list from the injected map. Two registries, one call, opposite answers.
+ *
+ * The gateway's own e2e cannot catch it either: it runs `installPluginProviders`
+ * first, so it exercises the one process where the global *is* populated.
+ */
+test("connect reaches a plugin-supplied provider, through the real flows", async () => {
+  const root = await installation();
+  writePluginDir(
+    root,
+    "acme-ai",
+    {
+      id: "acme-ai",
+      name: "Acme",
+      version: "1.0.0",
+      api: PLUGIN_API_VERSION,
+      server: "server.js",
+      capabilities: ["provider"],
+      origins: ["https://api.acme.test"],
+    },
+    { "server.js": ACME_OAUTH_PLUGIN },
+  );
+
+  // No `connect:` override — this is the whole point.
+  //
+  // The prompt throws so the command stops after printing the authorize URL.
+  // `silentPrompt` answers "" immediately, which would carry it into
+  // `finish` → the plugin's `exchange` → a **real** request to
+  // `api.acme.test`, and no test may reach a network. What is under test is
+  // `start`, which is where the two registries disagreed.
+  const result = await cli(["connect", "acme-ai"], {
+    root,
+    prompt: {
+      isTty: false,
+      input: async () => "",
+      confirm: async () => true,
+      secret: async () => {
+        throw new Error("stop before the exchange");
+      },
+    },
+  });
+
+  // It must not be refused by the connectable gate, and it must not be refused
+  // by `start` either. Before the fix the second refusal read:
+  //   "provider must be one of anthropic, openai, kimi, kilo, grok, acme-ai"
+  // — a list containing the provider it was refusing.
+  expect(result.err).not.toContain("provider must be one of");
+  expect(result.out + result.err).toContain("https://api.acme.test/authorize");
+});
+
+test("connect still refuses a provider no plugin supplies", async () => {
+  // The control. A gate that admitted everything would satisfy the test above.
+  const root = await installation();
+  const result = await cli(["connect", "notaprovider"], { root });
+
+  expect(result.code).toBe(2);
+  expect(result.err).toContain("provider must be one of");
+  expect(result.err).not.toContain("notaprovider,");
 });

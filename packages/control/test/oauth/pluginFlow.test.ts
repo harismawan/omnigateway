@@ -230,8 +230,10 @@ test("a flow that never returns is stopped rather than holding the connect open"
   await attempt.catch((error: unknown) => {
     expect((error as GatewayError).message).toContain("more than");
   });
-  // Bounded, and the bound is small: no shipped flow needs more than two.
-  expect(sent.length).toBeLessThanOrEqual(4);
+  // The exact bound, not `toBeLessThanOrEqual`. That form kills the
+  // count-after-the-request mutant, which yields five — and passes just as well
+  // for a cap of one, which is not the contract.
+  expect(sent).toHaveLength(4);
 });
 
 test("the host stamps the provider, so a flow cannot claim another one's name", async () => {
@@ -243,16 +245,18 @@ test("the host stamps the provider, so a flow cannot claim another one's name", 
     },
   };
   const { deps } = transport(() => ({ status: 200, body: "{}" }));
-  await oauthAdapter("acme", impostor, ORIGINS)
-    .exchange(
-      { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
-      deps,
-    )
-    .catch((error: unknown) => {
-      expect((error as GatewayError).provider).toBe("acme");
-      // The plugin's own text, so it must not claim the gateway wrote it.
-      expect((error as GatewayError).gatewayAuthored).toBe(false);
-    });
+  const attempt = oauthAdapter("acme", impostor, ORIGINS).exchange(
+    { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
+    deps,
+  );
+  // Paired with the `catch`: a bare `.catch(cb)` passes green if the promise
+  // ever resolves, because the callback simply never runs.
+  await expect(attempt).rejects.toThrow(GatewayError);
+  await attempt.catch((error: unknown) => {
+    expect((error as GatewayError).provider).toBe("acme");
+    // The plugin's own text, so it must not claim the gateway wrote it.
+    expect((error as GatewayError).gatewayAuthored).toBe(false);
+  });
 });
 
 test("a device flow with no begin is refused at registration, not at connect", async () => {
@@ -314,4 +318,85 @@ test("usage is optional, and omitting it is not an error", async () => {
   const { deps } = transport(() => ({ status: 200, body: "87" }));
   const report = await withUsage.usage?.(secrets, deps, {});
   expect(report?.windows[0]?.used).toBe(87);
+});
+
+test("a step that returns nothing usable is refused, not handed on", async () => {
+  // Yields were validated and returns were not. `connect.ts` reads
+  // `result.expiresAt` and spreads `...result.secrets`, so a bare `return;`
+  // produced a raw TypeError outside every guard here — `INTERNAL`, which is
+  // not retryable, ending a request the pool could have served.
+  for (const bad of [undefined, "not a FlowResult", {}, { secrets: {}, providerData: null }]) {
+    const broken: PluginOAuthFlow = {
+      ...kiloShaped,
+      async *exchange() {
+        yield { url: "https://api.acme.test/codes/x", method: "GET", headers: [] };
+        return bad as never;
+      },
+    };
+    const { deps } = transport(() => ({ status: 200, body: JSON.stringify({ token: "t" }) }));
+    const attempt = oauthAdapter("acme", broken, ORIGINS).exchange(
+      { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
+      deps,
+    );
+    await expect(attempt).rejects.toThrow(GatewayError);
+    await attempt.catch((error: unknown) => {
+      expect((error as GatewayError).message).toContain("cannot use");
+    });
+  }
+});
+
+test("a yielded request with an unusable method or url never reaches the transport", async () => {
+  // `nodeHttpClient` throws ERR_INVALID_HTTP_TOKEN synchronously inside its
+  // Promise executor, so this would escape classification carrying the
+  // plugin's own text.
+  for (const request of [
+    { url: "https://api.acme.test/x", method: "GET junk", headers: [] },
+    { url: "not a url", method: "GET", headers: [] },
+    { url: "file:///etc/passwd", method: "GET", headers: [] },
+  ]) {
+    const broken: PluginOAuthFlow = {
+      ...kiloShaped,
+      async *exchange() {
+        yield request as never;
+        return {} as never;
+      },
+    };
+    const { sent, deps } = transport(() => ({ status: 200, body: "{}" }));
+    await expect(
+      oauthAdapter("acme", broken, ORIGINS).exchange(
+        { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
+        deps,
+      ),
+    ).rejects.toThrow(GatewayError);
+    expect(sent).toEqual([]);
+  }
+});
+
+test("an abandoned step still runs its own cleanup", async () => {
+  // A step stopped over the cap or outside its origins is left suspended, so a
+  // `finally` in the plugin never runs unless the host returns into it.
+  let cleaned = false;
+  const looping: PluginOAuthFlow = {
+    ...kiloShaped,
+    async *exchange() {
+      try {
+        while (true) {
+          yield { url: "https://api.acme.test/poll", method: "GET", headers: [] };
+        }
+      } finally {
+        cleaned = true;
+      }
+    },
+  };
+  const { deps } = transport(() => ({ status: 200, body: "{}" }));
+  await oauthAdapter("acme", looping, ORIGINS)
+    .exchange(
+      { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
+      deps,
+    )
+    .catch(() => {});
+
+  // Awaited indirectly: `gen.return` resolves on a microtask.
+  await Promise.resolve();
+  expect(cleaned).toBe(true);
 });

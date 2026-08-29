@@ -23,9 +23,17 @@ export const connect: Command = {
     // than of a module constant. That constant was built at import time from
     // the five compiled-in providers, so it could never have named a plugin's,
     // and this command does not load plugins to find out.
-    const ids = await connectable();
+    const { ids, failures } = await connectable();
     if (!ids.includes(providerId)) {
-      throw new UsageError(`provider must be one of ${ids.join(", ")}`);
+      // A plugin that failed to load is named, because it is the likeliest
+      // reason the id was refused and listing five built-ins says nothing about
+      // the broken plugin on disk.
+      const broken = failures.find((failure) => failure.id === providerId);
+      throw new UsageError(
+        broken === undefined
+          ? `provider must be one of ${ids.join(", ")}`
+          : `provider ${providerId} comes from a plugin that failed to load: ${broken.reason}`,
+      );
     }
 
     const flows = connectFlows(await ctx.store());

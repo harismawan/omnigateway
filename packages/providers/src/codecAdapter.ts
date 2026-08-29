@@ -1,6 +1,7 @@
 import { GatewayError, type ProviderId, type StreamEvent } from "@omni/ir";
 import type { CodecFail, ProviderCodec } from "./codec.ts";
 import { httpError } from "./http.ts";
+import { isHttpMethod, isSendableUrl, withinOrigins } from "./origins.ts";
 import type { AdapterRequest, AdapterResult, Capabilities, ProviderAdapter } from "./types.ts";
 
 /**
@@ -101,42 +102,6 @@ function rebound(id: ProviderId, error: GatewayError): GatewayError {
 }
 
 /**
- * Whether a codec's `url` is one `HttpClient` can actually be handed.
- *
- * Parsed rather than pattern-matched, because the thing that must not throw is
- * `new URL(…)` inside the transport, and the only honest way to know it will not
- * is to have called it. The scheme check is the second half: `file:`,
- * `data:` and the rest parse cleanly and then throw
- * `Protocol "file:" not supported` a layer deeper — and an outbound request the
- * host believes is HTTP is worth refusing on its own terms, not only because
- * Node happens to.
- */
-function isSendableUrl(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Whether a codec's `method` is one the transport will accept.
- *
- * A closed set rather than the RFC's token grammar. The grammar would admit
- * `FROBNICATE`, which is a valid token and not a request any provider serves, so
- * the narrower rule costs nothing and refuses at the point a reader can see why.
- * Codecs that need another verb add it here, which is a two-line core edit and
- * should read as one.
- */
-const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
-
-function isHttpMethod(value: unknown): value is string {
-  return typeof value === "string" && HTTP_METHODS.has(value);
-}
-
-/**
  * Runs one codec hook, turning anything it throws into a failover-able error.
  *
  * A `GatewayError` passes through untouched, and that exception is the point.
@@ -229,31 +194,6 @@ async function* guardStream(
  * deadline, whether to retry, whether to fail over. Nothing in this file
  * decides anything; it performs.
  */
-/**
- * Whether a URL the codec described is one its manifest admitted.
- *
- * Compared as **parsed origins**, never as text: `https://api.kilo.ai.evil.test`
- * has `https://api.kilo.ai` as a prefix, so a `startsWith` allowlist is a
- * suggestion. `URL.origin` normalises scheme, host and port together, which is
- * also what `net:outbound` compares for the plugin's own `fetch` — one rule,
- * enforced in the two places a plugin can cause a request.
- */
-function withinOrigins(url: string, origins: readonly string[]): boolean {
-  let target: URL;
-  try {
-    target = new URL(url);
-  } catch {
-    return false;
-  }
-  return origins.some((allowed) => {
-    try {
-      return new URL(allowed).origin === target.origin;
-    } catch {
-      return false;
-    }
-  });
-}
-
 export function codecAdapter(
   id: ProviderId,
   capabilities: Capabilities,

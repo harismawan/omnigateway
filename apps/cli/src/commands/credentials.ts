@@ -5,7 +5,6 @@ import {
   getCredential,
   listCredentials,
   listModels,
-  OAUTH_PROVIDERS,
   PROVIDER_IDS,
   type ProviderExists,
   patchCredential,
@@ -18,7 +17,7 @@ import { boolFlag, numberFlag, requirePositional, stringFlag, UsageError } from 
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatTime, note, paint, table } from "../output.ts";
-import { pluginProviders } from "./plugins.ts";
+import { connectRegistryFor, pluginProviders } from "./plugins.ts";
 
 /** One word for what the router would do with this credential right now. */
 function condition(credential: {
@@ -210,7 +209,11 @@ export const credentialsRefresh: Command = {
     const credential = await findCredential(ctx, id);
     const refresh = createRefresher({
       store,
-      providers: OAUTH_PROVIDERS,
+      // Merged, for the same reason `connect` merges: this process never calls
+      // `loadPlugins`, so the built-in table alone answers "provider does not
+      // support OAuth refresh" for a credential a plugin's own flow minted.
+      // Before a plugin could declare a flow the gap did not exist; it does now.
+      providers: (await connectRegistryFor(ctx.root.root)).providers,
       http: nodeHttpClient(),
       now: ctx.now,
     });

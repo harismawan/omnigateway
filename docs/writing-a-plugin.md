@@ -406,8 +406,11 @@ const oauth = {
 ```
 
 **Each step is a generator that describes requests rather than making them**, the
-same inversion the codec uses: you never hold an HTTP client, so nothing you
-write can reach the network on its own. The host applies the timeout, reads the
+same inversion the codec uses. You are not handed an HTTP client, so an honest
+flow cannot reach the network by accident, and an operator can read from your
+manifest where it goes. It is not a sandbox — you share the gateway's process
+and could call global `fetch` — which is the same thing the opening section says
+about every capability here. The host applies the timeout, reads the
 body, and counts the round trips — **capped per step**, so a flow that loops is
 stopped rather than holding an operator's connect open.
 

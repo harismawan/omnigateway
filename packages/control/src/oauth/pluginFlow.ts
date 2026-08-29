@@ -1,5 +1,11 @@
 import { type ErrorCode, GatewayError, type ProviderId } from "@omni/ir";
-import type { HeaderPair } from "@omni/providers";
+import {
+  type HeaderPair,
+  type HttpResponse,
+  isHttpMethod,
+  isSendableUrl,
+  withinOrigins,
+} from "@omni/providers";
 import type { UsageSecrets } from "@omni/store";
 import { createPkce, randomState } from "./pkce.ts";
 import {
@@ -138,37 +144,18 @@ function flowFailure(id: ProviderId, step: string, what: string): GatewayError {
   });
 }
 
-/**
- * Whether a URL the flow described is one its manifest admitted.
- *
- * The same rule `codecAdapter` applies to an inference URL, for the same reason:
- * a plugin's manifest is the only place an operator can read where it reaches,
- * and a rule enforced on one of the two paths a plugin can cause a request is
- * not enforced.
- */
-function withinOrigins(url: string, origins: readonly string[]): boolean {
-  let target: URL;
-  try {
-    target = new URL(url);
-  } catch {
-    return false;
-  }
-  return origins.some((allowed) => {
-    try {
-      return new URL(allowed).origin === target.origin;
-    } catch {
-      return false;
-    }
-  });
-}
-
 /** A yielded value that is actually a request the transport can be handed. */
 function isAuthRequest(value: unknown): value is AuthRequest {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<AuthRequest>;
   return (
-    typeof candidate.url === "string" &&
-    typeof candidate.method === "string" &&
+    // The shared predicates, not `typeof === "string"`. `nodeHttpClient` throws
+    // `Invalid URL` and `ERR_INVALID_HTTP_TOKEN` synchronously inside its
+    // Promise executor, so a bad url or verb from a plugin becomes a raw
+    // rejection carrying plugin-authored text — measured on the inference path,
+    // which is why these live in one place now.
+    isSendableUrl(candidate.url) &&
+    isHttpMethod(candidate.method) &&
     Array.isArray(candidate.headers) &&
     candidate.headers.every(
       (pair) =>
@@ -189,6 +176,25 @@ function isAuthRequest(value: unknown): value is AuthRequest {
  * trips — happens here, once, rather than in each plugin.
  */
 async function runStep<T>(
+  id: ProviderId,
+  step: string,
+  gen: AuthStep<T>,
+  deps: OAuthDeps,
+  origins: readonly string[] | undefined,
+): Promise<T> {
+  try {
+    return await drive(id, step, gen, deps, origins);
+  } finally {
+    // A step abandoned mid-flight — over the cap, outside its origins, or
+    // yielding something unusable — is left suspended, so a `finally` inside the
+    // plugin never runs. Returning into it lets that cleanup happen. Its own
+    // failure is swallowed: the host is already throwing the reason that
+    // matters, and a plugin's cleanup error must not replace it.
+    void gen.return(undefined as unknown as T).catch(() => {});
+  }
+}
+
+async function drive<T>(
   id: ProviderId,
   step: string,
   gen: AuthStep<T>,
@@ -219,14 +225,22 @@ async function runStep<T>(
     // inference path: a flow naming another provider would put that name into
     // the error an operator reads, and one supplying its own signal could
     // outlive the timeout.
-    const res = await deps.http({
-      provider: id,
-      url: described.url,
-      method: described.method,
-      headers: described.headers,
-      body: described.body ?? "",
-      signal: AbortSignal.timeout(STEP_TIMEOUT_MS),
-    });
+    // Guarded, because the transport can throw synchronously for reasons the
+    // shape checks above cannot fully exclude, and an unguarded rejection here
+    // escapes classification carrying whatever text it was built from.
+    let res: HttpResponse;
+    try {
+      res = await deps.http({
+        provider: id,
+        url: described.url,
+        method: described.method,
+        headers: described.headers,
+        body: described.body ?? "",
+        signal: AbortSignal.timeout(STEP_TIMEOUT_MS),
+      });
+    } catch (error) {
+      throw rethrow(id, step, error);
+    }
     const body = await res.text().catch(() => "");
 
     try {
@@ -234,6 +248,10 @@ async function runStep<T>(
     } catch (error) {
       throw rethrow(id, step, error);
     }
+  }
+  const shape = RETURN_SHAPE[step];
+  if (shape !== undefined && !shape(next.value)) {
+    throw flowFailure(id, step, "returned something the host cannot use");
   }
   return next.value;
 }
@@ -333,3 +351,51 @@ export function oauthAdapter(
       runStep(id, "begin", begin({ ...opts, ...helpers(deps) }), deps, origins),
   };
 }
+
+/**
+ * Whether a step returned the shape its caller is about to dereference.
+ *
+ * **Yields were validated and returns were not**, which left the same hole the
+ * inference path spent thirty lines closing: `connect.ts` reads
+ * `result.expiresAt` and spreads `...result.secrets`, so a step that returned
+ * `undefined` — a bare `return;` — produced a raw `TypeError` thrown outside
+ * every guard here. `classify` reads that as `INTERNAL`, and `RETRYABLE.INTERNAL`
+ * is false, so on the refresh path a plugin bug ends a request the pool could
+ * have served.
+ *
+ * Checked to exactly what a consumer dereferences and no further, which is the
+ * rule `checkDescriptor` follows for the same reason.
+ */
+function isFlowResult(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { secrets?: unknown; providerData?: unknown };
+  if (typeof candidate.secrets !== "object" || candidate.secrets === null) return false;
+  const secrets = candidate.secrets as Record<string, unknown>;
+  for (const field of ["accessToken", "refreshToken", "apiKey", "idToken"] as const) {
+    const held = secrets[field];
+    if (held !== null && typeof held !== "string") return false;
+  }
+  return typeof candidate.providerData === "object" && candidate.providerData !== null;
+}
+
+/** `start` and `begin` return this; `connect.ts` reads both fields immediately. */
+function isAuthorizeStart(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { authorizeUrl?: unknown; pending?: unknown };
+  return (
+    typeof candidate.authorizeUrl === "string" &&
+    typeof candidate.pending === "object" &&
+    candidate.pending !== null
+  );
+}
+
+/** What each step must have returned, by name. */
+const RETURN_SHAPE: Readonly<Record<string, (value: unknown) => boolean>> = {
+  start: isAuthorizeStart,
+  begin: isAuthorizeStart,
+  exchange: isFlowResult,
+  refresh: isFlowResult,
+  // `usage` may legitimately answer `null` — "the endpoint exists and said
+  // nothing usable" — which is why it is not in this table at all rather than
+  // having a predicate that accepts everything.
+};

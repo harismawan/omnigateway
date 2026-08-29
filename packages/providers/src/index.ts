@@ -17,6 +17,7 @@ export { decodeKiloChat, kiloAdapter, toKiloWire } from "./kilo/index.ts";
 export * from "./kimi/device.ts";
 export { decodeChat, kimiAdapter, toChatWire } from "./kimi/index.ts";
 export { decodeResponses, openaiAdapter, toResponsesWire } from "./openai/index.ts";
+export { isHttpMethod, isSendableUrl, withinOrigins } from "./origins.ts";
 export * from "./profile.ts";
 export type { ProviderRegistryEntry } from "./registry.ts";
 export { ADAPTERS, PROVIDERS, registerProvider } from "./registry.ts";

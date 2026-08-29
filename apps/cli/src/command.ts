@@ -34,7 +34,17 @@ export type CommandEnv = {
    * an unknown provider is refused without touching a database, which is
    * asserted and easy to lose by reading the set off the flows instead.
    */
-  connectable: () => Promise<readonly string[]>;
+  connectable: () => Promise<{
+    ids: readonly string[];
+    /**
+     * Plugins that declared a provider and did not yield one.
+     *
+     * Carried into the refusal rather than dropped: a broken plugin is the
+     * likeliest reason an id was refused, and it is the operator's actual next
+     * step. `credentials add-key` already does this.
+     */
+    failures: readonly { id: string; reason: string }[];
+  }>;
   /** Runs the gateway attached to this terminal, returning its exit code. */
   foreground: (input: {
     argv: readonly string[];
