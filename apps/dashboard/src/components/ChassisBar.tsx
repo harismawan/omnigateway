@@ -3,6 +3,7 @@ import { LogOut, MonitorCog, Moon, Sun } from "lucide-react";
 import { useMemo } from "react";
 import styled from "styled-components";
 import { useLogout, useLogs } from "../api/queries.ts";
+import type { RequestRow } from "../api/types.ts";
 import { formatMs, formatPercent, formatUsd } from "../lib/format.ts";
 import { bucketLogs, summarize } from "../lib/vitals.ts";
 import { useLive } from "../session/live.tsx";
@@ -96,7 +97,7 @@ const Separator = styled.span`
  * operator toggled and must not be reported as though it were.
  *
  * `offline` is about this transport, not about the gateway. The mark lamp at
- * the far left already says "gateway unreachable" and it is reading a different
+ * the far left says "request log unreadable" and it is reading a different
  * signal — one of them being wrong is useful information, and two indicators
  * that always agree hide that.
  */
@@ -127,7 +128,10 @@ const LIVE_STATES = {
     lamp: "down",
     head: "OFFLINE",
     tail: null,
-    title: "Not refreshing — the admin session ended, sign in again",
+    // "This session", not "the admin session": the client surface mounts this
+    // same bar, and a key holder whose own session expired was being told about
+    // one they never had.
+    title: "Not refreshing — this session ended, sign in again",
   },
 } as const;
 
@@ -141,22 +145,29 @@ const MODE_LABEL: Record<ThemeMode, string> = {
 /** Ten minutes of traffic, which is what the log tail reliably covers. */
 const WINDOW_MS = 600_000;
 
+export type ChassisProps = {
+  /** The request tail the pulse is read from, already scoped to the caller. */
+  logs: readonly RequestRow[];
+  /** True when that read failed, which the mark lamp reports as unreachable. */
+  logsFailed: boolean;
+  signOut: { pending: boolean; run: () => void };
+};
+
 /**
- * The rack's top strip: it never changes between screens, so the operator can
- * read the gateway's pulse without deciding to go look at it.
+ * The top strip itself: brand, pulse, refresh switch, theme, and the way out.
+ *
+ * The rows and the sign-out are handed in rather than read here, because the
+ * console and the client surface answer both differently — `/api/logs` against
+ * `/api/client/logs`, and a router navigation against a full reload — while
+ * every other decision on this bar is the same one. A second copy of the LIVE
+ * state table is a copy that gets a fifth state without this one.
  */
-export function ChassisBar() {
-  const navigate = useNavigate();
-  const { live, toggle, cadence, connection } = useLive();
+export function Chassis({ logs, logsFailed, signOut }: ChassisProps) {
+  const { live, toggle, connection } = useLive();
   const { mode, setMode } = useTheme();
-  const logout = useLogout();
-  const logs = useLogs(200, cadence(10_000, "res:logs"));
 
   const now = Date.now();
-  const rows = useMemo(
-    () => (logs.data ?? []).filter((log) => now - log.at <= WINDOW_MS),
-    [logs.data, now],
-  );
+  const rows = useMemo(() => logs.filter((log) => now - log.at <= WINDOW_MS), [logs, now]);
   const vitals = summarize(rows, WINDOW_MS);
   const buckets = bucketLogs(rows, { now, spanMs: WINDOW_MS, count: 24 });
 
@@ -175,7 +186,7 @@ export function ChassisBar() {
   const chip = LIVE_STATES[refresh];
 
   const health =
-    logs.isError || vitals.errorRate >= 0.25
+    logsFailed || vitals.errorRate >= 0.25
       ? "down"
       : vitals.errorRate >= 0.05
         ? "warn"
@@ -189,7 +200,11 @@ export function ChassisBar() {
         <Lamp
           state={health}
           label={
-            logs.isError ? "gateway unreachable" : `error rate ${formatPercent(vitals.errorRate)}`
+            // What failed, rather than what it might mean. On the console this
+            // read "gateway unreachable", which is one explanation of a failed
+            // log read; on the client surface the usual one is a 401 against a
+            // gateway that is answering `/health` perfectly well.
+            logsFailed ? "request log unreadable" : `error rate ${formatPercent(vitals.errorRate)}`
           }
         />
         Omnigateway
@@ -265,13 +280,35 @@ export function ChassisBar() {
         $size="sm"
         aria-label="Sign out"
         title="Sign out"
-        disabled={logout.isPending}
-        onClick={() => {
-          logout.mutate(undefined, { onSuccess: () => void navigate({ to: "/login" }) });
-        }}
+        disabled={signOut.pending}
+        onClick={signOut.run}
       >
         <LogOut />
       </IconButton>
     </Bar>
+  );
+}
+
+/**
+ * The rack's top strip: it never changes between screens, so the operator can
+ * read the gateway's pulse without deciding to go look at it.
+ */
+export function ChassisBar() {
+  const navigate = useNavigate();
+  const { cadence } = useLive();
+  const logout = useLogout();
+  const logs = useLogs(200, cadence(10_000, "res:logs"));
+
+  return (
+    <Chassis
+      logs={logs.data ?? []}
+      logsFailed={logs.isError}
+      signOut={{
+        pending: logout.isPending,
+        run: () => {
+          logout.mutate(undefined, { onSuccess: () => void navigate({ to: "/login" }) });
+        },
+      }}
+    />
   );
 }

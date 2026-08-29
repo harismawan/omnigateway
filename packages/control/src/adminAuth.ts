@@ -22,6 +22,20 @@ export type AdminAuth = {
   setInitialPassword(password: string): Promise<boolean>;
   login(password: string): Promise<string | null>;
 
+  /**
+   * Replaces the admin password, having been shown the current one.
+   *
+   * Returns false when `current` does not match, and changes nothing. The check
+   * is here rather than at the route because it is the same Argon2 verify
+   * `login` performs, and a caller that compared hashes itself would be a
+   * second place that decides what a correct password is.
+   *
+   * Re-authenticating is the point: an admin session is a cookie in a browser
+   * that may be sitting unattended, and a session cookie alone should not be
+   * able to lock the operator out of their own gateway.
+   */
+  changePassword(current: string, next: string): Promise<boolean>;
+
   /** Whether a read-only password has been set. */
   isViewerConfigured(): Promise<boolean>;
   /**
@@ -125,27 +139,61 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
     return key !== null && key.revokedAt === null;
   };
 
+  /**
+   * Writes a new admin password and ends every session.
+   *
+   * A local function rather than a method both entry points reach through the
+   * returned object: `changePassword` would otherwise depend on how it was
+   * called, and one destructured `const { changePassword } = admin` would
+   * silently stop clearing sessions.
+   */
+  const applyPassword = async (password: string): Promise<void> => {
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+    }
+    await store.config.setAdminPasswordHash(await hash(password, ARGON2));
+    // A password change is also a "log everyone out" event — every kind of
+    // session, because the operator changing their own password is the one
+    // action that should not leave someone else's window open.
+    sessions.clear();
+  };
+
   return {
     async isConfigured() {
       return (await store.config.getAdminPasswordHash()) !== null;
     },
 
-    async setPassword(password) {
-      if (password.length < MIN_PASSWORD_LENGTH) {
-        throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
-      }
-      await store.config.setAdminPasswordHash(await hash(password, ARGON2));
-      // A password change is also a "log everyone out" event — every kind of
-      // session, because the operator changing their own password is the one
-      // action that should not leave someone else's window open.
-      sessions.clear();
-    },
+    setPassword: applyPassword,
 
     async setInitialPassword(password) {
       if (password.length < MIN_PASSWORD_LENGTH) {
         throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
       }
       return store.config.setAdminPasswordHashIfAbsent(await hash(password, ARGON2));
+    },
+
+    async changePassword(current, next) {
+      // The length rule is checked **before** the current password, and the
+      // order is the whole security property.
+      //
+      // Reversed, the two failures answer differently — a wrong current
+      // password with a short new one is refused as unauthorised, a *correct*
+      // one with the same short new password is refused as a bad request — so
+      // `{current: guess, password: "x"}` becomes a free, unlimited,
+      // non-destructive oracle for the admin password against a stolen cookie.
+      // Rejecting the new password first collapses both to the same answer.
+      //
+      // It also equalises the work: the verify below is the only Argon2 either
+      // path runs, so a wrong guess and a right one take the same time. Leaving
+      // the length check after the verify would keep a ~2x latency split even
+      // once both returned the same status.
+      if (next.length < MIN_PASSWORD_LENGTH) {
+        throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+      }
+      const stored = await store.config.getAdminPasswordHash();
+      if (!(await passwordMatches(stored, current))) return false;
+      await applyPassword(next);
+      return true;
     },
 
     async login(password) {

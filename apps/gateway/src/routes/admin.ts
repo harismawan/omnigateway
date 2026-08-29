@@ -388,6 +388,44 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       /**
+       * Replaces the admin password, having been shown the current one.
+       *
+       * The session cookie is not enough on its own: it may be an unattended
+       * browser, and a cookie that could rewrite the credential behind it would
+       * turn "left the tab open" into "locked out of the gateway". The check
+       * itself is `@omni/control`'s, which is where every other decision about
+       * what a correct password is already lives.
+       *
+       * A success ends every session, this caller's included — so the response
+       * is a 200 whose cookie is already dead, and the console sends the
+       * operator to the login screen rather than pretending otherwise.
+       */
+      .put("/api/settings/password", async ({ request }) => {
+        await requireAdmin(request, deps.admin);
+        const body = await readJsonRecord(request);
+        const current = body?.current;
+        const password = body?.password;
+        if (typeof current !== "string" || typeof password !== "string") {
+          throw new GatewayError("BAD_REQUEST", "current and password are required");
+        }
+        let changed: boolean;
+        try {
+          changed = await deps.admin.changePassword(current, password);
+        } catch (error) {
+          throw new GatewayError("BAD_REQUEST", describeError(error, "invalid password"));
+        }
+        if (!changed) {
+          // Deliberately the same shape a failed login gets. Whether the
+          // current password was right is the one bit this route must not leak
+          // to anyone who reached it with a stolen cookie.
+          logger.info("admin password change refused", { reason: "invalid credentials" });
+          throw new GatewayError("AUTH", "current password is incorrect");
+        }
+        logger.info("admin password changed");
+        return { ok: true };
+      })
+
+      /**
        * Sets or clears the read-only administrator's password.
        *
        * A mutation, so `requireAdmin` — a viewer must not be able to change the

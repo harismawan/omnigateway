@@ -110,12 +110,17 @@ describe("AccountsBoard", () => {
     const weekly = screen.getByLabelText("7d window, 20% used");
     const quotaHeader = screen.getAllByRole("columnheader", { name: "Quota" })[0];
 
+    // The figure has a column of its own, so a 4% legend and a 100% one still
+    // start at the same x down the stack.
+    expect(within(fiveHour.parentElement as HTMLElement).getByText("95%")).toBeTruthy();
+    expect(within(weekly.parentElement as HTMLElement).getByText("20%")).toBeTruthy();
+
     expect(getComputedStyle(quotaHeader as HTMLElement).width).toBe("240px");
     expect(getComputedStyle(fiveHour.parentElement as HTMLElement).gridTemplateColumns).toBe(
-      "96px 1fr",
+      "96px 34px 1fr",
     );
     expect(getComputedStyle(weekly.parentElement as HTMLElement).gridTemplateColumns).toBe(
-      "96px 1fr",
+      "96px 34px 1fr",
     );
   });
 

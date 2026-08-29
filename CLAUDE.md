@@ -220,7 +220,22 @@ reviewing one — it open with what plugin can reach, which decide whether rest 
 - Encrypt provider credentials with required `OMNI_ENCRYPTION_KEY`; never add default secrets or
   commit `.env` files/databases.
 - Client errors omit provider tokens, credential IDs, internal stacks.
-- Preserve admin sessions on every `/api/*` route except documented setup/status/login flows.
+- Preserve admin sessions on every `/api/*` route except documented setup/status/login flows, and
+  the two password routes below, which end sessions **by design**.
+- **Two passwords, and neither have a default.** Admin password set once at `/api/setup`, replaced
+  at `PUT /api/settings/password` — which require the **current** one, because admin session is a
+  cookie in a browser that may sit unattended and a cookie that rewrite the credential behind it
+  turn "left tab open" into "locked out". Success clear **every** session, caller's included, so
+  console send operator to `/login?reason=password-changed` rather than refetch on a dead cookie.
+  Wrong current password answer exactly like a failed login — whether it was right is the one bit
+  that route must not leak to a stolen cookie.
+  Read-only (viewer) password is **optional and absent by default**: no row, `passwordMatches(null,
+  …)` refuse everything including empty string, `viewerConfigured` false, login screen not offer the
+  mode. `PUT /api/settings/viewer-password` set/replace it; `{"password": null}` withdraw it and
+  **delete** the row — empty string would be a hash verifying nothing while `isViewerConfigured`
+  still report it set. Absent field is `BAD_REQUEST`, never a quieter spelling of removal. Setting
+  or clearing it drop **viewer** sessions only: withdrawing someone else's access have not changed
+  the operator's own credential.
 
 ## Client contracts
 
@@ -233,12 +248,34 @@ Client surface:
 - `GET /health`: unauthenticated liveness
 
 `/api/client/*` is the key holder's own read surface: `login`, `logout`, `summary`, `usage`, `logs`,
-`quota`. Scope come from the verified session, never from a query parameter — the two arrive as
-separate arguments because they have separate provenance, and one door for both is how a client come
-to choose its own. Client session re-read its key row on **every** verify and refuse a revoked one;
-one checking at login alone outlive a revocation by the session TTL. Provider quota reach a client
-as `usedRatio` in `0..1` with credential identity stripped in `@omni/control` — a **ratio**, because
-`formatPercent` multiply by 100 and a 0..100 field render as `4200%`.
+`quota`, `quota/history`. Scope come from the verified session, never from a query parameter — the
+two arrive as separate arguments because they have separate provenance, and one door for both is how
+a client come to choose its own. Client session re-read its key row on **every** verify and refuse a
+revoked one; one checking at login alone outlive a revocation by the session TTL.
+
+Provider quota reach a client as **named accounts**. `accountQuota` return one row per
+credential+window carrying the operator's own `label`: a deliberate widening — a screen that
+collapsed a provider's accounts could not say *which* account was filling up — so every key holder
+learn how many accounts this install run and what they are called. `usedRatio` and
+`ratePerHourRatio` are fractions in `0..1` of that window's own ceiling, because `formatPercent`
+multiply by 100 and a 0..100 field render as `4200%`.
+**The ceiling behind those fractions is derivable, and that is accepted, not defended.** `usedRatio`
+is the exact quotient of two provider integers, recoverable in lowest terms by continued fractions,
+and `exhaustsAt` give it a second way — it is `observedAt + ((limit - used) / ratePerHour) * HOUR`,
+so with `resetsAt`, `windowMs` and `windowType` it reduce to `(limit - used) / used`. Rounding was
+tried and **does not work**: it leave `exhaustsAt` untouched, and rounding to a thousandth is the
+identity whenever the ceiling divide 1000, which the small ones do. Never reintroduce a rounding
+step and claim size is withheld — that claim shipped once, was false, and reader who believe it make
+worse decisions than one who know. `used`, `limit` and units-per-hour stay off the payload because
+the surfaces render percentages, not because they are secret.
+`stale` and `rolledOver` arrive as separate booleans and must stay separate — folding them blank a
+chart of measured readings for up to a poll interval after every rollover, which is the trap
+`quotaRolledOver` exist for. `/api/client/quota/history` is the same disclosure over time, one
+series per account and window, and carry **no gateway rate**: that aggregate cover every key on the
+installation, so it answer a question about the operator's traffic, not this client's. The pair of
+e2e tests in `clientSurface.test.ts` hold both halves — one assert no credential identity on
+`logs`/`usage`/`summary`, the other assert the quota routes *do* name accounts and still omit
+`used`/`limit`/`ratePerHour`.
 
 Every `/v1/*` request accept Bearer or `x-api-key`; reject conflicts. `null` model allowlist mean
 unrestricted; empty array deny all models.

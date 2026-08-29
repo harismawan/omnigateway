@@ -4,16 +4,15 @@ import type { UsageBucket } from "../../api/types.ts";
 import { formatCount, formatUsd } from "../../lib/format.ts";
 import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Row, ScrollX, Stack } from "../../ui/primitives.ts";
+import { Controls, Segment } from "../../ui/Segment.tsx";
 import {
   addTotals,
   allTokens,
   asBucket,
-  Controls,
   dayLabel,
   METRICS,
   type MetricId,
   metricOf,
-  Segment,
   startOfDay,
   type Totals,
   ZERO_TOTALS,

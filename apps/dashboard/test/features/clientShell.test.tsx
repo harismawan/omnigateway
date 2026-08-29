@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { ClientShell } from "../../src/components/ClientShell.tsx";
 import { ClientBoard } from "../../src/features/client/ClientBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { apiKey, log, usageBucket } from "../helpers/fixtures.ts";
+import { apiKey, clientLog, usageBucket } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 import { createStubTimer, installSocketStub, restoreSocketStub } from "../helpers/socketStub.ts";
 
@@ -17,8 +17,8 @@ function boardStub(over: Record<string, () => unknown> = {}) {
   return createFetchStub({
     "GET /api/client/summary": () => apiKey(),
     "GET /api/client/usage": () => [usageBucket({ key: "fast" })],
-    "GET /api/client/logs": () => ({ logs: [log()] }),
-    "GET /api/client/quota": () => ({ headroom: [] }),
+    "GET /api/client/logs": () => ({ logs: [clientLog()] }),
+    "GET /api/client/quota": () => ({ accounts: [] }),
     ...over,
   });
 }
@@ -47,7 +47,10 @@ describe("client shell", () => {
 
   test("signing out empties the cache rather than merely navigating", async () => {
     const user = userEvent.setup();
-    createFetchStub({ "POST /api/client/logout": () => ({ ok: true }) });
+    createFetchStub({
+      "POST /api/client/logout": () => ({ ok: true }),
+      "GET /api/client/logs": () => ({ logs: [] }),
+    });
 
     // A client of its own, with garbage collection off.
     //
@@ -66,16 +69,45 @@ describe("client shell", () => {
     );
     client.setQueryData(["client", "summary"], { id: "key-1", label: "laptop" });
     client.setQueryData(["client", "logs", 50], [{ id: "req-1" }]);
-    expect(client.getQueryCache().getAll().length).toBe(2);
+    expect(client.getQueryData(["client", "summary"])).toBeDefined();
+    expect(client.getQueryData(["client", "logs", 50])).toBeDefined();
 
     await user.click(screen.getByRole("button", { name: "Sign out" }));
 
     // The next person at this browser starts clean. Leaving the cache would
     // render one key holder's label and spend to whoever signs in next.
+    //
+    // Asserted on the seeded entries rather than on the size of the cache: the
+    // shell's own chassis observes `["client", "logs", 200]` for the pulse it
+    // draws, and a mounted observer refetches the instant `clear()` removes its
+    // query — so an emptied cache is briefly a cache of one, and a count would
+    // be racing that refetch rather than testing the sign-out. Neither seeded
+    // key is observed, so nothing can put them back.
     await waitFor(() => {
-      expect(client.getQueryCache().getAll().length).toBe(0);
+      expect(client.getQueryData(["client", "summary"])).toBeUndefined();
     });
-    expect(client.getQueryData(["client", "summary"])).toBeUndefined();
+    expect(client.getQueryData(["client", "logs", 50])).toBeUndefined();
+  });
+
+  test("the chassis pulse is read from the client's own log tail", async () => {
+    const stub = createFetchStub({ "GET /api/client/logs": () => ({ logs: [] }) });
+    renderWithProviders(
+      <ClientShell>
+        <div>panel</div>
+      </ClientShell>,
+    );
+
+    // The bar is the console's `Chassis`, and the console's copy reads
+    // `/api/logs` — a 401 for this session, and the whole gateway's traffic if
+    // it ever answered. The rows have to come in from the client route.
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.url.startsWith("/api/client/logs"))).toBe(true);
+    });
+    expect(stub.calls.some((call) => call.url.startsWith("/api/logs"))).toBe(false);
+
+    // And the refresh switch is there, which is what a client reads to know
+    // whether the numbers below are still moving.
+    expect(screen.getByRole("button", { name: /live|paused|offline/i })).toBeTruthy();
   });
 
   test("the shell renders no navigation to the operator's console", async () => {

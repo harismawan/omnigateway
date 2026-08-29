@@ -143,6 +143,14 @@ const ROUTES: ReadonlyArray<{
     body: { password: null },
     isolate: true,
   },
+  // A success here ends every session in the harness, this row's included.
+  {
+    method: "PUT",
+    path: "/api/settings/password",
+    allow: ["admin"],
+    body: { current: "hunter2hunter2", password: "a-longer-new-password" },
+    isolate: true,
+  },
 
   // The client's own surface, which the operator is deliberately not on: an
   // admin session is not a client session and has no key to be scoped to.
@@ -150,6 +158,7 @@ const ROUTES: ReadonlyArray<{
   { method: "GET", path: "/api/client/usage", allow: ["client"] },
   { method: "GET", path: "/api/client/logs", allow: ["client"] },
   { method: "GET", path: "/api/client/quota", allow: ["client"] },
+  { method: "GET", path: "/api/client/quota/history", allow: ["client"] },
 
   // The remaining reader widenings, which the hand-written table missed.
   { method: "GET", path: "/api/credentials/health", allow: ["admin", "viewer"] },

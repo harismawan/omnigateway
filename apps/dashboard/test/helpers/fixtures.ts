@@ -1,7 +1,10 @@
 import type {
+  AccountQuota,
+  AccountQuotaSample,
   ApiKeySummary,
   BodyArtifact,
   BurnEstimate,
+  ClientRequestLog,
   Credential,
   CredentialHealth,
   DatabaseOverview,
@@ -81,6 +84,43 @@ export function burn(patch: Partial<BurnEstimate> = {}): BurnEstimate {
     exhaustsAt: NOW + 1_800_000,
     survives: false,
     stale: false,
+    ...patch,
+  };
+}
+
+/**
+ * One account's window as the client surface receives it: a named account, and
+ * fractions rather than the ceilings behind them.
+ */
+export function headroom(patch: Partial<AccountQuota> = {}): AccountQuota {
+  return {
+    credentialId: "cred-1",
+    label: "claude-main",
+    provider: "anthropic",
+    windowType: "fiveHour",
+    usedRatio: 0.42,
+    resetsAt: NOW + 3_600_000,
+    observedAt: NOW - 60_000,
+    windowMs: null,
+    ratePerHourRatio: 0.1,
+    exhaustsAt: NOW + 5 * 3_600_000,
+    survives: true,
+    stale: false,
+    rolledOver: false,
+    ...patch,
+  };
+}
+
+export function accountQuotaSample(patch: Partial<AccountQuotaSample> = {}): AccountQuotaSample {
+  return {
+    credentialId: "cred-1",
+    label: "claude-main",
+    provider: "anthropic",
+    windowType: "fiveHour",
+    observedAt: NOW - 3_600_000,
+    usedRatio: 0.2,
+    resetsAt: NOW + 3_600_000,
+    windowMs: null,
     ...patch,
   };
 }
@@ -191,6 +231,47 @@ export function log(patch: Partial<RequestLog> = {}): RequestLog {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    ...patch,
+  };
+}
+
+/**
+ * A row as `/api/client/logs` actually returns it.
+ *
+ * Enumerated, not subtracted. Spreading `log()` and deleting six keys would
+ * satisfy the type today and hand over every column added to `RequestLog`
+ * tomorrow — excess properties introduced by a spread are not freshness-checked,
+ * so TypeScript would say nothing — and that is the shape `toClientLog`'s own
+ * docblock rejects for the same reason.
+ *
+ * The projection this mirrors is pinned by
+ * `apps/gateway/test/routes/clientLogShape.test.ts`. Handing a client test the
+ * operator's full row is what let a shared component read `rtkFilters` off a
+ * payload that has never carried it, while every test stayed green and the
+ * modal threw in a browser.
+ */
+export function clientLog(patch: Partial<ClientRequestLog> = {}): ClientRequestLog {
+  const row = log();
+  return {
+    id: row.id,
+    state: row.state,
+    at: row.at,
+    requestedModel: row.requestedModel,
+    resolvedProvider: row.resolvedProvider,
+    resolvedModel: row.resolvedModel,
+    attempts: row.attempts,
+    status: row.status,
+    errorCode: row.errorCode,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    cacheReadTokens: row.cacheReadTokens,
+    cacheWriteTokens: row.cacheWriteTokens,
+    ttftMs: row.ttftMs,
+    durationMs: row.durationMs,
+    costUsd: row.costUsd,
+    degradations: row.degradations,
+    rtkApplied: row.rtkApplied,
+    rtkEstimatedTokensSaved: row.rtkEstimatedTokensSaved,
     ...patch,
   };
 }

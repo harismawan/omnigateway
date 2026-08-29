@@ -787,3 +787,38 @@ test("get returns null for an unknown id", async () => {
   expect(await repo.get("nope")).toBeNull();
   db.close();
 });
+
+/**
+ * A limited read keeps the newest readings and still answers in span order.
+ *
+ * The limit exists for the unscoped reader — the client surface reads every
+ * credential at once — where the span bounds how far back the scan reaches and
+ * nothing bounds how many rows come back from it. Truncating the default
+ * ordering would cut the alphabetical tail, so whole accounts would vanish
+ * rather than every account's history getting shorter.
+ */
+test("listQuotaSamples honours a limit by dropping the oldest readings", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  await repo.create({ ...input, id: "c2", label: "second" });
+
+  // Six retained readings, alternating accounts, each one a change.
+  for (const [index, credentialId] of ["c1", "c2", "c1", "c2", "c1", "c2"].entries()) {
+    await repo.saveQuota([
+      { ...reading, credentialId, used: 5 + index, observedAt: 100 + index * 100 },
+    ]);
+  }
+  expect(await repo.listQuotaSamples(allSamples)).toHaveLength(6);
+
+  const limited = await repo.listQuotaSamples({ ...allSamples, limit: 3 });
+  expect(limited).toHaveLength(3);
+  // The three newest instants, whichever accounts they belong to.
+  expect(limited.map((row) => row.observedAt).sort((a, b) => a - b)).toEqual([400, 500, 600]);
+  // Both accounts survive, which cutting the default ordering would not have
+  // preserved: `c2` sorts last and would have gone first.
+  expect(new Set(limited.map((row) => row.credentialId))).toEqual(new Set(["c1", "c2"]));
+  // And the rows come back in the order an unlimited read uses.
+  const keys = limited.map((row) => `${row.credentialId}:${row.windowType}:${row.observedAt}`);
+  expect([...keys].sort()).toEqual(keys);
+  db.close();
+});

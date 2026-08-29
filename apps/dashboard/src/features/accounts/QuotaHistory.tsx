@@ -1,128 +1,12 @@
-import { quotaRolledOver, quotaVerdict } from "@omni/store/types";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import styled from "styled-components";
+import { quotaRolledOver } from "@omni/store/types";
 import { useQuotaHistory } from "../../api/queries.ts";
-import type { BurnEstimate, GatewayRate, QuotaSample, QuotaWindow } from "../../api/types.ts";
-import {
-  formatChartTime,
-  formatCount,
-  formatDateTime,
-  formatDuration,
-  isDatedSpan,
-} from "../../lib/format.ts";
-import {
-  budgetPace,
-  burnOf,
-  isQuotaStale,
-  projectedPace,
-  type QuotaPace,
-  type QuotaPoint,
-  quotaSegments,
-  WINDOW_LABEL,
-  withLiveReading,
-} from "../../lib/vitals.ts";
-import { Legend, Mono, Row, Stack } from "../../ui/primitives.ts";
-import { ChartBox, TipCard } from "../usage/shared.ts";
+import type { BurnEstimate, GatewayRate, QuotaWindow } from "../../api/types.ts";
+import { formatCount } from "../../lib/format.ts";
+import { burnOf, isQuotaStale, rateRatioOf, readingOf } from "../../lib/vitals.ts";
+import { Stack } from "../../ui/primitives.ts";
+import { chartSpanOf, ExtraFact, WindowChart } from "../quota/WindowChart.tsx";
 
-const Facts = styled(Row)`
-  gap: ${({ theme }) => theme.space(5)};
-  flex-wrap: wrap;
-`;
-
-const Fact = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-`;
-
-/** A state the provider left unreported, said in words rather than left blank. */
-const Absent = styled.span`
-  font-size: 11.5px;
-  color: ${({ theme }) => theme.color.inkDim};
-`;
-
-/**
- * How the two pace lines are told apart.
- *
- * By dash rather than by hue: colour on this console means provider identity or
- * state, and neither of these is either. Dashed also reads as inferred rather
- * than measured, which is exactly what separates a projection from the solid
- * line of readings underneath it.
- */
-export const PACE_DASH = { budget: "1 4", projection: "6 4" } as const;
-
-/** The series the projection is drawn as. One per panel, never per window. */
-const PROJECTION_KEY = "projected";
-
-type BudgetSeries = { key: string; pace: QuotaPace };
-
-/** A chart row is one instant and whatever each series had to say at it. */
-type PanelRow = { at: number; [series: string]: number };
-
-/**
- * One row per instant, so a pace endpoint landing on a reading shares its row
- * rather than sitting beside it as a second point at the same x.
- *
- * Series are sparse by construction: a row carries the one key it came from, so
- * every other series reads null at that instant. Nothing here keeps a run
- * contiguous in row space — a budget's endpoint sits at its own `resetsAt`,
- * which lands inside the measured run whenever the window was read after the
- * reset it stated — so the lines drawn from these rows connect across nulls
- * rather than breaking on them, and the window split is carried by the per-run
- * `dataKey` instead.
- */
-function chartRows(
-  series: ReadonlyArray<{ key: string; points: readonly QuotaPoint[] }>,
-): PanelRow[] {
-  const rows = new Map<number, PanelRow>();
-  for (const { key, points } of series) {
-    for (const point of points) {
-      const row = rows.get(point.at) ?? { at: point.at };
-      row[key] = point.percent;
-      rows.set(point.at, row);
-    }
-  }
-  return [...rows.values()].sort((a, b) => a.at - b.at);
-}
-
-/**
- * The span the chart covers.
- *
- * The requested span, widened to whatever a pace reaches past it. A preceding
- * window that ran longer than this one begins before the span was asked for,
- * and its budget would otherwise be drawn outside the plot.
- */
-function paceDomain(
-  since: number,
-  resetsAt: number,
-  budgets: readonly BudgetSeries[],
-): [number, number] {
-  return [
-    Math.min(since, ...budgets.map((budget) => budget.pace.from.at)),
-    Math.max(resetsAt, ...budgets.map((budget) => budget.pace.to.at)),
-  ];
-}
-
-/**
- * The span a window is charted over: itself, plus the one before it.
- *
- * The length comes from the two instants already known — a window that resets
- * at `resetsAt` and began at `windowStartsAt` is that long — so no nominal
- * duration is duplicated here.
- */
-function spanStartOf(window: QuotaWindow, estimate: BurnEstimate | undefined): number | null {
-  const start = estimate?.windowStartsAt ?? null;
-  if (start === null || window.resetsAt === null) return null;
-  return start - (window.resetsAt - start);
-}
+export { PACE_DASH } from "../quota/WindowChart.tsx";
 
 export type QuotaHistoryProps = {
   credentialId: string;
@@ -149,7 +33,7 @@ export function QuotaHistory({
 }: QuotaHistoryProps) {
   const panels = windows.map((window) => {
     const estimate = burnOf(burn, window.windowType);
-    return { window, estimate, since: spanStartOf(window, estimate) };
+    return { window, estimate, since: chartSpanOf(readingOf(window)) };
   });
 
   const starts = panels.map((panel) => panel.since).filter((since) => since !== null);
@@ -163,7 +47,7 @@ export function QuotaHistory({
   return (
     <Stack $gap={4}>
       {panels.map((panel) => (
-        <WindowPanel
+        <AccountWindow
           key={panel.window.windowType}
           window={panel.window}
           estimate={panel.estimate}
@@ -182,11 +66,11 @@ export function QuotaHistory({
   );
 }
 
-type WindowPanelProps = {
+type AccountWindowProps = {
   window: QuotaWindow;
   estimate: BurnEstimate | undefined;
   since: number | null;
-  samples: readonly QuotaSample[];
+  samples: readonly Parameters<typeof readingOf>[0][];
   /** Absent until the history request lands, and null when it has no span. */
   gatewayRate: GatewayRate | undefined;
   pollIntervalMs: number;
@@ -194,40 +78,14 @@ type WindowPanelProps = {
 };
 
 /**
- * What the projection reached, phrased against where it stopped.
+ * One window of one account, said in the units the provider reports.
  *
- * `projectedPace` truncates at the ceiling, so a pace that would have overshot
- * ends at 100% at its crossing instant rather than above it at the reset. "By
- * reset" would then be untrue in the one case it most matters: the window is
- * full before the reset arrives, which is the opposite of what that reads as.
+ * The chart itself is shared with the client surface, which is told fractions
+ * rather than counts; what this adds is the operator's vocabulary and the one
+ * fact only an operator may see — how much of the provider's counter this
+ * gateway can account for.
  */
-function projectedText(window: QuotaWindow, projection: QuotaPace | null): string {
-  if (projection === null) return "unknown";
-  if (window.resetsAt !== null && projection.to.at < window.resetsAt) {
-    return "100% of limit before it resets";
-  }
-  return `${Math.round(projection.to.percent)}% of limit by reset`;
-}
-
-/**
- * How the exhaustion estimate reads, always phrased against the reset.
- *
- * The verdict comes from `@omni/store/types` rather than from `survives`
- * directly, and `omni quota` phrases from the same call. `survives` is true by
- * construction whenever there is no `exhaustsAt` — which includes a window with
- * no ceiling and one with no inferable rate — so branching on it first prints
- * "lasts the window" beside a panel that is simultaneously reporting that
- * nothing is known.
- */
-function estimateText(window: QuotaWindow, estimate: BurnEstimate, now: number): string {
-  const verdict = quotaVerdict(window, estimate);
-  if (verdict === "ok") return "lasts the window";
-  if (verdict !== "empty" || estimate.exhaustsAt === null) return "unknown";
-  if (estimate.exhaustsAt <= now) return "empty now";
-  return `empty ~${formatDuration(estimate.exhaustsAt - now)} before it resets`;
-}
-
-function WindowPanel({
+function AccountWindow({
   window,
   estimate,
   since,
@@ -235,253 +93,52 @@ function WindowPanel({
   gatewayRate,
   pollIntervalMs,
   now,
-}: WindowPanelProps) {
-  const label = WINDOW_LABEL[window.windowType];
+}: AccountWindowProps) {
   const spent =
     window.limit === null
       ? `${formatCount(window.used)} used`
       : `${formatCount(window.used)} of ${formatCount(window.limit)} used`;
 
-  // The same rule the bars and the router use. An estimate derived from a
-  // reading nobody believes is worse than no estimate at all.
-  //
-  // A rolled-over window is not that case and is not blanked here. `burnFor`
-  // suppresses its rate, its exhaustion instant and its verdict — every claim
-  // about a window still being spent — but keeps where the window began, and
-  // the retained readings underneath were measured and stay measured. So the
-  // chart is drawn and every derived figure below reads "unknown" on its own,
-  // with the note saying which of the two happened. Blanking it instead threw
-  // away real history for up to a poll interval after every rollover.
+  // The same rule the bars and the router use, decided here because only this
+  // surface holds the poll interval to age a reading against. A rolled-over
+  // window is not that case and is passed on separately: `burnFor` suppresses
+  // every claim about a window still being spent while keeping where it began,
+  // and the readings underneath were measured and stay measured.
   const rolledOver = quotaRolledOver(window, now);
-  const stale = isQuotaStale(window, now, pollIntervalMs);
-  if (estimate === undefined || stale || (estimate.stale && !rolledOver)) {
-    return (
-      <Stack $gap={2}>
-        <Row $gap={2} $wrap>
-          <Legend>{label} window</Legend>
-          <Absent>{spent}</Absent>
-        </Row>
-        <Absent>reading is stale</Absent>
-      </Stack>
-    );
-  }
-
-  // The snapshot's own reading, on the run it belongs to. Everything below is
-  // derived from this list, so it happens before any of it.
-  const segments = withLiveReading(quotaSegments(samples), window);
-  // One budget per window drawn, the preceding one included: each is the pace
-  // that spends its own allowance exactly as its own window resets.
-  const budgets = segments.flatMap((segment) => {
-    const pace = budgetPace(segment);
-    return pace === null ? [] : [{ key: `${segment.key}-budget`, pace }];
-  });
-  // One projection, for the window still being spent. The windows before it
-  // are settled, and a forecast drawn onto one would be a forecast of the past.
-  const projection = projectedPace(window, estimate);
-  const rows = chartRows([
-    ...segments,
-    ...budgets.map((budget) => ({ key: budget.key, points: [budget.pace.from, budget.pace.to] })),
-    ...(projection === null
-      ? []
-      : [{ key: PROJECTION_KEY, points: [projection.from, projection.to] }]),
-  ]);
-  // Only a measured reading gets a tooltip; the pace lines are figures the
-  // facts row already states in words.
-  const measured = new Set(segments.map((segment) => segment.key));
-  // A full window and no further. Readings are capped at one, budgets end at
-  // one, and `projectedPace` truncates at the instant it reaches one — so
-  // nothing drawn here can exceed it. Scaling to an overshoot instead is what
-  // this used to do, and in the minutes after a rollover the whole-window
-  // average is large enough to put the axis in the thousands of percent and
-  // flatten every measured reading onto the floor.
-  const ceiling = 100;
-  // Computed once, because the axis is labelled by how much time it covers as
-  // well as bounded by it: a span wider than a day gets dated ticks, and dated
-  // ticks are wide enough to need a wider gap kept between them.
-  const domain =
-    since === null || window.resetsAt === null ? null : paceDomain(since, window.resetsAt, budgets);
+  const stale =
+    estimate === undefined ||
+    isQuotaStale(window, now, pollIntervalMs) ||
+    (estimate.stale && !rolledOver);
 
   return (
-    <Stack $gap={2}>
-      <Row $gap={2} $wrap>
-        <Legend>{label} window</Legend>
-        <Absent>{spent}</Absent>
-        {/* Said beside the reading it qualifies, because that reading is the
-            spent window's and the figures below are all "unknown" without it
-            saying why. */}
-        {rolledOver ? <Absent>· rolled over, waiting for the next reading</Absent> : null}
-      </Row>
-
-      <Facts>
-        <Fact>
-          <Legend>Window average</Legend>
-          <Mono>
-            {estimate.ratePerHour === null ? "unknown" : `${formatCount(estimate.ratePerHour)}/h`}
-          </Mono>
-        </Fact>
-        <Fact>
-          <Legend>Estimate</Legend>
-          <Mono>{estimateText(window, estimate, now)}</Mono>
-        </Fact>
-        <Fact>
-          <Legend>Projected</Legend>
-          <Mono>{projectedText(window, projection)}</Mono>
-        </Fact>
-        <Fact>
-          {/* Provider units and gateway tokens do not convert, so this is a
-              second rate beside the first, never a share of it. */}
-          <Legend>This gateway accounts for</Legend>
-          <Mono>
-            {gatewayRate?.gatewayRatePerHour === undefined ||
-            gatewayRate.gatewayRatePerHour === null
+    <WindowChart
+      live={readingOf(window)}
+      samples={samples.map(readingOf)}
+      since={since}
+      now={now}
+      ratePerHourRatio={rateRatioOf(window, estimate)}
+      exhaustsAt={estimate?.exhaustsAt ?? null}
+      survives={estimate?.survives ?? null}
+      stale={stale}
+      rolledOver={rolledOver}
+      spent={spent}
+      rateText={
+        estimate?.ratePerHour === undefined || estimate.ratePerHour === null
+          ? "unknown"
+          : `${formatCount(estimate.ratePerHour)}/h`
+      }
+      extraFact={
+        <ExtraFact
+          // Provider units and gateway tokens do not convert, so this is a
+          // second rate beside the first, never a share of it.
+          legend="This gateway accounts for"
+          value={
+            gatewayRate?.gatewayRatePerHour === undefined || gatewayRate.gatewayRatePerHour === null
               ? "unknown"
-              : `${formatCount(gatewayRate.gatewayRatePerHour)} tokens/h`}
-          </Mono>
-        </Fact>
-      </Facts>
-
-      {window.limit === null ? (
-        <Absent>no ceiling reported</Absent>
-      ) : domain === null ? (
-        <Absent>no reset reported</Absent>
-      ) : segments.length === 0 ? (
-        <Absent>not yet observed</Absent>
-      ) : (
-        <>
-          {/* Named because the two overlays cannot be told apart by colour,
-              and only where they were actually drawn. */}
-          <Legend>
-            {[
-              "Used, this window and the one before",
-              ...(budgets.length === 0 ? [] : ["budget dotted"]),
-              ...(projection === null ? [] : ["projection dashed"]),
-            ].join(" · ")}
-          </Legend>
-          <ChartBox $height={160}>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={rows} margin={{ top: 4, right: 8, bottom: 4, left: 4 }}>
-                <CartesianGrid stroke="var(--rule)" vertical={false} />
-                <XAxis
-                  dataKey="at"
-                  type="number"
-                  scale="time"
-                  domain={domain}
-                  tickFormatter={(at: number) => formatChartTime(at, domain[1] - domain[0])}
-                  tick={{ fill: "var(--ink-faint)", fontSize: 10 }}
-                  stroke="var(--rule-strong)"
-                  minTickGap={isDatedSpan(domain[1] - domain[0]) ? 80 : 40}
-                />
-                {/* The scale is stated, not inferred. Left to itself recharts
-                    stretches a numeric domain to whatever the data reached, so
-                    the axis would be describing the samples rather than the
-                    window, and nothing would hold it to a full window when the
-                    readings stay well below one. */}
-                <YAxis
-                  domain={[0, ceiling]}
-                  allowDataOverflow
-                  tickFormatter={(percent: number) => `${Math.round(percent)}%`}
-                  tick={{ fill: "var(--ink-faint)", fontSize: 10 }}
-                  stroke="var(--rule-strong)"
-                  width={40}
-                />
-                <Tooltip
-                  cursor={{ stroke: "var(--rule-strong)" }}
-                  content={({ active, payload }) => {
-                    if (active !== true || payload === undefined || payload.length === 0) {
-                      return null;
-                    }
-                    const point = payload.find((entry) => measured.has(String(entry.dataKey)));
-                    if (point === undefined || typeof point.value !== "number") return null;
-                    const at = (point.payload as { at: number }).at;
-                    return (
-                      <TipCard>
-                        {/* Dated unconditionally, unlike the ticks: a tooltip
-                            is asked for one point at a time and has the room,
-                            so there is nothing to buy by leaving it ambiguous
-                            on the panels whose axis happens to fit in a day. */}
-                        <div>{formatDateTime(at)}</div>
-                        <div>{point.value.toFixed(1)}% used</div>
-                      </TipCard>
-                    );
-                  }}
-                />
-                {/* One series per window. A single series drawn across a
-                    rollover would fall to the floor and read as a refund.
-                    `monotone`, as the usage panels draw theirs: a quota counter
-                    climbs as requests land, not in one jump at the instant it
-                    happened to be read, and monotone cubic will not overshoot a
-                    reading on the way to the next.
-
-                    What the curve does between two readings is drawing, not
-                    evidence. A step claimed no more: dedup drops the unchanged
-                    reading that would have made a flat stretch provable, so an
-                    interior gap cannot be read as "probed, and nothing moved".
-                    The trailing stretch is the exception and is the one the
-                    snapshot buys: `withLiveReading` ends the run at a reading
-                    that was actually taken, so that last stretch is flat
-                    because the account was read and had not moved.
-
-                    `connectNulls` because the window split is carried by the
-                    per-run `dataKey`, not by the nulls: `chartRows` writes a
-                    run's key at that run's own instants and nowhere else, so
-                    the only values this line can reach are its own and a null
-                    means "some other series had something to say at this
-                    instant", never "this run stopped". Breaking on them
-                    silently assumed runs were contiguous in row space, which a
-                    budget endpoint at `resetsAt` makes untrue the moment a
-                    window is read past its own reset. */}
-                {segments.map((segment) => (
-                  <Line
-                    key={segment.key}
-                    type="monotone"
-                    dataKey={segment.key}
-                    stroke="var(--accent)"
-                    strokeWidth={2}
-                    dot={
-                      // A run of one reading draws no stroke — a line needs two
-                      // points to be a line — so it is marked instead, in the
-                      // stroke's own colour rather than a second one.
-                      segment.points.length === 1
-                        ? { r: 2.5, fill: "var(--accent)", stroke: "var(--accent)" }
-                        : false
-                    }
-                    connectNulls
-                    isAnimationActive={false}
-                  />
-                ))}
-                {/* Two ends and nothing between them, so each pace connects
-                    across the readings it is drawn over rather than breaking
-                    on every instant it has no value for. */}
-                {budgets.map((budget) => (
-                  <Line
-                    key={budget.key}
-                    type="linear"
-                    dataKey={budget.key}
-                    stroke="var(--ink-faint)"
-                    strokeWidth={1.5}
-                    strokeDasharray={PACE_DASH.budget}
-                    dot={false}
-                    connectNulls
-                    isAnimationActive={false}
-                  />
-                ))}
-                {projection === null ? null : (
-                  <Line
-                    type="linear"
-                    dataKey={PROJECTION_KEY}
-                    stroke="var(--ink-dim)"
-                    strokeWidth={1.5}
-                    strokeDasharray={PACE_DASH.projection}
-                    dot={false}
-                    connectNulls
-                    isAnimationActive={false}
-                  />
-                )}
-              </LineChart>
-            </ResponsiveContainer>
-          </ChartBox>
-        </>
-      )}
-    </Stack>
+              : `${formatCount(gatewayRate.gatewayRatePerHour)} tokens/h`
+          }
+        />
+      }
+    />
   );
 }

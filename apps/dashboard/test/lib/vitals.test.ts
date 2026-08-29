@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { SAME_WINDOW_TOLERANCE_MS } from "@omni/store/types";
+import type { QuotaSample, QuotaWindow } from "../../src/api/types.ts";
 import { formatRelative } from "../../src/lib/format.ts";
 import {
   bucketLogs,
@@ -15,12 +16,24 @@ import {
   quotaLegend,
   quotaSegments,
   quotaUsage,
+  rateRatioOf,
+  readingOf,
   summarize,
   withLiveReading,
 } from "../../src/lib/vitals.ts";
 import { burn, health, log, NOW, quota, quotaSample } from "../helpers/fixtures.ts";
 
 const POLL_MS = 300_000;
+
+/**
+ * The fixtures in the ratio space the chart helpers speak.
+ *
+ * The assertions below stay written in the counts a provider actually reports,
+ * and `readingOf` — the one place a used/limit pair becomes a ratio — is
+ * exercised on the way in rather than stubbed around.
+ */
+const reading = (patch: Partial<QuotaSample> = {}) => readingOf(quotaSample(patch));
+const liveWindow = (patch: Partial<QuotaWindow> = {}) => readingOf(quota(patch));
 
 describe("isError", () => {
   test("counts a 4xx or 5xx status and any recorded error code", () => {
@@ -362,8 +375,8 @@ describe("burnOf", () => {
 describe("quotaSegments", () => {
   test("keeps one window's readings as a single series, oldest first", () => {
     const segments = quotaSegments([
-      quotaSample({ observedAt: NOW - 1_000, used: 400 }),
-      quotaSample({ observedAt: NOW - 3_000, used: 100 }),
+      reading({ observedAt: NOW - 1_000, used: 400 }),
+      reading({ observedAt: NOW - 3_000, used: 100 }),
     ]);
 
     expect(segments).toHaveLength(1);
@@ -375,10 +388,10 @@ describe("quotaSegments", () => {
     // `resetsAt` moves on every rollover, which is the only signal that the
     // drop in `used` is a new window and not consumption running backwards.
     const segments = quotaSegments([
-      quotaSample({ observedAt: NOW - 4_000, used: 200, resetsAt: NOW }),
-      quotaSample({ observedAt: NOW - 3_000, used: 800, resetsAt: NOW }),
-      quotaSample({ observedAt: NOW - 2_000, used: 50, resetsAt: NOW + 18_000_000 }),
-      quotaSample({ observedAt: NOW - 1_000, used: 300, resetsAt: NOW + 18_000_000 }),
+      reading({ observedAt: NOW - 4_000, used: 200, resetsAt: NOW }),
+      reading({ observedAt: NOW - 3_000, used: 800, resetsAt: NOW }),
+      reading({ observedAt: NOW - 2_000, used: 50, resetsAt: NOW + 18_000_000 }),
+      reading({ observedAt: NOW - 1_000, used: 300, resetsAt: NOW + 18_000_000 }),
     ]);
 
     expect(segments).toHaveLength(2);
@@ -395,11 +408,11 @@ describe("quotaSegments", () => {
     // `segments.length !== 0` suppressing the "not yet observed" note.
     const resets = NOW + 18_000_000;
     const segments = quotaSegments([
-      quotaSample({ observedAt: NOW - 1_200_000, used: 100, resetsAt: resets }),
-      quotaSample({ observedAt: NOW - 900_000, used: 200, resetsAt: resets + 137 }),
-      quotaSample({ observedAt: NOW - 600_000, used: 300, resetsAt: resets - 402 }),
-      quotaSample({ observedAt: NOW - 300_000, used: 400, resetsAt: resets + 1_985 }),
-      quotaSample({ observedAt: NOW, used: 500, resetsAt: resets + 44 }),
+      reading({ observedAt: NOW - 1_200_000, used: 100, resetsAt: resets }),
+      reading({ observedAt: NOW - 900_000, used: 200, resetsAt: resets + 137 }),
+      reading({ observedAt: NOW - 600_000, used: 300, resetsAt: resets - 402 }),
+      reading({ observedAt: NOW - 300_000, used: 400, resetsAt: resets + 1_985 }),
+      reading({ observedAt: NOW, used: 500, resetsAt: resets + 44 }),
     ]);
 
     expect(segments).toHaveLength(1);
@@ -413,24 +426,24 @@ describe("quotaSegments", () => {
     // the other never wrote.
     const resets = NOW + 18_000_000;
     const held = quotaSegments([
-      quotaSample({ observedAt: NOW - 1_000, resetsAt: resets }),
-      quotaSample({ observedAt: NOW, resetsAt: resets + SAME_WINDOW_TOLERANCE_MS }),
+      reading({ observedAt: NOW - 1_000, resetsAt: resets }),
+      reading({ observedAt: NOW, resetsAt: resets + SAME_WINDOW_TOLERANCE_MS }),
     ]);
     expect(held).toHaveLength(1);
 
     const split = quotaSegments([
-      quotaSample({ observedAt: NOW - 1_000, resetsAt: resets }),
-      quotaSample({ observedAt: NOW, resetsAt: resets + SAME_WINDOW_TOLERANCE_MS + 1 }),
+      reading({ observedAt: NOW - 1_000, resetsAt: resets }),
+      reading({ observedAt: NOW, resetsAt: resets + SAME_WINDOW_TOLERANCE_MS + 1 }),
     ]);
     expect(split).toHaveLength(2);
   });
 
   test("drops readings with no ceiling to draw them against", () => {
-    expect(quotaSegments([quotaSample({ limit: null }), quotaSample({ limit: 0 })])).toEqual([]);
+    expect(quotaSegments([reading({ limit: null }), reading({ limit: 0 })])).toEqual([]);
   });
 
   test("never draws past a full window", () => {
-    const segments = quotaSegments([quotaSample({ used: 4_000, limit: 1_000 })]);
+    const segments = quotaSegments([reading({ used: 4_000, limit: 1_000 })]);
 
     expect(segments[0]?.points[0]?.percent).toBe(100);
   });
@@ -442,8 +455,8 @@ describe("withLiveReading", () => {
   /** Two readings inside the live window, the newest of them long before now. */
   function idleRun() {
     return quotaSegments([
-      quotaSample({ observedAt: NOW - 3_000_000, used: 100, resetsAt: RESETS_AT }),
-      quotaSample({ observedAt: NOW - 2_000_000, used: 300, resetsAt: RESETS_AT }),
+      reading({ observedAt: NOW - 3_000_000, used: 100, resetsAt: RESETS_AT }),
+      reading({ observedAt: NOW - 2_000_000, used: 300, resetsAt: RESETS_AT }),
     ]);
   }
 
@@ -456,7 +469,7 @@ describe("withLiveReading", () => {
     // assertion written against a fixture where the two agree.
     const segments = withLiveReading(
       idleRun(),
-      quota({ used: 500, limit: 1_000, observedAt: NOW - 30_000, resetsAt: RESETS_AT }),
+      liveWindow({ used: 500, limit: 1_000, observedAt: NOW - 30_000, resetsAt: RESETS_AT }),
     );
 
     expect(segments).toHaveLength(1);
@@ -478,16 +491,16 @@ describe("withLiveReading", () => {
     const older = RESETS_AT - 50_000;
     const newer = RESETS_AT + 50_000;
     const runs = quotaSegments([
-      quotaSample({ observedAt: NOW - 3_000_000, used: 100, resetsAt: older }),
-      quotaSample({ observedAt: NOW - 2_500_000, used: 200, resetsAt: older }),
-      quotaSample({ observedAt: NOW - 2_000_000, used: 300, resetsAt: newer }),
-      quotaSample({ observedAt: NOW - 1_500_000, used: 400, resetsAt: newer }),
+      reading({ observedAt: NOW - 3_000_000, used: 100, resetsAt: older }),
+      reading({ observedAt: NOW - 2_500_000, used: 200, resetsAt: older }),
+      reading({ observedAt: NOW - 2_000_000, used: 300, resetsAt: newer }),
+      reading({ observedAt: NOW - 1_500_000, used: 400, resetsAt: newer }),
     ]);
     expect(runs).toHaveLength(2);
 
     const segments = withLiveReading(
       runs,
-      quota({ used: 600, limit: 1_000, observedAt: NOW - 30_000, resetsAt: RESETS_AT }),
+      liveWindow({ used: 600, limit: 1_000, observedAt: NOW - 30_000, resetsAt: RESETS_AT }),
     );
 
     expect(segments[0]?.points.map((point) => point.at)).toEqual([
@@ -508,7 +521,7 @@ describe("withLiveReading", () => {
     // trailing stretch of the line with it.
     const segments = withLiveReading(
       idleRun(),
-      quota({ used: 1_500, limit: 1_000, observedAt: NOW - 30_000, resetsAt: RESETS_AT }),
+      liveWindow({ used: 1_500, limit: 1_000, observedAt: NOW - 30_000, resetsAt: RESETS_AT }),
     );
 
     expect(segments[0]?.points[2]?.percent).toBe(100);
@@ -521,7 +534,7 @@ describe("withLiveReading", () => {
     const rolled = RESETS_AT + SAME_WINDOW_TOLERANCE_MS + 1;
     const segments = withLiveReading(
       idleRun(),
-      quota({ used: 900, limit: 1_000, observedAt: NOW - 30_000, resetsAt: rolled }),
+      liveWindow({ used: 900, limit: 1_000, observedAt: NOW - 30_000, resetsAt: rolled }),
     );
 
     expect(segments[0]?.points.map((point) => point.at)).toEqual([
@@ -535,7 +548,7 @@ describe("withLiveReading", () => {
     // history, and a panel drawing it alone would claim a chart it has no data
     // for.
     expect(
-      withLiveReading([], quota({ used: 300, limit: 1_000, resetsAt: RESETS_AT })),
+      withLiveReading([], liveWindow({ used: 300, limit: 1_000, resetsAt: RESETS_AT })),
     ).toHaveLength(0);
   });
 
@@ -544,7 +557,7 @@ describe("withLiveReading", () => {
     // instant. Appending it again would put two points on one x.
     const segments = withLiveReading(
       idleRun(),
-      quota({ used: 300, limit: 1_000, observedAt: NOW - 2_000_000, resetsAt: RESETS_AT }),
+      liveWindow({ used: 300, limit: 1_000, observedAt: NOW - 2_000_000, resetsAt: RESETS_AT }),
     );
 
     expect(segments[0]?.points).toHaveLength(2);
@@ -554,10 +567,10 @@ describe("withLiveReading", () => {
     // The same rule the retained readings are dropped under: a percentage of an
     // unstated limit is not a number.
     const runs = idleRun();
-    expect(withLiveReading(runs, quota({ used: 300, limit: null, resetsAt: RESETS_AT }))).toEqual(
-      runs,
-    );
-    expect(withLiveReading(runs, quota({ used: 300, limit: 0, resetsAt: RESETS_AT }))).toEqual(
+    expect(
+      withLiveReading(runs, liveWindow({ used: 300, limit: null, resetsAt: RESETS_AT })),
+    ).toEqual(runs);
+    expect(withLiveReading(runs, liveWindow({ used: 300, limit: 0, resetsAt: RESETS_AT }))).toEqual(
       runs,
     );
   });
@@ -568,7 +581,7 @@ describe("withLiveReading", () => {
     const runs = idleRun();
     const extended = withLiveReading(
       runs,
-      quota({ used: 300, limit: 1_000, observedAt: NOW, resetsAt: RESETS_AT }),
+      liveWindow({ used: 300, limit: 1_000, observedAt: NOW, resetsAt: RESETS_AT }),
     );
 
     expect(runs[0]?.points).toHaveLength(2);
@@ -590,7 +603,7 @@ function onlySegment(samples: Parameters<typeof quotaSegments>[0]) {
 describe("budgetPace", () => {
   test("runs from empty at the window start to full at the reset", () => {
     const resetsAt = NOW + HOUR;
-    const pace = budgetPace(onlySegment([quotaSample({ observedAt: NOW - 600_000, resetsAt })]));
+    const pace = budgetPace(onlySegment([reading({ observedAt: NOW - 600_000, resetsAt })]));
 
     // Five hours back from the reset, which is where this window began.
     expect(pace).toEqual({
@@ -603,7 +616,7 @@ describe("budgetPace", () => {
     // A three-hour window read as five puts the budget two hours too early, and
     // every reading then looks ahead of a pace it was never on.
     const resetsAt = NOW + HOUR;
-    const pace = budgetPace(onlySegment([quotaSample({ resetsAt, windowMs: 3 * HOUR })]));
+    const pace = budgetPace(onlySegment([reading({ resetsAt, windowMs: 3 * HOUR })]));
 
     expect(pace?.from.at).toBe(resetsAt - 3 * HOUR);
   });
@@ -612,8 +625,8 @@ describe("budgetPace", () => {
     const resetsAt = NOW + HOUR;
     const previous = resetsAt - 5 * HOUR;
     const segments = quotaSegments([
-      quotaSample({ observedAt: previous - HOUR, used: 400, resetsAt: previous }),
-      quotaSample({ observedAt: previous + HOUR, used: 100, resetsAt }),
+      reading({ observedAt: previous - HOUR, used: 400, resetsAt: previous }),
+      reading({ observedAt: previous + HOUR, used: 100, resetsAt }),
     ]);
     const [before, current] = segments.map((segment) => budgetPace(segment));
 
@@ -627,14 +640,14 @@ describe("budgetPace", () => {
   test("has no budget for a run the provider named no reset for", () => {
     // Nothing to count back from and no endpoint to draw to. Falling back to
     // the current window's reset would draw a pace for a different window.
-    expect(budgetPace(onlySegment([quotaSample({ resetsAt: null })]))).toBeNull();
+    expect(budgetPace(onlySegment([reading({ resetsAt: null })]))).toBeNull();
   });
 });
 
 describe("projectedPace", () => {
   test("carries the reading forward at the rate it was read at", () => {
     const window = quota({ used: 500, limit: 1_000, observedAt: NOW, resetsAt: NOW + 2 * HOUR });
-    const pace = projectedPace(window, burn({ ratePerHour: 100 }));
+    const pace = projectedPace(readingOf(window), rateRatioOf(window, burn({ ratePerHour: 100 })));
 
     // 100 units an hour against a thousand-unit ceiling is ten points an hour.
     expect(pace).toEqual({
@@ -655,7 +668,10 @@ describe("projectedPace", () => {
     // As `@omni/control` defines it: the remaining allowance at that rate.
     const exhaustsAt = observedAt + ((1_000 - 620) / ratePerHour) * HOUR;
 
-    const pace = projectedPace(window, burn({ ratePerHour, exhaustsAt }));
+    const pace = projectedPace(
+      readingOf(window),
+      rateRatioOf(window, burn({ ratePerHour, exhaustsAt })),
+    );
     if (pace === null) throw new Error("expected a projection");
     const crossesAt =
       pace.from.at +
@@ -675,7 +691,7 @@ describe("projectedPace", () => {
     const resetsAt = NOW + 7 * 24 * HOUR;
     const ratePerHour = 6_000;
     const window = quota({ used: 500, limit: 1_000, observedAt, resetsAt });
-    const pace = projectedPace(window, burn({ ratePerHour }));
+    const pace = projectedPace(readingOf(window), rateRatioOf(window, burn({ ratePerHour })));
     if (pace === null) throw new Error("expected a projection");
 
     // Truncated at the ceiling, not clipped flat against it: the endpoint moves
@@ -691,7 +707,7 @@ describe("projectedPace", () => {
     // There is no crossing instant ahead of the reading, so the projection is a
     // point at the ceiling rather than a line climbing away from it.
     const window = quota({ used: 1_400, limit: 1_000, observedAt: NOW, resetsAt: NOW + HOUR });
-    const pace = projectedPace(window, burn({ ratePerHour: 100 }));
+    const pace = projectedPace(readingOf(window), rateRatioOf(window, burn({ ratePerHour: 100 })));
 
     expect(pace).toEqual({
       from: { at: NOW, percent: 100 },
@@ -702,13 +718,17 @@ describe("projectedPace", () => {
   test("says nothing when there is no ceiling to be a percentage of", () => {
     const window = quota({ used: 500, limit: null, observedAt: NOW, resetsAt: NOW + HOUR });
 
-    expect(projectedPace(window, burn({ ratePerHour: 100 }))).toBeNull();
+    expect(
+      projectedPace(readingOf(window), rateRatioOf(window, burn({ ratePerHour: 100 }))),
+    ).toBeNull();
   });
 
   test("says nothing when the provider named no reset to project to", () => {
     const window = quota({ used: 500, limit: 1_000, observedAt: NOW, resetsAt: null });
 
-    expect(projectedPace(window, burn({ ratePerHour: 100 }))).toBeNull();
+    expect(
+      projectedPace(readingOf(window), rateRatioOf(window, burn({ ratePerHour: 100 }))),
+    ).toBeNull();
   });
 
   test("says nothing when the rate is unknown or standing still", () => {
@@ -716,8 +736,12 @@ describe("projectedPace", () => {
     // with one reading reports, and a flat line would claim it will never move.
     const window = quota({ used: 500, limit: 1_000, observedAt: NOW, resetsAt: NOW + HOUR });
 
-    expect(projectedPace(window, burn({ ratePerHour: null }))).toBeNull();
-    expect(projectedPace(window, burn({ ratePerHour: 0 }))).toBeNull();
+    expect(
+      projectedPace(readingOf(window), rateRatioOf(window, burn({ ratePerHour: null }))),
+    ).toBeNull();
+    expect(
+      projectedPace(readingOf(window), rateRatioOf(window, burn({ ratePerHour: 0 }))),
+    ).toBeNull();
   });
 });
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import styled from "styled-components";
 import {
   LOG_CADENCE_MS,
@@ -7,30 +7,19 @@ import {
   useKeys,
   useLogs,
 } from "../../api/queries.ts";
-import type { RequestLog } from "../../api/types.ts";
+import type { RequestRow } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
-import {
-  formatClock,
-  formatCount,
-  formatDateTime,
-  formatDuration,
-  formatMs,
-  formatUsd,
-  shortId,
-} from "../../lib/format.ts";
-import { isError, isPending, lampLabel, lampState } from "../../lib/vitals.ts";
+import { formatCount } from "../../lib/format.ts";
+import { isError, isPending } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
 import { Button } from "../../ui/Button.tsx";
-import { Chip, ProviderTag } from "../../ui/Chip.tsx";
 import { Input, Select } from "../../ui/Field.tsx";
-import { Lamp } from "../../ui/Lamp.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { Module } from "../../ui/Panel.tsx";
-import { Legend, Mono, Row, ScrollX, Stack, Truncate } from "../../ui/primitives.ts";
+import { Row, ScrollX } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
-import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
-import { ProcessingTokens, TokenBreakdown, tokenBreakdownLabel } from "../../ui/TokenBreakdown.tsx";
 import { BodyArtifact } from "./BodyArtifact.tsx";
+import { filterLogs, RequestDetail, RequestTable, useCurrentTime } from "./RequestTable.tsx";
 
 const LIMITS = [50, 100, 250, 500] as const;
 
@@ -67,45 +56,6 @@ const RequestLogScroller = styled(ScrollX)`
   overflow-y: auto;
 `;
 
-function useCurrentTime(active: boolean): number {
-  const [now, setNow] = useState(Date.now);
-
-  useEffect(() => {
-    if (!active) return;
-    setNow(Date.now());
-    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(interval);
-  }, [active]);
-
-  return now;
-}
-
-function TokenCell({ log }: { log: RequestLog }) {
-  return (
-    <Td
-      $align="right"
-      $mono
-      {...(isPending(log) ? { "aria-label": "processing" } : { title: tokenBreakdownLabel(log) })}
-    >
-      {isPending(log) ? <ProcessingTokens /> : <TokenBreakdown tokens={log} />}
-    </Td>
-  );
-}
-
-const Detail = styled.dl`
-  display: grid;
-  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
-  gap: 6px ${({ theme }) => theme.space(3)};
-  margin: 0;
-  font-size: 12.5px;
-`;
-
-const Value = styled.dd`
-  margin: 0;
-  font-family: ${({ theme }) => theme.font.mono};
-  word-break: break-all;
-`;
-
 /**
  * One row per request, most recent first.
  *
@@ -117,7 +67,7 @@ export function LogsBoard() {
   const [limit, setLimit] = useState<number>(100);
   const [filter, setFilter] = useState<Filter>("all");
   const [term, setTerm] = useState("");
-  const [open, setOpen] = useState<RequestLog | null>(null);
+  const [open, setOpen] = useState<RequestRow | null>(null);
 
   const logs = useLogs(limit, cadence(LOG_CADENCE_MS, "res:logs"));
   const credentials = useCredentials();
@@ -130,40 +80,22 @@ export function LogsBoard() {
   const hasPending = (logs.data ?? []).some(isPending);
   const now = useCurrentTime(liveUpdates && hasPending);
 
-  const names = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const credential of credentials.data ?? []) map.set(credential.id, credential.label);
-    return map;
-  }, [credentials.data]);
-
   /**
-   * Key labels by id.
+   * The labels a row is annotated with.
    *
-   * A row outlives the key that made it — a revoked key still has requests in
-   * the log — so a missing label falls back to the id rather than to nothing.
+   * A row outlives the key and the account that made it — a revoked key still
+   * has requests in the log — so a missing label falls back to the id rather
+   * than to nothing.
    */
-  const keyNames = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const key of keys.data ?? []) map.set(key.id, key.label);
-    return map;
-  }, [keys.data]);
+  const names = useMemo(
+    () => ({
+      accounts: new Map((credentials.data ?? []).map((row) => [row.id, row.label])),
+      keys: new Map((keys.data ?? []).map((key) => [key.id, key.label])),
+    }),
+    [credentials.data, keys.data],
+  );
 
-  const needle = term.trim().toLowerCase();
-  const rows = (logs.data ?? []).filter((log) => {
-    if (filter === "failed" && !isError(log)) return false;
-    if (needle.length === 0) return true;
-    return (
-      log.requestedModel.toLowerCase().includes(needle) ||
-      (log.resolvedModel ?? "").toLowerCase().includes(needle) ||
-      (log.errorCode ?? "").toLowerCase().includes(needle) ||
-      (log.credentialId === null ? "" : (names.get(log.credentialId) ?? ""))
-        .toLowerCase()
-        .includes(needle) ||
-      (log.apiKeyId === null ? "" : (keyNames.get(log.apiKeyId) ?? log.apiKeyId))
-        .toLowerCase()
-        .includes(needle)
-    );
-  });
+  const rows = filterLogs(logs.data ?? [], filter, term, names);
 
   const failed = (logs.data ?? []).filter(isError).length;
   const live = (logs.data ?? []).filter(isPending).length;
@@ -227,102 +159,7 @@ export function LogsBoard() {
           />
         ) : (
           <RequestLogScroller data-testid="request-log-scroller">
-            <Table>
-              <thead>
-                <tr>
-                  <Th />
-                  <Th $align="right">Time</Th>
-                  <Th>Requested</Th>
-                  <Th>Routed to</Th>
-                  <Th>Account</Th>
-                  <Th>Key</Th>
-                  <Th $align="right">Try</Th>
-                  <Th $align="right">TTFT</Th>
-                  <Th $align="right">Total</Th>
-                  <Th $align="right">Tokens</Th>
-                  <Th $align="right">Cost</Th>
-                  <Th>Outcome</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((log) => (
-                  <Tr key={log.id} $selectable onClick={() => setOpen(log)}>
-                    <Td>
-                      <Lamp state={lampState(log)} label={lampLabel(log)} />
-                    </Td>
-                    {/* Clock only: every row in a tail shares the day, and the
-                        full stamp is a hover away. */}
-                    <Td $align="right" $mono title={formatDateTime(log.at)}>
-                      {formatClock(log.at)}
-                    </Td>
-                    <Td $mono>
-                      <Truncate style={{ display: "block", maxWidth: "20ch" }}>
-                        {log.requestedModel || "—"}
-                      </Truncate>
-                    </Td>
-                    {/* A row still in flight has been measured for none of
-                        what follows. Its zeros are placeholders the gateway
-                        filed to keep the column NOT NULL, so printing them
-                        would state a nought that nobody counted. */}
-                    <Td>
-                      {log.resolvedProvider === null ? (
-                        <Legend>{isPending(log) ? "routing…" : "not routed"}</Legend>
-                      ) : (
-                        <Row $gap={1}>
-                          <ProviderTag provider={log.resolvedProvider} />
-                          <Mono $dim>{log.resolvedModel ?? "—"}</Mono>
-                        </Row>
-                      )}
-                    </Td>
-                    <Td>
-                      <Truncate style={{ display: "block", maxWidth: "18ch" }}>
-                        {log.credentialId === null
-                          ? "—"
-                          : (names.get(log.credentialId) ?? shortId(log.credentialId))}
-                      </Truncate>
-                    </Td>
-                    {/* A key that has since been revoked keeps its requests in
-                        the log, and the label goes with it. The id is the
-                        fallback, and the title, so a renamed key is still
-                        traceable to the row that named it. */}
-                    <Td>
-                      <Truncate
-                        style={{ display: "block", maxWidth: "16ch" }}
-                        title={log.apiKeyId ?? undefined}
-                      >
-                        {log.apiKeyId === null
-                          ? "—"
-                          : (keyNames.get(log.apiKeyId) ?? shortId(log.apiKeyId))}
-                      </Truncate>
-                    </Td>
-                    <Td $align="right" $mono>
-                      {isPending(log) ? "—" : log.attempts}
-                    </Td>
-                    <Td $align="right" $mono>
-                      {isPending(log) ? "—" : formatMs(log.ttftMs)}
-                    </Td>
-                    <Td $align="right" $mono>
-                      {isPending(log)
-                        ? formatDuration(Math.max(0, now - log.at))
-                        : formatMs(log.durationMs)}
-                    </Td>
-                    <TokenCell log={log} />
-                    <Td $align="right" $mono>
-                      {isPending(log) ? "—" : formatUsd(log.costUsd)}
-                    </Td>
-                    <Td>
-                      {isPending(log) ? (
-                        <Chip $tone="accent">live</Chip>
-                      ) : log.errorCode === null ? (
-                        <Chip $tone="ok">{log.status}</Chip>
-                      ) : (
-                        <Chip $tone="down">{log.errorCode}</Chip>
-                      )}
-                    </Td>
-                  </Tr>
-                ))}
-              </tbody>
-            </Table>
+            <RequestTable rows={rows} now={now} names={names} onOpen={setOpen} />
           </RequestLogScroller>
         )}
       </RequestLogModule>
@@ -343,94 +180,12 @@ export function LogsBoard() {
         }
       >
         {open === null ? null : (
-          <Stack $gap={3}>
-            <Detail>
-              <Legend as="dt">Request id</Legend>
-              <Value>{open.id}</Value>
-              <Legend as="dt">At</Legend>
-              <Value>{formatDateTime(open.at)}</Value>
-              <Legend as="dt">Requested model</Legend>
-              <Value>{open.requestedModel || "—"}</Value>
-              <Legend as="dt">Routed to</Legend>
-              <Value>
-                {isPending(open)
-                  ? "—"
-                  : open.resolvedProvider === null
-                    ? "not routed"
-                    : `${open.resolvedProvider} · ${open.resolvedModel ?? "—"}`}
-              </Value>
-              <Legend as="dt">Account</Legend>
-              <Value>
-                {open.credentialId === null
-                  ? "—"
-                  : (names.get(open.credentialId) ?? open.credentialId)}
-              </Value>
-              <Legend as="dt">Key</Legend>
-              <Value>
-                {open.apiKeyId === null ? "—" : (keyNames.get(open.apiKeyId) ?? open.apiKeyId)}
-              </Value>
-              <Legend as="dt">Attempts</Legend>
-              <Value>{isPending(open) ? "—" : open.attempts}</Value>
-              <Legend as="dt">Status</Legend>
-              {/* The snapshot the row was opened with. The log behind this
-                  refreshes on the next poll; the modal does not. */}
-              <Value>
-                {isPending(open)
-                  ? "in flight"
-                  : open.errorCode === null
-                    ? open.status
-                    : `${open.status} ${open.errorCode}`}
-              </Value>
-              <Legend as="dt">Timing</Legend>
-              <Value>
-                {isPending(open)
-                  ? "—"
-                  : `first token ${formatMs(open.ttftMs)} · total ${formatMs(open.durationMs)}`}
-              </Value>
-              <Legend as="dt">Tokens</Legend>
-              <Value>
-                {isPending(open) ? (
-                  "—"
-                ) : (
-                  <>
-                    {formatCount(open.inputTokens)} in · {formatCount(open.outputTokens)} out ·{" "}
-                    {formatCount(open.cacheReadTokens)} cache read ·{" "}
-                    {formatCount(open.cacheWriteTokens)} cache write
-                  </>
-                )}
-              </Value>
-              <Legend as="dt">Cost</Legend>
-              <Value>{isPending(open) ? "—" : formatUsd(open.costUsd)}</Value>
-              <Legend as="dt">RTK compression</Legend>
-              <Value>
-                {isPending(open)
-                  ? "—"
-                  : open.rtkApplied
-                    ? `${formatCount(open.rtkFilterHits)} hits · ${formatCount(open.rtkOriginalCodeUnits)} → ${formatCount(open.rtkCompressedCodeUnits)} code units · ~${formatCount(open.rtkEstimatedTokensSaved)} tokens saved`
-                    : "not applied"}
-              </Value>
-              <Legend as="dt">RTK filters</Legend>
-              <Value>{open.rtkFilters.length === 0 ? "—" : open.rtkFilters.join(", ")}</Value>
-            </Detail>
-
-            {open.degradations.length === 0 ? null : (
-              <Stack $gap={1}>
-                <Legend>Capabilities dropped to fit the target</Legend>
-                <Row $gap={1} $wrap>
-                  {open.degradations.map((degradation) => (
-                    <Chip key={degradation} $tone="warn">
-                      {degradation}
-                    </Chip>
-                  ))}
-                </Row>
-              </Stack>
-            )}
-
+          <RequestDetail log={open} names={names}>
             {/* Mounted with the row, so the artifact is fetched only while
                 someone is looking at it. It reports its own absence, so there
                 is nothing to guard on here. */}
             <BodyArtifact requestId={open.id} />
-          </Stack>
+          </RequestDetail>
         )}
       </Modal>
     </>

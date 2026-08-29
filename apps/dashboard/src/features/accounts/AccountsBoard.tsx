@@ -12,7 +12,7 @@ import {
 import type { Credential, ProviderId, VirtualModel } from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
-import { formatMs, formatRelative } from "../../lib/format.ts";
+import { formatMs, formatPercent, formatRelative } from "../../lib/format.ts";
 import {
   burnOf,
   credentialStatus,
@@ -28,7 +28,7 @@ import { Input, NumberInput } from "../../ui/Field.tsx";
 import { Lamp } from "../../ui/Lamp.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
-import { Legend, Row, ScrollX, Stack } from "../../ui/primitives.ts";
+import { Legend, Mono, Row, ScrollX, Stack } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
@@ -82,10 +82,18 @@ const Note = styled.span`
 
 const QuotaCell = styled.div`
   display: grid;
-  grid-template-columns: 96px 1fr;
+  /* Bar, figure, legend. The figure has a column of its own so the legends stay
+     aligned down the stack whether a window reads 4% or 100%. */
+  grid-template-columns: 96px 34px 1fr;
   align-items: center;
   min-width: 208px;
   gap: 6px;
+`;
+
+/** The reading the bar draws, in words, for anyone reading the number instead. */
+const Percent = styled(Mono)`
+  font-size: 11px;
+  text-align: right;
 `;
 
 /** One row per reported window, shortest first. */
@@ -363,6 +371,12 @@ export function AccountsBoard() {
                                             fraction={fraction}
                                             label={`${WINDOW_LABEL[window.windowType]} window, ${Math.round(fraction * 100)}% used`}
                                           />
+                                          {/* Whole percent: the bar is the
+                                              comparison and this is the
+                                              reading, and a decimal here would
+                                              be precision the probe interval
+                                              does not have. */}
+                                          <Percent>{formatPercent(fraction, 0)}</Percent>
                                           <Legend>
                                             {quotaLegend(
                                               window,

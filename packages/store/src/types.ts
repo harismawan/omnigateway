@@ -157,7 +157,18 @@ export function quotaVerdict(
   // A row written before snapshots existed carries no reading to age, so it is
   // unknown rather than stale even though it is suppressed the same way.
   if (window.observedAt > 0 && estimate.stale) return "stale";
-  if (estimate.ratePerHour === null || window.limit === null) return "unknown";
+  // `limit <= 0`, not `=== null`. A ceiling of zero or below is a ceiling
+  // nobody stated — nothing validates what a provider reports on its way into
+  // `quota_windows` — and every other site of that rule already says so:
+  // `usedRatioOf`, `rateRatioOf`, `burnFor`, the CLI's rate column and
+  // `reportedWindows`. This was the sixth and the only one that disagreed, so
+  // a non-positive ceiling reached the last line and answered **"ok"** — the
+  // affirmative safety claim the note above says must never be made about a
+  // window nothing is known about. `omni quota` printed it beside a used
+  // column reading `10/0`.
+  if (estimate.ratePerHour === null || window.limit === null || window.limit <= 0) {
+    return "unknown";
+  }
   if (estimate.survives === false && estimate.exhaustsAt !== null) return "empty";
   return estimate.survives === true ? "ok" : "unknown";
 }
@@ -286,6 +297,21 @@ export type QuotaSampleQuery = {
   until: number;
   /** Omitted means every credential. */
   credentialId?: string | undefined;
+  /**
+   * At most this many rows, newest first, still returned oldest-first.
+   *
+   * Omitted means every row in the span, which is what the operator's own
+   * disclosure asks for: it is scoped to one credential and gated behind a
+   * session. The unscoped reader — the client surface, reachable by every key
+   * holder — passes one, because a span alone bounds how far back a scan
+   * reaches and not how many rows come back from it.
+   *
+   * Newest first is what makes truncation honest here. Cutting the tail of the
+   * default ordering would drop whole accounts by name; cutting old readings
+   * shortens every account's history evenly, which is the direction a chart
+   * already reads.
+   */
+  limit?: number | undefined;
 };
 
 /**

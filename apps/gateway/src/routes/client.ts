@@ -1,8 +1,9 @@
 import {
   ADMIN_COOKIE,
   type AdminAuth,
+  accountQuota,
+  accountQuotaHistory,
   logLimit,
-  providerHeadroom,
   queryUsage,
   readOwnKey,
   recentLogs,
@@ -118,10 +119,37 @@ export function clientRoutes(deps: ClientDeps) {
         return { logs: rows.map(toClientLog) };
       })
 
-      /** Provider room, with credential identity removed in `@omni/control`. */
+      /**
+       * What room each provider account has left.
+       *
+       * Named accounts, and figures as fractions of the window they belong to
+       * because that is what the panels render. Both the labels and the
+       * derivable ceiling behind each fraction are a deliberate disclosure by
+       * the operator — `AccountQuota` in `@omni/control` records the decision
+       * and why rounding the ratios would not have changed it.
+       */
       .get("/api/client/quota", async ({ request }) => {
         await requireClient(request, deps.admin);
-        return { headroom: await providerHeadroom(deps.store) };
+        return { accounts: await accountQuota({ store: deps.store, now }) };
+      })
+
+      /**
+       * The retained readings behind those figures, charted rather than printed.
+       *
+       * One series per account and window, so a client can see which account is
+       * filling up rather than only that one of them is. The gateway's own token
+       * rate — an aggregate over every key on the installation — is deliberately
+       * not part of the answer.
+       *
+       * Clamping the span to what pruning left readable is `@omni/control`'s
+       * rule, not this handler's, exactly as it is on the operator's route.
+       */
+      .get("/api/client/quota/history", async ({ request, query }) => {
+        await requireClient(request, deps.admin);
+        return accountQuotaHistory(
+          { store: deps.store, now },
+          { since: query.since, until: query.until },
+        );
       })
   );
 }

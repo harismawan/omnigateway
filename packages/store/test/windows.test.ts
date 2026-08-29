@@ -112,6 +112,26 @@ test("no ceiling is unknown, never a claim that the window lasts", () => {
   expect(quotaVerdict({ ...observed, limit: null }, reading({ exhaustsAt: null }))).toBe("unknown");
 });
 
+/**
+ * A ceiling of zero or below is a ceiling nobody stated.
+ *
+ * Nothing validates what a provider reports on its way into `quota_windows`,
+ * and every other site of this rule already says `limit <= 0` — `usedRatioOf`,
+ * `rateRatioOf`, `burnFor`, the CLI's rate column, `reportedWindows`. This was
+ * the one that checked `=== null` alone, so `burnFor` returning the suppressed
+ * `survives: true` for such a row fell through to the last line and answered
+ * **"ok"**: an affirmative safety claim about a window nothing is known about,
+ * printed by `omni quota` beside a used column reading `10/0`.
+ */
+test("a non-positive ceiling is unknown, whichever way it is wrong", () => {
+  for (const limit of [0, -5]) {
+    expect({
+      limit,
+      verdict: quotaVerdict({ ...observed, limit }, reading({ exhaustsAt: null })),
+    }).toEqual({ limit, verdict: "unknown" });
+  }
+});
+
 test("no inferable rate is unknown, never a claim that the window lasts", () => {
   expect(quotaVerdict(observed, reading({ ratePerHour: null, exhaustsAt: null }))).toBe("unknown");
 });

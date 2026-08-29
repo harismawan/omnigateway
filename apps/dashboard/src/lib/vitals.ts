@@ -7,9 +7,8 @@ import type {
   BurnEstimate,
   CredentialHealth,
   DisabledReason,
-  QuotaSample,
   QuotaWindow,
-  RequestLog,
+  RequestRow,
 } from "../api/types.ts";
 import { formatDuration } from "./format.ts";
 
@@ -42,7 +41,7 @@ export function percentile(values: readonly number[], p: number): number | null 
 }
 
 /** A request the gateway is still serving. Its zeros are placeholders. */
-export function isPending(log: RequestLog): boolean {
+export function isPending(log: RequestRow): boolean {
   return log.state === "pending";
 }
 
@@ -54,12 +53,12 @@ export function isPending(log: RequestLog): boolean {
  * rate toward zero exactly when traffic picks up — the health strip would dip
  * for being busy.
  */
-export function completed(logs: readonly RequestLog[]): RequestLog[] {
+export function completed(logs: readonly RequestRow[]): RequestRow[] {
   return logs.filter((log) => !isPending(log));
 }
 
 /** A log row counts as an error on any non-2xx status the gateway recorded. */
-export function isError(log: RequestLog): boolean {
+export function isError(log: RequestRow): boolean {
   // A request in flight has not failed yet. Its status is a placeholder zero,
   // so this would read as success anyway; saying so makes that intent.
   if (isPending(log)) return false;
@@ -84,17 +83,17 @@ export const LAMP_GLYPH: Record<LampState, string> = {
  * The label is the lamp's accessible name, and for a live row it is the whole
  * signal: the animation says nothing to a screen reader.
  */
-export function lampState(log: RequestLog): LampState {
+export function lampState(log: RequestRow): LampState {
   if (isPending(log)) return "live";
   return isError(log) ? "down" : "ok";
 }
 
-export function lampLabel(log: RequestLog): string {
+export function lampLabel(log: RequestRow): string {
   if (isPending(log)) return "in flight";
   return isError(log) ? `failed with ${log.status}` : "succeeded";
 }
 
-export function summarize(all: readonly RequestLog[], windowMs: number): Vitals {
+export function summarize(all: readonly RequestRow[], windowMs: number): Vitals {
   const logs = completed(all);
   const ttfts: number[] = [];
   let errors = 0;
@@ -146,7 +145,7 @@ export type Bucket = {
  * gateway draws a flat line rather than an empty box.
  */
 export function bucketLogs(
-  all: readonly RequestLog[],
+  all: readonly RequestRow[],
   options: { now: number; spanMs: number; count: number },
 ): Bucket[] {
   const logs = completed(all);
@@ -293,6 +292,29 @@ export function isQuotaStale(window: QuotaWindow, now: number, pollIntervalMs: n
   return now - window.observedAt > quotaStaleAfterMs(pollIntervalMs);
 }
 
+/**
+ * A burn rate re-expressed as a fraction of its own window's ceiling per hour.
+ *
+ * The operator's estimate is in provider units, and everything drawn from it is
+ * a percentage of that window. Dividing once here is what lets the chart take a
+ * rate from either surface: a client is handed the fraction already, because
+ * that is the shape the chart plots.
+ *
+ * `<= 0` for the same reason `readingOf` uses it, and this is the third site of
+ * one rule — nothing validates a provider's reported ceiling on its way into
+ * `quota_windows`, so a negative one must be unknown here too. It was the site
+ * left behind when the other two were fixed, which is what a rule spread across
+ * three places does.
+ */
+export function rateRatioOf(
+  window: Pick<QuotaWindow, "limit">,
+  estimate: BurnEstimate | undefined,
+): number | null {
+  if (estimate?.ratePerHour === undefined || estimate.ratePerHour === null) return null;
+  if (window.limit === null || window.limit <= 0) return null;
+  return estimate.ratePerHour / window.limit;
+}
+
 /** The estimate for one window out of a credential's entries, if it has one. */
 export function burnOf(
   rows: readonly BurnEstimate[],
@@ -327,25 +349,119 @@ export function quotaLegend(
   formatRelative: (at: number, now: number) => string,
   burn: BurnEstimate | undefined,
 ): string {
+  return quotaLegendOf(
+    window,
+    {
+      stale: isQuotaStale(window, now, pollIntervalMs),
+      rolledOver: quotaRolledOver(window, now),
+      estimateStale: burn === undefined || burn.stale,
+      survives: burn?.survives ?? null,
+      exhaustsAt: burn?.exhaustsAt ?? null,
+    },
+    now,
+    formatRelative,
+  );
+}
+
+/**
+ * The verdicts a legend is phrased from, however the surface learnt them.
+ *
+ * The console ages the snapshot itself and reads `burnFor`'s estimate; a client
+ * is told both, because the staleness test needs a setting it cannot read and
+ * `quotaRolledOver` has exactly one copy by rule. Same words either way — the
+ * two are describing the same window.
+ */
+export type QuotaVerdicts = {
+  /** The reading is too old to believe. */
+  stale: boolean;
+  /** The reading counts a window whose own reset has already passed. */
+  rolledOver: boolean;
+  /** The estimate is suppressed, or there is none. */
+  estimateStale: boolean;
+  survives: boolean | null;
+  exhaustsAt: number | null;
+};
+
+/** `quotaLegend`, over verdicts a caller already holds rather than a snapshot. */
+export function quotaLegendOf(
+  window: Pick<QuotaWindow, "windowType" | "observedAt" | "resetsAt">,
+  verdicts: QuotaVerdicts,
+  now: number,
+  formatRelative: (at: number, now: number) => string,
+): string {
   const label = WINDOW_LABEL[window.windowType];
   if (window.observedAt <= 0) return `${label} · never observed`;
-  if (isQuotaStale(window, now, pollIntervalMs)) {
+  if (verdicts.stale) {
     return `${label} · stale, read ${formatRelative(window.observedAt, now)}`;
   }
-  if (quotaRolledOver(window, now)) {
+  if (verdicts.rolledOver) {
     return `${label} · rolled over, waiting for the next reading`;
   }
   if (window.resetsAt === null) return label;
 
   const reset = `resets ${formatRelative(window.resetsAt, now)}`;
-  if (burn === undefined || burn.stale || burn.survives !== false || burn.exhaustsAt === null) {
+  if (verdicts.estimateStale || verdicts.survives !== false || verdicts.exhaustsAt === null) {
     return `${label} · ${reset}`;
   }
   // A window at or past its ceiling ran out at some instant already behind us,
   // which is not a countdown an operator can act on.
   const empty =
-    burn.exhaustsAt <= now ? "empty now" : `empty ~${formatDuration(burn.exhaustsAt - now)}`;
+    verdicts.exhaustsAt <= now
+      ? "empty now"
+      : `empty ~${formatDuration(verdicts.exhaustsAt - now)}`;
   return `${label} · ${empty} · ${reset}`;
+}
+
+/**
+ * One reading of one quota window, in ratio space.
+ *
+ * The counts are divided out at the edge because two surfaces chart the same
+ * quantity from different rows: the operator reads `used` against a provider's
+ * own ceiling, and a client is handed the fraction already divided. Everything
+ * downstream is a percentage anyway, so the ratio is the widest shape that
+ * loses nothing — it is the chart's own unit, not a redaction.
+ *
+ * `usedRatio` is null where the provider stated no ceiling. A percentage of an
+ * unstated ceiling is not a number, and zero would claim an idle account.
+ */
+export type QuotaReading = {
+  observedAt: number;
+  windowType: QuotaWindow["windowType"];
+  windowMs: number | null;
+  resetsAt: number | null;
+  usedRatio: number | null;
+};
+
+/**
+ * The one place a used/limit pair becomes a ratio on this side of the wire.
+ *
+ * A ceiling of zero is unknown rather than a division, and overshoot clamps to
+ * fully spent — spend is debited after a request served, so `used > limit` is
+ * reachable and "150% used" is not a reading. `@omni/control` applies the same
+ * rule to the figures it sends a client, and the two must agree or one chart
+ * would disagree with the other about the same account.
+ */
+export function readingOf(row: {
+  observedAt: number;
+  windowType: QuotaWindow["windowType"];
+  windowMs: number | null;
+  resetsAt: number | null;
+  used: number;
+  limit: number | null;
+}): QuotaReading {
+  return {
+    observedAt: row.observedAt,
+    windowType: row.windowType,
+    windowMs: row.windowMs,
+    resetsAt: row.resetsAt,
+    // `<= 0`, not `=== 0`: the guards this replaced were `limit > 0`, and
+    // nothing validates what a provider reports on its way into
+    // `quota_windows`. A negative ceiling clamps to a ratio of zero and would
+    // be *drawn at 0%* — an account reported as untouched — where it used to be
+    // dropped as the non-reading it is.
+    usedRatio:
+      row.limit === null || row.limit <= 0 ? null : Math.min(1, Math.max(0, row.used / row.limit)),
+  };
 }
 
 export type QuotaPoint = { at: number; percent: number };
@@ -379,17 +495,17 @@ export type QuotaSegment = {
  * Readings with no ceiling are dropped: a percentage of an unstated limit is
  * not a number, and drawing them at zero would claim an idle account.
  */
-export function quotaSegments(samples: readonly QuotaSample[]): QuotaSegment[] {
+export function quotaSegments(samples: readonly QuotaReading[]): QuotaSegment[] {
   const usable = samples
-    .filter((sample) => sample.limit !== null && sample.limit > 0)
+    .filter((sample) => sample.usedRatio !== null)
     .sort((a, b) => a.observedAt - b.observedAt);
 
   const segments: QuotaSegment[] = [];
-  let previous: QuotaSample | undefined;
+  let previous: QuotaReading | undefined;
   for (const sample of usable) {
     const point = {
       at: sample.observedAt,
-      percent: Math.min(100, (sample.used / (sample.limit as number)) * 100),
+      percent: Math.min(100, (sample.usedRatio as number) * 100),
     };
     // Each run carries its own window, taken from its newest reading: a
     // historical run reset hours ago and against its own length, and reusing
@@ -436,12 +552,12 @@ export function quotaSegments(samples: readonly QuotaSample[]): QuotaSegment[] {
  */
 export function withLiveReading(
   segments: readonly QuotaSegment[],
-  window: QuotaWindow,
+  window: QuotaReading,
 ): QuotaSegment[] {
-  const { limit, used, observedAt } = window;
+  const { usedRatio, observedAt } = window;
   // The rule the readings themselves are dropped under: a percentage of an
   // unstated ceiling is not a number.
-  if (limit === null || limit <= 0) return [...segments];
+  if (usedRatio === null) return [...segments];
 
   // Compared through `sameWindow` for the reason `quotaSegments` splits on it:
   // a derived reset jitters by milliseconds per probe, and a run the snapshot
@@ -462,7 +578,7 @@ export function withLiveReading(
   const last = run.points[run.points.length - 1];
   if (last === undefined || last.at >= observedAt) return [...segments];
 
-  const point = { at: observedAt, percent: Math.min(100, (used / limit) * 100) };
+  const point = { at: observedAt, percent: Math.min(100, usedRatio * 100) };
   return segments.map((segment, position) =>
     position === index ? { ...segment, points: [...segment.points, point] } : segment,
   );
@@ -517,15 +633,18 @@ const HOUR_MS = 3_600_000;
  * flat there: that instant is the one `exhaustsAt` names, so the slope drawn is
  * still the rate that was read and the two stay one claim.
  */
-export function projectedPace(window: QuotaWindow, estimate: BurnEstimate): QuotaPace | null {
-  const { limit, resetsAt, observedAt, used } = window;
-  const rate = estimate.ratePerHour;
+export function projectedPace(window: QuotaReading, ratePerHour: number | null): QuotaPace | null {
+  const { usedRatio, resetsAt, observedAt } = window;
+  // The rate is a fraction of this window's own ceiling per hour, which is what
+  // makes the conversion below one multiplication rather than a division by a
+  // ceiling this side may not have been told.
+  const rate = ratePerHour;
   // Zero is not "holds steady": it is what a window with one reading reports,
   // and a flat line would promise it never moves again.
-  if (limit === null || limit <= 0 || resetsAt === null || rate === null || rate <= 0) return null;
+  if (usedRatio === null || resetsAt === null || rate === null || rate <= 0) return null;
 
-  const usedPercent = Math.min(100, (used / limit) * 100);
-  const percentPerHour = (rate / limit) * 100;
+  const usedPercent = Math.min(100, usedRatio * 100);
+  const percentPerHour = rate * 100;
   const from = { at: observedAt, percent: usedPercent };
   const endPercent = usedPercent + percentPerHour * ((resetsAt - observedAt) / HOUR_MS);
   if (endPercent <= 100) return { from, to: { at: resetsAt, percent: endPercent } };
@@ -540,7 +659,7 @@ export function projectedPace(window: QuotaWindow, estimate: BurnEstimate): Quot
 }
 
 /** Shortest window first, so a row reads left-to-right from soonest to latest. */
-const WINDOW_ORDER: Record<QuotaWindow["windowType"], number> = {
+export const WINDOW_ORDER: Record<QuotaWindow["windowType"], number> = {
   fiveHour: 0,
   daily: 1,
   weekly: 2,

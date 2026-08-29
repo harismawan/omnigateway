@@ -61,6 +61,60 @@ export type {
 export type ApiErrorBody = { error: { code: ErrorCode | string; message: string } };
 
 /**
+ * A request row as `/api/client/logs` returns it.
+ *
+ * Hand-mirrored from `ClientRequestLog` in `@omni/control`, which the console
+ * may not import. It is an enumerated projection there rather than `RequestLog`
+ * minus three keys, so it is enumerated here too: typing this as the store's own
+ * row is what let a component read `rtkFilters` off a payload that has never
+ * carried it, and TypeScript agreed because the fetch is an unchecked cast.
+ */
+export type ClientRequestLog = {
+  id: string;
+  state: RequestLog["state"];
+  at: number;
+  requestedModel: string;
+  /** Which provider served it. The *account* is deliberately not here. */
+  resolvedProvider: RequestLog["resolvedProvider"];
+  resolvedModel: string | null;
+  attempts: number;
+  status: number;
+  errorCode: RequestLog["errorCode"];
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  ttftMs: number | null;
+  durationMs: number;
+  costUsd: number;
+  degradations: string[];
+  rtkApplied: boolean;
+  rtkEstimatedTokensSaved: number;
+};
+
+/**
+ * What a shared request component may assume it has been handed.
+ *
+ * The fields both surfaces carry, plus the operator's own as optional. A
+ * component renders an optional field only where it has checked for it, so the
+ * client's narrower row is a value the same table can draw rather than a second
+ * table — and a column the client has no data for cannot be reached by
+ * forgetting a guard.
+ */
+export type RequestRow = ClientRequestLog &
+  Partial<
+    Pick<
+      RequestLog,
+      | "apiKeyId"
+      | "credentialId"
+      | "rtkFilters"
+      | "rtkFilterHits"
+      | "rtkOriginalCodeUnits"
+      | "rtkCompressedCodeUnits"
+    >
+  >;
+
+/**
  * Which surface a session belongs to.
  *
  * Mirrored rather than imported: `Principal` is declared in `@omni/control`,
@@ -82,16 +136,89 @@ export type StatusResponse = {
   viewerConfigured: boolean;
 };
 
-/** Provider room as a client sees it: no credential ids, no account labels. */
-export type ProviderHeadroom = {
+/**
+ * One provider account's window as a client sees it.
+ *
+ * The label is a deliberate disclosure by the operator — a screen that collapsed
+ * a provider's accounts could not say which one was filling up. The figures are
+ * fractions because that is what the bars and the chart render, **not** because
+ * the ceiling behind them is withheld: exact ratios and `exhaustsAt` both give
+ * it back, and `AccountQuota` in `@omni/control` records why that was accepted
+ * rather than rounded away.
+ */
+export type AccountQuota = {
+  /** Stable per account, and what a chart joins its retained readings on. */
+  credentialId: string;
+  /** The operator's own name for the account. */
+  label: string;
   provider: ProviderId;
   windowType: "fiveHour" | "daily" | "weekly";
-  /** Null where no account reported a ceiling. Unknown, never unlimited. */
+  /** Null where the account reported no ceiling. Unknown, never unlimited. */
   usedRatio: number | null;
   resetsAt: number | null;
+  /** When the account behind the ratio was last read; where the chart places it. */
+  observedAt: number;
+  windowMs: number | null;
+  /**
+   * Burn as a fraction of the window's own ceiling per hour.
+   *
+   * Scaled for the reason `usedRatio` is: a fraction is what the chart plots.
+   * Null where suppressed.
+   */
+  ratePerHourRatio: number | null;
+  /** When this window runs out at that rate; null when it will not or cannot be said. */
+  exhaustsAt: number | null;
+  /** Whether the window outlives its own reset. Null when the estimate is suppressed. */
+  survives: boolean | null;
+  /**
+   * True when the reading is too old to believe. Decided in `@omni/control`,
+   * because the test needs `quotaPollIntervalMs` and that setting lives on a
+   * route no client may read.
+   */
+  stale: boolean;
+  /**
+   * True when the reading counts a window whose reset is already behind us.
+   *
+   * Apart from `stale` because the panel treats them differently: a rolled-over
+   * reading is minutes old and its measured history stays on the chart, with
+   * only the inferences suppressed.
+   */
+  rolledOver: boolean;
 };
 
-export type ClientQuotaResponse = { headroom: ProviderHeadroom[] };
+export type ClientQuotaResponse = { accounts: AccountQuota[] };
+
+/**
+ * One retained reading of one account's window, as the client surface charts it.
+ *
+ * `usedRatio` is never null: a reading against an unstated ceiling is not a
+ * percentage of anything and is dropped in `@omni/control`, the same rule
+ * `quotaSegments` applies to the operator's readings.
+ */
+export type AccountQuotaSample = {
+  credentialId: string;
+  label: string;
+  provider: ProviderId;
+  windowType: "fiveHour" | "daily" | "weekly";
+  observedAt: number;
+  usedRatio: number;
+  resetsAt: number | null;
+  windowMs: number | null;
+};
+
+/** Both bounds are epoch milliseconds; the route clamps them to retention. */
+export type ClientQuotaHistoryQuery = { since: number; until?: number };
+
+/**
+ * No gateway rate here, unlike the operator's history response: that aggregate
+ * covers every key on the installation, so it answers a question about the
+ * operator's traffic rather than this client's.
+ */
+export type ClientQuotaHistoryResponse = {
+  samples: AccountQuotaSample[];
+  /** True when the read hit its row cap, so the series starts later than asked. */
+  truncated: boolean;
+};
 
 export type CredentialsResponse = { credentials: Credential[] };
 
@@ -292,6 +419,9 @@ export type UsageQuery = {
 export type UsageResponse = { rows: UsageBucket[] };
 
 export type LogsResponse = { logs: RequestLog[] };
+
+/** The client's own tail, which is a narrower row than the operator's. */
+export type ClientLogsResponse = { logs: ClientRequestLog[] };
 
 /**
  * One line of the gateway's own output.

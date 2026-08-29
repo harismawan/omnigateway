@@ -161,12 +161,19 @@ export {
   scopeOf,
 } from "./principal.ts";
 export { type BurnEstimate, type BurnInput, burnEstimates, burnFor } from "./quota/burn.ts";
-export { type ProviderHeadroom, providerHeadroom } from "./quota/headroom.ts";
+export {
+  type AccountQuotaHistoryInput,
+  type AccountQuotaHistoryResult,
+  type AccountQuotaSample,
+  accountQuotaHistory,
+} from "./quota/clientHistory.ts";
+export { type AccountQuota, accountQuota, usedRatioOf } from "./quota/headroom.ts";
 export {
   type GatewayRate,
   type QuotaHistoryInput,
   type QuotaHistoryResult,
   quotaHistory,
+  retainedSpan,
 } from "./quota/history.ts";
 export {
   type PollerDeps,

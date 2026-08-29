@@ -32,6 +32,47 @@ export type QuotaHistoryResult = {
 };
 
 /**
+ * The span a retained-reading request actually covers.
+ *
+ * Clamped to what pruning leaves readable, so a request for "everything" cannot
+ * read further back than the rows go, and forward to the clock, so a span
+ * cannot reach into the future. Both surfaces that read samples go through
+ * this: two copies of the clamp would be two answers to "how far back does this
+ * install remember", and the one that drifted would be silently wrong rather
+ * than broken.
+ */
+export async function retainedSpan(
+  deps: { store: Store; now: () => number },
+  input: { since?: string | number | undefined; until?: string | number | undefined },
+  /**
+   * The furthest back this caller may reach, where it is narrower than
+   * retention.
+   *
+   * `/api/credentials/quota/history` passes none: it is scoped to one
+   * credential and fetched only while a row is expanded. The client route
+   * passes one because it is reachable by every key holder and reads every
+   * credential at once. See `accountQuotaHistory`.
+   *
+   * Note the console route is `requireReader`, so a read-only administrator
+   * reaches the unbounded form too — a parameterless GET there is the whole
+   * retention window across every account, which is the same synchronous read
+   * this ceiling exists to bound. It predates this parameter and is not made
+   * worse by it, but it is not "the operator's alone" either.
+   */
+  maxSpanMs?: number,
+): Promise<{ since: number; until: number }> {
+  const now = deps.now();
+  const settings = await deps.store.config.getSettings();
+  const retained = now - settings.logRetentionDays * DAY_MS;
+  const oldest = maxSpanMs === undefined ? retained : Math.max(retained, now - maxSpanMs);
+
+  return {
+    since: Math.max(optionalNumber(input.since, oldest), oldest),
+    until: Math.min(optionalNumber(input.until, now), now),
+  };
+}
+
+/**
  * The gateway's own rate for each snapshot window, over that window's span.
  *
  * One aggregate per window rather than one per distinct span: spans are keyed
@@ -106,12 +147,7 @@ export async function quotaHistory(
   deps: { store: Store; now: () => number },
   input: QuotaHistoryInput,
 ): Promise<QuotaHistoryResult> {
-  const now = deps.now();
-  const settings = await deps.store.config.getSettings();
-  const oldest = now - settings.logRetentionDays * DAY_MS;
-
-  const since = Math.max(optionalNumber(input.since, oldest), oldest);
-  const until = Math.min(optionalNumber(input.until, now), now);
+  const { since, until } = await retainedSpan(deps, input);
   const raw = input.credentialId?.trim();
   const credentialId = raw === undefined || raw.length === 0 ? undefined : raw;
 

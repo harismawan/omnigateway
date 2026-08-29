@@ -5,10 +5,21 @@ import type { RequestLog } from "@omni/store";
  *
  * `RequestLog` is the operator's row and names the account that served the
  * request. A key holder is entitled to know what they sent, what it cost and
- * whether it worked; they are not entitled to know how many accounts the
- * operator runs or which one they were routed to. That is the same line
- * `providerHeadroom` draws, and it has to be drawn twice because the two
- * surfaces reach the same fact by different routes.
+ * whether it worked.
+ *
+ * What this still protects is **per-request attribution**, and only that. The
+ * accounts themselves are no longer hidden — `accountQuota` publishes every
+ * account's id and the operator's own label for it, by decision — so the fact
+ * kept back here is narrower than it once was: which account served *this*
+ * request, on this row, at this instant. That is a traffic-analysis surface the
+ * quota panel does not open, and it is why `isClientVisibleDegradation` drops
+ * `excluded:*` as well.
+ *
+ * An earlier version of this note claimed the client was not entitled to know
+ * how many accounts the operator runs, and cited `providerHeadroom` as drawing
+ * the same line. Both halves are now false: that function is gone, and the
+ * surface that replaced it names the accounts. Left recorded because a
+ * justification that has quietly stopped being true is worse than none.
  *
  * A projection rather than a `delete` on the row: the fields are enumerated, so
  * a column added to `RequestLog` later is absent here until somebody decides it

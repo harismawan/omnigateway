@@ -134,7 +134,7 @@ test("the mark lamp keeps answering its own question while the switch is offline
   );
 
   await screen.findByRole("button", { name: "offline" });
-  expect(screen.queryByRole("img", { name: "gateway unreachable" })).toBeNull();
+  expect(screen.queryByRole("img", { name: "request log unreadable" })).toBeNull();
 });
 
 test("a live socket reaches the chassis through the providers the app mounts", async () => {
