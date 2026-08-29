@@ -50,8 +50,9 @@ shape and why the HTTP client is built on `node:http`.
    `proxy.test.ts` is compiler-caught. Beware assertions that still pass by prefix.
 2. No store migration. `credentials.provider` is `TEXT` with no `CHECK`, and `providerData` is
    free-form.
-3. Directory is `packages/providers/src/<id>/`: `descriptor.ts` the record above, `index.ts`
-   transport, `wire.ts` IR to request, `decode.ts` stream to IR, `models.ts` catalog entry,
+3. Directory is `packages/providers/src/<id>/`: `descriptor.ts` the record above, `codec.ts` the
+   request and the stream read back, `index.ts` four lines joining the two through `codecAdapter`,
+   `wire.ts` IR to request, `decode.ts` stream to IR, `models.ts` catalog entry,
    `profile.ts` header set and body key order, plus `device.ts` where the provider wants a stable
    client fingerprint. Mint fingerprints synthetically at connect time and freeze them onto the
    credential; never read the real hostname or machine id.
@@ -82,9 +83,22 @@ shape and why the HTTP client is built on `node:http`.
    provider's own domain before use, and a discovery failure is `UPSTREAM`, never `AUTH` — `AUTH`
    disables the credential.
 7. Where a provider serves OAuth and API-key traffic from different hosts, or from different paths
-   on one host as `kilo` does, select the URL by credential type in the adapter and assert the split
-   in a test. Crossing them surfaces as a billing or entitlement error, which reads as anything but
-   a routing bug.
+   on one host as `kilo` does, select the URL by credential type where the request is built and
+   assert the split in a test. Crossing them surfaces as a billing or entitlement error, which reads
+   as anything but a routing bug.
+   **Write a `codec.ts`; there is no other shape.** `ProviderCodec` in
+   `packages/providers/src/codec.ts` describes a request and reads a stream; `codecAdapter` performs
+   it, checks the status, applies the deadline and refuses an empty body — once, for every provider,
+   instead of once per provider. All six built-ins are codecs and `codecAdapter` is the only
+   implementation of `ProviderAdapter` this repository ships, which is what makes the plugin
+   capability honest: a plugin-supplied provider takes exactly the shape a built-in does, so no rule
+   holds for one and not the other. `ProviderAdapter` survives as the *injection point* dispatch and
+   its tests construct — do not collapse it into the codec, or a test can no longer stub a provider.
+   Which example to read: `openai/` or `kilo/` for a plain provider, `kimi/` or `grok/` for a
+   credential-bound identity, `custom/` when the wire format is a property of the credential rather
+   than the provider, `anthropic/` when you need the optional hooks — `decodeState` to carry state
+   from the request to the stream, `cloakedTools` to report a count the redaction boundary permits,
+   `classifyError` to relabel a refusal the status alone cannot name.
 8. A provider that prices by request size cannot be expressed in `ProviderModelPricing`. Pick a
    tier, say so in a comment, and warn operators in `README.md`.
 9. Cover streaming and non-streaming, and mutation-test the load-bearing assertions — URL selection,

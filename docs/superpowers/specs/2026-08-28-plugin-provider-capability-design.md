@@ -188,11 +188,20 @@ live the moment a plugin provider exists:
   calls it, which is the site the note predicted: it narrows `unknown` to
   `ProviderId`, which is what lets the rest of that function treat a
   plugin-supplied id as one.
-- **Four unpinned copies of the provider-id grammar** validate plugin ids
+- ~~**Four unpinned copies of the provider-id grammar** validate plugin ids
   (`plugin-api/manifest.ts`, `gateway/plugins/routes.ts`, `control/plugins.ts`,
-  `store/sqlite/plugins.ts`). A plugin provider's id is a plugin id *and* a
-  provider id at once, so the two grammars can no longer be allowed to drift
-  independently. One of them should be pinned to `PROVIDER_ID_PATTERN` by test.
+  `store/sqlite/plugins.ts`).~~ **Closed**, and all four rather than the one this
+  note asked for: a list of three remaining unpinned copies has exactly the
+  property the thing it describes lacks.
+  `apps/gateway/test/plugins/pluginIdGrammar.test.ts` drives each through the
+  public function that consults it and compares verdicts with
+  `PROVIDER_ID_PATTERN` over a shared corpus. The copies stay — a plugin id and a
+  provider id are different things that happen to share a grammar, and three of
+  the four sites validate ids with no provider near them — but they may no longer
+  drift, because a registered descriptor's `id` must equal the manifest id and so
+  a plugin provider's id is one string answering to both. Behaviour rather than
+  `.source` equality: the constants are module-private, and widening a published
+  package's surface so a test can read one is a worse trade than the weakening.
 
 ## Credentials and auth
 
@@ -242,7 +251,42 @@ it.
   That is acceptable — it never leaves the codec — but it must not become the
   channel by which a plugin smuggles a client or a store handle into `decode`.
   The type should be `unknown` to the host and never inspected.
-- **Converting the built-ins is not free**, and this spec deliberately does not
+- ~~**Converting the built-ins is not free**, and this spec deliberately does not
   do it. Until they convert, `ProviderAdapter` and `ProviderCodec` coexist, which
-  is the two-shapes risk named above — bounded, because the conversion is
-  scheduled rather than hoped for, but real while it lasts.
+  is the two-shapes risk named above.~~ **Closed. All six have converted**, and
+  `codecAdapter` is now the only implementation of `ProviderAdapter` this
+  repository ships — so the sentence this spec opened with, that the contract "is
+  intended to become the shape of every adapter, built-in and plugin alike", is a
+  fact rather than an intention. `ProviderAdapter` remains as the injection point
+  dispatch and its tests construct; that is a seam, not a second shape.
+  Anthropic was pulled forward past the pair this spec named, and it earned its
+  place: it is the only provider using
+  `decodeState`, `cloakedTools` or `classifyError`, so until it converted those
+  three were designed rather than exercised. It found a gap — `CodecErrorInput`
+  carried the response body but not the host's own default error, and what
+  Anthropic reclassifies is `httpError`'s *parsed* message, so expressing the
+  fingerprint refusal meant re-implementing three extraction rules inside a codec
+  to arrive back at a value the host had already computed. `fallback` is now on
+  that input. **This is the argument for converting before publication rather
+  than after**: a hook nothing exercises is a hook nobody has checked.
+  The three that followed found nothing further, which is the outcome that makes
+  the contract publishable — and `custom` supplied the second independent user of
+  `decodeState` (its wire format is a property of the credential, so `decode`
+  cannot infer it), so that field is no longer justified by one provider alone.
+  One method note worth keeping: every conversion's parity was captured from the
+  hand-written adapter **before** it was replaced. Two of the six had a
+  `stream: true` override whose deletion survived every assertion, because the
+  wire encoder copies the client's own flag and every fixture was a streaming
+  request — the non-streaming case has to be written explicitly or the override
+  reads as covered when it is not. One consequence is worth recording because it
+  recurs with each: the byte-for-byte parity test that made kilo's conversion
+  safe *died with the adapter it compared against*, and kept passing as a
+  comparison of one implementation with itself. It was replaced by golden wire
+  assertions rather than deleted, because what parity was protecting — the exact
+  bytes in the exact header order the upstream expects — outlives the second
+  implementation that was proving it.
+  Kimi's conversion applied the lesson rather than repeating it: the wire was
+  captured from the adapter **before** it was replaced, so the literals in
+  `kimiCodec.test.ts` are evidence from two implementations and not a
+  restatement of the one that remains. Do that for each remaining conversion, and
+  expect the parity tautology to be green on the day it stops meaning anything.
