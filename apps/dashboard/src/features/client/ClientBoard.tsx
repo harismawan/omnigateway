@@ -285,10 +285,17 @@ export function ClientBoard() {
 
   // One span covering every window on the page, so opening a second account
   // reuses the request the first one made rather than keying a new one.
+  //
+  // Pinned to the minute, because the span is derived from `resetsAt` and a
+  // provider stating a whole-second countdown has its absolute reset rederived
+  // on every probe — it jitters by milliseconds while the window stands still.
+  // Unpinned, one such millisecond on whichever account holds the minimum
+  // re-keys this query and refetches the whole unscoped history every time the
+  // headroom poll lands, orphaning the page's previous copy of it.
   const spans = headroom
     .map((row) => chartSpanOf(readingOfHeadroom(row)))
     .filter((start) => start !== null);
-  const historySince = spans.length === 0 ? 0 : Math.min(...spans);
+  const historySince = spans.length === 0 ? 0 : Math.floor(Math.min(...spans) / 60_000) * 60_000;
   const history = useClientQuotaHistory(
     { since: historySince },
     openAccount !== null && spans.length > 0,
@@ -530,7 +537,7 @@ export function ClientBoard() {
                                     <WindowChart
                                       key={row.windowType}
                                       live={live}
-                                      samples={(history.data ?? [])
+                                      samples={(history.data?.samples ?? [])
                                         .filter(
                                           (sample) =>
                                             sample.credentialId === row.credentialId &&
@@ -546,6 +553,7 @@ export function ClientBoard() {
                                         }))}
                                       since={since}
                                       now={Date.now()}
+                                      truncated={history.data?.truncated === true}
                                       ratePerHourRatio={row.ratePerHourRatio}
                                       exhaustsAt={row.exhaustsAt}
                                       survives={row.survives}
@@ -557,8 +565,9 @@ export function ClientBoard() {
                                           : `${formatPercent(row.usedRatio, 0)} used`
                                       }
                                       // A percentage of this window's own
-                                      // ceiling: how full the account is, never
-                                      // how large it is.
+                                      // ceiling, which is the unit the panel
+                                      // reads in — the operator's counts are
+                                      // simply not what this screen plots.
                                       rateText={
                                         row.ratePerHourRatio === null
                                           ? "unknown"

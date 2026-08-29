@@ -9,7 +9,6 @@ import {
 import { del, get, patch, post, put, request, withQuery } from "./client.ts";
 import type {
   AccountQuota,
-  AccountQuotaSample,
   AgentModelMapping,
   ApiKeySummary,
   BurnEstimate,
@@ -656,21 +655,29 @@ export function useClientQuota(cadence: Cadence = 60_000): UseQueryResult<Accoun
 export function useClientQuotaHistory(
   query: ClientQuotaHistoryQuery,
   enabled = true,
-): UseQueryResult<AccountQuotaSample[]> {
+): UseQueryResult<ClientQuotaHistoryResponse> {
   return useQuery({
     queryKey: queryKeys.clientQuotaHistory(query),
     enabled,
-    queryFn: async ({ signal }) =>
-      (
-        await get<ClientQuotaHistoryResponse>(
-          withQuery("/api/client/quota/history", {
-            since: query.since,
-            ...(query.until === undefined ? {} : { until: query.until }),
-          }),
-          signal,
-        )
-      ).samples,
-    refetchInterval: false,
+    queryFn: ({ signal }) =>
+      get<ClientQuotaHistoryResponse>(
+        withQuery("/api/client/quota/history", {
+          since: query.since,
+          ...(query.until === undefined ? {} : { until: query.until }),
+        }),
+        signal,
+      ),
+    // Polled at the provider cadence, with **no** topic.
+    //
+    // `refetchInterval: false` was copied from the operator's hook, where it is
+    // right because `res:quota` invalidates it. That frame's entry names
+    // `["quota-history"]`, which this key's `["client", "quota-history", …]`
+    // does not match — and a client cannot hold `res:quota` anyway. So the copy
+    // meant an expanded chart never refreshed: retained readings up to the
+    // moment it opened, then one straight segment to a live figure that kept
+    // moving. Naming a topic here would be the same bug with a push that never
+    // arrives; the rule is to poll and name nothing.
+    refetchInterval: 300_000,
   });
 }
 

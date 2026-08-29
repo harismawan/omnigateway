@@ -41,14 +41,21 @@ async function withQuota(rows: QuotaRow[]) {
 }
 
 /**
- * The disclosure this surface makes, and the one it does not.
+ * The shape this surface publishes: a named account and fractions.
  *
- * Account names reach a client by the operator's decision: a screen that
- * collapsed a provider's accounts could not say which one was filling up. The
- * size of an account is a different question and is still withheld — every
- * figure is a fraction of the window it belongs to.
+ * Account names reach a client by the operator's decision — a screen that
+ * collapsed a provider's accounts could not say which one was filling up — and
+ * the ceiling behind each fraction is derivable, which is accepted rather than
+ * defended. See `AccountQuota`.
+ *
+ * So what the key-set assertion below pins is the payload's *shape*, not a
+ * secret: the provider's own counters are absent because the surfaces plot
+ * percentages, and a row carrying both is a row two fields from being a copy of
+ * the operator's. An earlier version of this test read the same assertions as
+ * proof that the counters "must not be reconstructible", which they never were
+ * — a substring check on a JSON string says nothing about arithmetic.
  */
-test("an account is named, and its ceiling is not", async () => {
+test("an account is named, and the row carries fractions rather than counters", async () => {
   const store = await withQuota([
     { id: "cred-1", provider: "anthropic", label: "claude-main", used: 250, limit: 1_000 },
   ]);
@@ -56,11 +63,6 @@ test("an account is named, and its ceiling is not", async () => {
   const [row] = await accountQuota({ store, now: () => NOW });
   expect(row?.label).toBe("claude-main");
   expect(row?.usedRatio).toBeCloseTo(0.25, 6);
-
-  // The provider's own counters must not be reconstructible from the payload.
-  const payload = JSON.stringify(row);
-  expect(payload).not.toContain("250");
-  expect(payload).not.toContain("1000");
   expect(
     Object.keys(row ?? {})
       .sort()

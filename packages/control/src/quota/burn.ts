@@ -105,8 +105,14 @@ export function burnFor(window: QuotaWindow, input: BurnInput): BurnEstimate {
         ? 0
         : window.used / elapsedHours;
 
+  // `limit <= 0`, the same test `usedRatioOf` and `rateRatioOf` apply, and the
+  // fourth site of that one rule. Nothing validates a provider's reported
+  // ceiling on the way into `quota_windows`, and a negative one here produced
+  // `exhaustsAt === observedAt` with `survives: false` — so a panel printed
+  // "empty now" beside a bar reading "no ceiling reported", one row saying both
+  // that nothing is known and that it has run out.
   const exhaustsAt =
-    window.limit === null || ratePerHour === null || ratePerHour <= 0
+    window.limit === null || window.limit <= 0 || ratePerHour === null || ratePerHour <= 0
       ? null
       : // A window already at or past its ceiling is empty now rather than at
         // some instant in the past.

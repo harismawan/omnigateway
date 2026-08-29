@@ -162,8 +162,8 @@ export type AccountQuota = {
   /**
    * Burn as a fraction of the window's own ceiling per hour.
    *
-   * Scaled for the reason `usedRatio` is: provider units are the size of an
-   * account a client is not entitled to know. Null where suppressed.
+   * Scaled for the reason `usedRatio` is: a fraction is what the chart plots.
+   * Null where suppressed.
    */
   ratePerHourRatio: number | null;
   /** When this window runs out at that rate; null when it will not or cannot be said. */
@@ -214,7 +214,11 @@ export type ClientQuotaHistoryQuery = { since: number; until?: number };
  * covers every key on the installation, so it answers a question about the
  * operator's traffic rather than this client's.
  */
-export type ClientQuotaHistoryResponse = { samples: AccountQuotaSample[] };
+export type ClientQuotaHistoryResponse = {
+  samples: AccountQuotaSample[];
+  /** True when the read hit its row cap, so the series starts later than asked. */
+  truncated: boolean;
+};
 
 export type CredentialsResponse = { credentials: Credential[] };
 

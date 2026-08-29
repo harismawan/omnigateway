@@ -122,10 +122,11 @@ export function clientRoutes(deps: ClientDeps) {
       /**
        * What room each provider account has left.
        *
-       * Named accounts, unnamed ceilings: `@omni/control` converts every figure
-       * to a fraction of the window it belongs to, so a client learns how full
-       * an account is and never how large it is. The account labels are a
-       * deliberate disclosure by the operator — see `AccountQuota`.
+       * Named accounts, and figures as fractions of the window they belong to
+       * because that is what the panels render. Both the labels and the
+       * derivable ceiling behind each fraction are a deliberate disclosure by
+       * the operator — `AccountQuota` in `@omni/control` records the decision
+       * and why rounding the ratios would not have changed it.
        */
       .get("/api/client/quota", async ({ request }) => {
         await requireClient(request, deps.admin);

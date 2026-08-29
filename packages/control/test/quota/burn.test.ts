@@ -215,3 +215,33 @@ test("the estimate reads no table at all", async () => {
   expect(estimate?.ratePerHour).toBe(50);
   expect(estimate?.exhaustsAt).toBe(OBSERVED + 18 * HOUR);
 });
+
+/**
+ * A negative ceiling is not a ceiling, and must not become an exhaustion time.
+ *
+ * Nothing validates what a provider reports on its way into `quota_windows`.
+ * Guarding `limit === null` alone let `Math.max(0, limit - used)` collapse to
+ * zero, so `exhaustsAt` came back as the reading's own instant with
+ * `survives: false` — and the panels printed "empty now" beside a bar that read
+ * "no ceiling reported", one row asserting both that nothing is known and that
+ * it has run out. The ratio helpers already treat `limit <= 0` as unknown; this
+ * is the fourth site of that rule.
+ */
+test("a negative ceiling yields no exhaustion estimate", () => {
+  const estimate = burnFor(
+    quota({
+      limit: -5,
+      used: 10,
+      observedAt: OBSERVED,
+      resetsAt: OBSERVED + HOUR,
+      windowType: "fiveHour",
+    }),
+    { now: OBSERVED, pollIntervalMs: POLL_MS },
+  );
+
+  expect(estimate.exhaustsAt).toBeNull();
+  // `survives` is true by construction when there is no exhaustion instant, and
+  // that is the reading a surface must not turn into "lasts the window": the
+  // verdict helper asks about the ceiling first.
+  expect(estimate.survives).toBe(true);
+});

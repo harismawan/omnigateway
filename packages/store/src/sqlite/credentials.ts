@@ -543,10 +543,15 @@ export function createCredentialRepo(
         )
         .all(...args);
       if (newestFirst) {
+        // Compared with `<`/`>` rather than `localeCompare`, because the order
+        // being reproduced is SQLite's `ORDER BY`, which is BINARY: a mixed-case
+        // id sorts one way there and another under a locale collator, so the
+        // limited and unlimited reads would disagree for the same rows.
+        const order = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
         rows.sort(
           (a, b) =>
-            a.credential_id.localeCompare(b.credential_id) ||
-            a.window_type.localeCompare(b.window_type) ||
+            order(a.credential_id, b.credential_id) ||
+            order(a.window_type, b.window_type) ||
             a.observed_at - b.observed_at,
         );
       }

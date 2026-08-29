@@ -26,12 +26,14 @@ import { burnFor } from "./burn.ts";
  *
  * `usedRatio` is the exact quotient of two of the provider's integers, and a
  * ratio of coprime integers comes back in lowest terms through continued
- * fractions. `exhaustsAt` gives it a second way: it is
- * `observedAt + ((limit - used) / ratePerHour) * HOUR`, so together with
- * `resetsAt`, `windowMs` and `windowType` it reduces to `(limit - used) / used`.
- * Rounding the ratios was tried and does not close it — it leaves `exhaustsAt`
- * untouched, and rounding to a thousandth is the identity whenever the ceiling
- * divides 1000, which the small ones do.
+ * fractions. That is the route that always works. `exhaustsAt` is a weaker
+ * second one — it is `observedAt + ((limit - used) / ratePerHour) * HOUR`, so
+ * with `resetsAt`, `windowMs` and `windowType` it reduces to
+ * `(limit - used) / used`, though it is millisecond-quantised and absent
+ * whenever the estimate is suppressed, so it recovers small ceilings and not
+ * large ones. Rounding the ratios was tried and does not close either: it left
+ * `exhaustsAt` untouched, and rounding to a thousandth is the identity whenever
+ * the ceiling divides 1000, which the small ones do.
  *
  * The operator's decision is that this is acceptable: the account is already
  * named here, and a key holder who can see an account fill up learning roughly

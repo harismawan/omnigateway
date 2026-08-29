@@ -193,6 +193,11 @@ export type WindowChartProps = {
   rateText: string;
   /** A further fact after the shared three, where a surface has one. */
   extraFact?: ReactNode;
+  /**
+   * True when the readings were capped, so the series starts later than the
+   * axis it is drawn against. Said in the legend rather than left to the eye.
+   */
+  truncated?: boolean;
 };
 
 /**
@@ -206,7 +211,7 @@ export type WindowChartProps = {
  * fraction precisely so the size of the operator's account stays unstated.
  */
 export function WindowChart(props: WindowChartProps) {
-  const { live, samples, since, now, stale, rolledOver, spent } = props;
+  const { live, samples, since, now, stale, rolledOver, spent, truncated = false } = props;
   const label = WINDOW_LABEL[live.windowType];
 
   // An estimate derived from a reading nobody believes is worse than no
@@ -296,10 +301,16 @@ export function WindowChart(props: WindowChartProps) {
       ) : (
         <>
           {/* Named because the two overlays cannot be told apart by colour,
-              and only where they were actually drawn. */}
+              and only where they were actually drawn.
+
+              The truncation note is here rather than left to the eye: the axis
+              is stated from the span asked for, so a series that starts late
+              draws exactly like a gateway that was not recording — the one
+              reading a client must not be given by accident. */}
           <Legend>
             {[
               "Used, this window and the one before",
+              ...(truncated ? ["earliest readings not shown"] : []),
               ...(budgets.length === 0 ? [] : ["budget dotted"]),
               ...(projection === null ? [] : ["projection dashed"]),
             ].join(" · ")}

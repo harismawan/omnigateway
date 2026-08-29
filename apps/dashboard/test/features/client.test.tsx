@@ -112,9 +112,11 @@ describe("client board", () => {
    *
    * Account names reach a key holder by the operator's decision — a screen that
    * collapsed a provider's accounts could not say which one was filling up. The
-   * ceilings behind the fractions are the half that stays withheld.
+   * row renders the fraction rather than the counts because a percentage is
+   * what the bar means, not because the ceiling is being kept back: it is
+   * derivable, and `AccountQuota` says why that was accepted.
    */
-  test("provider headroom names the account and not its ceiling", async () => {
+  test("provider headroom names the account and renders a fraction", async () => {
     stub({ "GET /api/client/quota": () => ({ accounts: [headroom()] }) });
     const { container } = renderWithProviders(<ClientBoard />);
 

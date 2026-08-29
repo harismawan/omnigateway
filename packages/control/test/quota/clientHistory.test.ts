@@ -47,8 +47,9 @@ async function historyOf(store: Store, now = NOW) {
 /**
  * The pair the chart joins on: which account, and what fraction it was at.
  *
- * The counts behind the fraction stay in `@omni/control` — an account a client
- * can watch filling up is not an account whose size it has been told.
+ * The counts behind the fraction stay in `@omni/control` because the chart
+ * plots percentages, not because they are secret — `AccountQuota` records why
+ * the ceiling is derivable anyway and why that was accepted.
  */
 test("a sample names its account and carries no provider units", async () => {
   const store = await seeded();
@@ -216,5 +217,64 @@ test("an explicit span cannot reach past that ceiling either", async () => {
   // Asking for everything is not a way around it.
   const result = await accountQuotaHistory({ store, now: () => NOW }, { since: 0 });
   expect(result.samples.map((s) => s.observedAt)).toEqual([NOW - HOUR]);
+  store.close();
+});
+
+/**
+ * The cap is asked of the store, and a read that hits it says so.
+ *
+ * Two tests rather than one seeded fixture: proving truncation end-to-end means
+ * writing fifty thousand rows, which is slow enough that nobody would run it.
+ * Watching the query instead pins the wiring — deleting `limit: MAX_SAMPLES`
+ * from the call left every other test in this file green — and a fabricated
+ * full page pins what the flag means.
+ */
+test("the store is asked for a bounded page", async () => {
+  const store = await seeded();
+  await reading(store, { credentialId: "cred-alpha", observedAt: NOW - HOUR, used: 10 });
+
+  const seen: Array<{ limit?: number | undefined }> = [];
+  const watched = {
+    ...store,
+    credentials: {
+      ...store.credentials,
+      listQuotaSamples: async (q: Parameters<typeof store.credentials.listQuotaSamples>[0]) => {
+        seen.push(q);
+        return store.credentials.listQuotaSamples(q);
+      },
+    },
+  } as Store;
+
+  const result = await accountQuotaHistory({ store: watched, now: () => NOW }, {});
+  expect(seen).toHaveLength(1);
+  expect(typeof seen[0]?.limit).toBe("number");
+  // A page that came back short of the cap is the whole history, not a slice.
+  expect(result.truncated).toBe(false);
+  store.close();
+});
+
+test("a full page is reported as truncated rather than drawn as a gap", async () => {
+  const store = await seeded();
+  const full = {
+    ...store,
+    credentials: {
+      ...store.credentials,
+      listQuotaSamples: async (q: Parameters<typeof store.credentials.listQuotaSamples>[0]) =>
+        // Exactly the cap: what the store returns when there was more to read.
+        Array.from({ length: q.limit ?? 0 }, (_unused, index) => ({
+          credentialId: "cred-alpha",
+          windowType: "fiveHour" as const,
+          observedAt: NOW - index * 60_000,
+          used: 10,
+          limit: 100,
+          resetsAt: RESETS_AT,
+          windowMs: null,
+        })),
+    },
+  } as Store;
+
+  // The panel states its own x axis from the span it asked for, so a shortened
+  // series drawn against it looks exactly like a gateway that was not running.
+  expect((await accountQuotaHistory({ store: full, now: () => NOW }, {})).truncated).toBe(true);
   store.close();
 });

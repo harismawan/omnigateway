@@ -7,10 +7,16 @@ import { requestLog } from "@omni/testkit";
  *
  * `toClientLog` enumerates what a key holder may see. The dashboard cannot
  * import `@omni/control`, so `ClientRequestLog` in `apps/dashboard/src/api/
- * types.ts` is a hand-kept copy, and this file is what keeps the two honest —
- * the same job `limitVocabulary.test.ts` does for the plugin API's limit
- * vocabulary, in the same place, because `apps/gateway` is where both sides are
- * reachable.
+ * types.ts` is a hand-kept copy.
+ *
+ * This file pins the *projection* to the list below. It cannot reach the
+ * console's copy — the dashboard is a separate project with its own tsconfig,
+ * and importing across would be the boundary this mirror exists because of — so
+ * the other hop is pinned from that side, by `apps/dashboard/test/api/
+ * mirrors.test.ts`, against the same list. Two tests, one list each, and a
+ * reader comparing them is diffing two sorted arrays. That is weaker than
+ * `limitVocabulary.test.ts`, which imports both sides because both are
+ * importable from here; this shape is not.
  *
  * Direction matters: `toClientLog` is the source of truth. A failure here means
  * the projection gained or lost a column and the console's copy is stale; the

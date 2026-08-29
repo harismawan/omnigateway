@@ -128,7 +128,10 @@ const LIVE_STATES = {
     lamp: "down",
     head: "OFFLINE",
     tail: null,
-    title: "Not refreshing — the admin session ended, sign in again",
+    // "This session", not "the admin session": the client surface mounts this
+    // same bar, and a key holder whose own session expired was being told about
+    // one they never had.
+    title: "Not refreshing — this session ended, sign in again",
   },
 } as const;
 
@@ -197,7 +200,11 @@ export function Chassis({ logs, logsFailed, signOut }: ChassisProps) {
         <Lamp
           state={health}
           label={
-            logsFailed ? "gateway unreachable" : `error rate ${formatPercent(vitals.errorRate)}`
+            // What failed, rather than what it might mean. On the console this
+            // read "gateway unreachable", which is one explanation of a failed
+            // log read; on the client surface the usual one is a 401 against a
+            // gateway that is answering `/health` perfectly well.
+            logsFailed ? "request log unreadable" : `error rate ${formatPercent(vitals.errorRate)}`
           }
         />
         Omnigateway

@@ -293,8 +293,8 @@ test("the quota routes name accounts and carry fractions rather than counters", 
   expect(body).toContain("cred-OPERATOR-ACCOUNT");
   expect(body).toContain("usedRatio");
   expect(body).toContain("0.25");
-  // The provider's own counters are what stay behind: a fraction says how full
-  // an account is, and these would say how large it is.
+  // The provider's own counters stay behind because the panels plot
+  // percentages — a shape claim, not a secrecy one.
   expect(body).not.toContain('"used"');
   expect(body).not.toContain('"limit"');
   expect(body).not.toContain('"ratePerHour"');

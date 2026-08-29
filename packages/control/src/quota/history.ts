@@ -46,9 +46,18 @@ export async function retainedSpan(
   input: { since?: string | number | undefined; until?: string | number | undefined },
   /**
    * The furthest back this caller may reach, where it is narrower than
-   * retention. The operator's route has no ceiling — an account's history is
-   * theirs to read — but the client route is reachable by every key holder and
-   * reads every credential at once, so it names one. See `accountQuotaHistory`.
+   * retention.
+   *
+   * `/api/credentials/quota/history` passes none: it is scoped to one
+   * credential and fetched only while a row is expanded. The client route
+   * passes one because it is reachable by every key holder and reads every
+   * credential at once. See `accountQuotaHistory`.
+   *
+   * Note the console route is `requireReader`, so a read-only administrator
+   * reaches the unbounded form too — a parameterless GET there is the whole
+   * retention window across every account, which is the same synchronous read
+   * this ceiling exists to bound. It predates this parameter and is not made
+   * worse by it, but it is not "the operator's alone" either.
    */
   maxSpanMs?: number,
 ): Promise<{ since: number; until: number }> {

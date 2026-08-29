@@ -28,7 +28,18 @@ export type AccountQuotaHistoryInput = {
   until?: string | number | undefined;
 };
 
-export type AccountQuotaHistoryResult = { samples: AccountQuotaSample[] };
+export type AccountQuotaHistoryResult = {
+  samples: AccountQuotaSample[];
+  /**
+   * True when the cap was reached, so the readings start later than asked for.
+   *
+   * Said rather than absorbed. The chart states its own x domain from the span
+   * it requested — deliberately, so the axis describes the window rather than
+   * the samples — and a truncated series drawn against it is an empty stretch
+   * that reads exactly like a gateway that was not running.
+   */
+  truncated: boolean;
+};
 
 /**
  * The furthest back a client may reach, whatever retention allows.
@@ -47,15 +58,20 @@ const MAX_SPAN_MS = 16 * 24 * 60 * 60 * 1_000;
 /**
  * And at most this many rows out of that span.
  *
- * The span bounds how far back the read reaches; it does not bound what comes
- * back from it. At the default five-minute poll interval, sixteen days is ~4600
- * readings per credential-window, so a dozen accounts with two windows each is
- * six figures of rows serialised synchronously for one unauthenticated-by-cost
- * caller. Eight thousand is more than any chart on the screen can plot — a
- * window's line is a few hundred points — and the store keeps the newest, so
- * hitting the cap shortens history rather than dropping an account.
+ * A runaway guard, not a working limit, and the distinction is the whole of
+ * this constant's history: it was 8_000 on the reasoning that "a window's line
+ * is a few hundred points", which is wrong by an order of magnitude. A weekly
+ * window charted with its predecessor spans fourteen days, and at the default
+ * five-minute poll that is ~4_000 readings per credential-window — so a single
+ * account with two windows already exceeded 8_000 and had its chart silently
+ * shortened to a fraction of the axis it was drawn against.
+ *
+ * Fifty thousand is past what any install this surface is built for produces in
+ * sixteen days, while still bounding a `bun:sqlite` read that is synchronous and
+ * reachable by every key holder. Hitting it is a real condition rather than a
+ * routine one, so it is reported rather than absorbed — see `truncated`.
  */
-const MAX_SAMPLES = 8_000;
+const MAX_SAMPLES = 50_000;
 
 /**
  * The retained readings behind the client screen's quota charts.
@@ -119,5 +135,9 @@ export async function accountQuotaHistory(
         a.windowType.localeCompare(b.windowType) ||
         a.observedAt - b.observedAt,
     ),
+    // Asked of the rows the store returned, before this fold drops the ones
+    // whose credential is gone: the cap is what the *read* hit, and a series
+    // shortened by it is shortened whether or not the tail survived the join.
+    truncated: samples.length >= MAX_SAMPLES,
   };
 }

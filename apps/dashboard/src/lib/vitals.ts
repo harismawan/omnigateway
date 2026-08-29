@@ -417,9 +417,9 @@ export function quotaLegendOf(
  *
  * The counts are divided out at the edge because two surfaces chart the same
  * quantity from different rows: the operator reads `used` against a provider's
- * own ceiling, and a client is told a fraction with the ceiling withheld — the
- * size of an account is the operator's infrastructure. Everything downstream is
- * a percentage anyway, so the ratio is the widest shape that loses nothing.
+ * own ceiling, and a client is handed the fraction already divided. Everything
+ * downstream is a percentage anyway, so the ratio is the widest shape that
+ * loses nothing — it is the chart's own unit, not a redaction.
  *
  * `usedRatio` is null where the provider stated no ceiling. A percentage of an
  * unstated ceiling is not a number, and zero would claim an idle account.
