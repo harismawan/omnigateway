@@ -310,18 +310,6 @@ test("each row carries its own account's instants", async () => {
 });
 
 /**
- * The ratio is rounded on the way out, and that is a disclosure control.
- *
- * A full-precision float64 of `used / limit` is a ratio of two integers, and a
- * ratio of coprime integers comes back in lowest terms through continued
- * fractions — so the exact quotient publishes the ceiling this surface exists
- * not to publish. The history endpoint makes it certain by handing out many
- * readings against one denominator.
- *
- * Asserted by running the recovery: an assertion on the rounded value alone
- * would pass against a change that rounded to twelve decimals.
- */
-/**
  * The ratio is the exact quotient, and the ceiling is therefore derivable.
  *
  * Written down as a test because it was briefly the opposite: a rounding step

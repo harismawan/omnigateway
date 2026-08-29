@@ -207,8 +207,9 @@ export type WindowChartProps = {
  * Shared by the operator's account disclosure and the client's provider
  * headroom panel. Everything drawn here is a percentage of the window, so the
  * two surfaces differ only in the units they *say* — provider counts against a
- * ceiling for the operator, a bare percentage for a client, who is told the
- * fraction precisely so the size of the operator's account stays unstated.
+ * ceiling for the operator, a bare percentage for a client, whose surface is
+ * handed the fraction already divided because that is the unit its panels read
+ * in.
  */
 export function WindowChart(props: WindowChartProps) {
   const { live, samples, since, now, stale, rolledOver, spent, truncated = false } = props;

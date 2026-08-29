@@ -247,21 +247,31 @@ test("the store is asked for a bounded page", async () => {
 
   const result = await accountQuotaHistory({ store: watched, now: () => NOW }, {});
   expect(seen).toHaveLength(1);
-  expect(typeof seen[0]?.limit).toBe("number");
+  // The value, not merely its type: `typeof … === "number"` passed for a cap of
+  // three, so an edit back to the size that truncated a one-account install
+  // would have broken nothing. One more than the cap, because that extra row is
+  // what tells a full page from a cut one.
+  expect(seen[0]?.limit).toBe(50_001);
   // A page that came back short of the cap is the whole history, not a slice.
   expect(result.truncated).toBe(false);
   store.close();
 });
 
-test("a full page is reported as truncated rather than drawn as a gap", async () => {
-  const store = await seeded();
-  const full = {
+/**
+ * The overflow row is what tells a cut page from a full one.
+ *
+ * The read asks for `cap + 1`. A page of exactly the cap is the whole history
+ * and must not be reported as short — the first version of this compared
+ * `length >= cap` against a read of `cap`, which made those two cases the same
+ * and had every chart on the page claim missing readings when none were.
+ */
+function pageOf(store: Store, rows: number): Store {
+  return {
     ...store,
     credentials: {
       ...store.credentials,
       listQuotaSamples: async (q: Parameters<typeof store.credentials.listQuotaSamples>[0]) =>
-        // Exactly the cap: what the store returns when there was more to read.
-        Array.from({ length: q.limit ?? 0 }, (_unused, index) => ({
+        Array.from({ length: Math.min(rows, q.limit ?? rows) }, (_unused, index) => ({
           credentialId: "cred-alpha",
           windowType: "fiveHour" as const,
           observedAt: NOW - index * 60_000,
@@ -272,9 +282,25 @@ test("a full page is reported as truncated rather than drawn as a gap", async ()
         })),
     },
   } as Store;
+}
+
+test("an overflowing page is reported as truncated rather than drawn as a gap", async () => {
+  const store = await seeded();
 
   // The panel states its own x axis from the span it asked for, so a shortened
   // series drawn against it looks exactly like a gateway that was not running.
-  expect((await accountQuotaHistory({ store: full, now: () => NOW }, {})).truncated).toBe(true);
+  const cut = await accountQuotaHistory({ store: pageOf(store, 50_001), now: () => NOW }, {});
+  expect(cut.truncated).toBe(true);
+  // The overflow row is a probe, not data: it never reaches the caller.
+  expect(cut.samples).toHaveLength(50_000);
+  store.close();
+});
+
+test("a page of exactly the cap is the whole history, not a slice", async () => {
+  const store = await seeded();
+
+  const whole = await accountQuotaHistory({ store: pageOf(store, 50_000), now: () => NOW }, {});
+  expect(whole.truncated).toBe(false);
+  expect(whole.samples).toHaveLength(50_000);
   store.close();
 });

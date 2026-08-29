@@ -533,27 +533,39 @@ export function ClientBoard() {
                                 {windows.map((row) => {
                                   const live = readingOfHeadroom(row);
                                   const since = chartSpanOf(live);
+                                  const mine = (history.data?.samples ?? []).filter(
+                                    (sample) =>
+                                      sample.credentialId === row.credentialId &&
+                                      sample.windowType === row.windowType &&
+                                      sample.observedAt >= (since ?? 0),
+                                  );
                                   return (
                                     <WindowChart
                                       key={row.windowType}
                                       live={live}
-                                      samples={(history.data?.samples ?? [])
-                                        .filter(
-                                          (sample) =>
-                                            sample.credentialId === row.credentialId &&
-                                            sample.windowType === row.windowType &&
-                                            sample.observedAt >= (since ?? 0),
-                                        )
-                                        .map((sample) => ({
-                                          observedAt: sample.observedAt,
-                                          windowType: sample.windowType,
-                                          windowMs: sample.windowMs,
-                                          resetsAt: sample.resetsAt,
-                                          usedRatio: sample.usedRatio,
-                                        }))}
+                                      samples={mine.map((sample) => ({
+                                        observedAt: sample.observedAt,
+                                        windowType: sample.windowType,
+                                        windowMs: sample.windowMs,
+                                        resetsAt: sample.resetsAt,
+                                        usedRatio: sample.usedRatio,
+                                      }))}
                                       since={since}
                                       now={Date.now()}
-                                      truncated={history.data?.truncated === true}
+                                      // Asked of *this* series, not of the read.
+                                      // The cap covers every account at once, so
+                                      // it can be reached by rows the reader is
+                                      // not looking at — and a note saying the
+                                      // earliest readings are missing, printed
+                                      // over a chart that is complete, is the
+                                      // same lie as printing nothing over one
+                                      // that is not.
+                                      truncated={
+                                        history.data?.truncated === true &&
+                                        since !== null &&
+                                        mine.length > 0 &&
+                                        (mine[0]?.observedAt ?? 0) > since
+                                      }
                                       ratePerHourRatio={row.ratePerHourRatio}
                                       exhaustsAt={row.exhaustsAt}
                                       survives={row.survives}

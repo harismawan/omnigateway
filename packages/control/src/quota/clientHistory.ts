@@ -7,7 +7,8 @@ import { retainedSpan } from "./history.ts";
  * One retained reading of one account's quota window, as a fraction.
  *
  * The same disclosure `AccountQuota` makes, over time rather than at now: the
- * account is named, its ceiling is not. `usedRatio` is never null here — a
+ * account is named, and the ceiling behind the fraction is derivable — see the
+ * note on that type. `usedRatio` is never null here — a
  * reading against an unstated ceiling is not a percentage of anything, and it is
  * dropped rather than drawn at zero, the rule `quotaSegments` already applies to
  * the operator's own readings.
@@ -31,12 +32,17 @@ export type AccountQuotaHistoryInput = {
 export type AccountQuotaHistoryResult = {
   samples: AccountQuotaSample[];
   /**
-   * True when the cap was reached, so the readings start later than asked for.
+   * True when the page overflowed, so the oldest readings in the span were cut.
    *
    * Said rather than absorbed. The chart states its own x domain from the span
    * it requested — deliberately, so the axis describes the window rather than
-   * the samples — and a truncated series drawn against it is an empty stretch
+   * the samples — and a shortened series drawn against it is an empty stretch
    * that reads exactly like a gateway that was not running.
+   *
+   * A property of the read, which covers every account at once. A surface
+   * drawing one series must decide for *that* series whether it starts late:
+   * the cap can be reached by accounts the reader is not looking at, and the
+   * note belongs on a chart that is actually short, not on every chart.
    */
   truncated: boolean;
 };
@@ -99,14 +105,24 @@ export async function accountQuotaHistory(
   const { since, until } = await retainedSpan(deps, input, MAX_SPAN_MS);
 
   const [samples, credentials] = await Promise.all([
-    deps.store.credentials.listQuotaSamples({ since, until, limit: MAX_SAMPLES }),
+    // One more than the cap, so a page that is *exactly* full can be told from
+    // one that was cut. Asking for the cap made `length >= MAX_SAMPLES` true
+    // for a complete history of exactly that size, and every chart on the page
+    // then claimed readings were missing when none were.
+    deps.store.credentials.listQuotaSamples({ since, until, limit: MAX_SAMPLES + 1 }),
     deps.store.credentials.list(),
   ]);
 
   const byId = new Map(credentials.map((credential) => [credential.id, credential]));
 
+  // The page overflowed, so the oldest readings in the span were cut. Decided
+  // before the extra row is dropped, and reported per series below rather than
+  // for the request as a whole.
+  const truncated = samples.length > MAX_SAMPLES;
+  const page = truncated ? samples.slice(0, MAX_SAMPLES) : samples;
+
   const out: AccountQuotaSample[] = [];
-  for (const sample of samples) {
+  for (const sample of page) {
     const credential = byId.get(sample.credentialId);
     // A sample whose credential is gone names an account that no longer serves
     // anything, exactly as the live reading of it would.
@@ -135,9 +151,6 @@ export async function accountQuotaHistory(
         a.windowType.localeCompare(b.windowType) ||
         a.observedAt - b.observedAt,
     ),
-    // Asked of the rows the store returned, before this fold drops the ones
-    // whose credential is gone: the cap is what the *read* hit, and a series
-    // shortened by it is shortened whether or not the tail survived the join.
-    truncated: samples.length >= MAX_SAMPLES,
+    truncated,
   };
 }

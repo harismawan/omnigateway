@@ -157,7 +157,18 @@ export function quotaVerdict(
   // A row written before snapshots existed carries no reading to age, so it is
   // unknown rather than stale even though it is suppressed the same way.
   if (window.observedAt > 0 && estimate.stale) return "stale";
-  if (estimate.ratePerHour === null || window.limit === null) return "unknown";
+  // `limit <= 0`, not `=== null`. A ceiling of zero or below is a ceiling
+  // nobody stated — nothing validates what a provider reports on its way into
+  // `quota_windows` — and every other site of that rule already says so:
+  // `usedRatioOf`, `rateRatioOf`, `burnFor`, the CLI's rate column and
+  // `reportedWindows`. This was the sixth and the only one that disagreed, so
+  // a non-positive ceiling reached the last line and answered **"ok"** — the
+  // affirmative safety claim the note above says must never be made about a
+  // window nothing is known about. `omni quota` printed it beside a used
+  // column reading `10/0`.
+  if (estimate.ratePerHour === null || window.limit === null || window.limit <= 0) {
+    return "unknown";
+  }
   if (estimate.survives === false && estimate.exhaustsAt !== null) return "empty";
   return estimate.survives === true ? "ok" : "unknown";
 }

@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import type { AccountQuota, AccountQuotaSample, ClientRequestLog } from "../../src/api/types.ts";
+import type {
+  AccountQuota,
+  AccountQuotaSample,
+  ClientQuotaHistoryResponse,
+  ClientRequestLog,
+} from "../../src/api/types.ts";
 
 /**
  * The console's half of three hand-kept mirrors.
@@ -92,6 +97,17 @@ test("the console's client log mirror matches the projection's field list", () =
   ]);
 });
 
+/**
+ * The response envelope, pinned because its newest field is the kind that goes
+ * missing quietly: `truncated` is read as `history.data?.truncated === true`,
+ * so a server that stopped sending it would read as "nothing was cut" and the
+ * chart would go back to drawing a shortened series as an empty stretch.
+ */
+const CLIENT_QUOTA_HISTORY_RESPONSE: Record<keyof ClientQuotaHistoryResponse, true> = {
+  samples: true,
+  truncated: true,
+};
+
 test("the console's quota mirrors match what @omni/control publishes", () => {
   // The lists `headroom.test.ts` and `clientHistory.test.ts` assert on their
   // own payloads, kept here as strings so a server-side change that this file
@@ -102,4 +118,7 @@ test("the console's quota mirrors match what @omni/control publishes", () => {
   expect(Object.keys(ACCOUNT_QUOTA_SAMPLE).sort().join(",")).toBe(
     "credentialId,label,observedAt,provider,resetsAt,usedRatio,windowMs,windowType",
   );
+  // The envelope `accountQuotaHistory` returns, whose second field decides
+  // whether a shortened chart says so.
+  expect(Object.keys(CLIENT_QUOTA_HISTORY_RESPONSE).sort().join(",")).toBe("samples,truncated");
 });

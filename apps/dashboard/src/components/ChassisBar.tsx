@@ -97,7 +97,7 @@ const Separator = styled.span`
  * operator toggled and must not be reported as though it were.
  *
  * `offline` is about this transport, not about the gateway. The mark lamp at
- * the far left already says "gateway unreachable" and it is reading a different
+ * the far left says "request log unreadable" and it is reading a different
  * signal — one of them being wrong is useful information, and two indicators
  * that always agree hide that.
  */

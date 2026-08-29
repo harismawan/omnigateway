@@ -581,3 +581,96 @@ describe("client board renders the console's own views", () => {
     }
   });
 });
+
+/**
+ * The rendered half of truncation, which had no coverage at all.
+ *
+ * `truncated` rides the response through four hops to one legend string, and
+ * every stub omitted the field — so it was always `undefined`, and deleting
+ * either the prop or the legend arm left both suites green. The flag exists
+ * because the axis is stated from the requested span: a series that starts late
+ * draws as an empty stretch, and an empty stretch is what a gateway that was
+ * not recording looks like.
+ */
+describe("a shortened quota history", () => {
+  const openChart = async (user: ReturnType<typeof userEvent.setup>) => {
+    renderWithProviders(<ClientBoard />);
+    await user.click(
+      await screen.findByRole("button", { name: "Show quota history for claude-main" }),
+    );
+  };
+
+  test("says so on the series that is actually short", async () => {
+    const user = userEvent.setup();
+    stub({
+      "GET /api/client/quota": () => ({ accounts: [headroom()] }),
+      "GET /api/client/quota/history": () => ({
+        truncated: true,
+        // Both readings land well after the span the chart asks for, which is
+        // what being cut looks like from this side.
+        samples: [
+          accountQuotaSample({ observedAt: NOW - 20 * 60_000, usedRatio: 0.3 }),
+          accountQuotaSample({ observedAt: NOW - 60_000, usedRatio: 0.42 }),
+        ],
+      }),
+    });
+    const restore = measureCharts();
+    try {
+      await openChart(user);
+      expect(await screen.findByText(/earliest readings not shown/)).toBeTruthy();
+    } finally {
+      restore();
+    }
+  });
+
+  /**
+   * The cap covers every account at once, so it can be reached by rows the
+   * reader is not looking at. A note about missing readings printed over a
+   * complete chart is the same lie as printing nothing over an incomplete one.
+   */
+  test("stays quiet on a series that reaches back as far as it asked", async () => {
+    const user = userEvent.setup();
+    stub({
+      "GET /api/client/quota": () => ({ accounts: [headroom()] }),
+      "GET /api/client/quota/history": () => ({
+        truncated: true,
+        samples: [
+          // Exactly `chartSpanOf` for this window: the fixture resets in an
+          // hour and a five-hour window is charted with its predecessor, so the
+          // axis starts nine hours back. A reading *older* than that would not
+          // do — the board filters those out before the check, so the series
+          // would still begin late and the note would be right to appear.
+          accountQuotaSample({ observedAt: NOW + 3_600_000 - 10 * 3_600_000, usedRatio: 0.1 }),
+          accountQuotaSample({ observedAt: NOW - 60_000, usedRatio: 0.42 }),
+        ],
+      }),
+    });
+    const restore = measureCharts();
+    try {
+      await openChart(user);
+      await screen.findByText("Window average");
+      expect(screen.queryByText(/earliest readings not shown/)).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  test("says nothing when the read was not capped", async () => {
+    const user = userEvent.setup();
+    stub({
+      "GET /api/client/quota": () => ({ accounts: [headroom()] }),
+      "GET /api/client/quota/history": () => ({
+        truncated: false,
+        samples: [accountQuotaSample({ observedAt: NOW - 60_000, usedRatio: 0.42 })],
+      }),
+    });
+    const restore = measureCharts();
+    try {
+      await openChart(user);
+      await screen.findByText("Window average");
+      expect(screen.queryByText(/earliest readings not shown/)).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+});
