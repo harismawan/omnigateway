@@ -286,6 +286,21 @@ export type QuotaSampleQuery = {
   until: number;
   /** Omitted means every credential. */
   credentialId?: string | undefined;
+  /**
+   * At most this many rows, newest first, still returned oldest-first.
+   *
+   * Omitted means every row in the span, which is what the operator's own
+   * disclosure asks for: it is scoped to one credential and gated behind a
+   * session. The unscoped reader — the client surface, reachable by every key
+   * holder — passes one, because a span alone bounds how far back a scan
+   * reaches and not how many rows come back from it.
+   *
+   * Newest first is what makes truncation honest here. Cutting the tail of the
+   * default ordering would drop whole accounts by name; cutting old readings
+   * shortens every account's history evenly, which is the direction a chart
+   * already reads.
+   */
+  limit?: number | undefined;
 };
 
 /**

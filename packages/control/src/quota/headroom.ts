@@ -17,11 +17,27 @@ import { burnFor } from "./burn.ts";
  * `/client` and now learns how many provider accounts this installation runs and
  * what they are called.
  *
- * What is still withheld is the **size** of an account. Every figure here is a
- * fraction of that window's own ceiling, never the provider's units, so a client
- * learns how full an account is and not how large it is. `formatPercent`
- * multiplies by 100, so these stay in `0..1`; a field already scaled to 0..100
- * rendered as `4200%` the first time one was wired up.
+ * The figures are fractions rather than the provider's own units, and that is a
+ * shape decision, not a secret: `formatPercent` multiplies by 100, so these stay
+ * in `0..1` — a field already scaled to 0..100 rendered as `4200%` the first
+ * time one was wired up.
+ *
+ * ## The ceiling is derivable, and that is accepted
+ *
+ * `usedRatio` is the exact quotient of two of the provider's integers, and a
+ * ratio of coprime integers comes back in lowest terms through continued
+ * fractions. `exhaustsAt` gives it a second way: it is
+ * `observedAt + ((limit - used) / ratePerHour) * HOUR`, so together with
+ * `resetsAt`, `windowMs` and `windowType` it reduces to `(limit - used) / used`.
+ * Rounding the ratios was tried and does not close it — it leaves `exhaustsAt`
+ * untouched, and rounding to a thousandth is the identity whenever the ceiling
+ * divides 1000, which the small ones do.
+ *
+ * The operator's decision is that this is acceptable: the account is already
+ * named here, and a key holder who can see an account fill up learning roughly
+ * how large it is does not add a category of disclosure. **Do not restore a
+ * rounding step and claim the size is withheld** — that claim was made once, was
+ * false, and a reader who believes it makes worse decisions than one who knows.
  */
 export type AccountQuota = {
   /** Stable per account, and what a chart joins its retained readings on. */
@@ -46,9 +62,9 @@ export type AccountQuota = {
   /**
    * How fast the window is going, as a fraction of its own ceiling per hour.
    *
-   * Scaled for the reason `usedRatio` is: the ceiling it would otherwise be
-   * counted against is the size of the account. Null where the estimate is
-   * suppressed or no ceiling was stated.
+   * A fraction because that is what the chart plots, not because the units are
+   * withheld — see the note above. Null where the estimate is suppressed or no
+   * ceiling was stated.
    */
   ratePerHourRatio: number | null;
   /** When this window runs out at that rate, or null when it will not or cannot be said. */
@@ -77,27 +93,6 @@ export type AccountQuota = {
 };
 
 /**
- * How much of a ratio survives onto the wire: three decimals, a tenth of a
- * percent.
- *
- * This is a disclosure control, not a formatting preference. A full-precision
- * float64 of `used / limit` is a ratio of two integers, and a ratio of coprime
- * integers is recoverable in lowest terms by continued fractions — `137/88000`
- * comes back exactly from `0.0015568181818181818`. The history endpoint hands
- * out dozens of readings sharing one denominator, so the ceiling this surface
- * exists not to publish was reconstructible from the numbers that replaced it.
- *
- * Rounding here bounds any recovered denominator at 1000, and the surfaces lose
- * nothing: the bars render whole percent and the chart plots a percentage.
- */
-const RATIO_PRECISION = 1_000;
-
-/** A ratio at the precision this surface publishes, or null if there is none. */
-export function publishedRatio(ratio: number | null): number | null {
-  return ratio === null ? null : Math.round(ratio * RATIO_PRECISION) / RATIO_PRECISION;
-}
-
-/**
  * The one place a used/limit pair becomes a ratio.
  *
  * A ceiling of zero or below is unknown rather than a division: `used / 0`
@@ -105,13 +100,10 @@ export function publishedRatio(ratio: number | null): number | null {
  * fraction of, and a limit nobody stated is not a limit of nothing. Overshoot
  * clamps to fully spent, because spend is debited after the request served and
  * a meter reading "150%" is not a reading.
- *
- * Rounded through `publishedRatio`, so the exact quotient never leaves this
- * package. See the note there — the unrounded figure gives the ceiling back.
  */
 export function usedRatioOf(used: number, limit: number | null): number | null {
   if (limit === null || limit <= 0) return null;
-  return publishedRatio(Math.min(1, Math.max(0, used / limit)));
+  return Math.min(1, Math.max(0, used / limit));
 }
 
 /**
@@ -119,13 +111,14 @@ export function usedRatioOf(used: number, limit: number | null): number | null {
  *
  * Reads the same `quota_windows` rows the operator's panel reads, and keeps the
  * account's identity. What it drops is every provider unit: `used`, `limit` and
- * the units-per-hour rate never leave `@omni/control`, so a client can see that
- * an account is nearly spent without learning what it holds.
+ * the units-per-hour rate stay in this package, because the surfaces render
+ * percentages and a payload carrying both is a payload two fields from being a
+ * copy of the operator's row.
  *
- * The conversion happens here rather than in the route so the raw figures are
- * absent from the payload itself. A route that fetched the full shape and
- * divided while rendering would still put the ceilings on the wire the day
- * somebody added a generic serializer.
+ * The conversion happens here rather than in the route so a generic serializer
+ * added later cannot put the raw shape on the wire by default. It is not a
+ * secrecy boundary — the type's own note explains why the ceiling is derivable
+ * anyway, and that it is meant to be.
  */
 export async function accountQuota(deps: {
   store: Store;
@@ -158,12 +151,12 @@ export async function accountQuota(deps: {
       resetsAt: window.resetsAt,
       observedAt: window.observedAt,
       windowMs: window.windowMs,
-      // Rounded like `usedRatio`, and for the same reason: an exact quotient of
-      // two of the provider's integers is the ceiling in disguise.
+      // A fraction of this window's own ceiling per hour, which is the shape
+      // the chart plots. Not a secrecy measure — see the note on the type.
       ratePerHourRatio:
         estimate.ratePerHour === null || window.limit === null || window.limit <= 0
           ? null
-          : publishedRatio(estimate.ratePerHour / window.limit),
+          : estimate.ratePerHour / window.limit,
       exhaustsAt: estimate.exhaustsAt,
       survives: estimate.survives,
       // Asked directly rather than subtracted out of `estimate.stale`.

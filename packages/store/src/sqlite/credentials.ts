@@ -522,16 +522,34 @@ export function createCredentialRepo(
         window_ms: number | null;
       };
       // Both bounds inclusive, matching how `UsageQuery` reads a span.
+      //
+      // A limited read orders by `observed_at DESC` so the rows it keeps are the
+      // newest, then sorts back into the caller's order below. Applying `LIMIT`
+      // to the default ordering would cut the alphabetical tail instead, which
+      // is whole accounts missing rather than every account's history being
+      // shorter.
+      const newestFirst = q.limit !== undefined;
       const sql = (extra: string) =>
         `SELECT * FROM quota_samples
           WHERE observed_at >= ? AND observed_at <= ?${extra}
-          ORDER BY credential_id, window_type, observed_at`;
-      const rows =
-        q.credentialId === undefined
-          ? db.query<S, [number, number]>(sql("")).all(q.since, q.until)
-          : db
-              .query<S, [number, number, string]>(sql(" AND credential_id = ?"))
-              .all(q.since, q.until, q.credentialId);
+          ORDER BY ${newestFirst ? "observed_at DESC" : "credential_id, window_type, observed_at"}
+          ${q.limit === undefined ? "" : "LIMIT ?"}`;
+      const args: Array<number | string> = [q.since, q.until];
+      if (q.credentialId !== undefined) args.push(q.credentialId);
+      if (q.limit !== undefined) args.push(q.limit);
+      const rows = db
+        .query<S, Array<number | string>>(
+          sql(q.credentialId === undefined ? "" : " AND credential_id = ?"),
+        )
+        .all(...args);
+      if (newestFirst) {
+        rows.sort(
+          (a, b) =>
+            a.credential_id.localeCompare(b.credential_id) ||
+            a.window_type.localeCompare(b.window_type) ||
+            a.observed_at - b.observed_at,
+        );
+      }
       return rows.map(
         (r): QuotaSample => ({
           credentialId: r.credential_id,

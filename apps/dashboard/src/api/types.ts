@@ -139,10 +139,12 @@ export type StatusResponse = {
 /**
  * One provider account's window as a client sees it.
  *
- * Named accounts, unnamed ceilings. The label is a deliberate disclosure by the
- * operator — a screen that collapsed a provider's accounts could not say which
- * one was filling up — while every figure stays a fraction of the window it
- * belongs to, so the size of an account is still the operator's own business.
+ * The label is a deliberate disclosure by the operator — a screen that collapsed
+ * a provider's accounts could not say which one was filling up. The figures are
+ * fractions because that is what the bars and the chart render, **not** because
+ * the ceiling behind them is withheld: exact ratios and `exhaustsAt` both give
+ * it back, and `AccountQuota` in `@omni/control` records why that was accepted
+ * rather than rounded away.
  */
 export type AccountQuota = {
   /** Stable per account, and what a chart joins its retained readings on. */

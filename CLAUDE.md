@@ -253,13 +253,21 @@ two arrive as separate arguments because they have separate provenance, and one 
 a client come to choose its own. Client session re-read its key row on **every** verify and refuse a
 revoked one; one checking at login alone outlive a revocation by the session TTL.
 
-Provider quota reach a client as **named accounts with unnamed ceilings**, and the split is the
-rule. `accountQuota` return one row per credential+window carrying the operator's own `label`: that
-is a deliberate widening — a screen that collapsed a provider's accounts could not say *which*
-account was filling up — so every key holder learn how many accounts this install run and what they
-are called. What stay withheld is the **size** of an account: `used`, `limit` and units-per-hour
-never leave `@omni/control`. `usedRatio` and `ratePerHourRatio` are fractions in `0..1` of that
-window's own ceiling, because `formatPercent` multiply by 100 and a 0..100 field render as `4200%`.
+Provider quota reach a client as **named accounts**. `accountQuota` return one row per
+credential+window carrying the operator's own `label`: a deliberate widening — a screen that
+collapsed a provider's accounts could not say *which* account was filling up — so every key holder
+learn how many accounts this install run and what they are called. `usedRatio` and
+`ratePerHourRatio` are fractions in `0..1` of that window's own ceiling, because `formatPercent`
+multiply by 100 and a 0..100 field render as `4200%`.
+**The ceiling behind those fractions is derivable, and that is accepted, not defended.** `usedRatio`
+is the exact quotient of two provider integers, recoverable in lowest terms by continued fractions,
+and `exhaustsAt` give it a second way — it is `observedAt + ((limit - used) / ratePerHour) * HOUR`,
+so with `resetsAt`, `windowMs` and `windowType` it reduce to `(limit - used) / used`. Rounding was
+tried and **does not work**: it leave `exhaustsAt` untouched, and rounding to a thousandth is the
+identity whenever the ceiling divide 1000, which the small ones do. Never reintroduce a rounding
+step and claim size is withheld — that claim shipped once, was false, and reader who believe it make
+worse decisions than one who know. `used`, `limit` and units-per-hour stay off the payload because
+the surfaces render percentages, not because they are secret.
 `stale` and `rolledOver` arrive as separate booleans and must stay separate — folding them blank a
 chart of measured readings for up to a poll interval after every rollover, which is the trap
 `quotaRolledOver` exist for. `/api/client/quota/history` is the same disclosure over time, one

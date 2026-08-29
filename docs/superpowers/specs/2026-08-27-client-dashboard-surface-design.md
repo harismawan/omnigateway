@@ -244,13 +244,23 @@ throttled" but not "which account is the one filling up". They now report one ro
 per account carrying the operator's own label, so a key holder learns the fleet
 size and the account names.
 
-What did not change is the other half: `used`, `limit` and units-per-hour stay in
-`@omni/control`. Every figure on the wire is a fraction of the window it belongs
-to, so a client can see how full an account is and not how large it is, and the
-gateway rate on the operator's history route is still absent here because it is
-an aggregate over every key on the installation. The redaction test above now
-covers `logs`, `usage` and `summary`, with a second test asserting exactly what
-the quota routes do and do not publish.
+`used`, `limit` and units-per-hour stay in `@omni/control`, and every figure on
+the wire is a fraction of the window it belongs to — but that is the shape the
+surfaces render, not a secret kept. **The ceiling is derivable from what is
+published**, twice over: `usedRatio` is the exact quotient of two provider
+integers and comes back in lowest terms through continued fractions, and
+`exhaustsAt` reduces to `(limit - used) / used` against the other instants on the
+same row. A rounding step was added to close that and did not — it left
+`exhaustsAt` alone, and rounding to a thousandth is the identity whenever the
+ceiling divides 1000. The operator's decision is that this is acceptable: the
+account is already named, and knowing roughly how large a named account is adds
+no category of disclosure. It is written down here so nobody re-adds the rounding
+believing it does something.
+
+The gateway rate on the operator's history route is still absent here, because it
+is an aggregate over every key on the installation and so answers a question
+about the operator's traffic. The redaction test above now covers `logs`, `usage`
+and `summary`, with a second test pinning the *shape* of both quota routes.
 
 Existing admin GETs gain `requireReader`, with three exceptions that stay
 `requireAdmin`:

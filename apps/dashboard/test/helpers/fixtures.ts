@@ -238,22 +238,42 @@ export function log(patch: Partial<RequestLog> = {}): RequestLog {
 /**
  * A row as `/api/client/logs` actually returns it.
  *
- * Built by dropping exactly what `toClientLog` drops, rather than by handing a
- * client test the operator's row: a full `log()` fixture is what let a shared
- * component read `rtkFilters` off a payload that has never carried it and kept
- * every modal test green while the modal threw in a browser.
+ * Enumerated, not subtracted. Spreading `log()` and deleting six keys would
+ * satisfy the type today and hand over every column added to `RequestLog`
+ * tomorrow — excess properties introduced by a spread are not freshness-checked,
+ * so TypeScript would say nothing — and that is the shape `toClientLog`'s own
+ * docblock rejects for the same reason.
+ *
+ * The projection this mirrors is pinned by
+ * `apps/gateway/test/routes/clientLogShape.test.ts`. Handing a client test the
+ * operator's full row is what let a shared component read `rtkFilters` off a
+ * payload that has never carried it, while every test stayed green and the
+ * modal threw in a browser.
  */
 export function clientLog(patch: Partial<ClientRequestLog> = {}): ClientRequestLog {
-  const {
-    apiKeyId: _apiKeyId,
-    credentialId: _credentialId,
-    rtkFilters: _rtkFilters,
-    rtkFilterHits: _rtkFilterHits,
-    rtkOriginalCodeUnits: _rtkOriginalCodeUnits,
-    rtkCompressedCodeUnits: _rtkCompressedCodeUnits,
-    ...client
-  } = log();
-  return { ...client, ...patch };
+  const row = log();
+  return {
+    id: row.id,
+    state: row.state,
+    at: row.at,
+    requestedModel: row.requestedModel,
+    resolvedProvider: row.resolvedProvider,
+    resolvedModel: row.resolvedModel,
+    attempts: row.attempts,
+    status: row.status,
+    errorCode: row.errorCode,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    cacheReadTokens: row.cacheReadTokens,
+    cacheWriteTokens: row.cacheWriteTokens,
+    ttftMs: row.ttftMs,
+    durationMs: row.durationMs,
+    costUsd: row.costUsd,
+    degradations: row.degradations,
+    rtkApplied: row.rtkApplied,
+    rtkEstimatedTokensSaved: row.rtkEstimatedTokensSaved,
+    ...patch,
+  };
 }
 
 export function usageBucket(patch: Partial<UsageBucket> = {}): UsageBucket {

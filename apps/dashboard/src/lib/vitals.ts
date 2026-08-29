@@ -297,17 +297,21 @@ export function isQuotaStale(window: QuotaWindow, now: number, pollIntervalMs: n
  *
  * The operator's estimate is in provider units, and everything drawn from it is
  * a percentage of that window. Dividing once here is what lets the chart take a
- * rate from either surface: a client is told the fraction directly, because the
- * size of the account it would otherwise be divided by is not the client's to
- * know. Null where either figure is missing — a rate over an unstated ceiling
- * is not a fraction of anything.
+ * rate from either surface: a client is handed the fraction already, because
+ * that is the shape the chart plots.
+ *
+ * `<= 0` for the same reason `readingOf` uses it, and this is the third site of
+ * one rule — nothing validates a provider's reported ceiling on its way into
+ * `quota_windows`, so a negative one must be unknown here too. It was the site
+ * left behind when the other two were fixed, which is what a rule spread across
+ * three places does.
  */
 export function rateRatioOf(
   window: Pick<QuotaWindow, "limit">,
   estimate: BurnEstimate | undefined,
 ): number | null {
   if (estimate?.ratePerHour === undefined || estimate.ratePerHour === null) return null;
-  if (window.limit === null || window.limit === 0) return null;
+  if (window.limit === null || window.limit <= 0) return null;
   return estimate.ratePerHour / window.limit;
 }
 

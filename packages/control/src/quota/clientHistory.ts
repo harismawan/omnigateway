@@ -45,6 +45,19 @@ export type AccountQuotaHistoryResult = { samples: AccountQuotaSample[] };
 const MAX_SPAN_MS = 16 * 24 * 60 * 60 * 1_000;
 
 /**
+ * And at most this many rows out of that span.
+ *
+ * The span bounds how far back the read reaches; it does not bound what comes
+ * back from it. At the default five-minute poll interval, sixteen days is ~4600
+ * readings per credential-window, so a dozen accounts with two windows each is
+ * six figures of rows serialised synchronously for one unauthenticated-by-cost
+ * caller. Eight thousand is more than any chart on the screen can plot — a
+ * window's line is a few hundred points — and the store keeps the newest, so
+ * hitting the cap shortens history rather than dropping an account.
+ */
+const MAX_SAMPLES = 8_000;
+
+/**
  * The retained readings behind the client screen's quota charts.
  *
  * One series per account and window, which is what lets a key holder see which
@@ -57,8 +70,11 @@ const MAX_SPAN_MS = 16 * 24 * 60 * 60 * 1_000;
  * installation — a number about the operator's traffic, not this client's, and
  * one no client is entitled to.
  *
- * No `used` and no `limit`, for the reason `AccountQuota` omits them: an account
- * a client can watch filling up is not an account whose size it has been told.
+ * No `used` and no `limit`, for the reason `AccountQuota` omits them: the chart
+ * plots percentages, so the counts would be two more fields nobody reads. It is
+ * not a secrecy measure — a series of exact ratios sharing one denominator
+ * gives the ceiling back, and `AccountQuota` explains why that is accepted
+ * rather than papered over.
  */
 export async function accountQuotaHistory(
   deps: { store: Store; now: () => number },
@@ -67,7 +83,7 @@ export async function accountQuotaHistory(
   const { since, until } = await retainedSpan(deps, input, MAX_SPAN_MS);
 
   const [samples, credentials] = await Promise.all([
-    deps.store.credentials.listQuotaSamples({ since, until }),
+    deps.store.credentials.listQuotaSamples({ since, until, limit: MAX_SAMPLES }),
     deps.store.credentials.list(),
   ]);
 

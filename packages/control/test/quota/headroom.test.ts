@@ -319,25 +319,27 @@ test("each row carries its own account's instants", async () => {
  * Asserted by running the recovery: an assertion on the rounded value alone
  * would pass against a change that rounded to twelve decimals.
  */
-test("the exact quotient never reaches the wire, so the ceiling cannot be recovered", async () => {
+/**
+ * The ratio is the exact quotient, and the ceiling is therefore derivable.
+ *
+ * Written down as a test because it was briefly the opposite: a rounding step
+ * was added here to "withhold the size of an account", and it did not — it left
+ * `exhaustsAt` untouched, and rounding to a thousandth is the identity whenever
+ * the ceiling divides 1000, which the small ones do. The operator's decision is
+ * that a key holder inferring how large a named account is costs nothing beyond
+ * naming it.
+ *
+ * This test fails if somebody reintroduces the rounding, which is the point: the
+ * reader should find the decision rather than a lossy figure whose reason has
+ * been forgotten.
+ */
+test("the ratio is exact, so a client can derive the ceiling behind it", async () => {
   const store = await withQuota([
     { id: "a1", provider: "anthropic", used: 137, limit: 88_000, resetsAt: NOW + HOUR_MS },
   ]);
 
   const [row] = await accountQuota({ store, now: () => NOW });
-  const published = row?.usedRatio as number;
-  expect(published).not.toBe(137 / 88_000);
-
-  // The smallest denominator that explains the published figure. With the exact
-  // quotient this returns 88000; rounded to a thousandth it cannot.
-  const denominatorOf = (value: number): number => {
-    for (let d = 1; d <= 100_000; d += 1) {
-      if (Math.abs(value * d - Math.round(value * d)) < 1e-12) return d;
-    }
-    return Number.POSITIVE_INFINITY;
-  };
-  expect(denominatorOf(137 / 88_000)).toBe(88_000);
-  expect(denominatorOf(published)).toBeLessThanOrEqual(1_000);
+  expect(row?.usedRatio).toBe(137 / 88_000);
   store.close();
 });
 
@@ -378,12 +380,26 @@ test("a reading that is both stale and rolled over reports both", async () => {
   store.close();
 });
 
-test("a reading never taken is stale rather than merely rateless", async () => {
-  // `observedAt: 0` is a row written before snapshots existed, or a probe that
-  // has never succeeded. There is nothing to age, and nothing to believe.
+/**
+ * `observedAt: 0` is a row written before snapshots existed, or a probe that has
+ * never succeeded: there is nothing to age, and nothing to believe.
+ *
+ * Read at an instant close to the epoch, which is the only clock where the
+ * clause is load-bearing. Against the ordinary fixture clock the age test
+ * carries it — `now - 0` is beyond any staleness horizon — so deleting the
+ * clause left the suite green, and the test that first covered this named a
+ * property it could not fail on.
+ */
+test("a reading never taken is stale even before any window could age", async () => {
+  const early = 300_000;
   const store = await withQuota([
-    { id: "a1", provider: "anthropic", used: 0, limit: 1000, observedAt: 0 },
+    { id: "a1", provider: "anthropic", used: 0, limit: 1000, observedAt: 0, resetsAt: HOUR_MS },
   ]);
-  expect((await accountQuota({ store, now: () => NOW }))[0]?.stale).toBe(true);
+
+  // Five minutes past the epoch: `quotaStaleAfterMs` of the default poll
+  // interval is fifteen, so age alone says nothing here.
+  const [row] = await accountQuota({ store, now: () => early });
+  expect(row?.stale).toBe(true);
+  expect(row?.rolledOver).toBe(false);
   store.close();
 });
