@@ -1,4 +1,4 @@
-import type { ChatRequest, GatewayError, StreamEvent } from "@omni/ir";
+import type { ChatRequest, ErrorCode, GatewayError, StreamEvent } from "@omni/ir";
 import type { AdapterCredentials, HeaderPair } from "./types.ts";
 
 /**
@@ -110,7 +110,39 @@ export type CodecInput = {
    * caller's own.
    */
   autoCacheEnabled?: boolean | undefined;
+  /**
+   * Builds a classified error, using the **host's** `GatewayError`.
+   *
+   * A codec must reach for this rather than `new GatewayError(…)`, and the
+   * reason is not style. A plugin is installed as a self-contained tree —
+   * `packages/control/src/plugins.ts` resolves no dependencies and creates no
+   * `node_modules`, by construction — so a plugin's entry carries its own
+   * bundled copy of every class it imports. `codecAdapter` decides whether a
+   * codec meant its classification by asking `instanceof GatewayError`, and
+   * against a bundled copy that is false: an `AUTH` raised for a credential with
+   * no token becomes `UPSTREAM`, and dispatch gates its credential-refresh retry
+   * on `code === "AUTH"`, so the refresh silently stops happening.
+   *
+   * `degradations` is bounded here, as on the other two paths a codec can reach
+   * `request_logs.degradations` through.
+   *
+   * `gatewayAuthored` is deliberately **not** settable. A codec's text is
+   * authored outside this repository and is unknown in exactly the way an
+   * upstream body is — the same reason `rebound` drops the flag.
+   */
+  fail: CodecFail;
 };
+
+/** The host's error constructor, handed to a codec so identity never crosses a bundle. */
+export type CodecFail = (
+  code: ErrorCode,
+  message: string,
+  opts?: {
+    status?: number;
+    retryAfterMs?: number;
+    degradations?: readonly string[];
+  },
+) => GatewayError;
 
 /**
  * A request the host will perform, and anything `decode` needs to read it back.
@@ -171,6 +203,15 @@ export type CodecDecodeInput = {
   decodeState: unknown;
   /** For a provider that reports usage or rate limits in response headers. */
   headers: Headers;
+  /**
+   * The host's error constructor. See `CodecInput.fail`.
+   *
+   * Here as well as on `buildRequest` because a decoder reaches states its
+   * builder cannot rule out — `custom` cannot tell which dialect it is reading
+   * without the state it stashed — and an error raised there crosses the same
+   * bundle boundary.
+   */
+  fail: CodecFail;
 };
 
 export type CodecErrorInput = {
@@ -216,4 +257,6 @@ export type CodecErrorInput = {
    * that wants to relabel a case rebuilds from this and keeps the message.
    */
   fallback: GatewayError;
+  /** The host's error constructor. See `CodecInput.fail` for why a codec needs one. */
+  fail: CodecFail;
 };

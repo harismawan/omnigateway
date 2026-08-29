@@ -1,5 +1,5 @@
 import { GatewayError, type ProviderId, type StreamEvent } from "@omni/ir";
-import type { ProviderCodec } from "./codec.ts";
+import type { CodecFail, ProviderCodec } from "./codec.ts";
 import { httpError } from "./http.ts";
 import type { AdapterRequest, AdapterResult, Capabilities, ProviderAdapter } from "./types.ts";
 
@@ -148,10 +148,36 @@ function isHttpMethod(value: unknown): value is string {
  * would fail outright where it had succeeded. Only errors the contract has no
  * classification for are rewritten.
  */
+/**
+ * An error that says it is a `GatewayError` and is not this module's.
+ *
+ * What a bundler produces. A plugin is a self-contained tree with no
+ * `node_modules`, so a codec importing `GatewayError` ships its own copy, and
+ * `instanceof` against it is false however identical the shape.
+ *
+ * Detected only to **report** it. The classification is still refused —
+ * accepting a duck-typed object's `code` is exactly what `instanceof` is there
+ * to prevent, and a plain object could then claim `AUTH` and drive a credential
+ * refresh. What changes is that the author is told which mistake they made,
+ * instead of watching a deliberate `AUTH` become an `UPSTREAM` for reasons
+ * nothing in the logs explains.
+ */
+function isForeignGatewayError(error: unknown): boolean {
+  return error instanceof Error && error.name === "GatewayError";
+}
+
 function guard<T>(id: ProviderId, hook: string, run: () => T): T {
   try {
     return run();
   } catch (error) {
+    if (!(error instanceof GatewayError) && isForeignGatewayError(error)) {
+      throw codecFailure(
+        id,
+        hook,
+        "threw a GatewayError from its own bundled copy, whose classification the host " +
+          "cannot trust; build the error with input.fail() instead",
+      );
+    }
     // Passed through, but not verbatim: the classification is the codec's and
     // the `provider` and `degradations` fields are the host's. `kiloCodec`
     // throwing `AUTH` for a credential with no token is the case this
@@ -212,11 +238,24 @@ export function codecAdapter(
     id,
     capabilities,
     async send(req: AdapterRequest): Promise<AdapterResult> {
+      // One factory per request rather than per adapter: it closes over `id`, so
+      // a codec cannot name another provider in the error it raises any more
+      // than it can in the request it describes.
+      const fail: CodecFail = (code, message, opts) =>
+        new GatewayError(code, message, {
+          provider: id,
+          ...(opts?.status === undefined ? {} : { status: opts.status }),
+          ...(opts?.retryAfterMs === undefined ? {} : { retryAfterMs: opts.retryAfterMs }),
+          degradations: boundedDegradations(opts?.degradations),
+          // Never `gatewayAuthored`. See `CodecInput.fail`.
+        });
+
       const built = guard(id, "buildRequest", () =>
         codec.buildRequest({
           request: req.request,
           model: req.model,
           credentials: req.credentials,
+          fail,
           ...(req.requestId === undefined ? {} : { requestId: req.requestId }),
           ...(req.autoCache === undefined ? {} : { autoCacheEnabled: req.autoCache }),
         }),
@@ -326,6 +365,7 @@ export function codecAdapter(
             body: text,
             headers: res.headers,
             fallback,
+            fail,
             // What the request gave up, so a refusal caused by exactly that can
             // say so. `dispatch` writes `error.degradations` into `request_logs`.
             // Bounded here as on the success path. Unbounded, a codec could
@@ -369,6 +409,7 @@ export function codecAdapter(
               body,
               decodeState: built.decodeState,
               headers: res.headers,
+              fail,
             }),
           ),
         ),

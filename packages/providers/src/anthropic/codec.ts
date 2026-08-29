@@ -1,4 +1,4 @@
-import { CONTEXT_1M_BETA, CONTEXT_1M_TOKENS, GatewayError } from "@omni/ir";
+import { CONTEXT_1M_BETA, CONTEXT_1M_TOKENS, type GatewayError } from "@omni/ir";
 import { applyAnthropicSystem, orderFields, signAnthropicBody } from "../body.ts";
 import { catalogLimits } from "../catalog.ts";
 import type { CodecErrorInput, CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
@@ -123,9 +123,7 @@ export const anthropicCodec: ProviderCodec = {
     } else if (input.credentials.apiKey !== null) {
       protocol.push(["x-api-key", input.credentials.apiKey]);
     } else {
-      throw new GatewayError("AUTH", "anthropic credential has no token", {
-        provider: "anthropic",
-      });
+      throw input.fail("AUTH", "anthropic credential has no token");
     }
 
     if (betas.size > 0) protocol.push(["anthropic-beta", [...betas].join(",")]);
@@ -177,8 +175,7 @@ export const anthropicCodec: ProviderCodec = {
     // asks first whether the cloak was running — and on the throw path there is
     // no result to carry the answer, so without this the row says only that the
     // request was refused.
-    return new GatewayError("FINGERPRINT_REFUSED", input.fallback.message, {
-      provider: "anthropic",
+    return input.fail("FINGERPRINT_REFUSED", input.fallback.message, {
       degradations: input.degradations,
       ...(input.fallback.upstreamStatus === undefined
         ? {}

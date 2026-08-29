@@ -1121,3 +1121,146 @@ test("a codec cannot edit the error the host is about to throw", async () => {
     expect(thrown.degradations).toEqual([]);
   });
 });
+
+/**
+ * The defect a bundled plugin hits, and the factory that closes it.
+ *
+ * A plugin is installed as a self-contained tree — `packages/control/src/plugins.ts`
+ * resolves no dependencies and creates no `node_modules`, deliberately — so a
+ * plugin's server entry carries its own bundled copy of every class it imports.
+ * `guard` asks `error instanceof GatewayError` to decide whether a codec meant
+ * its classification, and against a bundled copy that is false.
+ *
+ * The consequence is not cosmetic. A codec raising `AUTH` for a credential with
+ * no token is rewritten to `UPSTREAM`, and dispatch gates its credential-refresh
+ * retry on `code === "AUTH"` — so the refresh silently stops happening, and on a
+ * single-candidate pool the request fails where it would have succeeded.
+ *
+ * `ForeignGatewayError` is what a bundler produces: structurally identical,
+ * different identity. It is declared here rather than imported precisely because
+ * importing it would defeat the test.
+ */
+class ForeignGatewayError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly provider: string | undefined;
+  readonly upstreamStatus: number | undefined;
+  readonly gatewayAuthored: boolean;
+  readonly retryAfterMs: number | undefined;
+  readonly degradations: readonly string[];
+  constructor(code: string, message: string, opts: { provider?: string } = {}) {
+    super(message);
+    this.name = "GatewayError";
+    this.code = code;
+    this.retryable = code === "UPSTREAM";
+    this.provider = opts.provider;
+    this.upstreamStatus = undefined;
+    this.gatewayAuthored = false;
+    this.retryAfterMs = undefined;
+    this.degradations = [];
+  }
+}
+
+function sendWith(codec: ProviderCodec) {
+  return codecAdapter("kilo", kiloDescriptor.capabilities, codec).send({
+    request,
+    model: "m",
+    credentials: credentials({ accessToken: null }),
+    http: async () => ({
+      status: 200,
+      headers: new Headers(),
+      body: sseBody(),
+      text: async () => "",
+    }),
+    signal: new AbortController().signal,
+  });
+}
+
+test("a codec's fail() keeps its classification, which is what refresh depends on", async () => {
+  const codec: ProviderCodec = {
+    buildRequest: (input) => {
+      throw input.fail("AUTH", "kilo credential has no token");
+    },
+    decode: async function* () {},
+  };
+
+  const attempt = sendWith(codec);
+  await expect(attempt).rejects.toThrow(GatewayError);
+  await attempt.catch((error: unknown) => {
+    const failure = error as GatewayError;
+    // `AUTH` and not `UPSTREAM`: dispatch gates its credential refresh on this
+    // exact code, so flattening it disables a self-healing path silently.
+    expect(failure.code).toBe("AUTH");
+    expect(failure.provider).toBe("kilo");
+    // The host's own class, so every later `instanceof` in dispatch holds too.
+    expect(failure).toBeInstanceOf(GatewayError);
+  });
+});
+
+test("fail() cannot claim the gateway wrote the message", async () => {
+  // `gatewayAuthored` gates whether `reasonField` prints a message at default
+  // level. A plugin's text is authored outside this repository and is unknown in
+  // exactly the way an upstream body is, which is why `rebound` drops the flag
+  // and `codecFailure` sets it. `fail()` must not be a way around that.
+  //
+  // Asserted on the error that comes *out*, not inside the codec: an assertion
+  // in there never runs while `fail` is undefined, so it would pass before the
+  // fix existed and prove nothing.
+  const codec: ProviderCodec = {
+    buildRequest: (input) => {
+      throw input.fail("AUTH", "PROMPT LEAK");
+    },
+    decode: async function* () {},
+  };
+  await sendWith(codec).catch((error: unknown) => {
+    expect((error as GatewayError).gatewayAuthored).toBe(false);
+    expect((error as GatewayError).code).toBe("AUTH");
+  });
+  await expect(sendWith(codec)).rejects.toThrow(GatewayError);
+});
+
+test("fail() bounds the degradations it is handed", async () => {
+  // The same column `boundedDegradations` caps on the success and classify
+  // paths, from the same untrusted source. A third way in is how the first two
+  // were found.
+  const codec: ProviderCodec = {
+    buildRequest: (input) => {
+      throw input.fail("AUTH", "no token", {
+        degradations: Array.from({ length: 40 }, () => "x".repeat(400)),
+      });
+    },
+    decode: async function* () {},
+  };
+  await sendWith(codec).catch((error: unknown) => {
+    const failure = error as GatewayError;
+    expect(failure.degradations).toHaveLength(16);
+    for (const entry of failure.degradations) expect(entry.length).toBeLessThanOrEqual(64);
+  });
+});
+
+test("a foreign GatewayError is reported as one, not silently reclassified", async () => {
+  // The diagnostic half. `instanceof` stays the authority — a duck-typed object
+  // must not be able to impersonate a classification — but a plugin that threw
+  // its own bundled copy gets told so, instead of watching its AUTH become an
+  // UPSTREAM for reasons nothing explains.
+  const codec: ProviderCodec = {
+    buildRequest: () => {
+      throw new ForeignGatewayError("AUTH", "kilo credential has no token", { provider: "kilo" });
+    },
+    decode: async function* () {},
+  };
+
+  const attempt = sendWith(codec);
+  await attempt.catch((error: unknown) => {
+    const failure = error as GatewayError;
+    expect(failure).toBeInstanceOf(GatewayError);
+    // Still not AUTH — accepting an impostor's classification is the thing
+    // `instanceof` is there to refuse.
+    expect(failure.code).toBe("UPSTREAM");
+    // But the message names the actual mistake and the fix.
+    expect(failure.message).toContain("bundled");
+    expect(failure.message).toContain("fail()");
+    expect(failure.gatewayAuthored).toBe(true);
+  });
+  await expect(attempt).rejects.toThrow(GatewayError);
+});

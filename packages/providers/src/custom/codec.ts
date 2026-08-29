@@ -1,5 +1,4 @@
-import { GatewayError } from "@omni/ir";
-import type { CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
+import type { CodecFail, CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
 import { parseSse } from "../sse.ts";
 import type { HeaderPair } from "../types.ts";
 import { decodeCustomChat, decodeCustomResponses } from "./decode.ts";
@@ -7,14 +6,17 @@ import { toCustomChatWire, toCustomResponsesWire } from "./wire.ts";
 
 type Protocol = "chat_completions" | "responses";
 
-function metadata(data: Record<string, unknown>): {
+function metadata(
+  data: Record<string, unknown>,
+  fail: CodecFail,
+): {
   origin: string;
   basePath: string;
   protocol: Protocol;
 } {
   const { origin, protocol } = data;
   if (typeof origin !== "string" || (protocol !== "chat_completions" && protocol !== "responses")) {
-    throw new GatewayError("BAD_REQUEST", "custom credential has invalid endpoint metadata");
+    throw fail("BAD_REQUEST", "custom credential has invalid endpoint metadata");
   }
   // Rows written before custom endpoints carried a base path have none.
   const basePath = typeof data.basePath === "string" ? data.basePath : "";
@@ -52,7 +54,7 @@ function endpointUrl(origin: string, basePath: string, protocol: Protocol): stri
  * cast would surface as a `TypeError` inside `decode`, where `guardStream`
  * relabels it as an upstream failure and fails the request over.
  */
-function protocolOf(state: unknown): Protocol {
+function protocolOf(state: unknown, fail: CodecFail): Protocol {
   if (state !== null && typeof state === "object") {
     const protocol = (state as { protocol?: unknown }).protocol;
     if (protocol === "responses" || protocol === "chat_completions") return protocol;
@@ -64,12 +66,7 @@ function protocolOf(state: unknown): Protocol {
   // upstream answered in full. Reaching here means the host handed back
   // something other than what `buildRequest` returned, which is a gateway bug,
   // and a gateway bug should read as one.
-  throw new GatewayError("INTERNAL", "custom codec lost its endpoint protocol", {
-    provider: "custom",
-    // Built from a literal this repository owns; it carries nothing an upstream
-    // or an operator supplied.
-    gatewayAuthored: true,
-  });
+  throw fail("INTERNAL", "custom codec lost its endpoint protocol");
 }
 
 /**
@@ -83,9 +80,9 @@ export const customCodec: ProviderCodec = {
   buildRequest(input: CodecInput): CodecRequest {
     const apiKey = input.credentials.apiKey;
     if (apiKey === null) {
-      throw new GatewayError("AUTH", "custom credential has no API key", { provider: "custom" });
+      throw input.fail("AUTH", "custom credential has no API key");
     }
-    const { origin, basePath, protocol } = metadata(input.credentials.providerData);
+    const { origin, basePath, protocol } = metadata(input.credentials.providerData, input.fail);
     const encoded =
       protocol === "chat_completions"
         ? toCustomChatWire(input.request, input.model)
@@ -111,8 +108,8 @@ export const customCodec: ProviderCodec = {
     };
   },
 
-  decode({ body, decodeState }) {
-    return protocolOf(decodeState) === "chat_completions"
+  decode({ body, decodeState, fail }) {
+    return protocolOf(decodeState, fail) === "chat_completions"
       ? decodeCustomChat(parseSse(body))
       : decodeCustomResponses(parseSse(body));
   },

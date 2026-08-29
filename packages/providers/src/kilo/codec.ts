@@ -1,4 +1,3 @@
-import { GatewayError } from "@omni/ir";
 import { orderFields } from "../body.ts";
 import type { CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
 import { mergeHeaders, orderHeaders } from "../profile.ts";
@@ -48,7 +47,7 @@ export const kiloCodec: ProviderCodec = {
     const oauth = input.credentials.accessToken !== null;
     const token = input.credentials.accessToken ?? input.credentials.apiKey;
     if (token === null) {
-      throw new GatewayError("AUTH", "kilo credential has no token", { provider: "kilo" });
+      throw input.fail("AUTH", "kilo credential has no token");
     }
 
     const { body, degradations } = toKiloWire(input.request, input.model);
