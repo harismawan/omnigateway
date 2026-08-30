@@ -240,8 +240,35 @@ export async function* decodeCustomChat(
       }
     }
 
+    // Only a reason that is actually present is judged. `null` mid-stream is
+    // how this wire spells "not finished yet" and arrives on nearly every
+    // chunk, so the `typeof` check is load-bearing rather than defensive.
     if (typeof choice.finish_reason === "string") {
-      stopReason = CHAT_FINISH[choice.finish_reason] ?? "endTurn";
+      // `Object.hasOwn` rather than `!== undefined`. `CHAT_FINISH` is an
+      // ordinary object literal, so `finish_reason: "constructor"` reads the
+      // Object constructor back out — present, not a `StopReason`, and assigned
+      // straight into the end event, where `JSON.stringify` then drops it and
+      // leaves the field simply missing. Measured. Same trap the
+      // provider-keyed tables carry, reaching this one from an upstream body.
+      const reason = choice.finish_reason;
+      const mapped = Object.hasOwn(CHAT_FINISH, reason) ? CHAT_FINISH[reason] : undefined;
+      if (mapped === undefined) {
+        // Defaulting to `endTurn` was the previous behaviour and it is the one
+        // wrong answer that cannot be noticed: a truncated turn, a filtered one
+        // and a new tool-call spelling all read to the client as a complete
+        // reply, and nothing in `request_logs` disagrees. The endpoint is
+        // whatever an operator pointed the gateway at, so naming the reason is
+        // the only way they learn their server speaks a vocabulary this
+        // decoder does not.
+        yield {
+          type: "error",
+          code: "UPSTREAM",
+          message: `unrecognized custom endpoint finish reason "${reason}"`,
+          retryable: false,
+        };
+        return;
+      }
+      stopReason = mapped;
     }
   }
 
@@ -270,6 +297,54 @@ const RESPONSES_ERROR_CODE: Readonly<Record<string, ErrorCode>> = {
   context_length_exceeded: "BAD_REQUEST",
   content_policy_violation: "CONTENT_FILTER",
 };
+
+/**
+ * Every Responses event this decoder accepts, whether or not it acts on one.
+ *
+ * An allowlist, not a mirror of the switch below: most of these are known and
+ * deliberately ignored, and that is the distinction worth keeping. Skipping an
+ * event the set does not name is content the client never sees and nothing in
+ * the log explains — a stream that ends clean and short reads exactly like a
+ * short answer.
+ *
+ * The argument is strongest here of the three. A custom endpoint is whatever an
+ * operator pointed the gateway at, so the odds of it emitting something outside
+ * OpenAI's set are the highest and the evidence is the thinnest — and the same
+ * fact means the failure has to name the endpoint's own event, since nobody
+ * else can tell the operator what their server sent.
+ *
+ * Scoped to what the request can produce: `wire.ts` sends only
+ * `type: "function"` tools, so the hosted-tool families cannot arrive.
+ *
+ * Forked from `grok/decode.ts` rather than shared, per boundary rule 2 — the
+ * same reason this file already forks its chat and responses codecs.
+ */
+const KNOWN_RESPONSES_EVENTS: ReadonlySet<string> = new Set([
+  "response.created",
+  "response.queued",
+  "response.in_progress",
+  "response.output_item.added",
+  "response.output_item.done",
+  "response.content_part.added",
+  "response.content_part.done",
+  "response.output_text.delta",
+  "response.output_text.done",
+  "response.output_text.annotation.added",
+  "response.refusal.delta",
+  "response.refusal.done",
+  "response.reasoning_summary_part.added",
+  "response.reasoning_summary_part.done",
+  "response.reasoning_summary_text.delta",
+  "response.reasoning_summary_text.done",
+  "response.reasoning_text.delta",
+  "response.reasoning_text.done",
+  "response.function_call_arguments.delta",
+  "response.function_call_arguments.done",
+  "response.completed",
+  "response.incomplete",
+  "response.failed",
+  "error",
+]);
 
 type ErrorPayload = { code?: string; type?: string; message?: string };
 
@@ -323,6 +398,27 @@ export async function* decodeCustomResponses(
   const ownsBlock = new Set<number>();
 
   for await (const msg of messages) {
+    // The Responses API terminates on `response.completed`, not on a sentinel,
+    // but nothing stops a compatible server from closing with the OpenAI-style
+    // one — this decoder's chat half treats it as the success marker. It carries
+    // no event name, so `parseSse` labels it "message" and the check below would
+    // read a benign close as an unknown event. Skipped, not treated as terminal:
+    // only a real completion may end the stream without an error.
+    if (msg.data === "[DONE]") continue;
+
+    // Checked before the payload is parsed. The other order lets an unknown
+    // event whose data is not JSON fall into the `null` skip and end the stream
+    // clean and short — the silent truncation this set exists to prevent.
+    if (!KNOWN_RESPONSES_EVENTS.has(msg.event)) {
+      yield {
+        type: "error",
+        code: "UPSTREAM",
+        message: `unrecognized custom endpoint stream event "${msg.event}"`,
+        retryable: false,
+      };
+      return;
+    }
+
     const d = json<ResponsesEvent>(msg.data);
     if (d === null) continue;
 
@@ -445,6 +541,7 @@ export async function* decodeCustomResponses(
       }
 
       default:
+        // Known, but carrying nothing the IR needs.
         break;
     }
   }

@@ -4,10 +4,24 @@ WORKDIR /app
 
 # Manifests first: this layer is cached until a dependency actually changes,
 # so editing source does not reinstall node_modules.
+#
+# Every workspace reachable from @omni/gateway has to be here, dev dependencies
+# included. A pruned checkout must keep each workspace its survivors name, and
+# bun checks that against bun.lock before it looks at whether --production would
+# have skipped the edge -- so @omni/testkit needs a line even though nothing
+# under src/ imports it and --production never links it. Omitting one is not a
+# slow image, it is `bun install` refusing to run at all.
 COPY package.json bun.lock ./
+COPY packages/control/package.json packages/control/
 COPY packages/ir/package.json packages/ir/
-COPY packages/store/package.json packages/store/
+COPY packages/plugin-api/package.json packages/plugin-api/
+COPY packages/ponytail/package.json packages/ponytail/
 COPY packages/providers/package.json packages/providers/
+COPY packages/ratelimit/package.json packages/ratelimit/
+COPY packages/router/package.json packages/router/
+COPY packages/rtk/package.json packages/rtk/
+COPY packages/store/package.json packages/store/
+COPY packages/testkit/package.json packages/testkit/
 COPY apps/gateway/package.json apps/gateway/
 RUN bun install --frozen-lockfile --production
 

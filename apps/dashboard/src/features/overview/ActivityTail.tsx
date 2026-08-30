@@ -3,6 +3,7 @@ import styled from "styled-components";
 import type { RequestLog } from "../../api/types.ts";
 import { formatClock, formatMs, formatUsd } from "../../lib/format.ts";
 import { isPending, lampLabel, lampState } from "../../lib/vitals.ts";
+import { providerColor } from "../../theme/tokens.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Lamp } from "../../ui/Lamp.tsx";
 import { Module } from "../../ui/Panel.tsx";
@@ -65,7 +66,7 @@ export function ActivityTail({ logs }: { logs: readonly RequestLog[] }) {
               <Mono $dim>{formatClock(log.at)}</Mono>
               <Model title={log.requestedModel}>{log.requestedModel || "—"}</Model>
               {log.resolvedProvider === null ? null : (
-                <Mono $dim style={{ color: `var(--p-${log.resolvedProvider})` }}>
+                <Mono $dim style={{ color: providerColor(log.resolvedProvider) }}>
                   {log.resolvedProvider}
                 </Mono>
               )}

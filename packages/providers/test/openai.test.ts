@@ -600,3 +600,109 @@ test("records nothing when no 1m request was made", () => {
   const { degradations } = toResponsesWire(base, "gpt-5.6");
   expect(degradations).not.toContain("openai:context-1m-dropped");
 });
+
+// The Responses decoder used to end its switch with a bare `default: break`, so
+// an event it had never heard of was dropped and the stream carried on. That is
+// content the client never sees with nothing in the log to explain it — a turn
+// that ends clean and short is indistinguishable from a short answer. The guard
+// is grok's, forked rather than shared, per boundary rule 2.
+test("fails visibly on an SSE event it does not know", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.created",
+          data: JSON.stringify({ response: { id: "resp_1", model: "gpt-5" } }),
+        },
+        { event: "response.tool_call.invented", data: JSON.stringify({ output_index: 0 }) },
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(events.some((e) => e.type === "end")).toBe(false);
+});
+
+test("fails visibly on an unknown SSE event whose data is not JSON", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.created",
+          data: JSON.stringify({ response: { id: "resp_1", model: "gpt-5" } }),
+        },
+        { event: "response.tool_call.invented", data: "not json at all" },
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+      ),
+    ),
+  );
+
+  // Parsing before checking the event name would let an unrecognized event hide
+  // behind its own payload: the stream would end clean and short, which is the
+  // exact silent truncation the check is there to refuse.
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(events.some((e) => e.type === "end")).toBe(false);
+});
+
+test("a known event the decoder ignores does not end the stream", async () => {
+  // What makes the set an allowlist rather than a restatement of the switch.
+  // Written from the switch instead, every one of these would fail — and the
+  // failure would be a real Codex turn refused by its own gateway.
+  const ignored = [
+    "response.queued",
+    "response.in_progress",
+    "response.output_text.done",
+    "response.output_text.annotation.added",
+    "response.refusal.delta",
+    "response.refusal.done",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_part.done",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_text.delta",
+    "response.reasoning_text.done",
+    "response.function_call_arguments.done",
+  ];
+
+  for (const event of ignored) {
+    const events = await collect(
+      decodeResponses(
+        msgs(
+          { event, data: JSON.stringify({ output_index: 0 }) },
+          {
+            event: "response.completed",
+            data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+          },
+        ),
+      ),
+    );
+    expect([event, events.at(-1)?.type]).toEqual([event, "end"]);
+  }
+});
+
+test("accepts the [DONE] sentinel instead of reading it as an unknown event", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+        // `parseSse` names an unlabelled record "message", so the transport
+        // sentinel would otherwise arrive as an event outside the known set.
+        // The Responses API sends one, so this is the ordinary close, not a
+        // hypothetical proxy being generous.
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+  expect(events.some((e) => e.type === "error")).toBe(false);
+});

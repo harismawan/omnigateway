@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import styled from "styled-components";
 import type { RequestLog, VirtualModel } from "../../api/types.ts";
 import { formatCount, formatUsd } from "../../lib/format.ts";
+import { providerColor } from "../../theme/tokens.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Chip } from "../../ui/Chip.tsx";
 import { Module } from "../../ui/Panel.tsx";
@@ -32,6 +33,12 @@ const ShareTrack = styled.div`
   border: 1px solid ${({ theme }) => theme.color.rule};
 `;
 
+/**
+ * `$color` lands in the stylesheet unescaped, so it comes from `providerColor`
+ * and never from a template built here. `target.provider` is read back through
+ * `sqlite/config.ts`'s bare `JSON.parse`, which is the read path
+ * `providerIdSchema` does not stand on.
+ */
 const Segment = styled.div<{ $color: string; $grow: number }>`
   flex: ${({ $grow }) => $grow} 0 0;
   background: ${({ $color }) => $color};
@@ -110,7 +117,7 @@ export function ModelTraffic({ models, logs }: ModelTrafficProps) {
                   {providers.map((provider) => (
                     <Segment
                       key={provider}
-                      $color={`var(--p-${provider})`}
+                      $color={providerColor(provider)}
                       $grow={share / providers.length}
                     />
                   ))}

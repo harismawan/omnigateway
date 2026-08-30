@@ -16,7 +16,27 @@ import { createServiceDeps, runForeground } from "./runtime.ts";
 import type { ServiceDeps } from "./service.ts";
 import { atomicWriteFile } from "./setupFs.ts";
 
-export const VERSION = "0.0.0";
+/**
+ * Substituted by `scripts/build-npm.ts` at bundle time; absent everywhere else.
+ *
+ * The release tag is the sole version source and it comes into existence after
+ * the source does, so there is no moment at which this file could hold the real
+ * number. `typeof` rather than a plain read because outside the bundle the
+ * identifier is not merely undefined, it is undeclared — a direct read throws.
+ */
+declare const OMNI_CLI_VERSION: string | undefined;
+
+/**
+ * What `omni --version` prints.
+ *
+ * The literal below is what a checkout reports, and it says so: a build reached
+ * npm as `omnigateway@1.2.3` while its own `--version` answered `0.0.0`,
+ * because the release version was written into the generated manifest and
+ * nowhere the CLI could read. An operator reporting a bug then names a version
+ * that never shipped. `-dev` makes the two cases tell themselves apart rather
+ * than differing by a number nobody has memorised.
+ */
+export const VERSION = typeof OMNI_CLI_VERSION === "string" ? OMNI_CLI_VERSION : "0.0.0-dev";
 
 export type RunOptions = ContextOptions & {
   /** Overridden by tests, which must never spawn a process or call systemctl. */

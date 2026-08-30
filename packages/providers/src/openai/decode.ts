@@ -16,6 +16,53 @@ const ERROR_CODE: Readonly<Record<string, ErrorCode>> = {
   content_policy_violation: "CONTENT_FILTER",
 };
 
+/**
+ * Every event this decoder accepts, whether or not it acts on one.
+ *
+ * An allowlist, not a mirror of the switch below: most of these are known and
+ * deliberately ignored, and that is the distinction worth keeping. Skipping an
+ * event the set does not name is content the client never sees and nothing in
+ * the log explains — a stream that ends clean and short reads exactly like a
+ * short answer.
+ *
+ * Scoped to what the request can produce. `wire.ts` sends only
+ * `type: "function"` tools, so the hosted-tool families — `web_search_call`,
+ * `file_search_call`, `code_interpreter_call`, `image_generation_call`,
+ * `mcp_call` — cannot arrive, and naming them would widen the set to cover
+ * shapes this decoder has no handler for anyway. Adding a hosted tool to the
+ * request means adding its events here, and this is the line that will say so.
+ *
+ * Forked from `grok/decode.ts` rather than shared, per boundary rule 2: the two
+ * sets agree today because xAI's surface is assumed to match this one, and the
+ * point of the fork is that either may move without dragging the other.
+ */
+const KNOWN_EVENTS: ReadonlySet<string> = new Set([
+  "response.created",
+  "response.queued",
+  "response.in_progress",
+  "response.output_item.added",
+  "response.output_item.done",
+  "response.content_part.added",
+  "response.content_part.done",
+  "response.output_text.delta",
+  "response.output_text.done",
+  "response.output_text.annotation.added",
+  "response.refusal.delta",
+  "response.refusal.done",
+  "response.reasoning_summary_part.added",
+  "response.reasoning_summary_part.done",
+  "response.reasoning_summary_text.delta",
+  "response.reasoning_summary_text.done",
+  "response.reasoning_text.delta",
+  "response.reasoning_text.done",
+  "response.function_call_arguments.delta",
+  "response.function_call_arguments.done",
+  "response.completed",
+  "response.incomplete",
+  "response.failed",
+  "error",
+]);
+
 type ErrorPayload = { code?: string; type?: string; message?: string };
 
 /** The subset of the Responses API's SSE payload shapes this decoder reads. */
@@ -76,6 +123,26 @@ export async function* decodeResponses(
   const ownsBlock = new Set<number>();
 
   for await (const msg of messages) {
+    // The Responses API terminates on `response.completed`, not on a sentinel,
+    // but it sends the OpenAI-style one anyway and a compatible proxy may too.
+    // It carries no event name, so `parseSse` labels it "message" and the check
+    // below would read a benign close as an unknown event. Skipped, not treated
+    // as terminal: only a real completion may end the stream without an error.
+    if (msg.data === "[DONE]") continue;
+
+    // Checked before the payload is parsed. The other order lets an unknown
+    // event whose data is not JSON fall into the `null` skip and end the stream
+    // clean and short — the silent truncation this set exists to prevent.
+    if (!KNOWN_EVENTS.has(msg.event)) {
+      yield {
+        type: "error",
+        code: "UPSTREAM",
+        message: `unrecognized OpenAI stream event "${msg.event}"`,
+        retryable: false,
+      };
+      return;
+    }
+
     const d = json(msg.data);
     if (d === null) continue;
 
@@ -198,6 +265,7 @@ export async function* decodeResponses(
       }
 
       default:
+        // Known, but carrying nothing the IR needs.
         break;
     }
   }
