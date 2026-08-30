@@ -55,3 +55,35 @@ test("tolerates CRLF line endings", async () => {
 test("emits a trailing message with no terminating blank line", async () => {
   expect(await drain(streamOf("data: last"))).toEqual([{ event: "message", data: "last" }]);
 });
+
+// The buffer is normalized one appended segment at a time, so the only CRLF a
+// scan of that segment cannot see is one whose halves land in different chunks.
+// A fix that normalizes the segment and forgets to carry the trailing `\r`
+// passes every test above and corrupts exactly these.
+test("normalizes a CRLF split across a chunk boundary", async () => {
+  expect(await drain(streamOf("event: e\r", "\ndata: d\r", "\n\r", "\n"))).toEqual([
+    { event: "e", data: "d" },
+  ]);
+});
+
+test("splitting a CRLF record anywhere parses it identically", async () => {
+  const whole = 'event: message_start\r\ndata: {"a":1}\r\n\r\nevent: ping\r\ndata: {}\r\n\r\n';
+  const expected = await drain(streamOf(whole));
+  expect(expected).toEqual([
+    { event: "message_start", data: '{"a":1}' },
+    { event: "ping", data: "{}" },
+  ]);
+  for (let cut = 1; cut < whole.length; cut++) {
+    expect(await drain(streamOf(whole.slice(0, cut), whole.slice(cut)))).toEqual(expected);
+  }
+});
+
+// A `\r` that is not a line ending is ordinary data and must survive being held
+// back and re-joined, rather than being dropped or moved.
+test("keeps a bare carriage return that is followed by ordinary text", async () => {
+  expect(await drain(streamOf("data: a\r", "b\n\n"))).toEqual([{ event: "message", data: "a\rb" }]);
+});
+
+test("keeps a bare carriage return at the very end of a stream", async () => {
+  expect(await drain(streamOf("data: a", "\r"))).toEqual([{ event: "message", data: "a\r" }]);
+});
