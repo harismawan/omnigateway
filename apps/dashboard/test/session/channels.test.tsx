@@ -116,6 +116,39 @@ test("holding a topic subscribes it on the wire and delivers its frames", () => 
   expect(read("a")).toBe(`open|frame:{"n":1}`);
 });
 
+test("a topic first held after the socket opened is subscribed there and then", () => {
+  // The production case, and the one a test that mounts everything up front
+  // cannot see: the socket opens with the shell and a panel mounts on
+  // navigation, so `hold` is reached with a live connection and has to write
+  // the frame itself rather than wait for a reconnect to replay it. Breaking
+  // that branch left every other assertion in this file green, because they all
+  // mount before `open()` and are subscribed by the replay.
+  const { stub, timer, client } = connected();
+  const late = mountGate(false);
+  renderWithProviders(
+    <late.Gate>
+      <Reader topic={OTHER} id="b" />
+    </late.Gate>,
+    { client, stream: { enabled: true, timer: timer.schedule } },
+  );
+
+  act(() => {
+    stub.last().open();
+  });
+  expect(framesOfType(stub.last().frames(), "subscribe")).not.toContain(OTHER);
+
+  act(() => {
+    late.set(true);
+  });
+
+  expect(framesOfType(stub.last().frames(), "subscribe")).toContain(OTHER);
+  act(() => {
+    stub.last().emit({ type: "ack", topic: OTHER });
+    stub.last().emit({ type: "event", topic: OTHER, payload: { n: 9 } });
+  });
+  expect(read("b")).toBe(`open|frame:{"n":9}`);
+});
+
 test("a second holder does not subscribe again, and the first to leave does not unsubscribe", () => {
   // The refcount, from both directions. One holder passes an off-by-one either
   // way: with a single reader, "subscribe once" and "subscribe per holder" are
