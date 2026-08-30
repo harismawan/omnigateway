@@ -207,11 +207,29 @@ export function tokenErrorCode(status: number): ErrorCode {
 
 /** Reads an error identifier out of a token response without leaking the body. */
 export function tokenErrorMessage(status: number, body: unknown): string {
-  const code =
+  const raw =
     typeof body === "object" &&
     body !== null &&
     typeof (body as { error?: unknown }).error === "string"
       ? (body as { error: string }).error
-      : `http_${status}`;
+      : "";
+  // **Shape-checked, not merely read.** `oauthAdapter`'s `trusted` marks the
+  // five built-in flows' messages `gatewayAuthored`, which is what lets an
+  // operator see *why* a refresh failed — and that flag claims the text is
+  // built from values this repository owns. That was only nearly true: `error`
+  // is upstream-supplied, and nothing checked it was the identifier RFC 6749
+  // §5.2 intends. Measured at 3037 characters on stdout.
+  //
+  // A token endpoint never receives a prompt — the body is `grant_type`, a code
+  // and a client id — so the leak this flag guards against is unreachable here.
+  // But a server that echoes the offending parameter could put part of an
+  // authorization code in `error`, and a claim the code does not enforce is one
+  // the next contributor extends to `error_description`, which *is* free text.
+  //
+  // The character class admits every code the five flows act on —
+  // `invalid_grant`, `invalid_client`, `expired_token`, `authorization_pending`,
+  // `slow_down`, `access_denied` — and a bare `slice` would bound the length
+  // while still admitting arbitrary content.
+  const code = /^[A-Za-z0-9_.:-]{1,64}$/.test(raw) ? raw : `http_${status}`;
   return `token endpoint rejected the request: ${code}`;
 }

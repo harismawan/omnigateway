@@ -318,3 +318,53 @@ test("an upstream body is still withheld at default level", () => {
     ),
   ).toEqual({});
 });
+
+test("a token endpoint's refusal reaches the operator, bounded", async () => {
+  // The case the test above does **not** reach. A dead transport makes four of
+  // the five produce `flowFailure`, whose `gatewayAuthored` is unconditional —
+  // so only kilo exercised `trusted`, and only because its refresh throws
+  // before making a request. If kilo ever gains a real refresh, that coverage
+  // disappears silently.
+  //
+  // Here the transport *answers*, so the message comes from the flow's own
+  // `fail` via `tokenErrorMessage` — the path `trusted` exists for, and the one
+  // carrying an upstream-supplied value.
+  const quiet = createLogger({ level: "info", write: () => {}, now: () => 0 });
+  const refusing = (payload: string) =>
+    (async () => ({
+      status: 400,
+      headers: new Headers(),
+      body: null,
+      text: async () => payload,
+    })) as never;
+
+  const anthropic = OAUTH_PROVIDERS.anthropic;
+  if (anthropic === undefined) throw new Error("anthropic is not installed");
+
+  const ordinary = await anthropic
+    .refresh("t", { http: refusing(JSON.stringify({ error: "invalid_grant" })), now: () => 0 }, {})
+    .then(() => {
+      throw new Error("resolved against a 400");
+    })
+    .catch((raised: unknown) => raised as GatewayError);
+
+  // The sentence an operator has to act on. `AUTH`, because a 400 from a token
+  // endpoint *is* the provider repudiating the credential.
+  expect(ordinary.code).toBe("AUTH");
+  expect(reasonField(ordinary, quiet)).toEqual({
+    reason: "token endpoint rejected the request: invalid_grant",
+  });
+
+  // And the value is bounded, because `trusted` claims this text is the
+  // gateway's. An `error` field is upstream-supplied and nothing made it an
+  // identifier; 3000 characters reached stdout before it was shape-checked.
+  const hostile = await anthropic
+    .refresh("t", { http: refusing(JSON.stringify({ error: "x".repeat(3000) })), now: () => 0 }, {})
+    .then(() => {
+      throw new Error("resolved against a 400");
+    })
+    .catch((raised: unknown) => raised as GatewayError);
+
+  expect(hostile.message).toBe("token endpoint rejected the request: http_400");
+  expect(hostile.message.length).toBeLessThan(80);
+});

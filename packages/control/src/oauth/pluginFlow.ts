@@ -275,26 +275,38 @@ async function runStep<T>(
   deps: OAuthDeps,
   origins: readonly string[] | undefined,
 ): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       drive(id, step, gen, deps, origins),
       new Promise<never>((_resolve, reject) => {
-        const timer = setTimeout(() => {
+        timer = setTimeout(() => {
           reject(flowFailure(id, step, `did not finish within ${STEP_WALL_CLOCK_MS}ms`));
         }, STEP_WALL_CLOCK_MS);
         // Unref'd so a step that finishes normally does not hold the process
         // open for the rest of the deadline. The CLI exits when its command is
         // done, and a live timer would delay every connect by the slack it did
-        // not use.
+        // not use. Cleared below as well: `unref` stops it holding the process
+        // open but still retains the closure for the full 150s.
         timer.unref?.();
       }),
     ]);
   } finally {
-    // A step abandoned mid-flight — over the cap, outside its origins, or
-    // yielding something unusable — is left suspended, so a `finally` inside the
-    // plugin never runs. Returning into it lets that cleanup happen. Its own
-    // failure is swallowed: the host is already throwing the reason that
-    // matters, and a plugin's cleanup error must not replace it.
+    if (timer !== undefined) clearTimeout(timer);
+    // A step **suspended at a `yield`** — over the cap, outside its origins, or
+    // yielding something unusable — never runs its own `finally`. Returning into
+    // it lets that cleanup happen. Its own failure is swallowed: the host is
+    // already throwing the reason that matters, and a plugin's cleanup error
+    // must not replace it.
+    //
+    // **It does not reach a generator stuck inside its own `await`**, which is
+    // the shape `STEP_WALL_CLOCK_MS` exists for: `gen.return()` queues behind
+    // the pending `next()` and never runs. Measured — the plugin's `finally`
+    // does not fire and the generator survives. So the wall clock bounds *the
+    // host's wait*, not the plugin's execution, and nothing in JavaScript can
+    // bound the latter. Under rule 15 that is a guardrail reaching its limit
+    // rather than a hole; it is written down because the alternative is a
+    // reader believing the cleanup is unconditional.
     void gen.return(undefined as unknown as T).catch(() => {});
   }
 }
@@ -318,23 +330,35 @@ async function drive<T>(
     if (++sent > MAX_REQUESTS_PER_STEP) {
       throw flowFailure(id, step, `asked for more than ${MAX_REQUESTS_PER_STEP} requests`);
     }
-    if (!isAuthRequest(next.value)) {
+    // **Copied first, then only the copy is read — validation included.**
+    //
+    // Every field is otherwise read twice: once by `isAuthRequest` and again by
+    // the origin check or the transport. A property answering differently each
+    // time — a getter is enough — passes validation and sends something else.
+    // Measured with `origins` unset: `isSendableUrl` approved an
+    // `https://api.acme.test` URL and the transport received `file:///etc/passwd`.
+    //
+    // A first version copied *below* the check, closing the origin-to-transport
+    // gap and leaving check-to-transport open, under a comment claiming both.
+    // Rule 15 is a guardrail rather than a sandbox, so this is not containment;
+    // what it protects is the guardrail's stated value, that the manifest is an
+    // honest audit surface, and a silent bypass is the direction that goes wrong.
+    //
+    // **Shallow**: the header array is copied, the pairs inside it are shared.
+    // Nothing reads a header's contents twice today — Node refuses the CRLF
+    // itself — so it costs nothing, and writing "copied once" without this note
+    // would state the wide form of a rule that only holds in its narrow one.
+    const yielded = next.value as Partial<AuthRequest>;
+    const described: AuthRequest = {
+      url: yielded.url as string,
+      method: yielded.method as string,
+      headers: Array.isArray(yielded.headers) ? [...yielded.headers] : [],
+      ...(yielded.body === undefined ? {} : { body: yielded.body }),
+      ...(yielded.timeoutMs === undefined ? {} : { timeoutMs: yielded.timeoutMs }),
+    };
+    if (!isAuthRequest(described) || !Array.isArray(yielded.headers)) {
       throw flowFailure(id, step, "yielded something that is not a request");
     }
-    // **Copied once, then only the copy is read.** The checks below and the
-    // transport otherwise read `url` three times, and a property that answers
-    // differently each time — a getter is enough — passes the origin check and
-    // puts a different host on the wire. Rule 15 is a guardrail rather than a
-    // sandbox, so this is not containment; what it protects is the guardrail's
-    // stated value, that the manifest is an honest audit surface, and a silent
-    // bypass is the direction that goes wrong.
-    const described: AuthRequest = {
-      url: next.value.url,
-      method: next.value.method,
-      headers: [...next.value.headers],
-      ...(next.value.body === undefined ? {} : { body: next.value.body }),
-      ...(next.value.timeoutMs === undefined ? {} : { timeoutMs: next.value.timeoutMs }),
-    };
     if (origins !== undefined && !withinOrigins(described.url, origins)) {
       throw flowFailure(id, step, "described a request to an origin its manifest does not declare");
     }

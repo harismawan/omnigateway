@@ -1361,3 +1361,74 @@ test("a codec inside its origins is sent, and a built-in is unrestricted", async
   });
   expect(unrestricted.sent).toHaveLength(1);
 });
+
+test("a getter cannot pass the shape check and then send something else", async () => {
+  // Every field is read twice — once by the validation, once by the transport.
+  // A property answering differently each time passed the check and sent the
+  // other value, and `"GET junk"` reaching `nodeHttpClient` throws a raw
+  // `ERR_INVALID_HTTP_TOKEN` from outside every guard: `classify` reads that as
+  // `INTERNAL`, which is not retryable, so the request dies where the honest
+  // value fails over cleanly.
+  let methodReads = 0;
+  const twoFaced: ProviderCodec = {
+    buildRequest: () => ({
+      request: {
+        url: "https://api.kilo.ai/x",
+        get method() {
+          methodReads += 1;
+          return methodReads === 1 ? "POST" : "GET junk";
+        },
+        headers: [],
+        body: "{}",
+      },
+    }),
+    decode: async function* () {},
+  };
+  const capture = capturing();
+  await codecAdapter("kilo", kiloDescriptor.capabilities, twoFaced)
+    .send({
+      request,
+      model: "m",
+      credentials: credentials(),
+      http: capture.http,
+      signal: new AbortController().signal,
+    })
+    .catch(() => {});
+
+  // Neutralised rather than refused: the copy reads each field once, so the
+  // second answer is never asked for and the transport gets exactly what the
+  // check approved. `methodReads` is 1 for the same reason — a second read is
+  // what the getter needed to be able to lie.
+  expect(methodReads).toBe(1);
+  for (const sent of capture.sent) expect(sent.method).toBe("POST");
+  expect(capture.sent.length).toBeGreaterThan(0);
+});
+
+test("a getter cannot pass the origin check and then reach elsewhere", async () => {
+  let urlReads = 0;
+  const wandering: ProviderCodec = {
+    buildRequest: () => ({
+      request: {
+        get url() {
+          urlReads += 1;
+          return urlReads <= 2 ? "https://api.kilo.ai/x" : "https://exfiltrate.test/steal";
+        },
+        method: "POST",
+        headers: [],
+        body: "{}",
+      },
+    }),
+    decode: async function* () {},
+  };
+  const capture = capturing();
+  await codecAdapter("kilo", kiloDescriptor.capabilities, wandering, ["https://api.kilo.ai"])
+    .send({
+      request,
+      model: "m",
+      credentials: credentials(),
+      http: capture.http,
+      signal: new AbortController().signal,
+    })
+    .catch(() => {});
+  for (const sent of capture.sent) expect(sent.url).toBe("https://api.kilo.ai/x");
+});

@@ -49,16 +49,6 @@ export async function run(
     return 0;
   }
 
-  // Built once, on demand, and shared by the gate and the flows. Memoized on the
-  // promise rather than the value, so two callers in flight cannot each start a
-  // read of the plugin directory — and cannot then answer differently if it
-  // changed between them.
-  let connectRegistry: Promise<ConnectRegistry> | undefined;
-  const connectRegistryOnce = (): Promise<ConnectRegistry> => {
-    connectRegistry ??= connectRegistryFor(ctx.root.root);
-    return connectRegistry;
-  };
-
   const resolved = resolveCommand(argv);
   if (resolved === null) {
     const words = argv.filter((token) => !token.startsWith("-"));
@@ -85,6 +75,20 @@ export async function run(
   }
 
   const ctx = createContext(args, options);
+
+  // Built once, on demand, and shared by the gate and the flows. Memoized on the
+  // promise rather than the value, so two callers in flight cannot each start a
+  // read of the plugin directory — and cannot then answer differently if it
+  // changed between them.
+  //
+  // Declared **below** `ctx`, which it closes over. It sat above, which worked
+  // only because nothing called it before this line; a later call site placed
+  // between the two would have been a temporal-dead-zone `ReferenceError`.
+  let connectRegistry: Promise<ConnectRegistry> | undefined;
+  const connectRegistryOnce = (): Promise<ConnectRegistry> => {
+    connectRegistry ??= connectRegistryFor(ctx.root.root);
+    return connectRegistry;
+  };
 
   // Written straight to stderr rather than through `note`, for the same reason
   // `connect` prints its URL there: this is not progress chatter but a report

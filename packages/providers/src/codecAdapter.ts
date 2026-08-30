@@ -1,5 +1,5 @@
 import { GatewayError, type ProviderId, type StreamEvent } from "@omni/ir";
-import type { CodecFail, ProviderCodec } from "./codec.ts";
+import type { CodecFail, CodecHttpRequest, ProviderCodec } from "./codec.ts";
 import { httpError } from "./http.ts";
 import { isHttpMethod, isSendableUrl, withinOrigins } from "./origins.ts";
 import type { AdapterRequest, AdapterResult, Capabilities, ProviderAdapter } from "./types.ts";
@@ -234,11 +234,38 @@ export function codecAdapter(
           ...(req.autoCache === undefined ? {} : { autoCacheEnabled: req.autoCache }),
         }),
       );
+      // **Copied first, then only the copy is read — checks included.**
+      //
+      // Every field is otherwise read twice: once by the shape check below and
+      // again by the transport. A property that answers differently each time —
+      // a getter is enough — passes the check and sends something else.
+      // Measured: a getter on `method` returning `"GET"` then `"GET junk"` put a
+      // raw `ERR_INVALID_HTTP_TOKEN` out of `send()`, which `classify` reads as
+      // `INTERNAL`, and `RETRYABLE.INTERNAL` is false — so the request died
+      // where the honest value fails over cleanly.
+      //
+      // A first version of this copy sat *below* the shape check, which closed
+      // the origin-check-to-transport gap and left check-to-transport open, on
+      // a comment claiming it had closed both. That is the same shape as the
+      // note further down about checking one member of a class and describing
+      // it as the class.
+      const described = (built?.request ?? {}) as Partial<{
+        url: string;
+        method: string;
+        headers: readonly (readonly [string, string])[];
+        body: string;
+      }>;
+      const request = {
+        url: described.url,
+        method: described.method,
+        headers: Array.isArray(described.headers) ? [...described.headers] : described.headers,
+        body: described.body,
+      };
       if (
-        typeof built?.request?.body !== "string" ||
-        !isSendableUrl(built.request.url) ||
-        !isHttpMethod(built.request.method) ||
-        !Array.isArray(built.request.headers) ||
+        typeof request.body !== "string" ||
+        !isSendableUrl(request.url) ||
+        !isHttpMethod(request.method) ||
+        !Array.isArray(request.headers) ||
         // The elements, not just the array. `Array.isArray` alone let a
         // malformed pair through to `nodeHttpClient`, which threw a raw
         // `TypeError` — `ERR_INVALID_CHAR`, `ERR_INVALID_HTTP_TOKEN`, or
@@ -256,7 +283,7 @@ export function codecAdapter(
         // codec-authored string into a client-visible message. Checking one
         // member of a class and describing it as the class is how the other two
         // survived a review that was looking straight at them.
-        !built.request.headers.every(
+        !request.headers.every(
           (pair) =>
             Array.isArray(pair) &&
             pair.length === 2 &&
@@ -266,23 +293,18 @@ export function codecAdapter(
       ) {
         throw codecFailure(id, "buildRequest", "did not return a usable request");
       }
-
-      // After the shape check and before the transport. A plugin's manifest is
-      // the only place an operator can read where their prompts go, so a codec
-      // that names somewhere else is refused rather than reported afterwards.
-      // **Copied once, then only the copy is read.** `url` is otherwise read by
-      // the shape check, by the origin check and by the transport, and a
-      // property answering differently each time — a getter is enough — passes
-      // the origin check and puts a different host on the wire. The auth path
-      // carries the same normalisation for the same reason; `origins.ts` was
-      // collapsed into one function precisely because a rule enforced on one of
-      // the two paths a plugin can cause a request is not enforced.
-      const request = {
-        url: built.request.url,
-        method: built.request.method,
-        headers: [...built.request.headers],
-        body: built.request.body,
+      // Narrowed off the copy the checks above just validated, so the transport
+      // and the checks cannot see different values.
+      const sendable: CodecHttpRequest = {
+        url: request.url,
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
       };
+
+      // Checked on the copy, before the transport. A plugin's manifest is the
+      // only place an operator can read where their prompts go, so a codec that
+      // names somewhere else is refused rather than reported afterwards.
       if (origins !== undefined && !withinOrigins(request.url, origins)) {
         throw codecFailure(
           id,
@@ -298,7 +320,7 @@ export function codecAdapter(
       // codec that supplied its own could outlive it.
       const res = await req.http({
         provider: id,
-        ...request,
+        ...sendable,
         signal: req.signal,
       });
 
@@ -394,6 +416,7 @@ export function codecAdapter(
         });
       }
 
+      const cloaked = built.cloakedTools;
       return {
         events: guardStream(
           id,
@@ -430,9 +453,14 @@ export function codecAdapter(
         // deleting it changed nothing, which is how a reader comes to believe a
         // guard is broader than it is. `>= 0` is the one that carries its own
         // weight: zero is a count a codec may legitimately state.
-        ...(Number.isInteger(built.cloakedTools) && (built.cloakedTools ?? 0) >= 0
-          ? { cloakedTools: built.cloakedTools }
-          : {}),
+        // Read **once**, into a local, and the local is what is tested and
+        // emitted. It was read three times — twice by the guard, once by the
+        // field — so a getter answering an integer twice and then
+        // `"SessionSearch,ReadFile"` put client tool names into
+        // `LogFields.cloakedTools` through `dispatch`'s debug line. Measured.
+        // That is the leak the count-not-names contract exists to prevent, and
+        // the guard three lines above says it was already closed.
+        ...(Number.isInteger(cloaked) && (cloaked ?? 0) >= 0 ? { cloakedTools: cloaked } : {}),
       };
     },
   };
