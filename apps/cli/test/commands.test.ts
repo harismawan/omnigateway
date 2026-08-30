@@ -37,6 +37,19 @@ test("--help works before anything is opened", async () => {
   expect(result.out).toContain("omni <command>");
 });
 
+test("--version says so when it is running from a checkout", async () => {
+  // The other half of the version fix, and the half `scripts/test` cannot see:
+  // there the value is substituted at bundle time, here nothing substitutes it.
+  // `--version` is answered before anything is parsed or opened so that it works
+  // on a broken installation, and that has to keep being true with no build step
+  // in front of it. The suffix is the point — a checkout answering a bare
+  // release-shaped number is what let `0.0.0` look like an answer for so long.
+  const result = await cli(["--version"], { root: makeRoot() });
+
+  expect(result.code).toBe(0);
+  expect(result.out.trim()).toBe("0.0.0-dev");
+});
+
 test("db migrate creates the database the gateway would open", async () => {
   const root = makeRoot();
   const result = await cli(["db", "migrate", "--json"], { root });

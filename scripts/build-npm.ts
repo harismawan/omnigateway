@@ -44,7 +44,7 @@ export function releaseVersion(raw: string): string {
   return version;
 }
 
-async function bundle(entry: string, outfile: string): Promise<void> {
+export async function bundle(entry: string, outfile: string, version: string): Promise<void> {
   // No `outdir`: the artifact is written by hand so the two bundles can land
   // at the exact paths the CLI expects to find each other at.
   const result = await Bun.build({
@@ -52,6 +52,14 @@ async function bundle(entry: string, outfile: string): Promise<void> {
     target: "bun",
     format: "esm",
     external: EXTERNAL,
+    // The one moment the source and the tag are both known.
+    //
+    // `omni --version` answered `0.0.0` in every published build: the version
+    // reached the generated `package.json` and nothing else, so npm and the
+    // binary it installed disagreed permanently. Substituting here rather than
+    // reading a file at startup keeps `--version` answering on a broken
+    // installation, which is half of why it is handled before anything opens.
+    define: { OMNI_CLI_VERSION: JSON.stringify(version) },
   });
 
   if (!result.success) {
@@ -70,8 +78,8 @@ export async function buildPackage(version: string): Promise<string> {
 
   // The CLI's bin, and the server it starts. They are siblings by contract:
   // `gatewayEntrypoint` looks for `../gateway.js` relative to the bin.
-  await bundle("apps/cli/src/index.ts", join(outDir, "bin", "omni.js"));
-  await bundle("apps/gateway/src/index.ts", join(outDir, "gateway.js"));
+  await bundle("apps/cli/src/index.ts", join(outDir, "bin", "omni.js"), version);
+  await bundle("apps/gateway/src/index.ts", join(outDir, "gateway.js"), version);
 
   // The console, served by that same server from `./public`.
   await cp(join(root, "apps", "dashboard", "dist"), join(outDir, "public"), { recursive: true });
