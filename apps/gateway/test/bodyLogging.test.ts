@@ -865,7 +865,15 @@ test("reports what a still-running drain has already read", async () => {
   // to the end would hang: the source stays open until the abort below.
   await reader.read();
   await reader.read();
-  for (let tick = 0; tick < 10; tick++) await Promise.resolve();
+
+  // Waited for rather than counted in microtask ticks. How many turns the tee
+  // needs to hand the capture branch its chunks is a scheduling detail, and a
+  // fixed tick count is a test that passes on an idle machine and reports a
+  // product bug on a loaded one. The deadline still fails if nothing arrives.
+  const deadline = Date.now() + 2_000;
+  while (collector.attempts()[0]?.response === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
 
   const partial = String(collector.attempts()[0]?.response);
   expect(partial).toContain("message_start");
