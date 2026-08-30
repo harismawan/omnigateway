@@ -595,6 +595,59 @@ test("decodes upstream cache counters into canonical usage", async () => {
   });
 });
 
+test("a prototype-key stop reason is refused, not passed through", async () => {
+  // `STOP_REASON` is an ordinary literal, so `stop_reason: "constructor"` used
+  // to read the Object constructor back out — present, not undefined, so the
+  // unrecognized-reason refusal never fired and the function was assigned as
+  // the stop reason, where JSON.stringify then drops the field entirely. Same
+  // trap the provider-keyed tables carry, reached from an upstream body.
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs(
+        {
+          event: "message_start",
+          data: JSON.stringify({
+            message: { id: "msg_1", model: "claude-opus-4", usage: { input_tokens: 1 } },
+          }),
+        },
+        {
+          event: "message_delta",
+          data: JSON.stringify({
+            delta: { stop_reason: "constructor" },
+            usage: { output_tokens: 1 },
+          }),
+        },
+      ),
+    ),
+  );
+  expect(events.at(-1)).toEqual({
+    type: "error",
+    code: "UPSTREAM",
+    message: 'unrecognized Anthropic stop reason "constructor"',
+    retryable: false,
+  });
+});
+
+test("a prototype-key error type still classifies as UPSTREAM", async () => {
+  // Same literal-table trap through the error arm: `type: "constructor"` used
+  // to read the Object constructor out of `ERROR_TYPE`, and `?? "UPSTREAM"`
+  // never fired on a truthy function.
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs({
+        event: "error",
+        data: JSON.stringify({ error: { type: "constructor", message: "boom" } }),
+      }),
+    ),
+  );
+  expect(events.at(-1)).toEqual({
+    type: "error",
+    code: "UPSTREAM",
+    message: "boom",
+    retryable: true,
+  });
+});
+
 test("decodes a text stream into canonical events", async () => {
   const events = await collectEvents(
     decodeAnthropic(
