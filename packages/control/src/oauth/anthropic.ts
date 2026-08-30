@@ -1,12 +1,15 @@
 import { GatewayError } from "@omni/ir";
 import { ANTHROPIC_CLI_VERSION, anthropicProfile } from "@omni/providers";
-import { createPkce, randomState } from "./pkce.ts";
+import {
+  type AuthHelpers,
+  type AuthStep,
+  oauthAdapter,
+  type PluginOAuthFlow,
+} from "./pluginFlow.ts";
+import { getJsonRequest, parsed as parseBody, postJsonRequest } from "./requests.ts";
 import {
   type FlowResult,
-  getJson,
-  type OAuthDeps,
   type OAuthProvider,
-  postJson,
   tokenErrorCode,
   tokenErrorMessage,
   type UsageReport,
@@ -32,18 +35,34 @@ type TokenResponse = {
   account?: { email_address?: string };
 };
 
-async function postToken(body: Record<string, string>, deps: OAuthDeps): Promise<TokenResponse> {
-  const { status, parsed } = await postJson(deps, "anthropic", TOKEN_URL, anthropicProfile, {
+/**
+ * The token call, as a step the host performs.
+ *
+ * A generator rather than a function because it yields: the flow describes the
+ * request and the host sends it, so this is delegated to with `yield*` from
+ * `exchange` and `refresh` exactly as it was awaited from both before.
+ */
+// `async function*`, not `function*`. A sync generator delegated with `yield*`
+// from an async one runs, but its `TNext` widens to `AuthResponse | undefined`
+// — so every field read off the response becomes possibly-undefined and the
+// step stops matching `AuthStep`. Caught by the compiler, not by the tests,
+// which passed either way.
+async function* postToken(
+  body: Record<string, string>,
+  fail: AuthHelpers["fail"],
+): AuthStep<TokenResponse> {
+  const res = yield postJsonRequest(TOKEN_URL, anthropicProfile, {
     contentType: "application/json",
     body: JSON.stringify({ ...body, client_id: CLIENT_ID }),
   });
+  const parsed = parseBody(res.body);
 
-  if (status < 200 || status >= 300) {
-    throw new GatewayError(tokenErrorCode(status), tokenErrorMessage(status, parsed));
+  if (res.status < 200 || res.status >= 300) {
+    throw fail(tokenErrorCode(res.status), tokenErrorMessage(res.status, parsed));
   }
 
   if (!isTokenResponse(parsed) || typeof parsed.access_token !== "string") {
-    throw new GatewayError("AUTH", "token endpoint returned no access_token");
+    throw fail("AUTH", "token endpoint returned no access_token");
   }
   return parsed;
 }
@@ -55,7 +74,7 @@ function isTokenResponse(value: unknown): value is TokenResponse {
 function toResult(
   token: TokenResponse,
   fallbackRefresh: string | null,
-  deps: OAuthDeps,
+  now: () => number,
 ): FlowResult {
   return {
     secrets: {
@@ -65,7 +84,7 @@ function toResult(
       apiKey: null,
       idToken: null,
     },
-    expiresAt: typeof token.expires_in === "number" ? deps.now() + token.expires_in * 1000 : null,
+    expiresAt: typeof token.expires_in === "number" ? now() + token.expires_in * 1000 : null,
     accountEmail: token.account?.email_address ?? null,
     providerData: {},
   };
@@ -95,13 +114,17 @@ export function parseAnthropicUsage(value: unknown, now: number): UsageReport | 
   ]);
 }
 
-export const anthropicOAuth: OAuthProvider = {
-  id: "anthropic",
+const anthropicFlow: PluginOAuthFlow = {
   kind: "pkce",
   supportsManualPaste: true,
 
-  start() {
-    const { verifier, challenge } = createPkce();
+  // biome-ignore lint/correctness/useYield: nothing to ask an endpoint for
+  async *start({ redirectUri: _ignored, pkce, randomState }) {
+    // The host mints PKCE and the CSRF state now, so this flow holds no crypto
+    // of its own. `redirectUri` is ignored deliberately: Anthropic's is a fixed
+    // registered value, and echoing back one the caller supplied would let a
+    // caller choose where the code lands.
+    const { verifier, challenge } = pkce();
     const state = randomState();
     const redirectUri = REDIRECT_URI;
 
@@ -118,14 +141,14 @@ export const anthropicOAuth: OAuthProvider = {
     return { authorizeUrl: url.toString(), pending: { verifier, challenge, state, redirectUri } };
   },
 
-  async exchange({ code, pending }, deps) {
+  async *exchange({ code, pending, fail, now }) {
     // A manually pasted code arrives as `<code>#<state>`.
     const [rawCode, pastedState] = code.split("#");
     if (pastedState !== undefined && pastedState !== pending.state) {
-      throw new GatewayError("AUTH", "authorization state mismatch");
+      throw fail("AUTH", "authorization state mismatch");
     }
 
-    const token = await postToken(
+    const token = yield* postToken(
       {
         grant_type: "authorization_code",
         code: (rawCode ?? "").trim(),
@@ -133,23 +156,23 @@ export const anthropicOAuth: OAuthProvider = {
         code_verifier: pending.verifier,
         state: pending.state,
       },
-      deps,
+      fail,
     );
 
-    return toResult(token, null, deps);
+    return toResult(token, null, now);
   },
 
-  async refresh(refreshToken, deps) {
-    const token = await postToken(
+  async *refresh({ refreshToken, fail, now }) {
+    const token = yield* postToken(
       { grant_type: "refresh_token", refresh_token: refreshToken },
-      deps,
+      fail,
     );
-    return toResult(token, refreshToken, deps);
+    return toResult(token, refreshToken, now);
   },
 
-  async usage(secrets, deps) {
+  async *usage({ secrets, now }) {
     if (secrets.accessToken === null) return null;
-    const { status, parsed } = await getJson(deps, "anthropic", USAGE_URL, anthropicProfile, {
+    const res = yield getJsonRequest(USAGE_URL, anthropicProfile, {
       accessToken: secrets.accessToken,
       extraHeaders: [
         ["anthropic-beta", "oauth-2025-04-20"],
@@ -160,7 +183,9 @@ export const anthropicOAuth: OAuthProvider = {
         ["User-Agent", `claude-code/${ANTHROPIC_CLI_VERSION}`],
       ],
     });
-    if (!usageReadable(status, "anthropic")) return null;
-    return parseAnthropicUsage(parsed, deps.now());
+    if (!usageReadable(res.status, "anthropic")) return null;
+    return parseAnthropicUsage(parseBody(res.body), now());
   },
 };
+
+export const anthropicOAuth: OAuthProvider = oauthAdapter("anthropic", anthropicFlow);

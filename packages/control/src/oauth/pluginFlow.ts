@@ -41,6 +41,21 @@ export type AuthRequest = {
   method: string;
   headers: readonly HeaderPair[];
   body?: string;
+  /**
+   * How long this one call may take, bounded by the host.
+   *
+   * Here because the built-in flows deliberately use **two** deadlines, and a
+   * single host constant could not say so: a token call gets 30s because an
+   * operator is waiting on it, and a usage probe gets 15s because nothing on
+   * the request path waits for one and a slow probe should be abandoned rather
+   * than retried. Porting the five found this — the fixture that stood in for
+   * them had one kind of call and so could not.
+   *
+   * Clamped to `MAX_STEP_TIMEOUT_MS`, and absent means that maximum. A plugin
+   * can therefore shorten its own deadline but never extend it past what the
+   * host is willing to hold a connect flow open for.
+   */
+  timeoutMs?: number;
 };
 
 /**
@@ -129,8 +144,14 @@ export type PluginOAuthFlow = {
  */
 const MAX_REQUESTS_PER_STEP = 4;
 
-/** Token calls are short and must not hang a connect flow forever. */
-const STEP_TIMEOUT_MS = 30_000;
+/**
+ * The longest any one call may take, and what a step gets if it asks for nothing.
+ *
+ * Token calls are short and must not hang a connect flow forever. A step may
+ * ask for **less** through `AuthRequest.timeoutMs` — a usage probe does — but
+ * never more, because the ceiling is the host's to set.
+ */
+const MAX_STEP_TIMEOUT_MS = 30_000;
 
 function flowFailure(id: ProviderId, step: string, what: string): GatewayError {
   // `AUTH` rather than `UPSTREAM`: reaching here means this credential cannot be
@@ -164,7 +185,13 @@ function isAuthRequest(value: unknown): value is AuthRequest {
         typeof pair[0] === "string" &&
         typeof pair[1] === "string",
     ) &&
-    (candidate.body === undefined || typeof candidate.body === "string")
+    (candidate.body === undefined || typeof candidate.body === "string") &&
+    // A non-positive or non-finite deadline would make `AbortSignal.timeout`
+    // fire immediately or throw, either of which reads as an upstream failure.
+    (candidate.timeoutMs === undefined ||
+      (typeof candidate.timeoutMs === "number" &&
+        Number.isFinite(candidate.timeoutMs) &&
+        candidate.timeoutMs > 0))
   );
 }
 
@@ -236,7 +263,9 @@ async function drive<T>(
         method: described.method,
         headers: described.headers,
         body: described.body ?? "",
-        signal: AbortSignal.timeout(STEP_TIMEOUT_MS),
+        signal: AbortSignal.timeout(
+          Math.min(described.timeoutMs ?? MAX_STEP_TIMEOUT_MS, MAX_STEP_TIMEOUT_MS),
+        ),
       });
     } catch (error) {
       throw rethrow(id, step, error);
