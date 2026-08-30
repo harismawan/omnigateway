@@ -138,9 +138,15 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     **One exception, and it is real: a plugin supplying a provider receive the decrypted credential
     for its own provider.** `codec.buildRequest` get `{accessToken, apiKey, providerData}` straight
     from `credential.openForInference()`, because a codec that cannot authenticate cannot build a
-    request. Bounded two ways: router only produce candidates for that codec's own provider id, so a
-    plugin see its own provider's secrets and no other; and the codec never hold the client or the
-    store, so it cannot send them anywhere the host did not ask for. This list read as unconditional
+    request. **Its `oauth` flow reach the same class of secret by a second door**: `refresh` receive
+    the decrypted **refresh token** and `usage` receive the access token through `UsageSecrets`. Say
+    both — this bullet named the codec alone for the release in which the auth half landed, which is
+    the narrow-statement version of the mistake the next sentence warn about.
+    Bounded three ways: router only produce candidates for that codec's own provider id and the
+    refresher only hand a credential to its own provider's flow, so a plugin see its own provider's
+    secrets and no other; neither codec nor flow hold the client or the store, so they cannot send
+    them anywhere the host did not ask for; and every URL either one name is checked against the
+    manifest's `origins`, so where a secret may travel is readable without running the plugin. This list read as unconditional
     for one release after that stopped being true — a rule stated wrong is one a contributor
     preserve while breaking the real thing, so state the exception rather than the tidy version.
     `packages/plugin-api` stay pure like `ir`; loader, context, event bus, channel registry live in
@@ -193,8 +199,12 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     see it. And `PluginOAuthFlow` is a **discriminated union** with `oauthAdapter` overloaded on
     `kind`, because the flat shape flatten the return type — `kiloOAuth` stop being a
     `DeviceOAuthProvider` and every consumer reading `begin`/`needsDeviceId` lose it.
-    `requests.ts` hold pure builder mirroring `postJson`/`getJson` — same profile, same merge and
-    order, stopping before the send — so ported flow emit the byte its own golden test already pin.
+    `requests.ts` hold pure builder that **replaced** `postJson`/`getJson` — same profile, same merge
+    and order, stopping before the send — so ported flow emit the byte its own golden test already
+    pin. Those two were deleted once the last flow stopped calling them: an exported, tested way to
+    send with `deps.http` directly is a way to bypass the yield cap, the origin check and the
+    return-shape validation the adapter exist to impose, and none of those absence is visible at the
+    call site.
     Each provider's test file is **unchanged**, which is the proof; mutant against all five (dropped
     `client_id`, dropped beta header, state check off, kilo's second request unauthenticated, kilo's
     org read skipped, grok's host check off, kimi's device headers dropped, openai's content type
