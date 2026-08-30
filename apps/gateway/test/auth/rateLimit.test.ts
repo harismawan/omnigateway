@@ -596,3 +596,82 @@ test("an unlimited key allocates nothing and holds no gauge", async () => {
   release();
   store.close();
 });
+
+// ---------------------------------------------------------------------------
+// The idle-key sweep
+// ---------------------------------------------------------------------------
+
+/**
+ * A limiter over several keys, with no long window so nothing reads the store.
+ *
+ * Key ids are arbitrary strings on purpose: with only a `1m` requests limit the
+ * limiter never asks the store about them, so the sweep can be exercised
+ * without seeding a row per key.
+ */
+async function sweepHarness() {
+  const store = await memoryStore();
+  const logger = captureLogger();
+  let clock = T0;
+  const limiter = new ApiKeyRateLimiter({ store, now: () => clock, logger });
+  const limits: LimitConfig = { requests: { "1m": 1_000 } };
+  return {
+    store,
+    limiter,
+    at: (ms: number) => {
+      clock = ms;
+    },
+    /** One complete request for a key: admitted, then released. */
+    async pass(keyId: string) {
+      (await limiter.admit(keyId, limits, "req_sweep")).release();
+    },
+  };
+}
+
+/**
+ * The sweep is time-gated, and the gate must not turn into "never".
+ *
+ * `cleanup` walked every live key on every `admit` and `consume`. Gating it is
+ * only safe if it still runs, and the drop is invisible through every other
+ * answer this class gives — which is what `liveKeys` exists for.
+ */
+test("drops an idle key once its window has aged out", async () => {
+  const h = await sweepHarness();
+  await h.pass("k_old");
+  expect(h.limiter.liveKeys()).toBe(1);
+
+  // A minute on, `k_old` holds nothing: no gauge, no debits, an empty ring.
+  h.at(T0 + 60_001);
+  await h.pass("k_live");
+
+  expect(h.limiter.liveKeys()).toBe(1);
+  h.store.close();
+});
+
+/**
+ * The gate's own arithmetic, which is the mutation target: an interval that
+ * compares the wrong way round, or against the wrong instant, either sweeps on
+ * every call (the cost this removes) or stops sweeping (an unbounded map).
+ */
+test("sweeps at most once per interval, and again after it", async () => {
+  const h = await sweepHarness();
+  await h.pass("k_a");
+  h.at(T0 + 500);
+  await h.pass("k_b");
+
+  // First sweep: `k_a`'s stamp has aged out, `k_b`'s has not.
+  h.at(T0 + 60_001);
+  await h.pass("k_c");
+  expect(h.limiter.liveKeys()).toBe(2);
+
+  // `k_b` becomes droppable here, but this call is inside the interval that
+  // just swept, so it walks nothing and `k_b` is held over.
+  h.at(T0 + 60_501);
+  await h.pass("k_c");
+  expect(h.limiter.liveKeys()).toBe(2);
+
+  // Past the gate, and `k_b` goes.
+  h.at(T0 + 61_002);
+  await h.pass("k_c");
+  expect(h.limiter.liveKeys()).toBe(1);
+  h.store.close();
+});

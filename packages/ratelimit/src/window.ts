@@ -29,7 +29,10 @@ export class SlidingWindow {
       if (stamp > cutoff) break;
       aged++;
     }
-    if (aged > 0) this.stamps = this.stamps.slice(aged);
+    // In place, rather than `slice` into a fresh array. This runs on every
+    // claim of every limited key, and the old form allocated a replacement
+    // array each time even though the trim is almost always a no-op.
+    if (aged > 0) this.stamps.splice(0, aged);
     return this.stamps.length;
   }
 
