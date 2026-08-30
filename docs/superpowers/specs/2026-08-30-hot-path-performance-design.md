@@ -49,6 +49,42 @@ the carry passes every whole-chunk test and corrupts exactly the boundary case.
 
 ### P2 — every successful request writes a health row that usually says nothing
 
+> **Superseded at implementation time. Do not implement as written below.** Two
+> things were measured wrong, and both are recorded here rather than edited away
+> because the reasoning is the reusable part.
+>
+> **The identity never holds.** `recordSuccess`
+> (`packages/router/src/breaker.ts:74-82`) returns `lastUsedAt: opts.now` on
+> every success and recomputes `ewmaTtftMs` whenever a TTFT sample exists. A
+> field-for-field identity therefore requires two successes inside one
+> millisecond with no TTFT — so the skip below would fire on approximately no
+> requests. Neither field is cosmetic: `lastUsedAt` is the idle-time routing
+> tiebreak (`packages/router/src/index.ts:89`) and `ewmaTtftMs` is the latency
+> score (`packages/router/src/score.ts:105,138`), so widening the comparison to
+> ignore them is a routing change, not an optimization.
+>
+> **The cost was not the write.** The share was right — `updateHealth` was 24%
+> of a request's store time with failover, 32% without — but the cause was
+> `PRAGMA synchronous` defaulting to FULL, which fsyncs the WAL on every commit.
+> Measured on xfs, 1,000 iterations after warmup:
+>
+> | | FULL | NORMAL |
+> |---|---|---|
+> | `updateHealth`, read + write | 2,177.3 µs | 16.4 µs |
+> | `updateHealth`, read + skip write | 2.0 µs | 1.8 µs |
+>
+> Setting `synchronous = NORMAL` in `packages/store/src/sqlite/db.ts` took a
+> request's whole store time from 9,075 µs to 315 µs — more than every finding
+> in this document combined, and it is one line. At NORMAL a perfect skip of the
+> health write would save 14.6 µs, which does not justify touching a routing
+> input. **P2 is closed as won by the pragma.**
+>
+> The transferable lesson: the finding located the right *row in the profile*
+> and inferred the wrong *cause* from it, and the fix that followed from the
+> inference would have been a behaviour change worth 0.16% of the one that
+> followed from measuring. Measure the layer below the one that looks slow
+> before designing around it.
+
 `apps/gateway/src/dispatch/index.ts:636-642`: the success path awaits
 `persistHealth` → `credentials.updateHealth`, a write transaction, once per
 request. A request already pays `beginLog`'s insert, `routeLog`'s update on
@@ -175,6 +211,11 @@ entry. P2 second — the largest event-loop win, and the one with real mutation
 surface. P3–P6 are independent, opportunistic, and safe to batch with adjacent
 work. Nothing here blocks or is blocked by anything else in flight.
 
+**As implemented:** P1, P3, P4, P5 and P6 landed as described. P2 was closed
+without the change it proposed — see the note under that finding — and the
+`synchronous = NORMAL` pragma it led to is the largest win in the set by two
+orders of magnitude.
+
 ## Out of scope
 
 - **No timeout around store reads**, reaffirmed: `bun:sqlite` is synchronous
@@ -186,3 +227,6 @@ work. Nothing here blocks or is blocked by anything else in flight.
 - **No benchmark harness.** Each fix above is pinned by behaviour tests;
   timing assertions in CI are flake generators. The measurements that
   motivated the ordering live in this document.
+- **No further pragma tuning.** `synchronous = NORMAL` is taken and documented
+  in `ARCHITECTURE.md#storage`; `OFF` is not, because it gives up the
+  application- and OS-crash safety NORMAL keeps for no measured gain over it.

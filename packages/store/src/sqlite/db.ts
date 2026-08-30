@@ -43,6 +43,25 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
 export function openDb(path: string): Database {
   const db = new Database(path, { create: true });
   db.run("PRAGMA journal_mode = WAL");
+  // The single largest cost on the request path, and it is a pragma rather than
+  // any amount of doing less work.
+  //
+  // `synchronous` defaults to FULL, which fsyncs the WAL on every commit. A
+  // request commits three or four times — `usage.begin`, `usage.route` on
+  // failover, `usage.append` with its two rollups, `credentials.updateHealth` —
+  // and `bun:sqlite` is synchronous, so each fsync blocks the whole event loop
+  // rather than one request. Measured on xfs, 1,000 iterations after warmup:
+  // one health write costs 2,177µs at FULL and 16.4µs at NORMAL, so a request's
+  // store time falls from roughly 9ms to well under 100µs.
+  //
+  // NORMAL is safe here in the way that matters: WAL, not this pragma, is what
+  // rules out corruption, and NORMAL still survives an application crash and an
+  // OS crash. What it gives up is durability of the most recently committed
+  // transactions across a power loss or kernel panic — for request logs, usage
+  // counters and credential health, losing the last few milliseconds of writes
+  // to a power cut is the right side of a 133× trade. Anything that is not is
+  // not stored here.
+  db.run("PRAGMA synchronous = NORMAL");
   db.run("PRAGMA foreign_keys = ON");
   db.run("PRAGMA busy_timeout = 5000");
   db.run(

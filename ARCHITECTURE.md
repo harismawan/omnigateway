@@ -221,6 +221,8 @@ Catalog supplies defaults — pricing and context limits — at moment you creat
 
 One SQLite file, WAL mode, eleven migrations — plus, when body capture on, tree of encrypted artifacts beside it.
 
+**`synchronous = NORMAL`, set explicitly, and it is the single largest lever on request-path cost.** Default is FULL, which fsyncs WAL on every commit; a request commits three or four times — `usage.begin`, `usage.route` on failover, `usage.append` with its two rollups, `credentials.updateHealth`. `bun:sqlite` synchronous, so each fsync block whole event loop, not one request. Measured on xfs, 1,000 iterations after warmup: one health write 2,177 µs at FULL against 16.4 µs at NORMAL, and a request's whole store time 9.1 ms against 315 µs. What NORMAL give up is narrow and named: WAL — not this pragma — is what rule out corruption, and NORMAL still survive application crash and OS crash. Exposure is losing most recently committed transactions to power loss or kernel panic, and what live here is request logs, usage counters and credential health. Pinned by `packages/store/test/pragmas.test.ts`, because a revert show up as nothing but a slow gateway.
+
 ```mermaid
 flowchart TB
   subgraph ledger[Schema ledgers]
