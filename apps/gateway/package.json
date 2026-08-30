@@ -18,8 +18,10 @@
     "@omni/router": "workspace:*",
     "@omni/rtk": "workspace:*",
     "@omni/store": "workspace:*",
-    "@omni/testkit": "workspace:*",
     "elysia": "1.4.29",
     "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@omni/testkit": "workspace:*"
   }
 }
