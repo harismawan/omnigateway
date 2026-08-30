@@ -79,6 +79,14 @@ export const PLUGIN_API_VERSION = 2;
  * can see. A patch, since the surface a plugin compiles against is unchanged and
  * every published `sdk: "^0.1.0"` range should go on matching.
  *
+ * `0.1.4` added `usePluginChannel`, and with it the client half of plugin
+ * channels: a panel can hold its own plugin's topic on the console's socket,
+ * receive frames on it and publish back. A patch on the same reasoning as
+ * `0.1.2` — the hook is new, `LiveContextValue.channels` is optional and sits
+ * on a type a panel consumes but cannot construct, and a `0.1.3` panel keeps
+ * doing exactly what it did. Reserve the minor for the first genuine
+ * narrowing, with a deprecation window.
+ *
  * **Changing this line means republishing _this_ package, not just the SDK.**
  * It reads as an SDK fact and it lives here, so the obvious move — bump
  * `packages/dashboard-sdk`, tag, done — leaves the registry with a
@@ -91,4 +99,4 @@ export const PLUGIN_API_VERSION = 2;
  * advertised. `publishable.test.ts` now refuses a state where this package
  * trails the SDK.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.3";
+export const DASHBOARD_SDK_VERSION = "0.1.4";

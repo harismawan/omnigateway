@@ -99,7 +99,7 @@ here and never escaped anywhere downstream.
 
 `api` is the host's plugin-API **generation** — a counter that only goes up, not
 the npm major of `@omnigateway/plugin-api`. It is `2` today while that package is
-`0.1.x`, and the two are independent on purpose: semver resets a stabilising
+`0.2.x`, and the two are independent on purpose: semver resets a stabilising
 package to `1.0.0`, and a compatibility generation may never go backwards. A
 mismatch skips the plugin at boot, server half included.
 
@@ -250,6 +250,64 @@ One caveat with teeth: a client must **subscribe** before it sends. Your only
 way to answer is `send(connectionId, …)`, which publishes on that same topic, so
 a frame from an unsubscribed connection is a question whose answer has nowhere
 to land — the host refuses it rather than handing you one you cannot reply to.
+
+### The panel's half
+
+Your UI reaches the same channel through one hook:
+
+```jsx
+import { usePluginChannel } from "@omnigateway/dashboard-sdk";
+
+function Panel({ pluginId }) {
+  const [lines, setLines] = useState([]);
+  const { status, send } = usePluginChannel(pluginId, "session", (payload) => {
+    setLines((previous) => [...previous, payload]);
+  });
+
+  if (status === "refused") return <p>Live updates need operator access.</p>;
+  return <button onClick={() => send({ ask: "hello" })}>Ask</button>;
+}
+```
+
+`pluginId` comes from the props the host hands your `mount`, and the hook
+composes `plugin:<your-id>:session` from it — you write the channel name and
+never the topic, on the panel side as on the server side. On the server side
+that is enforced; here it is convenience, so that a panel cannot reach another
+plugin's channel by accident and a plugin renamed on disk keeps working.
+
+**Declare `"sdk": "^0.1.4"` in your manifest if you use this hook.** With a
+wider range your panel mounts on a gateway whose console predates it, finds no
+transport, and sits at `idle` forever — which is indistinguishable from a
+channel nothing is sending on. The version gate is what turns that into a
+disabled nav entry with a reason.
+
+Three things worth knowing before you build on it:
+
+- **`status` is `idle`, `open` or `refused`, and the third one is why it
+  exists.** Only an operator holds a plugin topic; a read-only viewer is
+  refused, and so is anyone whose console never managed a WebSocket upgrade.
+  Told nothing, your panel could not tell that from a channel you simply have
+  nothing to say on — so render the refusal rather than a spinner.
+- **`send` returns `false` when the channel is not open**, and writes nothing.
+  Check it or ignore it, but do not assume a send arrived because the call
+  returned.
+- **Unmounting gives the channel up**, which is what fires your `onClose` for
+  that connection. A panel the operator navigated away from is a session you can
+  drop — you do not have to wait for the tab to close. The corollary is that
+  `onClose` may name a `connectionId` you have never seen: a connection that
+  subscribed and left without sending anything is one you only learn about
+  through its departure, and React's development mode mounts every panel twice,
+  so this is routine rather than exotic. Treat an unknown id as a no-op.
+
+The subscription survives a dropped socket: the console resubscribes on
+reconnect and you get a fresh `onMessage` for the same connection under a new
+`connectionId`. Your panel sees `closed` and then `open` again, which is the
+window in which nothing is arriving. There is no replay across it, for the same
+reason there is no replay anywhere else here.
+
+If you want the console's LIVE switch to stop polling a query your channel
+already pushes, the hook hands you the composed `topic` to feed
+`cadence(ms, topic)` — see the SDK's `useLive`.
 
 ## 5. Logging
 

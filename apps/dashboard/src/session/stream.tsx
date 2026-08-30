@@ -16,6 +16,7 @@ import {
   RES_TOPICS,
   STREAM_TOPICS,
 } from "./invalidation.ts";
+import type { ChannelTransport } from "./live.tsx";
 import { type LiveConnection, LiveProvider } from "./live.tsx";
 
 /**
@@ -72,6 +73,12 @@ const BACKOFF_BASE_MS = 500;
  */
 const BACKOFF_CAP_MS = 30_000;
 
+/**
+ * The topics this client subscribes to at open and never gives up, as a set for
+ * the per-frame membership test in `wants`.
+ */
+const TABLE_TOPICS: ReadonlySet<string> = new Set([...RES_TOPICS, ...STREAM_TOPICS]);
+
 /** How many drops inside {@link DROP_WINDOW_MS} mean the socket is not worth trusting. */
 const DROP_LIMIT = 3;
 const DROP_WINDOW_MS = 60_000;
@@ -98,8 +105,18 @@ function streamUrl(): string {
   return `${protocol === "https:" ? "wss:" : "ws:"}//${host}/api/stream`;
 }
 
-/** The subset of `ClientFrame` this console sends. It never publishes. */
-type ClientFrame = { type: "subscribe"; topic: string; sinceSeq?: number };
+/**
+ * The subset of `ClientFrame` this console sends.
+ *
+ * It publishes on plugin topics and nowhere else. `res:*` and `stream:*` are
+ * host-owned and one-directional — the gateway answers a `send` on either with
+ * `topic is read-only` — so the only writer here is a plugin panel talking to
+ * its own plugin.
+ */
+type ClientFrame =
+  | { type: "subscribe"; topic: string; sinceSeq?: number }
+  | { type: "unsubscribe"; topic: string }
+  | { type: "send"; topic: string; payload: unknown };
 
 type ServerFrame = { type: string; topic?: string; seq?: number; payload?: unknown };
 
@@ -116,7 +133,25 @@ type ServerFrame = { type: string; topic?: string; seq?: number; payload?: unkno
  * none of them mean; the panel that subscribed is the one place that can say
  * what a well-formed frame on its own topic looks like.
  */
-export type TopicMessage = { kind: "frame"; payload: unknown } | { kind: "gap" };
+export type TopicMessage =
+  | { kind: "frame"; payload: unknown }
+  | { kind: "gap" }
+  /**
+   * The three status arms, which exist for the topics this client holds on
+   * request rather than from the compile-time table.
+   *
+   * A plugin topic can be *refused* — `authorised` gives one to an admin and to
+   * nobody else — and a panel that was handed silence could not tell that from
+   * a channel that is merely quiet. That distinction is the whole reason a
+   * subscriber gets told anything but frames.
+   *
+   * They are delivered by topic, so a `stream:*` reader sees them too.
+   * `ConsoleBoard` acts on `frame` and `gap` and ignores the rest, which is
+   * what keeps them additive for the one caller that predates them.
+   */
+  | { kind: "open" }
+  | { kind: "refused" }
+  | { kind: "closed" };
 
 /**
  * Reads one server frame, or `null` when it is not one.
@@ -165,6 +200,20 @@ type StreamClient = {
   /** Opens the socket. The returned function closes it and cancels any retry. */
   start: () => () => void;
   onStream: TopicSubscribe;
+  /**
+   * Holds a topic that is not in the compile-time table, for as long as the
+   * returned function has not been called.
+   *
+   * `onStream` registers a reader for a topic the client already subscribed to
+   * at open. This one *is* the subscription: it sends the frame, refcounts the
+   * holders, replays on reconnect and gives the topic up when the last holder
+   * leaves. Wire subscription and local reader are one call rather than two
+   * because two lifetimes kept in step by convention drift into a topic that is
+   * subscribed and rendered by nobody, and that state is silent.
+   */
+  hold: TopicSubscribe;
+  /** Publishes on a plugin topic. `false` when the topic is not open. */
+  publish: (topic: string, payload: unknown) => boolean;
 };
 
 type StreamClientDeps = {
@@ -182,6 +231,23 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
   const seen = new Map<string, number>();
   /** Who is rendering which `stream:*` topic. Empty for a topic nobody has mounted. */
   const readers = new Map<string, Set<(message: TopicMessage) => void>>();
+  /**
+   * Topics held on request, and how many holders each has.
+   *
+   * A count rather than a set because two panels may render the same channel —
+   * a list and a detail view of one session — and the first to unmount must not
+   * take the subscription out from under the second.
+   */
+  const held = new Map<string, number>();
+
+  /**
+   * Whether this client currently wants a topic at all.
+   *
+   * The compile-time table plus whatever is held right now. Asked of an
+   * incoming `ack`, because an ack is not only the answer to a subscribe: the
+   * gateway answers an unsubscribe with one too, on the same topic.
+   */
+  const wants = (topic: string): boolean => held.has(topic) || TABLE_TOPICS.has(topic);
 
   let drops: number[] = [];
   let socket: WebSocket | null = null;
@@ -240,6 +306,11 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
           : { type: "subscribe", topic, sinceSeq: last },
       );
     }
+    // Held topics are not in the table above, so nothing else would put them
+    // back after a drop. Never with `sinceSeq`: a plugin frame carries no `seq`
+    // and has no ring behind it, so asking to resume from one would invite a
+    // `gap` for a class that cannot produce one.
+    for (const topic of held.keys()) send({ type: "subscribe", topic });
   }
 
   function handleOpen(): void {
@@ -268,15 +339,29 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
       // Acked, not sent: a topic is only pushed once the server says it holds
       // it. `stream:console` on an installation whose log capture is `none` is
       // answered `error` instead, and that board must keep polling.
-      if (topic !== undefined) {
+      if (topic !== undefined && wants(topic)) {
+        // Gated on still wanting the topic, because the gateway acks an
+        // *unsubscribe* on the same topic with the same frame. Ungated, the
+        // last holder leaving would clear `acked` and the ack for its own
+        // departure would put it straight back — leaving `pushed(topic)` true
+        // for a topic nothing is subscribed to, so `cadence(ms, topic)` tells a
+        // query to stop polling in favour of a push that cannot arrive.
         acked.add(topic);
+        deliver(topic, { kind: "open" });
         publish();
       }
       return;
     }
 
     if (frame.type === "error") {
-      if (topic !== undefined && acked.delete(topic)) publish();
+      if (topic !== undefined) {
+        // Delivered whether or not the topic was acked, because the interesting
+        // case is the one where it never was: a refused subscribe is what a
+        // viewer gets for every plugin topic, and it is the only signal that
+        // separates "not permitted" from "nothing has happened yet".
+        if (acked.delete(topic)) publish();
+        deliver(topic, { kind: "refused" });
+      }
       return;
     }
 
@@ -338,6 +423,11 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
     opened = false;
     socket = null;
     acked.clear();
+    // Every subscription went with the socket, so every holder is told before
+    // anything else happens. It resubscribes on reconnect and `open` follows —
+    // but until it does, a panel that was told nothing would go on rendering a
+    // live channel while nothing was arriving on it.
+    for (const topic of [...readers.keys()]) deliver(topic, { kind: "closed" });
     // Our own close, on unmount. Nothing to report and nothing to retry.
     if (!running) return;
 
@@ -384,6 +474,26 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
     ws.addEventListener("close", handleClose);
   }
 
+  /**
+   * Registers a reader for a topic, and returns its removal.
+   *
+   * Shared by `onStream` and `hold` rather than one calling the other through
+   * `this`, which a caller destructuring the client would break — and the
+   * console does destructure it.
+   */
+  function addReader(topic: string, listener: (message: TopicMessage) => void): () => void {
+    const listeners = readers.get(topic) ?? new Set<(message: TopicMessage) => void>();
+    readers.set(topic, listeners);
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      // Dropped rather than left empty, because `deliver` reads emptiness as
+      // "nobody is rendering this" and an empty set left behind would answer
+      // the same — but a leaked set per topic per remount would not.
+      if (listeners.size === 0) readers.delete(topic);
+    };
+  }
+
   return {
     subscribe(listener) {
       listeners.add(listener);
@@ -392,18 +502,57 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
       };
     },
     snapshot: () => current,
-    onStream(topic, listener) {
-      const listeners = readers.get(topic) ?? new Set<(message: TopicMessage) => void>();
-      readers.set(topic, listeners);
-      listeners.add(listener);
+    hold(topic, listener) {
+      const release = addReader(topic, listener);
+      const holders = (held.get(topic) ?? 0) + 1;
+      held.set(topic, holders);
+      // Only the first holder subscribes. A second one asking again would have
+      // the gateway ack a topic it already holds, and — more to the point —
+      // would make "release on last" and "release on any" indistinguishable.
+      if (holders === 1 && opened) send({ type: "subscribe", topic });
+      // The ordinary case rather than the exotic one: the socket opens with the
+      // shell and a panel mounts on navigation, so the ack has usually been and
+      // gone. A status delivered only as an event would leave that panel
+      // reading `idle` forever, with frames arriving underneath it.
+      if (acked.has(topic)) listener({ kind: "open" });
+      // Called once by React, which calls an effect's cleanup exactly once — but
+      // `ChannelTransport.subscribe` is exported to plugin authors, who call it
+      // by hand. A second call would drop the count to zero again and send an
+      // `unsubscribe` out from under whoever holds the topic now, firing the
+      // plugin's `onClose` for a session that is still live.
+      let released = false;
       return () => {
-        listeners.delete(listener);
-        // Dropped rather than left empty, because `deliver` reads emptiness as
-        // "nobody is rendering this" and an empty set left behind would answer
-        // the same — but a leaked set per topic per remount would not.
-        if (listeners.size === 0) readers.delete(topic);
+        if (released) return;
+        released = true;
+        release();
+        const remaining = (held.get(topic) ?? 1) - 1;
+        if (remaining > 0) {
+          held.set(topic, remaining);
+          return;
+        }
+        held.delete(topic);
+        // Cleared here as well as gated at the ack, and both are needed: this
+        // makes `cadence` flip back to its interval on the spot rather than at
+        // whatever later point the socket happens to drop.
+        if (acked.delete(topic)) publish();
+        // Told rather than left implicit: the gateway fires the plugin's
+        // `onClose` for this connection off exactly this frame, so a panel that
+        // unmounted without one leaves the plugin holding a session it will
+        // never be told to drop.
+        if (opened) send({ type: "unsubscribe", topic });
       };
     },
+    publish(topic, payload) {
+      // Asked of `acked` rather than of `held`, because the gateway refuses a
+      // send from a connection it has not acked the subscription for — and
+      // answers that refusal with an `error` on the topic, which this client
+      // reads as `refused`. A panel that sent early would turn its own timing
+      // bug into a permission failure it then reports to the operator.
+      if (!opened || !acked.has(topic)) return false;
+      send({ type: "send", topic, payload });
+      return true;
+    },
+    onStream: addReader,
     start() {
       running = true;
       connect();
@@ -431,6 +580,14 @@ const StreamContext = createContext<LiveConnection | null>(null);
  * transition and re-subscribe every reader on every drop.
  */
 const TopicContext = createContext<TopicSubscribe | null>(null);
+
+/**
+ * The plugin-channel half of the same idea, kept separate from `TopicContext`
+ * because it is handed to the SDK rather than consumed here, and because the
+ * two are read by different code: a console board holds a declared topic, a
+ * plugin panel holds one that only exists at runtime.
+ */
+const ChannelContext = createContext<ChannelTransport | null>(null);
 
 /**
  * What a component sees with no socket above it: polling, which is exactly what
@@ -464,6 +621,31 @@ export function StreamProvider({
   // Created once and never recreated: it owns a socket, and a client rebuilt on
   // a re-render would be a second connection per tab.
   const [client] = useState(() => createStreamClient({ client: queryClient, timer, now, url }));
+  // Built once, from methods that never change identity. A transport rebuilt
+  // per render would re-subscribe every panel on every render of the shell.
+  const [transport] = useState<ChannelTransport>(() => ({
+    subscribe: (topic, listener) =>
+      client.hold(topic, (message) => {
+        // `gap` is the one arm of `TopicMessage` the SDK does not carry, and
+        // omitting it is sound rather than convenient: a gap is reported
+        // against a `seq`, plugin frames carry none, and there is no ring
+        // behind a plugin topic for a subscriber to fall off the back of. A
+        // panel cannot reach this, so exporting the arm would be a case every
+        // plugin author writes and none runs.
+        //
+        // Reported as `closed` rather than dropped, all the same. If a plugin
+        // topic ever does gain a ring, a silent `return` here is exactly the
+        // skipped hole the `stream:*` class exists to make visible — where
+        // `closed` tells the panel to stop trusting what it has, which is the
+        // safe reading of a message this build should never see.
+        if (message.kind === "gap") {
+          listener({ kind: "closed" });
+          return;
+        }
+        listener(message);
+      }),
+    send: client.publish,
+  }));
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -473,7 +655,9 @@ export function StreamProvider({
   const connection = useSyncExternalStore(client.subscribe, client.snapshot, client.snapshot);
   return (
     <StreamContext value={connection}>
-      <TopicContext value={client.onStream}>{children}</TopicContext>
+      <TopicContext value={client.onStream}>
+        <ChannelContext value={transport}>{children}</ChannelContext>
+      </TopicContext>
     </StreamContext>
   );
 }
@@ -522,5 +706,10 @@ export function useStreamTopic(topic: string, onMessage: (message: TopicMessage)
  */
 export function StreamedLiveProvider({ children }: { children: ReactNode }) {
   const connection = useStreamConnection();
-  return <LiveProvider connection={connection}>{children}</LiveProvider>;
+  const channels = use(ChannelContext);
+  return (
+    <LiveProvider connection={connection} {...(channels === null ? {} : { channels })}>
+      {children}
+    </LiveProvider>
+  );
 }

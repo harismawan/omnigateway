@@ -191,6 +191,13 @@ export function ConsoleBoard() {
   const followLatest = useRef(true);
 
   useStreamTopic(CONSOLE_TOPIC, (message) => {
+    // `open`, `refused` and `closed` are transport status, delivered by topic to
+    // every reader — they exist for plugin channels, which can be refused, and
+    // this board is not one. Ignored explicitly rather than by falling through:
+    // the arm below treats anything that is not a readable frame as a hole and
+    // drops the accumulated tail, so an unhandled status arm would clear the
+    // terminal on every reconnect and on every ack.
+    if (message.kind !== "frame" && message.kind !== "gap") return;
     const incoming = message.kind === "frame" ? readConsoleFrame(message.payload) : null;
     if (incoming === null) {
       // A `gap`, or a frame that could not be read whole. Both mean the same

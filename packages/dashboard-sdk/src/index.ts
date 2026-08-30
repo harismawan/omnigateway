@@ -60,7 +60,14 @@ export {
   usePluginApi,
 } from "./api.ts";
 export {
+  type ChannelStatus,
+  type PluginChannel,
+  usePluginChannel,
+} from "./channel.ts";
+export {
   type Cadence,
+  type ChannelMessage,
+  type ChannelTransport,
   type LiveConnection,
   type LiveContextValue,
   LiveProvider,

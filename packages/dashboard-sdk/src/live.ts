@@ -37,6 +37,42 @@ export type LiveConnection = {
 /** What a panel with no transport above it sees: polling, as before. */
 const POLLING_ONLY: LiveConnection = { status: "poll", pushed: () => false };
 
+/**
+ * What a plugin channel hands a subscriber.
+ *
+ * Three of the four are status rather than content, and they are here because
+ * the alternative is silence: a channel the host refuses looks exactly like one
+ * that is merely quiet, and a panel cannot tell an operator which it is
+ * without being told.
+ *
+ * No `gap` arm, unlike the console's own `stream:*` class. A plugin frame
+ * carries no sequence number and has no ring behind it — `channels.send` in the
+ * gateway emits `{ type, topic, payload }` and nothing more — so a `gap` is a
+ * message no plugin channel can produce, and exporting one would be a case
+ * every panel author handles and none reaches.
+ */
+export type ChannelMessage =
+  | { kind: "frame"; payload: unknown }
+  /** The host acknowledged the subscription. Frames may now arrive. */
+  | { kind: "open" }
+  /** The host refused it. A viewer holds no plugin topic, and never will. */
+  | { kind: "refused" }
+  /** The transport went away. It resubscribes on its own; `open` follows. */
+  | { kind: "closed" };
+
+/**
+ * How a panel reaches its plugin's channels.
+ *
+ * Supplied by the host, which owns the socket. A panel never constructs one,
+ * and the type is exported so a panel can name it — not so it can build one.
+ */
+export type ChannelTransport = {
+  /** Holds `topic` for as long as the returned function has not been called. */
+  subscribe(topic: string, listener: (message: ChannelMessage) => void): () => void;
+  /** Publishes to the plugin behind `topic`. `false` when the topic is not open. */
+  send(topic: string, payload: unknown): boolean;
+};
+
 export type LiveContextValue = {
   live: boolean;
   toggle: () => void;
@@ -50,6 +86,20 @@ export type LiveContextValue = {
    */
   cadence: (ms: number, topic?: string) => Cadence;
   connection: LiveConnection;
+  /**
+   * Absent outside the console's shell, and that is the honest answer rather
+   * than a stub: a panel rendered by its own harness has no socket to hold a
+   * topic on, and a `subscribe` that silently never delivers would be a panel
+   * waiting on frames that were never going to come.
+   *
+   * Carried here rather than on `LiveConnection`, which is rebuilt on every
+   * transport transition to defeat `useSyncExternalStore`'s identity bail-out —
+   * a subscribe function riding on that object would change identity per
+   * transition and re-subscribe every reader on every drop. Carried here rather
+   * than in a second context for the reason this file already gives about
+   * having exactly one.
+   */
+  channels?: ChannelTransport;
 };
 
 const LiveContext = createContext<LiveContextValue | null>(null);
@@ -104,8 +154,15 @@ const LiveContext = createContext<LiveContextValue | null>(null);
 export function LiveProvider({
   children,
   connection = POLLING_ONLY,
+  channels,
 }: {
   children: ReactNode;
+  /**
+   * Supplied by the console alongside `connection`, and optional for the same
+   * reason a harness may omit that one: absent means no socket, which is a
+   * state a panel can render rather than one it hangs in.
+   */
+  channels?: ChannelTransport;
   /**
    * Supplied by the console, which owns the socket.
    *
@@ -123,6 +180,7 @@ export function LiveProvider({
       live,
       toggle,
       connection,
+      ...(channels === undefined ? {} : { channels }),
       cadence: (ms: number, topic?: string) => {
         // The switch wins over everything: paused is paused however the data
         // would have arrived.
@@ -133,7 +191,7 @@ export function LiveProvider({
         return connection.pushed(topic) ? false : ms;
       },
     }),
-    [live, toggle, connection],
+    [live, toggle, connection, channels],
   );
   return createElement(LiveContext, { value }, children);
 }

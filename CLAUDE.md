@@ -107,7 +107,24 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     `apps/dashboard/test/routes/appGate.test.tsx`. SDK permitted because alternative was second copy
     of rule about what may leave plugin's
     own API prefix — rule held in two places is one that end up true in one. Same argument later
-    moved LIVE switch there: which control pause polling is a rule too. SDK **no longer** leaf with
+    moved LIVE switch there: which control pause polling is a rule too. `usePluginChannel` join it
+    for a third: panel hold `plugin:<id>:<name>` on console's own socket, and topic that is not in
+    any compile-time table is exactly the case console's `RES_TOPICS`/`STREAM_TOPICS` cannot serve.
+    Hook compose topic from `pluginId` it is handed. That is **ergonomics, not boundary**, and it
+    resemble the server-side rule closely enough to be read as one: there host write prefix from
+    validated manifest and plugin cannot reach another's namespace, here a panel spelling another
+    plugin's topic by hand is **authorised** — `authorised` grant admin every *opened* plugin topic
+    and ask nothing else. Not a hole hook could close: panel bundle already run in console's page
+    with operator's cookie and can open own socket, which is rule 15's guardrail-not-sandbox one
+    step further out. Say it that way; earlier version of this line claimed host would refuse, and a
+    contributor who believe it treat cross-plugin subscribe as impossible when it is one line.
+    It ride `LiveContextValue.channels`, **not** a second
+    SDK context and **not** `LiveConnection`: that object rebuilt per transition to defeat
+    `useSyncExternalStore` identity bail-out, so subscribe function on it re-subscribe every reader
+    on every drop. `channel.ts` therefore import React and hold no `createContext`, and
+    `packages/dashboard-sdk/test/package.test.ts` pin **both** halves — allowlist of modules that
+    may import React, and the separate rule that exactly one module create a context. Second is the
+    silent one. SDK **no longer** leaf with
     no imports — `live.ts` import React — so it now in `SHARED_IMPORTS`, one copy served to console
     and every panel. Order load-bearing: SDK holding a context but bundled per plugin give each its
     own `createContext`, and panel reading that one find no provider, take "polling off" default,
@@ -886,6 +903,15 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   enumerated key list. `["logs", limit]` and `["usage", …6]` are parameterised, so an enumerated
   table go stale silently. One exception is real: `res:logs` must exclude `["logs","body",…]`, a
   prefix collision on immutable data.
+- **`plugin:*` is third class and carry no `seq`, so it can never `gap`.** `channels.send` emit
+  `{type,topic,payload}` and nothing more — no ring behind it, nothing to fall off the back of — so
+  console `hold` resubscribe **without** `sinceSeq` and SDK `ChannelMessage` carry no `gap` arm.
+  Adding one would be a case every panel author write and none reach. What panel do get is
+  `open`/`refused`/`closed`, because plugin topic is the one class a principal can be **refused**:
+  `authorised` give it to admin alone, so viewer's panel must be able to say so. Silence there read
+  as channel that is merely quiet, same failure `declared` exist for on `stream:*`. Console `hold`
+  is refcounted and unsubscribe on last release — that frame is what fire plugin's `onClose`, so
+  panel unmounting with tab still open is a session plugin may drop.
 - **A topic name a resource, and every branch reading that resource must be in its entry.** Console
   and client surface hold different query keys for the same rows — `["usage",…]` and
   `["client","usage",…]` — so `res:usage` and `res:logs` cover both. An entry covering one branch
