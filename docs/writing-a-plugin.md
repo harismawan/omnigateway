@@ -99,7 +99,7 @@ here and never escaped anywhere downstream.
 
 `api` is the host's plugin-API **generation** — a counter that only goes up, not
 the npm major of `@omnigateway/plugin-api`. It is `2` today while that package is
-`0.1.x`, and the two are independent on purpose: semver resets a stabilising
+`0.2.x`, and the two are independent on purpose: semver resets a stabilising
 package to `1.0.0`, and a compatibility generation may never go backwards. A
 mismatch skips the plugin at boot, server half included.
 
