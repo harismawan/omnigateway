@@ -386,6 +386,93 @@ describe("custom chat decodes upstream reasoning as unsigned thinking", () => {
       { type: "error", code: "RATE_LIMIT", message: "slow down", retryable: true },
     ]);
   });
+
+  // The responses fork ended its switch with a bare `default: break`, so an
+  // event it had never heard of was dropped and the stream carried on. The
+  // argument for refusing is strongest here of the three decoders: a custom
+  // endpoint is whatever an operator pointed the gateway at, so it is the most
+  // likely to emit something outside OpenAI's set and the least likely to have
+  // that documented anywhere. Dropping it silently loses content the operator
+  // has no other way to learn about.
+  test("an unknown responses event ends the stream visibly", async () => {
+    const events = await decodedEvents(
+      [
+        { event: "response.created", payload: '{"response":{"id":"resp-1","model":"m"}}' },
+        { event: "response.tool_call.invented", payload: '{"output_index":0}' },
+        { event: "response.completed", payload: '{"response":{"usage":{}}}' },
+      ],
+      "responses",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      code: "UPSTREAM",
+      message: 'unrecognized custom endpoint stream event "response.tool_call.invented"',
+    });
+    expect(events.some((event) => event.type === "end")).toBe(false);
+  });
+
+  test("an unknown responses event whose data is not JSON ends the stream too", async () => {
+    // Checked before the payload is parsed. The other order lets the event hide
+    // behind its own body: `json` returns null, the frame is skipped, and the
+    // turn ends clean and short — the silent truncation the set exists for.
+    const events = await decodedEvents(
+      [
+        { event: "response.created", payload: '{"response":{"id":"resp-1","model":"m"}}' },
+        { event: "response.tool_call.invented", payload: "not json at all" },
+        { event: "response.completed", payload: '{"response":{"usage":{}}}' },
+      ],
+      "responses",
+    );
+
+    expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+    expect(events.some((event) => event.type === "end")).toBe(false);
+  });
+
+  test("a known responses event the decoder ignores does not end the stream", async () => {
+    // What makes the set an allowlist rather than a restatement of the switch.
+    // Written from the switch instead, each of these would refuse a stream that
+    // is entirely well-formed.
+    const ignored = [
+      "response.queued",
+      "response.in_progress",
+      "response.output_text.done",
+      "response.output_text.annotation.added",
+      "response.refusal.delta",
+      "response.refusal.done",
+      "response.reasoning_summary_part.added",
+      "response.reasoning_summary_part.done",
+      "response.reasoning_summary_text.done",
+      "response.reasoning_text.delta",
+      "response.reasoning_text.done",
+      "response.function_call_arguments.done",
+    ];
+
+    for (const event of ignored) {
+      const events = await decodedEvents(
+        [
+          { event, payload: '{"output_index":0}' },
+          { event: "response.completed", payload: '{"response":{"usage":{}}}' },
+        ],
+        "responses",
+      );
+      expect([event, events.at(-1)?.type]).toEqual([event, "end"]);
+    }
+  });
+
+  test("the [DONE] sentinel is not read as an unknown responses event", async () => {
+    // `sseResponse` appends one to every stream it builds, which is what a
+    // compatible server sends and what this file's chat half treats as the
+    // success marker. `parseSse` names an unlabelled record "message", so
+    // without the skip the ordinary close would be refused as an unknown event.
+    const events = await decodedEvents(
+      [{ event: "response.completed", payload: '{"response":{"usage":{}}}' }],
+      "responses",
+    );
+
+    expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+    expect(events.some((event) => event.type === "error")).toBe(false);
+  });
 });
 
 // Base paths exist so reverse-proxied servers (`https://host/api`) are
