@@ -18,7 +18,7 @@ import { boolFlag, numberFlag, requirePositional, stringFlag, UsageError } from 
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatTime, note, paint, table } from "../output.ts";
-import { pluginProviders } from "./plugins.ts";
+import { connectRegistryFor, pluginProviders } from "./plugins.ts";
 
 /** One word for what the router would do with this credential right now. */
 function condition(credential: {
@@ -210,7 +210,21 @@ export const credentialsRefresh: Command = {
     const credential = await findCredential(ctx, id);
     const refresh = createRefresher({
       store,
-      providers: OAUTH_PROVIDERS,
+      // Merged, for the same reason `connect` merges: this process never calls
+      // `loadPlugins`, so the built-in table alone answers "provider does not
+      // support OAuth refresh" for a credential a plugin's own flow minted.
+      // Before a plugin could declare a flow the gap did not exist; it does now.
+      //
+      // Short-circuited for a built-in, exactly as `add-key` below does and for
+      // the reason its comment gives at length: `connectRegistryFor` imports
+      // every provider-declaring plugin's module, which runs third-party
+      // top-level code on a command that handles a secret, costs the import
+      // timeout per hanging plugin, and can print warnings about plugins that
+      // have nothing to do with the credential being refreshed. The provider is
+      // known before the refresher is built, so ask first.
+      providers: Object.hasOwn(PROVIDER_DESCRIPTORS, credential.provider)
+        ? OAUTH_PROVIDERS
+        : (await connectRegistryFor(ctx.root.root)).providers,
       http: nodeHttpClient(),
       now: ctx.now,
     });
@@ -241,8 +255,9 @@ export const credentialsAddKey: Command = {
   async run(args, { ctx, writer, prompt }) {
     const providerId = requirePositional(args, 0, "provider");
     // Every provider, unlike `connect`: a key is the one way in that `custom`
-    // has — and the only way in a plugin-supplied provider has at all, since a
-    // plugin declares no OAuth flow.
+    // has, and one of two a plugin-supplied provider may have — a plugin can
+    // declare an OAuth flow now, and `omni connect` reaches it through the same
+    // `readPluginProviders` read this command uses.
     //
     // The **real registry**, not a manifest guess. This asked
     // a manifest's `provider` capability — and

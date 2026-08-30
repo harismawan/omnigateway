@@ -1,4 +1,4 @@
-import { type ConnectFlows, OAUTH_PROVIDER_IDS } from "@omni/control";
+import type { ConnectFlows } from "@omni/control";
 import { requirePositional, stringFlag, UsageError } from "../args.ts";
 import type { Command } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -11,16 +11,32 @@ export const connect: Command = {
   usage: "connect <provider> [--label L]",
   summary: "Authorize a provider account from the terminal",
   options: { label: { type: "string" } },
-  async run(args, { ctx, writer, prompt, connect: connectFlows }) {
+  async run(args, { ctx, writer, prompt, connect: connectFlows, connectable }) {
     const providerId = requirePositional(args, 0, "provider");
+
     // The connectable set, not every provider that exists: `custom` is a
     // provider and has no authorization to start, so accepting it here would
     // only defer the refusal to `start` with a worse message.
-    if (!(OAUTH_PROVIDER_IDS as readonly string[]).includes(providerId)) {
-      throw new UsageError(`provider must be one of ${OAUTH_PROVIDER_IDS.join(", ")}`);
+    //
+    // Asked before the store is opened, so an unknown provider is refused
+    // without a database being touched — and asked of the installation rather
+    // than of a module constant. That constant was built at import time from
+    // the five compiled-in providers, so it could never have named a plugin's,
+    // and this command does not load plugins to find out.
+    const { ids, failures } = await connectable();
+    if (!ids.includes(providerId)) {
+      // A plugin that failed to load is named, because it is the likeliest
+      // reason the id was refused and listing five built-ins says nothing about
+      // the broken plugin on disk.
+      const broken = failures.find((failure) => failure.id === providerId);
+      throw new UsageError(
+        broken === undefined
+          ? `provider must be one of ${ids.join(", ")}`
+          : `provider ${providerId} comes from a plugin that failed to load: ${broken.reason}`,
+      );
     }
 
-    const flows = connectFlows(await ctx.store());
+    const flows = await connectFlows(await ctx.store());
 
     const start = await flows.start(providerId, stringFlag(args.values, "label"));
 

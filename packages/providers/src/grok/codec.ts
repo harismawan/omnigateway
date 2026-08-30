@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { GatewayError } from "@omni/ir";
 import { orderFields } from "../body.ts";
 import type { CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
 import { mergeHeaders, orderHeaders } from "../profile.ts";
@@ -89,7 +88,7 @@ export const grokCodec: ProviderCodec = {
     } else if (input.credentials.apiKey !== null) {
       protocol.push(["Authorization", `Bearer ${input.credentials.apiKey}`]);
     } else {
-      throw new GatewayError("AUTH", "grok credential has no token", { provider: "grok" });
+      throw input.fail("AUTH", "grok credential has no token");
     }
 
     protocol.push(...requestIdentityHeaders(input.model, input.requestId));

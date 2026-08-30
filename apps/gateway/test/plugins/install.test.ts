@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { validateRegistration } from "@omni/control";
+import { OAUTH_PROVIDERS, validateRegistration } from "@omni/control";
 import { ADAPTERS, PROVIDER_DESCRIPTORS } from "@omni/providers";
 import { captureLogger, entryOf } from "@omni/testkit";
 import { installPluginProviders } from "../../src/plugins/install.ts";
@@ -37,6 +37,13 @@ afterEach(() => {
   for (const id of installed.splice(0)) {
     delete (PROVIDER_DESCRIPTORS as Record<string, unknown>)[id];
     delete (ADAPTERS as Record<string, unknown>)[id];
+    // The OAuth registry too. Nothing here declares a flow today, so nothing
+    // leaks — but adding one is a single field on a fixture, and the failure
+    // would land in `packages/control/test/oauth/kimi.test.ts` and
+    // `providerCoverage.test.ts`, neither of which mentions plugins. The second
+    // is newly exposed: it reads `oauthProviderIds()` at call time now rather
+    // than a frozen constant.
+    delete (OAUTH_PROVIDERS as Record<string, unknown>)[id];
   }
 });
 

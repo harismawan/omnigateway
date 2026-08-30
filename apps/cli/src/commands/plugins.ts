@@ -3,6 +3,8 @@ import {
   listPlugins,
   nodeFetchBytes,
   nodePluginFs,
+  OAUTH_PROVIDERS,
+  type OAuthProvider,
   type PluginDeps,
   type PluginProviderRead,
   type PluginSummary,
@@ -311,7 +313,7 @@ export async function pluginProviders(root: string): Promise<PluginProviderRead>
     PROVIDER_DESCRIPTORS,
     read.descriptors,
   );
-  return { descriptors, failures: read.failures };
+  return { descriptors, oauth: read.oauth, failures: read.failures };
 }
 
 /**
@@ -381,4 +383,62 @@ export function pluginDoctorLines(ctx: Context, plugins: readonly PluginSummary[
           : state(ctx, true, "ok");
     return `${plugin.id}${version} (${api}, ${sdk}) ${verdict}`;
   });
+}
+
+/**
+ * The OAuth flows this installation can start, built-ins and plugins together.
+ *
+ * Separate from `pluginProviders` above because the caller is different in the
+ * way that matters: `connect` asks *before* opening a store, so that an unknown
+ * provider is refused without a database being touched. That property is
+ * asserted, and folding this into anything that needs a `Store` would lose it.
+ *
+ * The two halves are disjoint — `readProviders` refuses a plugin declaring a
+ * built-in's id, which is the one place that rule lives — so the merge order
+ * decides nothing.
+ */
+export type ConnectRegistry = {
+  /** Built-in flows merged with whatever plugins declared. */
+  providers: Readonly<Record<string, OAuthProvider>>;
+  /**
+   * The descriptors those flows belong to, merged the same way.
+   *
+   * **Both halves, from one read.** `createConnectFlows` asks the descriptor
+   * registry two questions — does this provider exist, and what redirect does it
+   * use — and this process never populates the module global, because it must
+   * not call `loadPlugins`. Handing it only the flows admitted a provider at one
+   * gate and refused it at the next, with a message naming the provider it had
+   * just refused.
+   */
+  descriptors: ProviderDescriptors;
+  /** Plugins that declared a provider and did not yield one. */
+  failures: readonly { id: string; reason: string }[];
+};
+
+/**
+ * Everything `omni connect` and `omni credentials refresh` need in order to
+ * reach a plugin-supplied provider, from a single read of the plugin directory.
+ *
+ * Separate from `pluginProviders` above because the caller differs in the way
+ * that matters: `connect` asks *before* opening a store, so an unknown provider
+ * is refused without a database being touched. That is asserted, and folding
+ * this into anything needing a `Store` would lose it.
+ *
+ * One read and not two: the directory could change between them, and the
+ * operator would be refused a provider the flow then had.
+ */
+export async function connectRegistryFor(root: string): Promise<ConnectRegistry> {
+  const read = await readPluginProviders(
+    listPlugins(doctorPluginDeps(), root),
+    (entry) => import(entry),
+  );
+  return {
+    providers: Object.assign(Object.create(null), OAUTH_PROVIDERS, read.oauth),
+    descriptors: Object.assign(Object.create(null), PROVIDER_DESCRIPTORS, read.descriptors),
+    // Carried for the same reason `add-key` carries them: a plugin that failed
+    // to load is the likeliest reason an id was refused, and it is the
+    // operator's actual next step. Without it `omni connect acme-ai` lists five
+    // built-ins and says nothing about the plugin sitting broken on disk.
+    failures: read.failures,
+  };
 }

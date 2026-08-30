@@ -410,7 +410,12 @@ describe("omni doctor", () => {
  * that reads them is now handed to control rather than checked and discarded.
  */
 describe("omni credentials add-key", () => {
-  const PROVIDER = { ...MANIFEST, id: "poke-dex", capabilities: ["provider"] } as const;
+  const PROVIDER = {
+    ...MANIFEST,
+    id: "poke-dex",
+    capabilities: ["provider"],
+    origins: ["https://upstream.test"],
+  } as const;
   /**
    * A server entry that actually declares one, since the capability alone is no
    * longer enough.
@@ -632,6 +637,7 @@ describe("the CLI reads a plugin's declared provider", () => {
     ...MANIFEST,
     id: "acme-ai",
     capabilities: ["provider"],
+    origins: ["https://upstream.test"],
     server: "server.js",
   } as const;
 

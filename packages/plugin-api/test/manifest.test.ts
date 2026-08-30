@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   CAPABILITIES,
   isApiCompatible,
@@ -171,4 +171,51 @@ test("the plugin API generation never goes backwards", () => {
   const old = safeParseManifest(base({ api: 1 }));
   expect(old.ok).toBe(true);
   expect(old.ok && isApiCompatible(old.manifest)).toBe(false);
+});
+
+describe("a provider plugin must declare where it will send traffic", () => {
+  const base = {
+    id: "acme",
+    name: "Acme",
+    version: "1.0.0",
+    api: PLUGIN_API_VERSION,
+    server: "s.js",
+  };
+
+  test("the provider capability requires origins", () => {
+    // The manifest is the audit surface. A provider plugin directs the *host's*
+    // client at an upstream, so without this an operator reading the manifest
+    // cannot see where their prompts go — the one thing the capability list is
+    // supposed to tell them.
+    const result = safeParseManifest({ ...base, capabilities: ["provider"] });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("origins");
+  });
+
+  test("and is satisfied by declaring them", () => {
+    expect(
+      safeParseManifest({
+        ...base,
+        capabilities: ["provider"],
+        origins: ["https://api.acme.test"],
+      }).ok,
+    ).toBe(true);
+  });
+
+  test("origins are justified by provider as well as by net:outbound", () => {
+    // The reverse rule already existed for net:outbound and said "origins
+    // requires the net:outbound capability". That sentence became false the
+    // moment a second capability enforced them, and a manifest naming origins
+    // for its provider must not be refused for naming them.
+    expect(
+      safeParseManifest({
+        ...base,
+        capabilities: ["provider"],
+        origins: ["https://api.acme.test"],
+      }).ok,
+    ).toBe(true);
+    expect(
+      safeParseManifest({ ...base, capabilities: [], origins: ["https://api.acme.test"] }).ok,
+    ).toBe(false);
+  });
 });

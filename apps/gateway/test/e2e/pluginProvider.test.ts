@@ -28,6 +28,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createConnectFlows, OAUTH_PROVIDERS } from "@omni/control";
 import { ADAPTERS, PROVIDER_DESCRIPTORS } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
@@ -160,12 +161,19 @@ afterEach(async () => {
   for (const id of installed.splice(0)) {
     delete (PROVIDER_DESCRIPTORS as Record<string, unknown>)[id];
     delete (ADAPTERS as Record<string, unknown>)[id];
+    // The OAuth registry too, and it is the one that bites hardest: it is
+    // asserted by key set in packages/control/test/oauth/kimi.test.ts, so a
+    // flow left behind here fails a test in another package that never
+    // mentioned plugins. Measured, before this line existed.
+    delete (OAUTH_PROVIDERS as Record<string, unknown>)[id];
   }
   await rm(dir, { recursive: true, force: true });
 });
 
 /** Writes the plugin, loads it the way boot does, and installs what it declared. */
-async function bootPlugin(): Promise<void> {
+async function bootPlugin(
+  over: { origins?: readonly string[]; server?: string } = {},
+): Promise<void> {
   const root = join(dir, "plugins");
   const home = join(root, PLUGIN_ID);
   await mkdir(join(home, "server"), { recursive: true });
@@ -178,9 +186,13 @@ async function bootPlugin(): Promise<void> {
       api: PLUGIN_API_VERSION,
       server: "server/index.js",
       capabilities: ["provider"],
+      // Must match what the codec below actually calls. The host refuses a
+      // request to an origin the manifest does not name, so these two agreeing
+      // is part of what this test asserts rather than incidental setup.
+      origins: over.origins ?? ["https://api.acme.test"],
     }),
   );
-  await writeFile(join(home, "server", "index.js"), ACME_SERVER);
+  await writeFile(join(home, "server", "index.js"), over.server ?? ACME_SERVER);
 
   const bus = createPluginEventBus({});
   buses.push(bus);
@@ -327,4 +339,200 @@ test("routing infers the plugin's own model prefix, and prices from its catalog"
   expect(log?.costUsd).toBeCloseTo((31 * 4 + 7 * 20) / 1_000_000, 12);
   // What the codec reported it could not express is recorded, not interpreted.
   expect(log?.degradations).toContain("acme:invented-a-degradation");
+});
+
+test("a plugin cannot reach an origin its manifest never declared", async () => {
+  // The audit surface, enforced end to end. A provider plugin never holds a
+  // client — it directs the host's — so nothing about this path passed through
+  // the check that bounds a plugin's own `fetch`, and an operator reading the
+  // manifest could not see where their prompts went.
+  //
+  // The fixture is the same plugin with one word changed in its manifest, so
+  // what is under test is the enforcement and not the plugin.
+  await bootPlugin({ origins: ["https://somewhere.else.test"] });
+  const { call, upstream } = await harness();
+  upstream.queue(ACME_RESPONSE);
+
+  const res = await call({
+    model: "acme-large",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello acme" }],
+  });
+
+  expect(res.status).toBeGreaterThanOrEqual(400);
+  // Never sent. Reporting it afterwards would mean the prompt already left.
+  expect(upstream.calls).toEqual([]);
+});
+
+/**
+ * The auth half, end to end: a plugin declares a flow, the host loads it, and an
+ * authorization completes into an encrypted credential the router can then use.
+ *
+ * The flow is written as untyped JavaScript in a self-contained tree, which is
+ * what a plugin actually is — so this also exercises the two things that only
+ * bite there: the generator crossing the module boundary, and the fact that the
+ * only classified errors it can raise are the ones the host handed it.
+ */
+const ACME_OAUTH_SERVER = `
+const DESCRIPTOR = {
+  id: "acme-ai",
+  capabilities: { tools: true, images: false, reasoning: false },
+  writeOverInput: { fiveMinute: 1.25, oneHour: 2 },
+  catalog: {
+    defaultModel: "acme-large",
+    authTypes: ["oauth"],
+    models: [
+      {
+        id: "acme-large",
+        label: "Acme Large",
+        pricing: { input: 4, output: 20, cacheRead: 0.4, cacheWrite5m: 5, cacheWrite1h: 8 },
+        limits: { contextWindow: 111000, maxOutputTokens: 4096 },
+      },
+    ],
+  },
+  modelPrefixes: ["acme-"],
+  presentation: {
+    label: "Acme",
+    tone: "warm",
+    order: 90,
+    colour: { light: "#aa3366", dark: "#ff88bb" },
+  },
+};
+
+const codec = {
+  buildRequest(input) {
+    return {
+      request: {
+        url: "https://api.acme.test/v1/converse",
+        method: "POST",
+        headers: [["authorization", "Bearer " + input.credentials.accessToken]],
+        body: JSON.stringify({ acmeModel: input.model }),
+      },
+      decodeState: { model: input.model },
+    };
+  },
+  async *decode(input) {
+    const payload = JSON.parse(await new Response(input.body).text());
+    yield { type: "start", id: payload.reply_id, model: input.decodeState.model };
+    yield { type: "blockStart", index: 0, block: { type: "text" } };
+    yield { type: "blockDelta", index: 0, delta: { type: "text", text: payload.say } };
+    yield { type: "blockEnd", index: 0 };
+    yield {
+      type: "end",
+      stopReason: "endTurn",
+      usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    };
+  },
+};
+
+const oauth = {
+  kind: "pkce",
+  supportsManualPaste: true,
+  async *start(input) {
+    // The host mints the PKCE pair, so the plugin needs no crypto and this stays
+    // deterministic under test.
+    const { verifier, challenge } = input.pkce();
+    const state = input.randomState();
+    return {
+      authorizeUrl: "https://api.acme.test/authorize?challenge=" + challenge,
+      pending: { verifier, challenge, state, redirectUri: input.redirectUri },
+    };
+  },
+  async *exchange(input) {
+    const res = yield {
+      url: "https://api.acme.test/token",
+      method: "POST",
+      headers: [["content-type", "application/json"]],
+      body: JSON.stringify({ code: input.code, verifier: input.pending.verifier }),
+    };
+    if (res.status !== 200) throw input.fail("AUTH", "acme refused the code");
+    const parsed = JSON.parse(res.body);
+    return {
+      secrets: {
+        accessToken: parsed.access_token,
+        refreshToken: parsed.refresh_token,
+        apiKey: null,
+        idToken: null,
+      },
+      expiresAt: null,
+      accountEmail: parsed.email,
+      providerData: {},
+    };
+  },
+  async *refresh(input) {
+    const res = yield {
+      url: "https://api.acme.test/token",
+      method: "POST",
+      headers: [["content-type", "application/json"]],
+      body: JSON.stringify({ refresh_token: input.refreshToken }),
+    };
+    const parsed = JSON.parse(res.body);
+    return {
+      secrets: {
+        accessToken: parsed.access_token,
+        refreshToken: parsed.refresh_token,
+        apiKey: null,
+        idToken: null,
+      },
+      expiresAt: null,
+      accountEmail: null,
+      providerData: {},
+    };
+  },
+};
+
+export default {
+  providers: [{ descriptor: DESCRIPTOR, codec, oauth }],
+  setup() {
+    return {};
+  },
+};
+`;
+
+test("a plugin's oauth flow authorizes an account the router can then use", async () => {
+  await bootPlugin({ server: ACME_OAUTH_SERVER });
+
+  const upstream = createStubUpstream();
+  const flows = createConnectFlows({
+    store,
+    // The merged registry the gateway assembles at boot. The built-ins are here
+    // too, which is what makes the plugin's entry a peer rather than a
+    // replacement.
+    providers: OAUTH_PROVIDERS,
+    http: async (req) => {
+      upstream.calls.push({
+        url: req.url,
+        authorization: null,
+        headers: req.headers,
+        rawBody: req.body,
+        body: null,
+      });
+      const body = JSON.stringify({
+        access_token: "acme-access",
+        refresh_token: "acme-refresh",
+        email: "operator@acme.test",
+      });
+      return { status: 200, headers: new Headers(), body: null, text: async () => body };
+    },
+    now: () => NOW,
+  });
+
+  // The plugin's provider is connectable at all, which the built-in table alone
+  // could never have said.
+  expect(flows.connectableIds()).toContain(PLUGIN_ID);
+
+  const started = await flows.start(PLUGIN_ID, "acme account");
+  expect(started.authorizeUrl).toContain("https://api.acme.test/authorize");
+  expect(started.kind).toBe("pkce");
+
+  const { id } = await flows.finish(started.flowId, "the-code");
+
+  // Stored, encrypted, and reachable as an ordinary credential.
+  const credential = await store.credentials.get(id);
+  expect(credential?.provider).toBe(PLUGIN_ID);
+  expect(credential?.authType).toBe("oauth");
+  expect(credential?.accountEmail).toBe("operator@acme.test");
+
+  // The token call went where the flow said, and nowhere else.
+  expect(upstream.calls.map((c) => c.url)).toEqual(["https://api.acme.test/token"]);
 });

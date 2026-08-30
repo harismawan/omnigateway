@@ -1,4 +1,4 @@
-import type { RegisteredProvider } from "@omni/control";
+import { OAUTH_PROVIDERS, type RegisteredProvider, registerOAuthProvider } from "@omni/control";
 import type { Logger } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS, registerProvider } from "@omni/providers";
 
@@ -48,7 +48,13 @@ export function installPluginProviders(
     // `Object.hasOwn`, not an index check: `PROVIDER_DESCRIPTORS` is
     // null-prototype so both answer alike today, and the explicit form is what
     // keeps that true if it is ever handed an ordinary literal.
-    if (Object.hasOwn(PROVIDER_DESCRIPTORS, id)) {
+    // Both tables, not one as a proxy for the other. `registerOAuthProvider`
+    // throws on a duplicate too, and this loop is documented as never throwing —
+    // a throw here escapes to the top-level catch and `process.exit(1)`s, which
+    // is a plugin turning into a boot outage and is what rule 15 forbids. The
+    // descriptor check alone relied on an unstated invariant that the two key
+    // sets agree.
+    if (Object.hasOwn(PROVIDER_DESCRIPTORS, id) || Object.hasOwn(OAUTH_PROVIDERS, id)) {
       logger.warn("plugin provider ignored", {
         plugin: id,
         reason: `a provider named ${id} is already installed`,
@@ -56,6 +62,20 @@ export function installPluginProviders(
       continue;
     }
     registerProvider(provider.descriptor, provider.adapter);
+    // The flow, when the plugin declared one. Registered here rather than at a
+    // second call site because the ordering constraint is the same and having
+    // one place obey it is what keeps a provider from being routable while its
+    // authorization is not installed.
+    if (provider.oauth !== undefined) {
+      registerOAuthProvider(provider.descriptor.id, provider.oauth);
+    }
     logger.info("plugin provider registered", { plugin: id });
+    // A separate line rather than a field on the one above. `LogFields` is a
+    // closed allowlist and has no member for this — and a conditional spread
+    // would have added one without the compiler objecting, because excess
+    // property checking does not see through a spread. Measured.
+    if (provider.oauth !== undefined) {
+      logger.info("plugin oauth flow registered", { plugin: id });
+    }
   }
 }

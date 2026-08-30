@@ -1,11 +1,5 @@
 import { type ErrorCode, GatewayError, type ProviderId } from "@omni/ir";
-import {
-  type ClientProfile,
-  type HeaderPair,
-  type HttpClient,
-  mergeHeaders,
-  orderHeaders,
-} from "@omni/providers";
+import type { HttpClient } from "@omni/providers";
 import type { CredentialSecrets, UsageSecrets, WindowType } from "@omni/store";
 
 /**
@@ -191,139 +185,6 @@ export type DeviceOAuthProvider = OAuthProviderBase & {
 
 export type OAuthProvider = PkceOAuthProvider | DeviceOAuthProvider;
 
-/** Sent by every token call. Arguments are ordered by the provider's profile. */
-export async function postJson(
-  deps: OAuthDeps,
-  provider: ProviderId,
-  url: string,
-  profile: ClientProfile,
-  opts: {
-    contentType: string;
-    body: string;
-    extraHeaders?: readonly HeaderPair[];
-  },
-): Promise<{ status: number; parsed: unknown }> {
-  const headers = orderHeaders(
-    mergeHeaders(profile.headers, [
-      ["Content-Type", opts.contentType],
-      ["Accept", "application/json"],
-      ...(opts.extraHeaders ?? []),
-    ]),
-    profile.order,
-  );
-
-  const res = await deps.http({
-    provider,
-    url,
-    method: "POST",
-    headers,
-    body: opts.body,
-    // Token calls are short and must not hang a connect flow forever.
-    signal: AbortSignal.timeout(30_000),
-  });
-
-  const text = await res.text();
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // Non-JSON error bodies are real; the caller falls back to the status.
-  }
-  return { status: res.status, parsed };
-}
-
-/**
- * The GET both readers share. `authHeaders` is the whole difference between
- * them, so neither can drift from the other's timeout or parsing.
- */
-async function sendGet(
-  deps: OAuthDeps,
-  provider: ProviderId,
-  url: string,
-  profile: ClientProfile,
-  authHeaders: readonly HeaderPair[],
-  extraHeaders: readonly HeaderPair[],
-): Promise<{ status: number; parsed: unknown }> {
-  const headers = orderHeaders(
-    mergeHeaders(profile.headers, [
-      ...authHeaders,
-      ["Accept", "application/json"],
-      ...extraHeaders,
-    ]),
-    profile.order,
-  );
-
-  const res = await deps.http({
-    provider,
-    url,
-    method: "GET",
-    headers,
-    body: "",
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  const text = await res.text();
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // An HTML error page is a real answer; the caller falls back to the status.
-  }
-  return { status: res.status, parsed };
-}
-
-/**
- * Reads an account-level JSON endpoint with a bearer token.
- *
- * Same client identity as inference and the token endpoints: a process that
- * authenticates as one client and then reads its account as another is a
- * louder signal than either alone. The timeout is short because nothing on the
- * request path waits for this — a slow probe should be abandoned, not retried.
- *
- * `accessToken` is `string`, not `string | null`, and that is the point. Every
- * `usage()` probe reads a `UsageSecrets` whose token is nullable, so the
- * compiler makes each one say what it does about a credential with no token
- * before it can call this. Widen it and a probe that lost its guard would go
- * out unauthenticated, read the 401 as "no usage data", and leave the account's
- * quota reading unknown forever with nothing logged. Use
- * `getJsonUnauthenticated` where sending nothing is the intent.
- */
-export function getJson(
-  deps: OAuthDeps,
-  provider: ProviderId,
-  url: string,
-  profile: ClientProfile,
-  opts: { accessToken: string; extraHeaders?: readonly HeaderPair[] },
-): Promise<{ status: number; parsed: unknown }> {
-  return sendGet(
-    deps,
-    provider,
-    url,
-    profile,
-    [["Authorization", `Bearer ${opts.accessToken}`]],
-    opts.extraHeaders ?? [],
-  );
-}
-
-/**
- * Reads a JSON endpoint with no credential, deliberately.
- *
- * Named rather than expressed as a null token so the absence is a word at the
- * call site and a greppable one. Kilo's device-code poll is the case: the token
- * is what the call returns, so there is nothing yet to authenticate it with,
- * and an empty bearer would be a credential claim rather than the absence of
- * one. Never use this for a call that has a token available.
- */
-export function getJsonUnauthenticated(
-  deps: OAuthDeps,
-  provider: ProviderId,
-  url: string,
-  profile: ClientProfile,
-  opts?: { extraHeaders?: readonly HeaderPair[] },
-): Promise<{ status: number; parsed: unknown }> {
-  return sendGet(deps, provider, url, profile, [], opts?.extraHeaders ?? []);
-}
-
 /**
  * Classifies a failed token-endpoint status.
  *
@@ -346,11 +207,29 @@ export function tokenErrorCode(status: number): ErrorCode {
 
 /** Reads an error identifier out of a token response without leaking the body. */
 export function tokenErrorMessage(status: number, body: unknown): string {
-  const code =
+  const raw =
     typeof body === "object" &&
     body !== null &&
     typeof (body as { error?: unknown }).error === "string"
       ? (body as { error: string }).error
-      : `http_${status}`;
+      : "";
+  // **Shape-checked, not merely read.** `oauthAdapter`'s `trusted` marks the
+  // five built-in flows' messages `gatewayAuthored`, which is what lets an
+  // operator see *why* a refresh failed — and that flag claims the text is
+  // built from values this repository owns. That was only nearly true: `error`
+  // is upstream-supplied, and nothing checked it was the identifier RFC 6749
+  // §5.2 intends. Measured at 3037 characters on stdout.
+  //
+  // A token endpoint never receives a prompt — the body is `grant_type`, a code
+  // and a client id — so the leak this flag guards against is unreachable here.
+  // But a server that echoes the offending parameter could put part of an
+  // authorization code in `error`, and a claim the code does not enforce is one
+  // the next contributor extends to `error_description`, which *is* free text.
+  //
+  // The character class admits every code the five flows act on —
+  // `invalid_grant`, `invalid_client`, `expired_token`, `authorization_pending`,
+  // `slow_down`, `access_denied` — and a bare `slice` would bound the length
+  // while still admitting arbitrary content.
+  const code = /^[A-Za-z0-9_.:-]{1,64}$/.test(raw) ? raw : `http_${status}`;
   return `token endpoint rejected the request: ${code}`;
 }

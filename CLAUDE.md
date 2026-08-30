@@ -166,11 +166,39 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     model name cannot carry an endpoint id. `control` has three things and one of them is large.
     Two branches — `schemas.ts` name `custom` in the one rule that survive its target union (a
     custom target carry an `endpointId` and nothing else may), and `credentials.ts` plus `models.ts`
-    ask `=== "custom"` about endpoint metadata. And an **unmigrated per-provider OAuth subsystem**:
-    `control/src/oauth/` hold `OAUTH_PROVIDERS` keyed by five provider literals plus five modules of
-    vendor URLs, scopes and id literals. That last one violate the *first* clause, for which no
-    exception is carved at all, and no sub-project own it yet — say so rather than let the next
-    contributor discover it and conclude the rule is aspirational everywhere.
+    ask `=== "custom"` about endpoint metadata. And a **per-provider OAuth subsystem**:
+    `control/src/oauth/` still hold `OAUTH_PROVIDERS` keyed by five provider literals plus five
+    modules of vendor URLs, scopes and id literals, and that violate the *first* clause, for which
+    no exception is carved at all. Two things changed and the difference matter. It is no longer the
+    only way **in**: a plugin declare its own flow and `registerOAuthProvider` install it at boot,
+    so adding a provider no longer require editing that table. And all five built-ins now **run on
+    the plugin contract** — each is a `PluginOAuthFlow` wrapped by `oauthAdapter`, so the contract
+    have five real consumers rather than a fixture written to agree with it. What remain is the
+    vendor data itself: URLs, scopes and client ids compiled into core. That is the violation; the
+    mechanism around it is no longer one.
+    Plugin flow live in `control/src/oauth/pluginFlow.ts` and follow the codec's inversion: each
+    step is an async generator that **yield described requests**, host perform every one, so plugin
+    never hold `HttpClient` and rule 15 need no second footnote. Generator not build/parse pair
+    because `kilo.exchange` is two request where second carry a token read from first — measured,
+    not assumed. Yield **capped** per step: generator can loop, and device poll already looped by
+    host. `fail`, `keepPolling`, `pkce`, `randomState` supplied by host — `keepPolling` named that
+    way because `exchange` already receive `pending: PendingFlow` and one name for two thing in one
+    argument object is how author reach for wrong one.
+    **Porting the five found three thing the fixture could not**, each because a fixture written to
+    fit a contract cannot disagree with it. Built-ins use **two** deadline — 30s for a token call an
+    operator wait on, 15s for a usage probe nothing wait on — so `AuthRequest.timeoutMs` is optional
+    and clamp to the host ceiling; one constant would have quadruple the second silently. A
+    delegated step must be `async function*`: a sync generator yielded through from an async one
+    run fine, every test pass, but `TNext` widen to `AuthResponse | undefined` and only the compiler
+    see it. And `PluginOAuthFlow` is a **discriminated union** with `oauthAdapter` overloaded on
+    `kind`, because the flat shape flatten the return type — `kiloOAuth` stop being a
+    `DeviceOAuthProvider` and every consumer reading `begin`/`needsDeviceId` lose it.
+    `requests.ts` hold pure builder mirroring `postJson`/`getJson` — same profile, same merge and
+    order, stopping before the send — so ported flow emit the byte its own golden test already pin.
+    Each provider's test file is **unchanged**, which is the proof; mutant against all five (dropped
+    `client_id`, dropped beta header, state check off, kilo's second request unauthenticated, kilo's
+    org read skipped, grok's host check off, kimi's device headers dropped, openai's content type
+    changed) each kill test.
     Nothing above is licence to add a fourth. New provider knowledge in core still go through the
     three outcomes below. The union itself is **gone**: its arms were hand-written for
     exhaustiveness over a closed `ProviderId`, that closed type no longer exist, and the enum
@@ -276,6 +304,16 @@ reviewing one — it open with what plugin can reach, which decide whether rest 
 
 - Never log prompt/response bodies, OAuth tokens, API keys, passwords, encryption keys, or arbitrary
   headers/metadata.
+- **`fields?: LogFields` did not enforce the allowlist, and the gap was not theoretical.** A closed
+  object type is enforced by *excess property checking*, which apply only to a fresh object literal —
+  so `{ plugin, ...(cond ? {} : { detail }) }` and `logger.info("m", wider)` both compile clean,
+  measured against `tsc`. The conditional spread is how it was found: it is the natural way to write
+  an optional field and the compiler agree with it. `Logger` method now take
+  `<T extends LogFields>(msg, fields?: OnlyLogFields<T>)`, which make every key outside the
+  allowlist `never`, so both spelling fail. Pinned by `packages/ir/test/logFields.test.ts` with
+  `@ts-expect-error` — relaxing the signature make those directive unused, which is a *typecheck*
+  failure, and a runtime test could not see this at all because the field would simply print. This
+  do **not** make `LogFields` extensible; it move enforcement from review to compiler.
 - `LogFields` is closed allowlist + redaction boundary. Treat new free-text fields as security
   changes; never add index signature.
 - **`GatewayError.gatewayAuthored` is the second half of that boundary, and it is opt-in on
@@ -715,16 +753,20 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   `PROVIDER_MODEL_CATALOG` — a different global, not injected — so it carry zero prices and can show
   no multiplier.
 - **A module-scope `Object.keys`/`Object.entries` over `PROVIDER_DESCRIPTORS` is a build-time
-  snapshot**, and `loadPlugins()` run long after import. **Five** sites read one and were wrong the
-  same way — the count went three, then five, because each sweep stopped at the sites the previous
+  snapshot**, and `loadPlugins()` run long after import. **Six** sites read one and were wrong the
+  same way — the count went three, then five, then six, because each sweep stopped at the sites the previous
   bug had made visible: `providerCatalog` served a console missing every plugin provider,
   `providerIdSchema` was `z.enum(PROVIDER_IDS)` and would have refused their credentials,
   `isProviderId` reported them as not existing, `PREFIX_PROVIDER` made a provider's own
   `modelPrefixes` unreachable while `provider/model` for the same provider resolved — an asymmetry
-  *inside one function* — and `CALLBACKS` redirected nowhere. All five ask the registry **at call
-  time** now; `CALLBACKS` was deleted outright, since a second table derived from the first is a
-  thing to keep in step rather than a thing to have. Assume a sixth exist until you have grepped for
-  the pattern rather than for the names above.
+  *inside one function* — and `CALLBACKS` redirected nowhere. The sixth was `OAUTH_PROVIDER_IDS`,
+  a module-scope `Object.keys` of the built-in OAuth table that **gated `omni connect`**, so a
+  plugin's provider was refused by a list compiled before it could exist; it is `oauthProviderIds()`
+  now, and `ConnectFlows` answer from the map it was handed. All six ask the registry **at call
+  time**; `CALLBACKS` was deleted outright, since a second table derived from the first is a thing
+  to keep in step rather than a thing to have. Assume a **seventh** exist until you have grepped for
+  the pattern rather than for the names above — six sweeps have each stopped at the sites the
+  previous bug made visible.
   `PROVIDER_IDS` still exist and is still a snapshot — it feed CLI usage messages and tests, never a
   gate. `descriptors.ts` say so at the definition, which is where a reader meet it.
 - `provider:missing` is the pin rule applied to the provider, and follow it exactly: emitted **once

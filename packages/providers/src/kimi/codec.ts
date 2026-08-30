@@ -1,4 +1,3 @@
-import { GatewayError } from "@omni/ir";
 import { orderFields } from "../body.ts";
 import type { CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
 import { mergeHeaders, orderHeaders } from "../profile.ts";
@@ -38,7 +37,7 @@ export const kimiCodec: ProviderCodec = {
       // `GatewayError`'s own classification through untouched: dispatch gates
       // its credential-refresh retry on this code, so flattening it here would
       // silently turn a refreshable token into a failover.
-      throw new GatewayError("AUTH", "kimi credential has no token", { provider: "kimi" });
+      throw input.fail("AUTH", "kimi credential has no token");
     }
 
     const protocol: HeaderPair[] = [

@@ -512,7 +512,7 @@ const PROVIDER_PLUGIN = (id: string, over = "") => `export default {
 test("a plugin declaring the provider capability registers one", async () => {
   await plugin({
     id: "acme-ai",
-    manifest: { capabilities: ["provider"] },
+    manifest: { capabilities: ["provider"], origins: ["https://upstream.test"] },
     server: PROVIDER_PLUGIN("acme-ai"),
   });
 
@@ -550,7 +550,7 @@ test("a plugin that did not declare the capability is refused, not quietly ignor
 test("a plugin registering another provider's id is skipped, and says whose", async () => {
   await plugin({
     id: "acme-ai",
-    manifest: { capabilities: ["provider"] },
+    manifest: { capabilities: ["provider"], origins: ["https://upstream.test"] },
     server: PROVIDER_PLUGIN("anthropic"),
   });
 
@@ -572,7 +572,7 @@ test("a provider declared by a plugin whose setup then throws is not returned", 
   // told the plugin was unavailable.
   await plugin({
     id: "acme-ai",
-    manifest: { capabilities: ["provider"] },
+    manifest: { capabilities: ["provider"], origins: ["https://upstream.test"] },
     server: PROVIDER_PLUGIN("acme-ai").replace("return {};", 'throw new Error("late failure");'),
   });
 
@@ -588,7 +588,7 @@ test("a malformed descriptor skips the plugin rather than the gateway", async ()
   // reported, never fatal. The proxy path depends on no plugin.
   await plugin({
     id: "acme-ai",
-    manifest: { capabilities: ["provider"] },
+    manifest: { capabilities: ["provider"], origins: ["https://upstream.test"] },
     server: PROVIDER_PLUGIN("acme-ai").replace(
       "writeOverInput: { fiveMinute: 1.25, oneHour: 2 },",
       "",
@@ -628,6 +628,7 @@ test("a plugin rejected after setup does not leave its provider installed", asyn
     id: "acme-ai",
     manifest: {
       capabilities: ["provider"],
+      origins: ["https://upstream.test"],
       // Valid enough to get past `setup` and rejected by the UI rule after it.
       ui: "dist/index.js",
       sdk: "^1.0.0",
@@ -649,7 +650,12 @@ test("a plugin accepted with a compatible ui keeps its provider", async () => {
   // providers whenever a `ui` was present would satisfy it and be wrong.
   await plugin({
     id: "acme-ai",
-    manifest: { capabilities: ["provider"], ui: "ui/index.js", sdk: "^1.0.0" },
+    manifest: {
+      capabilities: ["provider"],
+      origins: ["https://upstream.test"],
+      ui: "ui/index.js",
+      sdk: "^1.0.0",
+    },
     server: PROVIDER_PLUGIN("acme-ai"),
   });
 

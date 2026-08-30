@@ -1,15 +1,12 @@
-import { GatewayError } from "@omni/ir";
-import { grokProfile, mergeHeaders, mintGrokDevice, orderHeaders } from "@omni/providers";
-import { createPkce, randomState } from "./pkce.ts";
+import { grokProfile, mintGrokDevice } from "@omni/providers";
 import {
-  type AuthorizeStart,
-  type FlowResult,
-  type OAuthDeps,
-  type OAuthProvider,
-  postJson,
-  tokenErrorCode,
-  tokenErrorMessage,
-} from "./types.ts";
+  type AuthHelpers,
+  type AuthStep,
+  oauthAdapter,
+  type PluginOAuthFlow,
+} from "./pluginFlow.ts";
+import { getJsonUnauthenticatedRequest, parsed as parseBody, postJsonRequest } from "./requests.ts";
+import { type FlowResult, type OAuthProvider, tokenErrorCode, tokenErrorMessage } from "./types.ts";
 
 /**
  * Public client ID of xAI's own desktop client. A public PKCE client holds no
@@ -66,16 +63,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * disables a credential on `AUTH`, and a discovery document that fails this
  * check says nothing about whether the refresh token is still good.
  */
-function trustedEndpoint(value: unknown, field: string): string {
+function trustedEndpoint(value: unknown, field: string, fail: AuthHelpers["fail"]): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new GatewayError("UPSTREAM", `discovery document has no ${field}`);
+    throw fail("UPSTREAM", `discovery document has no ${field}`);
   }
 
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new GatewayError("UPSTREAM", `discovery document has an unusable ${field}`);
+    throw fail("UPSTREAM", `discovery document has an unusable ${field}`);
   }
 
   // `endsWith(".x.ai")` rather than `endsWith("x.ai")`, so that `evilx.ai` and
@@ -85,54 +82,46 @@ function trustedEndpoint(value: unknown, field: string): string {
   if (url.protocol !== "https:" || (host !== TRUSTED_HOST && !host.endsWith(`.${TRUSTED_HOST}`))) {
     // The offending URL is deliberately not echoed: it is attacker-supplied
     // text, and the field name is enough to diagnose from.
-    throw new GatewayError(
-      "UPSTREAM",
-      `discovery document ${field} is not an ${TRUSTED_HOST} https url`,
-    );
+    throw fail("UPSTREAM", `discovery document ${field} is not an ${TRUSTED_HOST} https url`);
   }
   return url.toString();
 }
 
 /**
- * Reads xAI's OIDC metadata.
+ * Reads xAI's OIDC metadata, as a step the host performs.
  *
  * Not cached. This runs once per connect and once per refresh, which is rare
  * enough that a cache would only add a way for a rotated endpoint to go
- * unnoticed, and module-level state that outlives a test.
+ * unnoticed, and module-level state that outlives a test. It is delegated to
+ * with `yield*` from all three steps, exactly as it was awaited from all three
+ * before — which is why grok's `start` is the one built-in start that yields.
  */
-async function discover(deps: OAuthDeps): Promise<Endpoints> {
-  const res = await deps.http({
-    provider: "grok",
-    url: DISCOVERY_URL,
-    method: "GET",
-    headers: orderHeaders(
-      mergeHeaders(grokProfile.headers, [["Accept", "application/json"]]),
-      grokProfile.order,
-    ),
-    body: "",
-    // Short: a connect flow waits on this, and a slow answer is worth
-    // abandoning rather than holding the operator on.
-    signal: AbortSignal.timeout(15_000),
-  });
+// `async function*`, not `function*`. A sync generator delegated with `yield*`
+// from an async one runs, but its `TNext` widens to `AuthResponse | undefined`
+// — so every field read off the response becomes possibly-undefined and the
+// step stops matching `AuthStep`. Caught by the compiler, not by the tests,
+// which passed either way.
+async function* discover(fail: AuthHelpers["fail"]): AuthStep<Endpoints> {
+  // Unauthenticated on purpose, and said so by name: discovery is what runs
+  // before there is any credential to present. The builder's deadline is the
+  // short one, which is what this call wants — a connect flow waits on it, and
+  // a slow answer is worth abandoning rather than holding the operator on.
+  const res = yield getJsonUnauthenticatedRequest(DISCOVERY_URL, grokProfile);
 
-  const text = await res.text();
   if (res.status < 200 || res.status >= 300) {
-    throw new GatewayError("UPSTREAM", `discovery endpoint returned http_${res.status}`);
+    throw fail("UPSTREAM", `discovery endpoint returned http_${res.status}`);
   }
 
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // An HTML error page is a real answer; it is just not a discovery document.
-  }
+  // An HTML error page is a real answer; it is just not a discovery document,
+  // so `parseBody` reads it as null and the shape check refuses it.
+  const parsed = parseBody(res.body);
   if (!isRecord(parsed)) {
-    throw new GatewayError("UPSTREAM", "discovery endpoint returned an unusable response");
+    throw fail("UPSTREAM", "discovery endpoint returned an unusable response");
   }
 
   return {
-    authorizeUrl: trustedEndpoint(parsed.authorization_endpoint, "authorization_endpoint"),
-    tokenUrl: trustedEndpoint(parsed.token_endpoint, "token_endpoint"),
+    authorizeUrl: trustedEndpoint(parsed.authorization_endpoint, "authorization_endpoint", fail),
+    tokenUrl: trustedEndpoint(parsed.token_endpoint, "token_endpoint", fail),
   };
 }
 
@@ -168,24 +157,26 @@ function emailFromIdToken(idToken: string | null): string | null {
   }
 }
 
-async function postToken(
+/** The token call, as a step the host performs. `async function*` for the reason above. */
+async function* postToken(
   tokenUrl: string,
   body: Record<string, string>,
-  deps: OAuthDeps,
-): Promise<TokenResponse> {
+  fail: AuthHelpers["fail"],
+): AuthStep<TokenResponse> {
   // Form-encoded, and with no client_secret: a public client has none to send.
-  const { status, parsed } = await postJson(deps, "grok", tokenUrl, grokProfile, {
+  const res = yield postJsonRequest(tokenUrl, grokProfile, {
     contentType: "application/x-www-form-urlencoded",
     body: new URLSearchParams(body).toString(),
   });
+  const parsed = parseBody(res.body);
 
-  if (status < 200 || status >= 300) {
-    throw new GatewayError(tokenErrorCode(status), tokenErrorMessage(status, parsed));
+  if (res.status < 200 || res.status >= 300) {
+    throw fail(tokenErrorCode(res.status), tokenErrorMessage(res.status, parsed));
   }
 
   const token = parseTokenResponse(parsed);
   if (token === null) {
-    throw new GatewayError("AUTH", "token endpoint returned no access_token");
+    throw fail("AUTH", "token endpoint returned no access_token");
   }
   return token;
 }
@@ -207,7 +198,7 @@ function toResult(
   token: TokenResponse,
   fallbackRefresh: string | null,
   agentId: string,
-  deps: OAuthDeps,
+  now: () => number,
 ): FlowResult {
   return {
     secrets: {
@@ -220,21 +211,23 @@ function toResult(
       apiKey: null,
       idToken: token.idToken,
     },
-    expiresAt: token.expiresIn === null ? null : deps.now() + token.expiresIn * 1000,
+    expiresAt: token.expiresIn === null ? null : now() + token.expiresIn * 1000,
     accountEmail: emailFromIdToken(token.idToken),
     // Read back by the grok adapter as the `x-grok-agent-id` device fingerprint.
     providerData: { agentId },
   };
 }
 
-export const grokOAuth: OAuthProvider = {
-  id: "grok",
+const grokFlow: PluginOAuthFlow = {
   kind: "pkce",
   supportsManualPaste: true,
 
-  async start({ redirectUri }, deps): Promise<AuthorizeStart> {
-    const { authorizeUrl } = await discover(deps);
-    const { verifier, challenge } = createPkce();
+  async *start({ redirectUri, fail, pkce, randomState }) {
+    const { authorizeUrl } = yield* discover(fail);
+    // The host mints PKCE and the CSRF state now, so this flow holds no crypto
+    // of its own. `redirectUri` is the caller's own loopback listener, unlike
+    // providers whose redirect is a fixed registered value.
+    const { verifier, challenge } = pkce();
     const state = randomState();
 
     const url = new URL(authorizeUrl);
@@ -255,15 +248,15 @@ export const grokOAuth: OAuthProvider = {
     return { authorizeUrl: url.toString(), pending: { verifier, challenge, state, redirectUri } };
   },
 
-  async exchange({ code, pending }, deps) {
+  async *exchange({ code, pending, fail, now }) {
     // A pasted callback URL arrives unpicked as `<code>#<state>`.
     const [rawCode, pastedState] = code.split("#");
     if (pastedState !== undefined && pastedState !== pending.state) {
-      throw new GatewayError("AUTH", "authorization state mismatch");
+      throw fail("AUTH", "authorization state mismatch");
     }
 
-    const { tokenUrl } = await discover(deps);
-    const token = await postToken(
+    const { tokenUrl } = yield* discover(fail);
+    const token = yield* postToken(
       tokenUrl,
       {
         grant_type: "authorization_code",
@@ -272,23 +265,25 @@ export const grokOAuth: OAuthProvider = {
         client_id: CLIENT_ID,
         code_verifier: pending.verifier,
       },
-      deps,
+      fail,
     );
 
-    return toResult(token, null, mintGrokDevice().agentId, deps);
+    return toResult(token, null, mintGrokDevice().agentId, now);
   },
 
-  async refresh(refreshToken, deps, providerData) {
-    const { tokenUrl } = await discover(deps);
-    const token = await postToken(
+  async *refresh({ refreshToken, providerData, fail, now }) {
+    const { tokenUrl } = yield* discover(fail);
+    const token = yield* postToken(
       tokenUrl,
       { grant_type: "refresh_token", client_id: CLIENT_ID, refresh_token: refreshToken },
-      deps,
+      fail,
     );
-    return toResult(token, refreshToken, agentIdFrom(providerData), deps);
+    return toResult(token, refreshToken, agentIdFrom(providerData), now);
   },
 
   // No `usage`. xAI publishes no rate-limit headers and its own client reads
   // none, so a grok account reads as *unknown* rather than as unlimited —
   // which is the honest answer, and the one the tightest-window rule expects.
 };
+
+export const grokOAuth: OAuthProvider = oauthAdapter("grok", grokFlow, { trusted: true });

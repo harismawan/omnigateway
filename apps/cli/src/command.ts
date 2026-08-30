@@ -26,7 +26,32 @@ export type CommandEnv = {
   /** Built on demand: most commands never touch the process. */
   service: () => ServiceDeps;
   /** Built on demand, and injected by tests so no test ever reaches a provider. */
-  connect: (store: Store) => ConnectFlows;
+  /**
+   * Async because building the flows reads the plugin directory, and the
+   * registry it produces must be the same one `connectable` judged against.
+   * Returning it synchronously meant reading whatever a previous call happened
+   * to memoize, which was correct only for the one command that calls both in
+   * the right order.
+   */
+  connect: (store: Store) => Promise<ConnectFlows>;
+  /**
+   * Which providers an authorization can be started for.
+   *
+   * Separate from `connect` because it is asked **before** a store is opened:
+   * an unknown provider is refused without touching a database, which is
+   * asserted and easy to lose by reading the set off the flows instead.
+   */
+  connectable: () => Promise<{
+    ids: readonly string[];
+    /**
+     * Plugins that declared a provider and did not yield one.
+     *
+     * Carried into the refusal rather than dropped: a broken plugin is the
+     * likeliest reason an id was refused, and it is the operator's actual next
+     * step. `credentials add-key` already does this.
+     */
+    failures: readonly { id: string; reason: string }[];
+  }>;
   /** Runs the gateway attached to this terminal, returning its exit code. */
   foreground: (input: {
     argv: readonly string[];

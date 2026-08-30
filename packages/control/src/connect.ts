@@ -2,6 +2,7 @@ import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir
 import type { HttpClient } from "@omni/providers";
 import {
   PROVIDER_DESCRIPTORS,
+  type ProviderDescriptors,
   PROVIDER_IDS as REGISTRY_PROVIDER_IDS,
 } from "@omni/providers/descriptors";
 import type { Store } from "@omni/store";
@@ -45,8 +46,11 @@ const FLOW_TTL_MS = 600_000;
  * its prototype to avoid. Reading the descriptor at call time has neither
  * problem and needs no second table to keep in step with the first.
  */
-function callbackOf(provider: ProviderId): { uri: string; label: string } | undefined {
-  return PROVIDER_DESCRIPTORS[provider]?.callback;
+function callbackOf(
+  provider: ProviderId,
+  descriptors: ProviderDescriptors,
+): { uri: string; label: string } | undefined {
+  return descriptors[provider]?.callback;
 }
 
 export type ConnectDeps = {
@@ -55,6 +59,31 @@ export type ConnectDeps = {
   http: HttpClient;
   now: () => number;
   logger?: Logger;
+  /**
+   * The provider registry this installation actually has.
+   *
+   * **Injected, and defaulting to the module global is only right for the
+   * gateway.** `start` asks two questions of it — does this provider exist, and
+   * what redirect does it use — and both were asked of `PROVIDER_DESCRIPTORS`
+   * directly. The gateway populates that global at boot through
+   * `registerProvider`; **the CLI never does and must not**, because
+   * `loadPlugins` runs migrations, opens channels and registers routes, none of
+   * which a diagnostic should do.
+   *
+   * So `omni connect <plugin-provider>` admitted the id at its own gate and was
+   * then refused here, by a message that named the provider it had just
+   * refused — `unconnectable()` builds its list from the *injected* map while
+   * the guard above it read the *global* one. Two registries, one call,
+   * opposite answers: the trap CLAUDE.md calls this repository's most repeated
+   * bug, and `credentials.ts` had already paid for it once with
+   * `ProviderExists`.
+   *
+   * The registry rather than a predicate, because the callback lookup has the
+   * same hole and a predicate would have closed one of the two — a plugin's
+   * PKCE flow would have received `redirectUri: ""` and failed at the
+   * authorization server instead.
+   */
+  descriptors?: ProviderDescriptors;
 };
 
 /** What the operator needs in order to authorize, however they are shown it. */
@@ -125,7 +154,19 @@ export function createConnectFlows(deps: ConnectDeps) {
   const logger = deps.logger ?? noopLogger;
   const flows = createPendingFlows({ now: deps.now, ttlMs: FLOW_TTL_MS });
   const pollsInFlight = new Map<string, Promise<{ id: string }>>();
-  const callbackUri = (provider: ProviderId) => callbackOf(provider)?.uri ?? "";
+  const descriptors = deps.descriptors ?? PROVIDER_DESCRIPTORS;
+  const callbackUri = (provider: ProviderId) => callbackOf(provider, descriptors)?.uri ?? "";
+  /** Existence against the installation, never against the compiled-in six. */
+  const exists = (value: unknown): value is ProviderId =>
+    typeof value === "string" && Object.hasOwn(descriptors, value);
+  /**
+   * Read at call time from the map this instance was handed.
+   *
+   * One function with two readers — the exported method and `start`'s own
+   * refusal message — because they answer the same question and a second
+   * `Object.keys(deps.providers)` inline is how the two come to disagree.
+   */
+  const connectableIds = (): readonly string[] => Object.keys(deps.providers);
 
   /**
    * Accepts what the operator actually has in hand.
@@ -136,7 +177,7 @@ export function createConnectFlows(deps: ConnectDeps) {
    * an Anthropic-style flow shows — passes through untouched.
    */
   function normalizeAuthorizationCode(flow: StoredFlow, input: string): string {
-    const callback = callbackOf(flow.provider);
+    const callback = callbackOf(flow.provider, descriptors);
     if (callback === undefined) return input;
     const expected = new URL(callback.uri);
 
@@ -211,6 +252,22 @@ export function createConnectFlows(deps: ConnectDeps) {
   }
 
   return {
+    /**
+     * The providers this installation can start an authorization for.
+     *
+     * Read from `deps.providers` at call time, which is the whole point: the
+     * map is assembled per caller — the gateway merges what plugins registered
+     * at boot, the CLI merges what `readPluginProviders` read — so a
+     * module-scope snapshot of the built-in table answers for neither.
+     * `OAUTH_PROVIDER_IDS` was exactly that snapshot and it gated
+     * `omni connect`, so a plugin's provider would have been refused by a list
+     * compiled before it could exist.
+     *
+     * That is the sixth site in this repository to read a registry at import
+     * time and be wrong the same way; CLAUDE.md names the other five.
+     */
+    connectableIds,
+
     /** Begins an authorization and returns what the operator must act on. */
     async start(providerInput: unknown, labelInput?: unknown): Promise<ConnectStart> {
       flows.sweep();
@@ -222,12 +279,9 @@ export function createConnectFlows(deps: ConnectDeps) {
       // is read off the injected table, so it cannot drift from what `start`
       // would actually accept the way a hand-written one did.
       const unconnectable = () =>
-        new GatewayError(
-          "BAD_REQUEST",
-          `provider must be one of ${Object.keys(deps.providers).join(", ")}`,
-        );
+        new GatewayError("BAD_REQUEST", `provider must be one of ${connectableIds().join(", ")}`);
 
-      if (!isProviderId(providerInput)) throw unconnectable();
+      if (!exists(providerInput)) throw unconnectable();
       const provider = deps.providers[providerInput];
       if (provider === undefined) throw unconnectable();
 

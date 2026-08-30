@@ -1,6 +1,7 @@
 import { GatewayError, type ProviderId, type StreamEvent } from "@omni/ir";
-import type { ProviderCodec } from "./codec.ts";
+import type { CodecFail, CodecHttpRequest, ProviderCodec } from "./codec.ts";
 import { httpError } from "./http.ts";
+import { isHttpMethod, isSendableUrl, withinOrigins } from "./origins.ts";
 import type { AdapterRequest, AdapterResult, Capabilities, ProviderAdapter } from "./types.ts";
 
 /**
@@ -101,42 +102,6 @@ function rebound(id: ProviderId, error: GatewayError): GatewayError {
 }
 
 /**
- * Whether a codec's `url` is one `HttpClient` can actually be handed.
- *
- * Parsed rather than pattern-matched, because the thing that must not throw is
- * `new URL(…)` inside the transport, and the only honest way to know it will not
- * is to have called it. The scheme check is the second half: `file:`,
- * `data:` and the rest parse cleanly and then throw
- * `Protocol "file:" not supported` a layer deeper — and an outbound request the
- * host believes is HTTP is worth refusing on its own terms, not only because
- * Node happens to.
- */
-function isSendableUrl(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Whether a codec's `method` is one the transport will accept.
- *
- * A closed set rather than the RFC's token grammar. The grammar would admit
- * `FROBNICATE`, which is a valid token and not a request any provider serves, so
- * the narrower rule costs nothing and refuses at the point a reader can see why.
- * Codecs that need another verb add it here, which is a two-line core edit and
- * should read as one.
- */
-const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
-
-function isHttpMethod(value: unknown): value is string {
-  return typeof value === "string" && HTTP_METHODS.has(value);
-}
-
-/**
  * Runs one codec hook, turning anything it throws into a failover-able error.
  *
  * A `GatewayError` passes through untouched, and that exception is the point.
@@ -148,10 +113,36 @@ function isHttpMethod(value: unknown): value is string {
  * would fail outright where it had succeeded. Only errors the contract has no
  * classification for are rewritten.
  */
+/**
+ * An error that says it is a `GatewayError` and is not this module's.
+ *
+ * What a bundler produces. A plugin is a self-contained tree with no
+ * `node_modules`, so a codec importing `GatewayError` ships its own copy, and
+ * `instanceof` against it is false however identical the shape.
+ *
+ * Detected only to **report** it. The classification is still refused —
+ * accepting a duck-typed object's `code` is exactly what `instanceof` is there
+ * to prevent, and a plain object could then claim `AUTH` and drive a credential
+ * refresh. What changes is that the author is told which mistake they made,
+ * instead of watching a deliberate `AUTH` become an `UPSTREAM` for reasons
+ * nothing in the logs explains.
+ */
+function isForeignGatewayError(error: unknown): boolean {
+  return error instanceof Error && error.name === "GatewayError";
+}
+
 function guard<T>(id: ProviderId, hook: string, run: () => T): T {
   try {
     return run();
   } catch (error) {
+    if (!(error instanceof GatewayError) && isForeignGatewayError(error)) {
+      throw codecFailure(
+        id,
+        hook,
+        "threw a GatewayError from its own bundled copy, whose classification the host " +
+          "cannot trust; build the error with input.fail() instead",
+      );
+    }
     // Passed through, but not verbatim: the classification is the codec's and
     // the `provider` and `degradations` fields are the host's. `kiloCodec`
     // throwing `AUTH` for a credential with no token is the case this
@@ -207,25 +198,74 @@ export function codecAdapter(
   id: ProviderId,
   capabilities: Capabilities,
   codec: ProviderCodec,
+  /**
+   * The origins this provider's manifest declared, for a plugin-supplied codec.
+   *
+   * Absent for the six built-ins, and absent means unrestricted — they are not
+   * plugins, have no manifest, and their URLs are in this repository where a
+   * reader can see them. A plugin's are not, which is the whole asymmetry this
+   * closes.
+   */
+  origins?: readonly string[],
 ): ProviderAdapter {
   return {
     id,
     capabilities,
     async send(req: AdapterRequest): Promise<AdapterResult> {
+      // One factory per request rather than per adapter: it closes over `id`, so
+      // a codec cannot name another provider in the error it raises any more
+      // than it can in the request it describes.
+      const fail: CodecFail = (code, message, opts) =>
+        new GatewayError(code, message, {
+          provider: id,
+          ...(opts?.status === undefined ? {} : { status: opts.status }),
+          ...(opts?.retryAfterMs === undefined ? {} : { retryAfterMs: opts.retryAfterMs }),
+          degradations: boundedDegradations(opts?.degradations),
+          // Never `gatewayAuthored`. See `CodecInput.fail`.
+        });
+
       const built = guard(id, "buildRequest", () =>
         codec.buildRequest({
           request: req.request,
           model: req.model,
           credentials: req.credentials,
+          fail,
           ...(req.requestId === undefined ? {} : { requestId: req.requestId }),
           ...(req.autoCache === undefined ? {} : { autoCacheEnabled: req.autoCache }),
         }),
       );
+      // **Copied first, then only the copy is read — checks included.**
+      //
+      // Every field is otherwise read twice: once by the shape check below and
+      // again by the transport. A property that answers differently each time —
+      // a getter is enough — passes the check and sends something else.
+      // Measured: a getter on `method` returning `"GET"` then `"GET junk"` put a
+      // raw `ERR_INVALID_HTTP_TOKEN` out of `send()`, which `classify` reads as
+      // `INTERNAL`, and `RETRYABLE.INTERNAL` is false — so the request died
+      // where the honest value fails over cleanly.
+      //
+      // A first version of this copy sat *below* the shape check, which closed
+      // the origin-check-to-transport gap and left check-to-transport open, on
+      // a comment claiming it had closed both. That is the same shape as the
+      // note further down about checking one member of a class and describing
+      // it as the class.
+      const described = (built?.request ?? {}) as Partial<{
+        url: string;
+        method: string;
+        headers: readonly (readonly [string, string])[];
+        body: string;
+      }>;
+      const request = {
+        url: described.url,
+        method: described.method,
+        headers: Array.isArray(described.headers) ? [...described.headers] : described.headers,
+        body: described.body,
+      };
       if (
-        typeof built?.request?.body !== "string" ||
-        !isSendableUrl(built.request.url) ||
-        !isHttpMethod(built.request.method) ||
-        !Array.isArray(built.request.headers) ||
+        typeof request.body !== "string" ||
+        !isSendableUrl(request.url) ||
+        !isHttpMethod(request.method) ||
+        !Array.isArray(request.headers) ||
         // The elements, not just the array. `Array.isArray` alone let a
         // malformed pair through to `nodeHttpClient`, which threw a raw
         // `TypeError` — `ERR_INVALID_CHAR`, `ERR_INVALID_HTTP_TOKEN`, or
@@ -243,7 +283,7 @@ export function codecAdapter(
         // codec-authored string into a client-visible message. Checking one
         // member of a class and describing it as the class is how the other two
         // survived a review that was looking straight at them.
-        !built.request.headers.every(
+        !request.headers.every(
           (pair) =>
             Array.isArray(pair) &&
             pair.length === 2 &&
@@ -253,6 +293,25 @@ export function codecAdapter(
       ) {
         throw codecFailure(id, "buildRequest", "did not return a usable request");
       }
+      // Narrowed off the copy the checks above just validated, so the transport
+      // and the checks cannot see different values.
+      const sendable: CodecHttpRequest = {
+        url: request.url,
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+      };
+
+      // Checked on the copy, before the transport. A plugin's manifest is the
+      // only place an operator can read where their prompts go, so a codec that
+      // names somewhere else is refused rather than reported afterwards.
+      if (origins !== undefined && !withinOrigins(request.url, origins)) {
+        throw codecFailure(
+          id,
+          "buildRequest",
+          "described a request to an origin its manifest does not declare",
+        );
+      }
 
       // `provider` and `signal` are stamped here rather than taken from the
       // codec. The first is the host's own id for it — a codec naming a
@@ -261,10 +320,7 @@ export function codecAdapter(
       // codec that supplied its own could outlive it.
       const res = await req.http({
         provider: id,
-        url: built.request.url,
-        method: built.request.method,
-        headers: built.request.headers,
-        body: built.request.body,
+        ...sendable,
         signal: req.signal,
       });
 
@@ -326,6 +382,7 @@ export function codecAdapter(
             body: text,
             headers: res.headers,
             fallback,
+            fail,
             // What the request gave up, so a refusal caused by exactly that can
             // say so. `dispatch` writes `error.degradations` into `request_logs`.
             // Bounded here as on the success path. Unbounded, a codec could
@@ -359,6 +416,7 @@ export function codecAdapter(
         });
       }
 
+      const cloaked = built.cloakedTools;
       return {
         events: guardStream(
           id,
@@ -369,6 +427,7 @@ export function codecAdapter(
               body,
               decodeState: built.decodeState,
               headers: res.headers,
+              fail,
             }),
           ),
         ),
@@ -394,9 +453,14 @@ export function codecAdapter(
         // deleting it changed nothing, which is how a reader comes to believe a
         // guard is broader than it is. `>= 0` is the one that carries its own
         // weight: zero is a count a codec may legitimately state.
-        ...(Number.isInteger(built.cloakedTools) && (built.cloakedTools ?? 0) >= 0
-          ? { cloakedTools: built.cloakedTools }
-          : {}),
+        // Read **once**, into a local, and the local is what is tested and
+        // emitted. It was read three times — twice by the guard, once by the
+        // field — so a getter answering an integer twice and then
+        // `"SessionSearch,ReadFile"` put client tool names into
+        // `LogFields.cloakedTools` through `dispatch`'s debug line. Measured.
+        // That is the leak the count-not-names contract exists to prevent, and
+        // the guard three lines above says it was already closed.
+        ...(Number.isInteger(cloaked) && (cloaked ?? 0) >= 0 ? { cloakedTools: cloaked } : {}),
       };
     },
   };

@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
+import { OAUTH_PROVIDERS } from "@omni/control";
+import { createLogger, GatewayError } from "@omni/ir";
 import type { RequestLog, Store } from "@omni/store";
 import {
   beginLog,
   finishLog,
   newCompletedRequestLog,
   newPendingRequestLog,
+  reasonField,
   routeLog,
 } from "../src/logging.ts";
 import type { Invalidator } from "../src/stream/broadcaster.ts";
@@ -259,4 +262,109 @@ test("a throwing invalidation does not turn a finished request into an error", a
   });
 
   expect(appends).toHaveLength(1);
+});
+
+/**
+ * The log line an operator reads when their accounts stop refreshing.
+ *
+ * `reasonField` withholds a message when the error names a provider and is not
+ * gateway-authored, because `httpError` builds one from up to 500 characters of
+ * an upstream body. The five built-in OAuth flows are the other case: their
+ * text comes from literals and from `tokenErrorMessage`, which reads an error
+ * identifier *without* the body.
+ *
+ * Porting them onto the plugin contract silenced all of it for one commit —
+ * `fail` stamped `provider` and left the flag off, so both arms went false and
+ * a refresh failure printed a bare code. Owned here because this is the only
+ * layer that may import both the flows and the line that reads them.
+ */
+test("a built-in oauth failure still explains itself at default level", async () => {
+  const quiet = createLogger({ level: "info", write: () => {}, now: () => 0 });
+  const dead = async () => {
+    throw new Error("connection reset");
+  };
+
+  // Walked from the registry rather than listed, so a sixth built-in is covered
+  // the day it is added — the instrument `providerTables.test.ts` uses, for the
+  // reason it gives: a list of what to check has exactly the property the thing
+  // it checks lacks.
+  const providers = Object.values(OAUTH_PROVIDERS);
+  expect(providers.length).toBeGreaterThan(0);
+  for (const provider of providers) {
+    const error: GatewayError = await provider
+      .refresh("a-refresh-token", { http: dead as never, now: () => 0 }, {})
+      .then(() => {
+        throw new Error(`${provider.id} refresh resolved against a dead transport`);
+      })
+      .catch((raised: unknown) => raised as GatewayError);
+
+    expect({ provider: provider.id, printed: "reason" in reasonField(error, quiet) }).toEqual({
+      provider: provider.id,
+      printed: true,
+    });
+  }
+});
+
+test("an upstream body is still withheld at default level", () => {
+  // The control. A change that printed everything would satisfy the test above
+  // while putting prompt text on stdout, which is why the flag is opt-in.
+  const quiet = createLogger({ level: "info", write: () => {}, now: () => 0 });
+  expect(
+    reasonField(
+      new GatewayError("UPSTREAM", "context length exceeded: <prompt text>", {
+        provider: "anthropic",
+      }),
+      quiet,
+    ),
+  ).toEqual({});
+});
+
+test("a token endpoint's refusal reaches the operator, bounded", async () => {
+  // The case the test above does **not** reach. A dead transport makes four of
+  // the five produce `flowFailure`, whose `gatewayAuthored` is unconditional —
+  // so only kilo exercised `trusted`, and only because its refresh throws
+  // before making a request. If kilo ever gains a real refresh, that coverage
+  // disappears silently.
+  //
+  // Here the transport *answers*, so the message comes from the flow's own
+  // `fail` via `tokenErrorMessage` — the path `trusted` exists for, and the one
+  // carrying an upstream-supplied value.
+  const quiet = createLogger({ level: "info", write: () => {}, now: () => 0 });
+  const refusing = (payload: string) =>
+    (async () => ({
+      status: 400,
+      headers: new Headers(),
+      body: null,
+      text: async () => payload,
+    })) as never;
+
+  const anthropic = OAUTH_PROVIDERS.anthropic;
+  if (anthropic === undefined) throw new Error("anthropic is not installed");
+
+  const ordinary = await anthropic
+    .refresh("t", { http: refusing(JSON.stringify({ error: "invalid_grant" })), now: () => 0 }, {})
+    .then(() => {
+      throw new Error("resolved against a 400");
+    })
+    .catch((raised: unknown) => raised as GatewayError);
+
+  // The sentence an operator has to act on. `AUTH`, because a 400 from a token
+  // endpoint *is* the provider repudiating the credential.
+  expect(ordinary.code).toBe("AUTH");
+  expect(reasonField(ordinary, quiet)).toEqual({
+    reason: "token endpoint rejected the request: invalid_grant",
+  });
+
+  // And the value is bounded, because `trusted` claims this text is the
+  // gateway's. An `error` field is upstream-supplied and nothing made it an
+  // identifier; 3000 characters reached stdout before it was shape-checked.
+  const hostile = await anthropic
+    .refresh("t", { http: refusing(JSON.stringify({ error: "x".repeat(3000) })), now: () => 0 }, {})
+    .then(() => {
+      throw new Error("resolved against a 400");
+    })
+    .catch((raised: unknown) => raised as GatewayError);
+
+  expect(hostile.message).toBe("token endpoint rejected the request: http_400");
+  expect(hostile.message.length).toBeLessThan(80);
 });

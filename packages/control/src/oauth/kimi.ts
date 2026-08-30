@@ -1,13 +1,13 @@
-import { GatewayError } from "@omni/ir";
 import { type KimiDevice, kimiDeviceHeaders, kimiProfile, mintKimiDevice } from "@omni/providers";
-import type {
-  AuthorizeStart,
-  DeviceOAuthProvider,
-  FlowResult,
-  OAuthDeps,
-  UsageReport,
-} from "./types.ts";
-import { getJson, pendingError, postJson, tokenErrorCode, tokenErrorMessage } from "./types.ts";
+import {
+  type AuthHelpers,
+  type AuthStep,
+  oauthAdapter,
+  type PluginOAuthFlow,
+} from "./pluginFlow.ts";
+import { getJsonRequest, parsed as parseBody, postJsonRequest } from "./requests.ts";
+import type { DeviceOAuthProvider, FlowResult, UsageReport } from "./types.ts";
+import { tokenErrorCode, tokenErrorMessage } from "./types.ts";
 import { recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
 
 // Re-exported because the pending marker moved to `types.ts` when kilo became
@@ -58,14 +58,14 @@ function positiveNumberFrom(value: Record<string, unknown>, field: string): numb
     : null;
 }
 
-function tokenFrom(value: unknown): TokenResponse {
+function tokenFrom(value: unknown, fail: AuthHelpers["fail"]): TokenResponse {
   const record = recordFrom(value);
   if (record === null) {
-    throw new GatewayError("AUTH", "token endpoint returned no access_token");
+    throw fail("AUTH", "token endpoint returned no access_token");
   }
   const accessToken = stringFrom(record, "access_token");
   if (accessToken === null) {
-    throw new GatewayError("AUTH", "token endpoint returned no access_token");
+    throw fail("AUTH", "token endpoint returned no access_token");
   }
   return {
     accessToken,
@@ -75,15 +75,15 @@ function tokenFrom(value: unknown): TokenResponse {
   };
 }
 
-function deviceCodeFrom(value: unknown): DeviceCodeResponse {
+function deviceCodeFrom(value: unknown, fail: AuthHelpers["fail"]): DeviceCodeResponse {
   const record = recordFrom(value);
   if (record === null) {
-    throw new GatewayError("AUTH", "device code endpoint returned an unusable response");
+    throw fail("AUTH", "device code endpoint returned an unusable response");
   }
   const deviceCode = stringFrom(record, "device_code");
   const userCode = stringFrom(record, "user_code");
   if (deviceCode === null || userCode === null) {
-    throw new GatewayError("AUTH", "device code endpoint returned an unusable response");
+    throw fail("AUTH", "device code endpoint returned an unusable response");
   }
   return {
     deviceCode,
@@ -96,25 +96,44 @@ function deviceCodeFrom(value: unknown): DeviceCodeResponse {
   };
 }
 
-async function post(
+/**
+ * The form post every kimi endpoint takes, as a step the host performs.
+ *
+ * A generator rather than a function because it yields: the flow describes the
+ * request and the host sends it, so `begin`, `exchange` and `refresh` delegate
+ * to this with `yield*` exactly as they awaited it before. The device
+ * fingerprint rides on every one of them — kimi ties the session to it — which
+ * is why it is a parameter here rather than something each caller remembers to
+ * add to `extraHeaders`.
+ */
+// `async function*`, not `function*`. A sync generator delegated with `yield*`
+// from an async one runs, but its `TNext` widens to `AuthResponse | undefined`
+// — so every field read off the response becomes possibly-undefined and the
+// step stops matching `AuthStep`. Caught by the compiler, not by the tests,
+// which passed either way.
+async function* post(
   url: string,
   body: Record<string, string>,
   device: KimiDevice,
-  deps: OAuthDeps,
-): Promise<unknown> {
-  const { status, parsed } = await postJson(deps, "kimi", url, kimiProfile, {
+  fail: AuthHelpers["fail"],
+  keepPolling: AuthHelpers["keepPolling"],
+): AuthStep<unknown> {
+  const res = yield postJsonRequest(url, kimiProfile, {
     contentType: "application/x-www-form-urlencoded",
     body: new URLSearchParams({ ...body, client_id: CLIENT_ID }).toString(),
     extraHeaders: kimiDeviceHeaders(device),
   });
+  const parsed = parseBody(res.body);
 
-  if (status >= 200 && status < 300) return parsed;
+  if (res.status >= 200 && res.status < 300) return parsed;
 
   const record = recordFrom(parsed);
   const code =
-    record === null ? `http_${status}` : (stringFrom(record, "error") ?? `http_${status}`);
-  if (PENDING_ERRORS.has(code)) throw pendingError(code);
-  throw new GatewayError(tokenErrorCode(status), tokenErrorMessage(status, parsed));
+    record === null ? `http_${res.status}` : (stringFrom(record, "error") ?? `http_${res.status}`);
+  // `keepPolling` rather than a thrown marker of our own: the "not approved
+  // yet" signal carries a private marker only the host can set.
+  if (PENDING_ERRORS.has(code)) throw keepPolling(code);
+  throw fail(tokenErrorCode(res.status), tokenErrorMessage(res.status, parsed));
 }
 
 /** Reads a persisted identity back, minting a fresh one if it is absent. */
@@ -143,7 +162,7 @@ function toResult(
   token: TokenResponse,
   device: KimiDevice,
   fallbackRefresh: string | null,
-  deps: OAuthDeps,
+  now: () => number,
 ): FlowResult {
   return {
     secrets: {
@@ -152,7 +171,7 @@ function toResult(
       apiKey: null,
       idToken: null,
     },
-    expiresAt: token.expiresIn === null ? null : deps.now() + token.expiresIn * 1000,
+    expiresAt: token.expiresIn === null ? null : now() + token.expiresIn * 1000,
     accountEmail: token.email,
     providerData: { ...device },
   };
@@ -179,15 +198,15 @@ export function parseKimiUsage(value: unknown, now: number): UsageReport | null 
   return reportFrom([windowFrom(root.usage ?? root.Usage, "weekly", now)]);
 }
 
-export const kimiOAuth: DeviceOAuthProvider = {
-  id: "kimi",
+const kimiFlow: PluginOAuthFlow = {
   kind: "device",
   // Kimi ties the session to the fingerprint `start` mints and sends it on
   // every later call; a blank one is refused upstream as a malformed device.
   needsDeviceId: true,
   supportsManualPaste: false,
 
-  start() {
+  // biome-ignore lint/correctness/useYield: the url is a constant and the fingerprint is minted locally
+  async *start() {
     const device = mintKimiDevice();
     return {
       authorizeUrl: "https://www.kimi.com/device",
@@ -195,22 +214,25 @@ export const kimiOAuth: DeviceOAuthProvider = {
     };
   },
 
-  async begin({ deviceId }, deps): Promise<AuthorizeStart> {
+  async *begin({ deviceId, fail, keepPolling }) {
     // Kept as a backstop, not as the primary check: `needsDeviceId: true` is
     // what `connect.ts`'s `deviceIdFrom` reads, and no flow that goes through
     // it can arrive here blank. `begin` is exported on `OAUTH_PROVIDERS`
     // though, so it is reachable without that flow, and a fingerprint is
     // kimi's own requirement rather than something to look up elsewhere.
     //
-    // `INTERNAL`, not a bare `Error`, and the same code the shared check
-    // raises: an unclassified throw is rewritten to the flat "internal error"
-    // by `apiErrorResponse`, so the operator reads a 500 with no hint of which
-    // half of the flow broke.
+    // `INTERNAL` through `fail`, never a bare `Error`, and the same code the
+    // shared check raises: the host relabels an arbitrary throw as "kimi oauth
+    // begin threw" and drops the message with it, so the operator reads a 500
+    // with no hint of which half of the flow broke.
     if (deviceId.trim().length === 0) {
-      throw new GatewayError("INTERNAL", "kimi begin requires a non-blank deviceId");
+      throw fail("INTERNAL", "kimi begin requires a non-blank deviceId");
     }
     const device = deviceForBegin(deviceId);
-    const response = deviceCodeFrom(await post(DEVICE_CODE_URL, {}, device, deps));
+    const response = deviceCodeFrom(
+      yield* post(DEVICE_CODE_URL, {}, device, fail, keepPolling),
+      fail,
+    );
     return {
       authorizeUrl: response.verificationUri,
       userCode: response.userCode,
@@ -227,13 +249,16 @@ export const kimiOAuth: DeviceOAuthProvider = {
   },
 
   /** One poll. The caller owns the loop and the deadline. */
-  async exchange({ pending }, deps) {
+  async *exchange({ pending, fail, keepPolling, now }) {
+    // `fail` for the same reason `begin` uses it: a bare `Error` out of a step
+    // reaches the operator as the host's "kimi oauth exchange threw", which
+    // names neither the missing device code nor that this is a gateway bug.
     if (pending.deviceCode === undefined) {
-      throw new Error("kimi exchange requires a pending flow produced by begin()");
+      throw fail("INTERNAL", "kimi exchange requires a pending flow produced by begin()");
     }
     const device = deviceFrom(pending.extra);
     const token = tokenFrom(
-      await post(
+      yield* post(
         TOKEN_URL,
         {
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
@@ -241,35 +266,45 @@ export const kimiOAuth: DeviceOAuthProvider = {
           device_id: device.deviceId,
         },
         device,
-        deps,
+        fail,
+        keepPolling,
       ),
+      fail,
     );
-    return toResult(token, device, null, deps);
+    return toResult(token, device, null, now);
   },
 
-  async refresh(refreshToken, deps, providerData) {
+  async *refresh({ refreshToken, providerData, fail, keepPolling, now }) {
     const device = deviceFrom(providerData);
     const token = tokenFrom(
-      await post(
+      yield* post(
         TOKEN_URL,
         { grant_type: "refresh_token", refresh_token: refreshToken, device_id: device.deviceId },
         device,
-        deps,
+        fail,
+        keepPolling,
       ),
+      fail,
     );
-    return toResult(token, device, refreshToken, deps);
+    return toResult(token, device, refreshToken, now);
   },
 
-  async usage(secrets, deps, providerData) {
+  async *usage({ secrets, providerData, now }) {
     if (secrets.accessToken === null) return null;
     const device = deviceFrom(providerData);
-    const { status, parsed } = await getJson(deps, "kimi", USAGE_URL, kimiProfile, {
+    const res = yield getJsonRequest(USAGE_URL, kimiProfile, {
       accessToken: secrets.accessToken,
       // The device identity the credential was minted with. Kimi ties a session
       // to it, and a probe from an unknown device is answered differently.
       extraHeaders: kimiDeviceHeaders(device),
     });
-    if (!usageReadable(status, "kimi")) return null;
-    return parseKimiUsage(parsed, deps.now());
+    if (!usageReadable(res.status, "kimi")) return null;
+    return parseKimiUsage(parseBody(res.body), now());
   },
 };
+
+// `DeviceOAuthProvider`, not the union: consumers read `begin` and
+// `needsDeviceId`, neither of which exists on the pkce arm. `oauthAdapter` is
+// overloaded on the flow's `kind`, so the narrow type survives the adapter and
+// this needs neither a guard nor an assertion.
+export const kimiOAuth: DeviceOAuthProvider = oauthAdapter("kimi", kimiFlow, { trusted: true });

@@ -1,4 +1,3 @@
-import { GatewayError } from "@omni/ir";
 import { orderFields } from "../body.ts";
 import type { CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
 import { mergeHeaders, orderHeaders } from "../profile.ts";
@@ -37,7 +36,7 @@ export const openaiCodec: ProviderCodec = {
     } else if (input.credentials.apiKey !== null) {
       protocol.push(["Authorization", `Bearer ${input.credentials.apiKey}`]);
     } else {
-      throw new GatewayError("AUTH", "openai credential has no token", { provider: "openai" });
+      throw input.fail("AUTH", "openai credential has no token");
     }
 
     // `originator` and `Accept: text/event-stream` come from the profile.

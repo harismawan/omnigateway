@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { type ConnectFlows, createConnectFlows, OAUTH_PROVIDERS } from "@omni/control";
+import { type ConnectFlows, createConnectFlows, oauthProviderIds } from "@omni/control";
 import { describeError, GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { Store } from "@omni/store";
 import { boolFlag, parse, UsageError } from "./args.ts";
 import type { CommandEnv } from "./command.ts";
+import { type ConnectRegistry, connectRegistryFor } from "./commands/plugins.ts";
 import { CliError, type ContextOptions, createContext } from "./context.ts";
 import { commandHelp, helpText } from "./help.ts";
 import type { Writer } from "./output.ts";
@@ -75,6 +76,20 @@ export async function run(
 
   const ctx = createContext(args, options);
 
+  // Built once, on demand, and shared by the gate and the flows. Memoized on the
+  // promise rather than the value, so two callers in flight cannot each start a
+  // read of the plugin directory — and cannot then answer differently if it
+  // changed between them.
+  //
+  // Declared **below** `ctx`, which it closes over. It sat above, which worked
+  // only because nothing called it before this line; a later call site placed
+  // between the two would have been a temporal-dead-zone `ReferenceError`.
+  let connectRegistry: Promise<ConnectRegistry> | undefined;
+  const connectRegistryOnce = (): Promise<ConnectRegistry> => {
+    connectRegistry ??= connectRegistryFor(ctx.root.root);
+    return connectRegistry;
+  };
+
   // Written straight to stderr rather than through `note`, for the same reason
   // `connect` prints its URL there: this is not progress chatter but a report
   // that the invocation differs from what was typed, and a `--json` run that
@@ -104,14 +119,39 @@ export async function run(
       options.service?.({ root: ctx.root.root, env: ctx.env }) ??
       createServiceDeps({ root: ctx.root.root, env: ctx.env, scope, now: ctx.now }),
     foreground: options.foreground ?? runForeground,
-    connect: (store) =>
-      options.connect?.(store) ??
-      createConnectFlows({
+    // Awaited here rather than read off whatever `connectable()` happened to
+    // leave behind. Both resolve the **same memoized** registry, so they cannot
+    // disagree and the order they are called in decides nothing.
+    //
+    // It read `connectRegistry ?? OAUTH_PROVIDERS`, which was correct only
+    // because `connect.ts` calls `connectable()` first. A second command
+    // calling `connect` alone would have got the built-in tables, with no
+    // plugin provider in them and no test to notice — the same "threaded into
+    // some of the call graph" shape this branch fixed one instance of already.
+    connect: async (store) => {
+      if (options.connect !== undefined) return options.connect(store);
+      const registry = await connectRegistryOnce();
+      return createConnectFlows({
         store,
-        providers: OAUTH_PROVIDERS,
+        // Merged, not the built-in tables: a plugin's provider is connectable
+        // too, and this process never calls `loadPlugins`, so what
+        // `readPluginProviders` read is where both halves come from.
+        //
+        // **Both**, not just the flows. `createConnectFlows` asks the descriptor
+        // registry whether a provider exists and what redirect it uses, and
+        // giving it the flows alone admitted a plugin at the gate below and
+        // refused it here — with a message naming the provider it had just
+        // refused.
+        providers: registry.providers,
+        descriptors: registry.descriptors,
         http: nodeHttpClient(),
         now: ctx.now,
-      }),
+      });
+    },
+    connectable: async () => {
+      const registry = await connectRegistryOnce();
+      return { ids: oauthProviderIds(registry.providers), failures: registry.failures };
+    },
   };
 
   try {

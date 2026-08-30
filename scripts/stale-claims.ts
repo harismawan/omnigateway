@@ -49,7 +49,14 @@ const git = (...args: string[]): string =>
     stdio: ["ignore", "pipe", "ignore"],
   });
 
-const DECL = /\b(?:function|class|const|let|var|type|interface|enum)\s+([A-Za-z_$][\w$]*)/g;
+// `function\*?` — a generator declaration is a declaration. Without the `*`,
+// `async function* postToken` matched nothing, so converting a plain function
+// to a generator read as a **deletion**: the old form vanished from the
+// merge-base blob and the new one never entered `alive`. The check then flagged
+// a comment naming a symbol that was still right there, three files over. A
+// checker that fires on a true claim teaches its reader to skip the output,
+// which costs more than the claims it catches.
+const DECL = /\b(?:function\*?|class|const|let|var|type|interface|enum)\s+([A-Za-z_$][\w$]*)/g;
 const HISTORY =
   /\b(was|were|used to|before|previously|replaced|no longer|until|outlived|started as|had been|once|old|former|removed|renamed|deleted|shipped)\b/i;
 
