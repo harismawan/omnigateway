@@ -416,6 +416,91 @@ describe("custom chat decodes upstream reasoning as unsigned thinking", () => {
     ]);
   });
 
+  test("responses bare incomplete event with an empty payload fails visibly", async () => {
+    // The payload arms cannot see this one: no status, no details, no
+    // `response` at all. The event's own name is the only thing left saying
+    // the turn was cut — and this is the decoder whose docstring rates a
+    // nonconforming server most likely.
+    const events = await decodedEvents(
+      [{ event: "response.incomplete", payload: "{}" }],
+      "responses",
+    );
+
+    expect(events).toEqual([
+      {
+        type: "error",
+        code: "UPSTREAM",
+        message: "custom endpoint reported the response incomplete without a reason",
+        retryable: false,
+      },
+    ]);
+  });
+
+  test("responses terminal status that is neither completed nor incomplete fails visibly", async () => {
+    const events = await decodedEvents(
+      [
+        {
+          event: "response.completed",
+          payload: '{"response":{"status":"cancelled","usage":{}}}',
+        },
+      ],
+      "responses",
+    );
+
+    expect(events).toEqual([
+      {
+        type: "error",
+        code: "UPSTREAM",
+        message: 'custom endpoint reported terminal response status "cancelled"',
+        retryable: false,
+      },
+    ]);
+  });
+
+  test("responses unrecognized reason fails even when the status claims completed", async () => {
+    // What keeps the reason arm load-bearing: every other unknown-reason
+    // fixture also says `status: "incomplete"`, so the status arm alone would
+    // satisfy all of them and deleting the reason check would go unnoticed.
+    const events = await decodedEvents(
+      [
+        {
+          event: "response.completed",
+          payload:
+            '{"response":{"status":"completed","incomplete_details":{"reason":"weird"},"usage":{}}}',
+        },
+      ],
+      "responses",
+    );
+
+    expect(events).toEqual([
+      {
+        type: "error",
+        code: "UPSTREAM",
+        message: 'unrecognized custom endpoint incomplete reason "weird"',
+        retryable: false,
+      },
+    ]);
+  });
+
+  test("responses prototype-key error code still classifies as UPSTREAM", async () => {
+    // `RESPONSES_ERROR_CODE` is an ordinary literal, so `code: "constructor"`
+    // used to read the Object constructor back out — truthy, so `?? "UPSTREAM"`
+    // never fired and a function landed in a typed ErrorCode field. This is
+    // also the decoder pointed at whatever server the operator configured.
+    const events = await decodedEvents(
+      [
+        { event: "response.created", payload: '{"response":{"id":"resp-1","model":"m"}}' },
+        { event: "error", payload: '{"error":{"code":"constructor","message":"boom"}}' },
+      ],
+      "responses",
+    );
+
+    expect(events).toEqual([
+      { type: "start", id: "resp-1", model: "m" },
+      { type: "error", code: "UPSTREAM", message: "boom", retryable: true },
+    ]);
+  });
+
   test("responses incomplete with a token cap still maps onto maxTokens", async () => {
     const events = await decodedEvents(
       [

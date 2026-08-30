@@ -21,10 +21,12 @@
  * written.
  *
  * The third one is why this is a test and not a `grep` anybody could re-run.
- * `ModelsBoard.tsx` holds a NUL byte — the sentinel `"\0new"` standing in for
- * the compose-a-new-model slot, an id no model can have — and grep classifies a
- * file containing one as binary and reports nothing for it, without saying so
- * under `-n`. Two separate sweeps for `var(--p-` had already missed that site.
+ * `ModelsBoard.tsx` held its compose-slot sentinel as a raw NUL byte when this
+ * test was written — and grep classifies a file containing one as binary and
+ * reports nothing for it, without saying so under `-n`. Two separate sweeps for
+ * `var(--p-` had already missed that site. The sentinel is spelled as the
+ * `"\0new"` escape now, precisely so the file greps again — but a future raw
+ * byte anywhere under `src/` would blind grep the same way, and
  * `Bun.Transpiler` has no such rule.
  *
  * Comments are stripped before matching rather than exempted by path.

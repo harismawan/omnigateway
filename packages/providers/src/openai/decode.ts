@@ -235,22 +235,32 @@ export async function* decodeResponses(
         let stopReason: StopReason = sawToolCall ? "toolUse" : "endTurn";
         if (reason === "max_output_tokens") stopReason = "maxTokens";
         else if (reason === "content_filter") stopReason = "contentFilter";
-        else if (reason !== undefined || r.status === "incomplete") {
+        else if (
+          reason !== undefined ||
+          msg.event === "response.incomplete" ||
+          (r.status !== undefined && r.status !== "completed")
+        ) {
           // An unrecognized — or missing — reason on an incomplete response
           // used to fall through to `endTurn`, which is the one wrong answer
           // nobody can notice: a truncated turn reads to the client as a
           // complete reply, and nothing in `request_logs` disagrees. Same rule
           // as an unrecognized chat finish reason: fail visibly, never fold.
-          // Keyed on the payload rather than the event name, because the two
-          // arrive crossed in practice — a `response.completed` event carrying
-          // `status: "incomplete"` names its reason and is mapped above.
+          // Keyed on the payload first, because a `response.completed` event
+          // carrying `status: "incomplete"` names its reason and is mapped
+          // above — but the event name stays as a backstop, else a bare
+          // `response.incomplete` with a sparse payload is the same silent
+          // truncation wearing an empty object. The status arm catches the
+          // rest: `cancelled` or any future terminal status is not a clean
+          // end either.
           yield {
             type: "error",
             code: "UPSTREAM",
             message:
-              reason === undefined
-                ? "OpenAI reported the response incomplete without a reason"
-                : `unrecognized OpenAI incomplete reason "${String(reason)}"`,
+              reason !== undefined
+                ? `unrecognized OpenAI incomplete reason "${String(reason)}"`
+                : r.status !== undefined && r.status !== "incomplete"
+                  ? `OpenAI reported terminal response status "${String(r.status)}"`
+                  : "OpenAI reported the response incomplete without a reason",
             retryable: false,
           };
           break;
@@ -274,7 +284,11 @@ export async function* decodeResponses(
       case "error": {
         terminal = true;
         const err = d.response?.error ?? d.error ?? {};
-        const code = ERROR_CODE[String(err.code ?? err.type)] ?? "UPSTREAM";
+        // `Object.hasOwn` because `ERROR_CODE` is an ordinary literal:
+        // `code: "constructor"` reads a truthy function back out, and
+        // `?? "UPSTREAM"` never fires on truthy.
+        const raw = String(err.code ?? err.type);
+        const code = (Object.hasOwn(ERROR_CODE, raw) ? ERROR_CODE[raw] : undefined) ?? "UPSTREAM";
         yield {
           type: "error",
           code,

@@ -325,7 +325,12 @@ export async function* decodeAnthropic(
       case "message_delta": {
         const reason = d.delta?.stop_reason;
         if (typeof reason === "string") {
-          const mapped = STOP_REASON[reason];
+          // `Object.hasOwn` rather than a bare index: `STOP_REASON` is an
+          // ordinary literal, so `stop_reason: "constructor"` reads the Object
+          // constructor back out — present, not undefined — and the refusal
+          // below never fires. Same trap the provider-keyed tables carry,
+          // reached from an upstream body.
+          const mapped = Object.hasOwn(STOP_REASON, reason) ? STOP_REASON[reason] : undefined;
           if (mapped === undefined) {
             yield protocolError(`unrecognized Anthropic stop reason "${reason}"`);
             return;
@@ -360,9 +365,12 @@ export async function* decodeAnthropic(
         // Runs ahead of the table, which maps by `type` alone: this refusal
         // arrives as an ordinary `invalid_request_error` and is only
         // distinguishable by what it says.
+        // `Object.hasOwn` for the same reason the stop-reason table carries
+        // it: `type: "constructor"` reads a truthy function out of the
+        // literal, and `?? "UPSTREAM"` never fires on truthy.
         const code = isFingerprintRefusal(type, message)
           ? "FINGERPRINT_REFUSED"
-          : (ERROR_TYPE[type] ?? "UPSTREAM");
+          : ((Object.hasOwn(ERROR_TYPE, type) ? ERROR_TYPE[type] : undefined) ?? "UPSTREAM");
         yield { type: "error", code, message, retryable: RETRYABLE[code] };
         break;
       }

@@ -546,6 +546,115 @@ test("fails visibly on an incomplete response that names no reason", async () =>
   ]);
 });
 
+test("fails visibly on a bare response.incomplete event with an empty payload", async () => {
+  // The payload arms cannot see this one: no status, no details, no `response`
+  // at all. The event's own name is the only thing left saying the turn was
+  // cut, which is why the guard keeps it as a backstop.
+  const events = await collect(
+    decodeGrokResponses(msgs({ event: "response.incomplete", data: "{}" })),
+  );
+  expect(events).toEqual([
+    {
+      type: "error",
+      code: "UPSTREAM",
+      message: "xAI reported the response incomplete without a reason",
+      retryable: false,
+    },
+  ]);
+});
+
+test("fails visibly on a terminal status that is neither completed nor incomplete", async () => {
+  const events = await collect(
+    decodeGrokResponses(
+      msgs({
+        event: "response.completed",
+        data: JSON.stringify({ response: { status: "cancelled", usage: {} } }),
+      }),
+    ),
+  );
+  expect(events).toEqual([
+    {
+      type: "error",
+      code: "UPSTREAM",
+      message: 'xAI reported terminal response status "cancelled"',
+      retryable: false,
+    },
+  ]);
+});
+
+test("an unrecognized reason fails even when the status claims completed", async () => {
+  // What keeps the reason arm load-bearing: every other unknown-reason fixture
+  // also says `status: "incomplete"`, so the status arm alone would satisfy
+  // all of them and deleting the reason check would go unnoticed.
+  const events = await collect(
+    decodeGrokResponses(
+      msgs({
+        event: "response.completed",
+        data: JSON.stringify({
+          response: { status: "completed", incomplete_details: { reason: "weird" }, usage: {} },
+        }),
+      }),
+    ),
+  );
+  expect(events).toEqual([
+    {
+      type: "error",
+      code: "UPSTREAM",
+      message: 'unrecognized xAI incomplete reason "weird"',
+      retryable: false,
+    },
+  ]);
+});
+
+test("a known event the decoder ignores does not end the stream", async () => {
+  // What makes the set an allowlist rather than a restatement of the switch.
+  // Written from the switch instead, every one of these would fail — and the
+  // failure would be a real xAI turn refused by its own gateway.
+  const ignored = [
+    "response.queued",
+    "response.in_progress",
+    "response.output_text.done",
+    "response.output_text.annotation.added",
+    "response.refusal.delta",
+    "response.refusal.done",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_part.done",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_text.done",
+    "response.function_call_arguments.done",
+  ];
+
+  for (const event of ignored) {
+    const events = await collect(
+      decodeGrokResponses(
+        msgs(
+          { event, data: JSON.stringify({ output_index: 0 }) },
+          {
+            event: "response.completed",
+            data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+          },
+        ),
+      ),
+    );
+    expect([event, events.at(-1)?.type]).toEqual([event, "end"]);
+  }
+});
+
+test("a prototype-key error code still classifies as UPSTREAM", async () => {
+  // `ERROR_CODE` is an ordinary literal, so `code: "constructor"` used to read
+  // the Object constructor back out — truthy, so `?? "UPSTREAM"` never fired
+  // and a function landed in a typed ErrorCode field.
+  const events = await collect(
+    decodeGrokResponses(
+      msgs({
+        event: "error",
+        data: JSON.stringify({ error: { code: "constructor", message: "boom" } }),
+      }),
+    ),
+  );
+  expect(events).toEqual([{ type: "error", code: "UPSTREAM", message: "boom", retryable: true }]);
+});
+
 test("subtracts xAI's cached tokens out of the prompt total", async () => {
   const events = await collect(
     decodeGrokResponses(
