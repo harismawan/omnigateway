@@ -197,6 +197,21 @@ export function streamRoutes(deps: StreamDeps) {
         }
 
         if (frame.type === "unsubscribe") {
+          // A panel unmounting is a connection leaving a channel, and the plugin
+          // has to hear about it here: `closed` is otherwise reached only from
+          // the socket's own close handler, so a console that navigated away
+          // with the tab still open would leave the plugin holding a session
+          // nothing would ever tell it to drop.
+          //
+          // Both halves of the guard are load-bearing. `has` first, because
+          // firing for a topic this connection never held would hand the plugin
+          // an `onClose` naming a connection it has no record of. And *before*
+          // `unsubscribe`, which is what detaches the topic — the same
+          // read-before-remove order the close handler below depends on, with
+          // the same silent failure when it is reversed.
+          if (topicClass(frame.topic) === "plugin" && deps.registry.has(id, frame.topic)) {
+            deps.channels.closed(id, [frame.topic]);
+          }
           deps.registry.unsubscribe(id, frame.topic);
           send(ws, { ...head, type: "ack", topic: frame.topic });
           return;

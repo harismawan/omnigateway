@@ -16,6 +16,8 @@
  */
 export {
   type Cadence,
+  type ChannelMessage,
+  type ChannelTransport,
   type LiveConnection,
   type LiveContextValue,
   LiveProvider,

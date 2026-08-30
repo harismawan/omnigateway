@@ -53,7 +53,7 @@ test("no host-owned package is a dependency or a devDependency", () => {
 });
 
 /**
- * The one module allowed to import React for its value, and why it is one.
+ * The modules allowed to import React for their value, and why each is one.
  *
  * This package imported React only as types until `live.ts`, on the reasoning
  * that the SDK is every plugin's one dependency and so the worst place to be
@@ -62,11 +62,20 @@ test("no host-owned package is a dependency or a devDependency", () => {
  * `apps/dashboard/shared/manifest.ts`, which serves one copy of this package to
  * the console and every panel alike.
  *
- * The list stays at one on purpose. A second module reaching for React is a
- * second reason to be federated, and the moment there are two the first one
- * stops being examined.
+ * `channel.ts` is the second, and it is a *weaker* exception than the first,
+ * which is the distinction worth keeping rather than the count. `live.ts`
+ * calls `createContext`, so a duplicated copy of it is a duplicated context
+ * object: a panel reading the second one finds no provider, takes a default,
+ * and goes quiet with nothing thrown and nothing logged. `channel.ts` holds
+ * hooks and no context of its own — it reads `live.ts`'s through `useLive` —
+ * so a duplicated copy fails the way a duplicated React always fails, with
+ * "invalid hook call" naming the plugin. Loud, and already covered.
+ *
+ * That asymmetry is what this list is for. A new entry has to say which kind it
+ * is, and an entry that would call `createContext` is not a list decision at
+ * all — it is a second context, and this package has exactly one.
  */
-const RUNTIME_REACT = new Set(["live.ts"]);
+const RUNTIME_REACT = new Set(["live.ts", "channel.ts"]);
 
 /**
  * Every way a source file can end up holding a runtime binding from a package.
@@ -107,7 +116,7 @@ function importsOf(source: string): { specifier: string; typeOnly: boolean }[] {
   return found;
 }
 
-test("only the live module imports a host-owned package for its value", () => {
+test("only the named modules import a host-owned package for their value", () => {
   // Read off disk rather than from a hard-coded file list, which is what this
   // test used to do: a new module was simply not looked at, so the rule held
   // for exactly the four files someone had thought of. The scan spans lines for
@@ -138,6 +147,26 @@ test("only the live module imports a host-owned package for its value", () => {
     }
   }
   expect(offenders).toEqual([]);
+});
+
+test("exactly one module in this package creates a context", () => {
+  // The rule the React allowlist above used to enforce by proxy, now that the
+  // allowlist holds two entries and only one of them is about identity.
+  //
+  // A second `createContext` in this package is the silent failure the whole
+  // federation design exists to prevent: a plugin resolving its own copy gets a
+  // second context object, every consumer below it finds no provider, and each
+  // falls through to a default that looks like a legitimate state — polling
+  // off, or a channel that never opens. Nothing is thrown and nothing is
+  // logged. A duplicated *hook* fails loudly by comparison, which is why
+  // `channel.ts` is allowed React and is not allowed this.
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+  const sources = readdirSync(dir).filter((file) => /\.tsx?$/.test(file));
+  const creators = sources.filter((file) =>
+    /\bcreateContext\s*[(<]/.test(readFileSync(join(dir, file), "utf8")),
+  );
+
+  expect(creators).toEqual(["live.ts"]);
 });
 
 test("the module named as the exception actually is one", () => {

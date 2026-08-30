@@ -463,6 +463,108 @@ test("a real socket closing fires the plugin's onClose handler", async () => {
   }
 });
 
+test("unsubscribing from a plugin topic fires the plugin's onClose handler", async () => {
+  // A panel that unmounts while the tab stays open. Before the console could
+  // subscribe to a plugin topic at all this was unreachable, so `closed` was
+  // called from the socket's close handler and nowhere else — which left a
+  // plugin holding a session for a connection that had stopped listening, for
+  // the life of the tab.
+  //
+  // The guard is what makes the ordering load-bearing here: `registry.has` is
+  // asked before `registry.unsubscribe` detaches the topic, so running the two
+  // the other way round means the connection no longer holds it, the guard
+  // refuses, and every handler goes unfired with nothing to say so.
+  const h = await streamHarness();
+  try {
+    const closed: string[] = [];
+    const seen: string[] = [];
+    const channel = h.channels.for("alpha").open("s");
+    channel.onMessage((message) => seen.push(message.connectionId));
+    channel.onClose((connectionId) => closed.push(connectionId));
+
+    const socket = await h.connect({ cookie: h.cookie });
+    socket.send({ id: "1", type: "subscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "1"), "the subscribe ack");
+    // Establishes the connection id and proves the subscription is real, for
+    // the reason the close test gives: without it this would pass against a
+    // connection that never held the topic.
+    socket.send({ id: "2", type: "send", topic: "plugin:alpha:s", payload: null });
+    await socket.waitFor((f) => isAck(f, "2"), "the send ack");
+    const connectionId = seen[0] ?? "";
+
+    socket.send({ id: "3", type: "unsubscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "3"), "the unsubscribe ack");
+
+    expect(closed).toEqual([connectionId]);
+    // The socket is still open and still usable. An unsubscribe is a panel
+    // unmounting, not a tab closing, and the console holds other topics on the
+    // same connection.
+    expect(socket.closes).toEqual([]);
+    socket.send({ id: "4", type: "subscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "4"), "the resubscribe ack");
+  } finally {
+    await h.close();
+  }
+});
+
+test("unsubscribing fires onClose once, and the later socket close does not fire it again", async () => {
+  // The `has` guard from the other side. Without it the close handler reports a
+  // topic the connection had already given up, so a plugin that opened a
+  // session on subscribe and dropped it on close would drop it twice — and the
+  // second drop lands on whatever session took its place.
+  const h = await streamHarness();
+  try {
+    const closed: string[] = [];
+    const seen: string[] = [];
+    const channel = h.channels.for("alpha").open("s");
+    channel.onMessage((message) => seen.push(message.connectionId));
+    channel.onClose((connectionId) => closed.push(connectionId));
+
+    const socket = await h.connect({ cookie: h.cookie });
+    socket.send({ id: "1", type: "subscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "1"), "the subscribe ack");
+    socket.send({ id: "2", type: "send", topic: "plugin:alpha:s", payload: null });
+    await socket.waitFor((f) => isAck(f, "2"), "the send ack");
+
+    socket.send({ id: "3", type: "unsubscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "3"), "the unsubscribe ack");
+    expect(closed).toHaveLength(1);
+
+    socket.close();
+    // Long enough that a second call would have landed: the close path is what
+    // the surrounding tests wait on the same way.
+    const deadline = Date.now() + 500;
+    while (closed.length < 2 && Date.now() < deadline) await Bun.sleep(5);
+
+    expect(closed).toEqual([seen[0] ?? ""]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("unsubscribing from a plugin topic the connection never held fires nothing", async () => {
+  // An unsubscribe is not a request to be told about a channel. Firing on one
+  // the connection never held would hand a plugin an `onClose` for a session it
+  // never opened, which is worse than silence: it names a connection id the
+  // plugin has no record of.
+  const h = await streamHarness();
+  try {
+    const closed: string[] = [];
+    h.channels
+      .for("alpha")
+      .open("s")
+      .onClose((connectionId) => closed.push(connectionId));
+
+    const socket = await h.connect({ cookie: h.cookie });
+    socket.send({ id: "1", type: "unsubscribe", topic: "plugin:alpha:s" });
+    await socket.waitFor((f) => isAck(f, "1"), "the unsubscribe ack");
+
+    expect(closed).toEqual([]);
+  } finally {
+    await h.close();
+  }
+});
+
 test("a 4401 session expiry fires the plugin's onClose handler", async () => {
   // The second review's probe, kept. The first review's test covers a
   // client-initiated close and cannot see this path: the registry closes the

@@ -251,6 +251,52 @@ way to answer is `send(connectionId, …)`, which publishes on that same topic, 
 a frame from an unsubscribed connection is a question whose answer has nowhere
 to land — the host refuses it rather than handing you one you cannot reply to.
 
+### The panel's half
+
+Your UI reaches the same channel through one hook:
+
+```jsx
+import { usePluginChannel } from "@omnigateway/dashboard-sdk";
+
+function Panel({ pluginId }) {
+  const [lines, setLines] = useState([]);
+  const { status, send } = usePluginChannel(pluginId, "session", (payload) => {
+    setLines((previous) => [...previous, payload]);
+  });
+
+  if (status === "refused") return <p>Live updates need operator access.</p>;
+  return <button onClick={() => send({ ask: "hello" })}>Ask</button>;
+}
+```
+
+`pluginId` comes from the props the host hands your `mount`, and the hook
+composes `plugin:<your-id>:session` from it — you write the channel name and
+never the topic, on the panel side exactly as on the server side.
+
+Three things worth knowing before you build on it:
+
+- **`status` is `idle`, `open` or `refused`, and the third one is why it
+  exists.** Only an operator holds a plugin topic; a read-only viewer is
+  refused, and so is anyone whose console never managed a WebSocket upgrade.
+  Told nothing, your panel could not tell that from a channel you simply have
+  nothing to say on — so render the refusal rather than a spinner.
+- **`send` returns `false` when the channel is not open**, and writes nothing.
+  Check it or ignore it, but do not assume a send arrived because the call
+  returned.
+- **Unmounting gives the channel up**, which is what fires your `onClose` for
+  that connection. A panel the operator navigated away from is a session you can
+  drop — you do not have to wait for the tab to close.
+
+The subscription survives a dropped socket: the console resubscribes on
+reconnect and you get a fresh `onMessage` for the same connection under a new
+`connectionId`. Your panel sees `closed` and then `open` again, which is the
+window in which nothing is arriving. There is no replay across it, for the same
+reason there is no replay anywhere else here.
+
+If you want the console's LIVE switch to stop polling a query your channel
+already pushes, the hook hands you the composed `topic` to feed
+`cadence(ms, topic)` — see the SDK's `useLive`.
+
 ## 5. Logging
 
 ```js
