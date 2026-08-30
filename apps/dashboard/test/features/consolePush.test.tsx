@@ -155,6 +155,38 @@ test("a gap frame refetches the whole window instead of stitching onto a hole", 
   expect(screen.queryByText(/omnigateway listening/)).toBeNull();
 });
 
+test("a transport status arm is ignored, not read as a hole", async () => {
+  // `open`, `refused` and `closed` were added to `TopicMessage` for plugin
+  // channels, which can be refused; they are delivered by topic, so this board
+  // sees them too. Its `gap` arm treats anything that is not a readable frame
+  // as a hole and drops the accumulated tail — so without an explicit ignore,
+  // an `ack` for `stream:console` would clear the terminal on every reconnect.
+  //
+  // Reachable today only because the ack arrives before anything has
+  // accumulated, which is luck rather than design: this drives the arm after a
+  // frame has landed, which is the arrangement the next status arm would hit.
+  const stub = createFetchStub({ "GET /api/console": () => file([BOOT]) });
+  const socket = installSocketStub();
+  const timer = createStubTimer();
+
+  renderWithProviders(<ConsoleBoard />, { stream: { enabled: true, timer: timer.schedule } });
+  await screen.findByText(/omnigateway listening/);
+
+  connect(socket.last());
+  push(socket.last(), 1, [REFRESHED]);
+  await screen.findByText(/credential refreshed/);
+  const before = consoleCalls(stub);
+
+  // A second ack on the same topic: what a resubscribe answers with.
+  act(() => {
+    socket.last().emit({ type: "ack", topic: CONSOLE_TOPIC });
+  });
+
+  // The pushed line is still there, and nothing was refetched to put it back.
+  expect(screen.getByText(/credential refreshed/)).toBeTruthy();
+  expect(consoleCalls(stub)).toBe(before);
+});
+
 test(
   "an error frame leaves the panel polling over REST",
   async () => {
