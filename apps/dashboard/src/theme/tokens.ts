@@ -92,11 +92,13 @@ export function providerColor(provider: string): string {
   // **Checked here, because this is where the string becomes CSS.**
   //
   // styled-components does not escape an interpolation, so this function is a
-  // direct path from a stored value into the stylesheet. Four call sites hand it
+  // direct path from a stored value into the stylesheet. Its call sites hand it
   // `credential.provider`, `target.provider` and `log.resolvedProvider`, none of
   // which pass through `/api/catalog` — `packages/control` withholds a provider
   // whose id is not a usable custom-property name, and these never meet that
-  // check. `providerIdSchema` guards the write path, but not the read one:
+  // check. The count used to be written here and was wrong by the time anyone
+  // read it; `providerColorOnly.test.ts` counts instead, by refusing any other
+  // spelling. `providerIdSchema` guards the write path, but not the read one:
   // `sqlite/config.ts` parses `virtual_models.targets` with a bare `JSON.parse`,
   // so a restored snapshot or a hand-edited database carries whatever it says.
   // An id closing the declaration and opening its own would put
