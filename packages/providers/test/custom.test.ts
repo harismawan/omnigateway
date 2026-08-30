@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ChatRequest, StreamEvent } from "@omni/ir";
+import type { ChatRequest, StopReason, StreamEvent } from "@omni/ir";
 import { customAdapter } from "../src/custom/index.ts";
 import type { HttpRequest } from "../src/index.ts";
 import { ADAPTERS } from "../src/registry.ts";
@@ -520,4 +520,77 @@ test("registry includes custom provider", () => {
     "kimi",
     "openai",
   ]);
+});
+
+// `CHAT_FINISH[reason] ?? "endTurn"` used to answer for a reason this decoder
+// has never heard of, and `endTurn` is the one wrong answer that cannot be
+// noticed: a truncated turn, a filtered one and a new spelling of tool_calls
+// all reach the client as a complete reply, with nothing in `request_logs`
+// disagreeing. The argument is strongest here — the endpoint is whatever an
+// operator pointed the gateway at, so naming the reason is the only way they
+// learn their server speaks a vocabulary this decoder does not.
+//
+// Driven through the adapter, and `request` is `stream: false`, so these run the
+// non-streaming path: a client that never asked for a stream is served by
+// collecting one, and that is where a silently wrong stop reason is hardest to
+// spot.
+describe("custom chat refuses a finish reason it does not know", () => {
+  test("an invented reason ends the stream visibly", async () => {
+    const events = await decodedEvents([
+      '{"id":"chatcmpl-1","choices":[{"delta":{"content":"partial"}}]}',
+      '{"choices":[{"delta":{},"finish_reason":"invented_reason"}]}',
+    ]);
+
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      code: "UPSTREAM",
+      message: 'unrecognized custom endpoint finish reason "invented_reason"',
+    });
+    expect(events.some((event) => event.type === "end")).toBe(false);
+  });
+
+  test("a prototype key is not a finish reason", async () => {
+    // `CHAT_FINISH` is an ordinary object literal, so `CHAT_FINISH["constructor"]`
+    // answers the Object constructor: present, so `?? "endTurn"` never fired and
+    // never would have. It was assigned into the end event as the stop reason,
+    // where `JSON.stringify` drops a function and leaves the field simply absent.
+    const events = await decodedEvents([
+      '{"choices":[{"delta":{},"finish_reason":"constructor"}]}',
+    ]);
+
+    expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+    expect(events.some((event) => event.type === "end")).toBe(false);
+  });
+
+  test("every finish reason the table names still maps", async () => {
+    // The positive control. A decoder refusing all four passes the two tests
+    // above and serves nothing at all.
+    const expected: ReadonlyArray<[string, StopReason]> = [
+      ["stop", "endTurn"],
+      ["length", "maxTokens"],
+      ["tool_calls", "toolUse"],
+      ["content_filter", "contentFilter"],
+    ];
+
+    for (const [reason, stopReason] of expected) {
+      const events = await decodedEvents([
+        `{"choices":[{"delta":{},"finish_reason":"${reason}"}]}`,
+      ]);
+      expect([reason, events.at(-1)]).toMatchObject([reason, { type: "end", stopReason }]);
+    }
+  });
+
+  test("an explicit null finish reason mid-stream is not a failure", async () => {
+    // This wire spells "not finished yet" as `null` and sends it on nearly every
+    // chunk. A guard reading absence as an unknown reason would fail every
+    // request the moment it was written, which is the direction this must not be
+    // wrong in.
+    const events = await decodedEvents([
+      '{"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}',
+      '{"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    ]);
+
+    expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+    expect(events.some((event) => event.type === "error")).toBe(false);
+  });
 });

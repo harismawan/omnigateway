@@ -3,6 +3,7 @@ import {
   type ChatRequest,
   CONTEXT_1M_BETA,
   collect as collectResponse,
+  type StopReason,
   type StreamEvent,
 } from "@omni/ir";
 import type { AdapterCredentials, HttpRequest, HttpResponse } from "../src/index.ts";
@@ -1050,4 +1051,105 @@ test("content and tool_calls in one chunk still produce a flat sequence", async 
     { type: "text", text: "Calling now." },
     { type: "toolUse", id: "c1", name: "f", input: { a: 1 } },
   ]);
+});
+
+// `FINISH[reason] ?? "endTurn"` used to answer for a reason this decoder has
+// never heard of, and `endTurn` is the one wrong answer that cannot be noticed:
+// a truncated turn, a filtered one and a new spelling of tool_calls all reach
+// the client as a complete reply, with nothing in `request_logs` disagreeing.
+// Likelier here than on a direct upstream — the vocabulary belongs to whatever
+// model the proxy routed to, not to the proxy.
+test("fails visibly on a finish reason it does not know", async () => {
+  const events = await collect(
+    decodeKiloChat(
+      msgs(
+        {
+          event: "message",
+          data: JSON.stringify({ choices: [{ delta: {}, finish_reason: "invented_reason" }] }),
+        },
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({
+    type: "error",
+    code: "UPSTREAM",
+    message: 'unrecognized Kilo finish reason "invented_reason"',
+  });
+  expect(events.some((event) => event.type === "end")).toBe(false);
+});
+
+test("a prototype key is not a finish reason", async () => {
+  // `FINISH` is an ordinary object literal, so `FINISH["constructor"]` answers
+  // the Object constructor: present, so `?? "endTurn"` never fired and never
+  // would have. It was assigned into the end event as the stop reason, where
+  // `JSON.stringify` drops a function and leaves the field simply absent.
+  const events = await collect(
+    decodeKiloChat(
+      msgs(
+        {
+          event: "message",
+          data: JSON.stringify({ choices: [{ delta: {}, finish_reason: "constructor" }] }),
+        },
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
+  expect(events.some((event) => event.type === "end")).toBe(false);
+});
+
+test("every finish reason the table names still maps", async () => {
+  // The positive control. A decoder refusing all four passes the two tests
+  // above and serves nothing at all.
+  const expected: ReadonlyArray<[string, StopReason]> = [
+    ["stop", "endTurn"],
+    ["length", "maxTokens"],
+    ["tool_calls", "toolUse"],
+    ["content_filter", "contentFilter"],
+  ];
+
+  for (const [reason, stopReason] of expected) {
+    const events = await collect(
+      decodeKiloChat(
+        msgs(
+          {
+            event: "message",
+            data: JSON.stringify({ choices: [{ delta: {}, finish_reason: reason }] }),
+          },
+          { event: "message", data: "[DONE]" },
+        ),
+      ),
+    );
+    expect([reason, events.at(-1)]).toMatchObject([reason, { type: "end", stopReason }]);
+  }
+});
+
+test("an explicit null finish reason mid-stream is not a failure", async () => {
+  // This wire spells "not finished yet" as `null` and sends it on nearly every
+  // chunk. A guard reading absence as an unknown reason would fail every
+  // request the moment it was written, which is the direction this must not be
+  // wrong in.
+  const events = await collect(
+    decodeKiloChat(
+      msgs(
+        {
+          event: "message",
+          data: JSON.stringify({
+            choices: [{ delta: { content: "partial" }, finish_reason: null }],
+          }),
+        },
+        {
+          event: "message",
+          data: JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+        },
+        { event: "message", data: "[DONE]" },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+  expect(events.some((event) => event.type === "error")).toBe(false);
 });

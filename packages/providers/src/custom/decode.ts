@@ -240,8 +240,35 @@ export async function* decodeCustomChat(
       }
     }
 
+    // Only a reason that is actually present is judged. `null` mid-stream is
+    // how this wire spells "not finished yet" and arrives on nearly every
+    // chunk, so the `typeof` check is load-bearing rather than defensive.
     if (typeof choice.finish_reason === "string") {
-      stopReason = CHAT_FINISH[choice.finish_reason] ?? "endTurn";
+      // `Object.hasOwn` rather than `!== undefined`. `CHAT_FINISH` is an
+      // ordinary object literal, so `finish_reason: "constructor"` reads the
+      // Object constructor back out — present, not a `StopReason`, and assigned
+      // straight into the end event, where `JSON.stringify` then drops it and
+      // leaves the field simply missing. Measured. Same trap the
+      // provider-keyed tables carry, reaching this one from an upstream body.
+      const reason = choice.finish_reason;
+      const mapped = Object.hasOwn(CHAT_FINISH, reason) ? CHAT_FINISH[reason] : undefined;
+      if (mapped === undefined) {
+        // Defaulting to `endTurn` was the previous behaviour and it is the one
+        // wrong answer that cannot be noticed: a truncated turn, a filtered one
+        // and a new tool-call spelling all read to the client as a complete
+        // reply, and nothing in `request_logs` disagrees. The endpoint is
+        // whatever an operator pointed the gateway at, so naming the reason is
+        // the only way they learn their server speaks a vocabulary this
+        // decoder does not.
+        yield {
+          type: "error",
+          code: "UPSTREAM",
+          message: `unrecognized custom endpoint finish reason "${reason}"`,
+          retryable: false,
+        };
+        return;
+      }
+      stopReason = mapped;
     }
   }
 
