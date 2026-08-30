@@ -2,7 +2,7 @@ import type { CacheControl, ChatRequest, ContentBlock, ToolChoice, ToolDef } fro
 import {
   cacheControlOf,
   estimateCachedInputTokens,
-  estimateInputTokens,
+  estimateInputPrefixes,
   GatewayError,
 } from "@omni/ir";
 import { systemTextBlocks } from "../system.ts";
@@ -435,7 +435,7 @@ function lastCacheableHistoryBlock(messages: unknown[]): Record<string, unknown>
  *   `systemCacheControl`'s promotion path walks the IR, so it cannot observe a
  *   wire-side marker at all.
  * - A marker goes down only where it *adds* a cached prefix. The three tiers
- *   are not three independent questions: `estimateInputTokens` sums
+ *   are not three independent questions: `estimateInputPrefixes` accumulates
  *   non-negative terms, so tools ≤ tools+system ≤ whole request always, and a
  *   gate per tier on the prefix that tier caches passes all three whenever it
  *   passes the first. That is how a big tool set under a one-line system prompt
@@ -478,9 +478,15 @@ function addAutoCacheBreakpoints(
   // degradation id, because they are one statement about the request.
   let stablePrefixMarked = false;
 
+  // One walk with two checkpoints, rather than three calls that re-sum the
+  // tools three times and the system blocks twice. The tiers are nested by
+  // construction — the same nesting the `markedPrefix` comparison above relies
+  // on — so the cumulative sums and three separate estimates are one number.
+  const prefixes = estimateInputPrefixes(req);
+
   // The default TTL is left implicit on all three: it is the cheapest write,
   // and naming it would send a field the client never asked for.
-  const toolsPrefix = estimateInputTokens({ ...req, messages: [], system: [] });
+  const toolsPrefix = prefixes.tools;
   const lastTool = body.tools?.at(-1);
   if (lastTool !== undefined && worthAMarker(toolsPrefix)) {
     lastTool.cache_control = { type: "ephemeral" };
@@ -494,7 +500,7 @@ function addAutoCacheBreakpoints(
   // exactly the tools prefix, adds nothing, and takes no marker. A check
   // naming `OAUTH_IDENTITY` would defend against that one string and nothing
   // else shaped like it.
-  const systemPrefix = estimateInputTokens({ ...req, messages: [] });
+  const systemPrefix = prefixes.toolsAndSystem;
   const lastSystem = body.system?.at(-1);
   if (lastSystem !== undefined && worthAMarker(systemPrefix)) {
     lastSystem.cache_control = { type: "ephemeral" };
@@ -503,7 +509,7 @@ function addAutoCacheBreakpoints(
   }
   if (stablePrefixMarked) note("anthropic:cache-breakpoint-added");
 
-  if (!worthAMarker(estimateInputTokens(req))) return;
+  if (!worthAMarker(prefixes.total)) return;
   const lastHistory = lastCacheableHistoryBlock(body.messages);
   // A history of nothing but string-content system turns has nowhere to put
   // one. No marker, and nothing recorded: the column says what happened to the

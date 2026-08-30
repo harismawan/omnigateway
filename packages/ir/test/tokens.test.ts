@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "../src/index.ts";
-import { estimateCachedInputTokens, estimateInputTokens } from "../src/index.ts";
+import {
+  estimateCachedInputTokens,
+  estimateInputPrefixes,
+  estimateInputTokens,
+} from "../src/index.ts";
 
 const base: ChatRequest = {
   model: "fast",
@@ -156,6 +160,70 @@ test("cached prefix spans tools and system before the conversation", () => {
   const cached = estimateCachedInputTokens(request);
   expect(cached).toBeGreaterThan(2_000);
   expect(cached).toBeLessThan(estimateInputTokens(request));
+});
+
+// `estimateInputPrefixes` is a second spelling of the same sum, and the only
+// thing keeping the two walks in step is this test: a block class counted in
+// one and not the other is invisible at every call site, because both numbers
+// are estimates nobody bills from.
+test("the three prefixes agree with estimateInputTokens on the same request", () => {
+  const request: ChatRequest = {
+    model: "m",
+    system: [
+      { type: "text", text: "s".repeat(2_000) },
+      { type: "text", text: "s2" },
+    ],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "u".repeat(2_000) }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", text: "t".repeat(500) },
+          { type: "toolUse", id: "1", name: "search", input: { q: "x" } },
+          {
+            type: "providerNative",
+            provider: "anthropic",
+            blockType: "web_search",
+            data: { a: 1 },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "toolResult", toolUseId: "1", content: "r".repeat(500), isError: false },
+          { type: "image", mediaType: "image/png", data: "AAAA" },
+        ],
+      },
+    ],
+    tools: [
+      {
+        kind: "portable",
+        name: "search",
+        description: "d".repeat(2_000),
+        inputSchema: { type: "object" },
+      },
+      {
+        kind: "provider",
+        provider: "anthropic",
+        family: "bash",
+        name: "bash",
+        type: "bash_20250124",
+        wire: {},
+      },
+    ],
+    stream: false,
+  };
+
+  const prefixes = estimateInputPrefixes(request);
+
+  expect(prefixes.tools).toBe(estimateInputTokens({ ...request, messages: [], system: [] }));
+  expect(prefixes.toolsAndSystem).toBe(estimateInputTokens({ ...request, messages: [] }));
+  expect(prefixes.total).toBe(estimateInputTokens(request));
+
+  // Nested by construction, which is what lets a caller checkpoint one walk.
+  expect(prefixes.tools).toBeLessThan(prefixes.toolsAndSystem);
+  expect(prefixes.toolsAndSystem).toBeLessThan(prefixes.total);
 });
 
 test("a request with no cache breakpoint has no cached prefix", () => {

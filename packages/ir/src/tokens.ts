@@ -124,6 +124,36 @@ export function estimateInputTokens(request: ChatRequest): number {
 }
 
 /**
+ * The three cumulative prefixes a cache breakpoint can cover, in one walk.
+ *
+ * A prompt is assembled tools, then system, then the conversation, so the three
+ * places a marker can go are nested by construction: `tools` is a prefix of
+ * `toolsAndSystem`, which is a prefix of `total`. Asking `estimateInputTokens`
+ * for each one separately re-sums the tools three times and the system blocks
+ * twice, on every attempt of every request eligible for a marker.
+ *
+ * `total` is `estimateInputTokens` of the same request, and
+ * `packages/ir/test/tokens.test.ts` pins all three against it — this walk and
+ * that one are two spellings of one sum, and nothing but a test keeps them so.
+ */
+export function estimateInputPrefixes(request: ChatRequest): {
+  tools: number;
+  toolsAndSystem: number;
+  total: number;
+} {
+  let tools = 0;
+  for (const tool of request.tools ?? []) tools += toolTokens(tool);
+
+  let toolsAndSystem = tools;
+  for (const block of request.system ?? []) toolsAndSystem += blockTokens(block);
+
+  let total = toolsAndSystem;
+  for (const message of request.messages) total += messageTokens(message);
+
+  return { tools, toolsAndSystem, total };
+}
+
+/**
  * Estimates how much of a request's prompt a cache breakpoint covers.
  *
  * A breakpoint caches everything before it, in the order the prompt is
