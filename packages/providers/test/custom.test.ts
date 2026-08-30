@@ -501,6 +501,24 @@ describe("custom chat decodes upstream reasoning as unsigned thinking", () => {
     ]);
   });
 
+  test("responses [DONE] sentinel alone is skipped, never read as completion", async () => {
+    // `sseResponse` appends `[DONE]` to every stream, so an empty payload list
+    // is exactly the sentinel-only stream. The openai fork carries this pin
+    // and this fork did not — the skip guard is byte-identical, and a mutant
+    // making the sentinel terminal reported a clean short stream. This is also
+    // the only fixture here that reaches the trailing
+    // ended-before-completion arm at all.
+    const events = await decodedEvents([], "responses");
+    expect(events).toEqual([
+      {
+        type: "error",
+        code: "UPSTREAM",
+        message: "upstream stream ended before response completion",
+        retryable: true,
+      },
+    ]);
+  });
+
   test("responses incomplete with a token cap still maps onto maxTokens", async () => {
     const events = await decodedEvents(
       [

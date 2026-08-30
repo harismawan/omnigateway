@@ -519,6 +519,18 @@ test("a prototype-key error code still classifies as UPSTREAM", async () => {
   expect(events).toEqual([{ type: "error", code: "UPSTREAM", message: "boom", retryable: true }]);
 });
 
+test("a response.completed with no status at all still ends clean", async () => {
+  // Pins the guard's deliberate leniency: the status arm asks
+  // `status !== undefined && status !== "completed"`, and dropping the first
+  // half turns absent-status streams from compatible proxies into refusals.
+  const events = await collect(
+    decodeResponses(
+      msgs({ event: "response.completed", data: JSON.stringify({ response: { usage: {} } }) }),
+    ),
+  );
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+});
+
 test("turns a response.failed event into an error event", async () => {
   const events = await collect(
     decodeResponses(
