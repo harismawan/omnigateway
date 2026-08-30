@@ -484,6 +484,68 @@ test("decodes function call items with argument deltas", async () => {
   expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "toolUse" });
 });
 
+test("maps an incomplete response with a token cap onto maxTokens", async () => {
+  const events = await collect(
+    decodeGrokResponses(
+      msgs({
+        event: "response.incomplete",
+        data: JSON.stringify({
+          response: {
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+            usage: {},
+          },
+        }),
+      }),
+    ),
+  );
+  expect(events[0]).toMatchObject({ type: "end", stopReason: "maxTokens" });
+});
+
+test("fails visibly on an incomplete response with an unrecognized reason", async () => {
+  const events = await collect(
+    decodeGrokResponses(
+      msgs({
+        event: "response.incomplete",
+        data: JSON.stringify({
+          response: {
+            status: "incomplete",
+            incomplete_details: { reason: "ran_out_of_goodwill" },
+            usage: {},
+          },
+        }),
+      }),
+    ),
+  );
+  expect(events).toEqual([
+    {
+      type: "error",
+      code: "UPSTREAM",
+      message: 'unrecognized xAI incomplete reason "ran_out_of_goodwill"',
+      retryable: false,
+    },
+  ]);
+});
+
+test("fails visibly on an incomplete response that names no reason", async () => {
+  const events = await collect(
+    decodeGrokResponses(
+      msgs({
+        event: "response.incomplete",
+        data: JSON.stringify({ response: { status: "incomplete", usage: {} } }),
+      }),
+    ),
+  );
+  expect(events).toEqual([
+    {
+      type: "error",
+      code: "UPSTREAM",
+      message: "xAI reported the response incomplete without a reason",
+      retryable: false,
+    },
+  ]);
+});
+
 test("subtracts xAI's cached tokens out of the prompt total", async () => {
   const events = await collect(
     decodeGrokResponses(

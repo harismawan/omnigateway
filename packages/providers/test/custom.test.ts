@@ -369,6 +369,68 @@ describe("custom chat decodes upstream reasoning as unsigned thinking", () => {
     ]);
   });
 
+  test("responses incomplete with an unrecognized reason fails visibly", async () => {
+    const events = await decodedEvents(
+      [
+        { event: "response.created", payload: '{"response":{"id":"resp-1","model":"m"}}' },
+        {
+          event: "response.incomplete",
+          payload:
+            '{"response":{"status":"incomplete","incomplete_details":{"reason":"ran_out_of_goodwill"},"usage":{}}}',
+        },
+      ],
+      "responses",
+    );
+
+    expect(events).toEqual([
+      { type: "start", id: "resp-1", model: "m" },
+      {
+        type: "error",
+        code: "UPSTREAM",
+        message: 'unrecognized custom endpoint incomplete reason "ran_out_of_goodwill"',
+        retryable: false,
+      },
+    ]);
+  });
+
+  test("responses incomplete that names no reason fails visibly", async () => {
+    const events = await decodedEvents(
+      [
+        { event: "response.created", payload: '{"response":{"id":"resp-1","model":"m"}}' },
+        {
+          event: "response.incomplete",
+          payload: '{"response":{"status":"incomplete","usage":{}}}',
+        },
+      ],
+      "responses",
+    );
+
+    expect(events).toEqual([
+      { type: "start", id: "resp-1", model: "m" },
+      {
+        type: "error",
+        code: "UPSTREAM",
+        message: "custom endpoint reported the response incomplete without a reason",
+        retryable: false,
+      },
+    ]);
+  });
+
+  test("responses incomplete with a token cap still maps onto maxTokens", async () => {
+    const events = await decodedEvents(
+      [
+        {
+          event: "response.incomplete",
+          payload:
+            '{"response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{}}}',
+        },
+      ],
+      "responses",
+    );
+
+    expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "maxTokens" });
+  });
+
   test("responses failure events surface as canonical errors through the adapter", async () => {
     const events = await decodedEvents(
       [

@@ -225,6 +225,26 @@ export async function* decodeGrokResponses(
         let stopReason: StopReason = sawToolCall ? "toolUse" : "endTurn";
         if (reason === "max_output_tokens") stopReason = "maxTokens";
         else if (reason === "content_filter") stopReason = "contentFilter";
+        else if (reason !== undefined || r.status === "incomplete") {
+          // An unrecognized — or missing — reason on an incomplete response
+          // used to fall through to `endTurn`, which is the one wrong answer
+          // nobody can notice: a truncated turn reads to the client as a
+          // complete reply, and nothing in `request_logs` disagrees. Same rule
+          // as an unrecognized chat finish reason: fail visibly, never fold.
+          // Keyed on the payload rather than the event name, because the two
+          // can arrive crossed — a `response.completed` event carrying
+          // `status: "incomplete"` names its reason and is mapped above.
+          yield {
+            type: "error",
+            code: "UPSTREAM",
+            message:
+              reason === undefined
+                ? "xAI reported the response incomplete without a reason"
+                : `unrecognized xAI incomplete reason "${String(reason)}"`,
+            retryable: false,
+          };
+          break;
+        }
         yield {
           type: "end",
           stopReason,

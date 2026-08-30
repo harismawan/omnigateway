@@ -369,6 +369,68 @@ test("maps an incomplete response with a token cap onto maxTokens", async () => 
   expect(events[0]).toMatchObject({ type: "end", stopReason: "maxTokens" });
 });
 
+test("maps a content-filtered incomplete response onto contentFilter", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs({
+        event: "response.incomplete",
+        data: JSON.stringify({
+          response: {
+            status: "incomplete",
+            incomplete_details: { reason: "content_filter" },
+            usage: {},
+          },
+        }),
+      }),
+    ),
+  );
+  expect(events[0]).toMatchObject({ type: "end", stopReason: "contentFilter" });
+});
+
+test("fails visibly on an incomplete response with an unrecognized reason", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs({
+        event: "response.incomplete",
+        data: JSON.stringify({
+          response: {
+            status: "incomplete",
+            incomplete_details: { reason: "ran_out_of_goodwill" },
+            usage: {},
+          },
+        }),
+      }),
+    ),
+  );
+  expect(events).toEqual([
+    {
+      type: "error",
+      code: "UPSTREAM",
+      message: 'unrecognized OpenAI incomplete reason "ran_out_of_goodwill"',
+      retryable: false,
+    },
+  ]);
+});
+
+test("fails visibly on an incomplete response that names no reason", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs({
+        event: "response.incomplete",
+        data: JSON.stringify({ response: { status: "incomplete", usage: {} } }),
+      }),
+    ),
+  );
+  expect(events).toEqual([
+    {
+      type: "error",
+      code: "UPSTREAM",
+      message: "OpenAI reported the response incomplete without a reason",
+      retryable: false,
+    },
+  ]);
+});
+
 test("turns a response.failed event into an error event", async () => {
   const events = await collect(
     decodeResponses(
