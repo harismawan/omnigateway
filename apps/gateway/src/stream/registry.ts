@@ -130,7 +130,17 @@ type Connection = {
   socket: Socket;
   credential: Credential;
   topics: Set<string>;
-  queue: ServerFrame[];
+  /**
+   * Serialized frames, not frames.
+   *
+   * A publish fans one frame out to every subscriber of a topic, and a frame
+   * parked at the head by backpressure is retried on every later drain — so
+   * serializing at send time pays `JSON.stringify` once per connection and
+   * again per retry, for a string that is identical every time. The queue's
+   * capacity, drop accounting and head-retry semantics are unchanged by this;
+   * only what an element is changed.
+   */
+  queue: string[];
   lastPongAt: number;
   /** Set while a revalidation is in flight, so a slow verify cannot stack. */
   checking: boolean;
@@ -251,7 +261,7 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
       if (frame === undefined) break;
       let status: unknown;
       try {
-        status = connection.socket.send(JSON.stringify(frame));
+        status = connection.socket.send(frame);
       } catch {
         // A send that throws is a socket already gone. The close handler will
         // arrive and remove it; pre-empting it here would race that path.
@@ -264,7 +274,7 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
     }
   };
 
-  const deliver = (connection: Connection, frame: ServerFrame): void => {
+  const deliver = (connection: Connection, frame: string): void => {
     if (connection.queue.length >= capacity) {
       // Oldest first. On a transport whose whole point is currency, the frame
       // worth keeping under pressure is the newest one. Counted, because
@@ -464,15 +474,18 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
     publish(topic, frame) {
       const subscribers = index.get(topic);
       if (subscribers === undefined) return;
+      // Once, not once per subscriber. This is the only fan-out in the module;
+      // everything else below reaches exactly one connection.
+      const payload = JSON.stringify(frame);
       for (const id of subscribers) {
         const connection = connections.get(id);
-        if (connection !== undefined) deliver(connection, frame);
+        if (connection !== undefined) deliver(connection, payload);
       }
     },
 
     sendTo(id, frame) {
       const connection = connections.get(id);
-      if (connection !== undefined) deliver(connection, frame);
+      if (connection !== undefined) deliver(connection, JSON.stringify(frame));
     },
 
     closeAll(code, reason) {
