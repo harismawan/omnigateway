@@ -3,17 +3,20 @@ import { mergeHeaders, orderHeaders } from "@omni/providers";
 import type { AuthRequest } from "./pluginFlow.ts";
 
 /**
- * The request builders a flow yields, mirroring `postJson` and `getJson`.
+ * The request builders a flow yields.
  *
- * **Pure**, which is the whole difference: `postJson` merges headers, orders
- * them, sends, reads the body and parses it. These do the first two and stop,
- * because under `PluginOAuthFlow` the host does the rest. Splitting it here
- * rather than in each flow keeps the merge-and-order in one place — the wire
- * bytes are pinned by golden tests per provider, and five copies of a header
- * ordering is five chances for one to drift.
+ * These **replaced** `postJson` and `getJson`, which were deleted once the last
+ * flow stopped calling them. Those merged headers, ordered them, sent, read the
+ * body and parsed it; these do the first two and stop, because under
+ * `PluginOAuthFlow` the host does the rest.
  *
- * Same profile, same merge, same order as the functions they replace, so a
- * ported flow emits the bytes its own test already pins.
+ * **Pure**, which is the whole difference. Keeping the merge-and-order here
+ * rather than in each flow keeps it in one place: the wire bytes are pinned by
+ * golden tests per provider, and five copies of a header ordering is five
+ * chances for one to drift.
+ *
+ * Same profile, same merge, same order as the functions they replaced, so a
+ * ported flow emits the bytes its own test already pinned.
  */
 
 /**
@@ -87,9 +90,9 @@ export function getJsonRequest(
 /**
  * Reads a JSON endpoint with no credential.
  *
- * Separate from `getJsonRequest` for the reason `getJsonUnauthenticated` is
- * separate from `getJson`: sending nothing must be the stated intent, never
- * what a probe that lost its token does by accident.
+ * Separate from `getJsonRequest` for the reason the two functions this pair
+ * replaced were separate: sending nothing must be the stated intent, never what
+ * a probe that lost its token does by accident.
  */
 export function getJsonUnauthenticatedRequest(
   url: string,
@@ -106,7 +109,9 @@ export function getJsonUnauthenticatedRequest(
 }
 
 /**
- * What `postJson` returned, from what the host handed back.
+ * The parsed body, from what the host handed back.
+ *
+ * This is what the deleted `postJson` used to return alongside the status.
  *
  * A non-JSON body is a real answer — an HTML error page, an empty 502 — so it
  * parses to `null` and the caller falls back to the status, exactly as before.

@@ -295,4 +295,4 @@ const openaiFlow: PluginOAuthFlow = {
   },
 };
 
-export const openaiOAuth: OAuthProvider = oauthAdapter("openai", openaiFlow);
+export const openaiOAuth: OAuthProvider = oauthAdapter("openai", openaiFlow, { trusted: true });

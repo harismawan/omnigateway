@@ -286,4 +286,4 @@ const grokFlow: PluginOAuthFlow = {
   // which is the honest answer, and the one the tightest-window rule expects.
 };
 
-export const grokOAuth: OAuthProvider = oauthAdapter("grok", grokFlow);
+export const grokOAuth: OAuthProvider = oauthAdapter("grok", grokFlow, { trusted: true });

@@ -300,7 +300,9 @@ export function validateRegistration(
   return {
     descriptor: typed,
     adapter: codecAdapter(id, typed.capabilities, codec as ProviderCodec, origins),
-    ...(oauthFlow === undefined ? {} : { oauth: oauthAdapter(id, oauthFlow, origins) }),
+    ...(oauthFlow === undefined
+      ? {}
+      : { oauth: oauthAdapter(id, oauthFlow, { ...(origins === undefined ? {} : { origins }) }) }),
   };
 }
 
@@ -612,9 +614,25 @@ export async function readPluginProviders(
         failures.push({ id: plugin.id, reason: "server entry has no default export with a setup" });
         continue;
       }
+      // `origins` as well as `capabilities`, and both off the same manifest.
+      //
+      // Passing only the capabilities compiled cleanly — `origins` is optional —
+      // and left every adapter this path builds **unrestricted**, because absent
+      // means unrestricted. That is the half of the feature that handles
+      // secrets: this read is what `omni connect` and `omni credentials refresh`
+      // build their flows from, so an authorization code and a refresh token
+      // could both be sent to an origin the manifest never named, while the
+      // gateway enforced the rule on the same plugin. Two processes disagreeing
+      // about one rule is the trap this file's own header warns about.
+      const declaredOrigins = (manifest as { origins?: unknown }).origins;
       for (const read of readProviders(
         plugin.id,
-        { capabilities: capabilities as string[] },
+        {
+          capabilities: capabilities as string[],
+          ...(Array.isArray(declaredOrigins)
+            ? { origins: declaredOrigins.filter((o): o is string => typeof o === "string") }
+            : {}),
+        },
         definition as PluginDefinition,
       )) {
         descriptors[read.descriptor.id] = read.descriptor;

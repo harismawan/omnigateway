@@ -250,4 +250,4 @@ const kiloFlow: PluginOAuthFlow = {
 
 // `DeviceOAuthProvider`, not the union, for the reason kimi's export gives:
 // consumers read `begin` and `needsDeviceId`, and the overload preserves them.
-export const kiloOAuth: DeviceOAuthProvider = oauthAdapter("kilo", kiloFlow);
+export const kiloOAuth: DeviceOAuthProvider = oauthAdapter("kilo", kiloFlow, { trusted: true });

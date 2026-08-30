@@ -1,14 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import {
-  type ConnectFlows,
-  createConnectFlows,
-  OAUTH_PROVIDERS,
-  oauthProviderIds,
-} from "@omni/control";
+import { type ConnectFlows, createConnectFlows, oauthProviderIds } from "@omni/control";
 import { describeError, GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
-import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import type { Store } from "@omni/store";
 import { boolFlag, parse, UsageError } from "./args.ts";
 import type { CommandEnv } from "./command.ts";
@@ -55,8 +49,15 @@ export async function run(
     return 0;
   }
 
-  // Built once, on demand, and shared by the gate, the flows and the refresher.
-  let connectRegistry: ConnectRegistry | undefined;
+  // Built once, on demand, and shared by the gate and the flows. Memoized on the
+  // promise rather than the value, so two callers in flight cannot each start a
+  // read of the plugin directory — and cannot then answer differently if it
+  // changed between them.
+  let connectRegistry: Promise<ConnectRegistry> | undefined;
+  const connectRegistryOnce = (): Promise<ConnectRegistry> => {
+    connectRegistry ??= connectRegistryFor(ctx.root.root);
+    return connectRegistry;
+  };
 
   const resolved = resolveCommand(argv);
   if (resolved === null) {
@@ -114,9 +115,19 @@ export async function run(
       options.service?.({ root: ctx.root.root, env: ctx.env }) ??
       createServiceDeps({ root: ctx.root.root, env: ctx.env, scope, now: ctx.now }),
     foreground: options.foreground ?? runForeground,
-    connect: (store) =>
-      options.connect?.(store) ??
-      createConnectFlows({
+    // Awaited here rather than read off whatever `connectable()` happened to
+    // leave behind. Both resolve the **same memoized** registry, so they cannot
+    // disagree and the order they are called in decides nothing.
+    //
+    // It read `connectRegistry ?? OAUTH_PROVIDERS`, which was correct only
+    // because `connect.ts` calls `connectable()` first. A second command
+    // calling `connect` alone would have got the built-in tables, with no
+    // plugin provider in them and no test to notice — the same "threaded into
+    // some of the call graph" shape this branch fixed one instance of already.
+    connect: async (store) => {
+      if (options.connect !== undefined) return options.connect(store);
+      const registry = await connectRegistryOnce();
+      return createConnectFlows({
         store,
         // Merged, not the built-in tables: a plugin's provider is connectable
         // too, and this process never calls `loadPlugins`, so what
@@ -127,21 +138,15 @@ export async function run(
         // giving it the flows alone admitted a plugin at the gate below and
         // refused it here — with a message naming the provider it had just
         // refused.
-        providers: connectRegistry?.providers ?? OAUTH_PROVIDERS,
-        descriptors: connectRegistry?.descriptors ?? PROVIDER_DESCRIPTORS,
+        providers: registry.providers,
+        descriptors: registry.descriptors,
         http: nodeHttpClient(),
         now: ctx.now,
-      }),
+      });
+    },
     connectable: async () => {
-      // Cached onto the closure so `connect` reuses exactly what the gate
-      // judged. Reading the plugin directory twice could answer differently if
-      // it changed in between, and the operator would be refused a provider the
-      // flow then had, or offered one it did not.
-      connectRegistry ??= await connectRegistryFor(ctx.root.root);
-      return {
-        ids: oauthProviderIds(connectRegistry.providers),
-        failures: connectRegistry.failures,
-      };
+      const registry = await connectRegistryOnce();
+      return { ids: oauthProviderIds(registry.providers), failures: registry.failures };
     },
   };
 

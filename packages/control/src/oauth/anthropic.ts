@@ -187,4 +187,6 @@ const anthropicFlow: PluginOAuthFlow = {
   },
 };
 
-export const anthropicOAuth: OAuthProvider = oauthAdapter("anthropic", anthropicFlow);
+export const anthropicOAuth: OAuthProvider = oauthAdapter("anthropic", anthropicFlow, {
+  trusted: true,
+});

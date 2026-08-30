@@ -26,7 +26,14 @@ export type CommandEnv = {
   /** Built on demand: most commands never touch the process. */
   service: () => ServiceDeps;
   /** Built on demand, and injected by tests so no test ever reaches a provider. */
-  connect: (store: Store) => ConnectFlows;
+  /**
+   * Async because building the flows reads the plugin directory, and the
+   * registry it produces must be the same one `connectable` judged against.
+   * Returning it synchronously meant reading whatever a previous call happened
+   * to memoize, which was correct only for the one command that calls both in
+   * the right order.
+   */
+  connect: (store: Store) => Promise<ConnectFlows>;
   /**
    * Which providers an authorization can be started for.
    *

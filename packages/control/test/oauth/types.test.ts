@@ -1,45 +1,32 @@
 import { expect, test } from "bun:test";
-import type { HttpClient, HttpRequest } from "@omni/providers";
 import { kiloProfile } from "@omni/providers";
+import { getJsonRequest, getJsonUnauthenticatedRequest } from "../../src/oauth/requests.ts";
 import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
-import { getJson, getJsonUnauthenticated } from "../../src/oauth/types.ts";
 
-const NOW = 1_000_000;
+/**
+ * The GET builders, and the compile-time guard around them.
+ *
+ * These tested `getJson`/`getJsonUnauthenticated` until those were deleted: the
+ * flows describe requests now and the host sends them, so nothing in production
+ * called either. The **properties** did not stop mattering, so they moved here
+ * rather than being deleted with the functions — and the builders had no golden
+ * pin of their own, so dropping `Accept` from the shared GET passed the whole
+ * suite.
+ */
 
-/** Records the one request so the tests can read the headers off it. */
-function stubHttp(): HttpClient & { sent: () => HttpRequest } {
-  let seen: HttpRequest | null = null;
-  const client = (async (req: HttpRequest) => {
-    seen = req;
-    return {
-      status: 200,
-      headers: new Headers({ "content-type": "application/json" }),
-      body: null,
-      text: async () => "{}",
-    };
-  }) as HttpClient & { sent: () => HttpRequest };
-  client.sent = () => {
-    if (seen === null) throw new Error("stubHttp was never called");
-    return seen;
-  };
-  return client;
+function headers(req: { headers: readonly (readonly string[])[] }, name: string): string[] {
+  return req.headers
+    .filter(([n]) => n?.toLowerCase() === name.toLowerCase())
+    .map(([, v]) => v ?? "");
 }
 
-const deps = (http: HttpClient) => ({ http, now: () => NOW });
-
-function headers(req: HttpRequest, name: string): string[] {
-  return req.headers.filter(([n]) => n.toLowerCase() === name.toLowerCase()).map(([, v]) => v);
-}
-
-test("getJson authenticates the read and keeps the client identity", async () => {
-  const http = stubHttp();
-
-  await getJson(deps(http), "kilo", "https://api.kilo.ai/api/profile", kiloProfile, {
+test("getJsonRequest authenticates the read and keeps the client identity", () => {
+  const sent = getJsonRequest("https://api.kilo.ai/api/profile", kiloProfile, {
     accessToken: "kilo-token-1",
     extraHeaders: [["X-Kilocode-OrganizationID", "org-42"]],
   });
 
-  const sent = http.sent();
+  expect(sent.method).toBe("GET");
   expect(headers(sent, "authorization")).toEqual(["Bearer kilo-token-1"]);
   expect(headers(sent, "accept")).toEqual(["application/json"]);
   expect(headers(sent, "x-kilocode-organizationid")).toEqual(["org-42"]);
@@ -48,17 +35,12 @@ test("getJson authenticates the read and keeps the client identity", async () =>
   expect(headers(sent, "x-kilocode-editorname")).not.toEqual([]);
 });
 
-test("getJsonUnauthenticated sends no Authorization at all, not an empty one", async () => {
-  const http = stubHttp();
-
-  await getJsonUnauthenticated(
-    deps(http),
-    "kilo",
+test("getJsonUnauthenticatedRequest sends no Authorization at all, not an empty one", () => {
+  const sent = getJsonUnauthenticatedRequest(
     "https://api.kilo.ai/api/device-auth/codes/KILO-1",
     kiloProfile,
   );
 
-  const sent = http.sent();
   // Absent, not `Bearer ` and not `Bearer null`: an empty bearer is a
   // credential claim rather than the absence of one, and upstream answers the
   // two differently.
@@ -67,20 +49,16 @@ test("getJsonUnauthenticated sends no Authorization at all, not an empty one", a
   expect(headers(sent, "x-kilocode-editorname")).not.toEqual([]);
 });
 
-// --- The guard the type carries ----------------------------------------------
-
-test("getJson will not compile without a credential", () => {
+test("getJsonRequest will not compile without a credential", () => {
   // A `usage()` probe reads a nullable token off `UsageSecrets`. This is what
   // forces each one to say what it does about a credential that has none: drop
   // the guard and the probe would go out unauthenticated, read its own 401 as
   // "no usage data", and leave the account reading unknown forever with nothing
   // logged. `@ts-expect-error`, not a runtime assertion, because the whole
-  // value of the guard is that it fires before the code ever runs — widening
-  // `accessToken` back to `string | null` makes this directive unused, which
-  // `bun run typecheck` reports as an error.
-  type Authenticated = Parameters<typeof getJson>[4];
+  // value of the guard is that it fires before the code ever runs.
+  type Authenticated = Parameters<typeof getJsonRequest>[2];
   const withoutCredential: Authenticated = {
-    // @ts-expect-error `accessToken` is `string`; use `getJsonUnauthenticated`.
+    // @ts-expect-error `accessToken` is `string`; use getJsonUnauthenticatedRequest.
     accessToken: null,
   };
   expect(withoutCredential.accessToken).toBeNull();
@@ -135,16 +113,4 @@ test("a pkce provider is never asked the device question", () => {
     needsDeviceId: false,
   };
   expect(redirect.kind).toBe("pkce");
-});
-
-test("getJsonUnauthenticated will not compile with a credential", () => {
-  // The other direction: the deliberate unauthenticated read must not quietly
-  // accept a token, or a caller could believe it is authenticating when the
-  // header is being dropped on the floor.
-  type Unauthenticated = NonNullable<Parameters<typeof getJsonUnauthenticated>[4]>;
-  const withCredential: Unauthenticated = {
-    // @ts-expect-error this reader has no credential to take.
-    accessToken: "kilo-token-1",
-  };
-  expect(withCredential).toEqual({ accessToken: "kilo-token-1" } as Unauthenticated);
 });

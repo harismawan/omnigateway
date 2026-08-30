@@ -187,18 +187,22 @@ supply an OAuth flow for a provider it does not own.
 
 - Storage stays host-owned. The plugin returns `FlowResult`; the host encrypts
   and stores it. Unchanged from sub-project 4's decision.
-- `OAuthProvider`'s shipped shape for the five built-ins. They keep using
-  `OAuthDeps.http` directly; this contract is what a *plugin* implements, and
-  converting the built-ins onto it is a separate question with the same
-  arguments — and the same evidence — as converting the adapters onto
-  `ProviderCodec` had.
+- ~~`OAuthProvider`'s shipped shape for the five built-ins. They keep using
+  `OAuthDeps.http` directly.~~ **Superseded.** That was the decision when this
+  was written, and it was reversed for the reason the Risks section gives: a
+  contract with no consumer outside its own tests is designed rather than
+  exercised. All five were ported; what porting found is recorded above, and it
+  is three things, not the two this section originally listed — the third, the
+  discriminated union, came from porting the two *device* flows specifically.
+  `OAuthProvider` itself is unchanged, which is what let the ports land without
+  touching a single consumer.
 - Rule 15. The plugin still never holds an `HttpClient`, which is the whole
   reason the inversion was chosen over the two alternatives.
 
 ## What porting the built-ins found
 
 The recommendation below was taken: all five built-in flows were moved onto this
-contract. Two things it could not express, neither visible from the fixture that
+contract. **Four** things it could not express, none visible from the fixture that
 stood in for a real provider — that fixture was written to fit the contract, which
 is exactly why it could not disagree with it.
 
@@ -212,6 +216,20 @@ is exactly why it could not disagree with it.
   through from an async one runs correctly — every test passed — but its `TNext`
   widens to `AuthResponse | undefined`, so each field read off the response
   becomes possibly-undefined. Only the compiler saw it.
+- **A transport failure has to be raised *into* the step.** The host threw past
+  the suspended generator, so a `try` around a `yield` never saw it and the step
+  was abandoned. `kilo.exchange` exists to tolerate exactly that: it reads the
+  billing organization with a token already earned, and an operator whose browser
+  said "approved" must not be told the connect failed because a secondary read
+  was reset. Its test pins 500, 401 and a connection reset; the first two ported
+  and the third was **unwritable**. `gen.throw` now delivers it; a step that
+  does not catch is unchanged.
+- **`PluginOAuthFlow` had to become a discriminated union.** The flat shape
+  flattened `oauthAdapter`'s return type, so `kiloOAuth` stopped being a
+  `DeviceOAuthProvider` and every consumer reading `begin` or `needsDeviceId`
+  lost it. Overloading on `kind` restores that and moves "a device flow needs
+  `begin`" from a construction-time throw to the compiler, for in-repo flows —
+  the throw stays, because a plugin arrives as untyped JavaScript.
 
 `requests.ts` holds pure builders mirroring `postJson`/`getJson` — same profile,
 same merge and order, stopping before the send — so a ported flow emits the bytes

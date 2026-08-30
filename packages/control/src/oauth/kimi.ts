@@ -307,4 +307,4 @@ const kimiFlow: PluginOAuthFlow = {
 // `needsDeviceId`, neither of which exists on the pkce arm. `oauthAdapter` is
 // overloaded on the flow's `kind`, so the narrow type survives the adapter and
 // this needs neither a guard nor an assertion.
-export const kimiOAuth: DeviceOAuthProvider = oauthAdapter("kimi", kimiFlow);
+export const kimiOAuth: DeviceOAuthProvider = oauthAdapter("kimi", kimiFlow, { trusted: true });

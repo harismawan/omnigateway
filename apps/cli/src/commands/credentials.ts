@@ -5,6 +5,7 @@ import {
   getCredential,
   listCredentials,
   listModels,
+  OAUTH_PROVIDERS,
   PROVIDER_IDS,
   type ProviderExists,
   patchCredential,
@@ -213,7 +214,17 @@ export const credentialsRefresh: Command = {
       // `loadPlugins`, so the built-in table alone answers "provider does not
       // support OAuth refresh" for a credential a plugin's own flow minted.
       // Before a plugin could declare a flow the gap did not exist; it does now.
-      providers: (await connectRegistryFor(ctx.root.root)).providers,
+      //
+      // Short-circuited for a built-in, exactly as `add-key` below does and for
+      // the reason its comment gives at length: `connectRegistryFor` imports
+      // every provider-declaring plugin's module, which runs third-party
+      // top-level code on a command that handles a secret, costs the import
+      // timeout per hanging plugin, and can print warnings about plugins that
+      // have nothing to do with the credential being refreshed. The provider is
+      // known before the refresher is built, so ask first.
+      providers: Object.hasOwn(PROVIDER_DESCRIPTORS, credential.provider)
+        ? OAUTH_PROVIDERS
+        : (await connectRegistryFor(ctx.root.root)).providers,
       http: nodeHttpClient(),
       now: ctx.now,
     });

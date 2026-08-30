@@ -44,10 +44,20 @@ test("a field the allowlist does not name is refused, however it is written", ()
 
   // Every level, not just one: the constraint is written four times and three
   // of them could be dropped without any other test noticing.
+  //
+  // Through the **spread**, like case 2. Written as fresh literals these two
+  // passed against a plain `fields?: LogFields` — excess property checking
+  // already refuses those — so relaxing `debug` and `warn` alone left the suite
+  // green, and two of the four constraints were unpinned by the very test whose
+  // comment claimed all four.
+  // A concrete key beside the spread, as case 2 has. With only a spread the
+  // argument has no property TypeScript must infer from, so `T` falls back to
+  // `LogFields` itself, `keyof T` never contains `detail`, and the constraint
+  // has nothing to reject — the assertion would pass for the wrong reason.
   // @ts-expect-error - `detail` is not a member of LogFields
-  logger.debug("debug", { detail: "leak" });
+  logger.debug("debug", { plugin: "p", ...(sink.length > 99 ? {} : { detail: "leak" }) });
   // @ts-expect-error - `detail` is not a member of LogFields
-  logger.warn("warn", { detail: "leak" });
+  logger.warn("warn", { plugin: "p", ...(sink.length > 99 ? {} : { detail: "leak" }) });
 
   // The lines above still *run*, so this is also the proof they are reachable
   // rather than dead code the compiler alone ever sees.

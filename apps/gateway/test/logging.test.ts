@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
+import { OAUTH_PROVIDERS } from "@omni/control";
+import { createLogger, GatewayError } from "@omni/ir";
 import type { RequestLog, Store } from "@omni/store";
 import {
   beginLog,
   finishLog,
   newCompletedRequestLog,
   newPendingRequestLog,
+  reasonField,
   routeLog,
 } from "../src/logging.ts";
 import type { Invalidator } from "../src/stream/broadcaster.ts";
@@ -259,4 +262,59 @@ test("a throwing invalidation does not turn a finished request into an error", a
   });
 
   expect(appends).toHaveLength(1);
+});
+
+/**
+ * The log line an operator reads when their accounts stop refreshing.
+ *
+ * `reasonField` withholds a message when the error names a provider and is not
+ * gateway-authored, because `httpError` builds one from up to 500 characters of
+ * an upstream body. The five built-in OAuth flows are the other case: their
+ * text comes from literals and from `tokenErrorMessage`, which reads an error
+ * identifier *without* the body.
+ *
+ * Porting them onto the plugin contract silenced all of it for one commit —
+ * `fail` stamped `provider` and left the flag off, so both arms went false and
+ * a refresh failure printed a bare code. Owned here because this is the only
+ * layer that may import both the flows and the line that reads them.
+ */
+test("a built-in oauth failure still explains itself at default level", async () => {
+  const quiet = createLogger({ level: "info", write: () => {}, now: () => 0 });
+  const dead = async () => {
+    throw new Error("connection reset");
+  };
+
+  // Walked from the registry rather than listed, so a sixth built-in is covered
+  // the day it is added — the instrument `providerTables.test.ts` uses, for the
+  // reason it gives: a list of what to check has exactly the property the thing
+  // it checks lacks.
+  const providers = Object.values(OAUTH_PROVIDERS);
+  expect(providers.length).toBeGreaterThan(0);
+  for (const provider of providers) {
+    const error: GatewayError = await provider
+      .refresh("a-refresh-token", { http: dead as never, now: () => 0 }, {})
+      .then(() => {
+        throw new Error(`${provider.id} refresh resolved against a dead transport`);
+      })
+      .catch((raised: unknown) => raised as GatewayError);
+
+    expect({ provider: provider.id, printed: "reason" in reasonField(error, quiet) }).toEqual({
+      provider: provider.id,
+      printed: true,
+    });
+  }
+});
+
+test("an upstream body is still withheld at default level", () => {
+  // The control. A change that printed everything would satisfy the test above
+  // while putting prompt text on stdout, which is why the flag is opt-in.
+  const quiet = createLogger({ level: "info", write: () => {}, now: () => 0 });
+  expect(
+    reasonField(
+      new GatewayError("UPSTREAM", "context length exceeded: <prompt text>", {
+        provider: "anthropic",
+      }),
+      quiet,
+    ),
+  ).toEqual({});
 });

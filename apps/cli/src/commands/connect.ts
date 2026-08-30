@@ -36,7 +36,7 @@ export const connect: Command = {
       );
     }
 
-    const flows = connectFlows(await ctx.store());
+    const flows = await connectFlows(await ctx.store());
 
     const start = await flows.start(providerId, stringFlag(args.values, "label"));
 

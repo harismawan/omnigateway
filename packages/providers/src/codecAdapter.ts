@@ -270,7 +270,20 @@ export function codecAdapter(
       // After the shape check and before the transport. A plugin's manifest is
       // the only place an operator can read where their prompts go, so a codec
       // that names somewhere else is refused rather than reported afterwards.
-      if (origins !== undefined && !withinOrigins(built.request.url, origins)) {
+      // **Copied once, then only the copy is read.** `url` is otherwise read by
+      // the shape check, by the origin check and by the transport, and a
+      // property answering differently each time — a getter is enough — passes
+      // the origin check and puts a different host on the wire. The auth path
+      // carries the same normalisation for the same reason; `origins.ts` was
+      // collapsed into one function precisely because a rule enforced on one of
+      // the two paths a plugin can cause a request is not enforced.
+      const request = {
+        url: built.request.url,
+        method: built.request.method,
+        headers: [...built.request.headers],
+        body: built.request.body,
+      };
+      if (origins !== undefined && !withinOrigins(request.url, origins)) {
         throw codecFailure(
           id,
           "buildRequest",
@@ -285,10 +298,7 @@ export function codecAdapter(
       // codec that supplied its own could outlive it.
       const res = await req.http({
         provider: id,
-        url: built.request.url,
-        method: built.request.method,
-        headers: built.request.headers,
-        body: built.request.body,
+        ...request,
         signal: req.signal,
       });
 
