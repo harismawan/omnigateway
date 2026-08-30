@@ -842,6 +842,42 @@ test("hands the adapter its first frame before the capture branch has finished",
 });
 
 /**
+ * A drain still running contributes what it has read, not nothing.
+ *
+ * This is the partial-artifact guarantee `Attempt` is mutable for: a hung
+ * upstream or a stream cut off by a disconnect should leave a truncated body in
+ * the artifact rather than an empty one. It is pinned here because the response
+ * text is held as segments and joined at read time — joining once at the end of
+ * the drain instead is cheaper-looking, passes every settled test above, and
+ * turns exactly this case into an empty string.
+ */
+test("reports what a still-running drain has already read", async () => {
+  const controller = new AbortController();
+  const collector = createBodyCollector({ captureStreamChunks: false });
+  const http = collector.wrap(async (req) => bodyOf(ANTHROPIC_FRAMES, req.signal, 2));
+
+  const res = await http({ ...fixedRequest(), signal: controller.signal });
+  const reader = res.body?.getReader();
+  if (reader === undefined) throw new Error("expected a body");
+
+  // Drive the adapter's branch far enough that the tee has released both
+  // delivered frames, then let the capture drain's pending reads run. Reading
+  // to the end would hang: the source stays open until the abort below.
+  await reader.read();
+  await reader.read();
+  for (let tick = 0; tick < 10; tick++) await Promise.resolve();
+
+  const partial = String(collector.attempts()[0]?.response);
+  expect(partial).toContain("message_start");
+  // Still open, so this is genuinely a drain in flight rather than a finished one.
+  expect(partial).not.toBe(ANTHROPIC_FRAMES.join(""));
+
+  controller.abort();
+  await reader.cancel().catch(() => undefined);
+  await collector.settle();
+});
+
+/**
  * The stronger form of the same rule, and the one the spec states outright: a
  * capture branch that has stalled must not hold the adapter's bytes up.
  *

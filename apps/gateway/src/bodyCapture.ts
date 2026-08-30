@@ -46,13 +46,34 @@ type Attempt = {
   attempt: number;
   provider: ProviderId;
   request: unknown;
-  /** Raw response text as it arrived, reassembled. Parsed at read time. */
-  responseText: string;
+  /**
+   * Raw response text as it arrived, held as the decoded segments rather than
+   * one accumulating string. Joined at read time by `textOf`.
+   *
+   * Per-chunk `+=` is only tolerable because JavaScriptCore represents the
+   * result as a rope; a chunk array joined once is strictly cheaper and does
+   * not rest on an engine representation detail. Joining at read time rather
+   * than at the end of the drain is what keeps the partial-artifact guarantee
+   * above: a drain still running has its segments in here, and `textOf` sees
+   * exactly what it has read so far.
+   */
+  responseChunks: string[];
   /** Set once anything responded, so an attempt that never answered stays null. */
   responded: boolean;
   frames: string[] | null;
   truncated: boolean;
 };
+
+/**
+ * What an attempt has read so far, as one string.
+ *
+ * Called at most twice per attempt — once when a drain finishes and once when
+ * the artifact is assembled — so the join is paid on the same order as the old
+ * final concatenation, and never per chunk.
+ */
+function textOf(entry: Attempt): string {
+  return entry.responseChunks.join("");
+}
 
 export type BodyCollectorOptions = {
   /**
@@ -194,10 +215,10 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
           continue;
         }
         bytes += value.byteLength;
-        entry.responseText += decoder.decode(value, { stream: true });
+        entry.responseChunks.push(decoder.decode(value, { stream: true }));
         if (bytes > MAX_CAPTURED_BODY_BYTES) entry.truncated = true;
       }
-      entry.responseText += decoder.decode();
+      entry.responseChunks.push(decoder.decode());
     } catch {
       // Whatever broke, it broke on the capture branch. The adapter's branch is
       // a separate reader over a separate queue and is untouched by this.
@@ -205,7 +226,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
     } finally {
       reader.releaseLock();
     }
-    if (options.captureStreamChunks) entry.frames = framesOf(entry.responseText);
+    if (options.captureStreamChunks) entry.frames = framesOf(textOf(entry));
   };
 
   /**
@@ -242,9 +263,10 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
       text: async () => {
         const text = await res.text();
         entry.responded = true;
-        entry.responseText = text.slice(0, MAX_CAPTURED_BODY_BYTES);
-        if (entry.responseText.length < text.length) entry.truncated = true;
-        if (options.captureStreamChunks) entry.frames = framesOf(entry.responseText);
+        const kept = text.slice(0, MAX_CAPTURED_BODY_BYTES);
+        entry.responseChunks = [kept];
+        if (kept.length < text.length) entry.truncated = true;
+        if (options.captureStreamChunks) entry.frames = framesOf(kept);
         return text;
       },
     };
@@ -273,7 +295,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
             req.body.length > MAX_CAPTURED_BODY_BYTES
               ? req.body.slice(0, MAX_CAPTURED_BODY_BYTES)
               : asBody(req.body),
-          responseText: "",
+          responseChunks: [],
           responded: false,
           frames: null,
           truncated: req.body.length > MAX_CAPTURED_BODY_BYTES,
@@ -291,7 +313,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
         attempt: entry.attempt,
         provider: entry.provider,
         request: entry.request,
-        response: entry.responded ? asBody(entry.responseText) : null,
+        response: entry.responded ? asBody(textOf(entry)) : null,
         streamChunks: entry.frames,
         truncated: entry.truncated,
       }));
