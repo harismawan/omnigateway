@@ -1,4 +1,3 @@
-import { GatewayError } from "@omni/ir";
 import { ANTHROPIC_CLI_VERSION, anthropicProfile } from "@omni/providers";
 import {
   type AuthHelpers,

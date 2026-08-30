@@ -10,10 +10,12 @@ import type { UsageSecrets } from "@omni/store";
 import { createPkce, randomState } from "./pkce.ts";
 import {
   type AuthorizeStart,
+  type DeviceOAuthProvider,
   type FlowResult,
   type OAuthDeps,
   type OAuthProvider,
   type PendingFlow,
+  type PkceOAuthProvider,
   pendingError,
   type UsageReport,
 } from "./types.ts";
@@ -92,9 +94,16 @@ export type AuthResponse = {
  *   `exchange` is already handed `pending: PendingFlow` — the stored state of
  *   the authorization — and one name for two things in one argument object is
  *   how an author reaches for the wrong one.
- * - `pkce` and `randomState` mean a plugin needs no crypto, and its `start`
- *   stays testable. The implementation is 21 lines already shared by every
- *   built-in flow.
+ * - `pkce` and `randomState` cover the randomness **OAuth itself** needs, and
+ *   keep `start` testable. The implementation is 21 lines already shared by
+ *   every built-in flow.
+ *
+ *   Not "a plugin needs no crypto", which is what this said until porting kimi
+ *   disproved it: a device flow that binds a session to a machine fingerprint
+ *   mints that itself — `mintKimiDevice` — and nothing here replaces it. A
+ *   plugin doing the same would bundle its own. The narrow claim is the true
+ *   one, and the wide one is the kind a contributor preserves while breaking
+ *   the real thing.
  * - `now` because a flow that read the clock directly could not be tested
  *   against an expiry, which `kilo.exchange` checks before it polls.
  */
@@ -106,7 +115,13 @@ export type AuthHelpers = {
   now(): number;
 };
 
-/** A step: yields requests for the host to perform, returns when it has its answer. */
+/**
+ * A step: yields requests for the host to perform, returns when it has its answer.
+ *
+ * A request that fails at the transport is raised **at the yield**, so a step
+ * that tolerates one — `kilo.exchange`'s organization read — catches it there
+ * like any other call.
+ */
 export type AuthStep<T> = AsyncGenerator<AuthRequest, T, AuthResponse>;
 
 /**
@@ -116,15 +131,9 @@ export type AuthStep<T> = AsyncGenerator<AuthRequest, T, AuthResponse>;
  * `oauthAdapter` below is the only thing that has to know the difference —
  * exactly as `codecAdapter` is for the inference path.
  */
-export type PluginOAuthFlow = {
-  readonly kind: "pkce" | "device";
+type PluginFlowBase = {
   readonly supportsManualPaste: boolean;
-  /** Device flows only; see `DeviceOAuthProvider.needsDeviceId`. */
-  readonly needsDeviceId?: boolean;
-
   start(input: { redirectUri: string } & AuthHelpers): AuthStep<AuthorizeStart>;
-  /** Device flows only. */
-  begin?(input: { deviceId: string } & AuthHelpers): AuthStep<AuthorizeStart>;
   exchange(input: { code: string; pending: PendingFlow } & AuthHelpers): AuthStep<FlowResult>;
   refresh(
     input: { refreshToken: string; providerData: Record<string, unknown> } & AuthHelpers,
@@ -133,6 +142,29 @@ export type PluginOAuthFlow = {
     input: { secrets: UsageSecrets; providerData: Record<string, unknown> } & AuthHelpers,
   ): AuthStep<UsageReport | null>;
 };
+
+/** A redirect flow. Mirrors `PkceOAuthProvider`. */
+export type PkcePluginFlow = PluginFlowBase & { readonly kind: "pkce" };
+
+/**
+ * A device-code flow. Mirrors `DeviceOAuthProvider`, `begin` and all.
+ *
+ * **A union rather than one shape with two optional fields**, because the flat
+ * version could not say that a device flow must have `begin` — it checked at
+ * construction instead, which is late for an in-repo flow the compiler could
+ * have caught. It also flattened the adapter's return type: `oauthAdapter`
+ * answered `OAuthProvider`, so `kiloOAuth` stopped being a
+ * `DeviceOAuthProvider` and every consumer reading `.begin` or
+ * `.needsDeviceId` lost it. Porting the two device flows is what surfaced that;
+ * the fixture had only ever been read back through the union.
+ */
+export type DevicePluginFlow = PluginFlowBase & {
+  readonly kind: "device";
+  readonly needsDeviceId: boolean;
+  begin(input: { deviceId: string } & AuthHelpers): AuthStep<AuthorizeStart>;
+};
+
+export type PluginOAuthFlow = PkcePluginFlow | DevicePluginFlow;
 
 /**
  * How many requests one step may ask for.
@@ -268,7 +300,22 @@ async function drive<T>(
         ),
       });
     } catch (error) {
-      throw rethrow(id, step, error);
+      // Raised *into* the step rather than past it, because a flow can have a
+      // request whose failure is not the flow's failure. `kilo.exchange` reads
+      // the billing organization with a token it has already earned, and an
+      // operator who watched their browser say "approved" must not be told the
+      // connect failed because a secondary read was reset. Thrown past the
+      // generator that tolerance is unwritable at all: a suspended generator's
+      // own `try` never sees a rejection raised outside it, so the step is
+      // simply abandoned. A step that does not catch is unchanged — `gen.throw`
+      // rejects with the same error and `rethrow` relabels it exactly as this
+      // line did when it threw.
+      try {
+        next = await gen.throw(rethrow(id, step, error));
+      } catch (thrown) {
+        throw rethrow(id, step, thrown);
+      }
+      continue;
     }
     const body = await res.text().catch(() => "");
 
@@ -314,6 +361,21 @@ function rethrow(id: ProviderId, step: string, error: unknown): GatewayError {
  * — already takes its providers as a parameter, so a plugin's flow becomes
  * indistinguishable from a built-in's at the point of use.
  */
+export function oauthAdapter(
+  id: ProviderId,
+  flow: DevicePluginFlow,
+  origins?: readonly string[],
+): DeviceOAuthProvider;
+export function oauthAdapter(
+  id: ProviderId,
+  flow: PkcePluginFlow,
+  origins?: readonly string[],
+): PkceOAuthProvider;
+export function oauthAdapter(
+  id: ProviderId,
+  flow: PluginOAuthFlow,
+  origins?: readonly string[],
+): OAuthProvider;
 export function oauthAdapter(
   id: ProviderId,
   flow: PluginOAuthFlow,

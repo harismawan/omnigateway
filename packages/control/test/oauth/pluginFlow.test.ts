@@ -400,3 +400,72 @@ test("an abandoned step still runs its own cleanup", async () => {
   await Promise.resolve();
   expect(cleaned).toBe(true);
 });
+
+test("a transport failure is raised into the step, so a flow can tolerate one", async () => {
+  // A flow can have a request whose failure is not the flow's failure: kilo
+  // reads the billing organization with a token it has already earned, and an
+  // operator whose browser said "approved" must not be told the connect failed
+  // because a secondary read was reset.
+  //
+  // That tolerance is unwritable if the host throws *past* the generator — a
+  // suspended generator's own `try` never sees a rejection raised outside it,
+  // so the step is simply abandoned. Owned here rather than left to kilo's
+  // suite, because it is a property of the contract and kilo is one caller.
+  let caught: unknown = null;
+  const tolerant: PluginOAuthFlow = {
+    ...kiloShaped,
+    async *exchange() {
+      let org: string | null = null;
+      try {
+        yield { url: "https://api.acme.test/profile", method: "GET", headers: [] };
+      } catch (error) {
+        caught = error;
+        org = null;
+      }
+      return {
+        secrets: { accessToken: "kept", refreshToken: null, apiKey: null, idToken: null },
+        expiresAt: null,
+        accountEmail: null,
+        providerData: { orgId: org },
+      };
+    },
+  };
+
+  const deps: OAuthDeps = {
+    http: async () => {
+      throw new Error("connection reset");
+    },
+    now: () => 1_000_000,
+  };
+
+  const result = await oauthAdapter("acme", tolerant, ORIGINS).exchange(
+    { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } },
+    deps,
+  );
+
+  // The step saw it, and the flow completed with the credential it had earned.
+  expect(caught).toBeInstanceOf(GatewayError);
+  expect(result.secrets.accessToken).toBe("kept");
+  expect(result.providerData).toEqual({ orgId: null });
+});
+
+test("a step that does not catch still fails, unchanged", async () => {
+  // The other half. Raising into the generator must not turn a real transport
+  // failure into a silent success for every flow that never asked to tolerate
+  // one.
+  const deps: OAuthDeps = {
+    http: async () => {
+      throw new Error("connection reset");
+    },
+    now: () => 1_000_000,
+  };
+  await expect(
+    oauthAdapter("acme", kiloShaped, ORIGINS).exchange(
+      {
+        code: "",
+        pending: { verifier: "", challenge: "", state: "", redirectUri: "", deviceCode: "d" },
+      },
+      deps,
+    ),
+  ).rejects.toThrow(GatewayError);
+});

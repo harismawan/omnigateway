@@ -1,13 +1,17 @@
-import { GatewayError } from "@omni/ir";
 import { kiloProfile } from "@omni/providers";
-import type { AuthorizeStart, DeviceOAuthProvider, FlowResult, OAuthDeps } from "./types.ts";
 import {
-  getJson,
-  getJsonUnauthenticated,
-  pendingError,
-  postJson,
-  tokenErrorCode,
-} from "./types.ts";
+  type AuthHelpers,
+  type AuthStep,
+  oauthAdapter,
+  type PluginOAuthFlow,
+} from "./pluginFlow.ts";
+import {
+  getJsonRequest,
+  getJsonUnauthenticatedRequest,
+  parsed as parseBody,
+  postJsonRequest,
+} from "./requests.ts";
+import { type DeviceOAuthProvider, tokenErrorCode } from "./types.ts";
 
 /**
  * Kilo's device-code flow, which is not RFC 8628.
@@ -52,11 +56,11 @@ function positiveNumberFrom(value: Record<string, unknown>, field: string): numb
     : null;
 }
 
-function deviceCodeFrom(value: unknown): DeviceCodeResponse {
+function deviceCodeFrom(value: unknown, fail: AuthHelpers["fail"]): DeviceCodeResponse {
   const record = recordFrom(value);
   const code = record === null ? null : stringFrom(record, "code");
   if (record === null || code === null) {
-    throw new GatewayError("AUTH", "device code endpoint returned an unusable response");
+    throw fail("AUTH", "device code endpoint returned an unusable response");
   }
   return {
     code,
@@ -71,33 +75,39 @@ function deviceCodeFrom(value: unknown): DeviceCodeResponse {
  * Best-effort by construction: an account with no organization is normal, and
  * a failed read here must not fail a connect the operator already approved in
  * their browser. It must never be reported as `AUTH` either — that code
- * disables credentials — so nothing escapes this function.
+ * disables credentials — so nothing escapes this step.
+ *
+ * A step rather than a plain function because it reads the profile *with* the
+ * token the poll just returned: the request cannot be described until the
+ * response before it has been read, which is the case the generator contract
+ * exists for. Delegated to with `yield*` from `exchange`, and `async function*`
+ * for the reason `postToken` in `anthropic.ts` is — a sync generator widens
+ * `TNext` and every field read off the response becomes possibly-undefined.
  */
-async function orgIdFor(accessToken: string, deps: OAuthDeps): Promise<string | null> {
+async function* orgIdFor(accessToken: string): AuthStep<string | null> {
   try {
-    const { status, parsed } = await getJson(deps, "kilo", PROFILE_URL, kiloProfile, {
-      accessToken,
-    });
-    if (status < 200 || status >= 300) return null;
+    const res = yield getJsonRequest(PROFILE_URL, kiloProfile, { accessToken });
+    if (res.status < 200 || res.status >= 300) return null;
 
-    const record = recordFrom(parsed);
+    const record = recordFrom(parseBody(res.body));
     const organizations = record?.organizations;
     if (!Array.isArray(organizations)) return null;
     const first = recordFrom(organizations[0]);
     return first === null ? null : stringFrom(first, "id");
   } catch {
-    // A timeout or a connection reset is not a verdict on the token.
+    // A timeout or a connection reset is not a verdict on the token. The host
+    // raises it at the `yield`, so this stays the plain `try` it was before the
+    // port rather than becoming something the flow cannot see.
     return null;
   }
 }
 
-export const kiloOAuth: DeviceOAuthProvider = {
-  id: "kilo",
+const kiloFlow: PluginOAuthFlow = {
   kind: "device",
+  supportsManualPaste: false,
   // Kilo identifies an editor, not a machine: there is no per-installation
   // identity to mint, and `begin` sends none.
   needsDeviceId: false,
-  supportsManualPaste: false,
 
   /**
    * Nothing to prepare.
@@ -106,7 +116,8 @@ export const kiloOAuth: DeviceOAuthProvider = {
    * the flow is `begin()`'s single POST. What this returns is replaced by that
    * call and never reaches the operator.
    */
-  start() {
+  // biome-ignore lint/correctness/useYield: there is nothing to ask an endpoint for
+  async *start() {
     return {
       authorizeUrl: FALLBACK_VERIFICATION_URL,
       pending: { verifier: "", challenge: "", state: "", redirectUri: "" },
@@ -114,25 +125,26 @@ export const kiloOAuth: DeviceOAuthProvider = {
   },
 
   /** Mints the code. Takes no device id: Kilo has no device identity. */
-  async begin(_opts, deps): Promise<AuthorizeStart> {
-    const { status, parsed } = await postJson(deps, "kilo", CODES_URL, kiloProfile, {
+  async *begin({ fail, now }) {
+    const res = yield postJsonRequest(CODES_URL, kiloProfile, {
       contentType: "application/json",
       body: "",
     });
+    const parsed = parseBody(res.body);
 
     // Distinct from a generic failure because the operator can act on it: an
     // earlier authorization of theirs is still open and has to age out.
-    if (status === 429) {
-      throw new GatewayError(
+    if (res.status === 429) {
+      throw fail(
         "RATE_LIMIT",
         "kilo has too many pending device authorizations; wait for one to expire and retry",
       );
     }
-    if (status < 200 || status >= 300) {
-      throw new GatewayError(tokenErrorCode(status), `kilo refused a device code: http_${status}`);
+    if (res.status < 200 || res.status >= 300) {
+      throw fail(tokenErrorCode(res.status), `kilo refused a device code: http_${res.status}`);
     }
 
-    const response = deviceCodeFrom(parsed);
+    const response = deviceCodeFrom(parsed, fail);
     return {
       authorizeUrl: response.verificationUrl,
       userCode: response.code,
@@ -145,57 +157,60 @@ export const kiloOAuth: DeviceOAuthProvider = {
         interval: POLL_INTERVAL_SECONDS,
         // Kilo answers 410 once the code lapses, but the caller's poll loop
         // should not need a round trip to learn what it already knows.
-        extra: { expiresAt: deps.now() + response.expiresIn * 1000 },
+        extra: { expiresAt: now() + response.expiresIn * 1000 },
       },
     };
   },
 
   /** One poll. The caller owns the loop and the deadline. */
-  async exchange({ pending }, deps): Promise<FlowResult> {
+  async *exchange({ pending, fail, keepPolling, now }) {
     const code = pending.deviceCode;
     if (code === undefined) {
-      throw new Error("kilo exchange requires a pending flow produced by begin()");
+      // `INTERNAL` because reaching here is a gateway bug rather than anything
+      // the operator or Kilo did: only `begin()` produces a usable pending
+      // flow. It goes through `fail` like every other throw, since a plain
+      // `Error` out of a step reaches the host as "the flow threw" and loses
+      // this sentence.
+      throw fail("INTERNAL", "kilo exchange requires a pending flow produced by begin()");
     }
 
     const expiresAt =
       pending.extra === undefined ? null : positiveNumberFrom(pending.extra, "expiresAt");
-    if (expiresAt !== null && deps.now() >= expiresAt) {
-      throw new GatewayError("AUTH", "kilo device code expired; start the authorization again");
+    if (expiresAt !== null && now() >= expiresAt) {
+      throw fail("AUTH", "kilo device code expired; start the authorization again");
     }
 
     // The poll is what earns the token; there is nothing to send yet.
-    const { status, parsed } = await getJsonUnauthenticated(
-      deps,
-      "kilo",
+    const res = yield getJsonUnauthenticatedRequest(
       `${CODES_URL}/${encodeURIComponent(code)}`,
       kiloProfile,
     );
 
-    if (status === 202) throw pendingError("http_202");
-    if (status === 403) {
-      throw new GatewayError("AUTH", "kilo authorization was denied");
+    if (res.status === 202) throw keepPolling("http_202");
+    if (res.status === 403) {
+      throw fail("AUTH", "kilo authorization was denied");
     }
-    if (status === 410) {
-      throw new GatewayError("AUTH", "kilo device code expired; start the authorization again");
+    if (res.status === 410) {
+      throw fail("AUTH", "kilo device code expired; start the authorization again");
     }
-    if (status < 200 || status >= 300) {
-      throw new GatewayError(
-        tokenErrorCode(status),
-        `kilo refused the device code poll: http_${status}`,
+    if (res.status < 200 || res.status >= 300) {
+      throw fail(
+        tokenErrorCode(res.status),
+        `kilo refused the device code poll: http_${res.status}`,
       );
     }
 
-    const record = recordFrom(parsed);
-    if (record === null) throw pendingError("http_200");
+    const record = recordFrom(parseBody(res.body));
+    if (record === null) throw keepPolling("http_200");
     // Any status but "approved" is a state on the way there, not a failure.
-    if (stringFrom(record, "status") !== "approved") throw pendingError("http_200");
+    if (stringFrom(record, "status") !== "approved") throw keepPolling("http_200");
 
     const token = stringFrom(record, "token");
     if (token === null) {
-      throw new GatewayError("AUTH", "kilo approved the authorization without a token");
+      throw fail("AUTH", "kilo approved the authorization without a token");
     }
 
-    const orgId = await orgIdFor(token, deps);
+    const orgId = yield* orgIdFor(token);
     return {
       secrets: {
         accessToken: token,
@@ -212,15 +227,16 @@ export const kiloOAuth: DeviceOAuthProvider = {
   },
 
   /**
-   * Required by the interface, unreachable in practice.
+   * Required by the contract, unreachable in practice.
    *
    * Every path that refreshes first checks for a non-null `expiresAt`, and a
    * kilo credential never has one. `AUTH` is deliberate: if some future path
    * does reach here, the credential really is unusable until the operator
    * reconnects, and `AUTH` is what records that rather than retrying forever.
    */
-  async refresh(): Promise<FlowResult> {
-    throw new GatewayError(
+  // biome-ignore lint/correctness/useYield: refusing outright asks for no request
+  async *refresh({ fail }) {
+    throw fail(
       "AUTH",
       "kilo tokens cannot be refreshed; reconnect the kilo account to get a new one",
     );
@@ -231,3 +247,7 @@ export const kiloOAuth: DeviceOAuthProvider = {
   // credit exhaustion as a cooldown that never resets. An omitted probe makes
   // the account read as unknown, which is the truth.
 };
+
+// `DeviceOAuthProvider`, not the union, for the reason kimi's export gives:
+// consumers read `begin` and `needsDeviceId`, and the overload preserves them.
+export const kiloOAuth: DeviceOAuthProvider = oauthAdapter("kilo", kiloFlow);

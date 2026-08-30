@@ -166,15 +166,16 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     model name cannot carry an endpoint id. `control` has three things and one of them is large.
     Two branches — `schemas.ts` name `custom` in the one rule that survive its target union (a
     custom target carry an `endpointId` and nothing else may), and `credentials.ts` plus `models.ts`
-    ask `=== "custom"` about endpoint metadata. And a **partly migrated per-provider OAuth
-    subsystem**: `control/src/oauth/` still hold `OAUTH_PROVIDERS` keyed by five provider literals
-    plus five modules of vendor URLs, scopes and id literals, and that violate the *first* clause,
-    for which no exception is carved at all. What changed is that it is no longer the **only** way
-    in: a plugin declare its own flow and `registerOAuthProvider` install it at boot, so adding a
-    provider no longer require editing that table. The five built-ins stay literals, and converting
-    them is the same question — with the same evidence — as converting the adapters onto
-    `ProviderCodec` was. Say the remaining half plainly rather than let the next contributor read
-    "migrated" and find five literals.
+    ask `=== "custom"` about endpoint metadata. And a **per-provider OAuth subsystem**:
+    `control/src/oauth/` still hold `OAUTH_PROVIDERS` keyed by five provider literals plus five
+    modules of vendor URLs, scopes and id literals, and that violate the *first* clause, for which
+    no exception is carved at all. Two things changed and the difference matter. It is no longer the
+    only way **in**: a plugin declare its own flow and `registerOAuthProvider` install it at boot,
+    so adding a provider no longer require editing that table. And all five built-ins now **run on
+    the plugin contract** — each is a `PluginOAuthFlow` wrapped by `oauthAdapter`, so the contract
+    have five real consumers rather than a fixture written to agree with it. What remain is the
+    vendor data itself: URLs, scopes and client ids compiled into core. That is the violation; the
+    mechanism around it is no longer one.
     Plugin flow live in `control/src/oauth/pluginFlow.ts` and follow the codec's inversion: each
     step is an async generator that **yield described requests**, host perform every one, so plugin
     never hold `HttpClient` and rule 15 need no second footnote. Generator not build/parse pair
@@ -183,6 +184,21 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     host. `fail`, `keepPolling`, `pkce`, `randomState` supplied by host — `keepPolling` named that
     way because `exchange` already receive `pending: PendingFlow` and one name for two thing in one
     argument object is how author reach for wrong one.
+    **Porting the five found three thing the fixture could not**, each because a fixture written to
+    fit a contract cannot disagree with it. Built-ins use **two** deadline — 30s for a token call an
+    operator wait on, 15s for a usage probe nothing wait on — so `AuthRequest.timeoutMs` is optional
+    and clamp to the host ceiling; one constant would have quadruple the second silently. A
+    delegated step must be `async function*`: a sync generator yielded through from an async one
+    run fine, every test pass, but `TNext` widen to `AuthResponse | undefined` and only the compiler
+    see it. And `PluginOAuthFlow` is a **discriminated union** with `oauthAdapter` overloaded on
+    `kind`, because the flat shape flatten the return type — `kiloOAuth` stop being a
+    `DeviceOAuthProvider` and every consumer reading `begin`/`needsDeviceId` lose it.
+    `requests.ts` hold pure builder mirroring `postJson`/`getJson` — same profile, same merge and
+    order, stopping before the send — so ported flow emit the byte its own golden test already pin.
+    Each provider's test file is **unchanged**, which is the proof; mutant against all five (dropped
+    `client_id`, dropped beta header, state check off, kilo's second request unauthenticated, kilo's
+    org read skipped, grok's host check off, kimi's device headers dropped, openai's content type
+    changed) each kill test.
     Nothing above is licence to add a fourth. New provider knowledge in core still go through the
     three outcomes below. The union itself is **gone**: its arms were hand-written for
     exhaustiveness over a closed `ProviderId`, that closed type no longer exist, and the enum

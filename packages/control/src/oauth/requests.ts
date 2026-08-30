@@ -16,8 +16,16 @@ import type { AuthRequest } from "./pluginFlow.ts";
  * ported flow emits the bytes its own test already pins.
  */
 
-/** A usage probe's deadline: nothing on the request path waits for one. */
-export const USAGE_TIMEOUT_MS = 15_000;
+/**
+ * The short deadline, for a call an operator is not sitting behind.
+ *
+ * Named for the property rather than for a caller: a usage probe wants it
+ * because nothing on the request path waits for one, and grok's OIDC discovery
+ * wants the same number for a different reason — a connect flow is waiting, so
+ * a stalled discovery should fail fast rather than hold the operator. Calling it
+ * `USAGE_TIMEOUT_MS` made the second caller read as a mistake.
+ */
+export const SHORT_TIMEOUT_MS = 15_000;
 
 export function postJsonRequest(
   url: string,
@@ -44,6 +52,7 @@ function getRequest(
   profile: ClientProfile,
   authHeaders: readonly HeaderPair[],
   extraHeaders: readonly HeaderPair[],
+  timeoutMs: number = SHORT_TIMEOUT_MS,
 ): AuthRequest {
   return {
     url,
@@ -57,7 +66,7 @@ function getRequest(
       profile.order,
     ),
     body: "",
-    timeoutMs: USAGE_TIMEOUT_MS,
+    timeoutMs,
   };
 }
 
@@ -86,8 +95,14 @@ export function getJsonUnauthenticatedRequest(
   url: string,
   profile: ClientProfile,
   extraHeaders: readonly HeaderPair[] = [],
+  /**
+   * Overridable so a caller that wants this deadline for its **own** reason can
+   * say so, rather than inheriting one named after a different caller. Passing
+   * a longer value than the host's ceiling has no effect; the host clamps.
+   */
+  timeoutMs?: number,
 ): AuthRequest {
-  return getRequest(url, profile, [], extraHeaders);
+  return getRequest(url, profile, [], extraHeaders, timeoutMs);
 }
 
 /**

@@ -195,13 +195,39 @@ supply an OAuth flow for a provider it does not own.
 - Rule 15. The plugin still never holds an `HttpClient`, which is the whole
   reason the inversion was chosen over the two alternatives.
 
+## What porting the built-ins found
+
+The recommendation below was taken: all five built-in flows were moved onto this
+contract. Two things it could not express, neither visible from the fixture that
+stood in for a real provider — that fixture was written to fit the contract, which
+is exactly why it could not disagree with it.
+
+- **Two deadlines, not one.** A token call gets 30s because an operator is
+  waiting on it; a usage probe gets 15s because nothing on the request path waits
+  for one and a slow probe should be abandoned rather than retried. A single host
+  constant would have quadrupled the second silently. `AuthRequest.timeoutMs` is
+  now optional and clamped to the host's maximum: a step may ask for less, never
+  more.
+- **A delegated step must be `async function*`.** A sync generator yielded
+  through from an async one runs correctly — every test passed — but its `TNext`
+  widens to `AuthResponse | undefined`, so each field read off the response
+  becomes possibly-undefined. Only the compiler saw it.
+
+`requests.ts` holds pure builders mirroring `postJson`/`getJson` — same profile,
+same merge and order, stopping before the send — so a ported flow emits the bytes
+its own golden test already pins. One copy rather than five.
+
+Each provider's existing test file is **unchanged**, which is the proof: the
+golden byte pins say the port is faithful rather than merely typechecking. Three
+mutants against the ported Anthropic flow (dropped `client_id`, dropped the beta
+header, state check disabled) each kill tests, so those pins are load-bearing.
+
 ## Risks
 
-- **A second inverted contract is a second thing to get right**, and it arrives —
-  like the codec's optional hooks — with no consumer outside this repository to
-  prove it. The mitigation that worked last time was converting a real provider
-  early: porting one built-in flow onto this contract before the design is
-  called finished would find what Anthropic's conversion found.
+- **A second inverted contract is a second thing to get right.** It arrived —
+  like the codec's optional hooks — with no consumer outside this repository, and
+  the section above is what that cost. Read it before adding a step type: the
+  fixture agreed with the contract on both counts and was wrong on both.
 - **The generator is more rope than a build/parse pair.** It is justified by
   `kilo.exchange` genuinely needing two dependent requests, but it admits loops,
   which is why the yield cap is part of the contract rather than a later

@@ -410,7 +410,12 @@ same inversion the codec uses. You are not handed an HTTP client, so an honest
 flow cannot reach the network by accident, and an operator can read from your
 manifest where it goes. It is not a sandbox — you share the gateway's process
 and could call global `fetch` — which is the same thing the opening section says
-about every capability here. The host applies the timeout, reads the
+about every capability here.
+
+A yielded request may carry `timeoutMs` to ask for **less** time than the host's
+own ceiling; asking for more has no effect. The built-in flows use it to give a
+usage probe a shorter deadline than a token call, because an operator is waiting
+on one and nothing at all is waiting on the other. The host applies the timeout, reads the
 body, and counts the round trips — **capped per step**, so a flow that loops is
 stopped rather than holding an operator's connect open.
 
@@ -422,6 +427,17 @@ The helpers exist because you cannot do them safely yourself:
 | `keepPolling(reason)` | A device poll's "not approved yet" carries a private marker you have no way to set. Without it you can only fail, and the operator is told they were refused while still looking at the approval screen. |
 | `pkce()`, `randomState()` | So you need no crypto, and your `start` is testable. |
 | `now()` | So an expiry check can be driven in a test. |
+
+Two consequences worth knowing before you write a step:
+
+- **Throw through `fail()`, not `new Error(…)`.** An arbitrary throw is reported
+  as "your-provider oauth exchange threw" and **the message is discarded**, since
+  the host cannot tell your text apart from an upstream body. A bare `Error`
+  whose sentence you want an operator to read will lose it.
+- **A failed request is raised at the `yield`**, so a `try`/`catch` around one
+  works. That is what lets a flow tolerate a request whose failure is not the
+  flow's failure — a best-effort secondary read after the token is already
+  earned. Not catching is unchanged: the failure propagates.
 
 The host stores what you return, encrypted. You never see the store.
 
