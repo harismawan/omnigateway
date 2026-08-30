@@ -25,8 +25,17 @@ does not contain hostile code, which can `import` from `@omni/store` and read
 
 There is **one deliberate exception** to the list of things the context never
 carries, and it is stated here rather than buried: a plugin supplying a provider
-receives the decrypted credential for **its own** provider, because a codec that
-cannot authenticate cannot build a request. See §6.
+receives the decrypted credential for **its own** provider. A codec that cannot
+authenticate cannot build a request, and an `oauth` flow reaches the same class
+of secret by a second door — `refresh` is handed the refresh token, `usage` the
+access token. See §6 and §6.1.
+
+Three things bound it. The router only produces candidates for your own provider
+id and the refresher only hands a credential to its own provider's flow, so you
+see your provider's secrets and no other. Neither your codec nor your flow holds
+the HTTP client or the store, so neither can send a secret anywhere the host did
+not ask it to. And every URL either one names is checked against your manifest's
+`origins`, so where those secrets may travel is readable without running you.
 
 Install plugins you wrote or audited. If you are packaging one for other people,
 say the same thing in your own README.
@@ -105,9 +114,11 @@ promise for a contract that has not settled.
 
 `capabilities` is the whole list of what you get, with **one exception named
 below**. Anything you did not declare is absent from the context, so reaching for
-it is a type error rather than a runtime surprise. `origins` is required with
-`net:outbound` and forbidden without it. `channels` is the push socket, covered
-in §4.
+it is a type error rather than a runtime surprise. `origins` is required by
+`net:outbound` **and by `provider`**, and forbidden without one of them —
+`net:outbound` bounds the `fetch` you hold, `provider` bounds the requests the
+host makes on your behalf, and both are the same promise to an operator reading
+your manifest. `channels` is the push socket, covered in §4.
 
 The exception is `provider`, which is a permission rather than a context member.
 Declaring it lets your plugin supply a provider through the `providers` field on
@@ -360,7 +371,7 @@ two ways: routing only produces candidates for your own provider id, so you see
 your provider's secrets and no other; and the codec never holds the HTTP client
 or the store, so it cannot send them anywhere the host did not ask for.
 
-## Authorizing it
+### 6.1 Authorizing it
 
 An API key is a complete way in and needs nothing more. If your provider uses
 OAuth, declare a flow beside the codec:
@@ -458,9 +469,12 @@ Some rules the host enforces, so you find out at load rather than in production:
 - Declaring `providers` without the `provider` capability is a load failure. The
   manifest is the audit trail.
 
-Your account is added with `omni credentials add-key <your-plugin-id>`. There is
-no `connect` flow for a plugin provider: `connect` covers OAuth flows the
-built-ins declare, and a plugin declares none.
+An API-key account is added with `omni credentials add-key <your-plugin-id>`.
+
+If you declared an `oauth` flow — §6.1 above — `omni connect <your-plugin-id>`
+reaches it too, on the same terms a built-in gets. The CLI never loads plugins,
+so it reads your declaration through the same path `omni plugin list` uses; it
+does not run your `setup`.
 
 ## 7. The UI half
 

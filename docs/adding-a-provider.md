@@ -84,6 +84,30 @@ shape and why the HTTP client is built on `node:http`.
    when a response omits one. Endpoints read from OIDC discovery must be validated as HTTPS on the
    provider's own domain before use, and a discovery failure is `UPSTREAM`, never `AUTH` — `AUTH`
    disables the credential.
+   **Write a `PluginOAuthFlow`, not an `OAuthProvider`.** Each step is an `async function*` that
+   **yields a described request** and reads the response the host hands back; `oauthAdapter` turns it
+   into the `OAuthProvider` every consumer already takes. All five built-in flows are written this
+   way — `export const grokOAuth: OAuthProvider = oauthAdapter("grok", grokFlow, { trusted: true })`
+   — which is the same argument step 7 makes for codecs: a plugin-supplied flow takes exactly the
+   shape a built-in does, so no rule holds for one and not the other.
+   Build requests with `postJsonRequest`/`getJsonRequest` from `requests.ts`, which apply the
+   profile's header merge and order. Do not send directly with `deps.http`: that bypasses the yield
+   cap, the origin check and the return-shape validation the adapter exists to impose. The functions
+   that used to do it — `postJson`, `getJson`, `getJsonUnauthenticated` — were deleted once the last
+   flow stopped calling them.
+   Four host helpers arrive on every step, and each exists because the flow cannot do it safely:
+   `fail` builds the error (never `new GatewayError`, whose identity does not survive a plugin's
+   bundle), `keepPolling` is the device-poll "not yet" that carries a marker you cannot set,
+   and `pkce`/`randomState` mean no crypto in the flow. `now()` is the clock, so an expiry check is
+   testable.
+   Two traps the built-in ports paid for. A helper delegated with `yield*` must be `async function*`
+   — a sync generator runs correctly and every test passes, but its `TNext` widens and each field read
+   off the response becomes possibly-undefined, which only the compiler sees. And a step may carry
+   `timeoutMs` to ask for **less** than the host's 30s ceiling: a usage probe uses 15s, because
+   nothing on the request path waits for one.
+   `trusted: true` is for in-repo flows only. It marks their messages `gatewayAuthored`, which is what
+   lets a refresh failure's reason reach an operator's log — `reasonField` withholds a message that
+   names a provider and is not gateway-authored. A plugin's text never gets it.
 7. Where a provider serves OAuth and API-key traffic from different hosts, or from different paths
    on one host as `kilo` does, select the URL by credential type where the request is built and
    assert the split in a test. Crossing them surfaces as a billing or entitlement error, which reads

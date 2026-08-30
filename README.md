@@ -182,6 +182,9 @@ Connect an account. The CLI prints a URL to open, and waits:
 omni connect anthropic     # or: openai, kimi, kilo, grok
 ```
 
+An installed [plugin](#plugins) that supplies its own provider is connected the
+same way, under its plugin id.
+
 Every provider also takes a plain API key, if that is what you hold rather than
 a subscription:
 
@@ -741,13 +744,26 @@ and whether the gateway would load it:
 
 ```
 ID       NAME               VERSION  API  SDK     CAPABILITIES                    STATE
-pokemon  Pokémon Companion  1.0.0    1    ^1.0.0  storage,files,net:outbound,…    ok
+pokemon  Pokémon Companion  1.0.0    2    ^1.0.0  storage,files,net:outbound,…    ok
 ```
 
+The API column is the plugin API generation, and it is matched **exactly** — a
+plugin built against an older one is listed with that as its reason rather than
+loaded.
+
 The capabilities a manifest may declare are `storage`, `files`, `net:outbound`,
-`events:request`, `events:limit` and `channels` — the last being namespaced
-topics on the gateway's push socket, which a plugin owns without ever touching a
-connection. Anything a plugin did not declare is absent from what it is handed.
+`events:request`, `events:limit`, `channels` and `provider`. `channels` is
+namespaced topics on the gateway's push socket, which a plugin owns without ever
+touching a connection. `provider` lets a plugin supply a provider of its own —
+the models, the wire format, and optionally the OAuth flow, so
+`omni connect <plugin-id>` works for it exactly as it does for a built-in.
+Anything a plugin did not declare is absent from what it is handed.
+
+`net:outbound` and `provider` each require the manifest to declare `origins`,
+and both are enforced: a plugin's own `fetch` and the requests the gateway makes
+on a provider plugin's behalf are both refused outside them. That is what makes
+`omni plugin verify <id>` worth reading before you install one — where your
+prompts can be sent is in the manifest, not only in the code.
 
 A plugin that would *not* load is listed with the reason rather than hidden,
 because a plugin missing from the console is exactly what you are trying to
