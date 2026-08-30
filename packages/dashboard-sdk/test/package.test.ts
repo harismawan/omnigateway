@@ -93,6 +93,13 @@ const RUNTIME_REACT = new Set(["live.ts", "channel.ts"]);
  * Reported rather than silently skipped: a form this cannot classify is a form
  * whose safety nobody has established.
  */
+/** Every publishable source under `src`, at any depth, as paths relative to it. */
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir, { recursive: true })
+    .map(String)
+    .filter((file) => /\.tsx?$/.test(file));
+}
+
 function importsOf(source: string): { specifier: string; typeOnly: boolean }[] {
   const found: { specifier: string; typeOnly: boolean }[] = [];
 
@@ -129,7 +136,11 @@ test("only the named modules import a host-owned package for their value", () =>
   // looked straight past a second module holding a second `createContext` — the
   // exact duplicate this package is federated to prevent — and `files: ["src"]`
   // would have published it.
-  const sources = readdirSync(dir).filter((file) => /\.tsx?$/.test(file));
+  //
+  // Recursive for the same reason it looks at `.tsx`: `files: ["src"]` publishes
+  // subdirectories, so a flat scan is a rule that holds only for as long as
+  // nobody adds a folder.
+  const sources = sourceFiles(dir);
   expect(sources.length).toBeGreaterThan(0);
 
   const offenders: string[] = [];
@@ -161,7 +172,8 @@ test("exactly one module in this package creates a context", () => {
   // logged. A duplicated *hook* fails loudly by comparison, which is why
   // `channel.ts` is allowed React and is not allowed this.
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
-  const sources = readdirSync(dir).filter((file) => /\.tsx?$/.test(file));
+  const sources = sourceFiles(dir);
+  expect(sources.length).toBeGreaterThan(0);
   const creators = sources.filter((file) =>
     /\bcreateContext\s*[(<]/.test(readFileSync(join(dir, file), "utf8")),
   );

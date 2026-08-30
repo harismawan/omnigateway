@@ -71,6 +71,19 @@ function mountGate(initial: boolean) {
   };
 }
 
+/**
+ * What a topic's cadence would tell react-query, rendered as text.
+ *
+ * A separate component from `Reader` on purpose: the interesting case is the
+ * one where the panel holding the channel and the query naming the topic are
+ * not the same component — which is exactly the arrangement `PluginChannel`
+ * exposing its composed `topic` is there to enable.
+ */
+function CadenceProbe({ topic }: { topic: string }) {
+  const { cadence } = useLive();
+  return <span data-testid="cadence">{String(cadence(10_000, topic))}</span>;
+}
+
 function Sender({ topic }: { topic: string }) {
   const { channels } = useLive();
   const [result, setResult] = useState("untried");
@@ -149,13 +162,61 @@ test("a topic first held after the socket opened is subscribed there and then", 
   expect(read("b")).toBe(`open|frame:{"n":9}`);
 });
 
+test("releasing a topic stops it counting as pushed, and its own ack does not put it back", () => {
+  // The silent-staleness case this repository's socket rules are written
+  // against: `cadence(ms, topic) === false` means "stop polling, this is
+  // pushed". Once the last holder is gone the topic is not subscribed and no
+  // frame can arrive on it, so a component still naming it must go back to its
+  // interval — otherwise it waits forever on a push that is not coming, and
+  // that reads exactly like a quiet gateway.
+  //
+  // The second half is the part that is not obvious: the gateway acks an
+  // unsubscribe on the same topic, so clearing `acked` at release alone is
+  // undone one frame later by the ack branch.
+  const { stub, timer, client } = connected();
+  const holder = mountGate(true);
+  renderWithProviders(
+    <>
+      <holder.Gate>
+        <Reader topic={TOPIC} id="a" />
+      </holder.Gate>
+      <CadenceProbe topic={TOPIC} />
+    </>,
+    { client, stream: { enabled: true, timer: timer.schedule } },
+  );
+
+  act(() => {
+    stub.last().open();
+    stub.last().emit({ type: "ack", topic: TOPIC });
+  });
+  expect(read("cadence")).toBe("false");
+
+  act(() => {
+    holder.set(false);
+  });
+  expect(read("cadence")).toBe("10000");
+
+  // What the gateway actually answers an unsubscribe with.
+  act(() => {
+    stub.last().emit({ type: "ack", topic: TOPIC });
+  });
+  expect(read("cadence")).toBe("10000");
+});
+
 test("a second holder does not subscribe again, and the first to leave does not unsubscribe", () => {
   // The refcount, from both directions. One holder passes an off-by-one either
   // way: with a single reader, "subscribe once" and "subscribe per holder" are
   // the same frame count, and "release on last" and "release on any" are the
   // same unsubscribe.
+  //
+  // The second holder mounts *after* the socket is open, and that is the whole
+  // reason this test bites. With both mounted up front neither reaches `hold`'s
+  // own send at all — `subscribeAll` writes one frame per key of the held map
+  // however many holders each key has — so the count below would be measuring
+  // `Map` semantics rather than the guard, and dropping `holders === 1`
+  // survived the entire suite while it did.
   const { stub, timer, client } = connected();
-  const second = mountGate(true);
+  const second = mountGate(false);
   renderWithProviders(
     <>
       <Reader topic={TOPIC} id="a" />
@@ -169,6 +230,9 @@ test("a second holder does not subscribe again, and the first to leave does not 
   act(() => {
     stub.last().open();
     stub.last().emit({ type: "ack", topic: TOPIC });
+  });
+  act(() => {
+    second.set(true);
   });
   expect(framesOfType(stub.last().frames(), "subscribe").filter((t) => t === TOPIC)).toHaveLength(
     1,

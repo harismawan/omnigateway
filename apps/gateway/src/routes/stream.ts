@@ -203,12 +203,19 @@ export function streamRoutes(deps: StreamDeps) {
           // with the tab still open would leave the plugin holding a session
           // nothing would ever tell it to drop.
           //
-          // Both halves of the guard are load-bearing. `has` first, because
-          // firing for a topic this connection never held would hand the plugin
-          // an `onClose` naming a connection it has no record of. And *before*
-          // `unsubscribe`, which is what detaches the topic — the same
-          // read-before-remove order the close handler below depends on, with
-          // the same silent failure when it is reversed.
+          // The guard answers a real question: firing for a topic this
+          // connection never held would hand the plugin an `onClose` naming a
+          // connection it has no record of.
+          //
+          // The order matters *only through that guard*, and the distinction is
+          // worth spelling out because `closeOne` in `stream/registry.ts`
+          // carries a comment arguing the opposite about code that looks the
+          // same. There the topic list is a snapshot already taken, so swapping
+          // the two lines changes nothing. Here `registry.has` reads live state
+          // and `unsubscribe` is what clears it — so reversed, the guard refuses
+          // and every handler goes unfired. Drop the guard and the order stops
+          // mattering, which is the tell that it is the guard and not the
+          // announcement that depends on it.
           if (topicClass(frame.topic) === "plugin" && deps.registry.has(id, frame.topic)) {
             deps.channels.closed(id, [frame.topic]);
           }

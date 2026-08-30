@@ -226,6 +226,59 @@ test("the transport's own refusal is reported rather than swallowed", () => {
   expect(read("send")).toBe("false");
 });
 
+/**
+ * A panel whose handler reads component state **directly**, rather than through
+ * a functional updater.
+ *
+ * This is the shape the ref in `usePluginChannel` exists for, and the shape
+ * every other fixture in this file is not: `setFrames((previous) => …)` is
+ * immune to a stale closure, so a hook that captured its first `onFrame`
+ * forever passes against it. Deleting the ref outright survived the whole
+ * dashboard suite while that was the only shape under test.
+ */
+function StatefulPanel() {
+  const [label, setLabel] = useState("first");
+  const [seen, setSeen] = useState("");
+  usePluginChannel(PLUGIN, NAME, (payload) => {
+    setSeen(`${label}:${String(payload)}`);
+  });
+
+  return (
+    <div>
+      <span data-testid="seen">{seen}</span>
+      <button type="button" data-testid="relabel" onClick={() => setLabel("second")}>
+        relabel
+      </button>
+    </div>
+  );
+}
+
+test("a frame is judged against the panel's current state, not its first render's", () => {
+  const h = harness();
+  render(
+    <LiveProvider channels={h.transport}>
+      <StatefulPanel />
+    </LiveProvider>,
+  );
+
+  act(() => {
+    h.emit(TOPIC, { kind: "open" });
+    h.emit(TOPIC, { kind: "frame", payload: "a" });
+  });
+  expect(read("seen")).toBe("first:a");
+
+  // A re-render with new state, and no resubscribe: the effect depends on the
+  // transport and the topic, neither of which moved.
+  act(() => {
+    screen.getByTestId("relabel").click();
+  });
+  act(() => {
+    h.emit(TOPIC, { kind: "frame", payload: "b" });
+  });
+
+  expect(read("seen")).toBe("second:b");
+});
+
 test("with no transport above it the panel is idle and sends nothing", () => {
   // A panel rendered by its own harness, or by a console whose socket never
   // upgraded. Idle rather than refused: nothing has said no, there is simply

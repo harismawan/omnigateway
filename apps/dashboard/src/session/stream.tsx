@@ -73,6 +73,12 @@ const BACKOFF_BASE_MS = 500;
  */
 const BACKOFF_CAP_MS = 30_000;
 
+/**
+ * The topics this client subscribes to at open and never gives up, as a set for
+ * the per-frame membership test in `wants`.
+ */
+const TABLE_TOPICS: ReadonlySet<string> = new Set([...RES_TOPICS, ...STREAM_TOPICS]);
+
 /** How many drops inside {@link DROP_WINDOW_MS} mean the socket is not worth trusting. */
 const DROP_LIMIT = 3;
 const DROP_WINDOW_MS = 60_000;
@@ -234,6 +240,15 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
    */
   const held = new Map<string, number>();
 
+  /**
+   * Whether this client currently wants a topic at all.
+   *
+   * The compile-time table plus whatever is held right now. Asked of an
+   * incoming `ack`, because an ack is not only the answer to a subscribe: the
+   * gateway answers an unsubscribe with one too, on the same topic.
+   */
+  const wants = (topic: string): boolean => held.has(topic) || TABLE_TOPICS.has(topic);
+
   let drops: number[] = [];
   let socket: WebSocket | null = null;
   let running = false;
@@ -324,7 +339,13 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
       // Acked, not sent: a topic is only pushed once the server says it holds
       // it. `stream:console` on an installation whose log capture is `none` is
       // answered `error` instead, and that board must keep polling.
-      if (topic !== undefined) {
+      if (topic !== undefined && wants(topic)) {
+        // Gated on still wanting the topic, because the gateway acks an
+        // *unsubscribe* on the same topic with the same frame. Ungated, the
+        // last holder leaving would clear `acked` and the ack for its own
+        // departure would put it straight back — leaving `pushed(topic)` true
+        // for a topic nothing is subscribed to, so `cadence(ms, topic)` tells a
+        // query to stop polling in favour of a push that cannot arrive.
         acked.add(topic);
         deliver(topic, { kind: "open" });
         publish();
@@ -494,7 +515,15 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
       // gone. A status delivered only as an event would leave that panel
       // reading `idle` forever, with frames arriving underneath it.
       if (acked.has(topic)) listener({ kind: "open" });
+      // Called once by React, which calls an effect's cleanup exactly once — but
+      // `ChannelTransport.subscribe` is exported to plugin authors, who call it
+      // by hand. A second call would drop the count to zero again and send an
+      // `unsubscribe` out from under whoever holds the topic now, firing the
+      // plugin's `onClose` for a session that is still live.
+      let released = false;
       return () => {
+        if (released) return;
+        released = true;
         release();
         const remaining = (held.get(topic) ?? 1) - 1;
         if (remaining > 0) {
@@ -502,6 +531,10 @@ function createStreamClient(deps: StreamClientDeps): StreamClient {
           return;
         }
         held.delete(topic);
+        // Cleared here as well as gated at the ack, and both are needed: this
+        // makes `cadence` flip back to its interval on the spot rather than at
+        // whatever later point the socket happens to drop.
+        if (acked.delete(topic)) publish();
         // Told rather than left implicit: the gateway fires the plugin's
         // `onClose` for this connection off exactly this frame, so a panel that
         // unmounted without one leaves the plugin holding a session it will
@@ -594,12 +627,21 @@ export function StreamProvider({
     subscribe: (topic, listener) =>
       client.hold(topic, (message) => {
         // `gap` is the one arm of `TopicMessage` the SDK does not carry, and
-        // dropping it here is sound rather than convenient: a gap is reported
+        // omitting it is sound rather than convenient: a gap is reported
         // against a `seq`, plugin frames carry none, and there is no ring
         // behind a plugin topic for a subscriber to fall off the back of. A
-        // panel cannot reach this, so the alternative — exporting the arm — is
-        // a case every plugin author writes and none runs.
-        if (message.kind === "gap") return;
+        // panel cannot reach this, so exporting the arm would be a case every
+        // plugin author writes and none runs.
+        //
+        // Reported as `closed` rather than dropped, all the same. If a plugin
+        // topic ever does gain a ring, a silent `return` here is exactly the
+        // skipped hole the `stream:*` class exists to make visible — where
+        // `closed` tells the panel to stop trusting what it has, which is the
+        // safe reading of a message this build should never see.
+        if (message.kind === "gap") {
+          listener({ kind: "closed" });
+          return;
+        }
         listener(message);
       }),
     send: client.publish,

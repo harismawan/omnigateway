@@ -110,8 +110,15 @@ focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typec
     moved LIVE switch there: which control pause polling is a rule too. `usePluginChannel` join it
     for a third: panel hold `plugin:<id>:<name>` on console's own socket, and topic that is not in
     any compile-time table is exactly the case console's `RES_TOPICS`/`STREAM_TOPICS` cannot serve.
-    Hook compose topic from `pluginId` it is handed, never from string panel spell — same rule
-    `ctx.channels.open` follow on server half. It ride `LiveContextValue.channels`, **not** a second
+    Hook compose topic from `pluginId` it is handed. That is **ergonomics, not boundary**, and it
+    resemble the server-side rule closely enough to be read as one: there host write prefix from
+    validated manifest and plugin cannot reach another's namespace, here a panel spelling another
+    plugin's topic by hand is **authorised** — `authorised` grant admin every *opened* plugin topic
+    and ask nothing else. Not a hole hook could close: panel bundle already run in console's page
+    with operator's cookie and can open own socket, which is rule 15's guardrail-not-sandbox one
+    step further out. Say it that way; earlier version of this line claimed host would refuse, and a
+    contributor who believe it treat cross-plugin subscribe as impossible when it is one line.
+    It ride `LiveContextValue.channels`, **not** a second
     SDK context and **not** `LiveConnection`: that object rebuilt per transition to defeat
     `useSyncExternalStore` identity bail-out, so subscribe function on it re-subscribe every reader
     on every drop. `channel.ts` therefore import React and hold no `createContext`, and

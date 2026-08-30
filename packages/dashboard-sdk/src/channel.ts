@@ -18,10 +18,21 @@ export type PluginChannel = {
   /**
    * The wire topic, composed here and exposed for `cadence(ms, topic)`.
    *
-   * A panel that spelled it itself could name another plugin's, which the host
-   * would refuse in a way that reads as a bug in the panel doing the asking.
-   * The plugin writes the tail and never the head, exactly as it does when it
-   * opens the channel on the server side.
+   * Composing it here is ergonomics and namespacing hygiene, **not** a boundary,
+   * and the difference is worth stating because the server-side rule it
+   * resembles *is* one. There, the host writes `plugin:<id>:` from the
+   * validated manifest and a plugin cannot reach another's namespace. Here, a
+   * panel that spelled the topic itself and named another plugin's channel
+   * would be *authorised*: `authorised` grants an admin principal every opened
+   * plugin topic, checking only that some plugin opened it.
+   *
+   * That is not a hole this hook could close. A panel bundle already runs in
+   * the console's page with the operator's session cookie and could open its
+   * own socket — rule 15 in `CLAUDE.md` says plainly that the capability system
+   * is a guardrail rather than a sandbox, and the browser half is not even a
+   * guardrail. What composing the topic buys is that a panel cannot reach
+   * another plugin's channel *by accident*, and that a plugin renamed on disk
+   * keeps working.
    */
   topic: string;
   /** Publishes to the plugin. `false` when the channel is not open. */

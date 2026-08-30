@@ -123,9 +123,15 @@ the socket opens with the shell and a panel mounts on navigation.
 
 `onStream` stays as it is, for `stream:console`, whose subscription is still
 the compile-time one. The three new arms are delivered by topic, so a
-`stream:*` reader sees them too: `ConsoleBoard` acts on `frame` and `gap` and
-ignores the rest, which is what keeps this additive for the one existing
-caller.
+`stream:*` reader sees them too — and this paragraph originally claimed
+`ConsoleBoard` "acts on `frame` and `gap` and ignores the rest", which was
+false. Its handler treated anything that was not a readable frame as a hole and
+dropped the accumulated tail, so every status arm cleared the terminal. That
+was unobservable, because each reachable `open` coincides with either an empty
+tail or an `invalidateEveryTopic` — but it was unobservable by luck, and the
+next arm added to `TopicMessage` would land in the same catch-all. The board now
+returns on any arm that is neither `frame` nor `gap`, which is what makes the
+sentence true.
 
 `pushed` needs no change. `acked` is populated by the same ack, so
 `cadence(ms, topic)` starts returning `false` for a held plugin topic on its
