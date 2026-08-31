@@ -47,6 +47,41 @@ sites; the carry keeps it in one.
 and assert the parsed messages are identical to the unsplit feed. A fix without
 the carry passes every whole-chunk test and corrupts exactly the boundary case.
 
+> **Implemented, and the fix is only half of what this finding claimed.**
+> Removing the `replaceAll` removed one of *two* superlinear terms. The
+> separator search — `buf.indexOf("\n\n")` from index 0 — still scans the whole
+> accumulated buffer on every chunk, and because `indexOf` forces a rope
+> flatten it dominates what is left. Measured on a single record delivered in
+> 1 KB chunks, no separator present:
+>
+> | chunks | before | after | scan newest segment only |
+> |---|---|---|---|
+> | 1,000 | 82 ms | 53 ms | 0.9 ms |
+> | 4,000 | 1,286 ms | 1,087 ms | 2.9 ms |
+> | 8,000 | 6,393 ms | 4,969 ms | 3.9 ms |
+> | 16,000 | — | 19,859 ms | 8.9 ms |
+>
+> Still 4× per doubling: a ~22% constant-factor win on an unchanged curve. A
+> control that appends and never scans runs in 0.1 ms at every size, which puts
+> the whole remaining cost in `indexOf`. Resuming the search from the join point
+> does **not** fix it — the flatten still happens. Only holding pending segments
+> in an array and scanning the newest segment plus a one-character overlap is
+> actually linear.
+>
+> Recorded rather than quietly fixed because the original text, the commit
+> message and the PR all present this as *the* fix for the superlinear path, and
+> a reader who believes that will not look here again. The remaining work is a
+> separate change.
+>
+> One behaviour change fell out of it, unmentioned at the time. `replaceAll` is
+> not idempotent — `R("\r\r\n") = "\r\n"` — so running it once per chunk over
+> the whole buffer collapsed an extra `\r` per pass, which made the *old*
+> parser's output depend on where chunks happened to split. The new code applies
+> it exactly once per byte and is chunk-independent, matching what the old code
+> produced for an unsplit stream. Every divergence requires a literal `\r\r`;
+> there are none without one. Arguably a fix, but it was neither intended nor
+> tested.
+
 ### P2 — every successful request writes a health row that usually says nothing
 
 > **Superseded at implementation time. Do not implement as written below.** Two
@@ -228,5 +263,9 @@ orders of magnitude.
   timing assertions in CI are flake generators. The measurements that
   motivated the ordering live in this document.
 - **No further pragma tuning.** `synchronous = NORMAL` is taken and documented
-  in `ARCHITECTURE.md#storage`; `OFF` is not, because it gives up the
-  application- and OS-crash safety NORMAL keeps for no measured gain over it.
+  in `ARCHITECTURE.md#storage`. `OFF` is not: what it gives up over NORMAL is
+  **integrity** — SQLite says the database "might become corrupted if the
+  operating system crashes" — for no measured gain, since NORMAL already
+  removes the per-commit fsync. Both settings keep durability across an
+  application crash, so that is not the distinction; an earlier version of this
+  line said it was.

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/sqlite/db.ts";
@@ -35,4 +35,39 @@ test("opens with WAL, synchronous NORMAL, and foreign keys on", () => {
     db.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/**
+ * Every write-mode connection is opened by `openDb`, checked in the source.
+ *
+ * `journal_mode` persists in the database file but `synchronous` does not, so a
+ * handle opened past `openDb` would still report WAL — read back off disk — and
+ * silently revert to the FULL default. The test above calls `openDb` directly
+ * and would not notice; `reopen()` after a database swap builds a fresh handle,
+ * which is exactly where such a connection would appear.
+ *
+ * Structural rather than behavioural because `synchronous` is per-connection
+ * and the `Store` surface exposes no way to read a pragma back through it. Same
+ * shape as `swap.test.ts`, which reads the forwarder's source for the same kind
+ * of reason: the property is about the code, and no call proves it.
+ */
+test("opens every writable connection through openDb", () => {
+  const storeSrc = readFileSync(new URL("../src/sqlite/store.ts", import.meta.url), "utf8");
+  // `reopen()` calls `open()`, so pinning `open` covers the swap path too.
+  expect(storeSrc).toContain("const db = openDb(opts.path);");
+
+  const sources = ["../src/sqlite/db.ts", "../src/sqlite/store.ts", "../src/sqlite/maintenance.ts"];
+  const openers: string[] = [];
+  for (const rel of sources) {
+    const text = readFileSync(new URL(rel, import.meta.url), "utf8");
+    for (const line of text.split("\n")) {
+      if (line.includes("new Database(")) openers.push(`${rel}: ${line.trim()}`);
+    }
+  }
+
+  // Two, and only one of them can write. A third — or a second writable one —
+  // means a connection that never took the pragmas above.
+  expect(openers).toHaveLength(2);
+  expect(openers.filter((line) => line.includes("readonly: true"))).toHaveLength(1);
+  expect(openers.filter((line) => line.includes("create: true"))).toHaveLength(1);
 });
