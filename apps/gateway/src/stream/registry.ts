@@ -274,6 +274,31 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
     }
   };
 
+  /**
+   * Serializes a frame, or answers `null` for one that cannot be.
+   *
+   * The `try` is not defensive padding. Serialization used to happen inside
+   * `flush`, whose `catch` swallowed it; moving it to the publish sites moved
+   * it out from behind that guard, and the payload of a `plugin:*` frame is
+   * plugin-authored `unknown` — a circular object or a `BigInt` reaches here
+   * unchecked. `PluginChannel.send` is documented as "a connection that is gone
+   * is a no-op, never an error", and a plugin calling it from its own timer
+   * rather than from inside `onMessage` would otherwise take the gateway down
+   * with an uncaught throw, which rule 15 forbids a plugin from being able to
+   * do. `ring.ts` already tolerates exactly this input for the same reason.
+   *
+   * Dropped rather than reported: a frame that cannot be serialized cannot go
+   * on the wire, and the sender is the one able to say anything useful about
+   * why. That matches what the `flush` catch did before.
+   */
+  const encode = (frame: ServerFrame): string | null => {
+    try {
+      return JSON.stringify(frame);
+    } catch {
+      return null;
+    }
+  };
+
   const deliver = (connection: Connection, frame: string): void => {
     if (connection.queue.length >= capacity) {
       // Oldest first. On a transport whose whole point is currency, the frame
@@ -476,7 +501,8 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
       if (subscribers === undefined) return;
       // Once, not once per subscriber. This is the only fan-out in the module;
       // everything else below reaches exactly one connection.
-      const payload = JSON.stringify(frame);
+      const payload = encode(frame);
+      if (payload === null) return;
       for (const id of subscribers) {
         const connection = connections.get(id);
         if (connection !== undefined) deliver(connection, payload);
@@ -485,7 +511,9 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
 
     sendTo(id, frame) {
       const connection = connections.get(id);
-      if (connection !== undefined) deliver(connection, JSON.stringify(frame));
+      if (connection === undefined) return;
+      const payload = encode(frame);
+      if (payload !== null) deliver(connection, payload);
     },
 
     closeAll(code, reason) {

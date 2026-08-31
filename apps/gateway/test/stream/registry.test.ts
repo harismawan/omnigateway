@@ -217,6 +217,44 @@ test("does not re-serialize a frame held at the queue head by backpressure", () 
   h.registry.stop();
 });
 
+/**
+ * A frame that cannot be serialized is dropped, never thrown.
+ *
+ * `plugin:*` payloads are plugin-authored `unknown`, and `PluginChannel.send`
+ * is documented as "a connection that is gone is a no-op, never an error" — so
+ * a plugin handing over a circular object must not be able to throw out of the
+ * host, least of all from a timer of its own where nothing is there to catch
+ * it. Serialization used to sit inside `flush`'s `catch`; the fan-out fix moved
+ * it out from behind that guard, and this is what holds the contract in place.
+ */
+test("drops an unserializable frame instead of throwing out of publish", () => {
+  const h = harness();
+  const a = socket();
+  const b = socket();
+  h.registry.add("a", a, credential());
+  h.registry.add("b", b, credential());
+  h.registry.subscribe("a", "plugin:demo:updates");
+  h.registry.subscribe("b", "plugin:demo:updates");
+
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  const frame = {
+    type: "event",
+    topic: "plugin:demo:updates",
+    payload: circular,
+  } as unknown as ServerFrame;
+
+  expect(() => h.registry.publish("plugin:demo:updates", frame)).not.toThrow();
+  expect(() => h.registry.sendTo("a", frame)).not.toThrow();
+  expect(a.sent).toEqual([]);
+  expect(b.sent).toEqual([]);
+
+  // And the connection is still usable: a bad frame costs itself, not the socket.
+  h.registry.publish("plugin:demo:updates", event(1));
+  expect(a.sent).toHaveLength(1);
+  h.registry.stop();
+});
+
 test("unsubscribe removes only that topic's index entry", () => {
   const h = harness();
   const a = socket();
