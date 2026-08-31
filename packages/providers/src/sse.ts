@@ -21,15 +21,15 @@ const HOLDBACK = 2;
  * absent `/v1/*` request-body ceiling, on the response side, and it is the last
  * open item of `docs/2026-08-08-engineering-audit.md:350-352`.
  *
- * Twenty-five MiB, an operator's chosen headroom rather than a figure the
- * measurements imply. What the measurements say: twenty-five captured
- * production responses ran 3,035–26,117 characters *whole*, carrying 45–270
- * line breaks, so individual records are on the order of 100–250 characters.
- * This sits roughly a hundred thousand times above the largest record observed,
- * a thousand times the largest whole response, and fifty times
- * `MAX_ARTIFACT_BYTES`. Generous on purpose: the cost of being wrong low is a
- * refused request on legitimate traffic, and the cost of being wrong high is
- * bounded memory that is merely larger.
+ * Ten MiB, an operator's chosen headroom rather than a figure the measurements
+ * imply. What the measurements say: twenty-five captured production responses
+ * ran 3,035–26,117 characters *whole*, carrying 45–270 line breaks, so
+ * individual records are on the order of 100–250 characters. This sits roughly
+ * forty thousand times above the largest record observed, four hundred times
+ * the largest whole response, and twenty times `MAX_ARTIFACT_BYTES`. Generous
+ * on purpose: the cost of being wrong low is a refused request on legitimate
+ * traffic, and the cost of being wrong high is bounded memory that is merely
+ * larger.
  *
  * **The bound this sets is per concurrent stream.** A gateway holding N streams
  * that are each mid-record can hold up to N × this before any of them is
@@ -41,7 +41,7 @@ const HOLDBACK = 2;
  * must never trip this. Characters rather than bytes because that is what is
  * actually held in memory here; for the JSON these carry the two are close.
  */
-export const MAX_RECORD_CHARS = 25 * 1024 * 1024;
+export const MAX_RECORD_CHARS = 10 * 1024 * 1024;
 
 /**
  * Parses an SSE byte stream into messages.

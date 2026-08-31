@@ -101,7 +101,7 @@ the carry passes every whole-chunk test and corrupts exactly the boundary case.
 > name, not silent corruption.
 >
 > **The audit's third recommendation is now done too.** `MAX_RECORD_CHARS`
-> caps one assembled record at 25 MiB and refuses past it with a retryable
+> caps one assembled record at 10 MiB and refuses past it with a retryable
 > `UPSTREAM` `GatewayError`. Being linear made the parser willing to assemble a
 > record for as long as bytes arrive, which left the remote party deciding how
 > much memory the gateway commits — the response-side twin of the absent
@@ -109,14 +109,14 @@ the carry passes every whole-chunk test and corrupts exactly the boundary case.
 >
 > The figure is chosen headroom, not something the measurements imply. What they
 > say: the same 25 captured responses ran 3,035–26,117 characters whole with
-> 45–270 line breaks, so records are ~100–250 characters — the cap sits ~100,000×
-> above the largest observed one, ~1,000× the largest whole response, and 50×
+> 45–270 line breaks, so records are ~100–250 characters — the cap sits ~40,000×
+> above the largest observed one, ~400× the largest whole response, and 20×
 > `MAX_ARTIFACT_BYTES`. Deliberately generous, because being wrong low refuses
 > legitimate traffic while being wrong high only bounds memory higher. **The
 > bound is per concurrent stream**, so the number to reason about under load is
-> N × 25 MiB for N streams mid-record; it is a ceiling on the pathological case,
-> four orders of magnitude above real records. It shipped at 1 MiB and was raised
-> on the operator's call.
+> N × 10 MiB for N streams mid-record; it is a ceiling on the pathological case,
+> four orders of magnitude above real records. It shipped at 1 MiB, went to
+> 25 MiB, and settled at 10 MiB on the operator's call.
 >
 > It is per **record**, not per stream; the test for that splits each record
 > across two chunks, because with one record per chunk the accumulator is empty
