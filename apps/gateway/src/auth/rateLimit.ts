@@ -700,7 +700,15 @@ export class ApiKeyRateLimiter {
    * reasoning that was wrong before the claim was made synchronous.
    */
   private cleanup(now: number): void {
-    if (now - this.lastCleanup < CLEANUP_INTERVAL_MS) return;
+    // A latch on wall-clock time, and `now` is `Date.now()` — so a backward NTP
+    // step or a VM restore leaves `lastCleanup` in the future and the elapsed
+    // figure negative. Comparing that against the interval alone would read as
+    // "swept recently" and hold the sweep off for the whole of the step. Every
+    // other piece of limiter state self-corrects under a clock step because it
+    // is compared against a window; a latch does not, and turning the sweep
+    // *off* is the one direction this gate must not fail in.
+    const since = now - this.lastCleanup;
+    if (since >= 0 && since < CLEANUP_INTERVAL_MS) return;
     this.lastCleanup = now;
     for (const [keyId, state] of this.keys) {
       state.ring.count(now);

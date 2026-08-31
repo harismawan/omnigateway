@@ -675,3 +675,59 @@ test("sweeps at most once per interval, and again after it", async () => {
   expect(h.limiter.liveKeys()).toBe(1);
   h.store.close();
 });
+
+/**
+ * The gate is a wall-clock latch and the clock is `Date.now()`, so it has to
+ * survive the clock going backwards.
+ *
+ * A backward NTP step or a VM restore leaves `lastCleanup` in the future. The
+ * elapsed figure is then negative, which compares as "swept recently" against
+ * the interval and holds the sweep off for the length of the step. Every other
+ * piece of limiter state is compared against a window and self-corrects; a
+ * latch does not.
+ */
+test("sweeps again after the clock steps backwards", async () => {
+  const h = await sweepHarness();
+  const back = T0 - 3_600_000;
+
+  await h.pass("k_old");
+  // One sweep, which sets the latch to this instant and drops `k_old`.
+  h.at(T0 + 60_001);
+  await h.pass("k_probe");
+  expect(h.limiter.liveKeys()).toBe(1);
+
+  // The clock jumps back an hour, leaving the latch an hour in the future.
+  h.at(back);
+  await h.pass("k_x");
+
+  // `k_x` has now aged out on the stepped-back clock. The key being passed here
+  // is deliberately a different one: a droppable key that is also the key of the
+  // call would be re-created by `state()` in the same call, so the sweep running
+  // and the sweep not running would look identical.
+  h.at(back + 60_001);
+  await h.pass("k_y");
+
+  // `k_probe`'s stamp is in the future relative to this clock, so it is retained
+  // either way; `k_x` is the one whose fate differs. Held off for the length of
+  // the step, this is 3.
+  expect(h.limiter.liveKeys()).toBe(2);
+  h.store.close();
+});
+
+/** The gate fires at exactly the interval, which `<` and `<=` disagree about. */
+test("sweeps when exactly the interval has elapsed", async () => {
+  const h = await sweepHarness();
+  await h.pass("k_a");
+  h.at(T0 + 500);
+  await h.pass("k_b");
+
+  h.at(T0 + 60_001);
+  await h.pass("k_c");
+  expect(h.limiter.liveKeys()).toBe(2);
+
+  // Exactly 1000ms after that sweep, and `k_b` is droppable by now.
+  h.at(T0 + 61_001);
+  await h.pass("k_c");
+  expect(h.limiter.liveKeys()).toBe(1);
+  h.store.close();
+});
