@@ -100,6 +100,19 @@ the carry passes every whole-chunk test and corrupts exactly the boundary case.
 > some provider does emit CRLF is a *visible* hard failure on an unknown event
 > name, not silent corruption.
 >
+> **The audit's third recommendation is now done too.** `MAX_RECORD_CHARS`
+> caps one assembled record at 1 MiB and refuses past it with a retryable
+> `UPSTREAM` `GatewayError`. Being linear made the parser willing to assemble a
+> record for as long as bytes arrive, which left the remote party deciding how
+> much memory the gateway commits — the response-side twin of the absent
+> `/v1/*` body ceiling. Sized off the same 25 captured responses: they ran
+> 3,035–26,117 characters whole with 45–270 line breaks, so records are ~100–250
+> characters and the cap sits ~4,000× above the largest observed one. It is per
+> **record**, not per stream; the test for that splits each record across two
+> chunks, because with one record per chunk the accumulator is empty at every
+> completion and a build that never resets it passes anyway — measured, that
+> version left the mutant alive.
+>
 > One behaviour change, pinned by its own test: a `\r` ending the final line is
 > now a terminator rather than data, so `data: a\r` yields `"a"` where it used
 > to yield `"a\r"`. The SSE grammar terminates a line with CRLF, LF or CR, so

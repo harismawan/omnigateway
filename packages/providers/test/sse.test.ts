@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { parseSse } from "../src/sse.ts";
+import { GatewayError } from "@omni/ir";
+import { MAX_RECORD_CHARS, parseSse, type SseMessage } from "../src/sse.ts";
 
 function streamOf(...chunks: string[]): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -155,4 +156,105 @@ test("handles chunks shorter than the hold-back window", async () => {
     { event: "message", data: "a" },
     { event: "message", data: "b" },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// The incomplete-record cap
+// ---------------------------------------------------------------------------
+
+/**
+ * An upstream that never sends a blank line must not decide how much memory the
+ * gateway commits.
+ *
+ * The parser is linear now, so it will happily assemble a record for as long as
+ * bytes keep arriving — which turns a broken or hostile upstream into an
+ * out-of-memory kill rather than a failed request. Last open item of
+ * `docs/2026-08-08-engineering-audit.md:350-352`.
+ */
+test("refuses a record that grows past the cap without a separator", async () => {
+  // Delivered in pieces, so this is the accumulating path rather than one
+  // oversized chunk.
+  const piece = "x".repeat(64 * 1024);
+  const chunks = ["data: ", ...Array.from({ length: 20 }, () => piece)];
+
+  let thrown: unknown;
+  try {
+    await drain(streamOf(...chunks));
+  } catch (error) {
+    thrown = error;
+  }
+
+  expect(thrown).toBeInstanceOf(GatewayError);
+  const error = thrown as GatewayError;
+  expect(error.code).toBe("UPSTREAM");
+  // Retryable, so a pool with another candidate gets to try one.
+  expect(error.retryable).toBe(true);
+  // Authored here, so an operator sees the reason without turning debug on.
+  expect(error.gatewayAuthored).toBe(true);
+  expect(error.message).toContain(String(MAX_RECORD_CHARS));
+  // Nothing of the body reaches the message.
+  expect(error.message).not.toContain("xxxx");
+});
+
+test("refuses an oversized record that arrives complete in one chunk", async () => {
+  const huge = `data: ${"y".repeat(MAX_RECORD_CHARS + 10)}\n\n`;
+  let thrown: unknown;
+  try {
+    await drain(streamOf(huge));
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toBeInstanceOf(GatewayError);
+  expect((thrown as GatewayError).code).toBe("UPSTREAM");
+});
+
+/**
+ * The cap is per record, and this is the test that says so.
+ *
+ * A counter that is never reset caps the *stream* instead, which breaks every
+ * long conversation — the failure would look like a provider dying partway
+ * through a normal answer, and only on the long ones.
+ */
+test("does not trip on a long stream whose total far exceeds the cap", async () => {
+  const half = "z".repeat(4 * 1024);
+  const body = half + half;
+  const records = 300; // ~2.4 MB total, no single record near the cap
+
+  // **Each record is split across two chunks on purpose.** Written with one
+  // record per chunk, the accumulator is empty every time a record completes,
+  // so a build that never resets it still passes and the test proves nothing.
+  // Measured: that version left the "counter never reset" mutant alive.
+  const chunks: string[] = [];
+  for (let i = 0; i < records; i++) {
+    chunks.push(`data: ${half}`);
+    chunks.push(`${half}\n\n`);
+  }
+
+  const msgs = await drain(streamOf(...chunks));
+  expect(msgs).toHaveLength(records);
+  expect(msgs[0]?.data).toBe(body);
+  expect(msgs[records - 1]?.data).toBe(body);
+});
+
+test("accepts a record just under the cap", async () => {
+  const body = "w".repeat(MAX_RECORD_CHARS - 100);
+  expect(await drain(streamOf(`data: ${body}\n\n`))).toEqual([{ event: "message", data: body }]);
+});
+
+// Records already parsed before the offending one still reached the caller, so
+// a stream that goes wrong late is not retroactively emptied.
+test("yields the records that arrived before the oversized one", async () => {
+  const piece = "q".repeat(64 * 1024);
+  const chunks = ["data: first\n\ndata: ", ...Array.from({ length: 20 }, () => piece)];
+
+  const seen: SseMessage[] = [];
+  let thrown: unknown;
+  try {
+    for await (const msg of parseSse(streamOf(...chunks))) seen.push(msg);
+  } catch (error) {
+    thrown = error;
+  }
+
+  expect(seen).toEqual([{ event: "message", data: "first" }]);
+  expect(thrown).toBeInstanceOf(GatewayError);
 });

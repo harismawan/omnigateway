@@ -1,3 +1,5 @@
+import { GatewayError } from "@omni/ir";
+
 export type SseMessage = { event: string; data: string };
 
 /**
@@ -9,6 +11,31 @@ export type SseMessage = { event: string; data: string };
  * are re-examined once the next chunk supplies the context.
  */
 const HOLDBACK = 2;
+
+/**
+ * The largest single SSE record this will assemble, in characters.
+ *
+ * Without a cap an upstream that never sends a blank line grows the buffer for
+ * as long as it keeps writing, and the party deciding how much memory the
+ * gateway commits is the remote one. That is the same exposure class as the
+ * absent `/v1/*` request-body ceiling, on the response side, and it is the last
+ * open item of `docs/2026-08-08-engineering-audit.md:350-352`.
+ *
+ * One MiB, sized off measured traffic rather than picked round. Twenty-five
+ * captured production responses ran 3,035–26,117 characters *whole*, carrying
+ * 45–270 line breaks, so individual records are on the order of 100–250
+ * characters. This leaves roughly four thousand times the largest record
+ * observed and forty times the largest whole response — margin for the big
+ * non-delta frames that motivated the linear rewrite (a coarsely-flushing
+ * provider, a large tool result, a web-search block) without leaving the bound
+ * to the sender. For scale it is also twice `MAX_ARTIFACT_BYTES`, so a record
+ * this large already exceeds anything body capture would store whole.
+ *
+ * Per **record**, not per stream: a long conversation is many small records and
+ * must never trip this. Characters rather than bytes because that is what is
+ * actually held in memory here; for the JSON these carry the two are close.
+ */
+export const MAX_RECORD_CHARS = 1024 * 1024;
 
 /**
  * Parses an SSE byte stream into messages.
@@ -42,6 +69,13 @@ export async function* parseSse(
   const decoder = new TextDecoder();
   /** Settled segments of the record being accumulated. Joined once, on completion. */
   const pending: string[] = [];
+  /**
+   * Characters held for the record in progress, counted rather than measured.
+   *
+   * `pending.join("").length` would answer the same question by building the
+   * string this cap exists to avoid building.
+   */
+  let pendingChars = 0;
   /** Trailing characters whose meaning the next chunk may still change. */
   let tail = "";
 
@@ -63,9 +97,14 @@ export async function* parseSse(
           nl = probe.indexOf("\n", nl + 1);
           continue;
         }
+        // Checked before the join, so a single oversized record arriving whole
+        // in one chunk is refused rather than assembled and then complained
+        // about. `pendingChars` resets below, so this is per record.
+        refuseIfOversized(pendingChars + (nl - start));
         pending.push(probe.slice(start, nl));
         const record = pending.join("");
         pending.length = 0;
+        pendingChars = 0;
         const msg = parseRecord(record);
         if (msg) yield msg;
         start = end;
@@ -77,8 +116,14 @@ export async function* parseSse(
       // the previous tail in front.
       const keep = Math.min(HOLDBACK, probe.length - start);
       const settled = probe.slice(start, probe.length - keep);
-      if (settled.length > 0) pending.push(settled);
+      if (settled.length > 0) {
+        pending.push(settled);
+        pendingChars += settled.length;
+      }
       tail = probe.slice(probe.length - keep);
+      // The incomplete case, and the one the cap exists for: an upstream that
+      // keeps writing and never sends a blank line.
+      refuseIfOversized(pendingChars + tail.length);
     }
     // A stream that ends without a final blank line still carries a message,
     // and nothing can follow the held tail, so it is ordinary content now.
@@ -87,6 +132,32 @@ export async function* parseSse(
   } finally {
     reader.releaseLock();
   }
+}
+
+/**
+ * Refuses a record past the cap, with a message this repository wrote entirely.
+ *
+ * `UPSTREAM` rather than `INTERNAL`: the gateway is working and the response is
+ * not one, which also makes it retryable, so a pool with another candidate gets
+ * to try one. Nothing here can be salvaged by continuing — the buffer is the
+ * thing being bounded, so it cannot be truncated and parsed on.
+ *
+ * `gatewayAuthored` is set, and this is the case the flag exists for: the text
+ * is one integer and a literal, with no part of the upstream body in it, so
+ * there is nothing here that could put a prompt on stdout.
+ *
+ * The message says only that a record was too large, and deliberately does not
+ * say "without a separator" — this fires both for a record still accumulating
+ * and for an oversized one that arrived complete, and a message naming only the
+ * first would misdescribe the second.
+ */
+function refuseIfOversized(chars: number): void {
+  if (chars <= MAX_RECORD_CHARS) return;
+  throw new GatewayError(
+    "UPSTREAM",
+    `upstream SSE record exceeded ${MAX_RECORD_CHARS} characters`,
+    { gatewayAuthored: true },
+  );
 }
 
 /**
