@@ -173,9 +173,12 @@ test("handles chunks shorter than the hold-back window", async () => {
  */
 test("refuses a record that grows past the cap without a separator", async () => {
   // Delivered in pieces, so this is the accumulating path rather than one
-  // oversized chunk.
-  const piece = "x".repeat(64 * 1024);
-  const chunks = ["data: ", ...Array.from({ length: 20 }, () => piece)];
+  // oversized chunk. Sized off the constant rather than a literal: a cap raised
+  // past a hardcoded total turns this into a test that never reaches the branch
+  // it is named for, and says nothing while doing it.
+  const piece = "x".repeat(1024 * 1024);
+  const pieces = Math.ceil(MAX_RECORD_CHARS / piece.length) + 1;
+  const chunks = ["data: ", ...Array.from({ length: pieces }, () => piece)];
 
   let thrown: unknown;
   try {
@@ -216,9 +219,18 @@ test("refuses an oversized record that arrives complete in one chunk", async () 
  * through a normal answer, and only on the long ones.
  */
 test("does not trip on a long stream whose total far exceeds the cap", async () => {
-  const half = "z".repeat(4 * 1024);
+  const half = "z".repeat(64 * 1024);
   const body = half + half;
-  const records = 300; // ~2.4 MB total, no single record near the cap
+  // Enough records that a build which never resets the counter would clear the
+  // cap, while no single record is anywhere near it.
+  //
+  // Sized against `half`, not `body`, and the difference is the whole test.
+  // Only the *first* chunk of each record reaches `pendingChars`: the second
+  // completes the record through the path that clears the accumulator instead
+  // of adding to it. So a broken build accrues one half per record, and sizing
+  // against the full body under-counts by two and leaves the mutant alive.
+  // Measured — that is exactly what happened when the cap moved to 25 MiB.
+  const records = Math.ceil(MAX_RECORD_CHARS / half.length) + 5;
 
   // **Each record is split across two chunks on purpose.** Written with one
   // record per chunk, the accumulator is empty every time a record completes,
@@ -244,8 +256,9 @@ test("accepts a record just under the cap", async () => {
 // Records already parsed before the offending one still reached the caller, so
 // a stream that goes wrong late is not retroactively emptied.
 test("yields the records that arrived before the oversized one", async () => {
-  const piece = "q".repeat(64 * 1024);
-  const chunks = ["data: first\n\ndata: ", ...Array.from({ length: 20 }, () => piece)];
+  const piece = "q".repeat(1024 * 1024);
+  const pieces = Math.ceil(MAX_RECORD_CHARS / piece.length) + 1;
+  const chunks = ["data: first\n\ndata: ", ...Array.from({ length: pieces }, () => piece)];
 
   const seen: SseMessage[] = [];
   let thrown: unknown;

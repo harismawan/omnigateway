@@ -101,17 +101,29 @@ the carry passes every whole-chunk test and corrupts exactly the boundary case.
 > name, not silent corruption.
 >
 > **The audit's third recommendation is now done too.** `MAX_RECORD_CHARS`
-> caps one assembled record at 1 MiB and refuses past it with a retryable
+> caps one assembled record at 25 MiB and refuses past it with a retryable
 > `UPSTREAM` `GatewayError`. Being linear made the parser willing to assemble a
 > record for as long as bytes arrive, which left the remote party deciding how
 > much memory the gateway commits — the response-side twin of the absent
-> `/v1/*` body ceiling. Sized off the same 25 captured responses: they ran
-> 3,035–26,117 characters whole with 45–270 line breaks, so records are ~100–250
-> characters and the cap sits ~4,000× above the largest observed one. It is per
-> **record**, not per stream; the test for that splits each record across two
-> chunks, because with one record per chunk the accumulator is empty at every
-> completion and a build that never resets it passes anyway — measured, that
-> version left the mutant alive.
+> `/v1/*` body ceiling.
+>
+> The figure is chosen headroom, not something the measurements imply. What they
+> say: the same 25 captured responses ran 3,035–26,117 characters whole with
+> 45–270 line breaks, so records are ~100–250 characters — the cap sits ~100,000×
+> above the largest observed one, ~1,000× the largest whole response, and 50×
+> `MAX_ARTIFACT_BYTES`. Deliberately generous, because being wrong low refuses
+> legitimate traffic while being wrong high only bounds memory higher. **The
+> bound is per concurrent stream**, so the number to reason about under load is
+> N × 25 MiB for N streams mid-record; it is a ceiling on the pathological case,
+> four orders of magnitude above real records. It shipped at 1 MiB and was raised
+> on the operator's call.
+>
+> It is per **record**, not per stream; the test for that splits each record
+> across two chunks, because with one record per chunk the accumulator is empty
+> at every completion and a build that never resets it passes anyway — measured,
+> that version left the mutant alive. Every size in those tests is derived from
+> the constant, so raising the cap cannot quietly put a total back under it and
+> retire the assertion.
 >
 > One behaviour change, pinned by its own test: a `\r` ending the final line is
 > now a terminator rather than data, so `data: a\r` yields `"a"` where it used
