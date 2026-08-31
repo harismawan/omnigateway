@@ -87,3 +87,15 @@ test("keeps a bare carriage return that is followed by ordinary text", async () 
 test("keeps a bare carriage return at the very end of a stream", async () => {
   expect(await drain(streamOf("data: a", "\r"))).toEqual([{ event: "message", data: "a\r" }]);
 });
+
+// Three chunks, and the record ends in neither of the first two: a held `\r`
+// must be cleared once it has been handed on, or it is re-prepended to every
+// later segment. Both tests above are blind to that — one terminates the record
+// inside the second chunk, the other sets the carry on the final chunk, where a
+// stale value and a fresh one are the same character.
+test("clears a carried carriage return once it has been used", async () => {
+  expect(await drain(streamOf("data: a\r", "b", "c\n\n"))).toEqual([
+    { event: "message", data: "a\rbc" },
+  ]);
+  expect(await drain(streamOf("data: a\r", "bcd"))).toEqual([{ event: "message", data: "a\rbcd" }]);
+});
