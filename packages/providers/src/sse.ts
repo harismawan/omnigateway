@@ -18,8 +18,8 @@ const HOLDBACK = 2;
  * Without a cap an upstream that never sends a blank line grows the buffer for
  * as long as it keeps writing, and the party deciding how much memory the
  * gateway commits is the remote one. That is the same exposure class as the
- * absent `/v1/*` request-body ceiling, on the response side, and it is the last
- * open item of `docs/2026-08-08-engineering-audit.md:350-352`.
+ * absent `/v1/*` request-body ceiling, on the response side, and it closed the
+ * last open item of `docs/2026-08-08-engineering-audit.md:350-352`.
  *
  * Ten MiB, an operator's chosen headroom rather than a figure the measurements
  * imply. What the measurements say: twenty-five captured production responses

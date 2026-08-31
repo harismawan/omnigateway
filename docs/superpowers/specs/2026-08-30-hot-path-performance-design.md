@@ -5,7 +5,9 @@
 A dedicated performance pass over the request path (2026-08-30) found six places
 where the gateway does more work than the job needs, and confirmed that the
 load-bearing design decisions — rollup-backed sums, synchronous limiter claims,
-bounded queues, coalesced push — hold. Nothing here is a correctness bug. Each
+bounded queues, coalesced push — hold. None of the six findings is a correctness
+bug as diagnosed — though two of the fixes introduced one apiece, and both are
+recorded with the findings they came from. Each
 finding is real, has a file and line, and has a fix that changes no behaviour;
 they are ordered by how often the code runs times how much it wastes.
 
@@ -19,6 +21,16 @@ response.
 ## Findings
 
 ### P1 — the SSE parser re-normalizes its whole buffer per chunk
+
+> **The diagnosis below holds. The fix and testing paragraphs do not — read them
+> as history, not as the contract.** The `\r`-carry they describe shipped, was
+> then found to address only one of two superlinear terms, and was **removed
+> outright** when the parser was rewritten; there is no carry in the code. The
+> "Testing" paragraph names the carry as its mutation target, so anything
+> written against it is coverage for a path that no longer exists. What actually
+> shipped is below, under "Since fixed"; the file it describes is
+> `packages/providers/src/sse.ts` and its docblock is authoritative over this
+> section.
 
 `packages/providers/src/sse.ts:21`:
 
@@ -85,7 +97,18 @@ the carry passes every whole-chunk test and corrupts exactly the boundary case.
 > | 16,000 | — | 19,859 ms | 28.8 ms |
 >
 > Doubling with the input rather than quadrupling — about 690× at the top of the
-> range. The carry and the normalization both went with it: CRLF is now handled
+> range.
+>
+> **Reconciling the two tables above, because their last columns disagree by ~3×
+> on identical inputs and that looks like a contradiction.** The first table's
+> "scan newest segment only" is a *probe* — an append-and-scan loop written to
+> localise where the time went, which never joins a record or calls
+> `parseRecord`. The second table's "after the rewrite" is the shipped parser
+> doing the whole job. Both are linear; the probe is faster because it does less,
+> not because the implementation is 3× off it. Read the probe as "the scan is not
+> the remaining cost" and the rewrite column as the number to expect.
+>
+> The carry and the normalization both went with it: CRLF is now handled
 > at the two sites where it is observable, `separatorEnd` (which accepts `\n\n`
 > and `\n\r\n`, together covering all four LF/CRLF blank-line spellings) and
 > `parseRecord` (which drops one trailing `\r` per line).
@@ -167,7 +190,7 @@ the carry passes every whole-chunk test and corrupts exactly the boundary case.
 > | `updateHealth`, read + skip write | 2.0 µs | 1.8 µs |
 >
 > Setting `synchronous = NORMAL` in `packages/store/src/sqlite/db.ts` took a
-> request's whole store time from 9,075 µs to 315 µs — more than every finding
+> request's whole store time from 9,076 µs to 315 µs — more than every finding
 > in this document combined, and it is one line. At NORMAL a perfect skip of the
 > health write would save 14.6 µs, which does not justify touching a routing
 > input. **P2 is closed as won by the pragma.**
@@ -223,7 +246,9 @@ spy), which is also the assertion that catches a future per-connection
 
 `apps/gateway/src/auth/rateLimit.ts:268,315`: `admit` and `consume` both open
 with `cleanup(now)`, which iterates the whole key map; each entry's
-`ring.count(now)` allocates via `slice`
+`ring.count(now)` allocates via `slice` when anything has aged out — not on
+every call, as an earlier version of this line implied; both the old and new
+forms sit behind the same `aged > 0` guard
 (`packages/ratelimit/src/window.ts:32`). O(active keys) per request, plus one
 array allocation per key walked.
 
@@ -313,7 +338,10 @@ orders of magnitude.
 
 - **No timeout around store reads**, reaffirmed: `bun:sqlite` is synchronous
   and the timer cannot fire until the query returns. The fix for store cost is
-  doing less of it (P2), never bounding it.
+  doing less of it, never bounding it. **Not via P2**, which this document
+  closed unimplemented — the store cost was removed by the `synchronous`
+  pragma instead, and pointing a later reader at P2 as the direction would
+  send them at a finding whose premise was measured wrong.
 - **No async SQLite driver, no worker thread for writes.** Either would
   re-open every ordering guarantee `finishLog` and the swap forwarder are
   built on, for throughput this deployment shape does not need.

@@ -289,7 +289,21 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
    *
    * Dropped rather than reported: a frame that cannot be serialized cannot go
    * on the wire, and the sender is the one able to say anything useful about
-   * why. That matches what the `flush` catch did before.
+   * why.
+   *
+   * **This is not what the old code did, and the difference is worth stating.**
+   * Serializing inside `flush` meant a throw hit its `catch`, which `return`s
+   * and leaves the frame at the queue head — so a poison frame stalled that one
+   * connection until `deliver` evicted it `capacity` frames later, as a
+   * *counted* drop. Here it never enters a queue: it is discarded immediately,
+   * for every subscriber of the topic, and **`dropped` does not move**.
+   *
+   * That counter is deliberately left alone rather than made to cover this. It
+   * is reported as `stream queue overflowed`, and an unserializable frame is
+   * not overflow — folding the two together would put a wrong cause in front of
+   * an operator. The consequence is real and should be read as a gap rather
+   * than a design: a plugin frame that cannot be serialized vanishes with no
+   * counter and no line. Closing it properly means a counter of its own.
    */
   const encode = (frame: ServerFrame): string | null => {
     try {

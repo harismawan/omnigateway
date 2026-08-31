@@ -29,9 +29,13 @@ export class SlidingWindow {
       if (stamp > cutoff) break;
       aged++;
     }
-    // In place, rather than `slice` into a fresh array. This runs on every
-    // claim of every limited key, and the old form allocated a replacement
-    // array each time even though the trim is almost always a no-op.
+    // In place, rather than `slice` into a fresh array.
+    //
+    // The saving is narrower than it looks and the first version of this
+    // comment overstated it: both forms sit behind this same `aged > 0`, so the
+    // old `slice` allocated only when something actually aged out, never on the
+    // common no-op path. What this removes is one array allocation on the
+    // trimming path, for the same O(n) move of the survivors.
     if (aged > 0) this.stamps.splice(0, aged);
     return this.stamps.length;
   }
