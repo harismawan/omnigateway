@@ -70,8 +70,41 @@ the carry passes every whole-chunk test and corrupts exactly the boundary case.
 >
 > Recorded rather than quietly fixed because the original text, the commit
 > message and the PR all present this as *the* fix for the superlinear path, and
-> a reader who believes that will not look here again. The remaining work is a
-> separate change.
+> a reader who believes that will not look here again.
+>
+> **Since fixed, in a follow-up commit on the same PR.** Segments are held in an
+> array and joined once per record, so nothing accumulates into a growing string
+> and no scan ever revisits the prefix. Same benchmark, one record in 1 KB
+> chunks:
+>
+> | chunks | original | after `replaceAll` removal | after the rewrite |
+> |---|---|---|---|
+> | 1,000 | 82 ms | 53 ms | 2.6 ms |
+> | 4,000 | 1,286 ms | 1,087 ms | 7.9 ms |
+> | 8,000 | 6,393 ms | 4,969 ms | 13.7 ms |
+> | 16,000 | — | 19,859 ms | 28.8 ms |
+>
+> Doubling with the input rather than quadrupling — about 690× at the top of the
+> range. The carry and the normalization both went with it: CRLF is now handled
+> at the two sites where it is observable, `separatorEnd` (which accepts `\n\n`
+> and `\n\r\n`, together covering all four LF/CRLF blank-line spellings) and
+> `parseRecord` (which drops one trailing `\r` per line).
+>
+> The decision to keep CRLF support at all rests on measurement rather than
+> assumption, and the measurement is partial: 25 captured production Anthropic
+> streams carry 1,755 LF and **zero** CRLF or bare CR. OpenAI, `custom` and
+> OpenRouter are unmeasured — a live OpenAI probe returned 401 with a
+> `text/plain` body, and refreshing the credential to retry was refused because
+> OAuth refresh rotation would have invalidated the token the running
+> installation holds. Support was kept on the grounds that the failure mode if
+> some provider does emit CRLF is a *visible* hard failure on an unknown event
+> name, not silent corruption.
+>
+> One behaviour change, pinned by its own test: a `\r` ending the final line is
+> now a terminator rather than data, so `data: a\r` yields `"a"` where it used
+> to yield `"a\r"`. The SSE grammar terminates a line with CRLF, LF or CR, so
+> this is the correct reading. A bare CR *between* lines is still not a
+> terminator — unchanged, and still a gap.
 >
 > One behaviour change fell out of it, unmentioned at the time. `replaceAll` is
 > not idempotent — `R("\r\r\n") = "\r\n"` — so running it once per chunk over
