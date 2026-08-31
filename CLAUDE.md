@@ -59,7 +59,11 @@ bun run build:npm v1.2.3
 ```
 
 Push `v*` tag run `.github/workflows/release.yml`; tag = sole version source. Before claim done: run
-focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typecheck`, `bun run lint`.
+focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typecheck`, `bun run lint`,
+`bun run check:claims`, `bun run check:dead`. **Last two were missing from this line and CI run
+them**, so a branch could pass every command named here and still fail `verify` — which it did, on a
+doc comment naming a symbol the same commit deleted. The set here is what `.github/workflows/ci.yml`
+run; when that file gain a step, this line gain one.
 
 ## Architectural boundaries
 

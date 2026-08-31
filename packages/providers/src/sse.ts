@@ -16,8 +16,8 @@ const HOLDBACK = 2;
  * Chunk boundaries fall anywhere, including mid-field, so the stream is only
  * consumed up to the last complete record.
  *
- * **Nothing accumulates into one growing string, and that is the point.** An
- * earlier version appended each chunk to a `buf` and searched it from index 0.
+ * **Nothing accumulates into one growing string, and that is the point.** This
+ * parser used to append each chunk to a `buf` that was searched from index 0.
  * Both halves were superlinear: `replaceAll` re-scanned the whole prefix per
  * chunk, and `indexOf` forced JavaScriptCore to flatten the rope that `+=`
  * builds — an O(n) copy per chunk whatever offset the search resumed from,
