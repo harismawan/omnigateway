@@ -221,6 +221,16 @@ Catalog supplies defaults — pricing and context limits — at moment you creat
 
 One SQLite file, WAL mode, eleven migrations — plus, when body capture on, tree of encrypted artifacts beside it.
 
+**`synchronous = NORMAL`, set explicitly, and it is the single largest lever on request-path cost.** Default is FULL, which fsyncs WAL on every commit; a request commits three or four times — `usage.begin`, `usage.route` on failover, `usage.append` with its two rollups, `credentials.updateHealth`. `bun:sqlite` synchronous, so each fsync block whole event loop, not one request. Measured on xfs, 1,000 iterations after warmup: one health write 2,177 µs at FULL against 16.4 µs at NORMAL, and a request's whole store time 9,076 µs against 315 µs.
+
+**What NORMAL give up, stated exactly.** It does **not** survive an OS crash — SQLite say a WAL transaction at NORMAL "might roll back following a power loss or system crash", and a kernel panic is a system crash. Durability across *application* crash is kept at every setting including OFF, so it is not something NORMAL buy. Window is not milliseconds: at NORMAL the WAL sync at **checkpoint**, not at commit, so exposure is every transaction since last sync — bounded by autocheckpoint (1000 pages) or kernel writeback, tens of seconds in practice. What WAL still guarantee, and this pragma not take away, is that the file cannot be **corrupted**; that is what `OFF` would give up and why this is NORMAL.
+
+Most of what is exposed is replayable — request logs, usage counters, credential health, and `usage_rollup`, which commit inside `append`'s transaction so rows and counters roll back together and `omni doctor` gain no false positive. **One row is not**: `updateSecrets` store a rotated OAuth refresh token, provider has already rotated it, so a rollback there leave a dead credential needing browser re-auth rather than a statistic to recompute. Accepted, not overlooked. Also here: password and API-key hashes, `virtual_models`, `quota_windows`, plugin tables. Supersede the 2026-08-08 audit's "keep breaker openings and provider rate limits durable immediately", which allowed exactly this exception — "unless the product explicitly accepts a crash-loss window". It does now.
+
+One documented invariant bend and it is worth naming: long-window rate limits "may over-count and must never under-count", but a power loss roll back committed `request_logs` rows, so `sumSince` under-count afterwards. Narrow — power loss only, and the in-memory half reset on restart regardless.
+
+Pinned by `packages/store/test/pragmas.test.ts`, because a revert show up as nothing but a slow gateway.
+
 ```mermaid
 flowchart TB
   subgraph ledger[Schema ledgers]

@@ -5,7 +5,9 @@
 A dedicated performance pass over the request path (2026-08-30) found six places
 where the gateway does more work than the job needs, and confirmed that the
 load-bearing design decisions — rollup-backed sums, synchronous limiter claims,
-bounded queues, coalesced push — hold. Nothing here is a correctness bug. Each
+bounded queues, coalesced push — hold. None of the six findings is a correctness
+bug as diagnosed — though two of the fixes introduced one apiece, and both are
+recorded with the findings they came from. Each
 finding is real, has a file and line, and has a fix that changes no behaviour;
 they are ordered by how often the code runs times how much it wastes.
 
@@ -19,6 +21,16 @@ response.
 ## Findings
 
 ### P1 — the SSE parser re-normalizes its whole buffer per chunk
+
+> **The diagnosis below holds. The fix and testing paragraphs do not — read them
+> as history, not as the contract.** The `\r`-carry they describe shipped, was
+> then found to address only one of two superlinear terms, and was **removed
+> outright** when the parser was rewritten; there is no carry in the code. The
+> "Testing" paragraph names the carry as its mutation target, so anything
+> written against it is coverage for a path that no longer exists. What actually
+> shipped is below, under "Since fixed"; the file it describes is
+> `packages/providers/src/sse.ts` and its docblock is authoritative over this
+> section.
 
 `packages/providers/src/sse.ts:21`:
 
@@ -47,7 +59,147 @@ sites; the carry keeps it in one.
 and assert the parsed messages are identical to the unsplit feed. A fix without
 the carry passes every whole-chunk test and corrupts exactly the boundary case.
 
+> **Implemented, and the fix is only half of what this finding claimed.**
+> Removing the `replaceAll` removed one of *two* superlinear terms. The
+> separator search — `buf.indexOf("\n\n")` from index 0 — still scans the whole
+> accumulated buffer on every chunk, and because `indexOf` forces a rope
+> flatten it dominates what is left. Measured on a single record delivered in
+> 1 KB chunks, no separator present:
+>
+> | chunks | before | after | scan newest segment only |
+> |---|---|---|---|
+> | 1,000 | 82 ms | 53 ms | 0.9 ms |
+> | 4,000 | 1,286 ms | 1,087 ms | 2.9 ms |
+> | 8,000 | 6,393 ms | 4,969 ms | 3.9 ms |
+> | 16,000 | — | 19,859 ms | 8.9 ms |
+>
+> Still 4× per doubling: a ~22% constant-factor win on an unchanged curve. A
+> control that appends and never scans runs in 0.1 ms at every size, which puts
+> the whole remaining cost in `indexOf`. Resuming the search from the join point
+> does **not** fix it — the flatten still happens. Only holding pending segments
+> in an array and scanning the newest segment plus a one-character overlap is
+> actually linear.
+>
+> Recorded rather than quietly fixed because the original text, the commit
+> message and the PR all present this as *the* fix for the superlinear path, and
+> a reader who believes that will not look here again.
+>
+> **Since fixed, in a follow-up commit on the same PR.** Segments are held in an
+> array and joined once per record, so nothing accumulates into a growing string
+> and no scan ever revisits the prefix. Same benchmark, one record in 1 KB
+> chunks:
+>
+> | chunks | original | after `replaceAll` removal | after the rewrite |
+> |---|---|---|---|
+> | 1,000 | 82 ms | 53 ms | 2.6 ms |
+> | 4,000 | 1,286 ms | 1,087 ms | 7.9 ms |
+> | 8,000 | 6,393 ms | 4,969 ms | 13.7 ms |
+> | 16,000 | — | 19,859 ms | 28.8 ms |
+>
+> Doubling with the input rather than quadrupling — about 690× at the top of the
+> range.
+>
+> **Reconciling the two tables above, because their last columns disagree by ~3×
+> on identical inputs and that looks like a contradiction.** The first table's
+> "scan newest segment only" is a *probe* — an append-and-scan loop written to
+> localise where the time went, which never joins a record or calls
+> `parseRecord`. The second table's "after the rewrite" is the shipped parser
+> doing the whole job. Both are linear; the probe is faster because it does less,
+> not because the implementation is 3× off it. Read the probe as "the scan is not
+> the remaining cost" and the rewrite column as the number to expect.
+>
+> The carry and the normalization both went with it: CRLF is now handled
+> at the two sites where it is observable, `separatorEnd` (which accepts `\n\n`
+> and `\n\r\n`, together covering all four LF/CRLF blank-line spellings) and
+> `parseRecord` (which drops one trailing `\r` per line).
+>
+> The decision to keep CRLF support at all rests on measurement rather than
+> assumption, and the measurement is partial: 25 captured production Anthropic
+> streams carry 1,755 LF and **zero** CRLF or bare CR. OpenAI, `custom` and
+> OpenRouter are unmeasured — a live OpenAI probe returned 401 with a
+> `text/plain` body, and refreshing the credential to retry was refused because
+> OAuth refresh rotation would have invalidated the token the running
+> installation holds. Support was kept on the grounds that the failure mode if
+> some provider does emit CRLF is a *visible* hard failure on an unknown event
+> name, not silent corruption.
+>
+> **The audit's third recommendation is now done too.** `MAX_RECORD_CHARS`
+> caps one assembled record at 10 MiB and refuses past it with a retryable
+> `UPSTREAM` `GatewayError`. Being linear made the parser willing to assemble a
+> record for as long as bytes arrive, which left the remote party deciding how
+> much memory the gateway commits — the response-side twin of the absent
+> `/v1/*` body ceiling.
+>
+> The figure is chosen headroom, not something the measurements imply. What they
+> say: the same 25 captured responses ran 3,035–26,117 characters whole with
+> 45–270 line breaks, so records are ~100–250 characters — the cap sits ~40,000×
+> above the largest observed one, ~400× the largest whole response, and 20×
+> `MAX_ARTIFACT_BYTES`. Deliberately generous, because being wrong low refuses
+> legitimate traffic while being wrong high only bounds memory higher. **The
+> bound is per concurrent stream**, so the number to reason about under load is
+> N × 10 MiB for N streams mid-record; it is a ceiling on the pathological case,
+> four orders of magnitude above real records. It shipped at 1 MiB, went to
+> 25 MiB, and settled at 10 MiB on the operator's call.
+>
+> It is per **record**, not per stream; the test for that splits each record
+> across two chunks, because with one record per chunk the accumulator is empty
+> at every completion and a build that never resets it passes anyway — measured,
+> that version left the mutant alive. Every size in those tests is derived from
+> the constant, so raising the cap cannot quietly put a total back under it and
+> retire the assertion.
+>
+> One behaviour change, pinned by its own test: a `\r` ending the final line is
+> now a terminator rather than data, so `data: a\r` yields `"a"` where it used
+> to yield `"a\r"`. The SSE grammar terminates a line with CRLF, LF or CR, so
+> this is the correct reading. A bare CR *between* lines is still not a
+> terminator — unchanged, and still a gap.
+>
+> One behaviour change fell out of it, unmentioned at the time. `replaceAll` is
+> not idempotent — `R("\r\r\n") = "\r\n"` — so running it once per chunk over
+> the whole buffer collapsed an extra `\r` per pass, which made the *old*
+> parser's output depend on where chunks happened to split. The new code applies
+> it exactly once per byte and is chunk-independent, matching what the old code
+> produced for an unsplit stream. Every divergence requires a literal `\r\r`;
+> there are none without one. Arguably a fix, but it was neither intended nor
+> tested.
+
 ### P2 — every successful request writes a health row that usually says nothing
+
+> **Superseded at implementation time. Do not implement as written below.** Two
+> things were measured wrong, and both are recorded here rather than edited away
+> because the reasoning is the reusable part.
+>
+> **The identity never holds.** `recordSuccess`
+> (`packages/router/src/breaker.ts:74-82`) returns `lastUsedAt: opts.now` on
+> every success and recomputes `ewmaTtftMs` whenever a TTFT sample exists. A
+> field-for-field identity therefore requires two successes inside one
+> millisecond with no TTFT — so the skip below would fire on approximately no
+> requests. Neither field is cosmetic: `lastUsedAt` is the idle-time routing
+> tiebreak (`packages/router/src/index.ts:89`) and `ewmaTtftMs` is the latency
+> score (`packages/router/src/score.ts:105,138`), so widening the comparison to
+> ignore them is a routing change, not an optimization.
+>
+> **The cost was not the write.** The share was right — `updateHealth` was 24%
+> of a request's store time with failover, 32% without — but the cause was
+> `PRAGMA synchronous` defaulting to FULL, which fsyncs the WAL on every commit.
+> Measured on xfs, 1,000 iterations after warmup:
+>
+> | | FULL | NORMAL |
+> |---|---|---|
+> | `updateHealth`, read + write | 2,177.3 µs | 16.4 µs |
+> | `updateHealth`, read + skip write | 2.0 µs | 1.8 µs |
+>
+> Setting `synchronous = NORMAL` in `packages/store/src/sqlite/db.ts` took a
+> request's whole store time from 9,076 µs to 315 µs — more than every finding
+> in this document combined, and it is one line. At NORMAL a perfect skip of the
+> health write would save 14.6 µs, which does not justify touching a routing
+> input. **P2 is closed as won by the pragma.**
+>
+> The transferable lesson: the finding located the right *row in the profile*
+> and inferred the wrong *cause* from it, and the fix that followed from the
+> inference would have been a behaviour change worth 0.16% of the one that
+> followed from measuring. Measure the layer below the one that looks slow
+> before designing around it.
 
 `apps/gateway/src/dispatch/index.ts:636-642`: the success path awaits
 `persistHealth` → `credentials.updateHealth`, a write transaction, once per
@@ -94,7 +246,9 @@ spy), which is also the assertion that catches a future per-connection
 
 `apps/gateway/src/auth/rateLimit.ts:268,315`: `admit` and `consume` both open
 with `cleanup(now)`, which iterates the whole key map; each entry's
-`ring.count(now)` allocates via `slice`
+`ring.count(now)` allocates via `slice` when anything has aged out — not on
+every call, as an earlier version of this line implied; both the old and new
+forms sit behind the same `aged > 0` guard
 (`packages/ratelimit/src/window.ts:32`). O(active keys) per request, plus one
 array allocation per key walked.
 
@@ -175,14 +329,29 @@ entry. P2 second — the largest event-loop win, and the one with real mutation
 surface. P3–P6 are independent, opportunistic, and safe to batch with adjacent
 work. Nothing here blocks or is blocked by anything else in flight.
 
+**As implemented:** P1, P3, P4, P5 and P6 landed as described. P2 was closed
+without the change it proposed — see the note under that finding — and the
+`synchronous = NORMAL` pragma it led to is the largest win in the set by two
+orders of magnitude.
+
 ## Out of scope
 
 - **No timeout around store reads**, reaffirmed: `bun:sqlite` is synchronous
   and the timer cannot fire until the query returns. The fix for store cost is
-  doing less of it (P2), never bounding it.
+  doing less of it, never bounding it. **Not via P2**, which this document
+  closed unimplemented — the store cost was removed by the `synchronous`
+  pragma instead, and pointing a later reader at P2 as the direction would
+  send them at a finding whose premise was measured wrong.
 - **No async SQLite driver, no worker thread for writes.** Either would
   re-open every ordering guarantee `finishLog` and the swap forwarder are
   built on, for throughput this deployment shape does not need.
 - **No benchmark harness.** Each fix above is pinned by behaviour tests;
   timing assertions in CI are flake generators. The measurements that
   motivated the ordering live in this document.
+- **No further pragma tuning.** `synchronous = NORMAL` is taken and documented
+  in `ARCHITECTURE.md#storage`. `OFF` is not: what it gives up over NORMAL is
+  **integrity** — SQLite says the database "might become corrupted if the
+  operating system crashes" — for no measured gain, since NORMAL already
+  removes the per-commit fsync. Both settings keep durability across an
+  application crash, so that is not the distinction; an earlier version of this
+  line said it was.

@@ -842,6 +842,50 @@ test("hands the adapter its first frame before the capture branch has finished",
 });
 
 /**
+ * A drain still running contributes what it has read, not nothing.
+ *
+ * This is the partial-artifact guarantee `Attempt` is mutable for: a hung
+ * upstream or a stream cut off by a disconnect should leave a truncated body in
+ * the artifact rather than an empty one. It is pinned here because the response
+ * text is held as segments and joined at read time — joining once at the end of
+ * the drain instead is cheaper-looking, passes every settled test above, and
+ * turns exactly this case into an empty string.
+ */
+test("reports what a still-running drain has already read", async () => {
+  const controller = new AbortController();
+  const collector = createBodyCollector({ captureStreamChunks: false });
+  const http = collector.wrap(async (req) => bodyOf(ANTHROPIC_FRAMES, req.signal, 2));
+
+  const res = await http({ ...fixedRequest(), signal: controller.signal });
+  const reader = res.body?.getReader();
+  if (reader === undefined) throw new Error("expected a body");
+
+  // Drive the adapter's branch far enough that the tee has released both
+  // delivered frames, then let the capture drain's pending reads run. Reading
+  // to the end would hang: the source stays open until the abort below.
+  await reader.read();
+  await reader.read();
+
+  // Waited for rather than counted in microtask ticks. How many turns the tee
+  // needs to hand the capture branch its chunks is a scheduling detail, and a
+  // fixed tick count is a test that passes on an idle machine and reports a
+  // product bug on a loaded one. The deadline still fails if nothing arrives.
+  const deadline = Date.now() + 2_000;
+  while (collector.attempts()[0]?.response === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+
+  const partial = String(collector.attempts()[0]?.response);
+  expect(partial).toContain("message_start");
+  // Still open, so this is genuinely a drain in flight rather than a finished one.
+  expect(partial).not.toBe(ANTHROPIC_FRAMES.join(""));
+
+  controller.abort();
+  await reader.cancel().catch(() => undefined);
+  await collector.settle();
+});
+
+/**
  * The stronger form of the same rule, and the one the spec states outright: a
  * capture branch that has stalled must not hold the adapter's bytes up.
  *
@@ -1081,3 +1125,95 @@ async function dropRow(root: string, requestId: string): Promise<void> {
   db.run("DELETE FROM request_bodies WHERE request_id = ?", [requestId]);
   db.close();
 }
+
+// ---------------------------------------------------------------------------
+// Capture edges the streaming fixtures do not reach
+// ---------------------------------------------------------------------------
+
+/**
+ * An under-cap buffered body is not truncated.
+ *
+ * The suite asserted the over-cap case and never the ordinary one, so making
+ * the comparison in `text()` inclusive — marking every buffered response as
+ * clipped — passed. `truncated` reaches the stored artifact, so a permanently
+ * set flag would make every captured body read as incomplete.
+ */
+test("does not mark a buffered response under the cap as truncated", async () => {
+  const collector = createBodyCollector({ captureStreamChunks: false });
+  const http = collector.wrap(async () => ({
+    status: 200,
+    headers: new Headers(),
+    body: null,
+    text: async () => '{"ok":true}',
+  }));
+
+  const res = await http(fixedRequest());
+  expect(await res.text()).toBe('{"ok":true}');
+  await collector.settle();
+
+  const attempt = collector.attempts()[0];
+  // `asBody` parses JSON, so the artifact holds the object rather than the text.
+  expect(attempt?.response).toEqual({ ok: true });
+  expect(attempt?.truncated).toBe(false);
+});
+
+/**
+ * A multi-byte character split across chunk boundaries survives.
+ *
+ * The decoder is stateful and the final `decode()` with no argument is what
+ * flushes a trailing partial sequence. Every other fixture here is ASCII and
+ * frame-aligned, so deleting that flush changed nothing observable.
+ */
+test("reassembles a multi-byte character split across chunks", async () => {
+  const text = "héllo → 世界";
+  const bytes = new TextEncoder().encode(text);
+  const collector = createBodyCollector({ captureStreamChunks: false });
+  const http = collector.wrap(async () => ({
+    status: 200,
+    headers: new Headers(),
+    // One byte at a time, so nearly every multi-byte sequence straddles a read.
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+        controller.close();
+      },
+    }),
+    text: async () => text,
+  }));
+
+  const res = await http(fixedRequest());
+  await readAll(res.body);
+  await collector.settle();
+
+  expect(String(collector.attempts()[0]?.response)).toBe(text);
+});
+
+/**
+ * A stream cut off mid-character records the replacement character, not nothing.
+ *
+ * This is what the final `decoder.decode()` with no argument is for, and it is
+ * the only case that distinguishes it: while bytes keep arriving the streaming
+ * decoder emits each character as it completes, so a stream that ends cleanly
+ * flushes nothing. Deleting the flush is invisible without a truncated tail.
+ */
+test("flushes a trailing partial character when the stream ends mid-sequence", async () => {
+  const collector = createBodyCollector({ captureStreamChunks: false });
+  const http = collector.wrap(async () => ({
+    status: 200,
+    headers: new Headers(),
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        // "ok" then the first byte of a two-byte sequence, then end.
+        controller.enqueue(new Uint8Array([0x6f, 0x6b, 0xc3]));
+        controller.close();
+      },
+    }),
+    text: async () => "ok",
+  }));
+
+  const res = await http(fixedRequest());
+  await readAll(res.body);
+  await collector.settle();
+
+  expect(String(collector.attempts()[0]?.response)).toBe("ok�");
+});

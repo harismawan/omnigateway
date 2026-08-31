@@ -150,6 +150,111 @@ test("a published frame reaches every subscriber to that topic and no others", (
   h.registry.stop();
 });
 
+/**
+ * Counts how many times a frame is serialized, by being the thing
+ * `JSON.stringify` calls.
+ *
+ * A spy rather than an injected serializer because the thing worth pinning is
+ * that `JSON.stringify` runs once, not that some indirection was used — a
+ * per-connection `stringify` creeping back in is caught either way, and this
+ * needs no seam the production code would otherwise not have.
+ */
+function counted(frame: ServerFrame): { frame: ServerFrame; calls: () => number } {
+  let calls = 0;
+  // `Object.assign` rather than a spread literal: `ServerFrame` is a union, and
+  // a fresh literal carrying `toJSON` fails excess property checking against
+  // whichever arm is inferred.
+  const spy = Object.assign(
+    { ...frame },
+    {
+      toJSON() {
+        calls++;
+        return frame;
+      },
+    },
+  );
+  return { frame: spy, calls: () => calls };
+}
+
+test("serializes a published frame once, not once per subscriber", () => {
+  const h = harness();
+  const a = socket();
+  const b = socket();
+  h.registry.add("a", a, credential());
+  h.registry.add("b", b, credential());
+  h.registry.subscribe("a", "res:usage");
+  h.registry.subscribe("b", "res:usage");
+
+  const spy = counted(event(1));
+  h.registry.publish("res:usage", spy.frame);
+
+  expect(spy.calls()).toBe(1);
+  // And both connections still received it, so "once" is not "once, to one".
+  expect(a.sent).toEqual([event(1)]);
+  expect(b.sent).toEqual([event(1)]);
+  h.registry.stop();
+});
+
+test("does not re-serialize a frame held at the queue head by backpressure", () => {
+  const h = harness();
+  const a = socket();
+  a.mode = "drop";
+  h.registry.add("a", a, credential());
+  h.registry.subscribe("a", "res:usage");
+
+  const spy = counted(event(1));
+  h.registry.publish("res:usage", spy.frame);
+  expect(a.sent).toEqual([]);
+
+  // Two further drains against the same parked frame. Serializing at send time
+  // pays for each of them.
+  h.registry.drain("a");
+  a.mode = "send";
+  h.registry.drain("a");
+
+  expect(spy.calls()).toBe(1);
+  expect(a.sent).toEqual([event(1)]);
+  h.registry.stop();
+});
+
+/**
+ * A frame that cannot be serialized is dropped, never thrown.
+ *
+ * `plugin:*` payloads are plugin-authored `unknown`, and `PluginChannel.send`
+ * is documented as "a connection that is gone is a no-op, never an error" — so
+ * a plugin handing over a circular object must not be able to throw out of the
+ * host, least of all from a timer of its own where nothing is there to catch
+ * it. Serialization used to sit inside `flush`'s `catch`; the fan-out fix moved
+ * it out from behind that guard, and this is what holds the contract in place.
+ */
+test("drops an unserializable frame instead of throwing out of publish", () => {
+  const h = harness();
+  const a = socket();
+  const b = socket();
+  h.registry.add("a", a, credential());
+  h.registry.add("b", b, credential());
+  h.registry.subscribe("a", "plugin:demo:updates");
+  h.registry.subscribe("b", "plugin:demo:updates");
+
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  const frame = {
+    type: "event",
+    topic: "plugin:demo:updates",
+    payload: circular,
+  } as unknown as ServerFrame;
+
+  expect(() => h.registry.publish("plugin:demo:updates", frame)).not.toThrow();
+  expect(() => h.registry.sendTo("a", frame)).not.toThrow();
+  expect(a.sent).toEqual([]);
+  expect(b.sent).toEqual([]);
+
+  // And the connection is still usable: a bad frame costs itself, not the socket.
+  h.registry.publish("plugin:demo:updates", event(1));
+  expect(a.sent).toHaveLength(1);
+  h.registry.stop();
+});
+
 test("unsubscribe removes only that topic's index entry", () => {
   const h = harness();
   const a = socket();

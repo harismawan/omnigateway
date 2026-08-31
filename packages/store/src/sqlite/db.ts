@@ -37,12 +37,59 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
 ];
 
 /**
- * Opens the database, enables WAL and foreign keys, and applies any migrations
+ * Opens the database, sets the connection pragmas, and applies any migrations
  * not yet recorded. Safe to call on an existing database.
+ *
+ * `journal_mode` persists in the file; `synchronous`, `foreign_keys` and
+ * `busy_timeout` are per-connection and must be re-applied on every open. That
+ * asymmetry is the trap here: a handle opened past this function would still
+ * read WAL out of the file and silently revert the other three to their
+ * defaults. `reopen()` after a database swap goes through `createStore`'s
+ * `open()`, which calls this; keep it that way.
  */
 export function openDb(path: string): Database {
   const db = new Database(path, { create: true });
   db.run("PRAGMA journal_mode = WAL");
+  // The single largest cost on the request path, and it is a pragma rather than
+  // any amount of doing less work.
+  //
+  // `synchronous` defaults to FULL, which fsyncs the WAL on every commit. A
+  // request commits three or four times — `usage.begin`, `usage.route` on
+  // failover, `usage.append` with its two rollups, `credentials.updateHealth` —
+  // and `bun:sqlite` is synchronous, so each fsync blocks the whole event loop
+  // rather than one request. Measured on xfs, 1,000 iterations after warmup:
+  // one health write costs 2,177µs at FULL and 16.4µs at NORMAL, and a
+  // request's whole store time 9,076µs against 315µs.
+  //
+  // What NORMAL gives up, stated exactly, because the first version of this
+  // comment got it wrong in the direction that made the trade look safer.
+  //
+  // It does **not** survive an OS crash. SQLite: a transaction committed in WAL
+  // mode at NORMAL "might roll back following a power loss or system crash". A
+  // kernel panic is a system crash. Durability across *application* crashes is
+  // kept at every setting including OFF, so it is not something NORMAL buys and
+  // naming it as one is how the earlier version read as safer than it is.
+  //
+  // The window is not milliseconds. At NORMAL the WAL is synced at checkpoint,
+  // not at commit, so what is exposed is every transaction since the last sync
+  // — bounded by the autocheckpoint (1000 pages) or kernel writeback, whichever
+  // comes first. Tens of seconds is the right order, and on a quiet install the
+  // checkpoint is the far one.
+  //
+  // What is at stake is mostly replayable — request logs, usage counters,
+  // credential health, `usage_rollup` (which commits inside `append`'s
+  // transaction, so rows and counters roll back together and `omni doctor`
+  // gains no false positive). **One row is not**: `updateSecrets` stores a
+  // rotated OAuth refresh token, and the provider has already rotated it, so a
+  // rollback there leaves a dead credential needing a browser re-auth rather
+  // than a statistic to recompute. That is the real cost of this pragma. It is
+  // accepted, not overlooked. Also here and worth knowing: password and API-key
+  // hashes, `virtual_models`, `quota_windows`, plugin tables.
+  //
+  // What WAL gives, and this pragma does not take away, is that the file cannot
+  // be *corrupted* by any of the above — that is the guarantee `OFF` would give
+  // up and the reason this is NORMAL rather than OFF.
+  db.run("PRAGMA synchronous = NORMAL");
   db.run("PRAGMA foreign_keys = ON");
   db.run("PRAGMA busy_timeout = 5000");
   db.run(

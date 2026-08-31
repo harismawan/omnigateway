@@ -130,7 +130,17 @@ type Connection = {
   socket: Socket;
   credential: Credential;
   topics: Set<string>;
-  queue: ServerFrame[];
+  /**
+   * Serialized frames, not frames.
+   *
+   * A publish fans one frame out to every subscriber of a topic, and a frame
+   * parked at the head by backpressure is retried on every later drain — so
+   * serializing at send time pays `JSON.stringify` once per connection and
+   * again per retry, for a string that is identical every time. The queue's
+   * capacity, drop accounting and head-retry semantics are unchanged by this;
+   * only what an element is changed.
+   */
+  queue: string[];
   lastPongAt: number;
   /** Set while a revalidation is in flight, so a slow verify cannot stack. */
   checking: boolean;
@@ -251,7 +261,7 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
       if (frame === undefined) break;
       let status: unknown;
       try {
-        status = connection.socket.send(JSON.stringify(frame));
+        status = connection.socket.send(frame);
       } catch {
         // A send that throws is a socket already gone. The close handler will
         // arrive and remove it; pre-empting it here would race that path.
@@ -264,7 +274,46 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
     }
   };
 
-  const deliver = (connection: Connection, frame: ServerFrame): void => {
+  /**
+   * Serializes a frame, or answers `null` for one that cannot be.
+   *
+   * The `try` is not defensive padding. Serialization used to happen inside
+   * `flush`, whose `catch` swallowed it; moving it to the publish sites moved
+   * it out from behind that guard, and the payload of a `plugin:*` frame is
+   * plugin-authored `unknown` — a circular object or a `BigInt` reaches here
+   * unchecked. `PluginChannel.send` is documented as "a connection that is gone
+   * is a no-op, never an error", and a plugin calling it from its own timer
+   * rather than from inside `onMessage` would otherwise take the gateway down
+   * with an uncaught throw, which rule 15 forbids a plugin from being able to
+   * do. `ring.ts` already tolerates exactly this input for the same reason.
+   *
+   * Dropped rather than reported: a frame that cannot be serialized cannot go
+   * on the wire, and the sender is the one able to say anything useful about
+   * why.
+   *
+   * **This is not what the old code did, and the difference is worth stating.**
+   * Serializing inside `flush` meant a throw hit its `catch`, which `return`s
+   * and leaves the frame at the queue head — so a poison frame stalled that one
+   * connection until `deliver` evicted it `capacity` frames later, as a
+   * *counted* drop. Here it never enters a queue: it is discarded immediately,
+   * for every subscriber of the topic, and **`dropped` does not move**.
+   *
+   * That counter is deliberately left alone rather than made to cover this. It
+   * is reported as `stream queue overflowed`, and an unserializable frame is
+   * not overflow — folding the two together would put a wrong cause in front of
+   * an operator. The consequence is real and should be read as a gap rather
+   * than a design: a plugin frame that cannot be serialized vanishes with no
+   * counter and no line. Closing it properly means a counter of its own.
+   */
+  const encode = (frame: ServerFrame): string | null => {
+    try {
+      return JSON.stringify(frame);
+    } catch {
+      return null;
+    }
+  };
+
+  const deliver = (connection: Connection, frame: string): void => {
     if (connection.queue.length >= capacity) {
       // Oldest first. On a transport whose whole point is currency, the frame
       // worth keeping under pressure is the newest one. Counted, because
@@ -464,15 +513,21 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
     publish(topic, frame) {
       const subscribers = index.get(topic);
       if (subscribers === undefined) return;
+      // Once, not once per subscriber. This is the only fan-out in the module;
+      // everything else below reaches exactly one connection.
+      const payload = encode(frame);
+      if (payload === null) return;
       for (const id of subscribers) {
         const connection = connections.get(id);
-        if (connection !== undefined) deliver(connection, frame);
+        if (connection !== undefined) deliver(connection, payload);
       }
     },
 
     sendTo(id, frame) {
       const connection = connections.get(id);
-      if (connection !== undefined) deliver(connection, frame);
+      if (connection === undefined) return;
+      const payload = encode(frame);
+      if (payload !== null) deliver(connection, payload);
     },
 
     closeAll(code, reason) {

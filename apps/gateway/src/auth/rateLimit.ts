@@ -31,6 +31,16 @@ type LongWindow = (typeof LONG_WINDOWS)[number];
 const CACHE_TTL_MS = 30_000;
 
 /**
+ * How often the idle-key sweep may run.
+ *
+ * One second, because the sweep only reclaims memory: a key that goes idle is
+ * held at most this much longer than it was before, and the shortest window
+ * this limiter serves is a minute. Anything shorter buys nothing and puts the
+ * O(active keys) walk back on a meaningful share of requests.
+ */
+const CLEANUP_INTERVAL_MS = 1_000;
+
+/**
  * The fraction of a ceiling past which a key stops waiting out the TTL.
  *
  * Precision rises exactly where a decision is close, and an idle key pays
@@ -240,6 +250,23 @@ export function trimDebits(debits: readonly Debit[], now: number): Debit[] {
  */
 export class ApiKeyRateLimiter {
   private readonly keys = new Map<string, KeyState>();
+  /**
+   * When the sweep last ran, so it runs at most once per `CLEANUP_INTERVAL_MS`.
+   *
+   * `cleanup` walks every live key, and both `admit` and `consume` opened with
+   * it — O(active keys) on every request, for a sweep whose only job is to free
+   * memory. Gating it changes nothing about *what* is droppable: an entry that
+   * becomes droppable mid-interval is dropped at the next gate instead, and
+   * nothing reads a droppable entry in between — a request naming that key
+   * re-uses the entry and trims its own ring through `claim`, and every other
+   * reader is holding a claim, which is what makes an entry undroppable.
+   *
+   * Negative infinity rather than zero states "has never run" outright. It is
+   * not load-bearing — at any clock value a real or injected one starts from,
+   * the first call is already past the gate, and at zero the map is empty — so
+   * do not expect a test to fail if it is changed.
+   */
+  private lastCleanup = Number.NEGATIVE_INFINITY;
   private readonly store: Store;
   private readonly now: () => number;
   private readonly logger: Logger;
@@ -402,6 +429,19 @@ export class ApiKeyRateLimiter {
    */
   pendingDebits(keyId: string): number {
     return this.keys.get(keyId)?.debits.length ?? 0;
+  }
+
+  /**
+   * Keys currently holding state, which is everything this limiter can grow.
+   *
+   * Exposed because the sweep that bounds it is otherwise unobservable: an
+   * entry is only droppable once nothing reads it, so its removal changes no
+   * other answer this class gives. That makes "the sweep still runs" a claim
+   * with no behavioural witness — and the sweep is now time-gated, which is
+   * exactly the kind of change that can silently turn into "never".
+   */
+  liveKeys(): number {
+    return this.keys.size;
   }
 
   private async refuse(
@@ -660,6 +700,16 @@ export class ApiKeyRateLimiter {
    * reasoning that was wrong before the claim was made synchronous.
    */
   private cleanup(now: number): void {
+    // A latch on wall-clock time, and `now` is `Date.now()` — so a backward NTP
+    // step or a VM restore leaves `lastCleanup` in the future and the elapsed
+    // figure negative. Comparing that against the interval alone would read as
+    // "swept recently" and hold the sweep off for the whole of the step. Every
+    // other piece of limiter state self-corrects under a clock step because it
+    // is compared against a window; a latch does not, and turning the sweep
+    // *off* is the one direction this gate must not fail in.
+    const since = now - this.lastCleanup;
+    if (since >= 0 && since < CLEANUP_INTERVAL_MS) return;
+    this.lastCleanup = now;
     for (const [keyId, state] of this.keys) {
       state.ring.count(now);
       if (state.deciding > 0 || !state.ring.empty || state.inFlight > 0) continue;

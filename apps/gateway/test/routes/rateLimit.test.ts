@@ -183,6 +183,10 @@ test("frees the concurrency slot when a client hangs up mid-stream, leaving no t
 
     await reader.cancel();
     expect(rateLimiter.inFlight(keyId)).toBe(0);
+    // Before `restore`, which uninstalls the patched `clearTimeout` and so
+    // freezes the set. The keepalive timer is cleared in a `.finally` that runs
+    // after the cancel resolves.
+    await timers.settle();
   } finally {
     timers.restore();
   }
@@ -351,7 +355,11 @@ type Timer = ReturnType<typeof setTimeout>;
  * only way to see a timer nobody cleaned up is to watch the two calls that make
  * and unmake one.
  */
-function trackTimers(): { live: () => number; restore: () => void } {
+function trackTimers(): {
+  live: () => number;
+  settle: (timeoutMs?: number) => Promise<void>;
+  restore: () => void;
+} {
   const live = new Set<Timer>();
   const realSetTimeout = globalThis.setTimeout;
   const realClearTimeout = globalThis.clearTimeout;
@@ -379,6 +387,30 @@ function trackTimers(): { live: () => number; restore: () => void } {
 
   return {
     live: () => live.size,
+    /**
+     * Waits for outstanding cleanup to land, and must be called before
+     * `restore`.
+     *
+     * The set only ever shrinks through `patchedClearTimeout`, so `restore`
+     * uninstalling it makes every later clear invisible here — a timer cleared
+     * one microtask after the assertion counts as leaked forever. The teardown
+     * this test cares about is exactly that late: `withKeepalive` clears its
+     * timer in a `.finally` on the race, which is a microtask that runs after
+     * `reader.cancel()` resolves, so asserting straight after the cancel is
+     * racing the code under test rather than checking it.
+     *
+     * Bounded rather than a fixed wait, and polled on `realSetTimeout` so the
+     * poll's own timers never enter the set. This is not a way to make the
+     * assertion pass: a genuinely leaked keepalive lives for `KEEPALIVE_MS`
+     * (10s), so it is still counted when this gives up and the assertion still
+     * fails.
+     */
+    async settle(timeoutMs = 2_000): Promise<void> {
+      const deadline = Date.now() + timeoutMs;
+      while (live.size > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => realSetTimeout(resolve, 1));
+      }
+    },
     restore() {
       globalThis.setTimeout = realSetTimeout;
       globalThis.clearTimeout = realClearTimeout;

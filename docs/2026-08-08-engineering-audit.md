@@ -340,6 +340,15 @@ dimensions.
 
 ### 7. Make SSE parsing incremental
 
+**Status (2026-08-31):** all three parts done, in PR #128. Parsing is incremental at segment level —
+segments are held in an array and joined once per record, so nothing re-scans an accumulating buffer;
+measured 19,859 ms to 28.8 ms for one record in 16,000 chunks. CRLF is handled per record rather than
+by rewriting the buffer: `separatorEnd` accepts a blank line in either spelling and `parseRecord`
+drops a trailing `\r` per line. `MAX_RECORD_CHARS` caps one assembled record at 10 MiB and refuses
+past it with a retryable `UPSTREAM` error. Byte-level framing was assessed and **not** taken — the
+complexity-class win is already captured and the remaining gain is unmeasurable against store and
+network cost.
+
 The parser appends decoded text, normalizes the full buffer, searches it, and slices it after every
 provider chunk. One large SSE record fragmented into many small chunks can produce quadratic copying.
 
