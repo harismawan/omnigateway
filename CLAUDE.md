@@ -599,13 +599,24 @@ Preserve these translation invariants:
 - Gateway not validate request-shape support per model; unsupported combos surface as upstream
   errors.
 - **`ChatRequest.conversationId` is the client's own name for its conversation, and the Codex
-  backend partition its prompt cache by it.** Arrive as Anthropic `metadata.user_id` or OpenAI
-  `user` — both sat in `KNOWN` with no schema entry, so both were parsed by nothing and dropped,
-  and neither ingress test noticed. Cost measured, not assumed: `request_logs` held **2 cache read
-  in 21** OpenAI request, against 9,373 in 9,637 for a second gateway on the same account and
-  model. Probe with byte-identical 10k-token body 75s apart read back **0 of 5** without a session
-  id and **14 of 15** with one, so it is neither prefix drift nor `instructions` placement — those
-  were each disproved separately, and an encoder change made on either theory is wasted work.
+  backend partition its prompt cache by it.** Arrive as Anthropic **`metadata.session_id`**.
+  `metadata` sat in `KNOWN` with no schema entry, so it was parsed by nothing and dropped, and no
+  ingress test noticed. Cost measured, not assumed: `request_logs` held **2 cache read in 21**
+  OpenAI request, against 9,373 in 9,637 for a second gateway on the same account and model. Probe
+  with byte-identical 10k-token body 75s apart read back **0 of 5** without a session id and **14
+  of 15** with one, so it is neither prefix drift nor `instructions` placement — those were each
+  disproved separately, and an encoder change made on either theory is wasted work.
+  **Field name is measured, not read off the spec, and the spec is wrong here.** `user_id` is the
+  only documented member of `metadata` and appear in **none** of 76 captured Claude Code request;
+  what the client send is `session_id`, `device_id`, `account_uuid`. First version of this read
+  `user_id`, typechecked, passed every test, and fire on no real request — a feature absent for
+  the one client it exist for, silently, because falling through to the derived key is not an
+  error. Read a capture before pinning a client field name.
+  Only **conversation**-scoped id may be used. `device_id`, `account_uuid` and OpenAI's `user`
+  name the machine, account or human, so keying on one merge every conversation on an install into
+  one partition — the ~49% ceiling, not the fix, and on a single-operator install that is every
+  conversation there is. They are read nowhere, and the derived key beat them because it is at
+  least per-conversation.
   `openai/wire.ts` resolve one key — client `prompt_cache_key`, then client `session_id`, then
   `conversationId`, then hash of instructions plus opening item, the shape `grok/wire.ts` already
   reason through — and return it, so `openai/codec.ts` put the **same** string in the `session_id`
@@ -614,9 +625,12 @@ Preserve these translation invariants:
   leg alone; `api.openai.com` take the body field, which both host carry. `"session_id"` sit in
   `openaiProfile.order` though no profile header supply it — `orderHeaders` append an unlisted
   name after `User-Agent`, which move an identity header to the end of the CLI fingerprint.
-  **Derived and `conversationId` case are hashed, never forwarded**: Claude Code put an account
-  uuid inside `metadata.user_id`, so raw forwarding disclose to the provider an identifier the
-  operator never chose to share, and the digest land inside the accepted charset for free.
+  Both non-client case are hashed, for **two different reasons** — say both, because stating only
+  one invite a contributor to drop the other. Derived case is a hash by construction: that is how
+  instructions plus opening item become one stable key. `conversationId` case is hashed for
+  **privacy** — it is a client identifier the operator never chose to disclose, and it arrive
+  beside `device_id` and `account_uuid` in the same object, so the habit of forwarding what is in
+  there raw is the thing to not form. Digest also land inside the accepted charset for free.
   `store: false` is **required**, not a default — Codex answer `{"detail":"Store must be set to
   false"}` with HTTP 400 otherwise, so the literal in `wire.ts` stay.
 - OpenAI surface read images from `messages[].images` (bare base64) and from `attachments` /

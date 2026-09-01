@@ -12,13 +12,16 @@ test("parses a minimal chat completions request", () => {
   expect(req.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
 });
 
-test("reads the client's own end-user id as the conversation", () => {
-  // `user` is this surface's nearest equivalent to Anthropic's
-  // `metadata.user_id`, and it was dropped by the same mechanism: named in
-  // KNOWN, absent from the schema, read nowhere.
-  expect(parseOpenAIRequest({ ...minimal, user: "u-42" }).conversationId).toBe("u-42");
-  expect(parseOpenAIRequest(minimal).conversationId).toBeUndefined();
-  expect(parseOpenAIRequest({ ...minimal, user: "" }).conversationId).toBeUndefined();
+test("the end-user id is not read as a conversation", () => {
+  // `user` names the human, not the conversation. Keying cache affinity on it
+  // would merge every one of that user's conversations into one partition —
+  // and on a single-operator install that is every conversation there is.
+  // A client with a conversation to name sends `prompt_cache_key` or
+  // `session_id`, which reach the encoder through the vendor bag.
+  expect(parseOpenAIRequest({ ...minimal, user: "u-42" }).conversationId).toBeUndefined();
+  expect(parseOpenAIRequest({ ...minimal, prompt_cache_key: "conv-7" }).vendor?.openai).toEqual({
+    prompt_cache_key: "conv-7",
+  });
 });
 
 test("lifts system and developer messages out of the message list", () => {

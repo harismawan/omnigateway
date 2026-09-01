@@ -63,10 +63,36 @@ test("an empty or non-string client key falls through rather than being sent", (
   // An empty session id is not a session id. Sending it would put every
   // conversation on this installation into one partition, which is worse than
   // the derived key it displaced.
-  expect(keyOf({ ...base, vendor: { openai: { prompt_cache_key: "" } } })).toMatch(
-    /^[0-9a-f]{32}$/,
-  );
-  expect(keyOf({ ...base, vendor: { openai: { session_id: 42 } } })).toMatch(/^[0-9a-f]{32}$/);
+  //
+  // Asserted on the **body**, not only on the returned key. The vendor bag is
+  // merged onto the body verbatim, so a version of this that checked the return
+  // value alone passed while the merge wrote the rejected value straight back
+  // into `prompt_cache_key` — and on the API-key leg, where no `session_id`
+  // header exists, that field is the only mechanism there is.
+  for (const rejected of [{ prompt_cache_key: "" }, { session_id: 42 }, { prompt_cache_key: 7 }]) {
+    const { body, cacheKey } = toResponsesWire({ ...base, vendor: { openai: rejected } }, "gpt-5");
+    expect(cacheKey).toMatch(/^[0-9a-f]{32}$/);
+    expect(body.prompt_cache_key).toBe(cacheKey);
+  }
+});
+
+test("a client's own key survives the vendor merge rather than being overwritten by it", () => {
+  // The other direction of the same ordering. The resolved key is written after
+  // the merge, so this proves the write is not simply clobbering whatever the
+  // client asked for.
+  const req: ChatRequest = { ...base, vendor: { openai: { prompt_cache_key: "mine" } } };
+  const { body, cacheKey } = toResponsesWire(req, "gpt-5");
+  expect(cacheKey).toBe("mine");
+  expect(body.prompt_cache_key).toBe("mine");
+});
+
+test("other vendor fields still ride the merge untouched", () => {
+  // The fix reorders the merge, so this pins that reordering did not cost the
+  // passthrough the merge exists for.
+  const req: ChatRequest = { ...base, vendor: { openai: { service_tier: "priority" } } };
+  const { body } = toResponsesWire(req, "gpt-5");
+  expect(body.service_tier).toBe("priority");
+  expect(body.prompt_cache_key).toMatch(/^[0-9a-f]{32}$/);
 });
 
 test("a conversation id is hashed, never forwarded", () => {

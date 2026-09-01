@@ -42,10 +42,11 @@ function suppliedKey(req: ChatRequest): string | undefined {
  * the opening item, which is what a conversation keeps.
  *
  * Hashed rather than forwarded. `conversationId` reaches us from Anthropic's
- * `metadata.user_id`, which carries an account identifier — sending it raw
- * would disclose to the provider something the operator never chose to share.
- * The digest also lands inside the character set the backend accepts, so there
- * is no validate-or-drop branch to get wrong.
+ * `metadata.session_id` — a client identifier the operator never chose to
+ * disclose, arriving in the same object as `device_id` and `account_uuid`, so
+ * forwarding what is in there raw is the habit not to form. The digest also
+ * lands inside the character set the backend accepts, so there is no
+ * validate-or-drop branch to get wrong.
  */
 function cacheKey(req: ChatRequest, instructions: string, firstInput: unknown): string {
   const stable =
@@ -211,12 +212,17 @@ export function toResponsesWire(
     }
   }
 
-  // Resolved before the vendor merge below so the body field and the header the
-  // codec derives from it cannot disagree: a client that set its own key keeps
-  // it, and the merge then writes the same string it already holds.
   const key = suppliedKey(req) ?? cacheKey(req, instructions ?? "", input[0]);
-  body.prompt_cache_key = key;
 
   Object.assign(body, req.vendor?.openai ?? {});
+
+  // Written **after** the vendor merge, and the order is the whole point. The
+  // merge copies the client's bag verbatim, including a `prompt_cache_key` that
+  // `suppliedKey` already rejected — an empty string, a number — so assigning
+  // first let the merge put the rejected value back. On the OAuth leg the
+  // header still carried the resolved key and the damage was invisible; on the
+  // API-key leg this field is the only mechanism there is, so the request went
+  // out with the useless value and nothing recorded it.
+  body.prompt_cache_key = key;
   return { body, degradations, cacheKey: key };
 }

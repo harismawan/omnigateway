@@ -301,14 +301,20 @@ export type ChatRequest = {
    *
    * On the request rather than beside it — the distinction `autoCacheEnabled`
    * draws in the other direction — because it is the caller's value, not a
-   * gateway decision. Clients supply it under several names: Anthropic's
-   * `metadata.user_id`, OpenAI's `user`.
+   * gateway decision. It is filled from Anthropic's `metadata.session_id`, and
+   * from nothing else today.
+   *
+   * Only a **conversation**-scoped id belongs here. An identifier naming the
+   * user, the account or the machine — `metadata.user_id`, `metadata.device_id`,
+   * OpenAI's `user` — is deliberately not read: an adapter keying cache
+   * affinity on one would merge every conversation on an installation into a
+   * single partition.
    *
    * Opaque and never interpreted. An adapter that wants cache affinity derives
    * a key from it; one with no such mechanism ignores it. It is **not** safe to
-   * forward verbatim — a client id can carry an account identifier, so a
-   * provider-facing value is hashed. `packages/providers/src/openai/wire.ts` is
-   * the worked example.
+   * forward verbatim — it is a client identifier the operator never chose to
+   * disclose — so a provider-facing value is hashed.
+   * `packages/providers/src/openai/wire.ts` is the worked example.
    */
   conversationId?: string;
 };

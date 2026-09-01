@@ -286,11 +286,22 @@ const schema = z.object({
       z.object({ type: z.literal("disabled") }),
     ])
     .optional(),
-  // Only `user_id` is documented, and it is free text rather than a bare id —
-  // Claude Code sends a compound `user_<hash>_account_<uuid>_session_<uuid>`.
+  // `session_id` is the only conversation-scoped identity a client sends here,
+  // and it is the one this surface reads. Measured against 76 captured Claude
+  // Code requests: the keys present are `session_id`, `device_id` and
+  // `account_uuid`, and `user_id` — the sole documented member — appears in
+  // none of them. The other two are deliberately not read: both name the
+  // machine or the account rather than the conversation, so keying on either
+  // would put every conversation on an installation into one cache partition.
+  //
   // Non-strict, like the rest of this surface: an unknown subfield rides
   // through rather than failing a request the client had every right to make.
-  metadata: z.object({ user_id: z.string().max(512).nullish() }).optional(),
+  // `.nullish()` on the object itself, not `.optional()`: before this field was
+  // modelled at all, zod stripped it unread, so `"metadata": null` — what a
+  // typed client SDK serializes for an unset optional — parsed fine. Modelling
+  // it with `.optional()` alone turns that same request into a 400 over a field
+  // it does not use.
+  metadata: z.object({ session_id: z.string().max(512).nullish() }).nullish(),
 });
 
 const KNOWN = [
@@ -579,10 +590,11 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
   }
 
   // Claude Code names its session here, and it is the one stable identity a
-  // conversation carries across turns. `metadata` stays in KNOWN — it is not
-  // forwarded today and this is a read, not a change of passthrough.
-  const userId = parsed.metadata?.user_id;
-  if (typeof userId === "string" && userId.length > 0) request.conversationId = userId;
+  // conversation carries across turns — it survives compaction, where the
+  // derived fallback cannot. `metadata` stays in KNOWN: this is a read, not a
+  // change of what gets forwarded.
+  const sessionId = parsed.metadata?.session_id;
+  if (typeof sessionId === "string" && sessionId.length > 0) request.conversationId = sessionId;
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { anthropic: extras };
