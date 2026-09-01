@@ -297,12 +297,31 @@ in particular, the gateway's own cost arithmetic must keep using `Usage`, not th
 | `endTurn`, `toolUse`, `stopSequence` | `status: "completed"` |
 | `maxTokens` | `status: "incomplete"`, `incomplete_details.reason: "max_output_tokens"` |
 | `contentFilter` | `status: "incomplete"`, `incomplete_details.reason: "content_filter"` |
-| `pauseTurn` | `status: "completed"`, degradation `responses:pause-turn-flattened` |
+| `pauseTurn` | `status: "completed"` |
 
-`pauseTurn` is Anthropic-only and is reachable here precisely because decision 3 lets a Responses
-request route to an Anthropic target. Inventing an `incomplete_details.reason` the API does not
-define would put an unknown string exactly where clients switch; flattening loses the "continue me"
-signal but keeps the response parseable, and the degradation is what keeps the loss visible.
+`pauseTurn` flattens to `completed`, which is what the chat surface already does with it
+(`egress/openai.ts:30-34` renders `"stop"`), and it carries the same comment for the same reason. Two
+earlier drafts of this section were wrong about it in two different ways, and both are worth stating
+so neither comes back.
+
+**It is not "reachable precisely because decision 3 routes to Anthropic".** `pause_turn` is emitted by
+Anthropic for server-tool turns; server tools reach IR only as `AnthropicToolDef`; and only the
+Anthropic ingress builds those. So an OpenAI-shaped client never declares one and never sees the stop
+reason — the same guard the chat surface already relies on, reached by the same chain. The
+hosted-tool widening does not open it either: those tools name `openai`, so they pin away from
+Anthropic rather than toward it. The honest description is a theoretically-reachable case with a
+structural guard in front of it, not a consequence of this design.
+
+**It cannot carry a degradation, and an earlier draft said it did.** Degradations are collected inside
+dispatch, from an `AdapterResult` or a `GatewayError` (`dispatch/index.ts:147-151`). The egress runs
+after dispatch has finished and has no channel to append one, so `responses:pause-turn-flattened` was
+unimplementable as written. Adding that plumbing to record a fact about a case with a structural guard
+in front of it is not worth a new mutation path into the request log.
+
+An invented `incomplete_details.reason` was the alternative — omniroute has precedent, using
+`adapter_eof` and `upstream_stall_timeout` for its own transport cases. Declined: an unknown reason
+string lands exactly where clients switch, and consistency with the chat surface's existing reading
+matters more than expressing a signal the client has no way to act on.
 
 ## Widening provider tools
 
@@ -398,6 +417,38 @@ client replays reasoning items, `requiredProviders` excludes every non-OpenAI ta
 the price of decision 3. A client that never receives reasoning items — anything not asking for
 `include` — is unaffected.
 
+## Mid-conversation system turns become `developer` items
+
+`openai/wire.ts:115-133` currently renders a mid-conversation system message as a **user** turn whose
+text is wrapped in `<system-reminder>…</system-reminder>`, recording `openai:system-turn-inlined`. The
+comment explains the constraint correctly — the Codex backend refuses a `system` item inside `input`,
+it supplies its own — but the documented fallback it names is not the only one. The Responses API
+takes a `developer` role, and both peers use it for exactly this case; omniroute's reason is
+cache-shaped: rewriting system turns to `developer` "keeps content in the cacheable prefix"
+(`executors/codex.ts:49-56`), and they log a separate fix for having lost developer instructions in
+this conversion at all (#6954/#7056).
+
+So the encoder emits `{type: "message", role: "developer", content: [...]}` with the text unwrapped,
+and records `openai:system-turn-as-developer` instead. This is strictly closer to the invariant this
+repository already states — *keep mid-conversation system messages in place, never fold into
+request-level `system`* — because a `developer` turn keeps both its position and its operator role,
+where a `<system-reminder>` user turn kept only the position.
+
+Two boundaries on it:
+
+- **Only `openai`.** `grok/wire.ts` carries the identical inlining and its own
+  `grok:system-turn-inlined` degradation (`packages/providers/test/grok.test.ts:279-284`). It is not
+  changed here: xAI is a different backend, nothing in this work measured what it accepts, and
+  changing two encoders on evidence about one is how a fix becomes a regression.
+- **It changes traffic that exists today** — every Claude Code request carrying a mid-conversation
+  system turn on an OpenAI target — which is why it lands as its own step with its own before-and-after
+  golden test rather than inside the ingress work. The old degradation string stays readable in
+  `request_logs` without migration: degradations are forensic text, never parsed on read, which is the
+  same property that let `excluded:capability:anthropicTools` rows survive their rename.
+
+`packages/providers/test/openai.test.ts:570-580` is the test that pins the current behaviour and is
+rewritten with it; the golden bytes for the Codex leg change in exactly one place.
+
 ## Verification
 
 No Codex ingress capture can exist before the route does, so the schema is measured, not assumed.
@@ -440,6 +491,13 @@ falls through to a working fallback.
 - `output_index` never repeats within one stream, including the preamble-message-then-tool-call
   sequence that collided in omniroute's production incident.
 - `openai/wire.ts` emits a synthetic empty output for a tool call with no result in history.
+- A mid-conversation system turn encodes as a `developer` item with unwrapped text and records
+  `openai:system-turn-as-developer`; the same fixture against `grok/wire.ts` still produces the
+  inlined user turn and `grok:system-turn-inlined`, which is what keeps the change scoped to the one
+  encoder it was measured for.
+- `pauseTurn` renders `status: "completed"` with no `incomplete_details`, and the Anthropic surface
+  still renders `pause_turn` for the same IR event — one stop reason, two dialects, neither borrowing
+  the other's reading.
 - `packages/providers/test/` — decode with and without `encrypted_content`, the second arm being the
   regression guard for Claude Code on OpenAI targets; wire re-emitting an openai-owned
   `providerNative` while still dropping a foreign one with its existing degradation.
@@ -452,12 +510,19 @@ falls through to a working fallback.
 ## Build order
 
 1. Phase 0: route, skeleton parser, capture, freeze the schema.
-2. Ingress, egress, route wiring, and the three widenings.
-3. The provider round trip.
-4. Documentation.
+2. `ProviderToolDef` in `@omni/ir`, with the Anthropic paths proved unchanged.
+3. Ingress, egress, route wiring, and the three widenings.
+4. The provider round trip: reasoning replay, id stripping, tool-call repair.
+5. Mid-conversation system turns as `developer` items.
+6. Documentation.
 
-The round trip is last because it is the only part that changes behaviour for traffic that already
-exists, so it lands with its regression test already in the tree.
+Steps 4 and 5 are last because they are the only parts that change behaviour for traffic that already
+exists, and 5 is last of all because it is the only one that changes it for a client — Claude Code on
+an OpenAI target — that is not asking for this feature at all. Each lands with its regression test
+already in the tree.
+
+Step 2 is first among the code steps because it is a core type change: everything downstream compiles
+against it, and doing it after the ingress would mean writing the hosted-tool path twice.
 
 ## What the peers got that this design declines
 
@@ -472,8 +537,7 @@ value the API defines. omniroute does map `max_tokens` and `content_filter` corr
 (`vendor/codex-chatgpt-web/bridge.ts:849-864`, which is where this design's mapping was checked
 against a second implementation) but also invents reasons for transport cases (`adapter_eof`,
 `upstream_stall_timeout`). That is precedent for giving `pauseTurn` its own invented reason instead of
-flattening it; this design still flattens, on the grounds that an unknown reason string lands exactly
-where clients switch.
+flattening it; this design still flattens, for the reasons under *Status*.
 
 9router carries two contradictory usage comments in one tree — one asserting `input_tokens` already
 includes cached tokens, the other reporting a measurement where it did not (2012 reported against a
@@ -492,11 +556,8 @@ re-surface as real errors so account rotation happens (9router `codex.js:16-26`,
 `CHANGELOG.md:1638`). The second decides whether a Codex capacity failure fails over here or is served
 to the client as a successful stream carrying an error.
 
-A third is a straight improvement to existing egress: Codex accepts `role: "developer"` items, and
-omniroute rewrites system turns to it "to keep content in the cacheable prefix"
-(`executors/codex.ts:49-56`). `openai/wire.ts:115-120` currently inlines a system turn into a **user**
-turn wrapped in `<system-reminder>` and records `openai:system-turn-inlined`. Changing it affects
-traffic that exists today, so it is a separate change with its own before-and-after evidence.
+A third finding was folded into this design rather than deferred — see *Mid-conversation system turns
+become `developer` items*.
 
 ## Documentation to update
 
