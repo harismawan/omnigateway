@@ -9,6 +9,7 @@ import {
   optionalSidecarImage,
   parseDataUrl,
   parseOrThrow,
+  readConversationHeader,
   requireSidecarImage,
 } from "./schemas.ts";
 
@@ -191,7 +192,7 @@ function toIrToolChoice(c: NonNullable<z.infer<typeof schema>["tool_choice"]>): 
   return { type: "tool", name: c.function.name };
 }
 
-export function parseOpenAIRequest(body: unknown): ChatRequest {
+export function parseOpenAIRequest(body: unknown, headers?: Headers): ChatRequest {
   if (typeof body !== "object" || body === null) {
     throw new GatewayError("BAD_REQUEST", "request body must be a JSON object");
   }
@@ -299,6 +300,15 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
   // "think adaptively, this deep".
   if (parsed.reasoning_effort !== undefined)
     request.reasoning = { mode: "adaptive", effort: parsed.reasoning_effort };
+
+  // No body field on this surface names a conversation, and `user` is
+  // deliberately not read as one: it names the end user, so keying cache
+  // affinity on it would merge every one of that user's conversations into a
+  // single partition. The header is the real source here — opencode and dsh
+  // both send a per-session id there and put nothing in the body. A client with
+  // its own key still wins, through `prompt_cache_key` in the vendor bag.
+  const conversation = readConversationHeader(headers ?? undefined);
+  if (conversation !== undefined) request.conversationId = conversation;
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { openai: extras };

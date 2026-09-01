@@ -29,6 +29,11 @@ export const openaiProfile: ClientProfile = {
     "Authorization",
     "chatgpt-account-id",
     "originator",
+    // Not a profile header: the codec supplies it per request, and it is listed
+    // here so an identity header keeps its place in the CLI's order rather than
+    // appending after `User-Agent`, which is where `orderHeaders` puts a name it
+    // does not know. Same arrangement `Authorization` already has.
+    "session_id",
     "Version",
     "Openai-Beta",
     "X-Codex-Beta-Features",

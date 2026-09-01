@@ -17,6 +17,7 @@ import {
   irCacheControl,
   isRecord,
   parseOrThrow,
+  readConversationHeader,
 } from "./schemas.ts";
 
 const textBlock = z.object({
@@ -286,6 +287,22 @@ const schema = z.object({
       z.object({ type: z.literal("disabled") }),
     ])
     .optional(),
+  // `user_id` is the documented member and the one this surface reads. It is
+  // opaque free text, not a bare id: measured across 1,240 captured Claude Code
+  // requests, all 1,240 carry a 96-character string that is itself JSON —
+  // `{account_uuid, device_id, session_id}` — and nothing else. That nested
+  // `session_id` is why the whole string is conversation-scoped rather than
+  // user-scoped, and it is why hashing the string whole is enough; this surface
+  // does not parse it, because a client's JSON is not a schema we own.
+  //
+  // Non-strict, like the rest of this surface: an unknown subfield rides
+  // through rather than failing a request the client had every right to make.
+  // `.nullish()` on the object itself, not `.optional()`: before this field was
+  // modelled at all, zod stripped it unread, so `"metadata": null` — what a
+  // typed client SDK serializes for an unset optional — parsed fine. Modelling
+  // it with `.optional()` alone turns that same request into a 400 over a field
+  // it does not use.
+  metadata: z.object({ user_id: z.string().max(512).nullish() }).nullish(),
 });
 
 const KNOWN = [
@@ -572,6 +589,20 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
   } else if (effort !== undefined) {
     request.reasoning = { mode: "adaptive", effort };
   }
+
+  // Claude Code names its session in here, and it is the one stable identity a
+  // conversation carries across turns — it survives compaction, where the
+  // derived fallback cannot. `metadata` stays in KNOWN: this is a read, not a
+  // change of what gets forwarded.
+  // Body first, header second. A client that fills `metadata` is naming the
+  // conversation in the field its own protocol defines; the header is how the
+  // harnesses that put nothing in the body say the same thing.
+  const userId = parsed.metadata?.user_id;
+  const conversation =
+    typeof userId === "string" && userId.length > 0
+      ? userId
+      : readConversationHeader(headers ?? undefined);
+  if (conversation !== undefined) request.conversationId = conversation;
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { anthropic: extras };

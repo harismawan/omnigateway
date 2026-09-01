@@ -529,7 +529,7 @@ async function handle(
     const chatRequest =
       surface === "anthropic"
         ? parseAnthropicRequest(body, request.headers)
-        : parseOpenAIRequest(body);
+        : parseOpenAIRequest(body, request.headers);
     if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {
       throw new GatewayError(
         "AUTH",

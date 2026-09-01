@@ -12,6 +12,26 @@ test("parses a minimal chat completions request", () => {
   expect(req.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
 });
 
+test("reads a session header as the conversation on this surface too", () => {
+  // opencode and dsh reach either surface, and this one has no body field that
+  // names a conversation at all — so the header is the only source there is.
+  const headers = new Headers({ "x-session-affinity": "ses_abc" });
+  expect(parseOpenAIRequest(minimal, headers).conversationId).toBe("ses_abc");
+  expect(parseOpenAIRequest(minimal).conversationId).toBeUndefined();
+});
+
+test("the end-user id is not read as a conversation", () => {
+  // `user` names the human, not the conversation. Keying cache affinity on it
+  // would merge every one of that user's conversations into one partition —
+  // and on a single-operator install that is every conversation there is.
+  // A client with a conversation to name sends `prompt_cache_key` or
+  // `session_id`, which reach the encoder through the vendor bag.
+  expect(parseOpenAIRequest({ ...minimal, user: "u-42" }).conversationId).toBeUndefined();
+  expect(parseOpenAIRequest({ ...minimal, prompt_cache_key: "conv-7" }).vendor?.openai).toEqual({
+    prompt_cache_key: "conv-7",
+  });
+});
+
 test("lifts system and developer messages out of the message list", () => {
   const req = parseOpenAIRequest({
     ...minimal,

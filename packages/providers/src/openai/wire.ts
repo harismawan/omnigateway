@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 import { systemText } from "../system.ts";
 
@@ -14,6 +15,56 @@ export type ResponsesBody = {
   store?: boolean;
   [key: string]: unknown;
 };
+
+/** A client-supplied cache key, when it is a usable string. */
+function suppliedKey(req: ChatRequest): string | undefined {
+  const vendor = req.vendor?.openai;
+  for (const name of ["prompt_cache_key", "session_id"] as const) {
+    const value = vendor?.[name];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Derives the cache-affinity key the Codex backend partitions its prompt cache
+ * by.
+ *
+ * Measured, not assumed: byte-identical 10k-token requests 75s apart read back
+ * 0 of 5 times without a session id and 14 of 15 with one, and the gateway's
+ * own `request_logs` showed 2 cache reads in 21 requests before this existed.
+ *
+ * The key has to survive the turns of one conversation and separate it from the
+ * next, which is why the client's own `conversationId` is preferred over
+ * anything derived. The fallback follows the same rule the xAI encoder reasons
+ * through at `grok/wire.ts:40-48`: the request id changes every turn and the
+ * whole history changes every turn, so what is hashed is the instructions plus
+ * the opening item, which is what a conversation keeps.
+ *
+ * Hashed rather than forwarded. `conversationId` reaches us from Anthropic's
+ * `metadata.user_id` — a client identifier the operator never chose to
+ * disclose, and on Claude Code a JSON string carrying a device id and an
+ * account uuid, so forwarding it raw is the habit not to form. The digest also
+ * lands inside the character set the backend accepts, so there is no
+ * validate-or-drop branch to get wrong.
+ */
+function cacheKey(req: ChatRequest, instructions: string, firstInput: unknown): string {
+  const stable =
+    req.conversationId !== undefined && req.conversationId.length > 0
+      ? JSON.stringify({ conversation: req.conversationId })
+      : // `?? null` because `JSON.stringify` **omits** a property whose value is
+        // `undefined`, so an empty `input` silently reduced the hash to the
+        // instructions alone — and with no system prompt either, to one
+        // constant shared by every such request on the installation.
+        // Reachable: `validateRequest` drops a message left empty after an
+        // orphaned tool result is stripped, and the ingress non-empty guard
+        // runs before that, so one crafted request empties `messages` on both
+        // surfaces. Such a request has no prefix worth caching, so the
+        // remaining collision between two of them costs nothing; what matters
+        // is that the term stops vanishing without a trace.
+        JSON.stringify({ instructions, firstInput: firstInput ?? null });
+  return createHash("sha256").update(stable).digest("hex").slice(0, 32);
+}
 
 function encodeToolChoice(c: ToolChoice): unknown {
   switch (c.type) {
@@ -43,7 +94,7 @@ export function toResponsesWire(
    * Defaults to the permissive API so only the OAuth path is constrained.
    */
   opts: { oauth: boolean } = { oauth: false },
-): { body: ResponsesBody; degradations: string[] } {
+): { body: ResponsesBody; degradations: string[]; cacheKey: string } {
   const degradations: string[] = [];
   const input: unknown[] = [];
 
@@ -171,6 +222,17 @@ export function toResponsesWire(
     }
   }
 
+  const key = suppliedKey(req) ?? cacheKey(req, instructions ?? "", input[0]);
+
   Object.assign(body, req.vendor?.openai ?? {});
-  return { body, degradations };
+
+  // Written **after** the vendor merge, and the order is the whole point. The
+  // merge copies the client's bag verbatim, including a `prompt_cache_key` that
+  // `suppliedKey` already rejected — an empty string, a number — so assigning
+  // first let the merge put the rejected value back. On the OAuth leg the
+  // header still carried the resolved key and the damage was invisible; on the
+  // API-key leg this field is the only mechanism there is, so the request went
+  // out with the useless value and nothing recorded it.
+  body.prompt_cache_key = key;
+  return { body, degradations, cacheKey: key };
 }

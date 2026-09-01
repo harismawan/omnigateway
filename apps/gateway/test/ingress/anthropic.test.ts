@@ -198,6 +198,96 @@ test("passes unknown top-level fields through as vendor extras", () => {
   expect(parseAnthropicRequest({ ...minimal, top_k: 40 }).vendor?.anthropic).toEqual({ top_k: 40 });
 });
 
+test("reads the client's session out of metadata.user_id, verbatim", () => {
+  // The one identity a conversation carries across its turns, and the whole
+  // input to prompt-cache affinity on the OpenAI leg. `metadata` was in KNOWN
+  // but not in the schema, so it was parsed by nothing and excluded from the
+  // vendor bag — discarded silently, with the cost showing up only as a
+  // cache-read column of zeroes.
+  //
+  // The fixture is the shape actually measured on the wire, not a bare id:
+  // across 1,240 captured Claude Code requests, every `user_id` is a string
+  // that is itself JSON carrying a nested `session_id`. Taken whole and never
+  // parsed — the nested id is why the string is conversation-scoped, but a
+  // client's JSON is not a schema this gateway owns.
+  const userId = JSON.stringify({
+    account_uuid: "",
+    device_id: "d-1",
+    session_id: "47cbbada-89ca-4800-b7ef-2c1d3e4f5a6b",
+  });
+  expect(parseAnthropicRequest({ ...minimal, metadata: { user_id: userId } }).conversationId).toBe(
+    userId,
+  );
+});
+
+test("two sessions from one device are two conversations", () => {
+  // The property the nested id buys, and the reason the whole string is usable
+  // as-is. A key that collapsed these would put every session on the machine
+  // into one cache partition.
+  const uid = (session: string): string =>
+    JSON.stringify({ account_uuid: "", device_id: "d-1", session_id: session });
+  const a = parseAnthropicRequest({ ...minimal, metadata: { user_id: uid("s-a") } });
+  const b = parseAnthropicRequest({ ...minimal, metadata: { user_id: uid("s-b") } });
+  expect(a.conversationId).not.toBe(b.conversationId);
+});
+
+test("metadata that names no user leaves the request without a conversation", () => {
+  // Absent, null and empty all mean the client did not name one. An empty
+  // string would otherwise become an id every conversation shares.
+  expect(parseAnthropicRequest(minimal).conversationId).toBeUndefined();
+  expect(parseAnthropicRequest({ ...minimal, metadata: {} }).conversationId).toBeUndefined();
+  expect(
+    parseAnthropicRequest({ ...minimal, metadata: { user_id: null } }).conversationId,
+  ).toBeUndefined();
+  expect(
+    parseAnthropicRequest({ ...minimal, metadata: { user_id: "" } }).conversationId,
+  ).toBeUndefined();
+});
+
+test("a null metadata is accepted, not a 400", () => {
+  // Before the field was modelled, zod stripped it unread, so `metadata: null`
+  // — what a typed client SDK serializes for an unset optional — parsed fine.
+  // Modelling it is what could turn a previously-working request into a refusal
+  // over a field it does not even use.
+  expect(parseAnthropicRequest({ ...minimal, metadata: null }).conversationId).toBeUndefined();
+});
+
+test("falls back to a session header when the body names no conversation", () => {
+  // opencode and dsh both send a per-session id in a header and nothing in the
+  // body, so a gateway reading bodies alone sees them as anonymous.
+  const headers = new Headers({ "X-Session-Id": "ses_0123456789ab" });
+  expect(parseAnthropicRequest(minimal, headers).conversationId).toBe("ses_0123456789ab");
+
+  const dsh = new Headers({ "x-deepseek-harness-session-id": "dsh-1" });
+  expect(parseAnthropicRequest(minimal, dsh).conversationId).toBe("dsh-1");
+});
+
+test("the body wins over a header when both name a conversation", () => {
+  const headers = new Headers({ "x-session-affinity": "from-header" });
+  const req = parseAnthropicRequest({ ...minimal, metadata: { user_id: "from-body" } }, headers);
+  expect(req.conversationId).toBe("from-body");
+});
+
+test("an unusable session header is ignored rather than becoming a shared id", () => {
+  // Whitespace and over-long values are the two ways a header arrives useless.
+  // Taking either would hand every request that sends one the same key.
+  expect(
+    parseAnthropicRequest(minimal, new Headers({ "x-session-id": "   " })).conversationId,
+  ).toBeUndefined();
+  const long = new Headers({ "x-session-id": "s".repeat(513) });
+  expect(parseAnthropicRequest(minimal, long).conversationId).toBeUndefined();
+});
+
+test("an unknown metadata subfield rides through rather than failing the request", () => {
+  // This surface filters rather than rejects, and a client sending a field the
+  // spec has since grown must not get a 400 from the gateway.
+  const req = parseAnthropicRequest({
+    ...minimal,
+    metadata: { user_id: "u1", session_id: "s1", future: 1 },
+  });
+  expect(req.conversationId).toBe("u1");
+});
+
 test("applies IR validation to the parsed request", () => {
   // An orphaned tool result is dropped by validateRequest, leaving an empty
   // message that is then removed.

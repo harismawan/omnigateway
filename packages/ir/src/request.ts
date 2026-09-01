@@ -296,4 +296,26 @@ export type ChatRequest = {
    * a provider with no such mechanism ignores it.
    */
   betas?: string[];
+  /**
+   * The client's own name for the conversation this request belongs to.
+   *
+   * On the request rather than beside it — the distinction `autoCacheEnabled`
+   * draws in the other direction — because it is the caller's value, not a
+   * gateway decision. It is filled from Anthropic's `metadata.user_id`, and
+   * from nothing else today.
+   *
+   * Only a **conversation**-scoped id belongs here. `user_id` qualifies despite
+   * its name: Claude Code sends a JSON string with a session id nested in it,
+   * so the value changes per conversation and not within one. OpenAI's `user`
+   * is deliberately not read — it names the human, and an adapter keying cache
+   * affinity on it would merge every conversation on an installation into a
+   * single partition.
+   *
+   * Opaque and never interpreted. An adapter that wants cache affinity derives
+   * a key from it; one with no such mechanism ignores it. It is **not** safe to
+   * forward verbatim — it is a client identifier the operator never chose to
+   * disclose — so a provider-facing value is hashed.
+   * `packages/providers/src/openai/wire.ts` is the worked example.
+   */
+  conversationId?: string;
 };

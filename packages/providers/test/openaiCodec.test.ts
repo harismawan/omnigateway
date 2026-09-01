@@ -46,9 +46,19 @@ const creds = (over: Partial<AdapterCredentials> = {}): AdapterCredentials => ({
   ...over,
 });
 
+/**
+ * The cache-affinity key this fixture derives, pinned as the literal it is.
+ *
+ * Nothing in the request names a conversation, so it falls back to the hash of
+ * the instructions and the opening item. Written out rather than recomputed in
+ * the test: a test that derives it the way the encoder does agrees with any
+ * encoder, including one that has started keying on something that moves.
+ */
+const KEY = "af75e45150ba5505736d80ccdd119119";
+
 const BODY =
   '{"model":"gpt-5-codex","stream":true,"input":[{"type":"message","role":"user",' +
-  '"content":[{"type":"input_text","text":"hi"}]}],"store":false}';
+  `"content":[{"type":"input_text","text":"hi"}]}],"store":false,"prompt_cache_key":"${KEY}"}`;
 
 async function sentFor(
   credentials: AdapterCredentials,
@@ -80,6 +90,7 @@ test("an OAuth credential goes to the Codex host, naming its billing account", a
     "Authorization",
     "chatgpt-account-id",
     "originator",
+    "session_id",
     "Version",
     "Openai-Beta",
     "X-Codex-Beta-Features",
@@ -89,6 +100,12 @@ test("an OAuth credential goes to the Codex host, naming its billing account", a
   expect(sent.headers).toContainEqual(["Authorization", "Bearer oa-tok"]);
   expect(sent.headers).toContainEqual(["chatgpt-account-id", "acct-9"]);
   expect(sent.headers).toContainEqual(["originator", "codex_cli_rs"]);
+  // Header and body carry one value. They are derived at different layers —
+  // the encoder returns the key, the codec places the header — so the two can
+  // drift apart, and a backend handed two names for one session caches under
+  // neither.
+  expect(sent.headers).toContainEqual(["session_id", KEY]);
+  expect(sent.body).toContain(`"prompt_cache_key":"${KEY}"`);
 });
 
 test("an OAuth credential with no account id omits the header rather than sending it empty", async () => {
@@ -106,6 +123,9 @@ test("an API key goes to the public host, with no account header at all", async 
   expect(sent.body).toBe(BODY);
   expect(sent.headers).toContainEqual(["Authorization", "Bearer sk-oa"]);
   expect(sent.headers.some(([name]) => name === "chatgpt-account-id")).toBe(false);
+  // `session_id` is the Codex backend's own affinity mechanism. This host has
+  // no such header and takes `prompt_cache_key`, which the body above carries.
+  expect(sent.headers.some(([name]) => name === "session_id")).toBe(false);
 });
 
 test("a non-streaming client request still asks the upstream to stream", async () => {
