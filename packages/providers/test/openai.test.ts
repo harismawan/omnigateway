@@ -813,6 +813,23 @@ test("fails visibly on an unknown SSE event whose data is not JSON", async () =>
   expect(events.some((e) => e.type === "end")).toBe(false);
 });
 
+test("an OpenAI keepalive does not end the stream", async () => {
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        { event: "keepalive", data: "" },
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+      ),
+    ),
+  );
+
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
+  expect(events.some((event) => event.type === "error")).toBe(false);
+});
+
 test("a known event the decoder ignores does not end the stream", async () => {
   // What makes the set an allowlist rather than a restatement of the switch.
   // Written from the switch instead, every one of these would fail — and the

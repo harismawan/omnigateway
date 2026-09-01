@@ -37,6 +37,7 @@ const ERROR_CODE: Readonly<Record<string, ErrorCode>> = {
  * point of the fork is that either may move without dragging the other.
  */
 const KNOWN_EVENTS: ReadonlySet<string> = new Set([
+  "keepalive",
   "response.created",
   "response.queued",
   "response.in_progress",
