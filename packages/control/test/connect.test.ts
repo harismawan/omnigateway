@@ -3,7 +3,7 @@ import { createConnectFlows, type FlowResult, type OAuthProvider } from "@omni/c
 import { GatewayError } from "@omni/ir";
 import type { HttpClient, HttpRequest } from "@omni/providers";
 import { memoryStore } from "@omni/testkit";
-import { kiloOAuth } from "../src/oauth/kilo.ts";
+import { kiloOAuth } from "./oauth/builtins.ts";
 
 const RESULT: FlowResult = {
   secrets: {

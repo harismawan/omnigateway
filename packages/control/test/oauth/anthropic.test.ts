@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import { type HttpClient, type HttpRequest, stainlessHost } from "@omni/providers";
-import { anthropicOAuth } from "../../src/oauth/anthropic.ts";
+import { anthropicOAuth } from "./builtins.ts";
 
 const NOW = 1_000_000;
 

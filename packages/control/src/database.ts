@@ -1,6 +1,12 @@
 import { basename, dirname, join, resolve } from "node:path";
 import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
-import { bodiesDirFor, type DatabaseStats, type MaintenanceRepo, type Settings } from "@omni/store";
+import {
+  bodiesDirFor,
+  type DatabaseInspection,
+  type DatabaseStats,
+  type MaintenanceRepo,
+  type Settings,
+} from "@omni/store";
 import { parseOrThrow, retentionSchema } from "./schemas.ts";
 
 /**
@@ -518,6 +524,28 @@ function describeTables(tables: readonly string[]): string {
 }
 
 /**
+ * Reads a candidate database and refuses it if it could not replace the live one.
+ *
+ * One function rather than a check at each caller, because `previewRestore`
+ * exists to answer the question `restoreSnapshot` is about to ask, and a
+ * preview that accepted a file the restore then refused would be worse than no
+ * preview at all — the operator would have judged the blast radius of an
+ * operation that never runs.
+ */
+async function judgeCandidate(deps: DatabaseDeps, path: string): Promise<DatabaseInspection> {
+  const inspection = await deps.store.maintenance.inspect(path);
+  if (!inspection.ok) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      inspection.quickCheck === "ok"
+        ? `that file is a database, but not one of ours: ${describeTables(inspection.tables)}`
+        : `that file failed its integrity check: ${inspection.quickCheck}`,
+    );
+  }
+  return inspection;
+}
+
+/**
  * Puts `candidate` in place of the live database.
  *
  * Ordered so that the two things which make this survivable cannot be skipped:
@@ -533,15 +561,7 @@ async function swapIn(
   deps: DatabaseDeps,
   candidate: { path: string; consume: boolean },
 ): Promise<RestoreResult> {
-  const inspection = await deps.store.maintenance.inspect(candidate.path);
-  if (!inspection.ok) {
-    throw new GatewayError(
-      "BAD_REQUEST",
-      inspection.quickCheck === "ok"
-        ? `that file is a database, but not one of ours: ${describeTables(inspection.tables)}`
-        : `that file failed its integrity check: ${inspection.quickCheck}`,
-    );
-  }
+  const inspection = await judgeCandidate(deps, candidate.path);
 
   // Unguarded on purpose: the caller already holds the exclusive lock, and this
   // snapshot is a step inside their operation rather than one of its own.
@@ -651,6 +671,64 @@ async function swapIn(
     adminPasswordChanged: adminHashAfter !== adminHashBefore,
     viewerPasswordChanged: viewerHashAfter !== viewerHashBefore,
   };
+}
+
+/**
+ * What a restore would replace, and what with.
+ *
+ * Row counts per table on each side, which is the coarsest description of blast
+ * radius that is still specific enough to act on: 12 request logs replacing 900
+ * is a different decision from 900 replacing 900, and the snapshot's id and
+ * mtime say neither.
+ *
+ * It covers the tables `inspect` counts — the schema-001 set it uses to decide
+ * whether a file is one of ours — and no others. `usage_daily`, `usage_rollup`
+ * and every `plugin_*` table are replaced by a restore and are absent from this
+ * table, so it is a floor on the blast radius rather than the whole of it.
+ * Widening it means widening what `inspect` counts, which is also what decides
+ * whether a candidate is refused.
+ */
+export type RestorePreview = {
+  /** The candidate's counts. Present always — an unreadable one is a refusal. */
+  snapshot: Record<string, number>;
+  /**
+   * The live database's counts, or null when it could not be inspected.
+   *
+   * Null rather than `{}`, and rather than a refusal. A live database that
+   * cannot be read is exactly the state a restore repairs, so refusing here
+   * would withhold the table at the moment it is most worth reading; and `{}`
+   * renders every live cell as absent, which reads as "the restore adds all of
+   * this" — a claim about the live side that nothing here knows to be true.
+   */
+  live: Record<string, number> | null;
+};
+
+/**
+ * What `restoreSnapshot` would do, without doing any of it.
+ *
+ * The same candidate validation, the same refusals, stopping where the swap
+ * would begin. It takes the same single-flight guard: a preview racing a real
+ * restore is the two-writers hazard that guard exists for, and holding it
+ * briefly is cheaper than reading a file mid-swap and reporting counts from
+ * neither side.
+ *
+ * Nothing is copied, closed, or renamed, so there is no working copy to clean
+ * up — `inspect` opens each file read-only on its own handle.
+ *
+ * A clean preview is not a promise the restore will succeed. `swapIn` validates
+ * the same way and then copies the candidate beside the live database, and that
+ * copy is where a full disk shows up. The preview answers "would this file be
+ * refused", which is the question an operator is about to be asked.
+ */
+export async function previewRestore(deps: DatabaseDeps, id: string): Promise<RestorePreview> {
+  const path = snapshotPath(deps, id);
+  if (deps.fs.stat(path) === null) throw new GatewayError("BAD_REQUEST", "no such snapshot");
+
+  return withExclusive("a restore preview", async () => {
+    const snapshot = await judgeCandidate(deps, path);
+    const live = await deps.store.maintenance.inspect(deps.store.databasePath);
+    return { snapshot: snapshot.counts, live: live.ok ? live.counts : null };
+  });
 }
 
 /**

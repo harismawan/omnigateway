@@ -1,9 +1,8 @@
 import { beforeEach, expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
-import { nodeHttpClient } from "@omni/providers";
+import { nodeHttpClient, parseOpenAIUsage } from "@omni/providers";
 import { type CredentialSecrets, type Store, sameWindow, type UsageSecrets } from "@omni/store";
 import { captureLogger, memoryStore, seedCredential } from "@omni/testkit";
-import { parseOpenAIUsage } from "../../src/oauth/openai.ts";
 import type { OAuthProvider, UsageReport } from "../../src/oauth/types.ts";
 import { poll, probe, RATE_LIMIT_COOLDOWN_MS, resetQuotaCooldowns } from "../../src/quota/poll.ts";
 

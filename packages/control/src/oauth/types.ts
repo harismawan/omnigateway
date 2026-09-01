@@ -1,36 +1,35 @@
-import { type ErrorCode, GatewayError, type ProviderId } from "@omni/ir";
-import type { HttpClient } from "@omni/providers";
-import type { CredentialSecrets, UsageSecrets, WindowType } from "@omni/store";
+import type { ProviderId } from "@omni/ir";
+import type {
+  AuthorizeStart,
+  FlowResult,
+  HttpClient,
+  PendingFlow,
+  UsageReport,
+} from "@omni/providers";
+import type { UsageSecrets } from "@omni/store";
 
 /**
- * Marks the one error a device flow raises that is not a failure.
+ * The host's side of an OAuth provider.
  *
- * A poll that finds the operator has not approved yet has to be told apart
- * from a poll that failed, and the difference travels back through a rejected
- * promise. The marker is a property rather than a subclass because it has to
- * survive `GatewayError`'s own construction and be readable by a caller that
- * only imports this module.
- *
- * Lives here rather than in one provider's file because every device flow needs
- * it: kimi reads it off an OAuth `error` code, kilo off an HTTP status.
+ * The flow contract itself — `PluginOAuthFlow`, `AuthRequest`, `FlowResult`,
+ * `UsageReport` and the token-error helpers — lives in `@omni/providers`,
+ * beside the five built-in flows that are written against it. What stays here
+ * is what a *host* needs: the adapted shape every consumer already takes as a
+ * parameter, and the transport and clock it is performed with. Re-exported
+ * rather than restated, because two spellings of one contract is how they come
+ * to disagree.
  */
-const PENDING_MARKER = "__omni_authorization_pending";
-
-type MarkedPendingError = GatewayError & { [PENDING_MARKER]?: boolean };
-
-export function isAuthorizationPending(error: unknown): boolean {
-  return error instanceof GatewayError && (error as MarkedPendingError)[PENDING_MARKER] === true;
-}
-
-/** A "keep polling" rejection. `reason` is an identifier, never a body. */
-export function pendingError(reason: string): GatewayError {
-  const error = new GatewayError(
-    "AUTH",
-    `authorization not yet complete: ${reason}`,
-  ) as MarkedPendingError;
-  error[PENDING_MARKER] = true;
-  return error;
-}
+export {
+  type AuthorizeStart,
+  type FlowResult,
+  isAuthorizationPending,
+  type PendingFlow,
+  pendingError,
+  tokenErrorCode,
+  tokenErrorMessage,
+  type UsageReport,
+  type UsageWindowReport,
+} from "@omni/providers";
 
 /** Injected so tests never touch the network or the clock. */
 export type OAuthDeps = {
@@ -42,61 +41,6 @@ export type OAuthDeps = {
   http: HttpClient;
   now: () => number;
 };
-
-/** The gateway-side half of an in-flight authorization, held until it completes. */
-export type PendingFlow = {
-  verifier: string;
-  challenge: string;
-  state: string;
-  redirectUri: string;
-  /** Device-code flows carry their poll handle here instead of a redirect. */
-  deviceCode?: string;
-  interval?: number;
-  /** Anything a provider needs to remember between start and finish. */
-  extra?: Record<string, unknown>;
-};
-
-export type AuthorizeStart = {
-  /** Open in a browser (PKCE) or show to the operator (device code). */
-  authorizeUrl: string;
-  /** Shown alongside the URL by device-code providers. */
-  userCode?: string;
-  pending: PendingFlow;
-};
-
-export type FlowResult = {
-  secrets: CredentialSecrets;
-  expiresAt: number | null;
-  accountEmail: string | null;
-  /** Merged into `credential.providerData` — account ids, device ids, endpoints. */
-  providerData: Record<string, unknown>;
-};
-
-/**
- * One usage window as the provider described it.
- *
- * `used` and `limit` carry the provider's own unit. Providers that report a
- * percentage are normalized to `used: 87, limit: 100` by their probe, so the
- * router and the console never have to know which is which.
- */
-export type UsageWindowReport = {
-  windowType: WindowType;
-  used: number;
-  limit: number | null;
-  resetsAt: number | null;
-  /**
-   * How long the window runs for, when the provider said so.
-   *
-   * `windowType` is one of three names, so a provider that reports a real
-   * duration has it rounded to the nearest of them. Codex states
-   * `limit_window_seconds`, and a three-hour window filed under `fiveHour`
-   * would have its start inferred two hours too early. Null is the normal
-   * answer: Anthropic and Kimi state no duration at all.
-   */
-  windowMs: number | null;
-};
-
-export type UsageReport = { windows: UsageWindowReport[] };
 
 type OAuthProviderBase = {
   readonly id: ProviderId;
@@ -184,52 +128,3 @@ export type DeviceOAuthProvider = OAuthProviderBase & {
 };
 
 export type OAuthProvider = PkceOAuthProvider | DeviceOAuthProvider;
-
-/**
- * Classifies a failed token-endpoint status.
- *
- * Only a repudiation should be `AUTH`, because `createRefresher` disables the
- * credential on exactly that code. A 5xx or a 429 means the provider had a bad
- * minute, not that the refresh token is dead — classifying those as `AUTH`
- * would permanently disable healthy credentials during an outage and force the
- * operator to reconnect every account by hand.
- *
- * Codes match `codeForStatus` in `@omni/providers` so token failures and
- * inference failures speak the same vocabulary.
- */
-export function tokenErrorCode(status: number): ErrorCode {
-  // 429 is 4xx but is the clearest "try again later" there is.
-  if (status === 429) return "RATE_LIMIT";
-  // The provider looked at the request and refused it.
-  if (status >= 400 && status < 500) return "AUTH";
-  return "UPSTREAM";
-}
-
-/** Reads an error identifier out of a token response without leaking the body. */
-export function tokenErrorMessage(status: number, body: unknown): string {
-  const raw =
-    typeof body === "object" &&
-    body !== null &&
-    typeof (body as { error?: unknown }).error === "string"
-      ? (body as { error: string }).error
-      : "";
-  // **Shape-checked, not merely read.** `oauthAdapter`'s `trusted` marks the
-  // five built-in flows' messages `gatewayAuthored`, which is what lets an
-  // operator see *why* a refresh failed — and that flag claims the text is
-  // built from values this repository owns. That was only nearly true: `error`
-  // is upstream-supplied, and nothing checked it was the identifier RFC 6749
-  // §5.2 intends. Measured at 3037 characters on stdout.
-  //
-  // A token endpoint never receives a prompt — the body is `grant_type`, a code
-  // and a client id — so the leak this flag guards against is unreachable here.
-  // But a server that echoes the offending parameter could put part of an
-  // authorization code in `error`, and a claim the code does not enforce is one
-  // the next contributor extends to `error_description`, which *is* free text.
-  //
-  // The character class admits every code the five flows act on —
-  // `invalid_grant`, `invalid_client`, `expired_token`, `authorization_pending`,
-  // `slow_down`, `access_denied` — and a bare `slice` would bound the length
-  // while still admitting arbitrary content.
-  const code = /^[A-Za-z0-9_.:-]{1,64}$/.test(raw) ? raw : `http_${status}`;
-  return `token endpoint rejected the request: ${code}`;
-}

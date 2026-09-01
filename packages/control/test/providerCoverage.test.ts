@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { PROVIDER_IDS } from "@omni/providers/descriptors";
 import { PROVIDER_IDS as CONNECT_PROVIDER_IDS } from "../src/connect.ts";
-import { oauthProviderIds } from "../src/oauth/index.ts";
+import { oauthProviderIds, seedBuiltinOAuth } from "../src/oauth/index.ts";
 import { modelSchema, providerIdSchema } from "../src/schemas.ts";
 
 test("the connect surface knows every provider the registry describes", () => {
@@ -40,6 +40,17 @@ test("providerIdSchema refuses an id that cannot name a provider", () => {
 });
 
 test("every OAuth provider is a provider the registry describes", () => {
+  // `OAUTH_PROVIDERS` is empty until a host seeds it, so this seeds rather than
+  // relying on another file in the same run having done it. Measured before the
+  // seed was added here: run alone the loop body never executed and the test
+  // passed green over an empty set — the "green and vacuous" shape this
+  // repository keeps an incident file for.
+  seedBuiltinOAuth();
+
+  // Assert the walk found something before asserting anything about what it
+  // found, the instrument `providerTables.test.ts` already uses.
+  expect(oauthProviderIds().length).toBeGreaterThan(0);
+
   // The reverse does not hold and must not be asserted: `custom` has no
   // authorization to start, and a provider may legitimately be key-only.
   for (const id of oauthProviderIds()) {

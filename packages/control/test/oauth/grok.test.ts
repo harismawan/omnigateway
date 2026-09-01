@@ -2,8 +2,7 @@ import { expect, test } from "bun:test";
 import { hostname } from "node:os";
 import { GatewayError } from "@omni/ir";
 import type { HttpClient, HttpRequest } from "@omni/providers";
-import { grokOAuth } from "../../src/oauth/grok.ts";
-import { OAUTH_PROVIDERS } from "../../src/oauth/index.ts";
+import { grokOAuth } from "./builtins.ts";
 
 const NOW = 1_000_000;
 const DISCOVERY_URL = "https://auth.x.ai/.well-known/openid-configuration";
@@ -68,7 +67,10 @@ function deps(http: HttpClient) {
 test("is registered as a pasteable pkce provider", () => {
   expect(grokOAuth.kind).toBe("pkce");
   expect(grokOAuth.supportsManualPaste).toBe(true);
-  expect(OAUTH_PROVIDERS.grok).toBe(grokOAuth);
+  // Not `OAUTH_PROVIDERS.grok === grokOAuth`: `builtins.ts` defines the second
+  // *as* the first, so that comparison became `x === x` when the flows moved.
+  // `id` is what the registry keys on and what `builtins.ts` does not assert.
+  expect(grokOAuth.id).toBe("grok");
 });
 
 test("reads no usage, so a grok account is unknown rather than unlimited", () => {

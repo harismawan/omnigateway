@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { kiloProfile } from "@omni/providers";
-import { getJsonRequest, getJsonUnauthenticatedRequest } from "../../src/oauth/requests.ts";
+import { getJsonRequest, getJsonUnauthenticatedRequest, kiloProfile } from "@omni/providers";
 import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
 
 /**

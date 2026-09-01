@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { OAUTH_PROVIDERS } from "@omni/control";
+import { OAUTH_PROVIDERS, seedBuiltinOAuth } from "@omni/control";
 import { createLogger, GatewayError } from "@omni/ir";
 import type { RequestLog, Store } from "@omni/store";
 import {
@@ -288,6 +288,11 @@ test("a built-in oauth failure still explains itself at default level", async ()
   // the day it is added — the instrument `providerTables.test.ts` uses, for the
   // reason it gives: a list of what to check has exactly the property the thing
   // it checks lacks.
+  // The registry is empty until a host fills it — the built-in flows live in
+  // `@omni/providers` now and arrive through `registerOAuthProvider` like a
+  // plugin's would, so the seed is part of what this asserts rather than
+  // scenery. `index.ts` runs it before anything reads the registry.
+  seedBuiltinOAuth();
   const providers = Object.values(OAUTH_PROVIDERS);
   expect(providers.length).toBeGreaterThan(0);
   for (const provider of providers) {
@@ -338,6 +343,7 @@ test("a token endpoint's refusal reaches the operator, bounded", async () => {
       text: async () => payload,
     })) as never;
 
+  seedBuiltinOAuth();
   const anthropic = OAUTH_PROVIDERS.anthropic;
   if (anthropic === undefined) throw new Error("anthropic is not installed");
 

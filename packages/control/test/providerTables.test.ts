@@ -4,6 +4,7 @@ import * as catalogSubpath from "@omni/providers/catalog";
 import * as descriptorsSubpath from "@omni/providers/descriptors";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import * as control from "../src/index.ts";
+import { seedBuiltinOAuth } from "../src/oauth/index.ts";
 
 /**
  * Every table keyed by a provider id must answer `undefined` for a key it does
@@ -54,6 +55,15 @@ function tablesIn(namespace: Record<string, unknown>, label: string) {
 }
 
 test("every exported provider-keyed table refuses inherited keys", () => {
+  // `OAUTH_PROVIDERS` is filled at boot rather than at import — the five vendor
+  // flows live in `@omni/providers` now and arrive through
+  // `registerOAuthProvider`. Unseeded it holds no provider id, so the walk below
+  // would not recognise it as a table and the assertion that the walk *found*
+  // it would be the thing that failed. Seeded here rather than left to another
+  // file in the same run, because a table that is only discoverable when the
+  // whole suite runs is one this test cannot claim to cover.
+  seedBuiltinOAuth();
+
   const found = [
     ...tablesIn(providers as Record<string, unknown>, "@omni/providers"),
     ...tablesIn(descriptorsSubpath as Record<string, unknown>, "@omni/providers/descriptors"),

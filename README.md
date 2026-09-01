@@ -376,7 +376,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni credentials …` | list, show, enable, disable, `set`, `rm`, refresh, `add-key`, health |
 | `omni models …` | list, show, put, `rm`, `dry-run`, `catalog` |
 | `omni keys …` | list, create, `limits`, revoke |
-| `omni plugin …` | list, verify, install, remove; see [Plugins](#plugins) |
+| `omni plugin …` | list, verify, install, update, remove; see [Plugins](#plugins) |
 | `omni service install` / `uninstall` | write or remove a systemd unit for this installation |
 | `omni setup claude` / `opencode` | point a client's config at this gateway |
 | `omni settings get` / `set` | routing weights, retention, deadlines, and the runtime switches |
@@ -384,7 +384,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni db migrate` | create or upgrade the database |
 | `omni db stats` | size on disk, free pages, schema version, and what snapshots are held |
 | `omni db backup` / `snapshots` | take a snapshot, and list the ones retention has kept |
-| `omni db restore <id>` | put a snapshot back; asks first, and refuses while the gateway is running |
+| `omni db restore <id>` | put a snapshot back; shows a live-vs-snapshot count table, then asks. `--dry-run` shows the table and stops |
 | `omni db vacuum` | rewrite the database, reclaiming the pages deletion left free |
 
 Two worth knowing:
@@ -616,6 +616,12 @@ request-log rows, 1.6 s at 2M, 6.5 s at 8M. A failure is logged rather than
 raised — the database is live either way, and `omni doctor` reports a rollup
 that disagrees with its rows.
 
+Before it asks, `restore` prints one row per table with what the snapshot holds
+against what is live, so the confirmation is informed rather than a judgement on
+an id and an mtime. `--dry-run` prints the same table and exits without asking.
+The counts cover the tables the integrity check reads, so they are a floor on
+what a restore replaces rather than the whole of it.
+
 **`omni db restore <id>` refuses while a gateway is running** against that
 installation, and there is no override flag. A second process can open its own
 handle but cannot quiesce the gateway's, and moving the file out from under a live
@@ -715,8 +721,15 @@ omni plugin install https://…/x.tgz   # a tarball over https, never http
 omni plugin install some-plugin@1.2.3 # a package name, through the npm registry
 omni plugin verify some-plugin        # every check the next boot will run
 omni plugin list                      # what is installed, and whether it would load
+omni plugin update some-plugin        # reinstall from whatever it was installed from
 omni restart                          # plugins load at boot, so this is required
 ```
+
+`update` needs no spec: `install` records the one you typed in
+`.omni-install.json` beside the plugin, so picking up a patch release is the
+plugin's id and nothing else. A bare package name re-resolves to the current
+release; `name@1.2.3` reinstalls that version exactly. A plugin copied in by
+hand has no record and `update` says so rather than guessing.
 
 **Nothing in the package is executed by any of these.** There is no dependency
 resolution, no `node_modules`, and no lifecycle script — the installer fetches,

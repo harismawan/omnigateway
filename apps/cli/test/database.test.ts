@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseOverview, SnapshotInfo } from "@omni/control";
 import { requestLog } from "@omni/testkit";
+import { previewTable } from "../src/commands/db.ts";
 import type { Prompt } from "../src/prompt.ts";
 import { pidFile } from "../src/service.ts";
 import { cli, type FakeService, fakeService, makeRoot, openStore } from "./helpers/harness.ts";
@@ -176,6 +177,149 @@ test("db restore asks before replacing anything, and a no leaves the database al
 });
 
 /**
+ * The confirmation has to be informed in the default flow, not only under a flag.
+ *
+ * The operator judging blast radius from an id and an mtime is the gap this
+ * closes, so the counts have to be in front of them *before* the question — and
+ * on stderr, beside the prompt, so `--json` on stdout stays parseable.
+ */
+test("db restore shows what each side holds before it asks", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  await cli(["keys", "create", "--label", "before", "--json"], { root, service });
+  const created = await cli(["db", "backup", "--json"], { root, service });
+  const snapshot = JSON.parse(created.out) as SnapshotInfo;
+  await cli(["keys", "create", "--label", "after", "--json"], { root, service });
+
+  const asked: string[] = [];
+  const result = await cli(["db", "restore", snapshot.id], {
+    root,
+    service,
+    prompt: refuses(asked),
+  });
+
+  expect(result.code).toBe(1);
+  // One key in the snapshot against two live: the two columns must not be the
+  // same column, which a fixture with equal counts could not tell.
+  expect(result.err).toContain("api_keys");
+  expect(result.err).toContain("SNAPSHOT");
+  expect(result.err).toContain("LIVE");
+  const table = result.err.split("\n").find((line) => line.startsWith("api_keys")) ?? "";
+  expect(table.split(/\s+/).slice(1, 3)).toEqual(["1", "2"]);
+  // That the table is here at all is the ordering proof for *this* path: the
+  // operator said no, so nothing after the prompt ran. It is only half the
+  // property, though — printing the table inside the refusal branch alone would
+  // satisfy it while leaving every `--yes` run uninformed, which is the case the
+  // feature exists for. The test below is the other half.
+  expect(asked).toHaveLength(1);
+});
+
+test("db restore shows the same table when the operator says yes", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  await cli(["keys", "create", "--label", "before", "--json"], { root, service });
+  const created = await cli(["db", "backup", "--json"], { root, service });
+  const snapshot = JSON.parse(created.out) as SnapshotInfo;
+  await cli(["keys", "create", "--label", "after", "--json"], { root, service });
+
+  // `--json` as well, because the counts used to go through `note` — which is
+  // `if (!ctx.json)` — so under `--json` they did not move to stderr, they
+  // vanished, and the scripted path asked nothing and reported nothing.
+  const result = await cli(["db", "restore", snapshot.id, "--yes", "--json"], { root, service });
+
+  expect(result.code).toBe(0);
+  expect(result.err).toContain("api_keys");
+  expect(result.err).toContain("SNAPSHOT");
+  // stdout stays a single parseable value.
+  expect(() => JSON.parse(result.out)).not.toThrow();
+});
+
+test("db restore --dry-run prints the same table, asks nothing, and changes nothing", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  await cli(["keys", "create", "--label", "before", "--json"], { root, service });
+  const created = await cli(["db", "backup", "--json"], { root, service });
+  const snapshot = JSON.parse(created.out) as SnapshotInfo;
+  await cli(["keys", "create", "--label", "after", "--json"], { root, service });
+
+  const asked: string[] = [];
+  const result = await cli(["db", "restore", snapshot.id, "--dry-run"], {
+    root,
+    service,
+    prompt: refuses(asked),
+  });
+
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("api_keys");
+  expect(asked).toEqual([]);
+  expect(await keyLabels(root, service)).toEqual(["after", "before"]);
+
+  // No undo snapshot, and no working copy: a dry run that leaves a
+  // database-sized file beside the live one is a dry run only in name.
+  const listed = await cli(["db", "snapshots", "--json"], { root, service });
+  const body = JSON.parse(listed.out) as { snapshots: SnapshotInfo[] };
+  expect(body.snapshots.map((s) => s.reason)).toEqual(["manual"]);
+  // The listing, not one guessed filename: a preview that left a working copy
+  // under any other name would satisfy a check for `.incoming` alone.
+  expect(readdirSync(root).filter((name) => name.startsWith("omnigateway.db"))).toEqual([
+    "omnigateway.db",
+  ]);
+});
+
+test("db restore --dry-run --json carries both sides", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  const created = await cli(["db", "backup", "--json"], { root, service });
+  const snapshot = JSON.parse(created.out) as SnapshotInfo;
+
+  const result = await cli(["db", "restore", snapshot.id, "--dry-run", "--json"], {
+    root,
+    service,
+  });
+
+  expect(result.code).toBe(0);
+  const body = JSON.parse(result.out) as {
+    snapshot: Record<string, number>;
+    live: Record<string, number> | null;
+  };
+  // Both sides answered, and the live one is a reading rather than a silence.
+  expect(Object.keys(body.snapshot)).toContain("api_keys");
+  expect(body.live).not.toBeNull();
+  expect(Object.keys(body.live ?? {})).toContain("api_keys");
+  // The id rides the payload: a script capturing this has nothing else to
+  // correlate the two columns with.
+  expect((body as { id?: string }).id).toBe(snapshot.id);
+});
+
+/**
+ * The refusal is about who may open the file, not about what happens after, so
+ * it covers the preview too: a dry run that sometimes lies about openability is
+ * worse than one that makes the operator stop the gateway first.
+ */
+test("db restore --dry-run refuses while a gateway is running, like the real thing", async () => {
+  const root = await installation();
+  const stopped = fakeService({ root });
+
+  const created = await cli(["db", "backup", "--json"], { root, service: stopped });
+  const snapshot = JSON.parse(created.out) as SnapshotInfo;
+
+  const running = fakeService({ root, pid: 99, alivePids: new Set([99]) });
+  writeFileSync(pidFile(running.deps.stateDir), "99\n");
+
+  const result = await cli(["db", "restore", snapshot.id, "--dry-run"], {
+    root,
+    service: running,
+  });
+
+  expect(result.code).toBe(1);
+  expect(result.err).toContain("omni stop");
+});
+
+/**
  * The dashboard restores under a latch that holds `/v1` off and swaps inside the
  * process that owns the handle. The CLI is a second process and has neither, so
  * a restore here would move the file out from under a gateway that is still
@@ -275,4 +419,41 @@ test("each command renders for a terminal as well as for a script", async () => 
   expect(restored.code).toBe(0);
   expect(restored.out).toContain("undo");
   expect(restored.out).toContain("api_keys");
+});
+
+/**
+ * The two rendering branches no CLI fixture can reach.
+ *
+ * Every snapshot a test takes is a `db backup` of the live database, so both
+ * sides always hold the same tables and the live side is always readable. Both
+ * branches are operator-facing all the same: `—` is a stated requirement of the
+ * preview, and the null sentence is the entire reason the control layer models
+ * an unreadable live database as `null` instead of `{}`.
+ */
+test("previewTable renders a table only one side has as absent, not as zero", () => {
+  const rendered = previewTable({
+    snapshot: { api_keys: 3, request_logs: 12 },
+    live: { api_keys: 3, credentials: 2 },
+  });
+
+  const row = (name: string) =>
+    (rendered.split("\n").find((line) => line.startsWith(name)) ?? "").split(/\s+/).slice(1, 3);
+
+  // Absent is not empty: "the snapshot has no credentials table at all" and
+  // "the snapshot has an empty one" are different facts, and 0 reads as the
+  // second.
+  expect(row("request_logs")).toEqual(["12", "—"]);
+  expect(row("credentials")).toEqual(["—", "2"]);
+  expect(rendered).not.toContain("could not be read");
+});
+
+test("previewTable says the live side is unknown rather than drawing it empty", () => {
+  const rendered = previewTable({ snapshot: { api_keys: 3 }, live: null });
+
+  // A column of dashes alone would read as "the restore adds all of this",
+  // which is a claim about the live side that nothing knows to be true.
+  expect(rendered).toContain("the live database could not be read");
+  expect((rendered.split("\n").find((l) => l.startsWith("api_keys")) ?? "").split(/\s+/)[1]).toBe(
+    "3",
+  );
 });

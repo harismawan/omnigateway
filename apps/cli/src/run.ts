@@ -1,6 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { type ConnectFlows, createConnectFlows, oauthProviderIds } from "@omni/control";
+import {
+  type ConnectFlows,
+  createConnectFlows,
+  oauthProviderIds,
+  seedBuiltinOAuth,
+} from "@omni/control";
 import { describeError, GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { Store } from "@omni/store";
@@ -15,28 +20,7 @@ import { resolveCommand } from "./registry.ts";
 import { createServiceDeps, runForeground } from "./runtime.ts";
 import type { ServiceDeps } from "./service.ts";
 import { atomicWriteFile } from "./setupFs.ts";
-
-/**
- * Substituted by `scripts/build-npm.ts` at bundle time; absent everywhere else.
- *
- * The release tag is the sole version source and it comes into existence after
- * the source does, so there is no moment at which this file could hold the real
- * number. `typeof` rather than a plain read because outside the bundle the
- * identifier is not merely undefined, it is undeclared — a direct read throws.
- */
-declare const OMNI_CLI_VERSION: string | undefined;
-
-/**
- * What `omni --version` prints.
- *
- * The literal below is what a checkout reports, and it says so: a build reached
- * npm as `omnigateway@1.2.3` while its own `--version` answered `0.0.0`,
- * because the release version was written into the generated manifest and
- * nowhere the CLI could read. An operator reporting a bug then names a version
- * that never shipped. `-dev` makes the two cases tell themselves apart rather
- * than differing by a number nobody has memorised.
- */
-export const VERSION = typeof OMNI_CLI_VERSION === "string" ? OMNI_CLI_VERSION : "0.0.0-dev";
+import { VERSION } from "./version.ts";
 
 export type RunOptions = ContextOptions & {
   /** Overridden by tests, which must never spawn a process or call systemctl. */
@@ -93,6 +77,11 @@ export async function run(
     writer.err(`usage: omni ${resolved.command.usage}`);
     return 2;
   }
+
+  // The CLI never calls `loadPlugins`, so nothing else would fill the registry:
+  // `omni connect` runs against an installation whose gateway is stopped, which
+  // is the whole reason the seed has two callers rather than one.
+  seedBuiltinOAuth();
 
   const ctx = createContext(args, options);
 

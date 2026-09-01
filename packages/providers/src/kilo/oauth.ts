@@ -1,17 +1,16 @@
-import { kiloProfile } from "@omni/providers";
 import {
   type AuthHelpers,
   type AuthStep,
-  oauthAdapter,
-  type PluginOAuthFlow,
-} from "./pluginFlow.ts";
+  type DevicePluginFlow,
+  tokenErrorCode,
+} from "../oauthFlow.ts";
 import {
   getJsonRequest,
   getJsonUnauthenticatedRequest,
   parsed as parseBody,
   postJsonRequest,
-} from "./requests.ts";
-import { type DeviceOAuthProvider, tokenErrorCode } from "./types.ts";
+} from "../oauthRequests.ts";
+import { kiloProfile } from "./profile.ts";
 
 /**
  * Kilo's device-code flow, which is not RFC 8628.
@@ -102,7 +101,7 @@ async function* orgIdFor(accessToken: string): AuthStep<string | null> {
   }
 }
 
-const kiloFlow: PluginOAuthFlow = {
+export const kiloOAuthFlow: DevicePluginFlow = {
   kind: "device",
   supportsManualPaste: false,
   // Kilo identifies an editor, not a machine: there is no per-installation
@@ -247,7 +246,3 @@ const kiloFlow: PluginOAuthFlow = {
   // credit exhaustion as a cooldown that never resets. An omitted probe makes
   // the account read as unknown, which is the truth.
 };
-
-// `DeviceOAuthProvider`, not the union, for the reason kimi's export gives:
-// consumers read `begin` and `needsDeviceId`, and the overload preserves them.
-export const kiloOAuth: DeviceOAuthProvider = oauthAdapter("kilo", kiloFlow, { trusted: true });

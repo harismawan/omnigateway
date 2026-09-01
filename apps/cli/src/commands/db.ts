@@ -5,11 +5,13 @@ import {
   getDatabaseOverview,
   listSnapshots,
   nodeDatabaseFs,
+  previewRestore,
+  type RestorePreview,
   restoreSnapshot,
   snapshotsDir,
   vacuum,
 } from "@omni/control";
-import { requirePositional } from "../args.ts";
+import { boolFlag, requirePositional } from "../args.ts";
 import type { Command, CommandEnv } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatBytes, formatTime, note, table } from "../output.ts";
@@ -167,9 +169,51 @@ export const dbVacuum: Command = {
   },
 };
 
+/**
+ * The two sides of a restore, table by table.
+ *
+ * Union'd rather than intersected, and an absent table rendered as `—` rather
+ * than as zero: a table one side does not have at all is a different fact from
+ * one it has and finds empty, and the second reads as "nothing changes here".
+ *
+ * A live side that could not be inspected is one sentence instead of a column,
+ * because that is the state a restore repairs and a column of dashes would read
+ * as an empty database rather than an unreadable one.
+ *
+ * Exported for its own test. Neither branch below is reachable from a CLI
+ * fixture — every snapshot a test takes is a `db backup` of the live database,
+ * so the two table sets are always identical and `live` is never null — and
+ * both are operator-facing: the `—` placeholder is a stated requirement, and
+ * the null sentence is the reason the control layer models an unreadable live
+ * database as `null` rather than `{}`.
+ */
+export function previewTable(preview: RestorePreview): string {
+  const live = preview.live;
+  const names = [...new Set([...Object.keys(preview.snapshot), ...Object.keys(live ?? {})])].sort();
+  const cell = (counts: Record<string, number> | null, name: string): string => {
+    const value = counts?.[name];
+    return value === undefined ? "—" : String(value);
+  };
+
+  const body = table(
+    [
+      { header: "TABLE" },
+      { header: "SNAPSHOT", align: "right" },
+      { header: "LIVE", align: "right" },
+    ],
+    names.map((name) => [name, cell(preview.snapshot, name), cell(live, name)]),
+  );
+  return live === null
+    ? `${body}
+
+the live database could not be read, so the LIVE column is unknown`
+    : body;
+}
+
 export const dbRestore: Command = {
-  usage: "db restore <id>",
+  usage: "db restore <id> [--dry-run]",
   summary: "Replace the database with a snapshot, keeping a copy of what was there",
+  options: { "dry-run": { type: "boolean" } },
   /**
    * Refuses while a gateway is running, and asks even when it is not.
    *
@@ -199,16 +243,39 @@ export const dbRestore: Command = {
       );
     }
 
-    // Asked before anything is opened, validated, or copied. Everything this
+    const deps = await database(env);
+
+    // The counts come first, and that ordering is the point. Everything this
     // command does after the question is irreversible from where the operator
-    // stands: the rows that are there now are gone, and the only way back is a
-    // second restore of the copy it takes on the way in. `--yes` answers it,
-    // which is also what makes the command usable from a script.
+    // stands, and until now the only evidence in front of them was the
+    // snapshot's id and its mtime — neither of which says whether this replaces
+    // 900 request logs with 12 or with 900. `previewRestore` performs the same
+    // candidate validation the restore does and stops where the swap would
+    // begin, so a snapshot that will be refused is refused here, before the
+    // question rather than after the answer.
+    const preview = await previewRestore(deps, id);
+
+    if (boolFlag(args.values, "dry-run")) {
+      // The id rides the payload: a script capturing this has nothing else to
+      // correlate the two columns with.
+      emit(ctx, writer, { id, ...preview }, () => previewTable(preview));
+      return;
+    }
+
+    // `writer.err`, not `note`: `note` is `if (!ctx.json)`, so under `--json`
+    // the counts did not move to stderr — they vanished, and `omni db restore
+    // <id> --json` without `--yes` asked the uninformed question this whole
+    // part exists to remove. Stderr keeps stdout a single parseable value for
+    // the script that passed `--yes`, which is the only thing `note` was
+    // wanted for.
+    writer.err(previewTable(preview));
+
+    // `--yes` answers it, which is what makes the command usable from a script.
     if (!(await prompt.confirm(`replace ${ctx.databasePath} with ${id}?`))) {
       throw new CliError("cancelled");
     }
 
-    const result = await restoreSnapshot(await database(env), id);
+    const result = await restoreSnapshot(deps, id);
 
     emit(ctx, writer, result, () =>
       fields([

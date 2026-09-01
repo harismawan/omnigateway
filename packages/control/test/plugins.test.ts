@@ -1,18 +1,21 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { GatewayError } from "@omni/ir";
 import { PLUGIN_API_VERSION } from "@omnigateway/plugin-api";
 import { nodeFetchBytes, nodePluginFs } from "../src/nodeFs.ts";
 import {
+  INSTALL_RECORD_FILENAME,
   installPlugin,
   listPlugins,
   MAX_PLUGIN_BYTES,
   orphanPluginTables,
   type PluginDeps,
   type PluginStore,
+  readInstallRecord,
   removePlugin,
+  updatePlugin,
   verifyPlugin,
 } from "../src/plugins.ts";
 
@@ -1429,4 +1432,243 @@ describe("orphanPluginTables", () => {
 
     expect(orphanPluginTables(deps, root, store)).toEqual([]);
   });
+});
+
+/* -------------------------------------------------------------------- update */
+
+describe("the install record", () => {
+  test("install writes the spec as typed, the resolved version, and when", async () => {
+    const root = makeRoot();
+    const from = source("poke-dex", MANIFEST);
+    const at = Date.parse("2026-08-30T12:00:00.000Z");
+
+    await installPlugin({ ...deps, now: () => at }, root, from);
+
+    const record = readInstallRecord(deps, root, "poke-dex");
+    expect(record).toEqual({
+      spec: from,
+      installedAt: "2026-08-30T12:00:00.000Z",
+      version: "1.4.2",
+    });
+    // On disk beside the plugin, not in the database: a restore that predates
+    // the install must not be able to take the record with it.
+    expect(existsSync(join(root, "plugins", "poke-dex", INSTALL_RECORD_FILENAME))).toBe(true);
+  });
+
+  test("the record does not stop the plugin verifying", async () => {
+    const root = makeRoot();
+    await installPlugin(deps, root, source("poke-dex", MANIFEST));
+
+    // A dot-prefixed file the manifest never names. `entrySchema` cannot name
+    // one, so no manifest can claim it as an entry point either.
+    expect(verifyPlugin(deps, root, "poke-dex").loadable).toBe(true);
+    expect(verifyPlugin(deps, root, "poke-dex").problems).toEqual([]);
+  });
+
+  test("a relative path is recorded absolute, so an update means the same bytes anywhere", async () => {
+    const root = makeRoot();
+    const from = source("poke-dex", MANIFEST);
+    // What an operator actually types — README and the plugin guide both
+    // document this form. `loadPayload` resolves it against `process.cwd()`, so
+    // recording it verbatim would make `omni plugin update` mean a different
+    // directory's bytes when run from somewhere else, and `expectId` could not
+    // catch that because the id would match.
+    const typed = relative(process.cwd(), from);
+    expect(isAbsolute(typed)).toBe(false);
+
+    const result = await installPlugin(deps, root, typed);
+
+    expect(isAbsolute(result.spec)).toBe(true);
+    expect(readInstallRecord(deps, root, "poke-dex")?.spec).toBe(from);
+  });
+
+  test("a tarball path is recorded absolute too, and updates from it", async () => {
+    const root = makeRoot();
+    const archive = writeTarball("poke-dex-1.4.2.tgz", [
+      ["poke-dex/omni-plugin.json", JSON.stringify(MANIFEST)],
+      ["poke-dex/server.js", "export default {};"],
+    ]);
+
+    await installPlugin(deps, root, relative(process.cwd(), archive));
+    expect(readInstallRecord(deps, root, "poke-dex")?.spec).toBe(archive);
+
+    // And the recorded path is one `update` can actually re-read.
+    const again = await updatePlugin(deps, root, "poke-dex");
+    expect(again.version).toBe("1.4.2");
+    expect(again.replaced).toBe(true);
+  });
+
+  test("a package name is recorded as typed, never resolved to a path", async () => {
+    const root = makeRoot();
+    const registry = fakeRegistry({ name: "poke-dex", versions: { "1.4.2": {} }, latest: "1.4.2" });
+
+    await installPlugin(registry.deps, root, "poke-dex");
+
+    // The other half of the rule: resolving a registry spec would silently pin
+    // every install, which is what "as typed" was written to prevent.
+    expect(readInstallRecord(deps, root, "poke-dex")?.spec).toBe("poke-dex");
+  });
+
+  test("a plugin with no record reads as null rather than throwing", () => {
+    const root = makeRoot();
+    place(root, "poke-dex", MANIFEST);
+
+    expect(readInstallRecord(deps, root, "poke-dex")).toBeNull();
+  });
+
+  test("an unreadable record reads as null rather than as a spec", async () => {
+    const root = makeRoot();
+    await installPlugin(deps, root, source("poke-dex", MANIFEST));
+    writeFileSync(join(root, "plugins", "poke-dex", INSTALL_RECORD_FILENAME), "{not json");
+
+    expect(readInstallRecord(deps, root, "poke-dex")).toBeNull();
+  });
+});
+
+describe("updatePlugin", () => {
+  test("a bare package name re-resolves, so an update picks up the new latest", async () => {
+    const root = makeRoot();
+    const first = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": {} },
+      latest: "1.4.2",
+    });
+    await installPlugin(first.deps, root, "poke-dex");
+    expect(readInstallRecord(deps, root, "poke-dex")?.spec).toBe("poke-dex");
+
+    const later = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": {}, "1.5.0": {} },
+      latest: "1.5.0",
+    });
+    const result = await updatePlugin(later.deps, root, "poke-dex");
+
+    expect(result.version).toBe("1.5.0");
+    expect(result.replaced).toBe(true);
+    expect(result.restartRequired).toBe(true);
+    // Recorded as typed: the spec that re-resolves stays the spec on file, so
+    // the next update re-resolves too rather than pinning 1.5.0 forever.
+    expect(readInstallRecord(deps, root, "poke-dex")?.spec).toBe("poke-dex");
+    expect(readInstallRecord(deps, root, "poke-dex")?.version).toBe("1.5.0");
+  });
+
+  test("an exact version reinstalls that version rather than the new latest", async () => {
+    const root = makeRoot();
+    const first = fakeRegistry({ name: "poke-dex", versions: { "1.4.2": {} }, latest: "1.4.2" });
+    await installPlugin(first.deps, root, "poke-dex@1.4.2");
+
+    const later = fakeRegistry({
+      name: "poke-dex",
+      versions: { "1.4.2": {}, "2.0.0": {} },
+      latest: "2.0.0",
+    });
+    const result = await updatePlugin(later.deps, root, "poke-dex");
+
+    expect(result.version).toBe("1.4.2");
+    expect(later.asked).toEqual([`${REGISTRY}/poke-dex`, `${REGISTRY}/poke-dex/-/pkg-1.4.2.tgz`]);
+  });
+
+  test("a plugin that is not installed is refused the way remove refuses it", async () => {
+    const root = makeRoot();
+
+    await expect(updatePlugin(deps, root, "poke-dex")).rejects.toThrow(
+      /no plugin "poke-dex" installed under/,
+    );
+  });
+
+  test("a plugin with no record is refused, naming the repair", async () => {
+    const root = makeRoot();
+    place(root, "poke-dex", MANIFEST);
+
+    // The fact and the repair, because the fact alone leaves an operator with a
+    // plugin they cannot update and no idea what to type next.
+    await expect(updatePlugin(deps, root, "poke-dex")).rejects.toThrow(
+      /omni plugin install <spec>/,
+    );
+  });
+
+  test("a package that renamed itself is refused rather than installed beside the old one", async () => {
+    const root = makeRoot();
+    const first = fakeRegistry({ name: "poke-dex", versions: { "1.4.2": {} }, latest: "1.4.2" });
+    await installPlugin(first.deps, root, "poke-dex");
+
+    const renamed = fakeRegistry({
+      name: "poke-dex",
+      versions: {
+        "2.0.0": {
+          bytes: Bun.gzipSync(
+            new Uint8Array(
+              makeTarball([
+                [
+                  "package/omni-plugin.json",
+                  JSON.stringify({ ...MANIFEST, id: "dex", version: "2.0.0" }),
+                ],
+                ["package/server.js", "export default {};"],
+              ]),
+            ),
+          ),
+        },
+      },
+      latest: "2.0.0",
+    });
+
+    await expect(updatePlugin(renamed.deps, root, "poke-dex")).rejects.toThrow(/does not match/);
+    // The whole point of recording the source: an update must never leave two
+    // plugins where the operator had one.
+    expect(existsSync(join(root, "plugins", "dex"))).toBe(false);
+    expect(readInstallRecord(deps, root, "poke-dex")?.version).toBe("1.4.2");
+  });
+
+  test("a failed update leaves the previous tree and its record serving", async () => {
+    const root = makeRoot();
+    const from = source("poke-dex", MANIFEST, { "data/seed.json": "[]" });
+    await installPlugin(deps, root, from);
+
+    // The source goes bad between install and update, which is the ordinary
+    // shape of a broken release.
+    writeFileSync(join(from, "omni-plugin.json"), "{not json");
+
+    await expect(updatePlugin(deps, root, "poke-dex")).rejects.toThrow(GatewayError);
+
+    expect(verifyPlugin(deps, root, "poke-dex").loadable).toBe(true);
+    expect(readFileSync(join(root, "plugins", "poke-dex", "data", "seed.json"), "utf8")).toBe("[]");
+    expect(readInstallRecord(deps, root, "poke-dex")?.spec).toBe(from);
+    expect(existsSync(join(root, "plugins", ".staging-poke-dex"))).toBe(false);
+  });
+});
+
+describe("a record that is not this record", () => {
+  /**
+   * The third clause of `readInstallRecord`'s null, which was the untested one.
+   *
+   * Missing file and unparseable JSON were covered; a document that parses but
+   * is not this shape was not, and it is the one that could hand
+   * `installPlugin` something it never wrote — `{"spec": {"a": 1}}` coerces to
+   * `"[object Object]"` under a bare `String(...)`, which is a path, which
+   * resolves.
+   */
+  const cases: Record<string, unknown> = {
+    "a non-string spec": { spec: { a: 1 }, installedAt: "2026-08-30T12:00:00.000Z", version: "1" },
+    "an empty spec": { spec: "", installedAt: "2026-08-30T12:00:00.000Z", version: "1" },
+    "a missing version": { spec: "poke-dex", installedAt: "2026-08-30T12:00:00.000Z" },
+    "a top-level array": [{ spec: "poke-dex" }],
+    "a bare string": "poke-dex",
+    null: null,
+  };
+
+  for (const [what, document] of Object.entries(cases)) {
+    test(`${what} reads as null, and update refuses with the reinstall hint`, async () => {
+      const root = makeRoot();
+      await installPlugin(deps, root, source("poke-dex", MANIFEST));
+      writeFileSync(
+        join(root, "plugins", "poke-dex", INSTALL_RECORD_FILENAME),
+        JSON.stringify(document),
+      );
+
+      expect(readInstallRecord(deps, root, "poke-dex")).toBeNull();
+      await expect(updatePlugin(deps, root, "poke-dex")).rejects.toThrow(
+        /omni plugin install <spec>/,
+      );
+    });
+  }
 });

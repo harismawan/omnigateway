@@ -39,6 +39,60 @@ export function pluginsDir(root: string): string {
 export const MANIFEST_FILENAME = "omni-plugin.json";
 
 /**
+ * Where an install records what it was installed from.
+ *
+ * Beside the plugin rather than in the database, and that placement is the
+ * decision. Plugins live in `<root>/plugins/` and outlive database restores
+ * that predate them — the orphan-tables case `doctor` reports is exactly a
+ * database and a plugin directory travelling separately — so a source recorded
+ * in the database would be the one piece of the plugin a restore could delete.
+ * Inside the plugin's own directory it rides the atomic rename instead: an
+ * install that fails halfway leaves the previous version's record serving, the
+ * same as it leaves the previous version's code.
+ *
+ * Dot-prefixed, and the loader reads `omni-plugin.json` plus the entries that
+ * manifest names — nothing else — so it never sees this file.
+ *
+ * It is **not** true that a manifest could not name it: `entrySchema` rejects a
+ * leading `/` and `..` segments and nothing else, so `server: ".omni-install.json"`
+ * parses. That claim was written here and was wrong. What actually follows is
+ * mild: the record is written last and overwrites whatever the payload had at
+ * that path, so such a plugin imports JSON, exposes no `setup`, and is skipped
+ * with a legible reason — a plugin that fails to load, not a plugin that loads
+ * the record. The corollary is the real cost, and it is stated rather than
+ * hidden: a plugin legitimately shipping a file at this path loses it.
+ *
+ * The record is not reachable over HTTP either — `pluginUiRoutes` roots at
+ * `<home>/ui`, not `<home>`.
+ *
+ * A spec naming a URL is recorded verbatim, credentials included if the
+ * operator typed them there. It is the string they would retype and it is not
+ * web-reachable, but it is on disk in plaintext.
+ */
+export const INSTALL_RECORD_FILENAME = ".omni-install.json";
+
+/**
+ * What an installed plugin remembers about where it came from.
+ *
+ * `spec` is recorded **as typed**, never as resolved. `omni plugin install
+ * poke-dex` should update to the current release and `omni plugin install
+ * poke-dex@1.2.0` should reinstall 1.2.0 exactly; recording the version the
+ * registry happened to serve would silently pin every install of the first
+ * kind, and the operator would have no way to see that it had happened.
+ *
+ * `version` is therefore a note about what this install got, not an input to
+ * the next one. Nothing reads it back to decide anything.
+ */
+export type PluginInstallRecord = {
+  /** The spec the operator typed: a path, a URL, or a package name. */
+  spec: string;
+  /** ISO 8601, from the caller's clock. */
+  installedAt: string;
+  /** The manifest version this install landed on. */
+  version: string;
+};
+
+/**
  * A ceiling on what one plugin may unpack to.
  *
  * A tarball is compressed and an installer that trusts the declared sizes in it
@@ -133,6 +187,15 @@ export type PluginDeps = {
    */
   fetchBytes?: (url: string, accept?: string) => Promise<Uint8Array>;
   /**
+   * The clock the install record is stamped from.
+   *
+   * Injected for boundary rule 6 — this package must not reach for a global
+   * clock — and defaulted because every read-only operation here is a pure
+   * filesystem question that would otherwise have to be handed a clock it never
+   * consults.
+   */
+  now?: () => number;
+  /**
    * Where a bare package name is resolved, defaulting to `DEFAULT_NPM_REGISTRY`.
    *
    * An injected option rather than an environment read, for boundary rule 6:
@@ -194,6 +257,14 @@ export type PluginInstallResult = {
   name: string;
   version: string;
   path: string;
+  /**
+   * The spec this install came from, which is also what was recorded.
+   *
+   * Returned rather than left for the caller to remember, so `update` can name
+   * the source it re-ran without reading the record a second time — two reads of
+   * one file is two answers that can disagree.
+   */
+  spec: string;
   /** True when an install of the same id was replaced rather than created. */
   replaced: boolean;
   /**
@@ -432,6 +503,7 @@ export function listPlugins(deps: PluginDeps, root: string): PluginSummary[] {
 
 const BLOCK = 512;
 const decoder = new TextDecoder();
+const encoder = new TextEncoder();
 
 function fieldText(header: Uint8Array, offset: number, length: number): string {
   const slice = header.subarray(offset, offset + length);
@@ -584,6 +656,20 @@ function gunzipIfNeeded(bytes: Uint8Array): Uint8Array {
 type Payload = {
   files: Map<string, Uint8Array> /** What the source calls this plugin, if anything. */;
   claimedId: string | null;
+  /**
+   * The spec to record, which is not always the spec that was typed.
+   *
+   * A registry spec is recorded **as typed** so `poke-dex` keeps re-resolving
+   * and `poke-dex@1.2.0` keeps pinning — that is the whole argument for not
+   * recording a resolved version. A *filesystem* spec is a different axis and
+   * the same rule is wrong there: `loadPayload` resolves it against
+   * `process.cwd()`, and the documented form is relative (`omni plugin install
+   * ./some-plugin`), so a recorded `./some-plugin` makes `omni plugin update`
+   * mean different bytes from a different directory — and `expectId` cannot
+   * catch that, because the id matches. Absolute here, typed for `https://` and
+   * npm.
+   */
+  recordSpec?: string;
 };
 
 /**
@@ -987,11 +1073,15 @@ async function loadPayload(deps: PluginDeps, spec: string): Promise<Payload> {
     // non-npm tarball root is. `resolve` first so a trailing slash or a `.` does
     // not turn the basename into something the operator never typed.
     const claimed = basename(source);
-    return { files, claimedId: ID_PATTERN.test(claimed) ? claimed : null };
+    return {
+      files,
+      claimedId: ID_PATTERN.test(claimed) ? claimed : null,
+      recordSpec: source,
+    };
   }
 
   const bytes = deps.fs.readBytes(source);
-  if (bytes !== null) return stripRoot(readTar(gunzipIfNeeded(bytes)));
+  if (bytes !== null) return { ...stripRoot(readTar(gunzipIfNeeded(bytes))), recordSpec: source };
 
   // The registry is the last thing tried, and that order is the safe one. A
   // spec naming something that is on this disk installs what is on this disk;
@@ -1008,6 +1098,25 @@ async function loadPayload(deps: PluginDeps, spec: string): Promise<Payload> {
     `no directory or archive at ${source}, and "${spec}" is not a package name`,
   );
 }
+
+export type PluginInstallOptions = {
+  /**
+   * Refuse unless the payload installs under exactly this id.
+   *
+   * Set by `updatePlugin` and by nothing else. An update names one plugin, and
+   * a package that has renamed itself between releases would otherwise install
+   * *beside* the one being updated — two plugins where the operator had one,
+   * which is the failure recording the source exists to prevent. The manifest
+   * check below catches this only when the payload carries a directory name of
+   * its own; an npm tarball's wrapper is called `package` and names nothing, so
+   * on the registry path there is nothing else to disagree with.
+   *
+   * Checked where the manifest check is — before anything touches
+   * `<root>/plugins` — so the refusal keeps this function's promise that a
+   * failure leaves no partial directory behind.
+   */
+  expectId?: string;
+};
 
 /**
  * Unpacks a plugin into `<root>/plugins/<id>`.
@@ -1041,6 +1150,7 @@ export async function installPlugin(
   deps: PluginDeps,
   root: string,
   spec: string,
+  options: PluginInstallOptions = {},
 ): Promise<PluginInstallResult> {
   const payload = await loadPayload(deps, spec);
 
@@ -1078,6 +1188,15 @@ export async function installPlugin(
     );
   }
 
+  if (options.expectId !== undefined && targetId !== options.expectId) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `${spec} installs plugin "${targetId}", which does not match "${options.expectId}"; ` +
+        "an update reinstalls the plugin it names and nothing else — install the new id " +
+        "separately if the rename was intended",
+    );
+  }
+
   const dir = pluginsDir(root);
   const target = join(dir, targetId);
   const replaced = deps.fs.isDirectory(target);
@@ -1094,6 +1213,20 @@ export async function installPlugin(
       deps.fs.mkdir(join(destination, ".."));
       deps.fs.writeBytes(destination, bytes);
     }
+    // Written last, so a payload that carries a record of its own — a directory
+    // that was itself an installed plugin — is overwritten by this install's
+    // own, rather than inheriting whatever the previous one was fetched from.
+    // Written into the stage, so it lands by the same rename as the code.
+    const record: PluginInstallRecord = {
+      spec: payload.recordSpec ?? spec,
+      installedAt: new Date((deps.now ?? Date.now)()).toISOString(),
+      version: manifest.version,
+    };
+    deps.fs.mkdir(staging);
+    deps.fs.writeBytes(
+      join(staging, INSTALL_RECORD_FILENAME),
+      encoder.encode(`${JSON.stringify(record, null, 2)}\n`),
+    );
     deps.fs.rm(target);
     deps.fs.rename(staging, target);
   } finally {
@@ -1107,9 +1240,82 @@ export async function installPlugin(
     name: manifest.name,
     version: manifest.version,
     path: target,
+    spec: payload.recordSpec ?? spec,
     replaced,
     restartRequired: true,
   };
+}
+
+/* ------------------------------------------------------------------ update */
+
+/**
+ * What `<root>/plugins/<id>` says it was installed from, or null.
+ *
+ * Null covers every way the answer can be absent — no file, unreadable file,
+ * something that is not this record — because they all lead an operator to the
+ * same repair, and a caller that had to distinguish them would be choosing
+ * between error messages rather than doing anything different. Never throws:
+ * this is read on the path that is trying to *fix* a plugin.
+ */
+export function readInstallRecord(
+  deps: PluginDeps,
+  root: string,
+  id: string,
+): PluginInstallRecord | null {
+  if (!ID_PATTERN.test(id)) return null;
+  const raw = deps.fs.readText(join(pluginsDir(root), id, INSTALL_RECORD_FILENAME));
+  if (raw === null) return null;
+
+  let document: unknown;
+  try {
+    document = JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+
+  const record = asRecord(document);
+  if (record === null) return null;
+  const spec = asString(record.spec);
+  const installedAt = asString(record.installedAt);
+  const version = asString(record.version);
+  if (spec === null || spec.length === 0 || installedAt === null || version === null) return null;
+  return { spec, installedAt, version };
+}
+
+/**
+ * Reinstalls a plugin from the source its last install recorded.
+ *
+ * Update *is* install — same unpacking, same checks, same staging rename, same
+ * `restartRequired` — with the spec read off the disk instead of retyped. That
+ * is the whole feature: retyping is where an operator gets a scope or a version
+ * subtly wrong and ends up with a second plugin beside the first.
+ *
+ * There is deliberately no `--all`, no version range, and no lockfile. The
+ * record answers "what would I retype" and nothing else.
+ */
+export async function updatePlugin(
+  deps: PluginDeps,
+  root: string,
+  id: string,
+): Promise<PluginInstallResult> {
+  // The same refusal `remove` gives, in the same words, because it is the same
+  // fact and an operator who mistyped an id should not have to learn two
+  // spellings of "there is no such plugin".
+  if (!ID_PATTERN.test(id) || !deps.fs.isDirectory(join(pluginsDir(root), id))) {
+    throw new GatewayError("BAD_REQUEST", `no plugin "${id}" installed under ${pluginsDir(root)}`);
+  }
+
+  const record = readInstallRecord(deps, root, id);
+  if (record === null) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `plugin "${id}" has no readable ${INSTALL_RECORD_FILENAME}, so nothing here knows where it ` +
+        "came from; it was copied in by hand or installed before this host recorded a source — " +
+        "reinstall it once with omni plugin install <spec> to seed the record",
+    );
+  }
+
+  return installPlugin(deps, root, record.spec, { expectId: id });
 }
 
 /* ------------------------------------------------------------------ remove */

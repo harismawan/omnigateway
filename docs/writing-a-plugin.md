@@ -602,8 +602,15 @@ naming your plugin and leaves the rest of the console working.
 omni plugin install ./my-plugin           # or a tarball; runs nothing from it
 omni plugin verify my-plugin              # every load-time check, without loading
 omni plugin list
+omni plugin update my-plugin              # reinstall from the recorded source
 omni restart
 ```
+
+`install` writes `.omni-install.json` into the plugin's directory recording what
+it was installed from, and `update` re-runs that. A local path is recorded
+absolute, so an update means the same bytes from any directory; a package name is
+recorded as typed, so `my-plugin` keeps re-resolving and `my-plugin@1.2.3` keeps
+pinning. Do not ship a file at that path — the installer overwrites it.
 
 `verify` is what to run before restarting a production gateway — it reaches the
 same verdict the next boot will, from the same validator, without importing your
@@ -645,6 +652,8 @@ tar -czf my-plugin.tgz -C dist my-plugin
 # on the host
 scp my-plugin.tgz gateway-host:/tmp/
 ssh gateway-host 'omni plugin install /tmp/my-plugin.tgz && omni plugin verify my-plugin && omni restart'
+# later releases, once the source is on record
+ssh gateway-host 'omni plugin update my-plugin && omni restart'
 ```
 
 Ship the built bundles and the manifest, nothing else. Your sources, tests and

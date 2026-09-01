@@ -1,5 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { OAUTH_PROVIDERS, validateRegistration } from "@omni/control";
+import {
+  OAUTH_PROVIDERS,
+  type OAuthProvider,
+  registerOAuthProvider,
+  validateRegistration,
+} from "@omni/control";
 import { ADAPTERS, PROVIDER_DESCRIPTORS } from "@omni/providers";
 import { captureLogger, entryOf } from "@omni/testkit";
 import { installPluginProviders } from "../../src/plugins/install.ts";
@@ -45,6 +50,58 @@ afterEach(() => {
     // than a frozen constant.
     delete (OAUTH_PROVIDERS as Record<string, unknown>)[id];
   }
+});
+
+/**
+/**
+ * The built-in OAuth flows reach a booted gateway, and this is the only test
+ * that says so.
+ *
+ * **Driven against a fresh registry, not the process-wide one**, and that is
+ * the whole load-bearing part. The first version of this test read
+ * `OAUTH_PROVIDERS` — which is module state Bun shares across every file in one
+ * process — so `logging.test.ts` and `apps/cli/test/connect.test.ts` seeded it
+ * first and the assertion passed on someone else's work. Measured: deleting
+ * `seedBuiltinOAuth()` from `installPluginProviders` left `bun test`,
+ * `bun test apps/gateway` and `bun test packages/control` all green — every
+ * invocation CI runs. That is the defect this seed was relocated to fix,
+ * reproduced inside its own fix, and only an injected registry makes the
+ * assertion about *this call*.
+ *
+ * The empty array is the case asserted because `main()` passes one on any
+ * installation with no plugin providers, which is most of them.
+ *
+ * The literal, not `builtinOAuthFlows()`. Comparing the registry against the
+ * same list a mutation would edit is a self-comparison — dropping a provider
+ * from the seed satisfies it — and the **order** is operator-facing: it is the
+ * sentence `omni connect` refuses an unknown provider with.
+ */
+test("boot seeds the five built-in oauth flows, in the order operators are offered them", () => {
+  const registry: Record<string, OAuthProvider> = Object.create(null);
+
+  installPluginProviders([], captureLogger(), registry);
+
+  expect(Object.keys(registry)).toEqual(["anthropic", "openai", "kimi", "kilo", "grok"]);
+  expect(registry.anthropic?.kind).toBe("pkce");
+  expect(registry.kilo?.kind).toBe("device");
+});
+
+test("a flow may not take an id the seed already installed", () => {
+  const registry: Record<string, OAuthProvider> = Object.create(null);
+  installPluginProviders([], captureLogger(), registry);
+  const anthropic = registry.anthropic as OAuthProvider;
+
+  // The refusal that replaced a silent `continue`. Round 1 found the skip; the
+  // guard that replaced it was then itself unpinned — reverting it to
+  // `if (Object.hasOwn(...)) continue` left the whole suite green.
+  expect(() => {
+    registerOAuthProvider("anthropic", anthropic, registry);
+  }).toThrow(/already installed/);
+
+  // And a fresh id still installs, so the refusal is about collision rather
+  // than about the registry being closed.
+  registerOAuthProvider("acme-ai", anthropic, registry);
+  expect(Object.keys(registry)).toContain("acme-ai");
 });
 
 test("a plugin provider is installed and said so", () => {

@@ -9,6 +9,7 @@
     "./descriptors": "./src/descriptors.ts"
   },
   "dependencies": {
-    "@omni/ir": "workspace:*"
+    "@omni/ir": "workspace:*",
+    "@omni/store": "workspace:*"
   }
 }

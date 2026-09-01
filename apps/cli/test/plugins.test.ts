@@ -284,6 +284,76 @@ describe("omni plugin install", () => {
   });
 });
 
+describe("omni plugin update", () => {
+  test("reinstalls from the recorded source without the operator retyping it", async () => {
+    const root = makeRoot();
+    const from = source("poke-dex", MANIFEST);
+    expect((await cli(["plugin", "install", from], { root })).code).toBe(0);
+
+    // The release the operator is picking up, published at the same place.
+    writeFileSync(
+      join(from, "omni-plugin.json"),
+      JSON.stringify({ ...MANIFEST, version: "1.5.0" }),
+    );
+
+    const result = await cli(["plugin", "update", "poke-dex"], { root });
+
+    expect(result.code).toBe(0);
+    // "reinstalled", not "updated": re-running an unchanged spec is the ordinary
+    // case, and reporting an update that did not happen is a claim the operator
+    // has no way to check.
+    expect(result.out).toContain("reinstalled Poke Dex 1.5.0");
+    expect(result.out).toContain("omni restart");
+    expect(
+      JSON.parse(readFileSync(join(root, "plugins", "poke-dex", "omni-plugin.json"), "utf8"))
+        .version,
+    ).toBe("1.5.0");
+  });
+
+  test("the install record is stamped from the CLI's own clock", async () => {
+    const root = makeRoot();
+    // Injected, per rule 11, rather than left to control's global default —
+    // which is untestable from here and which nothing else would notice.
+    await cli(["plugin", "install", source("poke-dex", MANIFEST)], {
+      root,
+      now: () => 1_800_000_000_000,
+    });
+
+    const record = JSON.parse(
+      readFileSync(join(root, "plugins", "poke-dex", ".omni-install.json"), "utf8"),
+    ) as { installedAt: string };
+    expect(record.installedAt).toBe(new Date(1_800_000_000_000).toISOString());
+  });
+
+  test("names the source it used, so the operator can see what was re-run", async () => {
+    const root = makeRoot();
+    const from = source("poke-dex", MANIFEST);
+    await cli(["plugin", "install", from], { root });
+
+    const result = await cli(["plugin", "update", "poke-dex", "--json"], { root });
+
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.out).spec).toBe(from);
+  });
+
+  test("a hand-copied plugin is refused with the command that would seed a record", async () => {
+    const root = makeRoot();
+    place(root, "poke-dex", MANIFEST);
+
+    const result = await cli(["plugin", "update", "poke-dex"], { root });
+
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("omni plugin install <spec>");
+  });
+
+  test("a plugin that is not installed is refused", async () => {
+    const result = await cli(["plugin", "update", "poke-dex"], { root: makeRoot() });
+
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain('no plugin "poke-dex" installed');
+  });
+});
+
 describe("omni plugin remove", () => {
   test("without --purge the tables survive", async () => {
     const root = makeRoot();

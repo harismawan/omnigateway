@@ -10,6 +10,7 @@ import {
   importSnapshot,
   listSnapshots,
   MAX_IMPORT_BYTES,
+  previewRestore,
   pruneSnapshots,
   putRetention,
   resolveSnapshotForDownload,
@@ -45,6 +46,17 @@ function deps(
     now?: number;
     freeBytes?: number | null;
     inspect?: DatabaseInspection;
+    /**
+     * Inspections keyed by the path asked about, for the callers that ask twice.
+     *
+     * A preview compares two files, and a fixture that answered both with one
+     * object would pass with the columns swapped — which is the mistake worth
+     * catching, because "snapshot" and "live" are the two words the operator
+     * reads the table by.
+     */
+    inspectBy?: Record<string, DatabaseInspection>;
+    /** Runs inside `inspect`, so a test can hold an operation open mid-flight. */
+    onInspect?: (path: string) => Promise<void>;
     /**
      * The admin password hash before the swap and after the reopen.
      *
@@ -103,7 +115,9 @@ function deps(
         },
         inspect: async (path) => {
           log.push(`inspect:${path}`);
+          await input.onInspect?.(path);
           return (
+            input.inspectBy?.[path] ??
             input.inspect ?? { ok: true, quickCheck: "ok", tables: [], counts: { settings: 1 } }
           );
         },
@@ -813,6 +827,125 @@ describe("restoreSnapshot", () => {
     expect((error as SwapFailedError).reopened).toBe(false);
     // The original failure is still the one an operator is shown.
     expect((error as SwapFailedError).cause).toBeInstanceOf(Error);
+  });
+});
+
+describe("previewRestore", () => {
+  const SNAP = `${SNAPSHOTS}/db_2026-08-18T04-12-03-114Z_manual.sqlite`;
+
+  function previewDeps(extra: Parameters<typeof deps>[0] = {}) {
+    return deps({
+      files: { [DB]: 4_096, [SNAP]: 2_048 },
+      inspectBy: {
+        [SNAP]: {
+          ok: true,
+          quickCheck: "ok",
+          tables: [],
+          counts: { settings: 1, request_logs: 12, api_keys: 3 },
+        },
+        [DB]: {
+          ok: true,
+          quickCheck: "ok",
+          tables: [],
+          counts: { settings: 1, request_logs: 900, credentials: 2 },
+        },
+      },
+      ...extra,
+    });
+  }
+
+  test("reports both sides, and does not answer one with the other", async () => {
+    const d = previewDeps();
+
+    const preview = await previewRestore(d, "db_2026-08-18T04-12-03-114Z_manual.sqlite");
+
+    expect(preview.snapshot).toEqual({ settings: 1, request_logs: 12, api_keys: 3 });
+    expect(preview.live).toEqual({ settings: 1, request_logs: 900, credentials: 2 });
+  });
+
+  test("swaps nothing, closes nothing, and leaves no working copy behind", async () => {
+    const d = previewDeps();
+    const before = [...d.files.keys()].sort();
+
+    await previewRestore(d, "db_2026-08-18T04-12-03-114Z_manual.sqlite");
+
+    // The directory listing, not the happy-path return: a dry run that leaves a
+    // database-sized file beside the live one is a dry run only in name.
+    expect([...d.files.keys()].sort()).toEqual(before);
+    expect(d.log).toEqual([`inspect:${SNAP}`, `inspect:${DB}`]);
+  });
+
+  test("refuses a file that is a database but not one of ours, as a restore does", async () => {
+    const d = previewDeps({
+      inspectBy: {
+        [SNAP]: {
+          ok: false,
+          quickCheck: "ok",
+          tables: ["albums", "tracks"],
+          counts: {},
+        },
+      },
+    });
+
+    await expect(previewRestore(d, "db_2026-08-18T04-12-03-114Z_manual.sqlite")).rejects.toThrow(
+      /not one of ours: it has albums, tracks/,
+    );
+  });
+
+  test("refuses a failed integrity check, as a restore does", async () => {
+    const d = previewDeps({
+      inspectBy: {
+        [SNAP]: { ok: false, quickCheck: "page 4 is never used", tables: [], counts: {} },
+      },
+    });
+
+    await expect(previewRestore(d, "db_2026-08-18T04-12-03-114Z_manual.sqlite")).rejects.toThrow(
+      /failed its integrity check: page 4 is never used/,
+    );
+  });
+
+  test("a snapshot that is not there is refused before anything is opened", async () => {
+    const d = previewDeps();
+
+    await expect(previewRestore(d, "db_2026-08-18T04-12-03-114Z_hourly.sqlite")).rejects.toThrow(
+      /no such snapshot/,
+    );
+    expect(d.log).toEqual([]);
+  });
+
+  test("a live database that cannot be read is unknown, never an empty column", async () => {
+    // The state a restore exists to repair. Refusing the preview here would
+    // withhold the table precisely when it is most worth reading, and reporting
+    // `{}` would draw every live cell as absent — which reads as "the restore
+    // adds all of this", the opposite of what is known.
+    const d = previewDeps({
+      inspectBy: {
+        [SNAP]: { ok: true, quickCheck: "ok", tables: [], counts: { settings: 1 } },
+        [DB]: { ok: false, quickCheck: "unreadable", tables: [], counts: {} },
+      },
+    });
+
+    const preview = await previewRestore(d, "db_2026-08-18T04-12-03-114Z_manual.sqlite");
+
+    expect(preview.snapshot).toEqual({ settings: 1 });
+    expect(preview.live).toBeNull();
+  });
+
+  test("holds the single-flight guard, so a restore cannot start under it", async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const d = previewDeps({ onInspect: async (path) => (path === SNAP ? held : undefined) });
+
+    const preview = previewRestore(d, "db_2026-08-18T04-12-03-114Z_manual.sqlite");
+    // Same two-writers hazard the guard exists for: a preview reading a file
+    // mid-swap would report counts from neither side.
+    await expect(restoreSnapshot(d, "db_2026-08-18T04-12-03-114Z_manual.sqlite")).rejects.toThrow(
+      /already running on this database/,
+    );
+    release();
+    await preview;
   });
 });
 

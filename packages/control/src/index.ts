@@ -73,8 +73,10 @@ export {
   importSnapshot,
   listSnapshots,
   MAX_IMPORT_BYTES,
+  previewRestore,
   pruneSnapshots,
   putRetention,
+  type RestorePreview,
   type RestoreResult,
   type RetentionPolicy,
   resolveSnapshotForDownload,
@@ -123,7 +125,12 @@ export {
   nodeFetchBytes,
   nodePluginFs,
 } from "./nodeFs.ts";
-export { OAUTH_PROVIDERS, oauthProviderIds, registerOAuthProvider } from "./oauth/index.ts";
+export {
+  OAUTH_PROVIDERS,
+  oauthProviderIds,
+  registerOAuthProvider,
+  seedBuiltinOAuth,
+} from "./oauth/index.ts";
 export { DISPATCH_REFRESH_LEAD_MS, SCHEDULER_REFRESH_LEAD_MS } from "./oauth/lead.ts";
 export { createPendingFlows, type StoredFlow } from "./oauth/pending.ts";
 export { createRefresher, type Refresher } from "./oauth/refresh.ts";
@@ -147,6 +154,7 @@ export {
 } from "./pluginProviders.ts";
 export {
   DEFAULT_NPM_REGISTRY,
+  INSTALL_RECORD_FILENAME,
   installPlugin,
   listPlugins,
   MANIFEST_FILENAME,
@@ -156,6 +164,8 @@ export {
   PLUGINS_DIRNAME,
   type PluginDeps,
   type PluginFs,
+  type PluginInstallOptions,
+  type PluginInstallRecord,
   type PluginInstallResult,
   type PluginProblem,
   type PluginRemoveOptions,
@@ -164,7 +174,9 @@ export {
   type PluginStore,
   type PluginSummary,
   pluginsDir,
+  readInstallRecord,
   removePlugin,
+  updatePlugin,
   verifyPlugin,
 } from "./plugins.ts";
 export {
