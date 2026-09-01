@@ -1,6 +1,6 @@
 import { GatewayError, type ProviderId } from "@omni/ir";
-import type { WindowType } from "@omni/store";
-import type { UsageWindowReport } from "./types.ts";
+import type { WindowType } from "@omni/store/types";
+import type { UsageWindowReport } from "./oauthFlow.ts";
 
 /**
  * Shared readers for provider usage payloads.

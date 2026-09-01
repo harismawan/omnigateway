@@ -1,170 +1,55 @@
-import { type ErrorCode, GatewayError, type ProviderId } from "@omni/ir";
+/**
+ * The host that performs a provider's OAuth flow.
+ *
+ * The auth half of the `provider` capability. A plugin already describes an
+ * inference request and lets the host send it — `ProviderCodec` — and this is
+ * the same inversion applied to authorization: **each step is an async
+ * generator that yields described requests and receives responses.** The plugin
+ * never holds an `HttpClient`, so boundary rule 15 keeps its "never
+ * `HttpClient`" without gaining a footnote, and a plugin author who has written
+ * a codec already knows the shape.
+ *
+ * The contract those flows are written against — `AuthRequest`, `AuthResponse`,
+ * `AuthHelpers`, `PluginOAuthFlow` — lives in `@omni/providers`, beside the
+ * five built-in flows and beside the codec contract it mirrors. It is
+ * re-exported below so a consumer of this module needs one import, not two;
+ * this file owns the *performing*, which is the part that holds the transport.
+ */
+
+import { GatewayError, type ProviderId } from "@omni/ir";
 import {
-  type HeaderPair,
+  type AuthHelpers,
+  type AuthRequest,
+  type AuthResponse,
+  type AuthStep,
+  type DevicePluginFlow,
   type HttpResponse,
   isHttpMethod,
   isSendableUrl,
+  type PkcePluginFlow,
+  type PluginOAuthFlow,
   withinOrigins,
 } from "@omni/providers";
 import type { UsageSecrets } from "@omni/store";
 import { createPkce, randomState } from "./pkce.ts";
 import {
-  type AuthorizeStart,
   type DeviceOAuthProvider,
-  type FlowResult,
   type OAuthDeps,
   type OAuthProvider,
   type PendingFlow,
   type PkceOAuthProvider,
   pendingError,
-  type UsageReport,
 } from "./types.ts";
 
-/**
- * A plugin's OAuth flow, and the host that performs it.
- *
- * The auth half of the `provider` capability. A plugin already describes an
- * inference request and lets the host send it — `ProviderCodec` — and this is the
- * same inversion applied to authorization: **each step is an async generator
- * that yields described requests and receives responses.** The plugin never
- * holds an `HttpClient`, so boundary rule 15 keeps its "never `HttpClient`"
- * without gaining a footnote, and a plugin author who has written a codec
- * already knows the shape.
- *
- * A generator rather than a build/parse pair, because a pair cannot express what
- * the shipped flows do. Measured across the five built-ins: most steps are one
- * request, `grok.start` is a discovery call followed by local work, and
- * `kilo.exchange` is **two** — it polls for a token and then reads the account's
- * organization id *with* that token, so the second request's existence and
- * content depend on the first response's body.
- */
-export type AuthRequest = {
-  url: string;
-  method: string;
-  headers: readonly HeaderPair[];
-  body?: string;
-  /**
-   * How long this one call may take, bounded by the host.
-   *
-   * Here because the built-in flows deliberately use **two** deadlines, and a
-   * single host constant could not say so: a token call gets 30s because an
-   * operator is waiting on it, and a usage probe gets 15s because nothing on
-   * the request path waits for one and a slow probe should be abandoned rather
-   * than retried. Porting the five found this — the fixture that stood in for
-   * them had one kind of call and so could not.
-   *
-   * Clamped to `MAX_STEP_TIMEOUT_MS`, and absent means that maximum. A plugin
-   * can therefore shorten its own deadline but never extend it past what the
-   * host is willing to hold a connect flow open for.
-   */
-  timeoutMs?: number;
+export type {
+  AuthHelpers,
+  AuthRequest,
+  AuthResponse,
+  AuthStep,
+  DevicePluginFlow,
+  PkcePluginFlow,
+  PluginOAuthFlow,
 };
-
-/**
- * What the host hands back for a yielded request.
- *
- * `body` is text the host has already read, for the same reason
- * `CodecErrorInput.body` is: a flow that received the response could re-read the
- * stream or reach the socket, and it needs neither.
- *
- * `status` is here because these flows read it as meaning, not merely as
- * success: `kilo.exchange` treats 202 as "keep polling", 403 as denied and 410
- * as expired, and collapsing those into an error would lose the difference
- * between "not yet" and "no".
- */
-export type AuthResponse = {
-  status: number;
-  headers: Headers;
-  body: string;
-};
-
-/**
- * What every step is given besides its own arguments.
- *
- * Each exists because the plugin cannot or should not do it itself:
- *
- * - `fail` builds the **host's** `GatewayError`. A plugin ships as a
- *   self-contained tree with no `node_modules`, so a class it imports is a
- *   bundled copy and `instanceof` against it is false — the defect that made a
- *   codec's deliberate `AUTH` read as an unclassified failure.
- * - `keepPolling` is the device-poll "not approved yet" signal. It carries a
- *   private marker a plugin has no way to set, so without this a device flow
- *   cannot say "not yet" at all — it could only fail, and the host would stop.
- *   Named for what it asks the host to do rather than `pending`, because
- *   `exchange` is already handed `pending: PendingFlow` — the stored state of
- *   the authorization — and one name for two things in one argument object is
- *   how an author reaches for the wrong one.
- * - `pkce` and `randomState` cover the randomness **OAuth itself** needs, and
- *   keep `start` testable. The implementation is 21 lines already shared by
- *   every built-in flow.
- *
- *   Not "a plugin needs no crypto", which is what this said until porting kimi
- *   disproved it: a device flow that binds a session to a machine fingerprint
- *   mints that itself — `mintKimiDevice` — and nothing here replaces it. A
- *   plugin doing the same would bundle its own. The narrow claim is the true
- *   one, and the wide one is the kind a contributor preserves while breaking
- *   the real thing.
- * - `now` because a flow that read the clock directly could not be tested
- *   against an expiry, which `kilo.exchange` checks before it polls.
- */
-export type AuthHelpers = {
-  fail(code: ErrorCode, message: string, opts?: { status?: number }): GatewayError;
-  keepPolling(reason: string): GatewayError;
-  pkce(): { verifier: string; challenge: string };
-  randomState(): string;
-  now(): number;
-};
-
-/**
- * A step: yields requests for the host to perform, returns when it has its answer.
- *
- * A request that fails at the transport is raised **at the yield**, so a step
- * that tolerates one — `kilo.exchange`'s organization read — catches it there
- * like any other call.
- */
-export type AuthStep<T> = AsyncGenerator<AuthRequest, T, AuthResponse>;
-
-/**
- * The flow a plugin declares beside its descriptor and codec.
- *
- * Mirrors `OAuthProvider`, which is what the host already consumes, so that
- * `oauthAdapter` below is the only thing that has to know the difference —
- * exactly as `codecAdapter` is for the inference path.
- */
-type PluginFlowBase = {
-  readonly supportsManualPaste: boolean;
-  start(input: { redirectUri: string } & AuthHelpers): AuthStep<AuthorizeStart>;
-  exchange(input: { code: string; pending: PendingFlow } & AuthHelpers): AuthStep<FlowResult>;
-  refresh(
-    input: { refreshToken: string; providerData: Record<string, unknown> } & AuthHelpers,
-  ): AuthStep<FlowResult>;
-  usage?(
-    input: { secrets: UsageSecrets; providerData: Record<string, unknown> } & AuthHelpers,
-  ): AuthStep<UsageReport | null>;
-};
-
-/** A redirect flow. Mirrors `PkceOAuthProvider`. */
-export type PkcePluginFlow = PluginFlowBase & { readonly kind: "pkce" };
-
-/**
- * A device-code flow. Mirrors `DeviceOAuthProvider`, `begin` and all.
- *
- * **A union rather than one shape with two optional fields**, because the flat
- * version could not say that a device flow must have `begin` — it checked at
- * construction instead, which is late for an in-repo flow the compiler could
- * have caught. It also flattened the adapter's return type: `oauthAdapter`
- * answered `OAuthProvider`, so `kiloOAuth` stopped being a
- * `DeviceOAuthProvider` and every consumer reading `.begin` or
- * `.needsDeviceId` lost it. Porting the two device flows is what surfaced that;
- * the fixture had only ever been read back through the union.
- */
-export type DevicePluginFlow = PluginFlowBase & {
-  readonly kind: "device";
-  readonly needsDeviceId: boolean;
-  begin(input: { deviceId: string } & AuthHelpers): AuthStep<AuthorizeStart>;
-};
-
-export type PluginOAuthFlow = PkcePluginFlow | DevicePluginFlow;
 
 /**
  * How many requests one step may ask for.

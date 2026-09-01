@@ -16,6 +16,7 @@ import {
   uninstall,
   unitInstalled,
 } from "../service.ts";
+import { VERSION } from "../version.ts";
 import { sourceHint } from "./console.ts";
 import { doctorPluginDeps, pluginDoctorLines, providerDeclared } from "./plugins.ts";
 
@@ -326,6 +327,11 @@ export const doctor: Command = {
     const strandedKeys = await danglingCredentials(ctx, plugins);
 
     const checks = {
+      // First field, and named in the JSON as well as on stdout: the JSON form
+      // is what ends up in scripts and issue templates, and a diagnostic bundle
+      // that does not say which build produced it makes every other line in it
+      // harder to act on.
+      version: VERSION,
       root: deps.root,
       rootSource: ctx.root.source,
       envFile: ctx.root.envFile,
@@ -355,80 +361,84 @@ export const doctor: Command = {
 
     emit(ctx, writer, checks, () => {
       const ok = (value: boolean, text: string) => state(ctx, value, text);
-      return fields([
-        ["root", `${checks.root} ${paint(ctx, "dim", `(from ${checks.rootSource})`)}`],
-        ["env file", checks.envFile ?? paint(ctx, "dim", "none")],
-        [
-          "database",
-          `${checks.databasePath} ${ok(checks.databaseExists, checks.databaseExists ? "exists" : "missing")}`,
-        ],
-        ["encryption key", checks.encryptionKey],
-        ["config", checks.configError === null ? ok(true, "ok") : ok(false, checks.configError)],
-        ["entrypoint", checks.gatewayEntrypoint ?? ok(false, "not found")],
-        [
-          "usage rollup",
-          checks.usageRollup === null
-            ? paint(ctx, "dim", "not checked")
-            : ok(checks.usageRollup.startsWith("ok"), checks.usageRollup),
-        ],
-        ["systemd unit", unit ? deps.scope : paint(ctx, "dim", "none")],
-        ["gateway", ok(status.running, status.running ? "running" : "stopped")],
-        ["console log", sourceHint(checks.consoleSource)],
-        // One row per plugin rather than a count. A count answers "are there
-        // plugins", and the question `doctor` is asked is "which one is wrong".
-        ...(plugins.length === 0
-          ? ([["plugins", paint(ctx, "dim", "none")]] as Array<[string, string]>)
-          : pluginDoctorLines(ctx, plugins).map(
-              (line, index) => [index === 0 ? "plugins" : "", line] as [string, string],
-            )),
-        [
-          "orphan plugin tables",
-          orphans === null
-            ? paint(ctx, "dim", "not checked")
-            : orphans.length === 0
-              ? ok(true, "none")
-              : // Named, not dropped. The store reports these and this command
-                // prints them; removing one is `omni plugin remove --purge`,
-                // which asks first.
-                paint(ctx, "yellow", `${orphans.length}: ${orphans.join(", ")}`),
-        ],
-        [
-          "dangling pins",
-          pins === null
-            ? paint(ctx, "dim", "not checked")
-            : pins.length === 0
-              ? ok(true, "none")
-              : // Named, like the orphans above: the fix is to repoint or clear
-                // the target in the model editor, and that needs to know which.
-                paint(ctx, "yellow", `${pins.length}: ${pins.join(", ")}`),
-        ],
-        [
-          "missing providers",
-          uninstalled === null
-            ? paint(ctx, "dim", "not checked")
-            : uninstalled.length === 0
-              ? ok(true, "none")
-              : // Named for the same reason the pins are: the fix is to repoint
-                // the target or reinstall the provider, and either needs to know
-                // which target and which provider.
-                paint(ctx, "yellow", `${uninstalled.length}: ${uninstalled.join(", ")}`),
-        ],
-        [
-          "stranded credentials",
-          strandedKeys === null
-            ? paint(ctx, "dim", "not checked")
-            : strandedKeys.length === 0
-              ? ok(true, "none")
-              : // The account is a stored secret for a provider that does not
-                // exist, so every request naming it is `provider:missing`. The
-                // fix is to install the plugin that was meant to supply it or to
-                // remove the account, and both need to know which.
-                paint(ctx, "yellow", `${strandedKeys.length}: ${strandedKeys.join(", ")}`),
-        ],
-        ...checks.warnings.map(
-          (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],
-        ),
-      ]);
+      // The version above the fields rather than inside them: it describes the
+      // program, not the installation, and every row below is a fact about a
+      // path or a process on this host.
+      return `omni ${VERSION}
+${fields([
+  ["root", `${checks.root} ${paint(ctx, "dim", `(from ${checks.rootSource})`)}`],
+  ["env file", checks.envFile ?? paint(ctx, "dim", "none")],
+  [
+    "database",
+    `${checks.databasePath} ${ok(checks.databaseExists, checks.databaseExists ? "exists" : "missing")}`,
+  ],
+  ["encryption key", checks.encryptionKey],
+  ["config", checks.configError === null ? ok(true, "ok") : ok(false, checks.configError)],
+  ["entrypoint", checks.gatewayEntrypoint ?? ok(false, "not found")],
+  [
+    "usage rollup",
+    checks.usageRollup === null
+      ? paint(ctx, "dim", "not checked")
+      : ok(checks.usageRollup.startsWith("ok"), checks.usageRollup),
+  ],
+  ["systemd unit", unit ? deps.scope : paint(ctx, "dim", "none")],
+  ["gateway", ok(status.running, status.running ? "running" : "stopped")],
+  ["console log", sourceHint(checks.consoleSource)],
+  // One row per plugin rather than a count. A count answers "are there
+  // plugins", and the question `doctor` is asked is "which one is wrong".
+  ...(plugins.length === 0
+    ? ([["plugins", paint(ctx, "dim", "none")]] as Array<[string, string]>)
+    : pluginDoctorLines(ctx, plugins).map(
+        (line, index) => [index === 0 ? "plugins" : "", line] as [string, string],
+      )),
+  [
+    "orphan plugin tables",
+    orphans === null
+      ? paint(ctx, "dim", "not checked")
+      : orphans.length === 0
+        ? ok(true, "none")
+        : // Named, not dropped. The store reports these and this command
+          // prints them; removing one is `omni plugin remove --purge`,
+          // which asks first.
+          paint(ctx, "yellow", `${orphans.length}: ${orphans.join(", ")}`),
+  ],
+  [
+    "dangling pins",
+    pins === null
+      ? paint(ctx, "dim", "not checked")
+      : pins.length === 0
+        ? ok(true, "none")
+        : // Named, like the orphans above: the fix is to repoint or clear
+          // the target in the model editor, and that needs to know which.
+          paint(ctx, "yellow", `${pins.length}: ${pins.join(", ")}`),
+  ],
+  [
+    "missing providers",
+    uninstalled === null
+      ? paint(ctx, "dim", "not checked")
+      : uninstalled.length === 0
+        ? ok(true, "none")
+        : // Named for the same reason the pins are: the fix is to repoint
+          // the target or reinstall the provider, and either needs to know
+          // which target and which provider.
+          paint(ctx, "yellow", `${uninstalled.length}: ${uninstalled.join(", ")}`),
+  ],
+  [
+    "stranded credentials",
+    strandedKeys === null
+      ? paint(ctx, "dim", "not checked")
+      : strandedKeys.length === 0
+        ? ok(true, "none")
+        : // The account is a stored secret for a provider that does not
+          // exist, so every request naming it is `provider:missing`. The
+          // fix is to install the plugin that was meant to supply it or to
+          // remove the account, and both need to know which.
+          paint(ctx, "yellow", `${strandedKeys.length}: ${strandedKeys.join(", ")}`),
+  ],
+  ...checks.warnings.map(
+    (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],
+  ),
+])}`;
     });
   },
 };

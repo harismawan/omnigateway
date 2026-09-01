@@ -3,9 +3,18 @@ import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { CredentialView, Store } from "@omni/store";
 import { memoryStore, seedCredential } from "@omni/testkit";
-import { OAUTH_PROVIDERS } from "../../src/oauth/index.ts";
+import { OAUTH_PROVIDERS, seedBuiltinOAuth } from "../../src/oauth/index.ts";
 import { createRefresher } from "../../src/oauth/refresh.ts";
 import type { FlowResult, OAuthProvider } from "../../src/oauth/types.ts";
+
+// The registry starts empty: the five vendor flows moved to `@omni/providers`
+// and reach it through `registerOAuthProvider`, the door a plugin's flow uses.
+// Seeded here rather than relied on from another file's import, because a test
+// that passes only when the whole suite runs is one that passes for the wrong
+// reason. Below the imports, not among them: ESM hoists every import, so a call
+// written between two of them still runs after both — and reads as though it
+// does not.
+seedBuiltinOAuth();
 
 const NOW = 1_000_000;
 

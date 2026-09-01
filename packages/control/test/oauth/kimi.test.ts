@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import type { HttpClient, HttpRequest } from "@omni/providers";
 import { OAUTH_PROVIDERS } from "../../src/oauth/index.ts";
-import { isAuthorizationPending, kimiOAuth } from "../../src/oauth/kimi.ts";
+import { isAuthorizationPending } from "../../src/oauth/types.ts";
+import { kimiOAuth } from "./builtins.ts";
 
 const NOW = 1_000_000;
 const KIMI_HEADERS = [
@@ -287,7 +288,10 @@ test("refresh preserves the stored token when the new refresh token is blank", a
   expect(result.secrets.refreshToken).toBe("test-token-2");
 });
 
-test("the registry exposes one flow per provider", () => {
+test("the registry exposes one flow per provider once the built-ins are seeded", () => {
+  // The registry starts empty now — the vendor flows live in `@omni/providers`
+  // and arrive through `registerOAuthProvider` like a plugin's would. Importing
+  // `builtins.ts` is what runs the seed, so this asserts the seed's own result.
   expect(Object.keys(OAUTH_PROVIDERS).sort()).toEqual([
     "anthropic",
     "grok",
@@ -295,6 +299,6 @@ test("the registry exposes one flow per provider", () => {
     "kimi",
     "openai",
   ]);
-  expect(OAUTH_PROVIDERS.kimi.id).toBe("kimi");
-  expect(OAUTH_PROVIDERS.kilo.id).toBe("kilo");
+  expect(kimiOAuth.id).toBe("kimi");
+  expect(kimiOAuth.kind).toBe("device");
 });

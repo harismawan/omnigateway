@@ -1,18 +1,16 @@
-import { type KimiDevice, kimiDeviceHeaders, kimiProfile, mintKimiDevice } from "@omni/providers";
 import {
   type AuthHelpers,
   type AuthStep,
-  oauthAdapter,
-  type PluginOAuthFlow,
-} from "./pluginFlow.ts";
-import { getJsonRequest, parsed as parseBody, postJsonRequest } from "./requests.ts";
-import type { DeviceOAuthProvider, FlowResult, UsageReport } from "./types.ts";
-import { tokenErrorCode, tokenErrorMessage } from "./types.ts";
-import { recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
-
-// Re-exported because the pending marker moved to `types.ts` when kilo became
-// the second device flow, and this module's existing callers ask kimi for it.
-export { isAuthorizationPending } from "./types.ts";
+  type DevicePluginFlow,
+  type FlowResult,
+  tokenErrorCode,
+  tokenErrorMessage,
+  type UsageReport,
+} from "../oauthFlow.ts";
+import { getJsonRequest, parsed as parseBody, postJsonRequest } from "../oauthRequests.ts";
+import { recordOf, reportFrom, usageReadable, windowFrom } from "../oauthUsage.ts";
+import { type KimiDevice, kimiDeviceHeaders, mintKimiDevice } from "./device.ts";
+import { kimiProfile } from "./profile.ts";
 
 /** Public client ID of the Kimi CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
@@ -198,7 +196,7 @@ export function parseKimiUsage(value: unknown, now: number): UsageReport | null 
   return reportFrom([windowFrom(root.usage ?? root.Usage, "weekly", now)]);
 }
 
-const kimiFlow: PluginOAuthFlow = {
+export const kimiOAuthFlow: DevicePluginFlow = {
   kind: "device",
   // Kimi ties the session to the fingerprint `start` mints and sends it on
   // every later call; a blank one is refused upstream as a malformed device.
@@ -302,9 +300,3 @@ const kimiFlow: PluginOAuthFlow = {
     return parseKimiUsage(parseBody(res.body), now());
   },
 };
-
-// `DeviceOAuthProvider`, not the union: consumers read `begin` and
-// `needsDeviceId`, neither of which exists on the pkce arm. `oauthAdapter` is
-// overloaded on the flow's `kind`, so the narrow type survives the adapter and
-// this needs neither a guard nor an assertion.
-export const kimiOAuth: DeviceOAuthProvider = oauthAdapter("kimi", kimiFlow, { trusted: true });

@@ -149,6 +149,14 @@ async function main(): Promise<void> {
 
   const now = () => Date.now();
   const http = nodeHttpClient({ logger, now });
+
+  // `OAUTH_PROVIDERS` is empty at this point and is filled by
+  // `installPluginProviders` below, which seeds the five built-ins before it
+  // registers anything a plugin supplied. The refresher is constructed here all
+  // the same: it takes the registry by reference and resolves a provider per
+  // refresh, so it sees whatever is installed by the time a credential is
+  // actually refreshed. The seed does not live on this line because nothing in
+  // `main()` is reachable from a test — see `installPluginProviders`.
   const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger });
   const staticDir = dashboardDir();
   logger.info(

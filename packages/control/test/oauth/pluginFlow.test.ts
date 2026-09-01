@@ -1,18 +1,14 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import type { HttpRequest, HttpResponse } from "@omni/providers";
-import { anthropicOAuth } from "../../src/oauth/anthropic.ts";
-import { grokOAuth } from "../../src/oauth/grok.ts";
 import { OAUTH_PROVIDERS } from "../../src/oauth/index.ts";
-import { kiloOAuth } from "../../src/oauth/kilo.ts";
-import { kimiOAuth } from "../../src/oauth/kimi.ts";
-import { openaiOAuth } from "../../src/oauth/openai.ts";
 import { oauthAdapter, type PluginOAuthFlow } from "../../src/oauth/pluginFlow.ts";
 import {
   isAuthorizationPending,
   type OAuthDeps,
   type OAuthProvider,
 } from "../../src/oauth/types.ts";
+import { anthropicOAuth, grokOAuth, kiloOAuth, kimiOAuth, openaiOAuth } from "./builtins.ts";
 
 /**
  * The auth half of the `provider` capability, judged against what the shipped

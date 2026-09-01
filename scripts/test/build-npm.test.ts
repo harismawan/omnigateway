@@ -126,3 +126,40 @@ test("a second version produces a second answer", () => {
       .trim(),
   ).toBe("1.2.3");
 });
+
+/**
+ * The same number, on the command an operator actually pastes into a report.
+ *
+ * `--version` is the assertion above; this is the one that matters in practice,
+ * because `doctor` is the diagnostic bundle and it named every path on the
+ * installation without ever saying which build produced them. Asserted against
+ * the bundled artifact rather than the checkout, for the reason the tests above
+ * are: in a checkout both answers are `0.0.0-dev`, so a `doctor` that
+ * hard-coded the fallback would satisfy an in-repo test perfectly.
+ *
+ * `--root` at a temporary directory, so the artifact diagnoses a throwaway
+ * installation rather than whatever this machine has at `~/.config`.
+ */
+test("the bundled CLI names that same version in doctor --json", () => {
+  const dir = mkdtempSync(join(tmpdir(), "omni-cli-doctor-"));
+  dirs.push(dir);
+  linkRuntimeDeps(dir);
+  const outfile = join(dir, "omni.js");
+
+  const build = bundleCli(outfile, "9.9.9-test");
+  expect(build.exitCode === 0 ? "" : (build.stderr?.toString() ?? "")).toBe("");
+
+  const built = Bun.spawnSync(["bun", "--no-install", outfile, "doctor", "--json", "--root", dir], {
+    cwd: dir,
+  });
+  expect(built.exitCode === 0 ? "" : (built.stderr?.toString() ?? "")).toBe("");
+  expect(JSON.parse(built.stdout.toString()).version).toBe("9.9.9-test");
+
+  // The human first line too, and from the same bundle. Spec §3 specifies both
+  // forms, and hard-coding the fallback in *either* is invisible in a checkout,
+  // where the real answer and the fallback are the same string.
+  const human = Bun.spawnSync(["bun", "--no-install", outfile, "doctor", "--root", dir], {
+    cwd: dir,
+  });
+  expect(human.stdout.toString().split("\n")[0]).toBe("omni 9.9.9-test");
+});

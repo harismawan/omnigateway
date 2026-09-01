@@ -1,20 +1,23 @@
-import { openaiProfile } from "@omni/providers";
-import type { WindowType } from "@omni/store";
+import type { WindowType } from "@omni/store/types";
 import {
   type AuthHelpers,
   type AuthStep,
-  oauthAdapter,
-  type PluginOAuthFlow,
-} from "./pluginFlow.ts";
-import { getJsonRequest, parsed as parseBody, postJsonRequest } from "./requests.ts";
-import {
   type FlowResult,
-  type OAuthProvider,
+  type PkcePluginFlow,
   tokenErrorCode,
   tokenErrorMessage,
   type UsageReport,
-} from "./types.ts";
-import { nestedOf, numberOf, recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
+} from "../oauthFlow.ts";
+import { getJsonRequest, parsed as parseBody, postJsonRequest } from "../oauthRequests.ts";
+import {
+  nestedOf,
+  numberOf,
+  recordOf,
+  reportFrom,
+  usageReadable,
+  windowFrom,
+} from "../oauthUsage.ts";
+import { openaiProfile } from "./profile.ts";
 
 /** Public client ID of the Codex CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -225,7 +228,7 @@ export function parseOpenAIUsage(value: unknown, now: number): UsageReport | nul
   ]);
 }
 
-const openaiFlow: PluginOAuthFlow = {
+export const openaiOAuthFlow: PkcePluginFlow = {
   kind: "pkce",
   supportsManualPaste: true,
 
@@ -294,5 +297,3 @@ const openaiFlow: PluginOAuthFlow = {
     return parseOpenAIUsage(parseBody(res.body), now());
   },
 };
-
-export const openaiOAuth: OAuthProvider = oauthAdapter("openai", openaiFlow, { trusted: true });

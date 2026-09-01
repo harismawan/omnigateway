@@ -23,7 +23,13 @@ import {
   modelsRemove,
   modelsShow,
 } from "./commands/models.ts";
-import { pluginInstall, pluginList, pluginRemove, pluginVerify } from "./commands/plugins.ts";
+import {
+  pluginInstall,
+  pluginList,
+  pluginRemove,
+  pluginUpdate,
+  pluginVerify,
+} from "./commands/plugins.ts";
 import { quota } from "./commands/quota.ts";
 import {
   doctor,
@@ -86,6 +92,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "plugin list": pluginList,
   "plugin verify": pluginVerify,
   "plugin install": pluginInstall,
+  "plugin update": pluginUpdate,
   "plugin remove": pluginRemove,
 
   "settings get": settingsGet,

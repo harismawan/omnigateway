@@ -11,6 +11,7 @@ import {
   pluginsDir,
   readPluginProviders,
   removePlugin,
+  updatePlugin,
   verifyPlugin,
 } from "@omni/control";
 import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
@@ -63,6 +64,10 @@ function installDeps(ctx: Context, args: Parsed): PluginDeps {
   return {
     ...pluginDeps(),
     fetchBytes: nodeFetchBytes(),
+    // Injected rather than left to control's own default, per rule 11: the
+    // install record is stamped from it, and "inject every side effect" is
+    // cheaper to honour than to argue about.
+    now: ctx.now,
     ...(registry === undefined ? {} : { registry }),
   };
 }
@@ -193,6 +198,31 @@ export const pluginInstall: Command = {
         // routes are built into the Elysia tree at construction, so a running
         // gateway will not pick this up — and an operator watching an unchanged
         // console has no way to tell that from a plugin that failed to load.
+        paint(ctx, "yellow", "restart the gateway for this to take effect: omni restart"),
+      ].join("\n");
+    });
+  },
+};
+
+export const pluginUpdate: Command = {
+  usage: "plugin update <id> [--registry <url>]",
+  summary: "Reinstall a plugin from the source it was installed from",
+  options: { registry: { type: "string" } },
+  async run(args, { ctx, writer }) {
+    const id = requirePositional(args, 0, "plugin id");
+    const result = await updatePlugin(installDeps(ctx, args), ctx.root.root, id);
+
+    emit(ctx, writer, result, () => {
+      note(
+        ctx,
+        writer,
+        paint(ctx, "dim", `re-run from ${result.spec}; no code from the package was executed`),
+      );
+      return [
+        // "reinstalled", not "updated": re-running an unchanged spec is the
+        // ordinary case and reporting an update that did not happen is a small
+        // lie the operator has no way to check.
+        `reinstalled ${result.name} ${result.version} at ${result.path}`,
         paint(ctx, "yellow", "restart the gateway for this to take effect: omni restart"),
       ].join("\n");
     });

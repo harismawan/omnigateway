@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseAnthropicUsage } from "../../src/oauth/anthropic.ts";
-import { parseKimiUsage } from "../../src/oauth/kimi.ts";
-import { parseOpenAIUsage } from "../../src/oauth/openai.ts";
-import { windowFrom } from "../../src/oauth/usage.ts";
+import { parseAnthropicUsage, parseKimiUsage, parseOpenAIUsage, windowFrom } from "@omni/providers";
 
 const NOW = 1_800_000_000_000;
 

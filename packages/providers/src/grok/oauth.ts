@@ -1,12 +1,18 @@
-import { grokProfile, mintGrokDevice } from "@omni/providers";
 import {
   type AuthHelpers,
   type AuthStep,
-  oauthAdapter,
-  type PluginOAuthFlow,
-} from "./pluginFlow.ts";
-import { getJsonUnauthenticatedRequest, parsed as parseBody, postJsonRequest } from "./requests.ts";
-import { type FlowResult, type OAuthProvider, tokenErrorCode, tokenErrorMessage } from "./types.ts";
+  type FlowResult,
+  type PkcePluginFlow,
+  tokenErrorCode,
+  tokenErrorMessage,
+} from "../oauthFlow.ts";
+import {
+  getJsonUnauthenticatedRequest,
+  parsed as parseBody,
+  postJsonRequest,
+} from "../oauthRequests.ts";
+import { mintGrokDevice } from "./device.ts";
+import { grokProfile } from "./profile.ts";
 
 /**
  * Public client ID of xAI's own desktop client. A public PKCE client holds no
@@ -218,7 +224,7 @@ function toResult(
   };
 }
 
-const grokFlow: PluginOAuthFlow = {
+export const grokOAuthFlow: PkcePluginFlow = {
   kind: "pkce",
   supportsManualPaste: true,
 
@@ -285,5 +291,3 @@ const grokFlow: PluginOAuthFlow = {
   // none, so a grok account reads as *unknown* rather than as unlimited —
   // which is the honest answer, and the one the tightest-window rule expects.
 };
-
-export const grokOAuth: OAuthProvider = oauthAdapter("grok", grokFlow, { trusted: true });

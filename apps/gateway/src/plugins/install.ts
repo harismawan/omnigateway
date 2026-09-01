@@ -1,4 +1,10 @@
-import { OAUTH_PROVIDERS, type RegisteredProvider, registerOAuthProvider } from "@omni/control";
+import {
+  OAUTH_PROVIDERS,
+  type OAuthProvider,
+  type RegisteredProvider,
+  registerOAuthProvider,
+  seedBuiltinOAuth,
+} from "@omni/control";
 import type { Logger } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS, registerProvider } from "@omni/providers";
 
@@ -27,8 +33,31 @@ import { PROVIDER_DESCRIPTORS, registerProvider } from "@omni/providers";
  * and the cost of removing it is that failure mode returning silently. Read it
  * as defence, not as the place the decision is made.
  *
+ * **The built-in OAuth flows are seeded here**, before the loop, and that is
+ * this function's second reason to exist. `OAUTH_PROVIDERS` is empty until a
+ * host fills it, and the seed used to sit inline in `main()` — which no test
+ * calls, so the only guard was a test grepping the source, and a `//` defeats
+ * a substring match. Here it is on the same unconditional boot path and
+ * reachable from a harness.
+ *
+ * **This function must stay unconditional.** `main()` calls it with an empty
+ * array when there are no plugins, and that call is what installs OAuth on
+ * such an installation — which is most of them. Wrapping it in
+ * `if (providers.length > 0)` reads as an obvious tidy-up and kills OAuth on
+ * every plugin-less host; the name says "plugin providers" and the seed is the
+ * part that is not about plugins at all.
+ *
+ * Safe this late in boot because every consumer takes the registry **by
+ * reference and reads it at call time**: `createRefresher` is constructed
+ * earlier in `main()` and resolves a provider per refresh. It runs *after*
+ * `loadPlugins`, which is only safe because the loader registers no flow —
+ * `readProviders`' shadow refusal consults `PROVIDER_DESCRIPTORS`, and the
+ * only `registerOAuthProvider` call on this host is in the loop below, after
+ * the seed. If the loader ever registers a flow, the seed must move ahead of
+ * it or a plugin will take a built-in's id.
+ *
  * Extracted from `index.ts` so it can be tested at all, and that is the whole
- * reason it exists as a function. It sat inline in `main()`, outside anything a
+ * reason it exists as a function.
  * harness reaches, and `registerProvider` throws on a duplicate — so deleting
  * the guard would not have made a plugin win, it would have made the throw
  * escape to the top-level `catch`, which `process.exit(1)`s. One plugin
@@ -42,7 +71,16 @@ import { PROVIDER_DESCRIPTORS, registerProvider } from "@omni/providers";
 export function installPluginProviders(
   providers: readonly RegisteredProvider[],
   logger: Logger,
+  // Injected so a test can hand this a fresh table and observe *this call's*
+  // effect. Reading the process-wide one made the guard below assert whatever
+  // an earlier test file had seeded, which is how the round-1 defect survived
+  // its own fix.
+  registry: Record<string, OAuthProvider> = OAUTH_PROVIDERS,
 ): void {
+  // First, and unconditionally — an empty `providers` must still leave a host
+  // with its own five flows.
+  seedBuiltinOAuth(registry);
+
   for (const provider of providers) {
     const id = provider.descriptor.id;
     // `Object.hasOwn`, not an index check: `PROVIDER_DESCRIPTORS` is
@@ -54,7 +92,7 @@ export function installPluginProviders(
     // is a plugin turning into a boot outage and is what rule 15 forbids. The
     // descriptor check alone relied on an unstated invariant that the two key
     // sets agree.
-    if (Object.hasOwn(PROVIDER_DESCRIPTORS, id) || Object.hasOwn(OAUTH_PROVIDERS, id)) {
+    if (Object.hasOwn(PROVIDER_DESCRIPTORS, id) || Object.hasOwn(registry, id)) {
       logger.warn("plugin provider ignored", {
         plugin: id,
         reason: `a provider named ${id} is already installed`,
@@ -67,7 +105,7 @@ export function installPluginProviders(
     // one place obey it is what keeps a provider from being routable while its
     // authorization is not installed.
     if (provider.oauth !== undefined) {
-      registerOAuthProvider(provider.descriptor.id, provider.oauth);
+      registerOAuthProvider(provider.descriptor.id, provider.oauth, registry);
     }
     logger.info("plugin provider registered", { plugin: id });
     // A separate line rather than a field on the one above. `LogFields` is a

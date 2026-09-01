@@ -193,17 +193,78 @@ run; when that file gain a step, this line gain one.
     model name cannot carry an endpoint id. `control` has three things and one of them is large.
     Two branches — `schemas.ts` name `custom` in the one rule that survive its target union (a
     custom target carry an `endpointId` and nothing else may), and `credentials.ts` plus `models.ts`
-    ask `=== "custom"` about endpoint metadata. And a **per-provider OAuth subsystem**:
-    `control/src/oauth/` still hold `OAUTH_PROVIDERS` keyed by five provider literals plus five
-    modules of vendor URLs, scopes and id literals, and that violate the *first* clause, for which
-    no exception is carved at all. Two things changed and the difference matter. It is no longer the
-    only way **in**: a plugin declare its own flow and `registerOAuthProvider` install it at boot,
-    so adding a provider no longer require editing that table. And all five built-ins now **run on
-    the plugin contract** — each is a `PluginOAuthFlow` wrapped by `oauthAdapter`, so the contract
-    have five real consumers rather than a fixture written to agree with it. What remain is the
-    vendor data itself: URLs, scopes and client ids compiled into core. That is the violation; the
-    mechanism around it is no longer one.
-    Plugin flow live in `control/src/oauth/pluginFlow.ts` and follow the codec's inversion: each
+    ask `=== "custom"` about endpoint metadata. That is now **all** control hold. The OAuth
+    subsystem used to be the third thing and the large one, and it is **gone from core**:
+    `OAUTH_PROVIDERS` is an empty null-prototype registry that `registerOAuthProvider` fill, the
+    five vendor module live at `providers/src/<id>/oauth.ts`, and `builtinOAuthFlows()` in
+    `@omni/providers` is the one list. Do not re-add a literal: a built-in reaching the
+    registry any way a plugin cannot is the shape this took three release to undo.
+    `seedBuiltinOAuth()` fill it, from **`installPluginProviders`** on the gateway and from
+    `apps/cli/src/run.ts` on the CLI, because `omni connect` run without a gateway. It sat inline
+    in gateway `main()` first, and that is the trap: **no test call `main()`**, so the only guard
+    was a test grepping the source, and a substring match pass on a commented-out call — measured,
+    commenting it out left all 3347 test green while a booted gateway would have had no OAuth at
+    all. It live on `installPluginProviders` because that function is called unconditionally at
+    boot and is reachable from a harness.
+    **Moving it there was not enough, and the second failure is the more instructive one.** The
+    replacement guard read `OAUTH_PROVIDERS` — process-wide module state, one Bun process for the
+    whole suite — so `logging.test.ts` and `apps/cli/test/connect.test.ts` seeded first and the
+    assertion pass on *their* seed. Measured: deleting the seed left `bun test`,
+    `bun test apps/gateway` and `bun test packages/control` green; only that one file alone caught
+    it. A module-scope `seeded` boolean made it unfixable in place — it latch, so clearing the table
+    do not help. Registry is therefore **threaded**: `registerOAuthProvider`, `seedBuiltinOAuth` and
+    `installPluginProviders` all take one, defaulting to the global, and the test drive
+    `Object.create(null)`. Thread it through **all** of a call graph or none — partial threading is
+    the bug this repository repeat most.
+    Idempotence is a `WeakMap` of **which id we installed into which registry**, and the second
+    iteration matter: a `WeakSet` of seeded *registries* make a deleted built-in unrecoverable —
+    measured, a reseed leave it at four provider — so "nothing ever delete a built-in" become a
+    load-bearing unstated invariant while two test file delete from the shared registry in
+    `afterEach`. Recording id let a reseed tell three case apart: ours and present (skip), ours and
+    gone (reinstall), someone else's (throw). Repair restore **membership, not position** — object
+    key order is insertion order, so a repaired id land last; production never delete one, so the
+    order an operator see is the seed's own.
+    Seeding that late is safe only because every consumer take the registry **by reference and read
+    at call time**, and because `loadPlugins` — which run *before* it — register no flow: the shadow
+    refusal in `readProviders` consult `PROVIDER_DESCRIPTORS`, and the only `registerOAuthProvider`
+    on this host sit in the loop after the seed. A loader that ever register a flow move the seed
+    ahead of it.
+    `installPluginProviders` must stay **unconditional**: wrapping it in
+    `if (providers.length > 0)` kill OAuth on every plugin-less install, which is most of them — a
+    tidy-up the function's own name invite, since the seed is the part of it that is not about
+    plugins. That edit left the suite green when it was first measured; `oauthSeed.test.ts` now
+    catch it, single-line and block form both, by asserting the call sit at **two-space indent** —
+    a top-level statement of `main()`. Indentation heuristic, said out loud as one: biome fix the
+    indent so it hold, and a reformat fail loudly rather than pass quietly, which is the safe
+    direction for a check standing in for a booted-gateway test. Its `|| Object.hasOwn(registry, id)` disjunct is
+    **defence-in-depth, not coverage**: every seeded id is in `PROVIDER_DESCRIPTORS` too and a
+    plugin enter both table in one iteration, so the first disjunct always fire first. An earlier
+    version of this line claimed that check "stop being vacuous"; measured false.
+    Seed **order is the operator-facing order** — anthropic, openai, kimi, kilo, grok —
+    because `oauthProviderIds` derive from `Object.keys` and that list is the sentence
+    `omni connect` refuse an unknown provider with; **`apps/cli/test/connect.test.ts`** match it by
+    equality for that reason, and `apps/gateway/test/plugins/install.test.ts` pin it as a literal.
+    Never pin it against `builtinOAuthFlows()` — that is the same source a mutation edit, so a
+    dropped or reordered provider satisfy it. Registry empty until seeded, so any test reading it
+    **seed first**, never rely on another file in the same run having done it;
+    `providerCoverage.test.ts` broke that rule in the very commit that wrote it and pass green over
+    an empty set when run alone.
+    Contract live in `providers/src/oauthFlow.ts` beside the flow written against it, with
+    `oauthRequests.ts` and `oauthUsage.ts`; `@omni/providers` therefore carry `@omni/store` as a
+    dependency, **type-only** — `import type` from `@omni/store/types` for `CredentialSecrets`,
+    `UsageSecrets`, `WindowType`. **Nothing enforce that type-only-ness by itself.** An earlier
+    version of this line claimed `leafSubpaths.test.ts` would catch a value import; that was
+    measured false — turning one into a value import leave the whole suite green, because those
+    module are outside both leaf graph regardless of import kind. What enforce it is
+    `packages/providers/test/oauthStoreEdge.test.ts`, which assert the package's own entry point
+    pull no runtime edge to `@omni/store`. Direction hold: store not depend on providers.
+    Host keep the mechanism — `pluginFlow.ts` (`oauthAdapter`), `pending.ts`, `refresh.ts`,
+    `pkce.ts`, `lead.ts`, and `types.ts` for the adapted `OAuthProvider` shape every consumer
+    already take as parameter.
+    Adapter is host's because it hold the transport, enforce origin check, yield cap and
+    return-shape validation, and stamp `gatewayAuthored`. A package adapting its own flow would need
+    the client rule 15 exist to keep out of it.
+    Plugin flow follow the codec's inversion: each
     step is an async generator that **yield described requests**, host perform every one, so plugin
     never hold `HttpClient` and rule 15 need no second footnote. Generator not build/parse pair
     because `kilo.exchange` is two request where second carry a token read from first — measured,
@@ -229,7 +290,16 @@ run; when that file gain a step, this line gain one.
     Each provider's test file is **unchanged**, which is the proof; mutant against all five (dropped
     `client_id`, dropped beta header, state check off, kilo's second request unauthenticated, kilo's
     org read skipped, grok's host check off, kimi's device headers dropped, openai's content type
-    changed) each kill test.
+    changed) each kill test — verified by mutation from the new location, not assumed. Two file
+    change beyond their import line: kimi's registry test, which now read the seed's own result, and
+    grok's, whose `OAUTH_PROVIDERS.grok === grokOAuth` became `x === x` once `builtins.ts` defined
+    one as the other. They stay in
+    `control/test/oauth/` after the move rather than travelling
+    with the flow, because they drive the **adapted** provider and `oauthAdapter` is control's —
+    a test in `packages/providers` reaching for it would invert the package graph. They read the
+    five through `test/oauth/builtins.ts`, which take them off the **seeded registry**: strictly
+    stronger than the named import it replace, since a seed that drop one, install the wrong flow or
+    forget `trusted` now fail all five suite rather than one wiring test.
     Nothing above is licence to add a fourth. New provider knowledge in core still go through the
     three outcomes below. The union itself is **gone**: its arms were hand-written for
     exhaustiveness over a closed `ProviderId`, that closed type no longer exist, and the enum

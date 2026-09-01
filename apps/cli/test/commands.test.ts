@@ -783,6 +783,31 @@ test("doctor reports the encryption key's presence, never the key", async () => 
   expect(body).toMatchObject({ rootSource: "flag", databaseExists: true, running: false });
 });
 
+/**
+ * The version, on the command whose output ends up in issue templates.
+ *
+ * `omni --version` has answered truthfully since the release tag started being
+ * substituted into the bundle, but `doctor` is the diagnostic operators
+ * actually paste, and it named every path on the installation except which
+ * build produced them. One resolved value, not two: `doctor` prints what
+ * `--version` prints, so a report can never name a build that never ran.
+ */
+test("doctor names the version, and it is the one --version answers", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+
+  const reported = (await cli(["--version"], { root, service })).out.trim();
+  expect(reported.length).toBeGreaterThan(0);
+
+  const json = await cli(["doctor", "--json"], { root, service });
+  expect(JSON.parse(json.out).version).toBe(reported);
+
+  const human = await cli(["doctor"], { root, service });
+  // First line, because that is where an operator pasting a bundle stops
+  // reading if the answer is not there.
+  expect(human.out.split("\n")[0]).toBe(`omni ${reported}`);
+});
+
 test("a command run under --root says so when it refuses an ambient OMNI_DB_PATH", async () => {
   const root = await installation();
   const ambient = "/home/operator/.config/omnigateway/omnigateway.db";

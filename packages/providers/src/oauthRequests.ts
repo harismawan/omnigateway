@@ -1,6 +1,6 @@
-import type { ClientProfile, HeaderPair } from "@omni/providers";
-import { mergeHeaders, orderHeaders } from "@omni/providers";
-import type { AuthRequest } from "./pluginFlow.ts";
+import { type ClientProfile, mergeHeaders, orderHeaders } from "./headers.ts";
+import type { AuthRequest } from "./oauthFlow.ts";
+import type { HeaderPair } from "./types.ts";
 
 /**
  * The request builders a flow yields.

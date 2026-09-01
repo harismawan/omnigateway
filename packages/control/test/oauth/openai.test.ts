@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import type { HttpClient, HttpRequest } from "@omni/providers";
-import { openaiOAuth } from "../../src/oauth/openai.ts";
+import { openaiOAuth } from "./builtins.ts";
 
 const NOW = 1_000_000;
 

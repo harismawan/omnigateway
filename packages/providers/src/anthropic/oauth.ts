@@ -1,19 +1,15 @@
-import { ANTHROPIC_CLI_VERSION, anthropicProfile } from "@omni/providers";
 import {
   type AuthHelpers,
   type AuthStep,
-  oauthAdapter,
-  type PluginOAuthFlow,
-} from "./pluginFlow.ts";
-import { getJsonRequest, parsed as parseBody, postJsonRequest } from "./requests.ts";
-import {
   type FlowResult,
-  type OAuthProvider,
+  type PkcePluginFlow,
   tokenErrorCode,
   tokenErrorMessage,
   type UsageReport,
-} from "./types.ts";
-import { nestedOf, recordOf, reportFrom, usageReadable, windowFrom } from "./usage.ts";
+} from "../oauthFlow.ts";
+import { getJsonRequest, parsed as parseBody, postJsonRequest } from "../oauthRequests.ts";
+import { nestedOf, recordOf, reportFrom, usageReadable, windowFrom } from "../oauthUsage.ts";
+import { ANTHROPIC_CLI_VERSION, anthropicProfile } from "./profile.ts";
 
 /**
  * The public OAuth client ID of the Claude CLI. Public clients cannot hold a
@@ -113,7 +109,7 @@ export function parseAnthropicUsage(value: unknown, now: number): UsageReport | 
   ]);
 }
 
-const anthropicFlow: PluginOAuthFlow = {
+export const anthropicOAuthFlow: PkcePluginFlow = {
   kind: "pkce",
   supportsManualPaste: true,
 
@@ -186,7 +182,3 @@ const anthropicFlow: PluginOAuthFlow = {
     return parseAnthropicUsage(parseBody(res.body), now());
   },
 };
-
-export const anthropicOAuth: OAuthProvider = oauthAdapter("anthropic", anthropicFlow, {
-  trusted: true,
-});

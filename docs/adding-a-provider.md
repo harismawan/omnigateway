@@ -79,18 +79,24 @@ shape and why the HTTP client is built on `node:http`.
    module-initialisation cycle whose only symptom is a gateway that will not boot **on installations
    that set an `OMNI_ORDER_*` variable**, because the helpers return their fallback before touching
    the module-scope regex when the variable is unset. The suite stayed green through exactly that.
-6. OAuth is optional — `OAUTH_PROVIDERS` is `Partial`. Omit `usage` when there is no quota surface,
+6. OAuth is optional — nothing registers a flow for a provider that has none. Write it as
+   `<id>/oauth.ts` in this package, beside the profile and the codec, because a vendor's authorize
+   endpoint, scopes and client id are its wire surface as much as its SSE framing is; core holds
+   none of them. Add the pair to `builtinOAuthFlows()` in `builtinOAuth.ts`, which is the one list
+   the gateway and the CLI both seed `OAUTH_PROVIDERS` from. Omit `usage` when there is no quota surface,
    so accounts read as unknown rather than unlimited. Refresh must retain the previous refresh token
    when a response omits one. Endpoints read from OIDC discovery must be validated as HTTPS on the
    provider's own domain before use, and a discovery failure is `UPSTREAM`, never `AUTH` — `AUTH`
    disables the credential.
    **Write a `PluginOAuthFlow`, not an `OAuthProvider`.** Each step is an `async function*` that
-   **yields a described request** and reads the response the host hands back; `oauthAdapter` turns it
-   into the `OAuthProvider` every consumer already takes. All five built-in flows are written this
-   way — `export const grokOAuth: OAuthProvider = oauthAdapter("grok", grokFlow, { trusted: true })`
-   — which is the same argument step 7 makes for codecs: a plugin-supplied flow takes exactly the
-   shape a built-in does, so no rule holds for one and not the other.
-   Build requests with `postJsonRequest`/`getJsonRequest` from `requests.ts`, which apply the
+   **yields a described request** and reads the response the host hands back; `oauthAdapter` — which
+   is the host's, in `@omni/control`, because it holds the transport — turns it into the
+   `OAuthProvider` every consumer already takes. All five built-in flows are written this way and
+   exported as flows, e.g. `export const grokOAuthFlow: PkcePluginFlow = { ... }`, which is the same
+   argument step 7 makes for codecs: a plugin-supplied flow takes exactly the shape a built-in does,
+   so no rule holds for one and not the other. Type it with its own arm — `PkcePluginFlow` or
+   `DevicePluginFlow` — not the union, so a device flow cannot compile without `begin`.
+   Build requests with `postJsonRequest`/`getJsonRequest` from `oauthRequests.ts`, which apply the
    profile's header merge and order. Do not send directly with `deps.http`: that bypasses the yield
    cap, the origin check and the return-shape validation the adapter exists to impose. The functions
    that used to do it — `postJson`, `getJson`, `getJsonUnauthenticated` — were deleted once the last

@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import type { HttpClient, HttpRequest } from "@omni/providers";
 import { kiloAdapter } from "@omni/providers";
-import { kiloOAuth } from "../../src/oauth/kilo.ts";
 import { isAuthorizationPending } from "../../src/oauth/types.ts";
+import { kiloOAuth } from "./builtins.ts";
 
 const NOW = 1_000_000;
 const CODES_URL = "https://api.kilo.ai/api/device-auth/codes";
