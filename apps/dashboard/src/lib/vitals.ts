@@ -477,6 +477,25 @@ export type QuotaSegment = {
 };
 
 /**
+ * Whether two idle readings carry a countdown restarted from their own probe.
+ *
+ * Both readings must independently name one whole window from observation: one
+ * matching by coincidence is not enough to override a real rollover. Their
+ * bounds are unknown because neither stated a stable reset to draw a budget to.
+ */
+function rollingIdleReset(previous: QuotaReading, sample: QuotaReading): boolean {
+  if (previous.usedRatio !== 0 || sample.usedRatio !== 0) return false;
+  const previousDuration = durationFor(previous.windowType, previous.windowMs);
+  const duration = durationFor(sample.windowType, sample.windowMs);
+  return (
+    previousDuration === duration &&
+    sameWindow(previous.resetsAt, previous.observedAt + previousDuration) &&
+    sameWindow(sample.resetsAt, sample.observedAt + duration) &&
+    !sameWindow(sample.resetsAt, previous.resetsAt)
+  );
+}
+
+/**
  * Retained readings as percentages of their own ceiling, split per window.
  *
  * A rollover resets `used`, so a series drawn straight through one would fall
@@ -518,16 +537,17 @@ export function quotaSegments(samples: readonly QuotaReading[]): QuotaSegment[] 
           : sample.resetsAt - durationFor(sample.windowType, sample.windowMs),
     };
     const last = segments[segments.length - 1];
+    const rollingIdle = previous !== undefined && rollingIdleReset(previous, sample);
     if (
       last === undefined ||
       previous === undefined ||
-      !sameWindow(sample.resetsAt, previous.resetsAt)
+      (!rollingIdle && !sameWindow(sample.resetsAt, previous.resetsAt))
     ) {
       segments.push({ key: `window-${segments.length}`, points: [point], ...bounds });
     } else {
       last.points.push(point);
-      last.resetsAt = bounds.resetsAt;
-      last.startsAt = bounds.startsAt;
+      last.resetsAt = rollingIdle ? null : bounds.resetsAt;
+      last.startsAt = rollingIdle ? null : bounds.startsAt;
     }
     previous = sample;
   }

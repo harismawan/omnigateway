@@ -419,6 +419,103 @@ describe("quotaSegments", () => {
     expect(segments[0]?.points.map((point) => point.percent)).toEqual([10, 20, 30, 40, 50]);
   });
 
+  test("does not draw one budget per idle reading when reset follows the probe", () => {
+    const windowMs = 18_000_000;
+    const segments = quotaSegments([
+      reading({
+        observedAt: NOW - 1_200_000,
+        used: 0,
+        resetsAt: NOW - 1_200_000 + windowMs,
+        windowMs,
+      }),
+      reading({
+        observedAt: NOW - 900_000,
+        used: 0,
+        resetsAt: NOW - 900_000 + windowMs,
+        windowMs,
+      }),
+      reading({
+        observedAt: NOW - 600_000,
+        used: 0,
+        resetsAt: NOW - 600_000 + windowMs,
+        windowMs,
+      }),
+      reading({ observedAt: NOW - 300_000, used: 50, resetsAt: NOW + windowMs, windowMs }),
+      reading({ observedAt: NOW, used: 100, resetsAt: NOW + windowMs, windowMs }),
+    ]);
+
+    expect(segments).toHaveLength(2);
+    expect(segments[0]?.points.map((point) => point.percent)).toEqual([0, 0, 0]);
+    expect(segments[0]?.startsAt).toBeNull();
+    expect(segments[0]?.resetsAt).toBeNull();
+    expect(segments[1]?.points.map((point) => point.percent)).toEqual([5, 10]);
+    expect(segments.filter((segment) => budgetPace(segment) !== null)).toHaveLength(1);
+    const activeSegment = segments[1];
+    expect(activeSegment).toBeDefined();
+    if (activeSegment === undefined) throw new Error("missing active segment");
+    expect(budgetPace(activeSegment)).not.toBeNull();
+  });
+
+  test("keeps fixed idle resets and changing active resets unchanged", () => {
+    const windowMs = 18_000_000;
+    const fixedReset = NOW + windowMs;
+    const fixedIdle = quotaSegments([
+      reading({ observedAt: NOW - 600_000, used: 0, resetsAt: fixedReset, windowMs }),
+      reading({ observedAt: NOW - 300_000, used: 0, resetsAt: fixedReset, windowMs }),
+    ]);
+    expect(fixedIdle).toHaveLength(1);
+    const fixedIdleSegment = fixedIdle[0];
+    expect(fixedIdleSegment).toBeDefined();
+    if (fixedIdleSegment === undefined) throw new Error("missing fixed idle segment");
+    expect(budgetPace(fixedIdleSegment)).not.toBeNull();
+
+    const changingActive = quotaSegments([
+      reading({
+        observedAt: NOW - 600_000,
+        used: 100,
+        resetsAt: NOW - 600_000 + windowMs,
+        windowMs,
+      }),
+      reading({
+        observedAt: NOW - 300_000,
+        used: 200,
+        resetsAt: NOW - 300_000 + windowMs,
+        windowMs,
+      }),
+    ]);
+    expect(changingActive).toHaveLength(2);
+  });
+
+  test("does not merge idle resets when only one reading follows its probe", () => {
+    const windowMs = 18_000_000;
+    const previousOnly = quotaSegments([
+      reading({
+        observedAt: NOW - 600_000,
+        used: 0,
+        resetsAt: NOW - 600_000 + windowMs,
+        windowMs,
+      }),
+      reading({ observedAt: NOW - 300_000, used: 0, resetsAt: NOW + windowMs, windowMs }),
+    ]);
+    const sampleOnly = quotaSegments([
+      reading({
+        observedAt: NOW - 600_000,
+        used: 0,
+        resetsAt: NOW - 1_200_000 + windowMs,
+        windowMs,
+      }),
+      reading({
+        observedAt: NOW - 300_000,
+        used: 0,
+        resetsAt: NOW - 300_000 + windowMs,
+        windowMs,
+      }),
+    ]);
+
+    expect(previousOnly).toHaveLength(2);
+    expect(sampleOnly).toHaveLength(2);
+  });
+
   test("the chart splits windows exactly where the shared tolerance does", () => {
     // Pins this site to `SAME_WINDOW_TOLERANCE_MS`, the same constant
     // `saveQuota` dedups on. If the chart and the store ever answered "is this
