@@ -80,3 +80,15 @@ test("every legitimate spelling still compiles, so the constraint is not merely 
 
   expect(sink).toHaveLength(4);
 });
+
+test("the surface field names the three client dialects and nothing else", () => {
+  sink.length = 0;
+  logger.info("anthropic", { surface: "anthropic" });
+  logger.info("openai", { surface: "openai" });
+  logger.info("responses", { surface: "responses" });
+  // Vocabulary, not free text: a fourth surface is a core edit by design, and
+  // this is the line that makes it one.
+  // @ts-expect-error - "grpc" is not a client surface this gateway serves
+  logger.info("invented", { surface: "grpc" });
+  expect(sink).toHaveLength(4);
+});

@@ -108,15 +108,21 @@ export function extraFields(
  * - `x-deepseek-harness-session-id`: dsh, whose design notes say it keeps
  *   identity out of the body on purpose.
  *
- * Codex is deliberately absent. It sends `session-id`, but it speaks only the
- * Responses API — `wire_api = "chat"` is a hard error in it now — and this
- * gateway exposes no Responses ingress, so it cannot arrive here at all. A name
- * listed for a client that cannot connect is a claim no test can check.
+ * - `session-id`: Codex, which sends the bare spelling. It was absent from this
+ *   list for as long as it could not reach any route here — it speaks only the
+ *   Responses API, `wire_api = "chat"` being a hard error in it now — and
+ *   `POST /v1/responses` is what changed that.
+ *
+ * Order is precedence, and only matters for a client sending two of these. The
+ * prefixed spellings come first because a client that sends one chose it; the
+ * bare name is the one another proxy is most likely to have set on the way
+ * through.
  */
 const CONVERSATION_HEADERS = [
   "x-session-id",
   "x-session-affinity",
   "x-deepseek-harness-session-id",
+  "session-id",
 ] as const;
 
 /**

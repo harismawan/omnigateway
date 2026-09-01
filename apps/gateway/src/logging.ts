@@ -121,7 +121,9 @@ export function reportRejection(
   requestId: string,
   log: RequestLog,
   error: GatewayError,
-  surface?: "anthropic" | "openai",
+  // Read off `LogFields` rather than restated, so a surface added there cannot
+  // be one this function silently refuses to record.
+  surface?: LogFields["surface"],
 ): void {
   const fields: LogFields = {
     requestId,
