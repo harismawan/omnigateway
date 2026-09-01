@@ -101,7 +101,13 @@ test("a base path ending in /v1 is not doubled", async () => {
   expect(sent.url).toBe("https://host.test/api/v1/responses");
 });
 
-test("a base path not ending in /v1 gets one", async () => {
+test("a base path ending in another version segment is not given /v1", async () => {
+  const sent = await sentFor(endpoint({ basePath: "/api/coding/paas/v4" }));
+
+  expect(sent.url).toBe("https://host.test/api/coding/paas/v4/chat/completions");
+});
+
+test("a base path not ending in a version segment gets /v1", async () => {
   const sent = await sentFor(endpoint({ basePath: "/api" }));
 
   expect(sent.url).toBe("https://host.test/api/v1/chat/completions");
