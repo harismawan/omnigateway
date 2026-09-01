@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import type { ChatRequest, Message } from "@omni/ir";
 import { toResponsesWire } from "../src/openai/wire.ts";
 
@@ -143,6 +144,27 @@ test("a client id beats the derived one, so an edited system prompt does not spl
   // because the first assertion alone passes against an encoder that ignores
   // the system prompt entirely.
   expect(keyOf(edited)).not.toBe(keyOf(base));
+});
+
+test("an empty history does not reduce the key to the instructions alone", () => {
+  // `JSON.stringify` omits a property whose value is `undefined`, so an empty
+  // `input` used to drop `firstInput` out of the hash entirely. A request whose
+  // only message is an orphaned tool result reaches exactly that state —
+  // `validateRequest` strips the block, the message goes with it, and the
+  // ingress non-empty guard has already run — on both surfaces.
+  const noHistory: ChatRequest = { ...base, messages: [] };
+  const instructionsOnly = createHash("sha256")
+    .update(JSON.stringify({ instructions: "be brief" }))
+    .digest("hex")
+    .slice(0, 32);
+
+  expect(keyOf(noHistory)).not.toBe(instructionsOnly);
+});
+
+test("a request with history and one without do not collide", () => {
+  // The property the term carries. Two requests sharing a system prompt are one
+  // conversation only if they share an opening turn too.
+  expect(keyOf({ ...base, messages: [] })).not.toBe(keyOf(base));
 });
 
 test("encoding does not write the key onto the request", () => {

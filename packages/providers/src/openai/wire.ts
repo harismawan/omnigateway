@@ -52,7 +52,17 @@ function cacheKey(req: ChatRequest, instructions: string, firstInput: unknown): 
   const stable =
     req.conversationId !== undefined && req.conversationId.length > 0
       ? JSON.stringify({ conversation: req.conversationId })
-      : JSON.stringify({ instructions, firstInput });
+      : // `?? null` because `JSON.stringify` **omits** a property whose value is
+        // `undefined`, so an empty `input` silently reduced the hash to the
+        // instructions alone — and with no system prompt either, to one
+        // constant shared by every such request on the installation.
+        // Reachable: `validateRequest` drops a message left empty after an
+        // orphaned tool result is stripped, and the ingress non-empty guard
+        // runs before that, so one crafted request empties `messages` on both
+        // surfaces. Such a request has no prefix worth caching, so the
+        // remaining collision between two of them costs nothing; what matters
+        // is that the term stops vanishing without a trace.
+        JSON.stringify({ instructions, firstInput: firstInput ?? null });
   return createHash("sha256").update(stable).digest("hex").slice(0, 32);
 }
 

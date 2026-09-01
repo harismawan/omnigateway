@@ -602,7 +602,14 @@ Preserve these translation invariants:
   backend partition its prompt cache by it.** Arrive as Anthropic **`metadata.user_id`**.
   `metadata` sat in `KNOWN` with no schema entry, so it was parsed by nothing and dropped, and no
   ingress test noticed. Cost measured, not assumed: `request_logs` held **2 cache read in 21**
-  OpenAI request, against 9,373 in 9,637 for a second gateway on the same account and model. Probe
+  OpenAI request, against 9,373 in 9,637 for a second gateway on the same account and model.
+  **That 2-in-21 is a *post-change* baseline, not a standing property of this code, and the
+  distinction matter to anyone reading these number later.** Same credential at same request
+  density read **70.0% over 7,367 request** in August and **16.7%** on 1 September. Encoder change
+  in that window are ruled out by probe: an August-shaped body — `reasoning` field included, which
+  the old code always set — cache **0 of 3** today, and byte-identical body cache 0 of 5 without a
+  session id. So Codex begin requiring session affinity for cache routing somewhere in that window,
+  and prefix alone stop being enough. Second gateway never notice because it always sent one. Probe
   with byte-identical 10k-token body 75s apart read back **0 of 5** without a session id and **14
   of 15** with one, so it is neither prefix drift nor `instructions` placement — those were each
   disproved separately, and an encoder change made on either theory is wasted work.
