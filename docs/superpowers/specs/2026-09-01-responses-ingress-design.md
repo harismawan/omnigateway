@@ -323,6 +323,22 @@ An invented `incomplete_details.reason` was the alternative — omniroute has pr
 string lands exactly where clients switch, and consistency with the chat surface's existing reading
 matters more than expressing a signal the client has no way to act on.
 
+**The chat surface is not changed, because it already agrees.** `"stop"` and `"completed"` are the
+same reading in two dialects, not two readings — and the full tables are parallel, arm for arm:
+
+| IR | chat `finish_reason` | Responses |
+|---|---|---|
+| `endTurn`, `toolUse`, `stopSequence` | `stop`, `tool_calls`, `stop` | `completed` |
+| `maxTokens` | `length` | `incomplete` + `max_output_tokens` |
+| `contentFilter` | `content_filter` | `incomplete` + `content_filter` |
+| `pauseTurn` | `stop` | `completed` |
+
+So there is nothing to align, and aligning the *spellings* would be the error: a Responses client
+reading `finish_reason` or a chat client reading `status` is a client that has been handed the wrong
+dialect. What the two surfaces must share is the **reading** — which IR stop reason means "finished
+normally" — and they do. If one ever changes its mind about `pauseTurn`, both change together, or the
+same turn is a success on one surface and a truncation on the other.
+
 ## Widening provider tools
 
 `AnthropicToolDef` in `packages/ir/src/request.ts:209-221` is already all but generic: its `provider`
@@ -417,7 +433,7 @@ client replays reasoning items, `requiredProviders` excludes every non-OpenAI ta
 the price of decision 3. A client that never receives reasoning items — anything not asking for
 `include` — is unaffected.
 
-## Mid-conversation system turns become `developer` items
+## Mid-conversation system turns become `developer` items (OpenAI and xAI)
 
 `openai/wire.ts:115-133` currently renders a mid-conversation system message as a **user** turn whose
 text is wrapped in `<system-reminder>…</system-reminder>`, recording `openai:system-turn-inlined`. The
@@ -434,20 +450,32 @@ repository already states — *keep mid-conversation system messages in place, n
 request-level `system`* — because a `developer` turn keeps both its position and its operator role,
 where a `<system-reminder>` user turn kept only the position.
 
-Two boundaries on it:
+**`grok/wire.ts` changes the same way, and its own comment is why.** It carries identical inlining and
+a `grok:system-turn-inlined` degradation, and says plainly that the behaviour was inherited rather
+than measured: "No xAI source says whether the proxy accepts a system turn inside `input`, and the
+OpenAI fork's answer is the safe one either way" (`grok/wire.ts:82-87`). xAI serves this same dialect
+at `/v1/responses` on both legs (`grok/codec.ts:19-20`), so the fork's answer stops being the safe one
+the moment the fork changes. It becomes `openai:system-turn-as-developer`'s sibling,
+`grok:system-turn-as-developer`.
 
-- **Only `openai`.** `grok/wire.ts` carries the identical inlining and its own
-  `grok:system-turn-inlined` degradation (`packages/providers/test/grok.test.ts:279-284`). It is not
-  changed here: xAI is a different backend, nothing in this work measured what it accepts, and
-  changing two encoders on evidence about one is how a fix becomes a regression.
-- **It changes traffic that exists today** — every Claude Code request carrying a mid-conversation
-  system turn on an OpenAI target — which is why it lands as its own step with its own before-and-after
-  golden test rather than inside the ingress work. The old degradation string stays readable in
-  `request_logs` without migration: degradations are forensic text, never parsed on read, which is the
-  same property that let `excluded:capability:anthropicTools` rows survive their rename.
+**Both encoders flip only behind a probe, and the probe is per leg.** Nothing in this work has
+measured that either backend accepts a `developer` item — omniroute's evidence is about the Codex
+backend specifically, and xAI has no published answer at all. So the step begins by sending one
+`developer`-item request against each of the four legs that exist — OpenAI OAuth (Codex), OpenAI API
+key, xAI OAuth proxy, xAI API key — and any leg that refuses keeps the inlined user turn it has today.
+A leg-by-leg result is the point: `grok/codec.ts` names two different hosts, and a proxy built for one
+CLI is exactly the kind of surface that accepts less than the documented API does. Recording "we did
+not check" beats recording a guess, which is the state this code is in now.
 
-`packages/providers/test/openai.test.ts:570-580` is the test that pins the current behaviour and is
-rewritten with it; the golden bytes for the Codex leg change in exactly one place.
+**It changes traffic that exists today** — every Claude Code request carrying a mid-conversation
+system turn on an OpenAI or xAI target — which is why it lands as its own step with before-and-after
+golden tests rather than inside the ingress work. The old degradation strings stay readable in
+`request_logs` without migration: degradations are forensic text, never parsed on read, the same
+property that let `excluded:capability:anthropicTools` rows survive their rename.
+
+`packages/providers/test/openai.test.ts:570-580` and `packages/providers/test/grok.test.ts:279-284`
+pin the current behaviour and are rewritten with it; the golden bytes change in exactly one place per
+encoder.
 
 ## Verification
 
@@ -491,13 +519,14 @@ falls through to a working fallback.
 - `output_index` never repeats within one stream, including the preamble-message-then-tool-call
   sequence that collided in omniroute's production incident.
 - `openai/wire.ts` emits a synthetic empty output for a tool call with no result in history.
-- A mid-conversation system turn encodes as a `developer` item with unwrapped text and records
-  `openai:system-turn-as-developer`; the same fixture against `grok/wire.ts` still produces the
-  inlined user turn and `grok:system-turn-inlined`, which is what keeps the change scoped to the one
-  encoder it was measured for.
-- `pauseTurn` renders `status: "completed"` with no `incomplete_details`, and the Anthropic surface
-  still renders `pause_turn` for the same IR event — one stop reason, two dialects, neither borrowing
-  the other's reading.
+- A mid-conversation system turn encodes as a `developer` item with unwrapped text on both encoders,
+  recording `openai:system-turn-as-developer` and `grok:system-turn-as-developer` — or, for any leg
+  the probe showed refuses it, the inlined user turn it has today, with a test naming that leg and the
+  refusal it encodes.
+- `pauseTurn` renders `status: "completed"` with no `incomplete_details`; the chat surface still
+  renders `"stop"` and the Anthropic surface still renders `pause_turn`, all three from one IR event.
+  Asserting the three together is what stops a later change to one from silently disagreeing with the
+  other two.
 - `packages/providers/test/` — decode with and without `encrypted_content`, the second arm being the
   regression guard for Claude Code on OpenAI targets; wire re-emitting an openai-owned
   `providerNative` while still dropping a foreign one with its existing degradation.
@@ -513,13 +542,15 @@ falls through to a working fallback.
 2. `ProviderToolDef` in `@omni/ir`, with the Anthropic paths proved unchanged.
 3. Ingress, egress, route wiring, and the three widenings.
 4. The provider round trip: reasoning replay, id stripping, tool-call repair.
-5. Mid-conversation system turns as `developer` items.
+5. Probe the four legs for `developer`-item support, then move mid-conversation system turns on the
+   legs that accept it.
 6. Documentation.
 
 Steps 4 and 5 are last because they are the only parts that change behaviour for traffic that already
-exists, and 5 is last of all because it is the only one that changes it for a client — Claude Code on
-an OpenAI target — that is not asking for this feature at all. Each lands with its regression test
-already in the tree.
+exists, and 5 is last of all because it is the only one that changes it for clients — Claude Code on
+an OpenAI or xAI target — that are not asking for this feature at all. Each lands with its regression
+test already in the tree. Step 5's probe comes before its edit, not after: the current inlining is
+what a refusing leg keeps, so a probe run afterwards would be measuring a change already shipped.
 
 Step 2 is first among the code steps because it is a core type change: everything downstream compiles
 against it, and doing it after the ingress would mean writing the hosted-tool path twice.
