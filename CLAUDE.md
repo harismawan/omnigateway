@@ -599,24 +599,28 @@ Preserve these translation invariants:
 - Gateway not validate request-shape support per model; unsupported combos surface as upstream
   errors.
 - **`ChatRequest.conversationId` is the client's own name for its conversation, and the Codex
-  backend partition its prompt cache by it.** Arrive as Anthropic **`metadata.session_id`**.
+  backend partition its prompt cache by it.** Arrive as Anthropic **`metadata.user_id`**.
   `metadata` sat in `KNOWN` with no schema entry, so it was parsed by nothing and dropped, and no
   ingress test noticed. Cost measured, not assumed: `request_logs` held **2 cache read in 21**
   OpenAI request, against 9,373 in 9,637 for a second gateway on the same account and model. Probe
   with byte-identical 10k-token body 75s apart read back **0 of 5** without a session id and **14
   of 15** with one, so it is neither prefix drift nor `instructions` placement — those were each
   disproved separately, and an encoder change made on either theory is wasted work.
-  **Field name is measured, not read off the spec, and the spec is wrong here.** `user_id` is the
-  only documented member of `metadata` and appear in **none** of 76 captured Claude Code request;
-  what the client send is `session_id`, `device_id`, `account_uuid`. First version of this read
-  `user_id`, typechecked, passed every test, and fire on no real request — a feature absent for
-  the one client it exist for, silently, because falling through to the derived key is not an
-  error. Read a capture before pinning a client field name.
-  Only **conversation**-scoped id may be used. `device_id`, `account_uuid` and OpenAI's `user`
-  name the machine, account or human, so keying on one merge every conversation on an install into
-  one partition — the ~49% ceiling, not the fix, and on a single-operator install that is every
-  conversation there is. They are read nowhere, and the derived key beat them because it is at
-  least per-conversation.
+  **`user_id` is opaque free text, not a bare id, and the shape matter.** Measured across 1,240
+  captured Claude Code request: every one carry a 96-character string that is itself JSON,
+  `{account_uuid, device_id, session_id}`. Nested `session_id` is what make the **whole string**
+  conversation-scoped rather than user-scoped, and it is why hashing it whole is enough. Ingress
+  **not** parse it: a client's JSON is not a schema this gateway own, and the hash care only that
+  the string change per conversation and not within one.
+  This bullet twice stated a field name that was wrong, in both direction, each time from a
+  half-read capture — first `user_id` believed absent, then `session_id` believed top-level. Both
+  survived typecheck and full suite, because reading a name no client send fall through to the
+  derived key, and **a fallback is not an error**. When checking what a client send, print the
+  key set of the object, not one member's value.
+  Only **conversation**-scoped id may be used. OpenAI's `user` name the human, so keying on it
+  merge every conversation on an install into one partition — on a single-operator install that is
+  every conversation there is. It is read nowhere; the derived key beat it because it is at least
+  per-conversation.
   `openai/wire.ts` resolve one key — client `prompt_cache_key`, then client `session_id`, then
   `conversationId`, then hash of instructions plus opening item, the shape `grok/wire.ts` already
   reason through — and return it, so `openai/codec.ts` put the **same** string in the `session_id`

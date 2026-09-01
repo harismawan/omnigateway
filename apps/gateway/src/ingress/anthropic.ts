@@ -286,13 +286,13 @@ const schema = z.object({
       z.object({ type: z.literal("disabled") }),
     ])
     .optional(),
-  // `session_id` is the only conversation-scoped identity a client sends here,
-  // and it is the one this surface reads. Measured against 76 captured Claude
-  // Code requests: the keys present are `session_id`, `device_id` and
-  // `account_uuid`, and `user_id` — the sole documented member — appears in
-  // none of them. The other two are deliberately not read: both name the
-  // machine or the account rather than the conversation, so keying on either
-  // would put every conversation on an installation into one cache partition.
+  // `user_id` is the documented member and the one this surface reads. It is
+  // opaque free text, not a bare id: measured across 1,240 captured Claude Code
+  // requests, all 1,240 carry a 96-character string that is itself JSON —
+  // `{account_uuid, device_id, session_id}` — and nothing else. That nested
+  // `session_id` is why the whole string is conversation-scoped rather than
+  // user-scoped, and it is why hashing the string whole is enough; this surface
+  // does not parse it, because a client's JSON is not a schema we own.
   //
   // Non-strict, like the rest of this surface: an unknown subfield rides
   // through rather than failing a request the client had every right to make.
@@ -301,7 +301,7 @@ const schema = z.object({
   // typed client SDK serializes for an unset optional — parsed fine. Modelling
   // it with `.optional()` alone turns that same request into a 400 over a field
   // it does not use.
-  metadata: z.object({ session_id: z.string().max(512).nullish() }).nullish(),
+  metadata: z.object({ user_id: z.string().max(512).nullish() }).nullish(),
 });
 
 const KNOWN = [
@@ -589,12 +589,12 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
     request.reasoning = { mode: "adaptive", effort };
   }
 
-  // Claude Code names its session here, and it is the one stable identity a
+  // Claude Code names its session in here, and it is the one stable identity a
   // conversation carries across turns — it survives compaction, where the
   // derived fallback cannot. `metadata` stays in KNOWN: this is a read, not a
   // change of what gets forwarded.
-  const sessionId = parsed.metadata?.session_id;
-  if (typeof sessionId === "string" && sessionId.length > 0) request.conversationId = sessionId;
+  const userId = parsed.metadata?.user_id;
+  if (typeof userId === "string" && userId.length > 0) request.conversationId = userId;
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { anthropic: extras };

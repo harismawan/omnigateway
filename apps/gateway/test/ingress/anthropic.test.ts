@@ -198,33 +198,49 @@ test("passes unknown top-level fields through as vendor extras", () => {
   expect(parseAnthropicRequest({ ...minimal, top_k: 40 }).vendor?.anthropic).toEqual({ top_k: 40 });
 });
 
-test("reads the client's session out of metadata.session_id", () => {
+test("reads the client's session out of metadata.user_id, verbatim", () => {
   // The one identity a conversation carries across its turns, and the whole
   // input to prompt-cache affinity on the OpenAI leg. `metadata` was in KNOWN
   // but not in the schema, so it was parsed by nothing and excluded from the
   // vendor bag — discarded silently, with the cost showing up only as a
   // cache-read column of zeroes.
   //
-  // The field name is measured, not read off the spec. `user_id` is the only
-  // documented member and appears in none of 76 captured Claude Code requests;
-  // `session_id` is what the client actually sends. Keying on the documented
-  // name alone produced a feature that never once fired.
-  const sessionId = "01997b2a-89ca-4800-b7ef-2c1d3e4f5a6b";
-  expect(
-    parseAnthropicRequest({ ...minimal, metadata: { session_id: sessionId } }).conversationId,
-  ).toBe(sessionId);
+  // The fixture is the shape actually measured on the wire, not a bare id:
+  // across 1,240 captured Claude Code requests, every `user_id` is a string
+  // that is itself JSON carrying a nested `session_id`. Taken whole and never
+  // parsed — the nested id is why the string is conversation-scoped, but a
+  // client's JSON is not a schema this gateway owns.
+  const userId = JSON.stringify({
+    account_uuid: "",
+    device_id: "d-1",
+    session_id: "47cbbada-89ca-4800-b7ef-2c1d3e4f5a6b",
+  });
+  expect(parseAnthropicRequest({ ...minimal, metadata: { user_id: userId } }).conversationId).toBe(
+    userId,
+  );
 });
 
-test("metadata that names no session leaves the request without a conversation", () => {
+test("two sessions from one device are two conversations", () => {
+  // The property the nested id buys, and the reason the whole string is usable
+  // as-is. A key that collapsed these would put every session on the machine
+  // into one cache partition.
+  const uid = (session: string): string =>
+    JSON.stringify({ account_uuid: "", device_id: "d-1", session_id: session });
+  const a = parseAnthropicRequest({ ...minimal, metadata: { user_id: uid("s-a") } });
+  const b = parseAnthropicRequest({ ...minimal, metadata: { user_id: uid("s-b") } });
+  expect(a.conversationId).not.toBe(b.conversationId);
+});
+
+test("metadata that names no user leaves the request without a conversation", () => {
   // Absent, null and empty all mean the client did not name one. An empty
   // string would otherwise become an id every conversation shares.
   expect(parseAnthropicRequest(minimal).conversationId).toBeUndefined();
   expect(parseAnthropicRequest({ ...minimal, metadata: {} }).conversationId).toBeUndefined();
   expect(
-    parseAnthropicRequest({ ...minimal, metadata: { session_id: null } }).conversationId,
+    parseAnthropicRequest({ ...minimal, metadata: { user_id: null } }).conversationId,
   ).toBeUndefined();
   expect(
-    parseAnthropicRequest({ ...minimal, metadata: { session_id: "" } }).conversationId,
+    parseAnthropicRequest({ ...minimal, metadata: { user_id: "" } }).conversationId,
   ).toBeUndefined();
 });
 
@@ -236,27 +252,14 @@ test("a null metadata is accepted, not a 400", () => {
   expect(parseAnthropicRequest({ ...minimal, metadata: null }).conversationId).toBeUndefined();
 });
 
-test("the device and account members of metadata are not read as a conversation", () => {
-  // Both are real fields this client sends, and both name the machine or the
-  // account rather than the conversation. Keying on either would put every
-  // conversation on an installation into one cache partition, which is the
-  // ~49% ceiling rather than the fix.
-  const req = parseAnthropicRequest({
-    ...minimal,
-    metadata: { device_id: "dev-1", account_uuid: "acct-1" },
-  });
-  expect(req.conversationId).toBeUndefined();
-});
-
 test("an unknown metadata subfield rides through rather than failing the request", () => {
   // This surface filters rather than rejects, and a client sending a field the
-  // spec has since grown must not get a 400 from the gateway. `user_id` is that
-  // case today: documented, unread, and no reason to refuse.
+  // spec has since grown must not get a 400 from the gateway.
   const req = parseAnthropicRequest({
     ...minimal,
-    metadata: { session_id: "s1", user_id: "u1", future: 1 },
+    metadata: { user_id: "u1", session_id: "s1", future: 1 },
   });
-  expect(req.conversationId).toBe("s1");
+  expect(req.conversationId).toBe("u1");
 });
 
 test("applies IR validation to the parsed request", () => {

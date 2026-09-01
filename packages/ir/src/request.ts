@@ -301,13 +301,14 @@ export type ChatRequest = {
    *
    * On the request rather than beside it — the distinction `autoCacheEnabled`
    * draws in the other direction — because it is the caller's value, not a
-   * gateway decision. It is filled from Anthropic's `metadata.session_id`, and
+   * gateway decision. It is filled from Anthropic's `metadata.user_id`, and
    * from nothing else today.
    *
-   * Only a **conversation**-scoped id belongs here. An identifier naming the
-   * user, the account or the machine — `metadata.user_id`, `metadata.device_id`,
-   * OpenAI's `user` — is deliberately not read: an adapter keying cache
-   * affinity on one would merge every conversation on an installation into a
+   * Only a **conversation**-scoped id belongs here. `user_id` qualifies despite
+   * its name: Claude Code sends a JSON string with a session id nested in it,
+   * so the value changes per conversation and not within one. OpenAI's `user`
+   * is deliberately not read — it names the human, and an adapter keying cache
+   * affinity on it would merge every conversation on an installation into a
    * single partition.
    *
    * Opaque and never interpreted. An adapter that wants cache affinity derives

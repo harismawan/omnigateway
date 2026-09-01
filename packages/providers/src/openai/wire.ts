@@ -42,9 +42,9 @@ function suppliedKey(req: ChatRequest): string | undefined {
  * the opening item, which is what a conversation keeps.
  *
  * Hashed rather than forwarded. `conversationId` reaches us from Anthropic's
- * `metadata.session_id` — a client identifier the operator never chose to
- * disclose, arriving in the same object as `device_id` and `account_uuid`, so
- * forwarding what is in there raw is the habit not to form. The digest also
+ * `metadata.user_id` — a client identifier the operator never chose to
+ * disclose, and on Claude Code a JSON string carrying a device id and an
+ * account uuid, so forwarding it raw is the habit not to form. The digest also
  * lands inside the character set the backend accepts, so there is no
  * validate-or-drop branch to get wrong.
  */
