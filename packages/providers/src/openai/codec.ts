@@ -23,7 +23,7 @@ const API_URL = "https://api.openai.com/v1/responses";
 export const openaiCodec: ProviderCodec = {
   buildRequest(input: CodecInput): CodecRequest {
     const oauth = input.credentials.accessToken !== null;
-    const { body, degradations } = toResponsesWire(input.request, input.model, { oauth });
+    const { body, degradations, cacheKey } = toResponsesWire(input.request, input.model, { oauth });
 
     const protocol: HeaderPair[] = [["Content-Type", "application/json"]];
 
@@ -33,6 +33,12 @@ export const openaiCodec: ProviderCodec = {
       // the credential at OAuth time.
       const accountId = input.credentials.providerData.accountId;
       if (typeof accountId === "string") protocol.push(["chatgpt-account-id", accountId]);
+      // The Codex backend partitions its prompt cache by session, and reads
+      // this header rather than `prompt_cache_key` to do it — measured, and the
+      // body field alone hit 2 of 5 where the header hit 14 of 15. Sent on this
+      // path only: `api.openai.com` has no such mechanism and takes the body
+      // field, which both hosts already carry.
+      protocol.push(["session_id", cacheKey]);
     } else if (input.credentials.apiKey !== null) {
       protocol.push(["Authorization", `Bearer ${input.credentials.apiKey}`]);
     } else {

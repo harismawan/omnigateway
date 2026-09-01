@@ -198,6 +198,38 @@ test("passes unknown top-level fields through as vendor extras", () => {
   expect(parseAnthropicRequest({ ...minimal, top_k: 40 }).vendor?.anthropic).toEqual({ top_k: 40 });
 });
 
+test("reads the client's session out of metadata.user_id", () => {
+  // The one identity a conversation carries across its turns, and the whole
+  // input to prompt-cache affinity on the OpenAI leg. It was in KNOWN but not
+  // in the schema, so it was parsed by nothing and excluded from the vendor bag
+  // — discarded silently, with the cost showing up only as a cache-read column
+  // of zeroes.
+  const userId = "user_abc_account_1111_session_2222";
+  expect(parseAnthropicRequest({ ...minimal, metadata: { user_id: userId } }).conversationId).toBe(
+    userId,
+  );
+});
+
+test("metadata that names no user leaves the request without a conversation", () => {
+  // Absent, null and empty all mean the client did not name one. An empty
+  // string would otherwise become an id every conversation shares.
+  expect(parseAnthropicRequest(minimal).conversationId).toBeUndefined();
+  expect(parseAnthropicRequest({ ...minimal, metadata: {} }).conversationId).toBeUndefined();
+  expect(
+    parseAnthropicRequest({ ...minimal, metadata: { user_id: null } }).conversationId,
+  ).toBeUndefined();
+  expect(
+    parseAnthropicRequest({ ...minimal, metadata: { user_id: "" } }).conversationId,
+  ).toBeUndefined();
+});
+
+test("an unknown metadata subfield rides through rather than failing the request", () => {
+  // This surface filters rather than rejects, and a client sending a field the
+  // spec has since grown must not get a 400 from the gateway.
+  const req = parseAnthropicRequest({ ...minimal, metadata: { user_id: "u1", future: 1 } });
+  expect(req.conversationId).toBe("u1");
+});
+
 test("applies IR validation to the parsed request", () => {
   // An orphaned tool result is dropped by validateRequest, leaving an empty
   // message that is then removed.

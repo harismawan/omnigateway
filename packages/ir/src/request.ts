@@ -296,4 +296,19 @@ export type ChatRequest = {
    * a provider with no such mechanism ignores it.
    */
   betas?: string[];
+  /**
+   * The client's own name for the conversation this request belongs to.
+   *
+   * On the request rather than beside it — the distinction `autoCacheEnabled`
+   * draws in the other direction — because it is the caller's value, not a
+   * gateway decision. Clients supply it under several names: Anthropic's
+   * `metadata.user_id`, OpenAI's `user`.
+   *
+   * Opaque and never interpreted. An adapter that wants cache affinity derives
+   * a key from it; one with no such mechanism ignores it. It is **not** safe to
+   * forward verbatim — a client id can carry an account identifier, so a
+   * provider-facing value is hashed. `packages/providers/src/openai/wire.ts` is
+   * the worked example.
+   */
+  conversationId?: string;
 };

@@ -598,6 +598,27 @@ Preserve these translation invariants:
   discovery mirrors removed, so it is an ordinary model id like any other.
 - Gateway not validate request-shape support per model; unsupported combos surface as upstream
   errors.
+- **`ChatRequest.conversationId` is the client's own name for its conversation, and the Codex
+  backend partition its prompt cache by it.** Arrive as Anthropic `metadata.user_id` or OpenAI
+  `user` — both sat in `KNOWN` with no schema entry, so both were parsed by nothing and dropped,
+  and neither ingress test noticed. Cost measured, not assumed: `request_logs` held **2 cache read
+  in 21** OpenAI request, against 9,373 in 9,637 for a second gateway on the same account and
+  model. Probe with byte-identical 10k-token body 75s apart read back **0 of 5** without a session
+  id and **14 of 15** with one, so it is neither prefix drift nor `instructions` placement — those
+  were each disproved separately, and an encoder change made on either theory is wasted work.
+  `openai/wire.ts` resolve one key — client `prompt_cache_key`, then client `session_id`, then
+  `conversationId`, then hash of instructions plus opening item, the shape `grok/wire.ts` already
+  reason through — and return it, so `openai/codec.ts` put the **same** string in the `session_id`
+  header. Resolved **before** the vendor `Object.assign`, else a client's own key land in the body
+  while the header carry a derived one and the backend cache under neither. Header on the OAuth
+  leg alone; `api.openai.com` take the body field, which both host carry. `"session_id"` sit in
+  `openaiProfile.order` though no profile header supply it — `orderHeaders` append an unlisted
+  name after `User-Agent`, which move an identity header to the end of the CLI fingerprint.
+  **Derived and `conversationId` case are hashed, never forwarded**: Claude Code put an account
+  uuid inside `metadata.user_id`, so raw forwarding disclose to the provider an identifier the
+  operator never chose to share, and the digest land inside the accepted charset for free.
+  `store: false` is **required**, not a default — Codex answer `{"detail":"Store must be set to
+  false"}` with HTTP 400 otherwise, so the literal in `wire.ts` stay.
 - OpenAI surface read images from `messages[].images` (bare base64) and from `attachments` /
   `experimental_attachments` as well as from `content`. Neither sidecar is OpenAI field; read
   because clients that send them send no other copy. Payload's own container header beat any

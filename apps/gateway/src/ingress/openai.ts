@@ -137,6 +137,9 @@ const schema = z.object({
   // value one upstream rejects surfaces as that upstream's error rather than
   // being refused here.
   reasoning_effort: z.enum(REASONING_EFFORTS).optional(),
+  // OpenAI's own end-user identifier, and the nearest thing this surface has to
+  // Anthropic's `metadata.user_id`. Stays in KNOWN — read here, not forwarded.
+  user: z.string().max(512).nullish(),
 });
 
 const KNOWN = [
@@ -299,6 +302,10 @@ export function parseOpenAIRequest(body: unknown): ChatRequest {
   // "think adaptively, this deep".
   if (parsed.reasoning_effort !== undefined)
     request.reasoning = { mode: "adaptive", effort: parsed.reasoning_effort };
+
+  if (typeof parsed.user === "string" && parsed.user.length > 0) {
+    request.conversationId = parsed.user;
+  }
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { openai: extras };

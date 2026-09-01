@@ -286,6 +286,11 @@ const schema = z.object({
       z.object({ type: z.literal("disabled") }),
     ])
     .optional(),
+  // Only `user_id` is documented, and it is free text rather than a bare id —
+  // Claude Code sends a compound `user_<hash>_account_<uuid>_session_<uuid>`.
+  // Non-strict, like the rest of this surface: an unknown subfield rides
+  // through rather than failing a request the client had every right to make.
+  metadata: z.object({ user_id: z.string().max(512).nullish() }).optional(),
 });
 
 const KNOWN = [
@@ -572,6 +577,12 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
   } else if (effort !== undefined) {
     request.reasoning = { mode: "adaptive", effort };
   }
+
+  // Claude Code names its session here, and it is the one stable identity a
+  // conversation carries across turns. `metadata` stays in KNOWN — it is not
+  // forwarded today and this is a read, not a change of passthrough.
+  const userId = parsed.metadata?.user_id;
+  if (typeof userId === "string" && userId.length > 0) request.conversationId = userId;
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { anthropic: extras };
