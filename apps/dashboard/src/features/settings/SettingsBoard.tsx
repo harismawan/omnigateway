@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import styled from "styled-components";
 import { useBodyLoggingAllowed, useSaveSettings, useSettings } from "../../api/queries.ts";
 import type { PonytailMode, Settings } from "../../api/types.ts";
@@ -7,7 +7,7 @@ import { Button } from "../../ui/Button.tsx";
 import { Field, Input, Select } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
-import { Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
+import { Grid, Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { AccessPanel } from "./AccessPanel.tsx";
@@ -29,20 +29,12 @@ const PONYTAIL_LEVELS: Record<PonytailMode, string> = {
 type WeightKey = keyof Settings["weights"];
 
 const WEIGHTS: ReadonlyArray<{ id: WeightKey; label: string; blurb: string }> = [
-  { id: "tier", label: "Tier", blurb: "How strongly a lower tier is preferred." },
-  { id: "health", label: "Health", blurb: "Penalty for recent failures and an open breaker." },
-  {
-    id: "quota",
-    label: "Quota",
-    blurb: "Preference for accounts keeping ahead of their window's burn rate.",
-  },
-  { id: "cost", label: "Cost", blurb: "Preference for the cheaper target of the candidates." },
-  { id: "latency", label: "Latency", blurb: "Preference for the faster observed first token." },
-  {
-    id: "load",
-    label: "Load",
-    blurb: "Preference for accounts with fewer requests in flight right now.",
-  },
+  { id: "tier", label: "Tier", blurb: "Prefers a lower tier." },
+  { id: "health", label: "Health", blurb: "Penalises recent failures and an open breaker." },
+  { id: "quota", label: "Quota", blurb: "Prefers accounts ahead of their window's burn rate." },
+  { id: "cost", label: "Cost", blurb: "Prefers the cheaper candidate." },
+  { id: "latency", label: "Latency", blurb: "Prefers the faster observed first token." },
+  { id: "load", label: "Load", blurb: "Prefers accounts with fewer requests in flight." },
 ];
 
 /**
@@ -74,7 +66,7 @@ const LIMITS: ReadonlyArray<{
   {
     id: "maxAttempts",
     label: "Attempts per request",
-    hint: "How many candidates dispatch may try before giving up. 1 disables failover.",
+    hint: "Candidates dispatch may try. 1 disables failover.",
     unit: "attempts",
     step: 1,
     min: 1,
@@ -82,7 +74,7 @@ const LIMITS: ReadonlyArray<{
   {
     id: "requestDeadlineMs",
     label: "Request deadline",
-    hint: "How long a request may take across all attempts. 0 disables only OmniGateway's deadline.",
+    hint: "Across all attempts. 0 disables only OmniGateway's deadline.",
     unit: "ms",
     step: 1000,
     min: 0,
@@ -90,7 +82,7 @@ const LIMITS: ReadonlyArray<{
   {
     id: "breakerThreshold",
     label: "Breaker threshold",
-    hint: "Consecutive failures on one account and model before it is taken out of rotation.",
+    hint: "Consecutive failures before an account and model leaves rotation.",
     unit: "failures",
     step: 1,
     min: 1,
@@ -98,7 +90,7 @@ const LIMITS: ReadonlyArray<{
   {
     id: "breakerCooldownMs",
     label: "Breaker cooldown",
-    hint: "Base wait before a tripped account is probed again. Doubles per extra failure.",
+    hint: "Wait before a tripped account is probed. Doubles per extra failure.",
     unit: "ms",
     step: 1000,
     min: 1,
@@ -106,7 +98,7 @@ const LIMITS: ReadonlyArray<{
   {
     id: "logRetentionDays",
     label: "Log retention",
-    hint: "How long request rows are kept before maintenance prunes them.",
+    hint: "How long request rows are kept before pruning.",
     unit: "days",
     step: 1,
     min: 1,
@@ -114,7 +106,7 @@ const LIMITS: ReadonlyArray<{
   {
     id: "quotaPollIntervalMs",
     label: "Quota poll interval",
-    hint: "How often each account's provider is asked for its remaining quota. 0 disables polling. Takes effect on restart.",
+    hint: "How often a provider is asked for remaining quota. 0 disables. Needs a restart.",
     unit: "ms",
     step: 60_000,
     min: 0,
@@ -135,6 +127,110 @@ const Blurb = styled.p`
   font-size: 11px;
   color: ${({ theme }) => theme.color.inkDim};
 `;
+
+/**
+ * The switches and the one mode select, laid out as cards rather than as a
+ * module apiece.
+ *
+ * One switch per full-width row put four unrelated booleans on four separate
+ * faces, so reading what this gateway does to a request meant scrolling past
+ * three paragraphs. A card holds the control, its name and its blurb together;
+ * the modules holding them sit side by side, so the cards themselves stack.
+ */
+const Options = styled.div`
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: ${({ theme }) => theme.space(2)};
+  align-items: start;
+`;
+
+const Option = styled.div`
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: ${({ theme }) => theme.space(2)};
+  row-gap: 4px;
+  align-items: center;
+  padding: ${({ theme }) => theme.space(2)};
+  background: ${({ theme }) => theme.color.panelSunk};
+  border: 1px solid ${({ theme }) => theme.color.rule};
+  border-radius: 3px;
+`;
+
+/** The card's own blurb sits under the name, clear of the control's column. */
+const OptionBlurb = styled(Blurb)`
+  grid-column: 2;
+`;
+
+const OptionName = styled.label`
+  font-size: 12px;
+  font-weight: 600;
+  color: ${({ theme }) => theme.color.ink};
+  cursor: pointer;
+`;
+
+/** A card whose control is too wide to sit beside its name. */
+const Choice = styled(Option)`
+  grid-template-columns: 1fr;
+
+  ${OptionBlurb} {
+    grid-column: 1;
+  }
+`;
+
+/**
+ * The mode card, wearing the same name and blurb as the switches beside it.
+ *
+ * `Field` is not used here even though it would associate the label for free:
+ * its legend is the silkscreened uppercase one, which next to three sentence-
+ * case switch names reads as a different kind of control in the same grid.
+ */
+function ChoiceOption({
+  label,
+  children,
+  blurb,
+}: {
+  label: string;
+  children: (props: { id: string }) => ReactNode;
+  blurb: ReactNode;
+}) {
+  const id = useId();
+  return (
+    <Choice>
+      <OptionName htmlFor={id}>{label}</OptionName>
+      {children({ id })}
+      <OptionBlurb>{blurb}</OptionBlurb>
+    </Choice>
+  );
+}
+
+function SwitchOption({
+  label,
+  checked,
+  disabled,
+  onCheckedChange,
+  children,
+}: {
+  label: string;
+  checked: boolean;
+  disabled?: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  children: ReactNode;
+}) {
+  const id = useId();
+  return (
+    <Option>
+      <Toggle
+        id={id}
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        label={label}
+        {...(disabled === undefined ? {} : { disabled })}
+      />
+      <OptionName htmlFor={id}>{label}</OptionName>
+      <OptionBlurb>{children}</OptionBlurb>
+    </Option>
+  );
+}
 
 const Problem = styled.p`
   font-size: 12px;
@@ -285,7 +381,7 @@ export function SettingsBoard() {
       <PageHead
         legend="Settings"
         title="Routing and retention"
-        summary="These apply to every request the gateway routes. Changes take effect on the next request; nothing is restarted."
+        summary="Applied to every request the gateway routes. Changes take effect on the next request; nothing restarts."
         actions={
           <Button
             type="button"
@@ -314,8 +410,8 @@ export function SettingsBoard() {
             footer={
               <Row>
                 <Legend>
-                  A candidate's score is the sum of each term times its weight, then multiplied by
-                  the account and target weights.
+                  Score is the sum of each term times its weight, then multiplied by the account and
+                  target weights.
                 </Legend>
                 <Spacer />
               </Row>
@@ -378,145 +474,131 @@ export function SettingsBoard() {
             </Weights>
           </Module>
 
-          <Module legend="Historical tool results">
-            <Row $gap={3} $align="start">
-              <Toggle
-                checked={draft.rtkEnabled === "true"}
-                onCheckedChange={(checked) => setDraft({ ...draft, rtkEnabled: String(checked) })}
-                label="Enable RTK compression"
-              />
-              <Blurb>
-                Compress recognized historical non-error tool results before provider dispatch.
-                Confirmed non-shell tools are excluded; unknown-origin results may be compressed
-                only when a built-in detector recognizes a high-confidence shell-output format.
-                Compression is deterministic and lossy. Disabled by default.
-              </Blurb>
-            </Row>
-          </Module>
+          {/* Paired: what the gateway does to a request, and what it keeps of
+              one. Both are short lists of switches, so side by side they read as
+              one decision rather than two screens apart. Stretched, because a
+              pair of faces of different heights reads as one panel cropped
+              rather than two panels of different lengths. */}
+          <Grid $min="380px" $stretch>
+            <Module legend="Request handling" meta="applied before dispatch">
+              <Options>
+                <SwitchOption
+                  label="Enable RTK compression"
+                  checked={draft.rtkEnabled === "true"}
+                  onCheckedChange={(checked) => setDraft({ ...draft, rtkEnabled: String(checked) })}
+                >
+                  Compresses recognized historical tool results. Confirmed non-shell tools are
+                  excluded; unknown-origin results may be compressed only when a detector recognizes
+                  shell output. Lossy.
+                </SwitchOption>
 
-          <Module legend="Prompt caching">
-            <Row $gap={3} $align="start">
-              <Toggle
-                checked={draft.autoCacheEnabled === "true"}
-                onCheckedChange={(checked) =>
-                  setDraft({ ...draft, autoCacheEnabled: String(checked) })
-                }
-                label="Add a cache breakpoint when a client sends none"
-              />
-              <Blurb>
-                Anthropic only caches a prompt the request marks, so a client that marks nothing
-                pays full price to resend the same prefix every turn. This marks the end of the
-                system prompt on Anthropic requests that carry no breakpoint of their own. Requests
-                that already mark one are left exactly as they arrived, and prompts too short to be
-                cacheable are skipped. Enabled by default.
-              </Blurb>
-            </Row>
-          </Module>
+                <SwitchOption
+                  label="Add a cache breakpoint when a client sends none"
+                  checked={draft.autoCacheEnabled === "true"}
+                  onCheckedChange={(checked) =>
+                    setDraft({ ...draft, autoCacheEnabled: String(checked) })
+                  }
+                >
+                  Marks the end of the system prompt on Anthropic requests carrying no breakpoint of
+                  their own. Requests that mark one are untouched.
+                </SwitchOption>
 
-          <Module legend="Coding style">
-            <Row $gap={3} $align="start">
-              <Field label="Lazy senior dev mode">
-                {(props) => (
-                  <Select
-                    {...props}
-                    value={draft.ponytailMode ?? "off"}
-                    onChange={(event) => setDraft({ ...draft, ponytailMode: event.target.value })}
-                  >
-                    {Object.entries(PONYTAIL_LEVELS).map(([mode, label]) => (
-                      <option key={mode} value={mode}>
-                        {label}
-                      </option>
-                    ))}
-                  </Select>
+                <ChoiceOption
+                  label="Lazy senior dev mode"
+                  blurb="Appends the ponytail ruleset, about 1,240 tokens, to every system prompt. A request already carrying it is left alone."
+                >
+                  {(props) => (
+                    <Select
+                      {...props}
+                      value={draft.ponytailMode ?? "off"}
+                      onChange={(event) => setDraft({ ...draft, ponytailMode: event.target.value })}
+                    >
+                      {Object.entries(PONYTAIL_LEVELS).map(([mode, label]) => (
+                        <option key={mode} value={mode}>
+                          {label}
+                        </option>
+                      ))}
+                    </Select>
+                  )}
+                </ChoiceOption>
+              </Options>
+            </Module>
+
+            <Module
+              legend="Request and response bodies"
+              meta={
+                bodyLoggingAllowed.data === true ? "permitted by the environment" : "not permitted"
+              }
+            >
+              <Stack $gap={2}>
+                {/* Deliberately not a live region: this is the standing state of
+                    the installation, present from first paint, not an outcome
+                    announced after an action. */}
+                {bodyLoggingAllowed.data === true ? null : (
+                  <Blocked>
+                    This gateway started without <code>OMNI_BODY_LOGGING_ALLOWED</code>, so nothing
+                    below can record anything. Set it in the installation's <code>.env</code> and
+                    restart first.
+                  </Blocked>
                 )}
-              </Field>
-              <Blurb>
-                Appends the ponytail ruleset to the system prompt of every request, so a coding
-                agent builds the smallest thing that works whether or not it has the skill installed
-                locally. About 1,240 tokens, cached along with the prompt it joins when the request
-                marks a breakpoint at the end of its system prompt or marks none at all. A request
-                that already carries the ruleset is left alone. Off by default.
-              </Blurb>
-            </Row>
-          </Module>
 
-          <Module
-            legend="Request and response bodies"
-            meta={
-              bodyLoggingAllowed.data === true ? "permitted by the environment" : "not permitted"
-            }
-          >
-            <Stack $gap={3}>
-              {/* Deliberately not a live region: this is the standing state of
-                  the installation, present from first paint, not an outcome
-                  announced after an action. */}
-              {bodyLoggingAllowed.data === true ? null : (
-                <Blocked>
-                  This gateway was started without <code>OMNI_BODY_LOGGING_ALLOWED</code>, so
-                  nothing below can record anything. Set it in the installation's <code>.env</code>{" "}
-                  and restart before turning capture on. Two keys mean an admin session on its own
-                  cannot start recording prompts.
-                </Blocked>
-              )}
+                <Options>
+                  <SwitchOption
+                    label="Capture request and response bodies"
+                    checked={draft.bodyLoggingEnabled === "true"}
+                    disabled={bodyLoggingAllowed.data !== true}
+                    onCheckedChange={(checked) =>
+                      setDraft({ ...draft, bodyLoggingEnabled: String(checked) })
+                    }
+                  >
+                    Stores what each client sent and each provider returned, encrypted beside the
+                    database. Tokens and keys are masked; headers are never captured. Expires on the
+                    log retention window above.
+                  </SwitchOption>
 
-              <Row $gap={3} $align="start">
-                <Toggle
-                  checked={draft.bodyLoggingEnabled === "true"}
-                  disabled={bodyLoggingAllowed.data !== true}
-                  onCheckedChange={(checked) =>
-                    setDraft({ ...draft, bodyLoggingEnabled: String(checked) })
-                  }
-                  label="Capture request and response bodies"
-                />
-                <Blurb>
-                  Stores what each client sent and what each provider returned, encrypted under
-                  OMNI_ENCRYPTION_KEY beside the database. Bearer tokens and API keys are masked
-                  first and headers are never captured. Bodies expire on the log retention window
-                  above, and the newest 100,000 requests are kept whatever that window says. Off by
-                  default.
-                </Blurb>
-              </Row>
-
-              <Row $gap={3} $align="start">
-                <Toggle
-                  checked={draft.bodyLoggingCaptureStreamChunks === "true"}
-                  disabled={bodyLoggingAllowed.data !== true || draft.bodyLoggingEnabled !== "true"}
-                  onCheckedChange={(checked) =>
-                    setDraft({ ...draft, bodyLoggingCaptureStreamChunks: String(checked) })
-                  }
-                  label="Also keep raw stream frames"
-                />
-                <Blurb>
-                  Retains the raw SSE frames of each attempt as well as the reassembled response.
-                  The only way to debug stream framing itself, and by far the most expensive thing
-                  capture can store, so it is gated separately rather than implied.
-                </Blurb>
-              </Row>
-            </Stack>
-          </Module>
+                  <SwitchOption
+                    label="Also keep raw stream frames"
+                    checked={draft.bodyLoggingCaptureStreamChunks === "true"}
+                    disabled={
+                      bodyLoggingAllowed.data !== true || draft.bodyLoggingEnabled !== "true"
+                    }
+                    onCheckedChange={(checked) =>
+                      setDraft({ ...draft, bodyLoggingCaptureStreamChunks: String(checked) })
+                    }
+                  >
+                    Also keeps the raw SSE frames of each attempt. The most expensive thing capture
+                    stores.
+                  </SwitchOption>
+                </Options>
+              </Stack>
+            </Module>
+          </Grid>
 
           {problem === null ? null : <Problem role="alert">{problem}</Problem>}
           {saved && problem === null ? <Saved role="status">Settings saved.</Saved> : null}
 
-          <AgentSetup />
-
-          <AccessPanel />
+          {/* The two panels an operator uses when handing this gateway to
+              someone else: what to paste into their agent, and what password
+              opens the console. */}
+          <Grid $min="380px" $stretch>
+            <AgentSetup />
+            <AccessPanel />
+          </Grid>
 
           <Module legend="Known limits">
             <Stack $gap={2}>
-              <Row $gap={2}>
+              <Row $gap={2} $align="start">
                 <Mono $dim>rate limits</Mono>
                 <Blurb>
-                  Per-key rate limits are counted inside one gateway process and reset when it
-                  restarts. They are not shared across instances.
+                  Counted per gateway process and reset when it restarts. Not shared across
+                  instances.
                 </Blurb>
               </Row>
-              <Row $gap={2}>
+              <Row $gap={2} $align="start">
                 <Mono $dim>logs</Mono>
                 <Blurb>
-                  Request rows record routing and token counts only. Prompts and responses are
-                  written only when body capture above is on, and to a separate encrypted store;
-                  credentials are never written to either.
+                  Request rows record routing and token counts only. Prompts and responses only when
+                  body capture is on, to a separate encrypted store. Credentials to neither.
                 </Blurb>
               </Row>
             </Stack>

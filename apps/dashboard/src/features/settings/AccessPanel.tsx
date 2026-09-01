@@ -5,7 +5,7 @@ import { endAdminSession } from "../../session/reasons.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Field, Input } from "../../ui/Field.tsx";
 import { Module } from "../../ui/Panel.tsx";
-import { Row, Stack } from "../../ui/primitives.ts";
+import { Divider, Legend, Row, Stack } from "../../ui/primitives.ts";
 import { describeError } from "../../ui/States.tsx";
 
 /**
@@ -30,8 +30,21 @@ const Saved = styled.p`
   color: ${({ theme }) => theme.color.ok};
 `;
 
-const Narrow = styled(Input)`
-  width: 260px;
+/**
+ * One password form, stacked.
+ *
+ * These were a wrapping row of equal-width boxes, which put the labels on one
+ * baseline only while the window happened to be wide enough and reflowed into a
+ * ragged two-and-one at every narrower width. A fixed column stacks the fields
+ * so the labels line up at any width, and caps the form well short of the
+ * panel: a password box as wide as the console reads as a search field.
+ */
+const Form = styled(Stack)`
+  max-width: 320px;
+`;
+
+const SubHead = styled(Legend)`
+  color: ${({ theme }) => theme.color.inkDim};
 `;
 
 /**
@@ -74,14 +87,12 @@ function AdminPassword() {
 
   return (
     <Stack $gap={2}>
-      <Blurb>
-        Changing this signs every session out, including this one, and you will be asked to sign in
-        again with the new password.
-      </Blurb>
-      <Row $gap={2} $wrap $align="end">
+      <SubHead>Admin password</SubHead>
+      <Blurb>Changing this signs every session out, including this one.</Blurb>
+      <Form $gap={2}>
         <Field label="Current password">
           {(props) => (
-            <Narrow
+            <Input
               {...props}
               type="password"
               autoComplete="current-password"
@@ -92,7 +103,7 @@ function AdminPassword() {
         </Field>
         <Field label="New password" hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}>
           {(props) => (
-            <Narrow
+            <Input
               {...props}
               type="password"
               autoComplete="new-password"
@@ -103,7 +114,7 @@ function AdminPassword() {
         </Field>
         <Field label="Repeat new password">
           {(props) => (
-            <Narrow
+            <Input
               {...props}
               type="password"
               autoComplete="new-password"
@@ -112,15 +123,17 @@ function AdminPassword() {
             />
           )}
         </Field>
-        <Button
-          type="button"
-          $variant="primary"
-          onClick={submit}
-          disabled={change.isPending || current.length === 0 || next.length === 0}
-        >
-          Change password
-        </Button>
-      </Row>
+        <Row $gap={2}>
+          <Button
+            type="button"
+            $variant="primary"
+            onClick={submit}
+            disabled={change.isPending || current.length === 0 || next.length === 0}
+          >
+            Change password
+          </Button>
+        </Row>
+      </Form>
       {problem === null ? null : <Problem role="alert">{problem}</Problem>}
     </Stack>
   );
@@ -168,23 +181,23 @@ function ViewerPassword() {
 
   return (
     <Stack $gap={2}>
+      <SubHead>Read-only password</SubHead>
       <Blurb>
-        A second password that signs in to a read-only console: every screen the operator sees,
-        without mutations, snapshot downloads, or request bodies. Hand it to someone who needs to
-        watch this gateway without being able to change it.{" "}
+        Opens a read-only console: every screen, without mutations, snapshot downloads, or request
+        bodies.{" "}
         {status.isPending
-          ? "Reading whether one is set…"
+          ? "Checking whether one is set…"
           : configured
-            ? "One is set. Entering a new one replaces it; withdrawing it ends any read-only session immediately."
+            ? "One is set. A new one replaces it; withdrawing ends read-only sessions at once."
             : "None is set, so nobody can sign in read-only. There is no default password."}
       </Blurb>
-      <Row $gap={2} $wrap $align="end">
+      <Form $gap={2}>
         <Field
           label={configured ? "Replace read-only password" : "Set read-only password"}
           hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}
         >
           {(props) => (
-            <Narrow
+            <Input
               {...props}
               type="password"
               autoComplete="new-password"
@@ -193,20 +206,22 @@ function ViewerPassword() {
             />
           )}
         </Field>
-        <Button
-          type="button"
-          $variant="primary"
-          onClick={save}
-          disabled={set.isPending || next.length === 0}
-        >
-          {configured ? "Replace" : "Set"}
-        </Button>
-        {configured ? (
-          <Button type="button" $variant="danger" onClick={withdraw} disabled={set.isPending}>
-            Withdraw access
+        <Row $gap={2}>
+          <Button
+            type="button"
+            $variant="primary"
+            onClick={save}
+            disabled={set.isPending || next.length === 0}
+          >
+            {configured ? "Replace" : "Set"}
           </Button>
-        ) : null}
-      </Row>
+          {configured ? (
+            <Button type="button" $variant="danger" onClick={withdraw} disabled={set.isPending}>
+              Withdraw access
+            </Button>
+          ) : null}
+        </Row>
+      </Form>
       {problem === null ? null : <Problem role="alert">{problem}</Problem>}
       {done === null || problem !== null ? null : <Saved role="status">{done}</Saved>}
     </Stack>
@@ -217,8 +232,9 @@ function ViewerPassword() {
 export function AccessPanel() {
   return (
     <Module legend="Access">
-      <Stack $gap={4}>
+      <Stack $gap={3}>
         <AdminPassword />
+        <Divider />
         <ViewerPassword />
       </Stack>
     </Module>
