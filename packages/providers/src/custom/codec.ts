@@ -31,12 +31,12 @@ function metadata(
  * blind `/v1` append would double. A bare-origin row therefore targets
  * `${origin}/v1/<suffix>` exactly as it always did, while a path-bearing row
  * targets `${origin}${basePath}/v1/<suffix>` unless its path already ends in
- * `/v1`.
+ * a version segment such as `/v1` or `/v4`.
  */
 function endpointUrl(origin: string, basePath: string, protocol: Protocol): string {
   const suffix = protocol === "chat_completions" ? "chat/completions" : "responses";
   const base = `${origin}${basePath}`.replace(/\/+$/, "");
-  return base.endsWith("/v1") ? `${base}/${suffix}` : `${base}/v1/${suffix}`;
+  return /\/v\d+$/i.test(base) ? `${base}/${suffix}` : `${base}/v1/${suffix}`;
 }
 
 /**

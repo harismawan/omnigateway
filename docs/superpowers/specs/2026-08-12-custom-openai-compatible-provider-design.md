@@ -97,10 +97,11 @@ transport, so dashboard and CLI must visibly distinguish HTTP from HTTPS without
 Rows written before base paths were accepted carry no `basePath` key; readers default it to empty.
 
 The selected protocol determines the request URL. The adapter joins the stored base onto `/v1/<suffix>`
-unless the stored base already ends in `/v1` (the OpenAI-SDK habit), which would otherwise double:
+unless the stored base already ends in a version segment such as `/v1` or `/v4`, which would
+otherwise produce paths such as `/v4/v1/chat/completions`:
 
 - Chat Completions: `<base>/chat/completions`, where `<base>` is `${origin}${basePath}` plus `/v1`
-  unless already `/v1`-suffixed
+  unless already version-suffixed
 - Responses: same join with `/responses`
 
 A bare-origin row therefore targets `${origin}/v1/chat/completions` exactly as before this rule.
