@@ -621,6 +621,20 @@ Preserve these translation invariants:
   merge every conversation on an install into one partition — on a single-operator install that is
   every conversation there is. It is read nowhere; the derived key beat it because it is at least
   per-conversation.
+  **Body is not the only place a harness name its conversation, and reading only body cover one
+  client of three.** `readConversationHeader` in `ingress/schemas.ts` hold the list, both surface
+  call it, and it is checked **after** the body field. Names measured from each client's source:
+  `x-session-id` and `x-session-affinity` (opencode send both, with that casing disagreement, so
+  match case-insensitively), `x-deepseek-harness-session-id` (dsh, whose design note say it keep
+  identity out of body deliberately). Neither of those two put anything in body at all. Codex
+  deliberately **absent** from list though it send `session-id`: it speak only Responses API —
+  `wire_api = "chat"` is hard error in it now — and this gateway expose no Responses ingress, so
+  it cannot arrive. Name listed for client that cannot connect is claim no test can check.
+  Derived fallback is **weaker than it look**, so prefer any client-supplied id over improving it:
+  measured per session on real traffic, system prompt take 4–9 distinct value and tool set 3–6, so
+  a key hashing either rotate that many time within one conversation. Do **not** hash tool list or
+  first message for this. And gateway-generated id is not a separate option — stateless generation
+  *is* content hashing, so it collapse into that same fallback; beating client need state.
   `openai/wire.ts` resolve one key — client `prompt_cache_key`, then client `session_id`, then
   `conversationId`, then hash of instructions plus opening item, the shape `grok/wire.ts` already
   reason through — and return it, so `openai/codec.ts` put the **same** string in the `session_id`

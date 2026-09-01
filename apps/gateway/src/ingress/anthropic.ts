@@ -17,6 +17,7 @@ import {
   irCacheControl,
   isRecord,
   parseOrThrow,
+  readConversationHeader,
 } from "./schemas.ts";
 
 const textBlock = z.object({
@@ -593,8 +594,15 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
   // conversation carries across turns — it survives compaction, where the
   // derived fallback cannot. `metadata` stays in KNOWN: this is a read, not a
   // change of what gets forwarded.
+  // Body first, header second. A client that fills `metadata` is naming the
+  // conversation in the field its own protocol defines; the header is how the
+  // harnesses that put nothing in the body say the same thing.
   const userId = parsed.metadata?.user_id;
-  if (typeof userId === "string" && userId.length > 0) request.conversationId = userId;
+  const conversation =
+    typeof userId === "string" && userId.length > 0
+      ? userId
+      : readConversationHeader(headers ?? undefined);
+  if (conversation !== undefined) request.conversationId = conversation;
 
   const extras = extraFields(body as Record<string, unknown>, KNOWN);
   if (extras !== undefined) request.vendor = { anthropic: extras };

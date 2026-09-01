@@ -94,6 +94,47 @@ export function extraFields(
   return Object.keys(extras).length > 0 ? extras : undefined;
 }
 
+/**
+ * Header names a harness uses to name the conversation it is in.
+ *
+ * Measured from each client's own source, not guessed. Two of the three send a
+ * per-session id in a header and put **nothing** in the body, so a gateway
+ * reading bodies alone sees them as anonymous and falls back to a derived key
+ * that — measured on real traffic — rotates 4 to 9 times per session as the
+ * system prompt changes.
+ *
+ * - `x-session-id` / `x-session-affinity`: opencode sends both, with that exact
+ *   disagreement in casing, which is why the match below is case-insensitive.
+ * - `x-deepseek-harness-session-id`: dsh, whose design notes say it keeps
+ *   identity out of the body on purpose.
+ *
+ * Codex is deliberately absent. It sends `session-id`, but it speaks only the
+ * Responses API — `wire_api = "chat"` is a hard error in it now — and this
+ * gateway exposes no Responses ingress, so it cannot arrive here at all. A name
+ * listed for a client that cannot connect is a claim no test can check.
+ */
+const CONVERSATION_HEADERS = [
+  "x-session-id",
+  "x-session-affinity",
+  "x-deepseek-harness-session-id",
+] as const;
+
+/**
+ * The conversation id a client named in a header, if any.
+ *
+ * Bounded at the same 512 characters the body fields are, and for the same
+ * reason rather than a different one: the value is hashed before it reaches a
+ * provider, so the bound is about what this gateway will hold, not about what
+ * the upstream accepts.
+ */
+export function readConversationHeader(headers: Headers | undefined): string | undefined {
+  for (const name of CONVERSATION_HEADERS) {
+    const raw = headers?.get(name)?.trim();
+    if (raw !== undefined && raw.length > 0 && raw.length <= 512) return raw;
+  }
+  return undefined;
+}
+
 /** Splits `data:image/png;base64,AAAA` into its media type and payload. */
 export function parseDataUrl(url: string): { mediaType: string; data: string } {
   const match = /^data:([^;,]+);base64,(.*)$/s.exec(url);

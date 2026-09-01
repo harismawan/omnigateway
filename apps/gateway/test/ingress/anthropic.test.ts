@@ -252,6 +252,32 @@ test("a null metadata is accepted, not a 400", () => {
   expect(parseAnthropicRequest({ ...minimal, metadata: null }).conversationId).toBeUndefined();
 });
 
+test("falls back to a session header when the body names no conversation", () => {
+  // opencode and dsh both send a per-session id in a header and nothing in the
+  // body, so a gateway reading bodies alone sees them as anonymous.
+  const headers = new Headers({ "X-Session-Id": "ses_0123456789ab" });
+  expect(parseAnthropicRequest(minimal, headers).conversationId).toBe("ses_0123456789ab");
+
+  const dsh = new Headers({ "x-deepseek-harness-session-id": "dsh-1" });
+  expect(parseAnthropicRequest(minimal, dsh).conversationId).toBe("dsh-1");
+});
+
+test("the body wins over a header when both name a conversation", () => {
+  const headers = new Headers({ "x-session-affinity": "from-header" });
+  const req = parseAnthropicRequest({ ...minimal, metadata: { user_id: "from-body" } }, headers);
+  expect(req.conversationId).toBe("from-body");
+});
+
+test("an unusable session header is ignored rather than becoming a shared id", () => {
+  // Whitespace and over-long values are the two ways a header arrives useless.
+  // Taking either would hand every request that sends one the same key.
+  expect(
+    parseAnthropicRequest(minimal, new Headers({ "x-session-id": "   " })).conversationId,
+  ).toBeUndefined();
+  const long = new Headers({ "x-session-id": "s".repeat(513) });
+  expect(parseAnthropicRequest(minimal, long).conversationId).toBeUndefined();
+});
+
 test("an unknown metadata subfield rides through rather than failing the request", () => {
   // This surface filters rather than rejects, and a client sending a field the
   // spec has since grown must not get a 400 from the gateway.
