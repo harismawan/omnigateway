@@ -1,9 +1,11 @@
 # OpenAI Responses ingress
 
-*Status: implemented. The `developer`-role change of step 5 was probed live against the Codex OAuth
-leg on 2026-09-02 — the same request differing only in that role returned 200 with nine events and
-`response.completed` both times — and shipped. The other three legs named below were not probed: the
-machine had no OpenAI API key and no xAI credential of either kind.*
+*Status: implemented. The `developer`-role change of step 5 was probed live on 2026-09-02 against
+two independent servers — the Codex OAuth backend and OpenRouter's `/api/v1/responses` — each
+answering 200 to a pair of requests differing only in that role, and it shipped for all three
+Responses encoders including `custom`. Not probed: the OpenAI API-key host (no credential on the
+machine, and the role is documented there), and both xAI hosts (no credential of either kind).
+`grok/wire.ts` says so at the line to revert.*
 
 *Phase 0's capture has not been run either: it needs a real Codex pointed at a running gateway. The
 route, the schema and the refusal list were written from Codex's own source and both peer gateways,
@@ -553,7 +555,10 @@ falls through to a working fallback.
 5. Probe the four legs for `developer`-item support, then move mid-conversation system turns on the
    legs that accept it. **Done for the OpenAI OAuth leg only** — measured, accepted, shipped. The
    OpenAI API-key host documents the role and was not reachable to check; both xAI hosts remain
-   unmeasured, and `grok/wire.ts` says so at the line that would be reverted.
+   unmeasured, and `grok/wire.ts` says so at the line that would be reverted. `custom` moved too,
+   on a second measurement — OpenRouter, the one custom endpoint available — and it is the weakest
+   of the three by construction: an open set of third-party servers, of which exactly one was
+   testable.
 6. Documentation.
 
 Steps 4 and 5 are last because they are the only parts that change behaviour for traffic that already

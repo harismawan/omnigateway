@@ -202,11 +202,25 @@ export function toCustomResponsesWire(
     const parts: unknown[] = [];
 
     // This API takes conversation-level instructions separately, so a
-    // mid-conversation system turn is inlined into a marked user turn: it keeps
-    // its position even though it loses the operator role.
-    const inlined = message.role === "system";
-    if (inlined) note("custom:system-turn-inlined");
-    const role = inlined ? "user" : message.role;
+    // mid-conversation operator turn goes as `developer` — the role the dialect
+    // defines for exactly that — keeping both its position and its standing.
+    //
+    // Measured on two independent servers before it shipped: the Codex backend
+    // and OpenRouter's `/api/v1/responses`, each answering 200 to a request
+    // differing only in this role. That is weaker evidence here than it is for
+    // the other two encoders and deliberately so — `custom` points at whatever
+    // server an operator configured, and only that operator can test it. The
+    // role is what the API defines, so a compliant endpoint accepts it, and one
+    // that does not fails loudly on every request carrying such a turn rather
+    // than quietly.
+    //
+    // Recorded as a degradation still, because the role is not the one the
+    // client wrote. Rows written before the rename carry
+    // `custom:system-turn-inlined` and stay readable: degradations are forensic
+    // text, never parsed on read.
+    const asDeveloper = message.role === "system";
+    if (asDeveloper) note("custom:system-turn-as-developer");
+    const role = asDeveloper ? "developer" : message.role;
 
     const flush = (): void => {
       if (parts.length === 0) return;
@@ -219,7 +233,7 @@ export function toCustomResponsesWire(
         case "text":
           parts.push({
             type: role === "assistant" ? "output_text" : "input_text",
-            text: inlined ? `<system-reminder>\n${block.text}\n</system-reminder>` : block.text,
+            text: block.text,
           });
           break;
         case "image":
