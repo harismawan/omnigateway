@@ -45,6 +45,14 @@ export type LogLevel = keyof typeof LEVELS;
 export type LogFields = {
   requestId?: string | undefined;
   /**
+   * Which coordinator a fleet-shared counter was served from, and whether the
+   * call fell through to memory. Two closed values and a boolean — the same
+   * family as `surface` — so a coordinator fault is reported by name and
+   * never by its message.
+   */
+  coord?: "redis" | "memory" | undefined;
+  coordFallback?: boolean | undefined;
+  /**
    * Which client dialect the request arrived in. Vocabulary the core owns, in
    * the same family as `ErrorCode` and `StopReason`: a new member is a core
    * edit by design, which is what keeps this field from becoming free text.
@@ -156,6 +164,8 @@ const FIELD_ORDER = [
   "credentialId",
   "apiKeyId",
   "plugin",
+  "coord",
+  "coordFallback",
   "snapshotId",
   "attempt",
   "attempts",

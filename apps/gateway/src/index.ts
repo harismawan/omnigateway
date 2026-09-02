@@ -16,6 +16,7 @@ import { nodeHttpClient } from "@omni/providers";
 import { createStore, deriveKey } from "@omni/store";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { createApp } from "./app.ts";
+import { redisCoord } from "./coord/redis.ts";
 import { createDeferredStop, createShutdown, type Shutdown } from "./lifecycle.ts";
 import { startMaintenance } from "./maintenance.ts";
 import { startRefreshScheduler } from "./oauth/scheduler.ts";
@@ -164,7 +165,11 @@ async function main(): Promise<void> {
   // `main()` is reachable from a test — see `installPluginProviders`.
   // One per process, shared by the limiter, the load registry and the
   // refresher: the counters a fleet must agree on all live behind it.
-  const coord = memoryCoord();
+  // The coordinator is what makes N processes one installation. Named by
+  // `OMNI_REDIS_URL`; in memory otherwise, which is the single process it was.
+  const shared =
+    config.redisUrl === null ? null : redisCoord({ url: config.redisUrl, logger, now });
+  const coord = shared ?? memoryCoord({ now });
   const lease = { coord, nodeId };
   const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger, coord });
   const staticDir = dashboardDir();
@@ -279,6 +284,8 @@ async function main(): Promise<void> {
     store,
     coord,
     nodeId,
+    mode: config.databaseUrl === null ? "single" : "cluster",
+    ...(shared === null ? {} : { coordHealthy: shared.healthy }),
     baseUrl: config.baseUrl,
     http,
     now,

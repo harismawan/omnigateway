@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { memoryCoord } from "@omni/coord";
+import { describe, expect, test } from "bun:test";
+import { type Coord, memoryCoord } from "@omni/coord";
 import type { StreamEvent } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
@@ -12,6 +12,8 @@ import {
   target,
   virtualModel,
 } from "@omni/testkit";
+import { RedisClient } from "bun";
+import { redisCoord } from "../../src/coord/redis.ts";
 import { proxyRoutes } from "../../src/routes/proxy.ts";
 
 /**
@@ -40,7 +42,7 @@ const EVENTS: StreamEvent[] = [
 
 const BODY = { model: "fast", max_tokens: 100, messages: [{ role: "user", content: "hi" }] };
 
-async function fleet(limits: LimitConfig) {
+async function fleet(limits: LimitConfig, coords: () => [Coord, Coord] = shared) {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
   await store.config.putModel(
@@ -50,10 +52,10 @@ async function fleet(limits: LimitConfig) {
     }),
   );
   const { raw } = await seedApiKey(store, { limits, modelAllowlist: null });
-  const coord = memoryCoord();
+  const [coordA, coordB] = coords();
 
   let n = 0;
-  const replica = () =>
+  const replica = (coord: Coord) =>
     proxyRoutes({
       store,
       coord,
@@ -77,28 +79,66 @@ async function fleet(limits: LimitConfig) {
       }),
     );
 
-  return { store, a: replica(), b: replica(), call };
+  return { store, a: replica(coordA), b: replica(coordB), call };
 }
 
-test("a concurrency ceiling holds across replicas", async () => {
-  const { store, a, b, call } = await fleet({ concurrency: 1 });
+/** One in-memory coordinator handed to both replicas. */
+function shared(): [Coord, Coord] {
+  const coord = memoryCoord();
+  return [coord, coord];
+}
 
-  const held = await call(a, { ...BODY, stream: true });
-  expect(held.status).toBe(200);
+function suite(name: string, coords: () => [Coord, Coord]) {
+  describe(name, () => {
+    test("a concurrency ceiling holds across replicas", async () => {
+      const { store, a, b, call } = await fleet({ concurrency: 1 }, coords);
 
-  expect((await call(b, BODY)).status).toBe(429);
+      const held = await call(a, { ...BODY, stream: true });
+      expect(held.status).toBe(200);
 
-  await held.text();
-  expect((await call(b, BODY)).status).toBe(200);
-  store.close();
-});
+      expect((await call(b, BODY)).status).toBe(429);
 
-test("a per-minute request ceiling holds across replicas", async () => {
-  const { store, a, b, call } = await fleet({ requests: { "1m": 2 } });
+      await held.text();
+      expect((await call(b, BODY)).status).toBe(200);
+      store.close();
+    });
 
-  expect((await call(a, BODY)).status).toBe(200);
-  expect((await call(b, BODY)).status).toBe(200);
-  expect((await call(b, BODY)).status).toBe(429);
-  expect((await call(a, BODY)).status).toBe(429);
-  store.close();
-});
+    test("a per-minute request ceiling holds across replicas", async () => {
+      const { store, a, b, call } = await fleet({ requests: { "1m": 2 } }, coords);
+
+      expect((await call(a, BODY)).status).toBe(200);
+      expect((await call(b, BODY)).status).toBe(200);
+      expect((await call(b, BODY)).status).toBe(429);
+      expect((await call(a, BODY)).status).toBe(429);
+      store.close();
+    });
+
+    test("a long window holds across replicas", async () => {
+      const { store, a, b, call } = await fleet({ requests: { "5h": 2 } }, coords);
+
+      expect((await call(a, BODY)).status).toBe(200);
+      expect((await call(b, BODY)).status).toBe(200);
+      // Debits land on completion; a moment for the second one to settle.
+      await Bun.sleep(20);
+      expect((await call(a, BODY)).status).toBe(429);
+      store.close();
+    });
+  });
+}
+
+suite("two replicas over one memory coord", shared);
+
+/**
+ * The same three, over two *separate* Redis-backed coordinators — which is
+ * what two pods actually hold. Skipped without a Redis to hand; CI names one.
+ */
+const url = process.env.OMNI_TEST_REDIS_URL;
+if (url !== undefined) {
+  const base = url.replace(/\/\d+$/, "");
+  suite("two replicas over two redis coords", () => {
+    const db = `${base}/14`;
+    const admin = new RedisClient(db);
+    void admin.send("FLUSHDB", []).finally(() => admin.close());
+    return [redisCoord({ url: db }), redisCoord({ url: db })];
+  });
+}

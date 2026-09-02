@@ -167,7 +167,17 @@ run; when that file gain a step, this line gain one.
     side and deliver side, and they add no delay. `stream()` take its `seq` from `coord.incr`, so
     a client moving between processes carry a number every one recognise; ring `push` accept
     that seq and drop a frame behind its head. Plugin channels are **pod-local by construction**
-    — each pod's plugin instance serve that pod's sockets — and that is not a gap. Design:
+    — each pod's plugin instance serve that pod's sockets — and that is not a gap. Redis impl
+    live in `apps/gateway/src/coord/redis.ts` (host own transport); every primitive is one Lua
+    script, `attempt()` decide fail-open per table (proxy-path primitives fall to an embedded
+    memory coord, `lease` false, `mutex` throw, `kv` refuse `OVERLOADED`), logged through the two
+    closed `LogFields` keys `coord`/`coordFallback`. **`RedisClient.connect()` never reject with
+    `autoReconnect` on** — it retry forever — so the first call race it against
+    `CONNECT_WAIT_MS` and every call read `connected` instead; a subscriber need its own
+    connection and an explicit `connect()` or `subscribe` never settle. Contract suite run
+    against real Redis when `OMNI_TEST_REDIS_URL` set (CI set it; `valkey` service), and
+    `test/cluster/sharedCoord.test.ts` run the two-replica suite over two **separate** Redis
+    coords — what two pods actually hold. Design:
     `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
 15. `packages/ratelimit` stay pure same way; `now` always a parameter, counters supplied by caller,
     so package never learn where they came from. `@omni/ratelimit/catalog` is leaf holding dimension

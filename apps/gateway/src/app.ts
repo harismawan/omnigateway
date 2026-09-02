@@ -57,6 +57,10 @@ export type AppDeps = {
   coord?: Coord;
   /** This process's name on leases and stream declarations. Fresh when absent. */
   nodeId?: string;
+  /** Reported on `/health`. `cluster` when the store is shared. */
+  mode?: "single" | "cluster";
+  /** Whether the coordinator's last call reached it. Absent means in memory, which is always up. */
+  coordHealthy?: () => boolean;
   /** Overridden by tests that assert in-flight accounting; one per process otherwise. */
   loadRegistry?: LoadRegistry;
   /** Overridden by tests that read the concurrency gauge; one per process otherwise. */
@@ -322,7 +326,16 @@ export function createApp(deps: AppDeps) {
         admitted.get(request)?.();
         admitted.delete(request);
       })
-      .get("/health", () => ({ ok: true }))
+      // `mode`, `nodeId` and `coord` are for a readiness probe and an operator
+      // with curl; the console's own watcher reads `ok` alone and must keep
+      // to it, because during a restart there is nothing else to read.
+      .get("/health", () => ({
+        ok: true,
+        mode: deps.mode ?? "single",
+        nodeId,
+        coord:
+          "healthy" in coord && !(coord as { healthy(): boolean }).healthy() ? "fallback" : "ok",
+      }))
       .use(
         proxyRoutes({
           store: deps.store,
