@@ -1,3 +1,4 @@
+import { type Coord, LockUnavailable, memoryCoord } from "@omni/coord";
 import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { CredentialSecrets, CredentialView, Store } from "@omni/store";
@@ -9,12 +10,22 @@ export type RefreshDeps = {
   http: HttpClient;
   now: () => number;
   logger?: Logger;
+  /** Serialises refreshes across processes. In-memory when absent. */
+  coord?: Coord;
 };
+
+/**
+ * How long one refresh may hold the cross-process lock, and how long a second
+ * process waits for it. Both the token-call deadline the flows already use: a
+ * lock outliving it belongs to a call that has already failed.
+ */
+const REFRESH_LOCK_MS = 30_000;
 
 export type Refresher = (credential: CredentialView) => Promise<CredentialSecrets>;
 
 export function createRefresher(deps: RefreshDeps): Refresher {
   const logger = deps.logger ?? noopLogger;
+  const coord = deps.coord ?? memoryCoord();
 
   /**
    * One in-flight refresh per credential.
@@ -33,6 +44,45 @@ export function createRefresher(deps: RefreshDeps): Refresher {
    * first is as good as any other for producing the next one.
    */
   const inFlight = new Map<string, Promise<CredentialSecrets>>();
+
+  /**
+   * The same rule across processes, which the map cannot see.
+   *
+   * The lock serialises; the re-read is the dedup. A process that waited on
+   * the lock re-reads the credential once it holds it, and an expiry that moved
+   * forward since its own view was taken means another process already
+   * refreshed — so it returns those secrets and never calls the provider,
+   * which for a rotating-token provider is the difference between a working
+   * credential and one only a browser can recover.
+   *
+   * A lock that cannot be taken falls through to an unserialised refresh with a
+   * warning, which is exactly today's single-process behaviour: the map above
+   * still folds this process's own callers, and the alternative — refusing the
+   * request — turns a coordination fault into an outage.
+   */
+  async function serialised(credential: CredentialView): Promise<CredentialSecrets> {
+    try {
+      return await coord.mutex.withLock(
+        `refresh:${credential.id}`,
+        REFRESH_LOCK_MS,
+        REFRESH_LOCK_MS,
+        async () => {
+          const fresh = await deps.store.credentials.get(credential.id);
+          if (fresh !== null && (fresh.expiresAt ?? 0) > (credential.expiresAt ?? 0)) {
+            return fresh.secrets();
+          }
+          return run(credential);
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof LockUnavailable)) throw error;
+      logger.warn("refresh lock unavailable; refreshing unserialised", {
+        provider: credential.provider,
+        credentialId: credential.id,
+      });
+      return run(credential);
+    }
+  }
 
   async function run(credential: CredentialView): Promise<CredentialSecrets> {
     const secrets = await credential.openForRefresh();
@@ -102,7 +152,7 @@ export function createRefresher(deps: RefreshDeps): Refresher {
     const existing = inFlight.get(credential.id);
     if (existing !== undefined) return existing;
 
-    const promise = run(credential).finally(() => {
+    const promise = serialised(credential).finally(() => {
       // Cleared on both paths: caching a rejection would make one transient
       // network error stick to the credential forever.
       inFlight.delete(credential.id);

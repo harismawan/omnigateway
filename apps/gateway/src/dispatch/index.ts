@@ -264,6 +264,10 @@ export async function dispatch(
     return fail(code, describeError(error, "unresolvable model"));
   }
 
+  // The one yield between here and the eager claim below. `counts` and
+  // `acquire` are synchronous, so a burst on this process ranks and claims
+  // without another request slipping in between the two.
+  await deps.loadRegistry.refresh();
   const { candidates, excluded } = rank({
     request: dispatchRequest,
     model,

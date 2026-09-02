@@ -18,6 +18,8 @@ OmniGateway = Bun/TypeScript monorepo for self-hosted AI gateway:
 - `packages/providers`: provider adapters + catalog
 - `packages/router`: pure routing
 - `packages/ratelimit`: pure API-key limit eval + sliding-window counting
+- `packages/coord`: pure coordination interface (window, gauge, mutex) + in-memory impl; every
+  counter a fleet must share live behind it
 - `packages/rtk`: tool-result filters, applied in dispatch before routing
 - `packages/ponytail`: vendored lazy-senior-dev ruleset, appended to system prompt in dispatch
 - `packages/store`: persistence + encryption
@@ -119,7 +121,7 @@ run; when that file gain a step, this line gain one.
     validated manifest and plugin cannot reach another's namespace, here a panel spelling another
     plugin's topic by hand is **authorised** — `authorised` grant admin every *opened* plugin topic
     and ask nothing else. Not a hole hook could close: panel bundle already run in console's page
-    with operator's cookie and can open own socket, which is rule 15's guardrail-not-sandbox one
+    with operator's cookie and can open own socket, which is rule 16's guardrail-not-sandbox one
     step further out. Say it that way; earlier version of this line claimed host would refuse, and a
     contributor who believe it treat cross-plugin subscribe as impossible when it is one line.
     It ride `LiveContextValue.channels`, **not** a second
@@ -143,7 +145,21 @@ run; when that file gain a step, this line gain one.
     import that subpath alone and re-export `PonytailMode` from `@omni/store/types`, the import
     dashboard already permitted. Ruleset text **vendored and pinned**, never fetched: a prompt that
     change under an installation is one no operator can reproduce a bill from.
-14. `packages/ratelimit` stay pure same way; `now` always a parameter, counters supplied by caller,
+14. `packages/coord` stay pure same way: interface + memory impl, `now` a parameter, the one timer
+    it own is the mutex wait. Invariant every impl must hold: a claim is visible to every
+    concurrent claimant **at call time, before the promise settle** — memory impl mutate then
+    return `Promise.resolve`. Consumers rely on it: `rateLimit.ts` raise `deciding` and claim
+    before its first yield; `loadRegistry.ts` keep a **synchronous local map** and read the shared
+    gauge only through `refresh()` before rank, because an `await` between `counts()` and
+    `acquire()` — even on a resolved promise — let a burst rank on one snapshot, and the burst
+    test in `dispatch.test.ts` catch exactly that. Thread `coord` through **all** of a call
+    graph; `apps/gateway/test/cluster/sharedCoord.test.ts` stand up two route trees over one
+    memory coord and fail on any site still reading a module-scope map. Refresh serialisation is
+    three layers — local `inFlight` map, `coord.mutex`, and the **re-read** behind the lock — and
+    the re-read is the dedup: a view whose `expiresAt` sit behind the row's is answered from the
+    store, never the provider. Design:
+    `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
+15. `packages/ratelimit` stay pure same way; `now` always a parameter, counters supplied by caller,
     so package never learn where they came from. `@omni/ratelimit/catalog` is leaf holding dimension
     + window unions, `LimitConfig`, its zod schema; `@omni/store` import that subpath alone and
     re-export `LimitConfig` from `@omni/store/types`, the import dashboard already permitted.
@@ -151,7 +167,7 @@ run; when that file gain a step, this line gain one.
     `@omnigateway/plugin-api/events` **mirrors** the unions and `WINDOW_MS` rather than importing
     them, because that package published and this one not. This package stay source of truth; mirror
     pinned by `apps/gateway/test/plugins/limitVocabulary.test.ts`, only place that may import both.
-15. Plugins load from `<root>/plugins/` at boot, receive capability-scoped `PluginContext`: never
+16. Plugins load from `<root>/plugins/` at boot, receive capability-scoped `PluginContext`: never
     `Store`, `HttpClient`, `AdminAuth`, `process.env`. **It is a guardrail,
     not a sandbox** — plugin share gateway's process and can import past all of it. What it buy:
     accidental overreach impossible, plugin's intent auditable from manifest. Say that plainly
@@ -179,7 +195,7 @@ run; when that file gain a step, this line gain one.
     `routes/stream.ts` decide who may hold it, so opening channel never widen plugin's own reach.
     Outbound frame reuse socket registry's own bounded per-connection queue — no second queue, and
     nothing here touch `Store`.
-16. **No provider-specific code in a core module.** Aim, not achieved state, and the difference is
+17. **No provider-specific code in a core module.** Aim, not achieved state, and the difference is
     stated here because an earlier version of this bullet claimed the clean version and a reader can
     disprove it in one grep — after which the rest of this file reads as decoration.
     Measured, package by package, because "clean" written from memory is how the last version got it
@@ -263,10 +279,10 @@ run; when that file gain a step, this line gain one.
     already take as parameter.
     Adapter is host's because it hold the transport, enforce origin check, yield cap and
     return-shape validation, and stamp `gatewayAuthored`. A package adapting its own flow would need
-    the client rule 15 exist to keep out of it.
+    the client rule 16 exist to keep out of it.
     Plugin flow follow the codec's inversion: each
     step is an async generator that **yield described requests**, host perform every one, so plugin
-    never hold `HttpClient` and rule 15 need no second footnote. Generator not build/parse pair
+    never hold `HttpClient` and rule 16 need no second footnote. Generator not build/parse pair
     because `kilo.exchange` is two request where second carry a token read from first — measured,
     not assumed. Yield **capped** per step: generator can loop, and device poll already looped by
     host. `fail`, `keepPolling`, `pkce`, `randomState` supplied by host — `keepPolling` named that
@@ -339,7 +355,7 @@ run; when that file gain a step, this line gain one.
     small. Design:
     [core/provider decoupling](docs/superpowers/specs/2026-08-27-core-provider-decoupling-design.md),
     [descriptor registry](docs/superpowers/specs/2026-08-26-provider-descriptor-registry-design.md).
-17. **`Principal` and `Scope` in `@omni/control` are the only copy of "who is asking" and "what may
+18. **`Principal` and `Scope` in `@omni/control` are the only copy of "who is asking" and "what may
     they read".** Four principals — `admin`, `viewer`, `client`, `machine` — share **one cookie**,
     so `AdminAuth.verify` return the principal, never a boolean: a caller that forget to check the
     kind then hold a value it cannot mistake for permission. `stream/registry.ts` re-export the

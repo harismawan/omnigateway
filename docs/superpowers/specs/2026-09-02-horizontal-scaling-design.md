@@ -97,14 +97,16 @@ in `CLAUDE.md` applies in full, and the cluster test below is what enforces it.
 ```ts
 export interface Coord {
   window: {
-    /** Atomic check-and-stamp; `ok: false` means refused and nothing was stamped. */
-    claim(key: string, windowMs: number, ceiling: number, now: number): Promise<Claim>;
-    rollback(key: string, stamp: Stamp): Promise<void>;
+    /** Records one event and reports what the window held before it. Unconditional. */
+    claim(key: string, windowMs: number, now: number): Promise<{ stamp: number; before: WindowCounter }>;
+    rollback(key: string, stamp: number): Promise<void>;
   };
   gauge: {
-    acquire(key: string, ceiling: number, ttlMs: number): Promise<boolean>;
+    /** Raises the gauge and reports what it held before. */
+    acquire(key: string, ttlMs: number): Promise<number>;
     release(key: string): Promise<void>;
-    counts(keys: readonly string[]): Promise<number[]>;
+    read(key: string): Promise<number>;
+    snapshot(prefix: string): Promise<ReadonlyMap<string, number>>;
   };
   buckets: {
     /** Add `delta` to the bucket containing `now`; one call covers every dimension. */
@@ -137,7 +139,13 @@ export interface Coord {
 ```
 
 Eight primitives and nothing else. Each exists because a named site below needs it; a
-primitive with no consumer in this spec is not added.
+primitive with no consumer in this spec is not added, and each lands in the pull request that
+brings its first consumer — PR 1 ships `window`, `gauge` and `mutex`.
+
+`window.claim` and `gauge.acquire` carry **no ceiling**. The ceiling is judged by the caller,
+which holds every dimension's figure and renders headroom from the one `evaluate`; what the
+primitive guarantees is that two claims taken together each see the other. Putting the
+ceiling in the primitive would have duplicated `evaluate` in Lua.
 
 **Memory implementation** (`packages/coord/src/memory.ts`) is today's code moved: the
 `SlidingWindow` ring behind `window`, `KeyState.inFlight` and `LoadRegistry` behind
@@ -246,9 +254,16 @@ is the backend's dialect — the plugin author's problem, stated in `writing-a-p
 
 ### Routing load — `apps/gateway/src/dispatch/loadRegistry.ts`
 
-`acquire`/`release` → `coord.gauge` keyed `load:<credentialId>:<model>`; `counts()` is one
-`gauge.counts` per rank, which is already once per rank. Fail-open falls back to local
-counts, which is today's behaviour.
+Two sources, read together. A **local map stays, synchronous and exact**: `counts()` and
+`acquire()` run without a yield between them, so a burst on one process ranks and claims
+one request at a time. This was measured, not assumed — the first version made both
+`async`, and the burst test in `dispatch.test.ts` failed at once: even an `await` on an
+already-resolved promise yields a microtask, and nine dispatches all ranked on the same
+empty snapshot. The shared gauge is **sampled** by `refresh()`, the one `await` before
+rank, and `counts()` reports `max(local, sample)` per key — so a process never under-reads
+itself and never double-counts what it published. A burst split across processes can
+stack for one round trip, and nothing short of ranking inside the shared service could
+prevent it. Fail-open falls back to the local map, which is today's behaviour.
 
 ### OAuth refresh — `packages/control/src/oauth/refresh.ts`
 
@@ -381,9 +396,9 @@ Seven pull requests, each mergeable alone, single-node green throughout:
 4. Redis implementation, fail-open table, the two `LogFields` keys, `/health` fields.
 5. Postgres store, `bytea` bodies, contract suite, CI services.
 6. `@omnigateway/plugin-api` 0.3.0, `PLUGIN_API_VERSION` 3, async storage.
-7. `omni db migrate`; README cluster section; `ARCHITECTURE.md` "Clustering"; `CLAUDE.md`
-   rule 18: every process-local mutable goes through `coord` or the store, and a review of
-   any new module-scope `Map` asks which.
+7. `omni db migrate`; README cluster section; `ARCHITECTURE.md` "Clustering". (`CLAUDE.md`
+   rule 14 landed with PR 1: every process-local mutable goes through `coord` or the store,
+   and a review of any new module-scope `Map` asks which.)
 
 ## Out of scope
 

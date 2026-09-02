@@ -68,6 +68,7 @@
       "dependencies": {
         "@node-rs/argon2": "2.0.2",
         "@omni/control": "workspace:*",
+        "@omni/coord": "workspace:*",
         "@omni/ir": "workspace:*",
         "@omni/ponytail": "workspace:*",
         "@omni/providers": "workspace:*",
@@ -88,6 +89,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@node-rs/argon2": "2.0.2",
+        "@omni/coord": "workspace:*",
         "@omni/ir": "workspace:*",
         "@omni/ponytail": "workspace:*",
         "@omni/providers": "workspace:*",
@@ -99,6 +101,13 @@
       },
       "devDependencies": {
         "@omni/testkit": "workspace:*",
+      },
+    },
+    "packages/coord": {
+      "name": "@omni/coord",
+      "version": "0.0.0",
+      "dependencies": {
+        "@omni/ratelimit": "workspace:*",
       },
     },
     "packages/dashboard-sdk": {
@@ -328,6 +337,8 @@
     "@omni/cli": ["@omni/cli@workspace:apps/cli"],
 
     "@omni/control": ["@omni/control@workspace:packages/control"],
+
+    "@omni/coord": ["@omni/coord@workspace:packages/coord"],
 
     "@omni/dashboard": ["@omni/dashboard@workspace:apps/dashboard"],
 

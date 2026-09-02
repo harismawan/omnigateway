@@ -13,6 +13,7 @@ WORKDIR /app
 # slow image, it is `bun install` refusing to run at all.
 COPY package.json bun.lock ./
 COPY packages/control/package.json packages/control/
+COPY packages/coord/package.json packages/coord/
 COPY packages/ir/package.json packages/ir/
 COPY packages/plugin-api/package.json packages/plugin-api/
 COPY packages/ponytail/package.json packages/ponytail/

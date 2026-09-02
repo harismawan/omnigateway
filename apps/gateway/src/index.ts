@@ -10,6 +10,7 @@ import {
   resolveConsoleSource,
   tailFile,
 } from "@omni/control";
+import { memoryCoord } from "@omni/coord";
 import { createLogger, describeError, type Logger } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import { createStore, deriveKey } from "@omni/store";
@@ -157,7 +158,10 @@ async function main(): Promise<void> {
   // refresh, so it sees whatever is installed by the time a credential is
   // actually refreshed. The seed does not live on this line because nothing in
   // `main()` is reachable from a test — see `installPluginProviders`.
-  const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger });
+  // One per process, shared by the limiter, the load registry and the
+  // refresher: the counters a fleet must agree on all live behind it.
+  const coord = memoryCoord();
+  const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger, coord });
   const staticDir = dashboardDir();
   logger.info(
     existsSync(staticDir) ? "dashboard directory resolved" : "dashboard directory absent",
@@ -276,6 +280,7 @@ async function main(): Promise<void> {
 
   const app = createApp({
     store,
+    coord,
     baseUrl: config.baseUrl,
     http,
     now,

@@ -1,3 +1,4 @@
+import type { Coord } from "@omni/coord";
 import {
   collect,
   describeError,
@@ -64,6 +65,7 @@ import { modelListBody } from "./models.ts";
 export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
   snapshots?: DispatchDeps["snapshots"];
   loadRegistry?: DispatchDeps["loadRegistry"];
+  coord?: Coord;
   requestId: () => string;
   rateLimiter?: ApiKeyRateLimiter;
   keepaliveMs?: number;
@@ -814,7 +816,13 @@ async function handle(
 export function proxyRoutes(deps: ProxyDeps) {
   const logger = deps.logger ?? noopLogger;
   const rateLimiter =
-    deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now: deps.now, logger });
+    deps.rateLimiter ??
+    new ApiKeyRateLimiter({
+      store: deps.store,
+      now: deps.now,
+      logger,
+      ...(deps.coord === undefined ? {} : { coord: deps.coord }),
+    });
   const dispatchDeps: ResolvedProxyDeps = {
     ...deps,
     logger,
@@ -822,7 +830,7 @@ export function proxyRoutes(deps: ProxyDeps) {
     // One registry for the process. Built here rather than per request, because
     // a fresh registry per request would always read zero and rank as if the
     // gateway were idle.
-    loadRegistry: deps.loadRegistry ?? createLoadRegistry(logger),
+    loadRegistry: deps.loadRegistry ?? createLoadRegistry(deps.coord),
     keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
   };
   return (

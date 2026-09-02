@@ -146,19 +146,19 @@ test("a concurrency ceiling denies while slots are held and allows once one is f
 
   const first = await admit();
   const second = await admit();
-  expect(limiter.inFlight(keyId)).toBe(2);
+  expect(await limiter.inFlight(keyId)).toBe(2);
   expect((await denied(admit)).code).toBe("RATE_LIMIT");
 
   first();
-  expect(limiter.inFlight(keyId)).toBe(1);
+  expect(await limiter.inFlight(keyId)).toBe(1);
   const third = await admit();
-  expect(limiter.inFlight(keyId)).toBe(2);
+  expect(await limiter.inFlight(keyId)).toBe(2);
 
   // Idempotent: a release that arrives twice frees one slot, not two.
   second();
   second();
   third();
-  expect(limiter.inFlight(keyId)).toBe(0);
+  expect(await limiter.inFlight(keyId)).toBe(0);
   store.close();
 });
 
@@ -182,7 +182,7 @@ test("a burst against a 1m ceiling admits exactly the ceiling", async () => {
 test("a burst against a concurrency ceiling admits exactly the ceiling", async () => {
   const { limiter, keyId, limits, store } = await harness({ concurrency: 3 });
   expect(await burst(8, () => limiter.admit(keyId, limits, "req_test"))).toBe(3);
-  expect(limiter.inFlight(keyId)).toBe(3);
+  expect(await limiter.inFlight(keyId)).toBe(3);
   store.close();
 });
 
@@ -198,7 +198,7 @@ test("a burst against a concurrency ceiling admits exactly the ceiling", async (
 test("a burst under a generous ceiling leaves the gauge at the true count", async () => {
   const { limiter, keyId, limits, store } = await harness({ concurrency: 10 });
   expect(await burst(4, () => limiter.admit(keyId, limits, "req_test"))).toBe(4);
-  expect(limiter.inFlight(keyId)).toBe(4);
+  expect(await limiter.inFlight(keyId)).toBe(4);
   store.close();
 });
 
@@ -224,10 +224,10 @@ test("a refused request rolls back both the gauge and the ring", async () => {
     result.status === "fulfilled" ? [result.value] : [],
   );
   expect(admitted).toHaveLength(2);
-  expect(limiter.inFlight(keyId)).toBe(2);
+  expect(await limiter.inFlight(keyId)).toBe(2);
 
   for (const admission of admitted) admission.release();
-  expect(limiter.inFlight(keyId)).toBe(0);
+  expect(await limiter.inFlight(keyId)).toBe(0);
 
   // The ring, read off the next request's headroom: the two stamps the
   // admissions recorded, and nothing at all from the six refusals.
@@ -422,7 +422,7 @@ test("a failing store read serves the request, logs it, and still enforces 1m an
   second();
   // Two requests are on the ring now, and `requests` at 1m is exact whatever
   // the store is doing.
-  expect(limiter.inFlight(keyId)).toBe(0);
+  expect(await limiter.inFlight(keyId)).toBe(0);
   expect((await denied(admit)).code).toBe("RATE_LIMIT");
 
   at(T0 + 60_000);
@@ -444,7 +444,7 @@ test("count_tokens consumes requests and never tokens, spend, or a concurrency s
   at(T0);
   await consume();
   await consume();
-  expect(limiter.inFlight(keyId)).toBe(0);
+  expect(await limiter.inFlight(keyId)).toBe(0);
 
   // Only `requests` at 1m, which two counts have now filled.
   expect((await denied(consume)).code).toBe("RATE_LIMIT");
@@ -591,7 +591,7 @@ test("a store that cannot answer stops the delta list growing without bound", as
 test("an unlimited key allocates nothing and holds no gauge", async () => {
   const { keyId, limiter, admit, reads, store } = await harness({});
   const release = await admit();
-  expect(limiter.inFlight(keyId)).toBe(0);
+  expect(await limiter.inFlight(keyId)).toBe(0);
   expect(reads).toHaveLength(0);
   release();
   store.close();
@@ -602,18 +602,20 @@ test("an unlimited key allocates nothing and holds no gauge", async () => {
 // ---------------------------------------------------------------------------
 
 /**
- * A limiter over several keys, with no long window so nothing reads the store.
+ * A limiter over several keys, with only a long window so every key holds a
+ * store-sum cache and nothing else.
  *
- * Key ids are arbitrary strings on purpose: with only a `1m` requests limit the
- * limiter never asks the store about them, so the sweep can be exercised
- * without seeding a row per key.
+ * Key ids are arbitrary strings on purpose: `memoryStore` sums zero rows for
+ * a key it never saw, so the sweep can be exercised without seeding one per
+ * key. The `1m` ring and the gauge live behind `Coord` and are swept there;
+ * what this limiter drops is an entry whose cache has expired.
  */
 async function sweepHarness() {
   const store = await memoryStore();
   const logger = captureLogger();
   let clock = T0;
   const limiter = new ApiKeyRateLimiter({ store, now: () => clock, logger });
-  const limits: LimitConfig = { requests: { "1m": 1_000 } };
+  const limits: LimitConfig = { tokens: { "5h": 1_000_000 } };
   return {
     store,
     limiter,
@@ -627,6 +629,9 @@ async function sweepHarness() {
   };
 }
 
+/** The cache TTL, past which an idle entry is droppable. */
+const TTL = 30_000;
+
 /**
  * The sweep is time-gated, and the gate must not turn into "never".
  *
@@ -634,13 +639,13 @@ async function sweepHarness() {
  * only safe if it still runs, and the drop is invisible through every other
  * answer this class gives — which is what `liveKeys` exists for.
  */
-test("drops an idle key once its window has aged out", async () => {
+test("drops an idle key once its cache has expired", async () => {
   const h = await sweepHarness();
   await h.pass("k_old");
   expect(h.limiter.liveKeys()).toBe(1);
 
-  // A minute on, `k_old` holds nothing: no gauge, no debits, an empty ring.
-  h.at(T0 + 60_001);
+  // A TTL on, `k_old` holds nothing: no debits, an expired cache.
+  h.at(T0 + TTL + 1);
   await h.pass("k_live");
 
   expect(h.limiter.liveKeys()).toBe(1);
@@ -658,19 +663,19 @@ test("sweeps at most once per interval, and again after it", async () => {
   h.at(T0 + 500);
   await h.pass("k_b");
 
-  // First sweep: `k_a`'s stamp has aged out, `k_b`'s has not.
-  h.at(T0 + 60_001);
+  // First sweep: `k_a`'s cache has expired, `k_b`'s has not.
+  h.at(T0 + TTL + 1);
   await h.pass("k_c");
   expect(h.limiter.liveKeys()).toBe(2);
 
   // `k_b` becomes droppable here, but this call is inside the interval that
   // just swept, so it walks nothing and `k_b` is held over.
-  h.at(T0 + 60_501);
+  h.at(T0 + TTL + 501);
   await h.pass("k_c");
   expect(h.limiter.liveKeys()).toBe(2);
 
   // Past the gate, and `k_b` goes.
-  h.at(T0 + 61_002);
+  h.at(T0 + TTL + 1_002);
   await h.pass("k_c");
   expect(h.limiter.liveKeys()).toBe(1);
   h.store.close();
@@ -692,7 +697,7 @@ test("sweeps again after the clock steps backwards", async () => {
 
   await h.pass("k_old");
   // One sweep, which sets the latch to this instant and drops `k_old`.
-  h.at(T0 + 60_001);
+  h.at(T0 + TTL + 1);
   await h.pass("k_probe");
   expect(h.limiter.liveKeys()).toBe(1);
 
@@ -700,16 +705,16 @@ test("sweeps again after the clock steps backwards", async () => {
   h.at(back);
   await h.pass("k_x");
 
-  // `k_x` has now aged out on the stepped-back clock. The key being passed here
+  // `k_x` has now expired on the stepped-back clock. The key being passed here
   // is deliberately a different one: a droppable key that is also the key of the
   // call would be re-created by `state()` in the same call, so the sweep running
   // and the sweep not running would look identical.
-  h.at(back + 60_001);
+  h.at(back + TTL + 1);
   await h.pass("k_y");
 
-  // `k_probe`'s stamp is in the future relative to this clock, so it is retained
-  // either way; `k_x` is the one whose fate differs. Held off for the length of
-  // the step, this is 3.
+  // `k_probe`'s cache was read in the future relative to this clock, so it is
+  // retained either way; `k_x` is the one whose fate differs. Held off for the
+  // length of the step, this is 3.
   expect(h.limiter.liveKeys()).toBe(2);
   h.store.close();
 });
@@ -721,12 +726,12 @@ test("sweeps when exactly the interval has elapsed", async () => {
   h.at(T0 + 500);
   await h.pass("k_b");
 
-  h.at(T0 + 60_001);
+  h.at(T0 + TTL + 1);
   await h.pass("k_c");
   expect(h.limiter.liveKeys()).toBe(2);
 
   // Exactly 1000ms after that sweep, and `k_b` is droppable by now.
-  h.at(T0 + 61_001);
+  h.at(T0 + TTL + 1_001);
   await h.pass("k_c");
   expect(h.limiter.liveKeys()).toBe(1);
   h.store.close();

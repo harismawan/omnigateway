@@ -1,3 +1,4 @@
+import { type Coord, memoryCoord } from "@omni/coord";
 import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
 import {
   type CounterSnapshot,
@@ -6,7 +7,6 @@ import {
   evaluate,
   type HeadroomByDimension,
   retryAfterMs,
-  SlidingWindow,
   type WindowCounter,
 } from "@omni/ratelimit";
 import { type LimitConfig, WINDOW_MS, type Window } from "@omni/ratelimit/catalog";
@@ -49,6 +49,17 @@ const CLEANUP_INTERVAL_MS = 1_000;
 const EAGER_FRACTION = 0.9;
 
 /**
+ * How long a shared gauge holds a slot for a process that never released it.
+ *
+ * Only a shared `Coord` reads this: an in-memory gauge dies with its process.
+ * A request may legitimately run for longer — the dispatch deadline can be
+ * unlimited — so this is a floor on a leaked slot's life, not a bound on a
+ * request's. ponytail: one constant; renew the slot from the stream loop if
+ * hour-long requests ever meet a shared gauge.
+ */
+const GAUGE_TTL_MS = 3_600_000;
+
+/**
  * How many delta entries one key may hold before the oldest are folded together.
  *
  * A successful store read is what normally empties this list, so a store that
@@ -65,18 +76,20 @@ export type Debit = { at: number; requests: number; tokens: number; costUsd: num
 /** The last store read for one key, and the instant it was issued at. */
 type StoreCounts = { readAt: number; sums: Record<LongWindow, UsageSums> };
 
+/**
+ * What this class still holds per key: the long-window side.
+ *
+ * The `1m` ring and the concurrency gauge live behind `Coord`, because they are
+ * the two counters a fleet must share exactly. What is left is the store-sum
+ * cache and the delta of rows debited since it was read.
+ */
 type KeyState = {
-  /** Exact `requests` at `1m`. A ring, because a ring at this size is free. */
-  ring: SlidingWindow;
-  /** In-flight requests for this key right now. A gauge, not a window. */
-  inFlight: number;
   /**
    * Checks sitting between claiming their place and being judged.
    *
-   * A check yields on a store read, and by then its claim is not always visible
-   * in the ring or the gauge: `consume` raises no gauge at all, and a ring stamp
-   * can age out under a slow read. This is what keeps `cleanup` off an entry a
-   * suspended check is still holding.
+   * A check yields on a store read, and until it returns this entry must not be
+   * dropped: a suspended check recording a debit onto an orphaned entry is a
+   * request counted nowhere.
    */
   deciding: number;
   debits: Debit[];
@@ -111,8 +124,8 @@ export type Admission = { release: () => void; headroom: HeadroomByDimension };
  * state that now counts itself.
  */
 type Claim = {
-  /** Where the ring stamp was recorded, and therefore the one to give back. */
-  at: number;
+  /** The ring stamp that was recorded, and therefore the one to give back. */
+  stamp: number;
   /** Whether the gauge was raised. `consume` claims a ring slot and nothing else. */
   gauge: boolean;
   before: { requests: WindowCounter; concurrency: number };
@@ -139,6 +152,8 @@ export type RateLimiterDeps = {
   store: Store;
   now: () => number;
   logger?: Logger;
+  /** Where the `1m` ring and the gauge live. In-memory when absent. */
+  coord?: Coord;
 };
 
 /** A configured ceiling, as opposed to an absent one or an explicit `null`. */
@@ -243,13 +258,14 @@ export function trimDebits(debits: readonly Debit[], now: number): Debit[] {
  * read, and `concurrency` from a gauge raised at admission and lowered at the
  * true end of the request.
  *
- * Process-local, and reset on restart. For `concurrency` that is correct rather
- * than a compromise — in-flight requests die with the process, so a surviving
- * count would be the bug — and the long windows rehydrate from the store on the
- * next read, so a restart costs at most the delta since the last one.
+ * The ring and the gauge live behind `Coord`, so a fleet shares them exactly
+ * and one process holds them in memory; the long-window cache is per process
+ * and reset on restart, rehydrating from the store on the next read, so a
+ * restart costs at most the delta since the last one.
  */
 export class ApiKeyRateLimiter {
   private readonly keys = new Map<string, KeyState>();
+  private readonly coord: Coord;
   /**
    * When the sweep last ran, so it runs at most once per `CLEANUP_INTERVAL_MS`.
    *
@@ -258,8 +274,8 @@ export class ApiKeyRateLimiter {
    * memory. Gating it changes nothing about *what* is droppable: an entry that
    * becomes droppable mid-interval is dropped at the next gate instead, and
    * nothing reads a droppable entry in between — a request naming that key
-   * re-uses the entry and trims its own ring through `claim`, and every other
-   * reader is holding a claim, which is what makes an entry undroppable.
+   * re-uses the entry, and every other reader is holding a claim, which is
+   * what makes an entry undroppable.
    *
    * Negative infinity rather than zero states "has never run" outright. It is
    * not load-bearing — at any clock value a real or injected one starts from,
@@ -275,6 +291,7 @@ export class ApiKeyRateLimiter {
     this.store = deps.store;
     this.now = deps.now;
     this.logger = deps.logger ?? noopLogger;
+    this.coord = deps.coord ?? memoryCoord();
   }
 
   /**
@@ -294,7 +311,7 @@ export class ApiKeyRateLimiter {
     const now = this.now();
     this.cleanup(now);
     const state = this.state(keyId, limits);
-    const claim = this.claim(state, now, true);
+    const claim = await this.claim(state, keyId, now, true);
 
     let admitted = false;
     try {
@@ -304,16 +321,10 @@ export class ApiKeyRateLimiter {
       admitted = true;
 
       let released = false;
-      // Closed over the state rather than looked up again, so a release that
-      // arrives after the entry was dropped lowers the count it raised instead
-      // of one belonging to a fresh entry. `cleanup` cannot drop a state a claim
-      // is holding — the gauge is raised before this method can yield, and
-      // `deciding` covers the check itself — so the two cannot disagree about a
-      // live key.
       const release = () => {
         if (released) return;
         released = true;
-        state.inFlight = Math.max(0, state.inFlight - 1);
+        void this.coord.gauge.release(keyId);
       };
       return { release, headroom: decision.headroom };
     } finally {
@@ -322,7 +333,7 @@ export class ApiKeyRateLimiter {
       // — gives every part of it back, because no window expires a gauge and a
       // slot leaked here locks the key out permanently and silently.
       state.deciding--;
-      if (!admitted) this.rollback(state, claim);
+      if (!admitted) await this.rollback(keyId, claim);
     }
   }
 
@@ -341,7 +352,7 @@ export class ApiKeyRateLimiter {
     const now = this.now();
     this.cleanup(now);
     const state = this.state(keyId, limits);
-    const claim = this.claim(state, now, false);
+    const claim = await this.claim(state, keyId, now, false);
 
     let consumed = false;
     try {
@@ -350,7 +361,7 @@ export class ApiKeyRateLimiter {
       consumed = true;
     } finally {
       state.deciding--;
-      if (!consumed) this.rollback(state, claim);
+      if (!consumed) await this.rollback(keyId, claim);
     }
   }
 
@@ -358,32 +369,31 @@ export class ApiKeyRateLimiter {
    * Takes this request's place in the counters, and reports what they held
    * before it did.
    *
-   * Synchronous, and finished before the caller can yield: that is the whole
-   * mechanism. A check that recorded only after its store read let every
-   * concurrent check judge the same pre-burst snapshot, so ten requests arriving
-   * together against a ceiling of three were ten admissions — and the same for
-   * the gauge, which is the dimension that is supposed to bound exactly that
-   * burst.
+   * Recorded before the caller can yield on its store read: that is the whole
+   * mechanism. A check that recorded only after that read let every concurrent
+   * check judge the same pre-burst snapshot, so ten requests arriving together
+   * against a ceiling of three were ten admissions — and the same for the
+   * gauge, which is the dimension that is supposed to bound exactly that
+   * burst. `Coord` promises each claim is visible the instant the call is
+   * made, so the `await`s here yield after the record, never before it.
    */
-  private claim(state: KeyState, now: number, gauge: boolean): Claim {
-    const before: Claim["before"] = {
-      requests: { used: state.ring.count(now), resetAt: state.ring.resetAt(now) },
-      concurrency: state.inFlight,
-    };
-    state.ring.record(now);
-    if (gauge) state.inFlight++;
-    // Held for the length of the check. Without it `cleanup` can drop an entry
-    // that looks idle and leave a suspended check recording onto an orphan, and
-    // a request counted nowhere is the one error direction this design must
-    // never take.
+  private async claim(state: KeyState, keyId: string, now: number, gauge: boolean): Promise<Claim> {
+    // Held for the length of the check, and raised before the first yield.
+    // Without it `cleanup` can drop an entry that looks idle and leave a
+    // suspended check recording onto an orphan, and a request counted nowhere
+    // is the one error direction this design must never take.
     state.deciding++;
-    return { at: now, gauge, before };
+    const ring = await this.coord.window.claim(keyId, WINDOW_MS["1m"], now);
+    const concurrency = gauge
+      ? await this.coord.gauge.acquire(keyId, GAUGE_TTL_MS)
+      : await this.coord.gauge.read(keyId);
+    return { stamp: ring.stamp, gauge, before: { requests: ring.before, concurrency } };
   }
 
   /** Gives back every part of a claim, for a request that will not be served. */
-  private rollback(state: KeyState, claim: Claim): void {
-    state.ring.forget(claim.at);
-    if (claim.gauge) state.inFlight = Math.max(0, state.inFlight - 1);
+  private async rollback(keyId: string, claim: Claim): Promise<void> {
+    await this.coord.window.rollback(keyId, claim.stamp);
+    if (claim.gauge) await this.coord.gauge.release(keyId);
   }
 
   /**
@@ -415,8 +425,8 @@ export class ApiKeyRateLimiter {
   }
 
   /** In-flight requests for one key. Zero for a key holding nothing. */
-  inFlight(keyId: string): number {
-    return this.keys.get(keyId)?.inFlight ?? 0;
+  inFlight(keyId: string): Promise<number> {
+    return this.coord.gauge.read(keyId);
   }
 
   /**
@@ -530,8 +540,6 @@ export class ApiKeyRateLimiter {
       return existing;
     }
     const created: KeyState = {
-      ring: new SlidingWindow(WINDOW_MS["1m"]),
-      inFlight: 0,
       deciding: 0,
       debits: [],
       counts: null,
@@ -683,21 +691,14 @@ export class ApiKeyRateLimiter {
 
   /**
    * Drops keys holding nothing, so a key that stopped calling stops costing
-   * anything. A key is only droppable once no check is inside it, its ring has
-   * drained, its gauge is empty, nothing is waiting to be absorbed by a store
-   * read, and its cached sums have expired anyway — dropping it earlier would
-   * lose a debit, strand a release, or orphan the entry a suspended check is
-   * still holding a claim on.
+   * anything. A key is only droppable once no check is inside it, nothing is
+   * waiting to be absorbed by a store read, and its cached sums have expired
+   * anyway — dropping it earlier would lose a debit or orphan the entry a
+   * suspended check is still holding.
    *
-   * `deciding` is redundant today and no test fails without it: `admit` raises
-   * the gauge inside `claim` before it can yield, and `consume` raises none but
-   * leaves a ring stamp, and an entry only becomes droppable once that stamp has
-   * aged out — by which point it counts toward nothing. It is kept, and named
-   * here as belt-and-braces rather than left looking load-bearing, because it
-   * makes this condition state the invariant outright: nothing is dropped while
-   * a check is inside it. Without it the same guarantee holds only by way of an
-   * argument about which half of a claim is visible when, which is exactly the
-   * reasoning that was wrong before the claim was made synchronous.
+   * The ring and the gauge used to be part of this condition; they live behind
+   * `Coord` now, which sweeps its own drained rings, so `deciding` is what
+   * keeps an entry alive across the check and nothing else does.
    */
   private cleanup(now: number): void {
     // A latch on wall-clock time, and `now` is `Date.now()` — so a backward NTP
@@ -711,9 +712,7 @@ export class ApiKeyRateLimiter {
     if (since >= 0 && since < CLEANUP_INTERVAL_MS) return;
     this.lastCleanup = now;
     for (const [keyId, state] of this.keys) {
-      state.ring.count(now);
-      if (state.deciding > 0 || !state.ring.empty || state.inFlight > 0) continue;
-      if (state.debits.length > 0) continue;
+      if (state.deciding > 0 || state.debits.length > 0) continue;
       if (state.counts !== null && now - state.counts.readAt < CACHE_TTL_MS) continue;
       this.keys.delete(keyId);
     }

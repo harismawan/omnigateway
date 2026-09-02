@@ -11,6 +11,7 @@ import {
   OAUTH_PROVIDERS,
   type Refresher,
 } from "@omni/control";
+import { type Coord, memoryCoord } from "@omni/coord";
 import { GatewayError, HTTP_STATUS, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from "@omni/providers";
 import type { Store } from "@omni/store";
@@ -52,6 +53,12 @@ export type AppDeps = {
   http?: HttpClient;
   adapters?: Readonly<Record<ProviderId, ProviderAdapter>>;
   requestId?: () => string;
+  /**
+   * Where every counter a fleet must share lives: the `1m` ring, the
+   * concurrency gauge, routing load, the refresh lock. In-memory when absent,
+   * which is the single-process installation.
+   */
+  coord?: Coord;
   /** Overridden by tests that assert in-flight accounting; one per process otherwise. */
   loadRegistry?: LoadRegistry;
   /** Overridden by tests that read the concurrency gauge; one per process otherwise. */
@@ -219,6 +226,7 @@ function absentLifecycle(): LifecycleDeps {
 
 export function createApp(deps: AppDeps) {
   const now = deps.now ?? (() => Date.now());
+  const coord = deps.coord ?? memoryCoord();
   const logger = deps.logger ?? noopLogger;
   const rand = deps.rand ?? Math.random;
   const http = deps.http ?? nodeHttpClient({ logger, now });
@@ -230,7 +238,8 @@ export function createApp(deps: AppDeps) {
   // `dispatch/index.ts`, which is on the path however the map was built.
   const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
-  const rateLimiter = deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger });
+  const rateLimiter =
+    deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger, coord });
   const snapshots = createRoutingSnapshotCache(deps.store, logger);
 
   const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS });
@@ -242,6 +251,7 @@ export function createApp(deps: AppDeps) {
       http,
       now,
       logger,
+      coord,
     });
 
   const staticDir = deps.staticDir ? resolve(deps.staticDir) : undefined;
@@ -333,6 +343,7 @@ export function createApp(deps: AppDeps) {
           requestId,
           rateLimiter,
           logger,
+          coord,
           ...(deps.loadRegistry === undefined ? {} : { loadRegistry: deps.loadRegistry }),
           bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
           ...(deps.emit === undefined ? {} : { emit: deps.emit }),
