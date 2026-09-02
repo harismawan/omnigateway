@@ -594,6 +594,23 @@ Preserve these translation invariants:
   Degradation spelled `excluded:capability:providerNative`; rows written before the rename carry
   `excluded:capability:anthropicTools` and stay readable, because degradations are forensic text
   never parsed on read. Redaction of `credentialId` there read `Excluded.kind`, never the string.
+- **A breakpoint on the request's final mid-conversation system turn must leave that turn**, and it
+  is `systemCacheControl` + the retarget in `toWire` that move it, onto the last cacheable block
+  *before* it (`lastCacheableHistoryBlock(body.messages.slice(0, -1))`). Such a turn is a directive
+  the client re-emit every request — hook output, reminder — so it sit at a **different position**
+  next request, after the exchange between. Prefix ending inside it is therefore never prefix of
+  next request, and entry it write can only be read by a retry of same request. Measured, not
+  reasoned: four request each previous plus an exchange, marked on trailing turn read **0** and
+  write whole prefix every time (14,329 then 14,340 then 14,351); moved one block back, second
+  request on write **11** and read 13,896. Code used to hoist it to **request-level
+  `cache_control`** instead, and that behave identically — probe say root marker and marker on the
+  turn itself both dead, so that path was not workaround for anything. Cost in production before
+  fix: one session 21 consecutive request each rewriting ~190k token, 09-02 alone 5.96M cache-write
+  token and $70.53, `cache_read_tokens` pinned at exactly the end-of-system prefix (37,960 /
+  38,062) — signature to recognise. Mixed system turn (block array) also get its own copy of marker
+  **stripped**: leaving it is second breakpoint paying a cache write for entry nothing read.
+  Recorded `anthropic:system-turn-cache-control-retargeted`; skipped, no degradation, when target
+  block already carry client's own marker, because overwriting swap client's TTL for turn's.
 - `pauseTurn` is own stop reason; never fold into `endTurn` or `toolUse`.
 - Client tool names renamed to PascalCase on Anthropic **OAuth** leg only, restored in
   `anthropic/decode.ts` — never at egress. Anthropic fingerprint some name sets and refuse them
@@ -627,8 +644,8 @@ Preserve these translation invariants:
   `req.messages`** — flatMap drop turn of entirely unsignable reasoning, so index differ and wrong
   turn get marked silently; skip string content (`encodeSystemTurn`) and any block type outside
   text/image/tool_use/tool_result/document. Write to wire body only, never IR: IR shared across
-  attempt, so marker there follow failover into other provider. `systemCacheControl` promotion path
-  walk IR, so it cannot see wire-side marker — earlier claim it could was wrong. IR rule pinned by
+  attempt, so marker there follow failover into other provider. `systemCacheControl` walk IR, so it
+  cannot see wire-side marker — earlier claim it could was wrong. IR rule pinned by
   **deep-freezing module fixture** in `packages/providers/test/anthropic.test.ts`, not by cloning
   and diffing: fixture handed to `toWire` unclone by earlier test, so leaked marker already inside
   clone and assertion compare polluted to polluted. Recorded as `anthropic:cache-breakpoint-added`
