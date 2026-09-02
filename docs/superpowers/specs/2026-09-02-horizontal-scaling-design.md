@@ -201,11 +201,12 @@ ones whose semantics change, both backends unless stated:
   pending row belongs to the one id or to a dead one, so the observable behaviour is
   today's.
 - `CredentialRepo.updateSecrets(id, secrets, expectedVersion)` becomes compare-and-swap on
-  a new `secrets_version` column: `WHERE id = ? AND secrets_version = ?`, returning whether
+  a new `token_version` column: `WHERE id = ? AND token_version = ?`, returning whether
   a row was written. `openForRefresh` returns the version it read.
-- `credentials.quota_cooldown_until` (new column) replaces the module-scope cooldown map in
-  `packages/control/src/quota/poll.ts:28`. Shared across replicas and surviving restart —
-  strictly better on one node too.
+- Probe cooldowns moved to `coord.kv` under `quota:cooldown:<id>` with the cooldown as TTL,
+  **not** to a column: the comment on the old map argued a cooldown outliving the process is
+  worse than none, and a TTL'd key shares it across replicas without outliving it. Landed in
+  PR 2.
 - `BodyRepo` in Postgres stores `bytea` in a `request_bodies` table. `sweepOrphans` is a
   no-op there (no files to orphan); `pruneToCap` sums `octet_length`. The SQLite
   implementation is untouched — files stay.

@@ -100,6 +100,7 @@ function deps(
         getViewerPasswordHash: async () => liveViewerHash,
       },
       maintenance: {
+        heartbeat: async () => {},
         stats: async () => ({
           pageSize: 4_096,
           pageCount: 100,

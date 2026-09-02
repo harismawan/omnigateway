@@ -51,6 +51,18 @@ export interface Coord {
      */
     withLock<T>(key: string, ttlMs: number, waitMs: number, fn: () => Promise<T>): Promise<T>;
   };
+  /**
+   * Small values with a lifetime: sessions, pending OAuth flows, probe
+   * cooldowns. Nothing here is durable, and a value that outlives its TTL is
+   * the one thing an implementation must never serve.
+   */
+  kv: {
+    set(key: string, value: string, ttlMs: number): Promise<void>;
+    get(key: string): Promise<string | null>;
+    del(key: string): Promise<void>;
+    /** Every key under `prefix`. For ending sessions of one kind, not for listing. */
+    delPrefix(prefix: string): Promise<void>;
+  };
 }
 
 export type WindowClaim = { stamp: number; before: WindowCounter };
@@ -70,6 +82,11 @@ export type MemoryCoord = Coord & {
   liveWindows(): number;
 };
 
+export type MemoryCoordOptions = {
+  /** The clock `kv` expires against. Injected so a test can move it. */
+  now?: () => number;
+};
+
 /**
  * The single-process implementation: the maps the gateway held before it had
  * an interface to put them behind.
@@ -77,10 +94,12 @@ export type MemoryCoord = Coord & {
  * Every method mutates synchronously and returns an already-settled promise,
  * which is what makes the visibility property above hold here without a lock.
  */
-export function memoryCoord(): MemoryCoord {
+export function memoryCoord(options: MemoryCoordOptions = {}): MemoryCoord {
+  const now = options.now ?? (() => Date.now());
   const windows = new Map<string, SlidingWindow>();
   const gauges = new Map<string, number>();
   const locks = new Map<string, Promise<void>>();
+  const values = new Map<string, { value: string; expiresAt: number }>();
   let lastSweep = Number.NEGATIVE_INFINITY;
 
   /**
@@ -140,6 +159,30 @@ export function memoryCoord(): MemoryCoord {
         const out = new Map<string, number>();
         for (const [key, count] of gauges) if (key.startsWith(prefix)) out.set(key, count);
         return Promise.resolve(out);
+      },
+    },
+
+    kv: {
+      set(key, value, ttlMs) {
+        values.set(key, { value, expiresAt: now() + ttlMs });
+        return Promise.resolve();
+      },
+      get(key) {
+        const entry = values.get(key);
+        if (entry === undefined) return Promise.resolve(null);
+        if (entry.expiresAt <= now()) {
+          values.delete(key);
+          return Promise.resolve(null);
+        }
+        return Promise.resolve(entry.value);
+      },
+      del(key) {
+        values.delete(key);
+        return Promise.resolve();
+      },
+      delPrefix(prefix) {
+        for (const key of values.keys()) if (key.startsWith(prefix)) values.delete(key);
+        return Promise.resolve();
       },
     },
 

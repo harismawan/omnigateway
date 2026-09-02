@@ -30,6 +30,7 @@ function summarizeCredential(credential: Credential): CredentialSummary {
     disabledReason: credential.disabledReason,
     disabledAt: credential.disabledAt,
     hasRefreshToken: credential.hasRefreshToken,
+    tokenVersion: credential.tokenVersion,
     createdAt: credential.createdAt,
     updatedAt: credential.updatedAt,
   };

@@ -395,3 +395,27 @@ test("two refreshers with separate coords both call the provider", async () => {
   await Promise.all([a(view), b(view)]);
   expect(calls).toBe(2);
 });
+
+/**
+ * The compare-and-swap, exercised without the lock: two refreshers with
+ * separate coords both call the provider, but only the first write lands.
+ * The loser is answered with the winner's rotation — the token the provider
+ * now honours — rather than writing a second one over it.
+ */
+test("a refresh that lost the write race returns the stored rotation", async () => {
+  const { store, view } = await seed();
+  let calls = 0;
+  const providers = fakeProvider(async () => {
+    calls += 1;
+    await Bun.sleep(5);
+    return result(`test-token-${calls + 2}`);
+  });
+  const a = createRefresher({ store, providers, http: nodeHttpClient(), now: () => NOW });
+  const b = createRefresher({ store, providers, http: nodeHttpClient(), now: () => NOW });
+  const results = await Promise.all([a(view), b(view)]);
+  expect(calls).toBe(2);
+  // Whichever wrote first is what both callers hold, and the row agrees.
+  const stored = (await (await store.credentials.get("c1"))?.secrets())?.accessToken ?? "";
+  expect(results.map((r) => r.accessToken)).toEqual([stored, stored]);
+  expect((await store.credentials.get("c1"))?.tokenVersion).toBe(1);
+});

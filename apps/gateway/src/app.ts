@@ -242,7 +242,7 @@ export function createApp(deps: AppDeps) {
     deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger, coord });
   const snapshots = createRoutingSnapshotCache(deps.store, logger);
 
-  const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS });
+  const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS, coord });
   const refresh =
     deps.refresh ??
     createRefresher({
@@ -399,6 +399,7 @@ export function createApp(deps: AppDeps) {
           http,
           now,
           logger,
+          coord,
         }),
       )
       .use(

@@ -147,7 +147,7 @@ async function swap(
      * retract it.
      */
     if (result.adminPasswordChanged) {
-      deps.admin.invalidateSessions();
+      await deps.admin.invalidateSessions();
       logger.warn("admin sessions ended: the restored database carries a different password", {
         reason: label,
       });

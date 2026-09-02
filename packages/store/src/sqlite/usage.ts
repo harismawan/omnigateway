@@ -1,14 +1,15 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
-import type {
-  RequestLog,
-  RequestState,
-  UsageBucket,
-  UsageDimension,
-  UsageGrain,
-  UsageQuery,
-  UsageRepo,
+import {
+  NODE_GRACE_MS,
+  type RequestLog,
+  type RequestState,
+  type UsageBucket,
+  type UsageDimension,
+  type UsageGrain,
+  type UsageQuery,
+  type UsageRepo,
 } from "../types.ts";
 import {
   auditRollup,
@@ -167,18 +168,19 @@ function label(value: string | number | null): string {
   return text.length === 0 ? "unknown" : text;
 }
 
-const COLUMNS = `(id, state, at, api_key_id, requested_model, resolved_provider, resolved_model,
-                  credential_id, attempts, status, error_code, input_tokens, output_tokens,
-                  cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms, cost_usd,
-                  degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
+const COLUMNS = `(id, state, node_id, at, api_key_id, requested_model, resolved_provider,
+                  resolved_model, credential_id, attempts, status, error_code, input_tokens,
+                  output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms,
+                  cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
                   rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters)`;
 
-const PLACEHOLDERS = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+const PLACEHOLDERS = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
-function values(log: RequestLog, state: RequestState): SQLQueryBindings[] {
+function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryBindings[] {
   return [
     log.id,
     state,
+    nodeId,
     log.at,
     log.apiKeyId,
     log.requestedModel,
@@ -244,7 +246,7 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_estimated_tokens_saved = excluded.rtk_estimated_tokens_saved,
     rtk_filters = excluded.rtk_filters`;
 
-export function createUsageRepo(db: Database): UsageRepo {
+export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
   /**
    * The raw row and both rollups are written together: a crash between them
    * would leave the year view, or a key's hourly counters, quietly disagreeing
@@ -256,7 +258,7 @@ export function createUsageRepo(db: Database): UsageRepo {
    * column the completing log did not carry.
    */
   const complete = db.transaction((log: RequestLog) => {
-    db.run(COMPLETE, values(log, "done"));
+    db.run(COMPLETE, values(log, "done", nodeId));
     const stored = db.query<Row, [string]>("SELECT * FROM request_logs WHERE id = ?").get(log.id);
     if (stored !== null) {
       const restored = toLog(stored);
@@ -300,7 +302,10 @@ export function createUsageRepo(db: Database): UsageRepo {
 
   return {
     async begin(log: RequestLog) {
-      db.run(`INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}`, values(log, "pending"));
+      db.run(
+        `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}`,
+        values(log, "pending", nodeId),
+      );
     },
 
     async route(id, target) {
@@ -316,10 +321,17 @@ export function createUsageRepo(db: Database): UsageRepo {
       complete(log);
     },
 
-    async sweepPending() {
+    async sweepPending(now) {
+      // Own rows, or rows of a node with no live heartbeat. `NOT IN` against
+      // the live set rather than a join on the dead set, because a node that
+      // never wrote a heartbeat has no row to join against and is dead too.
       const stale = db
-        .query<Row, []>("SELECT * FROM request_logs WHERE state = 'pending'")
-        .all()
+        .query<Row, [string, number]>(
+          `SELECT * FROM request_logs
+            WHERE state = 'pending'
+              AND (node_id = ? OR node_id NOT IN (SELECT id FROM nodes WHERE seen_at > ?))`,
+        )
+        .all(nodeId, now - NODE_GRACE_MS)
         .map(toLog);
       for (const log of stale) {
         // Through the same path as a real completion, so the daily rollup keeps

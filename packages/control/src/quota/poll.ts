@@ -1,3 +1,4 @@
+import type { Coord } from "@omni/coord";
 import { describeError, GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { CredentialView, QuotaWindow, Store } from "@omni/store";
@@ -19,21 +20,19 @@ const CONCURRENCY = 4;
 export const RATE_LIMIT_COOLDOWN_MS = 180_000;
 
 /**
- * Credential id to the time its probe may be tried again.
+ * Where a credential's probe cooldown lives: `quota:cooldown:<id>`.
  *
- * Process-local and lost on restart, like the API-key rate limiter. A cooldown
- * that outlived the process would be worse than none: the poller would come up
- * refusing to read accounts for reasons it can no longer explain.
+ * Behind `coord.kv` with the cooldown as its TTL, so every process polling the
+ * same account honours a 429 one of them received, and nothing outlives the
+ * cooldown itself — a poller that came up refusing to read accounts for
+ * reasons it could no longer explain would be worse than none.
  */
-const cooldowns = new Map<string, number>();
-
-/** Test seam: forget every recorded cooldown. */
-export function resetQuotaCooldowns(): void {
-  cooldowns.clear();
-}
+const COOLDOWN_PREFIX = "quota:cooldown:";
 
 export type PollerDeps = {
   store: Store;
+  /** Where probe cooldowns live; shared by every process polling this install. */
+  coord: Coord;
   providers: Readonly<Partial<Record<ProviderId, OAuthProvider>>>;
   http: HttpClient;
   refresh: Refresher;
@@ -111,14 +110,12 @@ export async function probe(
  */
 export async function poll(deps: PollerDeps): Promise<number> {
   const logger = deps.logger ?? noopLogger;
-  const now = deps.now();
-  const credentials = (await deps.store.credentials.list()).filter(
-    (c) =>
-      c.enabled &&
-      c.authType === "oauth" &&
-      deps.providers[c.provider]?.usage !== undefined &&
-      (cooldowns.get(c.id) ?? 0) <= now,
+  const _now = deps.now();
+  const eligible = (await deps.store.credentials.list()).filter(
+    (c) => c.enabled && c.authType === "oauth" && deps.providers[c.provider]?.usage !== undefined,
   );
+  const cooling = await Promise.all(eligible.map((c) => deps.coord.kv.get(COOLDOWN_PREFIX + c.id)));
+  const credentials = eligible.filter((_, index) => cooling[index] === null);
 
   let written = 0;
   let next = 0;
@@ -132,7 +129,7 @@ export async function poll(deps: PollerDeps): Promise<number> {
       } catch (error) {
         const rateLimited = error instanceof GatewayError && error.code === "RATE_LIMIT";
         if (rateLimited) {
-          cooldowns.set(credential.id, deps.now() + RATE_LIMIT_COOLDOWN_MS);
+          await deps.coord.kv.set(COOLDOWN_PREFIX + credential.id, "1", RATE_LIMIT_COOLDOWN_MS);
         }
         // A failed probe leaves the previous snapshot in place. The console
         // reports it as ageing rather than as an outage, which is what it is.

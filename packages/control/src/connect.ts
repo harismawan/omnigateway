@@ -1,3 +1,4 @@
+import type { Coord } from "@omni/coord";
 import { GatewayError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import {
@@ -59,6 +60,8 @@ export type ConnectDeps = {
   http: HttpClient;
   now: () => number;
   logger?: Logger;
+  /** Where pending flows live. In-memory when absent. */
+  coord?: Coord;
   /**
    * The provider registry this installation actually has.
    *
@@ -145,14 +148,19 @@ function deviceIdFrom(provider: DeviceOAuthProvider, start: AuthorizeStart): str
 /**
  * The authorization flows in progress, and the operations that move them along.
  *
- * Flows live in memory: an interrupted authorization is abandoned rather than
- * resumed, and nothing half-authorized is ever written down. Each front end
- * (the control API, the CLI) owns its own instance, which is why a flow started
- * in the console cannot be finished from the terminal.
+ * Flows live behind `coord.kv`: in memory an interrupted authorization is
+ * abandoned rather than resumed, and nothing half-authorized is ever written
+ * down. Each front end (the control API, the CLI) owns its own instance, which
+ * is why a flow started in the console cannot be finished from the terminal —
+ * but two gateway processes sharing a coordinator can finish each other's.
  */
 export function createConnectFlows(deps: ConnectDeps) {
   const logger = deps.logger ?? noopLogger;
-  const flows = createPendingFlows({ now: deps.now, ttlMs: FLOW_TTL_MS });
+  const flows = createPendingFlows({
+    now: deps.now,
+    ttlMs: FLOW_TTL_MS,
+    ...(deps.coord === undefined ? {} : { coord: deps.coord }),
+  });
   const pollsInFlight = new Map<string, Promise<{ id: string }>>();
   const descriptors = deps.descriptors ?? PROVIDER_DESCRIPTORS;
   const callbackUri = (provider: ProviderId) => callbackOf(provider, descriptors)?.uri ?? "";
@@ -242,11 +250,11 @@ export function createConnectFlows(deps: ConnectDeps) {
   async function pollOutcome(flowId: string, poll: Promise<{ id: string }>): Promise<ConnectPoll> {
     try {
       const created = await poll;
-      flows.take(flowId);
+      await flows.take(flowId);
       return { status: "complete", ...created };
     } catch (error) {
       if (isAuthorizationPending(error)) return { status: "pending" };
-      flows.take(flowId);
+      await flows.take(flowId);
       throw error;
     }
   }
@@ -270,8 +278,6 @@ export function createConnectFlows(deps: ConnectDeps) {
 
     /** Begins an authorization and returns what the operator must act on. */
     async start(providerInput: unknown, labelInput?: unknown): Promise<ConnectStart> {
-      flows.sweep();
-
       // One answer, not two. A name this gateway has never heard of and a
       // provider with no authorization to start are the same thing to the
       // caller — there is nothing here to begin — and the useful half of the
@@ -298,7 +304,7 @@ export function createConnectFlows(deps: ConnectDeps) {
           ? await provider.begin({ deviceId: deviceIdFrom(provider, initial) }, oauthDeps)
           : initial;
 
-      const flowId = flows.put({
+      const flowId = await flows.put({
         provider: providerInput,
         label,
         pending: start.pending,
@@ -321,7 +327,7 @@ export function createConnectFlows(deps: ConnectDeps) {
         throw new GatewayError("BAD_REQUEST", "flowId and code are required");
       }
 
-      const flow = flows.take(flowIdInput);
+      const flow = await flows.take(flowIdInput);
       if (flow === null) throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
 
       return complete(flow, normalizeAuthorizationCode(flow, codeInput));
@@ -342,10 +348,16 @@ export function createConnectFlows(deps: ConnectDeps) {
       const existing = pollsInFlight.get(flowIdInput);
       if (existing !== undefined) return pollOutcome(flowIdInput, existing);
 
-      const flow = flows.peek(flowIdInput);
-      if (flow === null) throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
-
-      const poll = complete(flow, "").finally(() => {
+      // Registered before the first yield. The flow lookup is a read of the
+      // coordinator and may suspend; a second poll arriving during it must
+      // find this one already in the map, or both redeem the device code.
+      const poll = (async () => {
+        const flow = await flows.peek(flowIdInput);
+        if (flow === null) {
+          throw new GatewayError("BAD_REQUEST", "unknown or expired authorization");
+        }
+        return complete(flow, "");
+      })().finally(() => {
         pollsInFlight.delete(flowIdInput);
       });
       pollsInFlight.set(flowIdInput, poll);

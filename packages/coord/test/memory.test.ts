@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { memoryCoord } from "../src/index.ts";
 import { coordContract } from "./contract.ts";
 
-coordContract("memory", async () => memoryCoord());
+coordContract("memory", async (now) => memoryCoord({ now }));
 
 const T0 = 1_700_000_000_000;
 

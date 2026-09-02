@@ -57,8 +57,11 @@ export async function createStore(opts: {
   path: string;
   encryptionKey: CryptoKey;
   logger?: Logger;
+  /** This process's identity on `request_logs.node_id`. Fresh per boot when absent. */
+  nodeId?: string;
 }): Promise<Store> {
   const logger = opts.logger ?? noopLogger;
+  const nodeId = opts.nodeId ?? crypto.randomUUID();
   const listeners = new Set<(change: RoutingChange) => void>();
   const emit = (change: RoutingChange): void => {
     for (const listener of listeners) {
@@ -81,13 +84,13 @@ export async function createStore(opts: {
       // The one repo handed the logger: an unreadable `limits` column is
       // reported rather than thrown, so this is where that trail is written.
       keys: createKeyRepo(db, logger),
-      usage: createUsageRepo(db),
+      usage: createUsageRepo(db, nodeId),
       // Derived from the database path rather than configured. One installation
       // is one directory: an artifact tree that could be pointed elsewhere is one
       // an operator can lose track of, and a prompt corpus is the last thing that
       // should end up somewhere nobody backs up or nobody prunes.
       bodies: createBodyRepo(db, opts.encryptionKey, bodiesDirFor(opts.path)),
-      maintenance: createMaintenanceRepo(db),
+      maintenance: createMaintenanceRepo(db, nodeId),
       // Plugin tables live in this same file, so they ride snapshots, restores,
       // and `vacuum()` with everything else — and are closed and reopened by a
       // swap with everything else, which is why this is a handle repo and not
@@ -118,8 +121,8 @@ export async function createStore(opts: {
       get: (id) => handle.credentials.get(id),
       create: (input) => handle.credentials.create(input),
       update: (id, patch) => handle.credentials.update(id, patch),
-      updateSecrets: (id, secrets, expiresAt) =>
-        handle.credentials.updateSecrets(id, secrets, expiresAt),
+      updateSecrets: (id, secrets, expiresAt, expectedVersion) =>
+        handle.credentials.updateSecrets(id, secrets, expiresAt, expectedVersion),
       remove: (id) => handle.credentials.remove(id),
       listHealth: () => handle.credentials.listHealth(),
       saveHealth: (rows) => handle.credentials.saveHealth(rows),
@@ -157,7 +160,7 @@ export async function createStore(opts: {
       begin: (log) => handle.usage.begin(log),
       route: (id, target) => handle.usage.route(id, target),
       append: (log) => handle.usage.append(log),
-      sweepPending: () => handle.usage.sweepPending(),
+      sweepPending: (now) => handle.usage.sweepPending(now),
       // Both arguments, spelled out. An optional parameter dropped here is not a
       // type error — the forwarder still satisfies the interface — and this one
       // carries the scope that keeps one API key's logs away from another's, so
@@ -182,6 +185,7 @@ export async function createStore(opts: {
 
     maintenance: {
       stats: () => handle.maintenance.stats(),
+      heartbeat: (now) => handle.maintenance.heartbeat(now),
       vacuum: () => handle.maintenance.vacuum(),
       snapshotTo: (path) => handle.maintenance.snapshotTo(path),
       inspect: (path) => handle.maintenance.inspect(path),

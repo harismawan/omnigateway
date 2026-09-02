@@ -59,6 +59,7 @@ export const CORE_TABLES = [
   "credential_health",
   "credentials",
   "migrations",
+  "nodes",
   "plugin_migrations",
   "quota_samples",
   "quota_windows",

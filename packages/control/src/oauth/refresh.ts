@@ -71,7 +71,9 @@ export function createRefresher(deps: RefreshDeps): Refresher {
           if (fresh !== null && (fresh.expiresAt ?? 0) > (credential.expiresAt ?? 0)) {
             return fresh.secrets();
           }
-          return run(credential);
+          // The row as it is now, so the version the write compares against is
+          // the one this call actually read rather than the caller's.
+          return run(fresh ?? credential);
         },
       );
     } catch (error) {
@@ -132,7 +134,27 @@ export function createRefresher(deps: RefreshDeps): Refresher {
     // `Credential` has no secrets member — token material only goes through
     // `updateSecrets`, which is the half that encrypts. `expiresAt` rides along
     // with the secrets it belongs to rather than being written twice.
-    await deps.store.credentials.updateSecrets(credential.id, result.secrets, result.expiresAt);
+    //
+    // Compare-and-swap on the version this call read. The lock above already
+    // serialises refreshes; this is what holds when it cannot — a lock lost to
+    // its TTL, or a coordinator that failed open. A refused write means another
+    // process rotated the token first, and the secrets it stored are the ones
+    // the provider now honours, so they are what is returned.
+    const written = await deps.store.credentials.updateSecrets(
+      credential.id,
+      result.secrets,
+      result.expiresAt,
+      credential.tokenVersion,
+    );
+    if (!written) {
+      logger.warn("refresh lost a race; using the stored rotation", {
+        provider: credential.provider,
+        credentialId: credential.id,
+      });
+      const stored = await deps.store.credentials.get(credential.id);
+      if (stored === null) throw new GatewayError("AUTH", `credential ${credential.id} is gone`);
+      return stored.secrets();
+    }
     await deps.store.credentials.update(credential.id, {
       accountEmail: result.accountEmail ?? credential.accountEmail,
       // Merge: a refresh response may omit fields the connect flow captured,

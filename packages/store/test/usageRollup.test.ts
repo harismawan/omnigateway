@@ -39,7 +39,7 @@ function log(patch: Partial<RequestLog> & { id: string; at: number }): RequestLo
 
 function repo(): { db: Database; usage: UsageRepo } {
   const db = openDb(":memory:");
-  return { db, usage: createUsageRepo(db) };
+  return { db, usage: createUsageRepo(db, "node-test") };
 }
 
 /**

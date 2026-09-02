@@ -127,16 +127,19 @@ async function main(): Promise<void> {
   }
 
   const encryptionKey = await deriveKey(config.encryptionKey);
+  const now = () => Date.now();
   const store = await createStore({
     path: config.databasePath,
     encryptionKey,
     logger,
   });
 
-  // The gateway is one process, so a request still marked in-flight at startup
-  // died with the last one. Retiring them here is what stops a crash leaving a
-  // row that spins in the console forever.
-  const swept = await store.usage.sweepPending();
+  // A request still marked in-flight under a process nobody has heard from
+  // died with it. Retiring those here is what stops a crash leaving a row that
+  // spins in the console forever — and the heartbeat first, so a replica
+  // joining a live fleet never reads its own silence as another's death.
+  await store.maintenance.heartbeat(now());
+  const swept = await store.usage.sweepPending(now());
   if (swept > 0) logger.info("retired interrupted requests", { count: swept });
 
   /**
@@ -148,7 +151,6 @@ async function main(): Promise<void> {
   const console = consoleSource(config.logFile);
   logger.info("console log source resolved", { reason: console.source.kind });
 
-  const now = () => Date.now();
   const http = nodeHttpClient({ logger, now });
 
   // `OAUTH_PROVIDERS` is empty at this point and is filled by
@@ -328,6 +330,7 @@ async function main(): Promise<void> {
   const stopRefreshScheduler = startRefreshScheduler({ store, refresh, now, logger, broadcaster });
   const stopQuotaPoller = await startQuotaPoller({
     store,
+    coord,
     providers: OAUTH_PROVIDERS,
     http,
     refresh,

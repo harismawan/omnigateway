@@ -85,9 +85,24 @@ export type MaintenanceDeps = {
   fs?: DatabaseDeps["fs"];
 };
 
-/** Starts the hourly sweep. Returns a function that stops it. */
+/** How often this process says it is alive; a sixth of the grace a sweep allows. */
+const HEARTBEAT_INTERVAL_MS = 10_000;
+
+/** Starts the hourly sweep and the heartbeat. Returns a function that stops both. */
 export function startMaintenance(deps: MaintenanceDeps): () => void {
   const logger = deps.logger ?? noopLogger;
+
+  // The heartbeat is what keeps this process's pending rows out of another
+  // process's `sweepPending`. Ten seconds against a sixty-second grace, so five
+  // missed beats — a stalled event loop, a store that would not answer — are
+  // survivable and a sixth is the honest verdict.
+  const heartbeat = setInterval(() => {
+    void deps.store.maintenance.heartbeat(deps.now()).catch((error: unknown) => {
+      logger.warn("heartbeat failed", { reason: describeError(error, "unknown") });
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+  heartbeat.unref?.();
+
   const files: DatabaseDeps = {
     store: deps.store,
     fs: deps.fs ?? nodeDatabaseFs(),
@@ -134,5 +149,8 @@ export function startMaintenance(deps: MaintenanceDeps): () => void {
   // Do not hold the process open for a maintenance timer.
   timer.unref?.();
 
-  return () => clearInterval(timer);
+  return () => {
+    clearInterval(timer);
+    clearInterval(heartbeat);
+  };
 }

@@ -1,3 +1,4 @@
+import { type Coord, memoryCoord } from "@omni/coord";
 import type { ProviderId } from "@omni/ir";
 import type { PendingFlow } from "./types.ts";
 
@@ -9,67 +10,45 @@ export type StoredFlow = {
 };
 
 export type PendingFlows = {
-  put(flow: StoredFlow): string;
-  take(id: string): StoredFlow | null;
-  /** Read without consuming — used by the browser callback to find its flow. */
-  byState(state: string): (StoredFlow & { id: string }) | null;
-  peek(id: string): StoredFlow | null;
-  sweep(): void;
-  size(): number;
+  put(flow: StoredFlow): Promise<string>;
+  take(id: string): Promise<StoredFlow | null>;
+  peek(id: string): Promise<StoredFlow | null>;
 };
 
-export type PendingFlowsOptions = { now: () => number; ttlMs: number };
+export type PendingFlowsOptions = { now: () => number; ttlMs: number; coord?: Coord };
+
+/** Where a flow lives: `oauth:pending:<id>`. */
+const PREFIX = "oauth:pending:";
 
 /**
- * In-memory only, with a TTL.
+ * Behind `coord.kv`, with a TTL.
  *
- * A pending flow holds a live PKCE verifier. Persisting it would write a secret
- * to disk to protect against a restart mid-authorization — a case where the
- * right answer is for the operator to start over anyway.
+ * A pending flow holds a live PKCE verifier. In memory that is a map a restart
+ * empties — an interrupted authorization is abandoned rather than resumed, and
+ * nothing half-authorized is ever written to disk. In a fleet it is whatever
+ * the coordinator holds for the length of the TTL, so the browser callback may
+ * land on a process other than the one that started the flow.
  */
 export function createPendingFlows(opts: PendingFlowsOptions): PendingFlows {
-  const flows = new Map<string, { flow: StoredFlow; expiresAt: number }>();
-
-  const expired = (entry: { expiresAt: number }): boolean => entry.expiresAt <= opts.now();
+  const coord = opts.coord ?? memoryCoord({ now: opts.now });
 
   return {
-    put(flow) {
+    async put(flow) {
       const id = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
-      flows.set(id, { flow, expiresAt: opts.now() + opts.ttlMs });
+      await coord.kv.set(PREFIX + id, JSON.stringify(flow), opts.ttlMs);
       return id;
     },
 
-    take(id) {
-      const entry = flows.get(id);
-      if (entry === undefined) return null;
-      flows.delete(id);
-      return expired(entry) ? null : entry.flow;
+    async take(id) {
+      const raw = await coord.kv.get(PREFIX + id);
+      if (raw === null) return null;
+      await coord.kv.del(PREFIX + id);
+      return JSON.parse(raw) as StoredFlow;
     },
 
-    peek(id) {
-      const entry = flows.get(id);
-      if (entry === undefined || expired(entry)) return null;
-      return entry.flow;
-    },
-
-    byState(state) {
-      if (state.trim().length === 0) return null;
-      for (const [id, entry] of flows) {
-        if (entry.flow.pending.state === state) {
-          return expired(entry) ? null : { ...entry.flow, id };
-        }
-      }
-      return null;
-    },
-
-    sweep() {
-      for (const [id, entry] of flows) {
-        if (expired(entry)) flows.delete(id);
-      }
-    },
-
-    size() {
-      return flows.size;
+    async peek(id) {
+      const raw = await coord.kv.get(PREFIX + id);
+      return raw === null ? null : (JSON.parse(raw) as StoredFlow);
     },
   };
 }

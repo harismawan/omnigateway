@@ -206,6 +206,11 @@ export type Credential = {
    * expired credential can be revived without decrypting anything.
    */
   hasRefreshToken: boolean;
+  /**
+   * Moves on every `updateSecrets`. A caller that read the credential before
+   * refreshing passes it back, and a write whose version has moved is refused.
+   */
+  tokenVersion: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -722,14 +727,24 @@ export interface CredentialRepo {
   listRouting(): Promise<CredentialView[]>;
   get(id: string): Promise<CredentialView | null>;
   create(
-    input: Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken"> & CredentialSecrets,
+    input: Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken" | "tokenVersion"> &
+      CredentialSecrets,
   ): Promise<Credential>;
   update(id: string, patch: Partial<Credential>): Promise<void>;
+  /**
+   * Writes token material, and reports whether it was written.
+   *
+   * With `expectedVersion`, the write lands only if `tokenVersion` still
+   * equals it — the compare-and-swap that keeps two processes from each
+   * rotating a refresh token the provider will honour only once. Without it,
+   * the write is unconditional, which is what the connect flow wants.
+   */
   updateSecrets(
     id: string,
     secrets: Partial<CredentialSecrets>,
     expiresAt: number | null,
-  ): Promise<void>;
+    expectedVersion?: number,
+  ): Promise<boolean>;
   remove(id: string): Promise<void>;
   listHealth(): Promise<CredentialHealth[]>;
   /**
@@ -1057,11 +1072,15 @@ export interface UsageRepo {
    */
   append(log: RequestLog): Promise<void>;
   /**
-   * Completes every row left pending, as `interrupted`. The gateway is one
-   * process, so anything still pending at startup died with the last one.
-   * Returns how many were swept.
+   * Completes every pending row whose owner is gone, as `interrupted`.
+   *
+   * Own rows — this process's `nodeId` — are always swept, because at boot
+   * there are none and anything under that id is a fresh id's leftovers;
+   * another process's rows are swept only once its heartbeat is older than
+   * `NODE_GRACE_MS`, or it never wrote one. On one node this is every pending
+   * row at startup, which is what it was before. Returns how many were swept.
    */
-  sweepPending(): Promise<number>;
+  sweepPending(now: number): Promise<number>;
   /**
    * The newest rows, newest first, optionally restricted to one API key.
    *
@@ -1177,8 +1196,13 @@ export type DatabaseInspection = {
  * therefore the caller's to serialise; this repo does not guard against a
  * second concurrent call.
  */
+/** How long a process may go without a heartbeat before its rows are retirable. */
+export const NODE_GRACE_MS = 60_000;
+
 export interface MaintenanceRepo {
   stats(): Promise<DatabaseStats>;
+  /** Records this process as alive at `now`; forgets nodes unseen for a day. */
+  heartbeat(now: number): Promise<void>;
   /** Rewrites the file, reclaiming freelist pages. Blocking. */
   vacuum(): Promise<void>;
   /**

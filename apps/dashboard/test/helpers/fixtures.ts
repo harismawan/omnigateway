@@ -41,6 +41,7 @@ export function credential(patch: Partial<Credential> = {}): Credential {
     disabledReason: null,
     disabledAt: null,
     hasRefreshToken: true,
+    tokenVersion: 0,
     createdAt: NOW - 86_400_000,
     updatedAt: NOW,
     ...patch,

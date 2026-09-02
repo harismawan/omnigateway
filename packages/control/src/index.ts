@@ -209,7 +209,6 @@ export {
   poll,
   probe,
   RATE_LIMIT_COOLDOWN_MS,
-  resetQuotaCooldowns,
 } from "./quota/poll.ts";
 export {
   credentialPatchSchema,

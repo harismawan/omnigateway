@@ -36,8 +36,15 @@ function sqlLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-export function createMaintenanceRepo(db: Database): MaintenanceRepo {
+export function createMaintenanceRepo(db: Database, nodeId: string): MaintenanceRepo {
   return {
+    async heartbeat(now) {
+      db.run("INSERT OR REPLACE INTO nodes (id, seen_at) VALUES (?, ?)", [nodeId, now]);
+      // A day, not the grace period: `sweepPending` reads absence as death, so
+      // a row here is only ever evidence of life and can go once it is stale
+      // beyond any question.
+      db.run("DELETE FROM nodes WHERE seen_at < ?", [now - 86_400_000]);
+    },
     async stats(): Promise<DatabaseStats> {
       // Raw pragmas through the query API, as the `data_version` read in
       // `store.ts` already does: there is no other way to ask SQLite this.

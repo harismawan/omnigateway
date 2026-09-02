@@ -111,6 +111,7 @@ export function credential(overrides: Partial<CredentialView> = {}): CredentialV
     disabledReason: null,
     disabledAt: null,
     hasRefreshToken: true,
+    tokenVersion: 0,
     createdAt: 0,
     updatedAt: 0,
     secrets: async () => ({
@@ -178,7 +179,8 @@ export async function memoryStore(): Promise<Store> {
 }
 
 type SeedCredentialInput = Partial<
-  Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken"> & CredentialSecrets
+  Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken" | "tokenVersion"> &
+    CredentialSecrets
 > & { id: string };
 
 /**
