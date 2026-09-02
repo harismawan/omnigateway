@@ -262,7 +262,7 @@ Real Claude Code prepends a system block carrying a billing header and an
 integrity token over the request body:
 
 ```
-system[0] = "x-anthropic-billing-header: cc_version=2.1.219.250; cc_entrypoint=cli; cch=<5 hex>;"
+system[0] = "x-anthropic-billing-header: cc_version=2.1.258.<3 hex>; cc_entrypoint=cli; cch=<5 hex>;"
 ```
 
 The token is `xxHash64(serialized_body, 0x6e52736ac806831e) & 0xFFFFF`, rendered
@@ -276,12 +276,27 @@ against canonical XXH64 vectors: `""` → `ef46db3751d8e999`, `"a"` →
 `d24ec4f1a98c6e5b`, `"abc"` → `44bc2cf5ad770999`. No wasm dependency is needed;
 OmniRoute's `xxhash-wasm` import exists because Node has no built-in.
 
-`cc_version` is `2.1.219.250` — the CLI version plus the build revision captured
-from the signed binary. OmniRoute also implements two per-request suffix
-algorithms (an "ex-machina" hash over characters 4, 7, and 20 of the first user
-message, and a daystamp hash it labels as its own construction). Neither is
-used here: a static build revision is what a real CLI build sends, and the
-alternatives are inferences about an algorithm we cannot verify.
+`cc_version` is the CLI version plus a three-hex-digit suffix that is **not** a
+build revision. Read from the 2.1.258 bundle: the CLI takes the characters at
+indices 4, 7 and 20 of the first user text (`"0"` where the text is shorter),
+prepends the salt `59cf53e54c78`, appends the version string, SHA-256s that and
+keeps the first three hex digits. So the suffix is one value per conversation.
+`ccVersionSuffix` in `body.ts` reproduces it; the salt is pinned there beside
+`ANTHROPIC_CLI_VERSION`, and a version bump that does not also re-read the salt
+from the new bundle produces a wrong suffix that nothing rejects.
+
+An earlier version of this section said the suffix was a static build revision
+(`250`) and dismissed the 4/7/20 derivation as unverifiable. That was wrong in
+both halves: `250` was one width-correct value the CLI happened to send in one
+capture, and the derivation is readable from the bundle.
+
+Two known divergences from the CLI's own value, both still one value per
+conversation so the prompt cache is unaffected: the CLI skips its own meta
+messages when picking the first user text, which the gateway cannot tell
+apart, and Claude Code often puts a `<system-reminder>` block as the first
+text block of the first user message, so the hashed characters come from the
+reminder rather than the operator's prompt. A first user turn carrying no text
+block at all (tool results only) hashes as the empty string.
 
 `cc_entrypoint` is `cli`, matching the `(external, cli)` User-Agent.
 

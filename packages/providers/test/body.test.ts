@@ -86,6 +86,15 @@ test("signAnthropicBody leaves a tool result that quotes the placeholder alone",
   expect(signed).not.toMatch(/"x-anthropic-billing-header: cch=00000;"/);
 });
 
+test("signAnthropicBody leaves a quoted placeholder alone when there is no billing block", () => {
+  // `indexOf(needle, -1)` searches from 0, so dropping the anchor guard
+  // silently reverts to first-match for exactly this body.
+  const json = JSON.stringify({
+    messages: [{ role: "user", content: [{ type: "text", text: "saw cch=00000; in a log" }] }],
+  });
+  expect(signAnthropicBody(json)).toBe(json);
+});
+
 test("signAnthropicBody is a no-op when there is no placeholder", () => {
   const json = '{"model":"m"}';
   expect(signAnthropicBody(json)).toBe(json);
