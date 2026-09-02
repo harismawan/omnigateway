@@ -69,6 +69,9 @@ const GATEWAY_OWNED = new Set([
   "window",
   // A loop position.
   "j",
+  // This repository's own pattern, printed so a client learns the rule it
+  // broke without being quoted its own value back.
+  "TOOL_NAME.source",
   // Operator-scoped, on admin routes a client cannot reach: a restore failure's
   // own text and the database filename an operator named.
   "error.message",
