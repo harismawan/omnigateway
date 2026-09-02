@@ -77,14 +77,6 @@ function cacheKey(req: ChatRequest, instructions: string, firstInput: unknown): 
  *
  * IR strips orphaned tool *results* in `validateRequest`; nothing strips or
  * completes an orphaned *call*, which is why this sits here.
- *
- * `function_call` is the only type it looks for, and that is a fact about this
- * encoder rather than about the API: IR has one `toolUse` block, so a tool the
- * client declared freeform is flattened to a function call here exactly as its
- * declaration is flattened to a function tool. Teaching this encoder to emit
- * `custom_tool_call` means teaching this function `custom_tool_call_output` in
- * the same change — a review read the older wording as a claim that both were
- * already handled, which is the failure a comment broader than its code causes.
  */
 function repairOrphanedCalls(input: unknown[]): void {
   const answered = new Set<string>();

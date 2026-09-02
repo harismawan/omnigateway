@@ -1083,3 +1083,44 @@ test("leaves an answered tool call alone", () => {
     [{ type: "function_call_output", call_id: "call_1", output: "ok" }],
   );
 });
+
+test("a freeform tool call goes upstream as a function call, and its orphan is repaired to match", () => {
+  // IR does not record whether the client declared a tool freeform — that
+  // distinction is the client's, kept for the Responses egress alone. So this
+  // encoder flattens both to `function_call`, exactly as it flattens both
+  // declarations to a function tool, and the repair only ever has one item type
+  // to answer. If this encoder ever learns to emit `custom_tool_call`, the
+  // repair has to learn `custom_tool_call_output` in the same change.
+  const { body } = toResponsesWire(
+    {
+      ...base,
+      tools: [
+        {
+          kind: "portable",
+          name: "apply_patch",
+          inputSchema: { type: "object", properties: { input: { type: "string" } } },
+        },
+      ],
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "toolUse", id: "c1", name: "apply_patch", input: { input: "*** Begin Patch" } },
+          ],
+        },
+      ],
+    },
+    "gpt-5",
+  );
+
+  expect((body.tools as { type: string }[])[0]?.type).toBe("function");
+  expect(body.input).toEqual([
+    {
+      type: "function_call",
+      call_id: "c1",
+      name: "apply_patch",
+      arguments: '{"input":"*** Begin Patch"}',
+    },
+    { type: "function_call_output", call_id: "c1", output: "" },
+  ]);
+});

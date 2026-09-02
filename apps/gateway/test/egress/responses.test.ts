@@ -574,3 +574,32 @@ test("a native reasoning block streams its summary and ends carrying the blob", 
   expect(bodies[1].delta).toBe("weighing");
   expect(bodies[2].item).toEqual(done);
 });
+
+test("a block that starts while another is open does not break the stream", async () => {
+  // A decoder that opens an item without closing the last one is a bug, but it
+  // is a bug on the far side of the network: throwing here turns it into a
+  // stream that dies mid-flight, which is strictly worse for the client than a
+  // tidy close and a correct next item.
+  const f = await stage(
+    responsesStream(
+      src(
+        { type: "blockStart", index: 0, block: { type: "thinking" } },
+        { type: "blockDelta", index: 0, delta: { type: "thinking", text: "weighing" } },
+        { type: "blockStart", index: 1, block: { type: "text" } },
+        { type: "blockDelta", index: 1, delta: { type: "text", text: "answer" } },
+        { type: "blockEnd", index: 1 },
+      ),
+      RENDER,
+    ),
+  );
+
+  const bodies = f.map((x) => JSON.parse(x.data));
+  const done = bodies.filter((b) => b.type === "response.output_item.done");
+  expect(done.map((b) => b.item.type)).toEqual(["reasoning", "message"]);
+  expect(done.map((b) => b.output_index)).toEqual([0, 1]);
+});
+
+test("a block that ends without having started is ignored, not fatal", async () => {
+  const f = await stage(responsesStream(src({ type: "blockEnd", index: 7 }), RENDER));
+  expect(f).toEqual([]);
+});
