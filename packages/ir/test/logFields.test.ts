@@ -105,9 +105,11 @@ test("a model name is capped on the way out, like the reason beside it", () => {
 });
 
 test("safeToken refuses what would forge a log line, at any length", () => {
-  // The charset is the half that matters: a newline writes a second line, a
-  // quote closes a field early, an escape repaints the terminal. None of these
-  // is long enough for a length bound to catch.
+  // The charset is the half that matters, and for a narrower reason than it
+  // first appears: `renderValue` JSON-quotes a value containing whitespace or a
+  // quote, so a newline is escaped rather than writing a second line. What the
+  // charset buys is keeping such a value off the line at all. None of these is
+  // long enough for a length bound to catch.
   const hostile = ['a"b', "a b", "a\nb", "a\rb", "a\u001b[31mb", "a=b"];
   for (const value of hostile) expect(safeToken(value)).toBe("(unprintable)");
   // And the length boundary itself, on a value the charset accepts.

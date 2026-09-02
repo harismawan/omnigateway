@@ -61,20 +61,19 @@ const GATEWAY_OWNED = new Set([
   // at worst, and `sqlite/config.ts` reads targets back with a bare
   // `JSON.parse`, so it is unvalidated — but it is not the client's.
   "candidate.target.provider",
-  // Vocabulary from closed unions.
+  // Vocabulary from a closed union.
   "reason",
-  "code",
-  "kind",
-  "dimension",
-  "window",
   // A loop position.
   "j",
   // This repository's own pattern, printed so a client learns the rule it
   // broke without being quoted its own value back.
   "TOOL_NAME.source",
-  // Operator-scoped, on admin routes a client cannot reach: a restore failure's
-  // own text and the database filename an operator named.
+  // A restore failure's own text, on an admin route a client cannot reach.
   "error.message",
+  // Not a filename: a `DatabaseDeps` object caught by the bare-argument arm and
+  // never interpolated into anything. Kept because the arm reports it, and
+  // named accurately because an unverifiable justification is worth less than
+  // no entry at all.
   "database",
   // The upstream's own words on the in-stream error path. Not bounded — it is
   // *withheld*, because that throw stamps the provider and `reasonField` prints
@@ -192,4 +191,46 @@ test("every value a refusal interpolates is this gateway's own or bounded", () =
   }
 
   expect(unowned).toEqual([]);
+});
+
+/**
+ * Every parser bounds the model name, discovered rather than listed.
+ *
+ * `requested_model` and `resolved_model` are columns and `ON CONFLICT` keys of
+ * `usage_rollup` and `usage_daily`, so an unbounded model persists whatever the
+ * client sent — on a *succeeding* request, past `bodyLoggingOptOut`, into the
+ * snapshot this repository documents as never a prompt corpus.
+ *
+ * This exists because two of the three parsers were bounded and the third was
+ * not: it was on another branch when the bound was written, and arrived with a
+ * rebase. Enumerating the parsers would have had the same hole, so this asks the
+ * directory instead. A fourth parser fails here on the day it is written.
+ *
+ * The refusal-interpolation check above cannot catch this: it reads what a
+ * message says, and this is about what a column stores.
+ */
+test("every ingress parser bounds the model name it will store", () => {
+  const unbounded: string[] = [];
+
+  for (const file of sources("apps/gateway/src/ingress")) {
+    const source = readFileSync(file, "utf8");
+    // A parser is a file that turns a body into a ChatRequest.
+    if (!/export function parse\w+Request/.test(source)) continue;
+
+    // The *request* schema, not every schema with a model in it: the one that
+    // also names the field carrying the conversation is the one whose `model`
+    // becomes `requestedModel`. `anthropic.ts` has a second, `fallbackModel`,
+    // which describes the `from`/`to` of a model-change block and rides the
+    // vendor bag rather than a column.
+    for (const declaration of source.matchAll(/\bmodel:\s*z\.string\(\)([^,\n]*)/g)) {
+      const after = source.slice(declaration.index, declaration.index + 1200);
+      const isRequestSchema = /\n\s{2}(?:messages|input):/.test(after);
+      if (!isRequestSchema) continue;
+      if (!(declaration[1] ?? "").includes("max(MODEL_NAME_MAX)")) {
+        unbounded.push(`${file}  model: z.string()${declaration[1] ?? ""}`);
+      }
+    }
+  }
+
+  expect(unbounded).toEqual([]);
 });

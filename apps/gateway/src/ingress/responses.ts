@@ -9,7 +9,7 @@ import type {
 } from "@omni/ir";
 import { GatewayError, REASONING_EFFORTS, safeToken, validateRequest } from "@omni/ir";
 import { z } from "zod";
-import { normalizeClientModel } from "./model.ts";
+import { MODEL_NAME_MAX, normalizeClientModel } from "./model.ts";
 import {
   extraFields,
   isRecord,
@@ -31,7 +31,7 @@ const reasoning = z.object({
 });
 
 const schema = z.object({
-  model: z.string().min(1),
+  model: z.string().min(1).max(MODEL_NAME_MAX),
   // Items are read by hand below rather than by a discriminated union, because
   // the vocabulary is open at the edges: an unknown item type must name itself
   // in the refusal, and a zod union reports every arm it tried instead.
