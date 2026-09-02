@@ -430,13 +430,20 @@ function readBlock(raw: unknown, role: Message["role"], path: string): ContentBl
       const parsed = nativeSchema.safeParse(raw);
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
-        const issuePath =
-          issue?.code === "unrecognized_keys" ? [...issue.path, issue.keys[0]] : issue?.path;
+        // `unrecognized_keys` is the one zod arm that quotes the client's own
+        // text back — its message is `Unrecognized key: "<key>"`, and the key
+        // is spliced into the path here as well. Both are bounded, and the
+        // message is written here rather than passed through, because zod's
+        // own wording is what carries the value. The other arms report the
+        // schema's expectation, not what arrived; checked against zod v4.
+        const unknownKey = issue?.code === "unrecognized_keys" ? safeToken(issue.keys[0]) : null;
+        const issuePath = unknownKey === null ? issue?.path : [...(issue?.path ?? []), unknownKey];
         const suffix = issuePath?.length ? `.${issuePath.join(".")}` : "";
-        throw new GatewayError(
-          "BAD_REQUEST",
-          `${path}${suffix}: ${issue?.message ?? "invalid native content block"}`,
-        );
+        const detail =
+          unknownKey === null
+            ? (issue?.message ?? "invalid native content block")
+            : `unrecognized key "${unknownKey}"`;
+        throw new GatewayError("BAD_REQUEST", `${path}${suffix}: ${detail}`);
       }
       const { type: _type, cache_control, ...data } = parsed.data;
       return {

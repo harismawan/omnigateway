@@ -88,16 +88,22 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
  * hold anything a caller decided to put in it, and stdout is not where it goes.
  *
  * Bounded rather than dropped, because a client cannot fix a value it is not
- * told about, and a wire `type` is exactly the thing worth naming. Forty
- * characters of a known charset is enough for every real discriminator and
- * short of anything worth smuggling; anything else says so instead. `reason` is
- * truncated at 200 characters on the way out, but truncation is a cap on
- * volume, not on content — the first 200 characters of a prompt are still a
- * prompt.
+ * told about, and a wire `type` is exactly the thing worth naming.
+ *
+ * Sixty-four characters, set by the vocabulary rather than by taste:
+ * `text_editor_code_execution_tool_result` is 38 before Anthropic dates it, so
+ * a 40-character bound rendered a real, current tool type as `(unprintable)` —
+ * a diagnostic regression wearing a security fix's clothes. The security
+ * property is unchanged at 64: a prompt is not 64 characters of this charset
+ * with no spaces in it.
+ *
+ * `reason` is truncated at 200 characters on the way out, and that is not this:
+ * truncation caps volume, not content, and the first 200 characters of a prompt
+ * are still a prompt.
  */
 export function safeToken(value: unknown): string {
   const text = typeof value === "string" ? value : String(value);
-  return /^[A-Za-z0-9_.:/+-]{1,40}$/.test(text) ? text : "(unprintable)";
+  return /^[A-Za-z0-9_.:/+-]{1,64}$/.test(text) ? text : "(unprintable)";
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
