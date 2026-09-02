@@ -107,3 +107,41 @@ test("strips a trailing slash from an explicit base url", () => {
     "https://gw.example.com",
   );
 });
+
+/**
+ * The switch and the two URLs move together. A URL without the switch is an
+ * operator who believes they are clustered; the switch without a URL is a
+ * fleet with nothing to share. Both are refused rather than half-honoured.
+ */
+test("cluster mode needs both URLs, and the URLs need cluster mode", () => {
+  const pg = "postgres://omni:x@db:5432/omni";
+  const redis = "redis://cache:6379";
+  expect(loadConfig(base).clusterMode).toBe(false);
+
+  const cluster = loadConfig({
+    ...base,
+    OMNI_CLUSTER_MODE: "true",
+    OMNI_DATABASE_URL: pg,
+    OMNI_REDIS_URL: redis,
+  });
+  expect(cluster.clusterMode).toBe(true);
+  expect(cluster.databaseUrl).toBe(pg);
+  expect(cluster.redisUrl).toBe(redis);
+
+  expect(() => loadConfig({ ...base, OMNI_CLUSTER_MODE: "true", OMNI_REDIS_URL: redis })).toThrow(
+    "needs OMNI_DATABASE_URL",
+  );
+  expect(() => loadConfig({ ...base, OMNI_CLUSTER_MODE: "true", OMNI_DATABASE_URL: pg })).toThrow(
+    "needs OMNI_REDIS_URL",
+  );
+  expect(() =>
+    loadConfig({
+      ...base,
+      OMNI_CLUSTER_MODE: "true",
+      OMNI_DATABASE_URL: "mysql://x",
+      OMNI_REDIS_URL: redis,
+    }),
+  ).toThrow("postgres://");
+  expect(() => loadConfig({ ...base, OMNI_DATABASE_URL: pg })).toThrow("OMNI_CLUSTER_MODE");
+  expect(() => loadConfig({ ...base, OMNI_REDIS_URL: redis })).toThrow("OMNI_CLUSTER_MODE");
+});

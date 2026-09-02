@@ -63,12 +63,15 @@ Recorded because each closes a door the design otherwise had to keep open.
 
 ## Mode selection
 
-One environment variable decides:
+One switch decides, and the URLs follow it:
 
-- `OMNI_DATABASE_URL` absent → **single-node mode**. SQLite at `OMNI_DB_PATH`, in-memory
-  coordination. Today's wiring, today's behaviour.
-- `OMNI_DATABASE_URL=postgres://…` → **cluster mode**. `OMNI_REDIS_URL` is required; boot
-  refuses without it in one sentence. `OMNI_ENCRYPTION_KEY` remains required in both.
+- `OMNI_CLUSTER_MODE` unset → **single-node mode**. SQLite at `OMNI_DB_PATH`, in-memory
+  coordination. Today's wiring, today's behaviour. `OMNI_DATABASE_URL` or `OMNI_REDIS_URL`
+  set here is refused at boot: an operator who set one believes they are clustered.
+- `OMNI_CLUSTER_MODE=true` → **cluster mode**. `OMNI_DATABASE_URL` (`postgres://`) and
+  `OMNI_REDIS_URL` are both required; boot refuses without either in one sentence.
+  `OMNI_ENCRYPTION_KEY` remains required in both. (First shipped with the database URL as
+  the switch; a dedicated variable replaced it so the intent is stated rather than inferred.)
 
 There is no third mode. A Postgres store with in-memory coordination would be a fleet with
 N× limits and one working console, which is the shape this spec exists to remove; a SQLite

@@ -131,7 +131,9 @@ async function main(): Promise<void> {
   // This process's name on every row it owns and every lease it holds.
   const nodeId = crypto.randomUUID();
   const store = await openStore({
-    ...(config.databaseUrl === null ? { path: config.databasePath } : { url: config.databaseUrl }),
+    ...(config.clusterMode && config.databaseUrl !== null
+      ? { url: config.databaseUrl }
+      : { path: config.databasePath }),
     encryptionKey,
     logger,
     nodeId,
@@ -168,7 +170,9 @@ async function main(): Promise<void> {
   // The coordinator is what makes N processes one installation. Named by
   // `OMNI_REDIS_URL`; in memory otherwise, which is the single process it was.
   const shared =
-    config.redisUrl === null ? null : redisCoord({ url: config.redisUrl, logger, now });
+    config.clusterMode && config.redisUrl !== null
+      ? redisCoord({ url: config.redisUrl, logger, now })
+      : null;
   const coord = shared ?? memoryCoord({ now });
   const lease = { coord, nodeId };
   const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger, coord });
@@ -284,7 +288,7 @@ async function main(): Promise<void> {
     store,
     coord,
     nodeId,
-    mode: config.databaseUrl === null ? "single" : "cluster",
+    mode: config.clusterMode ? "cluster" : "single",
     ...(shared === null ? {} : { coordHealthy: shared.healthy }),
     baseUrl: config.baseUrl,
     http,

@@ -487,8 +487,9 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](#recording-bodies) |
 | `OMNI_ROOT` | No | the installation in the current directory, else `~/.config/omnigateway` | Which installation the CLI acts on, when `--root` is not passed |
 | `OMNI_PLUGIN_REGISTRY` | No | the public npm registry | Registry `omni plugin install <name>` resolves through; must be `https://` |
-| `OMNI_DATABASE_URL` | No | unset | A `postgres://` URL selects [cluster mode](#running-more-than-one-gateway): the store is shared and `OMNI_REDIS_URL` becomes required. Unset is one process on SQLite |
-| `OMNI_REDIS_URL` | With `OMNI_DATABASE_URL` | unset | The coordinator every process of a cluster shares: rate-limit counters, sessions, leases, push fan-out |
+| `OMNI_CLUSTER_MODE` | No | unset | `true` selects [cluster mode](#running-more-than-one-gateway) and requires the two URLs below; unset is one process on SQLite, and then the URLs must be unset too |
+| `OMNI_DATABASE_URL` | In cluster mode | — | The shared Postgres store |
+| `OMNI_REDIS_URL` | In cluster mode | — | The coordinator every process of a cluster shares: rate-limit counters, sessions, leases, push fan-out |
 
 `OMNI_ROOT` is the one variable read from your shell and never from a root's `.env`, for the
 reason it has to be: a variable that selects the installation cannot live inside the installation
@@ -531,7 +532,7 @@ deliberately edited on the Database screen instead; see
 
 One process on SQLite is the default and is what every command in this document assumes. A
 fleet — several replicas behind a load balancer, on Kubernetes or otherwise — is **cluster
-mode**, selected by `OMNI_DATABASE_URL` and needing two things beside the gateway:
+mode**, switched on by `OMNI_CLUSTER_MODE=true` and needing two things beside the gateway:
 
 - **Postgres** as the store, named by `OMNI_DATABASE_URL`. Every replica reads and writes one
   database; there is no SQLite file, no snapshot, no restore, and no `omni db vacuum` — those are
@@ -543,10 +544,15 @@ mode**, selected by `OMNI_DATABASE_URL` and needing two things beside the gatewa
   console on one replica hear a change made on another.
 
 ```bash
+OMNI_CLUSTER_MODE=true
 OMNI_DATABASE_URL=postgres://omni:secret@db.internal:5432/omni
 OMNI_REDIS_URL=redis://cache.internal:6379
 OMNI_ENCRYPTION_KEY=…   # the same on every replica
 ```
+
+Boot refuses the switch without both URLs, and refuses either URL without the switch: a
+replica that believes it is clustered and is not is the failure this variable exists to make
+loud.
 
 What holds across the fleet, exactly: every API-key limit at every window and dimension; token
 refresh, which one replica performs while the others wait and reuse the result; a cookie issued
@@ -713,7 +719,8 @@ The container listens on `0.0.0.0:9000`, serves the console, and keeps its
 database and plugins under `/data`. It runs as the unprivileged `bun` user and
 carries a `HEALTHCHECK` on `/health`.
 
-For a fleet, set `OMNI_DATABASE_URL` and `OMNI_REDIS_URL` and drop the volume;
+For a fleet, set `OMNI_CLUSTER_MODE=true` with `OMNI_DATABASE_URL` and `OMNI_REDIS_URL` and
+drop the volume;
 see [Running more than one gateway](#running-more-than-one-gateway). A
 Kubernetes deployment — Deployment, Service, Ingress with the timeouts streaming
 needs, HPA, and an example Secret — is under `k8s/` as a kustomize

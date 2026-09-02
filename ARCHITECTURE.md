@@ -733,7 +733,8 @@ session verified against a fallback map is one a password change elsewhere canno
 once per thirty seconds under two closed `LogFields` keys, `coord` and `coordFallback`.
 Postgres unreachable is the same as SQLite locked: the request fails.
 
-**The store.** `OMNI_DATABASE_URL` selects `packages/store/src/postgres/`, a second
+**The store.** `OMNI_CLUSTER_MODE=true` selects `packages/store/src/postgres/` at
+`OMNI_DATABASE_URL`, a second
 implementation of the same `Store` interface over `Bun.SQL`. Migrations are its own numbered
 list under an advisory lock. Request bodies are `bytea` rows rather than files. `vacuum`,
 `snapshotTo`, `inspect`, restore and the quiesce latch are SQLite's and are refused; plugin
