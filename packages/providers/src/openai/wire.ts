@@ -149,12 +149,26 @@ export function toResponsesWire(
   for (const message of req.messages) {
     const parts: unknown[] = [];
 
-    // The Codex backend refuses a system turn inside `input` — it supplies its
-    // own. The documented fallback is to carry the instruction in a user turn,
-    // marked, so it keeps its position even though it loses the operator role.
-    const inlined = message.role === "system";
-    if (inlined) note("openai:system-turn-inlined");
-    const role = inlined ? "user" : message.role;
+    // The backend refuses a `system` turn inside `input` — it supplies its own —
+    // so a mid-conversation operator turn goes as `developer`, which is this
+    // dialect's role for exactly that. It keeps both its position and its
+    // operator standing, where the `<system-reminder>` user turn this replaced
+    // kept only the position; it also stays inside the cacheable prefix, which
+    // a rewritten user turn did not.
+    //
+    // Measured against the live Codex backend on 2026-09-02, not inferred: the
+    // same request sent twice, differing only in this role, came back 200 with
+    // nine events and `response.completed` both times. The OAuth leg is the one
+    // that was probed, and it is the narrower of the two hosts — `api.openai.com`
+    // documents the role.
+    //
+    // Recorded as a degradation still, because the role is not the one the
+    // client wrote. Rows written before the rename carry
+    // `openai:system-turn-inlined` and stay readable: degradations are
+    // forensic text, never parsed on read.
+    const asDeveloper = message.role === "system";
+    if (asDeveloper) note("openai:system-turn-as-developer");
+    const role = asDeveloper ? "developer" : message.role;
 
     const flush = (): void => {
       if (parts.length === 0) return;
@@ -167,7 +181,7 @@ export function toResponsesWire(
         case "text":
           parts.push({
             type: role === "assistant" ? "output_text" : "input_text",
-            text: inlined ? `<system-reminder>\n${block.text}\n</system-reminder>` : block.text,
+            text: block.text,
           });
           break;
         case "image":

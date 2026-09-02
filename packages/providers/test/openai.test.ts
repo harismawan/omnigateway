@@ -572,12 +572,12 @@ test("inlines a mid-conversation system turn, which this backend refuses", () =>
     { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
     {
       type: "message",
-      role: "user",
-      content: [{ type: "input_text", text: "<system-reminder>\nWrite Go.\n</system-reminder>" }],
+      role: "developer",
+      content: [{ type: "input_text", text: "Write Go." }],
     },
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
   ]);
-  expect(degradations).toContain("openai:system-turn-inlined");
+  expect(degradations).toContain("openai:system-turn-as-developer");
 });
 
 test("never emits a system role inside the input", () => {

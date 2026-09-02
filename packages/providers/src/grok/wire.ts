@@ -79,12 +79,29 @@ export function toGrokWire(
   for (const message of req.messages) {
     const parts: unknown[] = [];
 
-    // No xAI source says whether the proxy accepts a system turn inside `input`,
-    // and the OpenAI fork's answer is the safe one either way: the instruction
-    // keeps its position, marked, rather than risking a rejected turn.
-    const inlined = message.role === "system";
-    if (inlined) note("grok:system-turn-inlined");
-    const role = inlined ? "user" : message.role;
+    // The backend refuses a `system` turn inside `input` — it supplies its own —
+    // so a mid-conversation operator turn goes as `developer`, which is this
+    // dialect's role for exactly that. It keeps both its position and its
+    // operator standing, where the `<system-reminder>` user turn this replaced
+    // kept only the position; it also stays inside the cacheable prefix, which
+    // a rewritten user turn did not.
+    //
+    // **Not measured against xAI.** The OpenAI leg was probed live and accepts
+    // this role; neither xAI host has been, because no xAI credential existed
+    // on the machine where that probe ran. The fork's previous answer — a
+    // marked user turn — was equally unmeasured, and this one is at least the
+    // role the dialect defines, so it is not a step back. If xAI turns out to
+    // refuse it, this is the line to revert, and the symptom will be every
+    // request carrying a mid-conversation system turn failing at once rather
+    // than anything subtle.
+    //
+    // Recorded as a degradation still, because the role is not the one the
+    // client wrote. Rows written before the rename carry
+    // `grok:system-turn-inlined` and stay readable: degradations are
+    // forensic text, never parsed on read.
+    const asDeveloper = message.role === "system";
+    if (asDeveloper) note("grok:system-turn-as-developer");
+    const role = asDeveloper ? "developer" : message.role;
 
     const flush = (): void => {
       if (parts.length === 0) return;
@@ -97,7 +114,7 @@ export function toGrokWire(
         case "text":
           parts.push({
             type: role === "assistant" ? "output_text" : "input_text",
-            text: inlined ? `<system-reminder>\n${block.text}\n</system-reminder>` : block.text,
+            text: block.text,
           });
           break;
         case "image":

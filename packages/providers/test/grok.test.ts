@@ -269,19 +269,16 @@ test("keeps a mid-conversation system turn where the client put it", () => {
 
   // A system turn applies from its position forward, so folding it into
   // `instructions` would move it to the front of the history and change when it
-  // takes effect. No xAI source says the proxy accepts a `system` role inside
-  // `input`, so it keeps its slot as a marked user turn instead.
+  // takes effect. It keeps its slot as a `developer` turn, which is the role
+  // this dialect gives an operator instruction inside history — and which keeps
+  // the content in the cacheable prefix, where a rewritten user turn did not.
   expect(body.input).toEqual([
     { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
-    {
-      type: "message",
-      role: "user",
-      content: [{ type: "input_text", text: "<system-reminder>\nbe brief\n</system-reminder>" }],
-    },
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "be brief" }] },
     { type: "message", role: "user", content: [{ type: "input_text", text: "more" }] },
   ]);
   expect(body.instructions).toBeUndefined();
-  expect(degradations).toContain("grok:system-turn-inlined");
+  expect(degradations).toContain("grok:system-turn-as-developer");
 });
 
 test("encodes an image with image_url as a plain string", () => {

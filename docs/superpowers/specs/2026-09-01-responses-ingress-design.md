@@ -1,7 +1,9 @@
 # OpenAI Responses ingress
 
-*Status: implemented, except the `developer`-role change of step 5, which is gated on a live probe
-that has not been run — see* Build order.
+*Status: implemented. The `developer`-role change of step 5 was probed live against the Codex OAuth
+leg on 2026-09-02 — the same request differing only in that role returned 200 with nine events and
+`response.completed` both times — and shipped. The other three legs named below were not probed: the
+machine had no OpenAI API key and no xAI credential of either kind.*
 
 *Phase 0's capture has not been run either: it needs a real Codex pointed at a running gateway. The
 route, the schema and the refusal list were written from Codex's own source and both peer gateways,
@@ -549,7 +551,9 @@ falls through to a working fallback.
 3. Ingress, egress, route wiring, and the three widenings.
 4. The provider round trip: reasoning replay, id stripping, tool-call repair.
 5. Probe the four legs for `developer`-item support, then move mid-conversation system turns on the
-   legs that accept it.
+   legs that accept it. **Done for the OpenAI OAuth leg only** — measured, accepted, shipped. The
+   OpenAI API-key host documents the role and was not reachable to check; both xAI hosts remain
+   unmeasured, and `grok/wire.ts` says so at the line that would be reverted.
 6. Documentation.
 
 Steps 4 and 5 are last because they are the only parts that change behaviour for traffic that already
