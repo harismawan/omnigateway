@@ -182,6 +182,7 @@ const ROUTES: ReadonlyArray<{
 
   // Operator-only mutations, refusals only.
   { method: "POST", path: "/api/database/vacuum", allow: ["admin"], refusalOnly: true },
+  { method: "DELETE", path: "/api/database/bodies", allow: ["admin"], refusalOnly: true },
   { method: "POST", path: "/api/database/snapshots", allow: ["admin"], refusalOnly: true },
   { method: "DELETE", path: "/api/database/snapshots/nope", allow: ["admin"], refusalOnly: true },
   {

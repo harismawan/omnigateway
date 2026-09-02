@@ -3,6 +3,7 @@ import { GatewayError } from "@omni/ir";
 import { type DatabaseInspection, DEFAULT_SETTINGS, type Settings } from "@omni/store";
 import { type CaptureLogger, captureLogger } from "@omni/testkit";
 import {
+  clearBodies,
   createSnapshot,
   type DatabaseDeps,
   deleteSnapshot,
@@ -130,6 +131,16 @@ function deps(
         rebuildRollup: async () => {
           log.push("rebuildRollup");
           if (input.rebuildFails === true) throw new Error("no space left on device");
+        },
+      },
+      bodies: {
+        prune: async (olderThan) => {
+          log.push(`prune:${olderThan}`);
+          return 3;
+        },
+        sweepOrphans: async () => {
+          log.push("sweepOrphans");
+          return 1;
         },
       },
       close: () => log.push("close"),
@@ -1044,6 +1055,15 @@ describe("vacuum", () => {
     // And the lock is released again, rather than wedging the installation.
     d.store.maintenance.vacuum = async () => {};
     await vacuum(d);
+  });
+});
+
+describe("clearBodies", () => {
+  test("prunes to the present instant, then sweeps the files a crash left rowless", async () => {
+    const d = deps();
+    expect(await clearBodies(d)).toEqual({ removed: 3, orphans: 1 });
+    // The cutoff is now, not a horizon: everything on file is older than now.
+    expect(d.log).toEqual([`prune:${AT}`, "sweepOrphans"]);
   });
 });
 

@@ -15,6 +15,7 @@ import type {
   BurnEstimate,
   CatalogProvider,
   CatalogResponse,
+  ClearBodiesResult,
   ClientLogsResponse,
   ClientQuotaHistoryQuery,
   ClientQuotaHistoryResponse,
@@ -520,6 +521,18 @@ export function useVacuum(): UseMutationResult<VacuumResult, Error, void> {
   return useMutation({
     mutationFn: () => post<VacuumResult>("/api/database/vacuum"),
     onSuccess: () => invalidateDatabase(client),
+  });
+}
+
+export function useClearBodies(): UseMutationResult<ClearBodiesResult, Error, void> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => del<ClearBodiesResult>("/api/database/bodies"),
+    onSuccess: () => {
+      invalidateDatabase(client);
+      // Every request's body is now `pruned`, which the logs screen reports.
+      void client.invalidateQueries({ queryKey: ["logs"] });
+    },
   });
 }
 

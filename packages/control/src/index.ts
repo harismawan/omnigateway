@@ -65,6 +65,7 @@ export {
   removeCredential,
 } from "./credentials.ts";
 export {
+  clearBodies,
   createSnapshot,
   type DatabaseDeps,
   type DatabaseOverview,

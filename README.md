@@ -388,6 +388,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni db backup` / `snapshots` | take a snapshot, and list the ones retention has kept |
 | `omni db restore <id>` | put a snapshot back; shows a live-vs-snapshot count table, then asks. `--dry-run` shows the table and stops |
 | `omni db vacuum` | rewrite the database, reclaiming the pages deletion left free |
+| `omni db clear-bodies` | delete every captured request and response body; the requests stay logged |
 
 Two worth knowing:
 
@@ -715,6 +716,12 @@ database and reclaims the pages deletion left free. It holds SQLite's write lock
 for the rewrite, so a busy gateway stalls on its writes until it finishes — but
 nothing is lost by running it live, and it reports what it actually gave back to
 the filesystem.
+
+**Clearing bodies.** `omni db clear-bodies`, or the Database screen's *Clear
+bodies*, deletes every captured prompt and completion on either engine — the
+files beside a SQLite database, the `request_bodies` rows on Postgres. The
+requests stay in the log with their bodies marked pruned. There is no undo:
+bodies are never in a snapshot.
 
 ## Docker
 

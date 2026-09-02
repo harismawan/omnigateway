@@ -6,7 +6,14 @@ import { requestLog } from "@omni/testkit";
 import { previewTable } from "../src/commands/db.ts";
 import type { Prompt } from "../src/prompt.ts";
 import { pidFile } from "../src/service.ts";
-import { cli, type FakeService, fakeService, makeRoot, openStore } from "./helpers/harness.ts";
+import {
+  cli,
+  type FakeService,
+  fakeService,
+  makeRoot,
+  openStore,
+  silentPrompt,
+} from "./helpers/harness.ts";
 
 /** Every test starts from a migrated, empty installation. */
 async function installation(): Promise<string> {
@@ -58,6 +65,43 @@ test("db backup writes a snapshot beside the database, and db snapshots lists it
 
   const human = await cli(["db", "snapshots"], { root });
   expect(human.out).toContain(snapshot.id);
+});
+
+test("db clear-bodies asks first, then removes every artifact and keeps the request", async () => {
+  const root = await installation();
+  const id = "req_11111111-2222-4333-8444-555555555555";
+  const store = await openStore(root);
+  try {
+    await store.usage.append(requestLog({ id, at: 1_000 }));
+    await store.bodies.put({
+      schemaVersion: 1,
+      requestId: id,
+      at: 1_000,
+      client: { request: { model: "fast" }, response: { ok: true }, truncated: false },
+      attempts: [],
+      error: null,
+    });
+  } finally {
+    store.close();
+  }
+
+  const declined = await cli(["db", "clear-bodies"], {
+    root,
+    prompt: { ...silentPrompt, confirm: async () => false },
+  });
+  expect(declined.code).not.toBe(0);
+
+  const result = await cli(["db", "clear-bodies", "--json"], { root });
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.out)).toEqual({ removed: 1, orphans: 0 });
+
+  const after = await openStore(root);
+  try {
+    expect(await after.bodies.get(id)).toBeNull();
+    expect((await after.usage.recent(10)).some((row) => row.id === id)).toBe(true);
+  } finally {
+    after.close();
+  }
 });
 
 /**
