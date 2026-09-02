@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: omnigateway-ingress
+  annotations:
+    # Streaming responses and the console's WebSocket both hold a connection
+    # open past nginx's 60s default. The gateway sends `: keepalive` every
+    # 10s (5s on /v1/responses) and its own socket idle timeout is 255s, so
+    # anything above that keeps nginx from cutting a slow first token.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # Prompts with images are big.
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    # Streaming: no buffering, or the client sees nothing until the end.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # No session affinity needed: sessions and counters live in Redis, and a
+    # console reconnecting to another replica refetches once.
+spec:
+  rules:
+    - host: gateway.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: omnigateway
+                port:
+                  number: 9000

@@ -709,10 +709,24 @@ docker run --rm \
   omnigateway
 ```
 
-The container listens on `0.0.0.0:9000` and keeps its database at
-`/data/omnigateway.db`. Note that **the image builds the gateway only**: it
-serves the APIs and returns 404 for the console. Use the CLI or the control API
-against it, or install the npm package if you want the console.
+The container listens on `0.0.0.0:9000`, serves the console, and keeps its
+database and plugins under `/data`. It runs as the unprivileged `bun` user and
+carries a `HEALTHCHECK` on `/health`.
+
+For a fleet, set `OMNI_DATABASE_URL` and `OMNI_REDIS_URL` and drop the volume;
+see [Running more than one gateway](#running-more-than-one-gateway). A
+Kubernetes deployment — Deployment, Service, Ingress with the timeouts streaming
+needs, HPA, and an example Secret — is under `apps/gateway/k8s/` as a kustomize
+base:
+
+```bash
+cp apps/gateway/k8s/secret.example.yaml apps/gateway/k8s/secret.yaml   # edit it
+kubectl apply -f apps/gateway/k8s/secret.yaml
+kubectl apply -k apps/gateway/k8s
+```
+
+Plugins in a fleet are baked into the image so every replica holds the same
+set: `COPY plugins/ /data/plugins/` in a derived Dockerfile.
 
 Give the container a restart policy — `--restart unless-stopped` — if you want a
 restart request to bring it back. A container cannot read its own policy, so
