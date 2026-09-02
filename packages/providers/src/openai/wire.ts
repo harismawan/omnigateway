@@ -66,6 +66,35 @@ function cacheKey(req: ChatRequest, instructions: string, firstInput: unknown): 
   return createHash("sha256").update(stable).digest("hex").slice(0, 32);
 }
 
+/**
+ * Answers any tool call the history left unanswered.
+ *
+ * The Codex backend refuses an `input` array holding a `function_call` with no
+ * matching `function_call_output`, and a turn interrupted after the model asked
+ * for a tool but before the client ran it produces exactly that. The call is
+ * real history, so it is completed with an empty output rather than dropped —
+ * removing it would rewrite what the model said.
+ *
+ * IR strips orphaned tool *results* in `validateRequest`; nothing strips or
+ * completes an orphaned *call*, which is why this sits here.
+ */
+function repairOrphanedCalls(input: unknown[]): void {
+  const answered = new Set<string>();
+  for (const item of input) {
+    const record = item as { type?: string; call_id?: string };
+    if (record.type === "function_call_output" && typeof record.call_id === "string") {
+      answered.add(record.call_id);
+    }
+  }
+
+  for (let i = input.length - 1; i >= 0; i--) {
+    const record = input[i] as { type?: string; call_id?: string };
+    if (record.type !== "function_call" || typeof record.call_id !== "string") continue;
+    if (answered.has(record.call_id)) continue;
+    input.splice(i + 1, 0, { type: "function_call_output", call_id: record.call_id, output: "" });
+  }
+}
+
 function encodeToolChoice(c: ToolChoice): unknown {
   switch (c.type) {
     case "auto":
@@ -164,16 +193,31 @@ export function toResponsesWire(
           });
           break;
         case "providerNative":
-          // Unreachable in practice: the router excludes this provider from any
-          // request carrying another provider's native history. Recorded rather
-          // than ignored so that if it ever does arrive, the request log says
-          // what was lost instead of the client seeing a turn quietly rewritten.
+          if (block.provider === "openai") {
+            // This provider's own item, going home. `id` is deliberately left
+            // behind: under `store: false` the backend can resolve no
+            // server-assigned id, and an item still carrying one is rejected
+            // outright. What continuity needs is the payload — for a reasoning
+            // item, `encrypted_content` — which is never decrypted, inspected
+            // or regenerated on the way through.
+            flush();
+            const { id: _id, ...rest } = block.data;
+            input.push({ type: block.blockType, ...rest });
+            break;
+          }
+          // Another provider's. Unreachable in practice, since the router
+          // excludes this provider from any request carrying one, and recorded
+          // rather than ignored so that if it ever does arrive the request log
+          // says what was lost instead of the client seeing a turn quietly
+          // rewritten.
           note("openai:anthropic-native-block-dropped");
           break;
       }
     }
     flush();
   }
+
+  repairOrphanedCalls(input);
 
   const body: ResponsesBody = { model, input, stream: req.stream, store: false };
 

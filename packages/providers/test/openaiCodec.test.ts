@@ -13,7 +13,7 @@
 
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError } from "@omni/ir";
-import { openaiAdapter } from "../src/openai/index.ts";
+import { openaiAdapter, openaiCodec } from "../src/openai/index.ts";
 import type { AdapterCredentials, HttpRequest, HttpResponse } from "../src/types.ts";
 
 const request: ChatRequest = {
@@ -156,4 +156,25 @@ test("a credential with neither token is an AUTH failure, and sends nothing", as
   await expect(attempt).rejects.toThrow(GatewayError);
   await attempt.catch((e: unknown) => expect((e as GatewayError).code).toBe("AUTH"));
   expect(capture.sent).toEqual([]);
+});
+
+test("tells the decoder to keep reasoning native exactly when the client asked for it", () => {
+  // Read off the body that was actually built, not off the IR request: the
+  // client's `include` reaches the wire through the vendor bag, so this is the
+  // one place that knows what was really asked for.
+  const asked = openaiCodec.buildRequest({
+    request: { ...request, vendor: { openai: { include: ["reasoning.encrypted_content"] } } },
+    model: "gpt-5-codex",
+    credentials: creds({ apiKey: "sk-oa" }),
+    fail: (code, message) => new GatewayError(code, message),
+  });
+  expect(asked.decodeState).toEqual({ nativeReasoning: true });
+
+  const silent = openaiCodec.buildRequest({
+    request,
+    model: "gpt-5-codex",
+    credentials: creds({ apiKey: "sk-oa" }),
+    fail: (code, message) => new GatewayError(code, message),
+  });
+  expect(silent.decodeState).toEqual({ nativeReasoning: false });
 });

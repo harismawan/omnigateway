@@ -51,7 +51,15 @@ export const openaiCodec: ProviderCodec = {
       openaiProfile.order,
     );
 
+    // What the client asked to get back, which decides whether reasoning items
+    // are the client's to replay or a thinking block for it to read. Taken from
+    // the built body because that is where the vendor bag has already landed.
+    const include = body.include;
+    const nativeReasoning =
+      Array.isArray(include) && include.includes("reasoning.encrypted_content");
+
     return {
+      decodeState: { nativeReasoning },
       request: {
         // The Codex endpoint only streams. Non-streaming client requests are
         // served by collecting the stream in dispatch, so always ask for SSE.
@@ -64,7 +72,8 @@ export const openaiCodec: ProviderCodec = {
     };
   },
 
-  decode({ body }) {
-    return decodeResponses(parseSse(body));
+  decode({ body, decodeState }) {
+    const state = decodeState as { nativeReasoning?: boolean } | undefined;
+    return decodeResponses(parseSse(body), { nativeReasoning: state?.nativeReasoning === true });
   },
 };

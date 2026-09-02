@@ -419,6 +419,25 @@ export async function* responsesStream(
             });
           }
         }
+        if (delta.type === "providerNative" && item.kind === "native") {
+          // A summary the provider is producing now, forwarded under this
+          // dialect's own event name so a client watching the model think sees
+          // it as it arrives.
+          if (delta.deltaType === "reasoning_summary_text.delta") {
+            yield frame("response.reasoning_summary_text.delta", {
+              item_id: item.id,
+              output_index: item.outputIndex,
+              summary_index: CONTENT_INDEX,
+              delta: String(delta.data.text ?? ""),
+            });
+          }
+          // The finished item, folded in whole. `encrypted_content` exists on
+          // no earlier event, so this is where the replayed block learns it —
+          // and it is carried, never read.
+          if (delta.fold === "merge") {
+            item.native = { ...item.native, ...delta.data };
+          }
+        }
         // A `thinkingSignature` is Anthropic's, and there is no Responses
         // spelling for it. Dropped rather than carried as an unknown field: the
         // clients reading this stream parse it strictly.

@@ -519,3 +519,58 @@ test("rate limit headers read the same as the chat surface's", () => {
     openaiRateLimitHeaders(headroom, 999_000),
   );
 });
+
+test("a native reasoning block streams its summary and ends carrying the blob", async () => {
+  // The whole round trip in one stream: the summary reaches the user as it is
+  // produced, and the finished item carries the continuity blob the client
+  // replays on its next turn.
+  const done = {
+    type: "reasoning",
+    id: "rs_1",
+    summary: [{ type: "summary_text", text: "weighing" }],
+    encrypted_content: "gAAAAA",
+  };
+  const f = await stage(
+    responsesStream(
+      src(
+        {
+          type: "blockStart",
+          index: 0,
+          block: { type: "providerNative", provider: "openai", blockType: "reasoning", data: {} },
+        },
+        {
+          type: "blockDelta",
+          index: 0,
+          delta: {
+            type: "providerNative",
+            provider: "openai",
+            deltaType: "reasoning_summary_text.delta",
+            data: { text: "weighing" },
+          },
+        },
+        {
+          type: "blockDelta",
+          index: 0,
+          delta: {
+            type: "providerNative",
+            provider: "openai",
+            deltaType: "response.output_item.done",
+            fold: "merge",
+            data: done,
+          },
+        },
+        { type: "blockEnd", index: 0 },
+      ),
+      RENDER,
+    ),
+  );
+
+  expect(f.map((x) => x.event)).toEqual([
+    "response.output_item.added",
+    "response.reasoning_summary_text.delta",
+    "response.output_item.done",
+  ]);
+  const bodies = f.map((x) => JSON.parse(x.data));
+  expect(bodies[1].delta).toBe("weighing");
+  expect(bodies[2].item).toEqual(done);
+});

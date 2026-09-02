@@ -885,3 +885,201 @@ test("accepts the [DONE] sentinel instead of reading it as an unknown event", as
   expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
   expect(events.some((e) => e.type === "error")).toBe(false);
 });
+
+test("keeps reasoning as a thinking block when the client did not ask for the blob", async () => {
+  // The default, and the regression guard for every client that is not a
+  // Responses one: Claude Code on an OpenAI target must see exactly what it saw
+  // before this capability existed.
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({ output_index: 0, item: { type: "reasoning", id: "rs_1" } }),
+        },
+        {
+          event: "response.reasoning_summary_text.delta",
+          data: JSON.stringify({ output_index: 0, delta: "weighing" }),
+        },
+        {
+          event: "response.output_item.done",
+          data: JSON.stringify({
+            output_index: 0,
+            item: { type: "reasoning", id: "rs_1", summary: [] },
+          }),
+        },
+      ),
+    ),
+  );
+
+  expect(events[0]).toEqual({ type: "blockStart", index: 0, block: { type: "thinking" } });
+  expect(events[1]).toEqual({
+    type: "blockDelta",
+    index: 0,
+    delta: { type: "thinking", text: "weighing" },
+  });
+});
+
+test("carries reasoning as an openai-owned native block when the blob was requested", async () => {
+  const item = {
+    type: "reasoning",
+    id: "rs_1",
+    summary: [{ type: "summary_text", text: "weighing" }],
+    encrypted_content: "gAAAAA",
+  };
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({ output_index: 0, item: { type: "reasoning", id: "rs_1" } }),
+        },
+        {
+          event: "response.reasoning_summary_text.delta",
+          data: JSON.stringify({ output_index: 0, delta: "weighing" }),
+        },
+        { event: "response.output_item.done", data: JSON.stringify({ output_index: 0, item }) },
+      ),
+      { nativeReasoning: true },
+    ),
+  );
+
+  expect(events[0]).toEqual({
+    type: "blockStart",
+    index: 0,
+    block: { type: "providerNative", provider: "openai", blockType: "reasoning", data: {} },
+  });
+  // The summary still streams, so a client watching the model think sees the
+  // same thing it always did.
+  expect(events[1]).toEqual({
+    type: "blockDelta",
+    index: 0,
+    delta: {
+      type: "providerNative",
+      provider: "openai",
+      deltaType: "reasoning_summary_text.delta",
+      data: { text: "weighing" },
+    },
+  });
+  // The completed item folds in whole, which is where `encrypted_content` is:
+  // it does not exist on the `added` event, so the block cannot carry it until
+  // now. Never decrypted, never inspected, never regenerated.
+  expect(events[2]).toEqual({
+    type: "blockDelta",
+    index: 0,
+    delta: {
+      type: "providerNative",
+      provider: "openai",
+      deltaType: "response.output_item.done",
+      fold: "merge",
+      data: item,
+    },
+  });
+  expect(events[3]).toEqual({ type: "blockEnd", index: 0 });
+});
+
+test("replays an openai-owned reasoning item, without the id the backend cannot resolve", () => {
+  // Under `store: false` a server-assigned id resolves to nothing, and an item
+  // carrying one is rejected outright. The blob and the summary are what
+  // continuity needs; the id is not.
+  const { body, degradations } = toResponsesWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "providerNative",
+              provider: "openai",
+              blockType: "reasoning",
+              data: {
+                id: "rs_1",
+                summary: [{ type: "summary_text", text: "weighing" }],
+                encrypted_content: "gAAAAA",
+              },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "go on" }] },
+      ],
+    },
+    "gpt-5",
+  );
+
+  expect(body.input[0]).toEqual({
+    type: "reasoning",
+    summary: [{ type: "summary_text", text: "weighing" }],
+    encrypted_content: "gAAAAA",
+  });
+  expect(degradations).not.toContain("openai:anthropic-native-block-dropped");
+});
+
+test("still records a foreign native block as lost", () => {
+  const { body, degradations } = toResponsesWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "providerNative",
+              provider: "anthropic",
+              blockType: "web_search_tool_result",
+              data: { tool_use_id: "srvtoolu_1" },
+            },
+          ],
+        },
+      ],
+    },
+    "gpt-5",
+  );
+  expect(body.input).toEqual([]);
+  expect(degradations).toContain("openai:anthropic-native-block-dropped");
+});
+
+test("answers an orphaned tool call so the backend does not refuse the turn", () => {
+  // Codex rejects an input array holding a call with no matching output. The
+  // call is real history — the turn was interrupted before the tool ran — so it
+  // is completed with an empty output rather than dropped.
+  const { body } = toResponsesWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "toolUse", id: "call_1", name: "shell", input: { cmd: "ls" } }],
+        },
+      ],
+    },
+    "gpt-5",
+  );
+
+  expect(body.input).toEqual([
+    { type: "function_call", call_id: "call_1", name: "shell", arguments: '{"cmd":"ls"}' },
+    { type: "function_call_output", call_id: "call_1", output: "" },
+  ]);
+});
+
+test("leaves an answered tool call alone", () => {
+  const { body } = toResponsesWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "toolUse", id: "call_1", name: "shell", input: {} }],
+        },
+        {
+          role: "user",
+          content: [{ type: "toolResult", toolUseId: "call_1", content: "ok" }],
+        },
+      ],
+    },
+    "gpt-5",
+  );
+  expect(body.input.filter((i) => (i as { type: string }).type === "function_call_output")).toEqual(
+    [{ type: "function_call_output", call_id: "call_1", output: "ok" }],
+  );
+});

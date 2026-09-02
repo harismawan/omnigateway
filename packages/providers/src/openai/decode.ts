@@ -99,9 +99,27 @@ function json(data: string): ResponsesEvent | null {
   }
 }
 
+/**
+ * Whether this stream's reasoning items are the client's to keep.
+ *
+ * A reasoning item is a thinking block by default, which is what every client
+ * of this gateway has always seen. When the request asked for
+ * `include: ["reasoning.encrypted_content"]`, the item becomes an openai-owned
+ * native block instead, carried whole so the client can replay it on the next
+ * turn — under `store: false` the backend keeps nothing, and that blob is the
+ * only continuity there is.
+ *
+ * Read from the request rather than from the payload, because it has to be
+ * known at `response.output_item.added` and `encrypted_content` does not arrive
+ * until `response.output_item.done`.
+ */
+export type DecodeOptions = { nativeReasoning?: boolean };
+
 export async function* decodeResponses(
   messages: AsyncGenerator<SseMessage> | AsyncIterable<SseMessage>,
+  options: DecodeOptions = {},
 ): AsyncGenerator<StreamEvent, void, undefined> {
+  const nativeReasoning = options.nativeReasoning === true;
   // Responses addresses blocks by (output_index, content_index); the IR uses a
   // single flat index. Assign IR indices in first-seen order.
   const indices = new Map<string, number>();
@@ -163,7 +181,13 @@ export async function* decodeResponses(
           yield {
             type: "blockStart",
             index: irIndex(d.output_index ?? 0),
-            block: { type: "thinking" },
+            block: nativeReasoning
+              ? // Empty until `output_item.done` folds the finished item in:
+                // the `added` event carries no `encrypted_content`, and
+                // inventing a shape for it here would be a guess this decoder
+                // has no way to check.
+                { type: "providerNative", provider: "openai", blockType: "reasoning", data: {} }
+              : { type: "thinking" },
           };
         } else if (item.type === "function_call") {
           sawToolCall = true;
@@ -200,7 +224,16 @@ export async function* decodeResponses(
         yield {
           type: "blockDelta",
           index: irIndex(d.output_index ?? 0),
-          delta: { type: "thinking", text: String(d.delta ?? "") },
+          // The summary streams either way. A client watching the model think
+          // sees the same thing whichever shape the block took.
+          delta: nativeReasoning
+            ? {
+                type: "providerNative",
+                provider: "openai",
+                deltaType: "reasoning_summary_text.delta",
+                data: { text: String(d.delta ?? "") },
+              }
+            : { type: "thinking", text: String(d.delta ?? "") },
         };
         break;
 
@@ -223,6 +256,23 @@ export async function* decodeResponses(
         // content_block_stop. Deleting also makes a repeated done a no-op.
         const outputIndex = d.output_index ?? 0;
         if (ownsBlock.delete(outputIndex)) {
+          const item = d.item ?? {};
+          // The whole finished item, folded into the block it belongs to. This
+          // is the only event that carries `encrypted_content`, so it is the
+          // only place the block can learn it.
+          if (nativeReasoning && item.type === "reasoning") {
+            yield {
+              type: "blockDelta",
+              index: irIndex(outputIndex),
+              delta: {
+                type: "providerNative",
+                provider: "openai",
+                deltaType: "response.output_item.done",
+                fold: "merge",
+                data: item as Record<string, unknown>,
+              },
+            };
+          }
           yield { type: "blockEnd", index: irIndex(outputIndex) };
         }
         break;
