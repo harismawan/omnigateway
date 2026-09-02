@@ -23,6 +23,7 @@
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
 import { anthropicAdapter } from "../src/anthropic/index.ts";
+import { ccVersionSuffix } from "../src/body.ts";
 import type { AdapterCredentials, HttpRequest, HttpResponse } from "../src/types.ts";
 
 const URL = "https://api.anthropic.com/v1/messages";
@@ -163,6 +164,29 @@ test("an OAuth request adds the beta, the preamble, and its own signature", asyn
   expect(sent.body).toContain("cch=b3d1d;");
   expect(sent.body).toContain("You are Claude Code, Anthropic's official CLI for Claude.");
   expect(result.degradations).toEqual(["anthropic:oauth-system-prefix"]);
+});
+
+test("cc_version is hashed from the first user message's first text block", async () => {
+  // `base` sends "hi", which pads every picked index to "0" and so equals the
+  // empty-string suffix — a codec passing "" would sign identically. Both texts
+  // here are long enough to reach index 20, and the first message is not the
+  // user's, so `messages[0]` and `find(role === "user")` disagree too.
+  const assistantText = "Earlier assistant turn, long enough to reach index twenty.";
+  const userText = "Fix the auth middleware, please. Thanks";
+  const { sent } = await send(
+    {
+      ...base,
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: assistantText }] },
+        { role: "user", content: [{ type: "text", text: userText }] },
+      ],
+    },
+    apiKey(),
+  );
+  const expected = ccVersionSuffix(userText);
+  expect(expected).not.toBe(ccVersionSuffix(""));
+  expect(expected).not.toBe(ccVersionSuffix(assistantText));
+  expect(sent.body).toContain(`cc_version=2.1.258.${expected}; `);
 });
 
 test("the client's own betas ride along, and the OAuth beta is added not substituted", async () => {

@@ -131,10 +131,13 @@ const REWRITES: readonly (readonly [string, string])[] = [
  * in, so re-running never stacks a second copy.
  *
  * `firstUserText` is what the CLI hashes into `cc_version`: the first text
- * block of the first user message. The CLI skips its own meta messages there,
- * and the gateway cannot tell which those were, so on a conversation opened by
- * an attachment the suffix differs from the CLI's. Still one value per
- * conversation, which a constant never was.
+ * block of the first user message. It diverges from the CLI's own value in two
+ * known shapes: the CLI skips its own meta messages there and the gateway
+ * cannot tell which those were, and Claude Code often puts a system-reminder
+ * block as the first text block, so the hashed characters come from the
+ * reminder rather than the prompt. A first user turn with no text block at all
+ * hashes as "". Every one of those is still one value per conversation, which
+ * a constant never was.
  */
 export function applyAnthropicSystem(
   system: readonly SystemBlock[],
