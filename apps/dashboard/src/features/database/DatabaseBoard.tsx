@@ -33,6 +33,28 @@ const Problem = styled.p`
  * next to each other. Stopping and starting the process is not one of those and
  * lives in the rail, reachable from wherever the operator happens to be.
  */
+/**
+ * `host:port` of a Postgres URL. The whole URL, credentials masked, is too
+ * long for a readout and says nothing a host and port do not; the masked
+ * password is the part not worth the width.
+ */
+function serverOf(url: string): string {
+  try {
+    const { hostname, port } = new URL(url);
+    return port === "" ? hostname : `${hostname}:${port}`;
+  } catch {
+    return url;
+  }
+}
+
+function databaseOf(url: string): string {
+  try {
+    return new URL(url).pathname.replace(/^\//, "") || "—";
+  } catch {
+    return "—";
+  }
+}
+
 export function DatabaseBoard() {
   const overview = useDatabaseOverview();
   const vacuum = useVacuum();
@@ -99,7 +121,11 @@ export function DatabaseBoard() {
               value={formatBytes(data.logicalBytes)}
               unit={`${data.stats.pageCount} blocks of ${formatBytes(data.stats.pageSize)}`}
             />
-            <Readout legend="Server" value={data.location} unit="password masked" />
+            <Readout
+              legend="Server"
+              value={serverOf(data.location)}
+              unit={`database ${databaseOf(data.location)}`}
+            />
             <Readout
               legend="Captured bodies"
               value={formatBytes(data.bodiesBytes)}

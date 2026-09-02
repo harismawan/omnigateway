@@ -62,7 +62,11 @@ describe("DatabaseBoard", () => {
     });
     renderWithProviders(<DatabaseBoard />);
 
-    expect(await screen.findByText("postgres://omni:***@db.internal:5432/omni")).toBeTruthy();
+    // Host and port alone: the full URL overflows the readout and its masked
+    // password is not information.
+    expect(await screen.findByText("db.internal:5432")).toBeTruthy();
+    expect(screen.getByText("database omni")).toBeTruthy();
+    expect(screen.queryByText(/omni:\*\*\*@/)).toBeNull();
     expect(screen.getByText("1536 blocks of 8.0 KiB")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Compact" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Take a snapshot" })).toBeNull();
