@@ -180,19 +180,30 @@ jobs:
 
   # GitOps promotion: the kustomize base on `main` names the image tag, and
   # Argo CD watches `main`. Moving `newTag` is the deploy; nothing here talks
-  # to a cluster. Committed by the bot on top of whatever `main` holds now, so
-  # a release cut from an older commit still promotes to the tip.
+  # to a cluster.
+  #
+  # A pull request rather than a push. `main` requires one, and GitHub does not
+  # let a user-owned repository grant the Actions app a bypass — that is an
+  # organisation feature — so the bot does what a person does: branch, commit,
+  # open, merge. Zero approvals are required and no checks are, so the merge
+  # goes through on the same token. `pull-requests: write` is for the open.
   promote:
     runs-on: ubuntu-latest
     needs: image
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v5
         with:
           ref: main
 
       - name: Point the kustomize base at the new image
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          BRANCH="gitops/promote-${VERSION}"
           sed -i "s/newTag: .*/newTag: ${VERSION}/" k8s/kustomization.yaml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -201,5 +212,10 @@ jobs:
             echo "kustomization already at ${VERSION}"
             exit 0
           fi
+          git checkout -b "$BRANCH"
           git commit -m "chore(gitops): promote omnigateway image to ${VERSION}"
-          git push origin main
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore(gitops): promote omnigateway image to ${VERSION}" \
+            --body "Points \`k8s/kustomization.yaml\` at \`ghcr.io/harismawan/omnigateway:${VERSION}\`. Argo CD deploys on merge."
+          gh pr merge "$BRANCH" --squash --delete-branch
