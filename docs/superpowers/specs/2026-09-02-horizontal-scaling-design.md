@@ -353,18 +353,22 @@ refusing.
 
 ## Data migration — `omni db migrate --to <postgres-url>`
 
-In `packages/control`, injected like every CLI side effect. Refuses while the gateway is
-running (the same check `restore` makes) and refuses a non-empty target. Copies, in one
-target transaction: `credentials` (ciphertext and versions verbatim — the same
-`OMNI_ENCRYPTION_KEY` opens them), `api_keys` (hashes, limits, allowlist), `virtual_models`,
-`settings`, `request_logs` and `usage_daily`, and the latest `quota_windows` reading per
-credential and window. Then `rebuildRollup` on the target. Verifies row counts per table
-and prints them.
+`copyStore(source, target)` in `packages/control/src/copyStore.ts`, through the `Store`
+interface alone — no ciphertext moves; the target re-encrypts what the source decrypted, so
+both open with the same `OMNI_ENCRYPTION_KEY`. Two repo methods exist for it and nothing
+else: `keys.importRow` (a row exactly as read, dates and revocation included) and
+`usage.scan` (every row in `(at, id)` order, a page at a time). Refuses while the gateway
+is running and refuses a target that holds anything. Copies settings, both password hashes,
+credentials, virtual models, API keys, then every completed request row through `append` —
+which rebuilds `usage_rollup` and `usage_daily` as a side effect — and `rebuildRollup`
+last.
 
-Skipped, and said in the output: request bodies (the file corpus stays on the source host;
-body rows are dropped), sessions, pending flows, and `plugin_*` tables — listed by name with
-"migrate by hand", because their SQL is dialect-specific. The reverse direction is not
-offered.
+**Not carried, and printed every time:** request bodies; `usage_daily` older than the
+retained request logs (the spec first said this would be carried, and it is not — the
+daily table beyond log retention is history the rollup cannot rebuild, and carrying it
+needed two more interface methods for one command); quota readings and breaker state,
+re-measured within a poll interval; sessions and pending flows; `plugin_*` tables. The
+reverse direction is not offered.
 
 ## Testing
 
@@ -398,9 +402,11 @@ Seven pull requests, each mergeable alone, single-node green throughout:
 4. Redis implementation, fail-open table, the two `LogFields` keys, `/health` fields.
 5. Postgres store, `bytea` bodies, contract suite, CI services.
 6. `@omnigateway/plugin-api` 0.3.0, `PLUGIN_API_VERSION` 3, async storage.
-7. `omni db migrate`; README cluster section; `ARCHITECTURE.md` "Clustering". (`CLAUDE.md`
-   rule 14 landed with PR 1: every process-local mutable goes through `coord` or the store,
-   and a review of any new module-scope `Map` asks which.)
+7. `omni db migrate --to`; README "Running more than one gateway"; `ARCHITECTURE.md`
+   "Clustering". (`CLAUDE.md` rule 14 landed with PR 1: every process-local mutable goes
+   through `coord` or the store, and a review of any new module-scope `Map` asks which.)
+
+All seven landed on `feat/horizontal-scaling-spec`, 2026-09-02.
 
 ## Out of scope
 

@@ -944,6 +944,13 @@ export interface KeyRepo {
   /** Throws on a `limits` shape no reader could parse, rather than storing it. */
   create(input: ApiKeyInput): Promise<ApiKey>;
   /**
+   * Writes a row exactly as read from another store — `createdAt` and
+   * `revokedAt` included. For copying an installation between backends and
+   * nothing else; a key minted here goes through `create`. A row whose
+   * `limits` are `null` is refused, because nothing could read it back.
+   */
+  importRow(row: ApiKey): Promise<void>;
+  /**
    * Replaces one key's limit matrix, whole.
    *
    * One of two fields editable after minting — the allowlist via
@@ -1089,6 +1096,12 @@ export interface UsageRepo {
    * cannot see. Anonymous rows carry a NULL `api_key_id` and match no scope.
    */
   recent(limit: number, apiKeyId?: string): Promise<RequestLog[]>;
+  /**
+   * Every row in `(at, id)` order, `limit` at a time, from just after `cursor`.
+   * For copying an installation between backends: `recent` is a page with no
+   * way to ask for the next one.
+   */
+  scan(cursor: { at: number; id: string } | null, limit: number): Promise<RequestLog[]>;
   aggregate(q: UsageQuery): Promise<UsageBucket[]>;
   /**
    * What one API key has consumed since an instant, for the sliding windows a

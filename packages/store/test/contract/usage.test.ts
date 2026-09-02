@@ -311,3 +311,29 @@ forEachStore((backend) => {
     expect((await a.maintenance.nodes(t + NODE_GRACE_MS + 2)).map((n) => n.id)).toEqual([]);
   });
 });
+
+forEachStore((backend) => {
+  test("scan walks every row in (at, id) order, a page at a time, with no repeats", async () => {
+    const s = await backend.fresh();
+    for (const [id, at] of [
+      ["b", 2],
+      ["a", 2],
+      ["c", 1],
+      ["d", 3],
+    ] as const) {
+      await s.usage.append(logRow({ id, at: 1_700_000_000_000 + at }));
+    }
+    await s.usage.begin(logRow({ id: "p", at: 1_700_000_000_000 + 4, state: "pending" }));
+    const seen: string[] = [];
+    let cursor: { at: number; id: string } | null = null;
+    for (;;) {
+      const page = await s.usage.scan(cursor, 2);
+      if (page.length === 0) break;
+      seen.push(...page.map((row) => row.id));
+      const last = page[page.length - 1];
+      if (last === undefined) break;
+      cursor = { at: last.at, id: last.id };
+    }
+    expect(seen).toEqual(["c", "a", "b", "d", "p"]);
+  });
+});

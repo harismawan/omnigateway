@@ -126,6 +126,26 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       return { ...input, createdAt: now, revokedAt: null };
     },
 
+    async importRow(row) {
+      if (row.limits === null) throw new Error(`api key ${row.id} has unreadable limits`);
+      db.run(
+        `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
+                               body_logging_opt_out, created_at, revoked_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
+        [
+          row.id,
+          row.label,
+          row.prefix,
+          row.hash,
+          row.modelAllowlist === null ? null : JSON.stringify(row.modelAllowlist),
+          JSON.stringify(parseLimitConfig(row.limits)),
+          row.bodyLoggingOptOut ? 1 : 0,
+          row.createdAt,
+          row.revokedAt,
+        ],
+      );
+    },
+
     async setLimits(id: string, limits: LimitConfig) {
       db.run("UPDATE api_keys SET limits = ? WHERE id = ?", [
         // Same guard as `create`, and for the same reason: an edit that reached

@@ -321,6 +321,21 @@ export function createUsageRepo(sql: SQL, nodeId: string): UsageRepo {
       return rows.map(toLog);
     },
 
+    async scan(cursor, limit) {
+      const rows =
+        cursor === null
+          ? await sql.unsafe<Rows<Row>>("SELECT * FROM request_logs ORDER BY at, id LIMIT $1", [
+              limit,
+            ])
+          : await sql.unsafe<Rows<Row>>(
+              `SELECT * FROM request_logs
+                WHERE at > $1 OR (at = $1 AND id > $2)
+                ORDER BY at, id LIMIT $3`,
+              [cursor.at, cursor.id, limit],
+            );
+      return rows.map(toLog);
+    },
+
     async sumSince(apiKeyId: string, sinceMs: number) {
       // Two reads, and neither grows with how long the install has been running.
       //

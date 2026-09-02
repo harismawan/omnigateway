@@ -363,6 +363,20 @@ export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
         .map(toLog);
     },
 
+    async scan(cursor, limit) {
+      const rows =
+        cursor === null
+          ? db.query<Row, [number]>("SELECT * FROM request_logs ORDER BY at, id LIMIT ?").all(limit)
+          : db
+              .query<Row, [number, number, string, number]>(
+                `SELECT * FROM request_logs
+                  WHERE at > ? OR (at = ? AND id > ?)
+                  ORDER BY at, id LIMIT ?`,
+              )
+              .all(cursor.at, cursor.at, cursor.id, limit);
+      return rows.map(toLog);
+    },
+
     async sumSince(apiKeyId: string, sinceMs: number) {
       // Two reads, and neither grows with how long the install has been running.
       //

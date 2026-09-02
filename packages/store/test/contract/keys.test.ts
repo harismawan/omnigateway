@@ -82,3 +82,38 @@ forEachStore((backend) => {
     expect((await s.keys.get("k1"))?.modelAllowlist).toEqual(["c"]);
   });
 });
+
+forEachStore((backend) => {
+  test("importRow writes a row exactly as read, revocation and dates included", async () => {
+    const s = await backend.fresh();
+    await s.keys.importRow({
+      id: "k_imported",
+      label: "carried",
+      prefix: "omni_abcdefgh",
+      hash: "a".repeat(64),
+      modelAllowlist: ["fast"],
+      limits: { concurrency: 2 },
+      bodyLoggingOptOut: true,
+      createdAt: 1_600_000_000_000,
+      revokedAt: 1_600_000_100_000,
+    });
+    const row = await s.keys.get("k_imported");
+    expect(row?.createdAt).toBe(1_600_000_000_000);
+    expect(row?.revokedAt).toBe(1_600_000_100_000);
+    expect(row?.limits).toEqual({ concurrency: 2 });
+    expect(row?.bodyLoggingOptOut).toBe(true);
+    await expect(
+      s.keys.importRow({
+        id: "k_broken",
+        label: "b",
+        prefix: "p",
+        hash: "b".repeat(64),
+        modelAllowlist: null,
+        limits: null,
+        bodyLoggingOptOut: false,
+        createdAt: 1,
+        revokedAt: null,
+      }),
+    ).rejects.toThrow("unreadable limits");
+  });
+});

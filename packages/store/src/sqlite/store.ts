@@ -151,6 +151,7 @@ export async function createStore(opts: {
       findByHash: (hash) => handle.keys.findByHash(hash),
       get: (id) => handle.keys.get(id),
       create: (input) => handle.keys.create(input),
+      importRow: (row) => handle.keys.importRow(row),
       setLimits: (id, limits) => handle.keys.setLimits(id, limits),
       setModelAllowlist: (id, modelAllowlist) => handle.keys.setModelAllowlist(id, modelAllowlist),
       revoke: (id) => handle.keys.revoke(id),
@@ -166,6 +167,7 @@ export async function createStore(opts: {
       // carries the scope that keeps one API key's logs away from another's, so
       // dropping it would serve every row and report no fault.
       recent: (limit, apiKeyId) => handle.usage.recent(limit, apiKeyId),
+      scan: (cursor, limit) => handle.usage.scan(cursor, limit),
       aggregate: (q) => handle.usage.aggregate(q),
       sumSince: (apiKeyId, sinceMs) => handle.usage.sumSince(apiKeyId, sinceMs),
       sumBuckets: (apiKeyId, sinceMs, grainMs) =>

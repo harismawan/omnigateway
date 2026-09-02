@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import {
+  copyStore,
   createSnapshot,
   type DatabaseDeps,
   getDatabaseOverview,
@@ -11,11 +12,23 @@ import {
   snapshotsDir,
   vacuum,
 } from "@omni/control";
-import { boolFlag, requirePositional } from "../args.ts";
+import { createPostgresStore, deriveKey } from "@omni/store";
+import { boolFlag, requirePositional, stringFlag } from "../args.ts";
 import type { Command, CommandEnv } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatBytes, formatTime, note, table } from "../output.ts";
 import { status as serviceStatus } from "../service.ts";
+
+/** A URL safe to print: the password, if any, replaced. */
+function redact(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.password !== "") parsed.password = "***";
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
 
 /**
  * The database operations, pointed at the installation this invocation resolved.
@@ -30,9 +43,61 @@ async function database(env: CommandEnv): Promise<DatabaseDeps> {
 }
 
 export const dbMigrate: Command = {
-  usage: "db migrate",
-  summary: "Create or upgrade the database schema",
-  async run(_args, { ctx, writer }) {
+  usage: "db migrate [--to <postgres-url>]",
+  summary: "Create or upgrade the database schema, or copy this installation onto Postgres",
+  options: { to: { type: "string" } },
+  /**
+   * With `--to`, copies the essential state of this SQLite installation into an
+   * empty Postgres database — the first step of moving onto cluster mode. Both
+   * stores open with this installation's `OMNI_ENCRYPTION_KEY`, so the copy
+   * decrypts on one side and re-encrypts on the other and no ciphertext moves.
+   * Refused while a gateway is running: the rows it is writing would be
+   * missed, and it is about to be pointed elsewhere anyway. What is not carried
+   * is printed, by name, every time.
+   */
+  async run(args, env) {
+    const { ctx, writer, prompt } = env;
+    const to = stringFlag(args.values, "to");
+    if (to !== undefined) {
+      if (!to.startsWith("postgres")) throw new CliError("--to must be a postgres:// URL");
+      const running = await serviceStatus(env.service());
+      if (running.running) {
+        throw new CliError(
+          "a gateway is running against this installation; run omni stop first, so the copy " +
+            "misses nothing it is writing",
+        );
+      }
+      if (!(await prompt.confirm(`copy ${ctx.databasePath} into ${redact(to)}?`))) {
+        throw new CliError("cancelled");
+      }
+      const source = await ctx.store();
+      const target = await createPostgresStore({
+        url: to,
+        encryptionKey: await deriveKey(ctx.config().encryptionKey),
+      });
+      try {
+        const report = await copyStore(source, target);
+        emit(ctx, writer, { target: redact(to), ...report }, () =>
+          [
+            fields([
+              ["target", redact(to)],
+              ...Object.entries(report.counts).map(
+                ([table, count]) => [table, String(count)] as [string, string],
+              ),
+            ]),
+            "",
+            "not carried:",
+            ...report.notCarried.map((line) => `  - ${line}`),
+            "",
+            "next: set OMNI_DATABASE_URL and OMNI_REDIS_URL on every replica and start them.",
+          ].join("\n"),
+        );
+      } finally {
+        target.close();
+      }
+      return;
+    }
+
     const existed = existsSync(ctx.databasePath);
     // Opening the store runs every pending migration; there is no second code
     // path for it, which is what keeps the CLI and the gateway in step.

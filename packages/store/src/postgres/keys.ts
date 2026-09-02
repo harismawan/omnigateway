@@ -94,6 +94,26 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
       return { ...input, createdAt: now, revokedAt: null };
     },
 
+    async importRow(row) {
+      if (row.limits === null) throw new Error(`api key ${row.id} has unreadable limits`);
+      await sql.unsafe(
+        `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
+                               body_logging_opt_out, created_at, revoked_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          row.id,
+          row.label,
+          row.prefix,
+          row.hash,
+          row.modelAllowlist === null ? null : JSON.stringify(row.modelAllowlist),
+          JSON.stringify(parseLimitConfig(row.limits)),
+          row.bodyLoggingOptOut,
+          row.createdAt,
+          row.revokedAt,
+        ],
+      );
+    },
+
     async setLimits(id: string, limits: LimitConfig) {
       // Same guard as `create`, and for the same reason: an edit that reached
       // past the control schema must not be able to write a matrix the next

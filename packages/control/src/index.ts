@@ -49,6 +49,7 @@ export {
   resolveConsoleSource,
   UNIT_NAME,
 } from "./console.ts";
+export { type CopyCounts, type CopyReport, copyStore, NOT_CARRIED } from "./copyStore.ts";
 export {
   type CredentialPatch,
   type CredentialStatus,

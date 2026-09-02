@@ -572,8 +572,19 @@ Plugins are loaded from each replica's own `<root>/plugins/`; bake them into the
 replica holds the same set. Plugin storage is Postgres in cluster mode, so a plugin's SQL is
 written for it. `POST /api/restart` refuses in cluster mode — roll the deployment instead.
 
-Moving an existing SQLite installation onto Postgres is `omni db migrate --to <url>`; see
-[Snapshots and restore](#snapshots-and-restore).
+Moving an existing SQLite installation onto Postgres:
+
+```bash
+omni stop
+omni db migrate --to postgres://omni:secret@db.internal:5432/omni
+```
+
+It copies credentials (re-encrypted with the same `OMNI_ENCRYPTION_KEY`), API keys, virtual
+models, settings, both passwords and every completed request log into an **empty** Postgres
+database, rebuilds the rollups, and prints what it did not carry: request bodies, `usage_daily`
+older than the retained logs, quota readings and breaker state (re-measured within a poll
+interval), sessions, and `plugin_*` tables, whose SQL is the source dialect's. It refuses while a
+gateway is running and refuses a target that holds anything.
 
 ## Recording bodies
 
