@@ -30,3 +30,9 @@ snapshots/
 # source files — so the rule is that they cannot be staged, not that you should
 # remember to delete them.
 .tmp-*
+
+# Mutation-testing backups. These are restore copies of live source, so a
+# stray one is both dead code no gate can see and a way to reintroduce a fixed
+# bug by "restoring" it.
+*.bak
+*.bak[0-9]*

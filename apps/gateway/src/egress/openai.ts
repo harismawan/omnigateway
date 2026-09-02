@@ -34,7 +34,7 @@ const FINISH: Readonly<Record<StopReason, string>> = {
   pauseTurn: "stop",
 };
 
-const ERROR_TYPE: Readonly<Record<ErrorCode, { type: string; code: string }>> = {
+export const ERROR_TYPE: Readonly<Record<ErrorCode, { type: string; code: string }>> = {
   AUTH: { type: "invalid_request_error", code: "invalid_api_key" },
   RATE_LIMIT: { type: "rate_limit_error", code: "rate_limit_exceeded" },
   QUOTA_EXHAUSTED: { type: "insufficient_quota", code: "insufficient_quota" },

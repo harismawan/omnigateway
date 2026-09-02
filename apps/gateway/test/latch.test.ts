@@ -171,6 +171,21 @@ test("a refusal is retryable and rendered in the surface the caller asked for", 
   const body = (await openai.json()) as { error: { type: string } };
   expect(body.error.type).toBe("server_error");
 
+  // The Responses surface has its own error shape, and this function is keyed
+  // on the path rather than on the surface — so a route added without a line
+  // here is served the Anthropic dialect by default, which its client cannot
+  // read. `param` is the field that tells the two OpenAI dialects apart.
+  const responses = await proxy("/v1/responses");
+  expect(responses.status).toBe(503);
+  expect(await responses.json()).toEqual({
+    error: {
+      type: "server_error",
+      code: "server_error",
+      message: expect.stringContaining("maintenance"),
+      param: null,
+    },
+  });
+
   store.close();
 });
 

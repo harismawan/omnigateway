@@ -1,7 +1,8 @@
 # Agent Client Context and Setup Design
 
 **Date:** 2026-08-09
-**Status:** Implemented, except section 6 (`/v1/responses`), which is deferred
+**Status:** Implemented. Section 6 (`/v1/responses`) was deferred and is now superseded by
+[2026-09-01-responses-ingress-design.md](2026-09-01-responses-ingress-design.md)
 
 ## Goal
 
@@ -322,6 +323,10 @@ pool holds. The path is `/api/agent-setup` rather than `/api/setup` because the 
 already the first-run admin-password route.
 
 ## 6. `POST /v1/responses`
+
+*Superseded and implemented. See
+[2026-09-01-responses-ingress-design.md](2026-09-01-responses-ingress-design.md); the section below
+is the original reservation, kept for the measurements that motivated it.*
 
 Measurements 8 and 9 make this a prerequisite rather than an enhancement: Codex CLI speaks
 only the OpenAI Responses API, and this gateway has no such route.

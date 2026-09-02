@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatRequest, StopReason, StreamEvent } from "@omni/ir";
 import { customAdapter } from "../src/custom/index.ts";
+import { toCustomResponsesWire } from "../src/custom/wire.ts";
 import type { HttpRequest } from "../src/index.ts";
 import { ADAPTERS } from "../src/registry.ts";
 
@@ -758,4 +759,51 @@ describe("custom chat refuses a finish reason it does not know", () => {
     expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "endTurn" });
     expect(events.some((event) => event.type === "error")).toBe(false);
   });
+});
+
+test("a mid-conversation system turn goes as a developer item, keeping its place", () => {
+  // Measured against the one custom endpoint configured on the machine this was
+  // written on — OpenRouter's `/api/v1/responses` accepts the role and answers
+  // 200 — and against the Codex backend, which is a different implementation of
+  // the same API. Two independent servers, not a reading of the specification.
+  //
+  // `custom` is still the weakest of the three: it is an open set of
+  // third-party servers and only its operator can test their own. The role is
+  // what the API defines, so a compliant endpoint takes it, and a refusal is
+  // loud — every request carrying such a turn fails at once, rather than
+  // degrading in a way nobody notices.
+  const { body, degradations } = toCustomResponsesWire(
+    {
+      model: "m",
+      system: [{ type: "text", text: "top-level prompt" }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "system", content: [{ type: "text", text: "Write Go." }] },
+        { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      ],
+      stream: false,
+    },
+    "m",
+  );
+
+  expect(body.instructions).toBe("top-level prompt");
+  expect(body.input).toEqual([
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "Write Go." }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+  ]);
+  expect(degradations).toContain("custom:system-turn-as-developer");
+});
+
+test("never emits a system role inside a custom responses input", () => {
+  const { body } = toCustomResponsesWire(
+    {
+      model: "m",
+      messages: [{ role: "system", content: [{ type: "text", text: "Write Go." }] }],
+      stream: false,
+    },
+    "m",
+  );
+  const roles = (body.input as { role: string }[]).map((m) => m.role);
+  expect(roles).not.toContain("system");
 });

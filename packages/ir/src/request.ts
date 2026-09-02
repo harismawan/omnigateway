@@ -198,29 +198,54 @@ export type AnthropicToolFamily =
   | "mcpToolset";
 
 /**
- * A tool whose schema Anthropic owns.
+ * A tool whose schema a provider owns.
  *
  * The version is the contract: `bash_20241022` and `bash_20250124` are
  * different tools with different inputs, so `type` is carried exactly as the
- * caller wrote it and is never upgraded on their behalf. `name` is fixed by
- * Anthropic per type and validated at ingress rather than defaulted, because a
+ * caller wrote it and is never upgraded on their behalf. `name` is fixed by the
+ * provider per type and validated at ingress rather than defaulted, because a
  * mismatched pair is a request the client got wrong, not one to repair.
+ *
+ * `provider` was already a `ProviderId` rather than the literal `"anthropic"`
+ * when only Anthropic produced these, and that is what let the OpenAI hosted
+ * tools — `tool_search`, `local_shell`, `web_search` and the rest, which a
+ * Responses client declares and Codex depends on — join without a second shape.
+ * The one Anthropic-specific field is `family`, so it is the one that became
+ * optional; `AnthropicToolDef` below is the narrowing that still requires it.
+ *
+ * Nothing here interprets `wire`. Routing reads `provider` and the owning
+ * encoder reads the rest, which is why a hosted tool needs no entry in any core
+ * table: `requiredProviders` admits only targets of the provider named here.
  */
-export type AnthropicToolDef = {
+export type ProviderToolDef = {
   kind: "provider";
   /** Whose schema this is, and therefore the only provider that may receive it. */
   provider: ProviderId;
-  family: AnthropicToolFamily;
   /** Exact versioned wire `type`. */
   type: string;
-  /** The fixed name Anthropic pairs with `type`. */
+  /** The fixed name the provider pairs with `type`. */
   name: string;
   /** Every other validated wire field, verbatim, minus `type` and `name`. */
   wire: Record<string, unknown>;
   cacheControl?: CacheControl;
+  /**
+   * Which family the tool belongs to, for the provider that defines families.
+   * Present only on Anthropic's, which is why the narrowing below exists.
+   */
+  family?: AnthropicToolFamily;
 };
 
-export type ToolDef = CustomToolDef | AnthropicToolDef;
+/**
+ * A provider tool carrying the Anthropic family, which the Anthropic ingress
+ * always sets and the Anthropic encoder always reads.
+ *
+ * Kept as a narrowing rather than a separate arm of the union so those two stay
+ * exactly as they were: a missing `family` is a type error where it matters, and
+ * nowhere else has to ask.
+ */
+export type AnthropicToolDef = ProviderToolDef & { family: AnthropicToolFamily };
+
+export type ToolDef = CustomToolDef | ProviderToolDef;
 
 /**
  * Tagged rather than a bare string union, so every encoder can `switch` on

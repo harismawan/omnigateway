@@ -21,7 +21,12 @@ export type LogLevel = keyof typeof LEVELS;
  */
 export type LogFields = {
   requestId?: string | undefined;
-  surface?: "anthropic" | "openai" | undefined;
+  /**
+   * Which client dialect the request arrived in. Vocabulary the core owns, in
+   * the same family as `ErrorCode` and `StopReason`: a new member is a core
+   * edit by design, which is what keeps this field from becoming free text.
+   */
+  surface?: "anthropic" | "openai" | "responses" | undefined;
   status?: number | undefined;
   provider?: ProviderId | undefined;
   model?: string | undefined;

@@ -66,6 +66,43 @@ function cacheKey(req: ChatRequest, instructions: string, firstInput: unknown): 
   return createHash("sha256").update(stable).digest("hex").slice(0, 32);
 }
 
+/**
+ * Answers any tool call the history left unanswered.
+ *
+ * The Codex backend refuses an `input` array holding a `function_call` with no
+ * matching `function_call_output`, and a turn interrupted after the model asked
+ * for a tool but before the client ran it produces exactly that. The call is
+ * real history, so it is completed with an empty output rather than dropped —
+ * removing it would rewrite what the model said.
+ *
+ * IR strips orphaned tool *results* in `validateRequest`; nothing strips or
+ * completes an orphaned *call*, which is why this sits here.
+ *
+ * `function_call` is the only type it looks for, and that is a fact about this
+ * encoder rather than about the API: IR has one `toolUse` block, so a tool the
+ * client declared freeform is flattened to a function call here exactly as its
+ * declaration is flattened to a function tool. Teaching this encoder to emit
+ * `custom_tool_call` means teaching this function `custom_tool_call_output` in
+ * the same change — a review read the older wording as a claim that both were
+ * already handled, which is the failure a comment broader than its code causes.
+ */
+function repairOrphanedCalls(input: unknown[]): void {
+  const answered = new Set<string>();
+  for (const item of input) {
+    const record = item as { type?: string; call_id?: string };
+    if (record.type === "function_call_output" && typeof record.call_id === "string") {
+      answered.add(record.call_id);
+    }
+  }
+
+  for (let i = input.length - 1; i >= 0; i--) {
+    const record = input[i] as { type?: string; call_id?: string };
+    if (record.type !== "function_call" || typeof record.call_id !== "string") continue;
+    if (answered.has(record.call_id)) continue;
+    input.splice(i + 1, 0, { type: "function_call_output", call_id: record.call_id, output: "" });
+  }
+}
+
 function encodeToolChoice(c: ToolChoice): unknown {
   switch (c.type) {
     case "auto":
@@ -112,12 +149,26 @@ export function toResponsesWire(
   for (const message of req.messages) {
     const parts: unknown[] = [];
 
-    // The Codex backend refuses a system turn inside `input` — it supplies its
-    // own. The documented fallback is to carry the instruction in a user turn,
-    // marked, so it keeps its position even though it loses the operator role.
-    const inlined = message.role === "system";
-    if (inlined) note("openai:system-turn-inlined");
-    const role = inlined ? "user" : message.role;
+    // The backend refuses a `system` turn inside `input` — it supplies its own —
+    // so a mid-conversation operator turn goes as `developer`, which is this
+    // dialect's role for exactly that. It keeps both its position and its
+    // operator standing, where the `<system-reminder>` user turn this replaced
+    // kept only the position; it also stays inside the cacheable prefix, which
+    // a rewritten user turn did not.
+    //
+    // Measured against the live Codex backend on 2026-09-02, not inferred: the
+    // same request sent twice, differing only in this role, came back 200 with
+    // nine events and `response.completed` both times. The OAuth leg is the one
+    // that was probed, and it is the narrower of the two hosts — `api.openai.com`
+    // documents the role.
+    //
+    // Recorded as a degradation still, because the role is not the one the
+    // client wrote. Rows written before the rename carry
+    // `openai:system-turn-inlined` and stay readable: degradations are
+    // forensic text, never parsed on read.
+    const asDeveloper = message.role === "system";
+    if (asDeveloper) note("openai:system-turn-as-developer");
+    const role = asDeveloper ? "developer" : message.role;
 
     const flush = (): void => {
       if (parts.length === 0) return;
@@ -130,7 +181,7 @@ export function toResponsesWire(
         case "text":
           parts.push({
             type: role === "assistant" ? "output_text" : "input_text",
-            text: inlined ? `<system-reminder>\n${block.text}\n</system-reminder>` : block.text,
+            text: block.text,
           });
           break;
         case "image":
@@ -164,16 +215,31 @@ export function toResponsesWire(
           });
           break;
         case "providerNative":
-          // Unreachable in practice: the router excludes this provider from any
-          // request carrying another provider's native history. Recorded rather
-          // than ignored so that if it ever does arrive, the request log says
-          // what was lost instead of the client seeing a turn quietly rewritten.
+          if (block.provider === "openai") {
+            // This provider's own item, going home. `id` is deliberately left
+            // behind: under `store: false` the backend can resolve no
+            // server-assigned id, and an item still carrying one is rejected
+            // outright. What continuity needs is the payload — for a reasoning
+            // item, `encrypted_content` — which is never decrypted, inspected
+            // or regenerated on the way through.
+            flush();
+            const { id: _id, ...rest } = block.data;
+            input.push({ type: block.blockType, ...rest });
+            break;
+          }
+          // Another provider's. Unreachable in practice, since the router
+          // excludes this provider from any request carrying one, and recorded
+          // rather than ignored so that if it ever does arrive the request log
+          // says what was lost instead of the client seeing a turn quietly
+          // rewritten.
           note("openai:anthropic-native-block-dropped");
           break;
       }
     }
     flush();
   }
+
+  repairOrphanedCalls(input);
 
   const body: ResponsesBody = { model, input, stream: req.stream, store: false };
 
