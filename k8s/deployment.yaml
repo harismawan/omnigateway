@@ -18,8 +18,8 @@ spec:
       labels:
         app: omnigateway
     spec:
-      imagePullSecrets:
-        - name: ghcr-creds
+      # No imagePullSecrets: the package is public. Naming a secret that does
+      # not exist fails the pull on some runtimes rather than being ignored.
       # Long enough for in-flight streams to finish: the gateway drains on
       # SIGTERM and closes consoles with 1001 so they reconnect elsewhere.
       terminationGracePeriodSeconds: 60
