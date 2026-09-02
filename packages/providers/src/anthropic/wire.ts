@@ -144,8 +144,30 @@ function encodeSystemTurn(content: ContentBlock[], cloak: ToolCloak | null): str
   return content.map((block) => encodeBlock(block, cloak));
 }
 
+/**
+ * The breakpoint a client put on the request's final mid-conversation system
+ * turn, which has to be moved off it to cache anything at all.
+ *
+ * Such a turn is a directive the client re-emits every request — hook output, a
+ * reminder — so it sits at a *different position* in the next request, after
+ * the exchange that happened in between. A prefix ending inside it is therefore
+ * never a prefix of the next request, and the entry it wrote can only ever be
+ * read by a retry of the same request.
+ *
+ * Measured against the account rather than reasoned about, because the first
+ * two readings of this were both wrong. Four requests, each the previous one
+ * plus an exchange: marked on the trailing turn, every request read 0 and wrote
+ * the whole prefix (11,820 tokens, then 11,831, then 11,842); marked on the
+ * last block *before* it, every request read the previous total and wrote 11.
+ * Request-level `cache_control` — which this function used to promote it to —
+ * behaves exactly like marking the turn itself, so that path was not a
+ * workaround for anything. It is where the marker went to die.
+ *
+ * `retarget` is where the marker is *taken from*; `toWire` decides where it
+ * lands, because that is a question about the wire body and this walks the IR.
+ */
 function systemCacheControl(req: ChatRequest): {
-  promoted?: CacheControl;
+  retarget?: CacheControl;
   lost: boolean;
 } {
   const cacheable = req.messages.flatMap((message) =>
@@ -157,13 +179,13 @@ function systemCacheControl(req: ChatRequest): {
     ({ role, block }) => role === "system" && cacheControlOf(block) !== undefined,
   );
   const final = markedSystemBlocks.at(-1);
-  const promoted =
+  const retarget =
     final !== undefined && final.block.type === "text" && cacheable.at(-1) === final
       ? cacheControlOf(final.block)
       : undefined;
   return {
-    ...(promoted === undefined ? {} : { promoted }),
-    lost: markedSystemBlocks.length > (promoted === undefined ? 0 : 1),
+    ...(retarget === undefined ? {} : { retarget }),
+    lost: markedSystemBlocks.length > (retarget === undefined ? 0 : 1),
   };
 }
 
@@ -576,15 +598,41 @@ export function toWire(
     }),
     max_tokens: req.maxTokens ?? 4096,
     stream: req.stream,
-    ...(systemCache.promoted === undefined
-      ? {}
-      : {
-          cache_control: {
-            type: systemCache.promoted.type,
-            ...(systemCache.promoted.ttl === undefined ? {} : { ttl: systemCache.promoted.ttl }),
-          },
-        }),
   };
+
+  // The marker off the trailing system turn goes on the last cacheable block
+  // before it — the newest boundary that will still be a prefix of the next
+  // request. `slice(0, -1)` is what excludes the turn it came from: a mixed
+  // system turn is encoded as a block array, so the walk would otherwise put it
+  // straight back where it cannot work. An all-text turn is a string and the
+  // walk skips it anyway; the slice is what makes that not depend on which
+  // shape it took.
+  //
+  // Skipped when the block already carries one — the client marked it itself,
+  // and a second marker on the same block is the same boundary written twice.
+  // Nothing left to move it onto (a history of nothing but system turns) means
+  // no marker: there is no prefix worth a breakpoint.
+  if (systemCache.retarget !== undefined) {
+    // A mixed system turn is encoded block-for-block, so the marker `encodeBlock`
+    // already copied onto it is still there — at the one position that cannot be
+    // read back. Left in place it is not merely useless: it is a second
+    // breakpoint, so the request pays a cache write for an entry nothing will
+    // ever hit, every turn. An all-text turn is a string and has none.
+    const trailing = body.messages.at(-1);
+    if (isRecord(trailing) && Array.isArray(trailing.content)) {
+      for (const block of trailing.content) {
+        if (isRecord(block)) delete block.cache_control;
+      }
+    }
+    const target = lastCacheableHistoryBlock(body.messages.slice(0, -1));
+    if (target !== undefined && target.cache_control === undefined) {
+      target.cache_control = {
+        type: systemCache.retarget.type,
+        ...(systemCache.retarget.ttl === undefined ? {} : { ttl: systemCache.retarget.ttl }),
+      };
+      note("anthropic:system-turn-cache-control-retargeted");
+    }
+  }
 
   if (system !== undefined && system.length > 0) body.system = system;
   if (req.temperature !== undefined) body.temperature = req.temperature;

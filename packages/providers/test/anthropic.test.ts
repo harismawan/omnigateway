@@ -480,7 +480,21 @@ test("leaves the caller's breakpoint on its own block after the oauth prefix", (
   });
 });
 
-test("promotes a final system-turn breakpoint to automatic caching", () => {
+/**
+ * The block a wire message carries at `index`, for the retargeting tests.
+ * Narrows what `AnthropicBody.messages` types as `unknown`.
+ */
+function wireBlock(body: AnthropicBody, index: number, block = 0): Record<string, unknown> {
+  const message = body.messages?.[index];
+  if (!isWireRecord(message) || !Array.isArray(message.content)) {
+    throw new Error(`message ${index} has no block array`);
+  }
+  const found: unknown = message.content[block];
+  if (!isWireRecord(found)) throw new Error(`message ${index} block ${block} is not a record`);
+  return found;
+}
+
+test("moves a final system-turn breakpoint onto the block before it", () => {
   const { body, degradations } = toWire(
     {
       ...base,
@@ -502,8 +516,78 @@ test("promotes a final system-turn breakpoint to automatic caching", () => {
     { oauth: false },
   );
   expect(body.messages?.[1]).toEqual({ role: "system", content: "Write Go." });
-  expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  // On the user turn before it, not on the request and not on the turn itself:
+  // that turn is re-emitted at a new position every request, so a prefix ending
+  // inside it is never a prefix of the next one. Measured, not assumed — see
+  // `systemCacheControl`.
+  expect(wireBlock(body, 0).cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  expect(body.cache_control).toBeUndefined();
+  expect(degradations).toContain("anthropic:system-turn-cache-control-retargeted");
   expect(degradations).not.toContain("anthropic:system-turn-cache-control-dropped");
+});
+
+/**
+ * The mixed-content case, which the all-text one cannot stand in for.
+ *
+ * A system turn holding anything but text is encoded block-for-block, so the
+ * marker `encodeBlock` copies onto it survives on the wire — at the one
+ * position that is never a prefix of the next request. The marker has to leave
+ * that turn, not merely be added to an earlier block: two breakpoints mean the
+ * request pays a cache write for an entry nothing can read.
+ */
+test("takes the marker off a mixed system turn rather than leaving a second one", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "system",
+          content: [
+            { type: "image", mediaType: "image/png", data: "AAAA" },
+            { type: "text", text: "Write Go.", cacheControl: { type: "ephemeral" } },
+          ],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(wireBlock(body, 0).cache_control).toEqual({ type: "ephemeral" });
+  expect(wireBlock(body, 1, 1).cache_control).toBeUndefined();
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[0]"]);
+  expect(degradations).toContain("anthropic:system-turn-cache-control-retargeted");
+});
+
+/**
+ * The client already owns that boundary, so the move is a no-op rather than an
+ * overwrite. Writing over it would swap the TTL the client chose for the one on
+ * the system turn — a different cache write price at the same position, which
+ * is the kind of change nothing downstream would report.
+ */
+test("leaves a block the client already marked at its own TTL", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "hi", cacheControl: { type: "ephemeral", ttl: "5m" } }],
+        },
+        {
+          role: "system",
+          content: [
+            { type: "text", text: "Write Go.", cacheControl: { type: "ephemeral", ttl: "1h" } },
+          ],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(wireBlock(body, 0).cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[0]"]);
+  expect(degradations).not.toContain("anthropic:system-turn-cache-control-retargeted");
 });
 
 test("keeps degradation when content follows a marked system turn", () => {
@@ -928,7 +1012,7 @@ test("leaves the ttl split off when the upstream reports no breakdown", async ()
   expect(end).not.toHaveProperty("usage.cacheWrite1hTokens");
 });
 
-test("promotes the final system-turn breakpoint and records earlier losses once", () => {
+test("moves the final system-turn breakpoint and records earlier losses once", () => {
   const { body, degradations } = toWire(
     {
       ...base,
@@ -946,13 +1030,14 @@ test("promotes the final system-turn breakpoint and records earlier losses once"
     "m",
     { oauth: false },
   );
-  expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  expect(wireBlock(body, 0).cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  expect(body.cache_control).toBeUndefined();
   expect(degradations.filter((d) => d === "anthropic:system-turn-cache-control-dropped")).toEqual([
     "anthropic:system-turn-cache-control-dropped",
   ]);
 });
 
-test("promotes the final marker across several marked system turns", () => {
+test("moves the final marker across several marked system turns", () => {
   const { body, degradations } = toWire(
     {
       ...base,
@@ -971,7 +1056,8 @@ test("promotes the final marker across several marked system turns", () => {
     "m",
     { oauth: false },
   );
-  expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  expect(wireBlock(body, 0).cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  expect(body.cache_control).toBeUndefined();
   expect(degradations).toContain("anthropic:system-turn-cache-control-dropped");
 });
 
