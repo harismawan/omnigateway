@@ -7,6 +7,8 @@ resources:
   - ingress.yaml
   - hpa.yaml
 
+# `newTag` is written by the release workflow's promote job on every `v*`
+# tag, and Argo CD syncs `main`. Edit by hand only to roll back.
 images:
   - name: ghcr.io/harismawan/omnigateway
     newTag: 1.0.0

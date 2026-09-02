@@ -732,6 +732,10 @@ kubectl apply -f k8s/secret.yaml
 kubectl apply -k k8s
 ```
 
+Releases deploy by GitOps: a `v*` tag publishes `ghcr.io/harismawan/omnigateway:<version>`
+and the workflow commits that version into `k8s/kustomization.yaml` on `main`, which Argo
+CD syncs. Rolling back is editing `newTag` by hand.
+
 Plugins in a fleet are baked into the image so every replica holds the same
 set: `COPY plugins/ /data/plugins/` in a derived Dockerfile.
 

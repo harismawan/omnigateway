@@ -17,7 +17,7 @@ metadata:
     # console reconnecting to another replica refetches once.
 spec:
   rules:
-    - host: gateway.example.com
+    - host: omni.harismawan.com
       http:
         paths:
           - path: /

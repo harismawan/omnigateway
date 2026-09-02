@@ -13,7 +13,7 @@ data:
 
   # Public origin: what OAuth callbacks and generated client configs point at.
   # Must be the ingress host, not the Service.
-  OMNI_BASE_URL: "https://gateway.example.com"
+  OMNI_BASE_URL: "https://omni.harismawan.com"
 
   # Plugins are read from $OMNI_ROOT/plugins at boot. In a fleet every replica
   # must hold the same set, so bake them into the image rather than mounting.
