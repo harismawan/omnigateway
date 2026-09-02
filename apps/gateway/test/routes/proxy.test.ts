@@ -83,13 +83,14 @@ test("disables Bun's request timeout for both inference routes before authentica
   };
 
   try {
-    for (const path of ["/v1/messages", "/v1/chat/completions"] as const) {
+    for (const path of ["/v1/messages", "/v1/chat/completions", "/v1/responses"] as const) {
       const response = await fetch(`http://localhost:${server.port}${path}`, { method: "POST" });
       expect(response.status).toBe(401);
     }
     expect(calls).toEqual([
       { path: "/v1/messages", seconds: 0 },
       { path: "/v1/chat/completions", seconds: 0 },
+      { path: "/v1/responses", seconds: 0 },
     ]);
   } finally {
     await app.stop(true);

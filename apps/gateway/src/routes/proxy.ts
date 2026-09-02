@@ -36,8 +36,16 @@ import {
   openaiResponse,
   openaiStream,
 } from "../egress/openai.ts";
+import {
+  type ResponsesRender,
+  responsesErrorBody,
+  responsesRateLimitHeaders,
+  responsesResponse,
+  responsesStream,
+} from "../egress/responses.ts";
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
+import { customToolNames, parseResponsesRequest } from "../ingress/responses.ts";
 import {
   type BodyWriter,
   beginLog,
@@ -101,7 +109,7 @@ type ResolvedProxyDeps = DispatchDeps &
     logger: Logger;
   };
 
-type Surface = "anthropic" | "openai";
+type Surface = "anthropic" | "openai" | "responses";
 
 /**
  * How long a stream may carry no bytes before a keepalive is written. Upstream
@@ -113,6 +121,23 @@ type Surface = "anthropic" | "openai";
  * leaves room under any intermediate proxy's read timeout.
  */
 const KEEPALIVE_MS = 10_000;
+
+/**
+ * The same protection for a client that will not wait ten seconds for it.
+ *
+ * Codex's HTTP client drops a connection that has carried no bytes for about
+ * five seconds, so the shared cadence above would lose every request whose
+ * first token is slower than that — before a byte of the answer exists, which
+ * reads to the operator as a broken gateway rather than a slow model. Four
+ * seconds leaves a margin under that limit and still writes nothing a client
+ * has to parse: these are SSE comments, not events.
+ */
+const RESPONSES_KEEPALIVE_MS = 4_000;
+
+/** How long this surface's streams may stay silent. */
+function keepaliveFor(surface: Surface, configured: number): number {
+  return surface === "responses" ? Math.min(configured, RESPONSES_KEEPALIVE_MS) : configured;
+}
 
 /** Distinguishes "nothing arrived yet" from a frame, without a nullable frame. */
 const KEEPALIVE = Symbol("keepalive");
@@ -143,9 +168,9 @@ const SSE_HEADERS = {
  * second construction of it that could drift.
  */
 function errorBody(surface: Surface, code: ErrorCode, message: string): unknown {
-  return surface === "anthropic"
-    ? anthropicErrorBody(code, message)
-    : openaiErrorBody(code, message);
+  if (surface === "anthropic") return anthropicErrorBody(code, message);
+  if (surface === "responses") return responsesErrorBody(code, message);
+  return openaiErrorBody(code, message);
 }
 
 /**
@@ -161,9 +186,9 @@ function rateLimitHeaders(
   headroom: HeadroomByDimension,
   now: number,
 ): Record<string, string> {
-  return surface === "anthropic"
-    ? anthropicRateLimitHeaders(headroom)
-    : openaiRateLimitHeaders(headroom, now);
+  if (surface === "anthropic") return anthropicRateLimitHeaders(headroom);
+  if (surface === "responses") return responsesRateLimitHeaders(headroom, now);
+  return openaiRateLimitHeaders(headroom, now);
 }
 
 /**
@@ -529,7 +554,19 @@ async function handle(
     const chatRequest =
       surface === "anthropic"
         ? parseAnthropicRequest(body, request.headers)
-        : parseOpenAIRequest(body, request.headers);
+        : surface === "responses"
+          ? parseResponsesRequest(body, request.headers)
+          : parseOpenAIRequest(body, request.headers);
+    // Which tools the client declared freeform, which only it knows and only
+    // the Responses egress needs: the same call renders as `custom_tool_call`
+    // or `function_call` depending on it, and a client dispatching one of the
+    // two never runs the other. Read from the body rather than the request
+    // because IR has one portable shape for both.
+    const render = (): ResponsesRender => ({
+      requestId,
+      created: Math.floor(deps.now() / 1000),
+      customToolNames: customToolNames(body),
+    });
     if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {
       throw new GatewayError(
         "AUTH",
@@ -630,7 +667,9 @@ async function handle(
       const frames =
         surface === "anthropic"
           ? anthropicStream(dispatched.events, requestId)
-          : openaiStream(dispatched.events, requestId, Math.floor(deps.now() / 1000));
+          : surface === "responses"
+            ? responsesStream(dispatched.events, render())
+            : openaiStream(dispatched.events, requestId, Math.floor(deps.now() / 1000));
       // A stream has no rendered body, so what the gateway returned is the
       // frames it wrote. The sink is handed over live: a client that hangs up
       // mid-stream leaves whatever had already gone out, which is precisely
@@ -671,7 +710,7 @@ async function handle(
       const response = sseResponse(
         frames,
         finish,
-        deps.keepaliveMs,
+        keepaliveFor(surface, deps.keepaliveMs),
         dispatched.events,
         limitHeaders(),
         onFrame,
@@ -697,7 +736,9 @@ async function handle(
         ? errorBody(surface, failure.code, failure.message)
         : surface === "anthropic"
           ? anthropicResponse(collect(events), requestId)
-          : openaiResponse(collect(events), requestId, Math.floor(deps.now() / 1000));
+          : surface === "responses"
+            ? responsesResponse(collect(events), render())
+            : openaiResponse(collect(events), requestId, Math.floor(deps.now() / 1000));
     if (captured !== null) captured.client.response = responseBody;
 
     await log();
@@ -788,6 +829,10 @@ export function proxyRoutes(deps: ProxyDeps) {
       .post("/v1/messages", ({ request, server }) => {
         server?.timeout(request, 0);
         return handle(dispatchDeps, rateLimiter, "anthropic", request);
+      })
+      .post("/v1/responses", ({ request, server }) => {
+        server?.timeout(request, 0);
+        return handle(dispatchDeps, rateLimiter, "responses", request);
       })
       .post("/v1/chat/completions", ({ request, server }) => {
         server?.timeout(request, 0);

@@ -20,6 +20,7 @@ import type { LoadRegistry } from "./dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "./egress/anthropic.ts";
 import { openaiErrorBody } from "./egress/openai.ts";
+import { responsesErrorBody } from "./egress/responses.ts";
 import type { PluginEmit } from "./logging.ts";
 import type { LoadedPlugin } from "./plugins/loader.ts";
 import { type MountedPlugin, pluginRoutes } from "./plugins/routes.ts";
@@ -159,11 +160,23 @@ const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
  */
 const QUIESCE_MESSAGE = "the gateway is briefly quiesced for database maintenance";
 
+/**
+ * Keyed on the path, and that is the hazard worth naming: the latch admits any
+ * `/v1/*` route automatically, so a surface added without a line here is served
+ * a dialect its client cannot parse — silently, and only while a swap is in
+ * flight, which is the moment least likely to be under a test.
+ */
+const QUIESCE_BODY: Readonly<Record<string, (message: string) => unknown>> = {
+  "/v1/chat/completions": (m) => openaiErrorBody("OVERLOADED", m),
+  "/v1/responses": (m) => responsesErrorBody("OVERLOADED", m),
+};
+
 function quiesceResponse(path: string): Response {
+  const render = QUIESCE_BODY[path];
   const body =
-    path === "/v1/chat/completions"
-      ? openaiErrorBody("OVERLOADED", QUIESCE_MESSAGE)
-      : anthropicErrorBody("OVERLOADED", QUIESCE_MESSAGE);
+    render === undefined
+      ? anthropicErrorBody("OVERLOADED", QUIESCE_MESSAGE)
+      : render(QUIESCE_MESSAGE);
   return new Response(JSON.stringify(body), {
     status: HTTP_STATUS.OVERLOADED,
     headers: { "content-type": "application/json", "retry-after": "5" },
