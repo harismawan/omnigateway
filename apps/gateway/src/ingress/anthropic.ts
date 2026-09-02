@@ -19,6 +19,7 @@ import {
   parseOrThrow,
   readConversationHeader,
   safeToken,
+  zodDetail,
 } from "./schemas.ts";
 
 const textBlock = z.object({
@@ -430,20 +431,14 @@ function readBlock(raw: unknown, role: Message["role"], path: string): ContentBl
       const parsed = nativeSchema.safeParse(raw);
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
-        // `unrecognized_keys` is the one zod arm that quotes the client's own
-        // text back — its message is `Unrecognized key: "<key>"`, and the key
-        // is spliced into the path here as well. Both are bounded, and the
-        // message is written here rather than passed through, because zod's
-        // own wording is what carries the value. The other arms report the
-        // schema's expectation, not what arrived; checked against zod v4.
+        // The key is bounded on the path as well as in the message: a key
+        // spliced into `${path}.${key}` reads as structure and carries exactly
+        // the same client bytes, which is the half a bound on the message alone
+        // does nothing about.
         const unknownKey = issue?.code === "unrecognized_keys" ? safeToken(issue.keys[0]) : null;
         const issuePath = unknownKey === null ? issue?.path : [...(issue?.path ?? []), unknownKey];
         const suffix = issuePath?.length ? `.${issuePath.join(".")}` : "";
-        const detail =
-          unknownKey === null
-            ? (issue?.message ?? "invalid native content block")
-            : `unrecognized key "${unknownKey}"`;
-        throw new GatewayError("BAD_REQUEST", `${path}${suffix}: ${detail}`);
+        throw new GatewayError("BAD_REQUEST", `${path}${suffix}: ${zodDetail(issue)}`);
       }
       const { type: _type, cache_control, ...data } = parsed.data;
       return {
@@ -475,10 +470,7 @@ function readBlock(raw: unknown, role: Message["role"], path: string): ContentBl
       }
     }
     const suffix = issue?.path.length ? `.${issue.path.join(".")}` : "";
-    throw new GatewayError(
-      "BAD_REQUEST",
-      `${path}${suffix}: ${issue?.message ?? "invalid content block"}`,
-    );
+    throw new GatewayError("BAD_REQUEST", `${path}${suffix}: ${zodDetail(issue)}`);
   }
   return toIrBlock(parsed.data);
 }

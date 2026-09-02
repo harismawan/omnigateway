@@ -6,7 +6,7 @@ import {
   anthropicToolSpec,
 } from "@omni/providers";
 import { z } from "zod";
-import { cacheControlSchema, irCacheControl, safeToken } from "./schemas.ts";
+import { cacheControlSchema, irCacheControl, safeToken, zodDetail } from "./schemas.ts";
 
 /**
  * Per-field schemas for Anthropic tool definitions, named once and shared by
@@ -77,11 +77,12 @@ function fail(path: string, message: string): never {
 /** Runs one field's schema, reporting the failure at that field's own path. */
 function field(path: string, name: string, value: unknown): unknown {
   const schema = TOOL_FIELDS[name];
-  if (schema === undefined) fail(`${path}.${name}`, `unsupported field "${name}"`);
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) {
-    fail(`${path}.${name}`, parsed.error.issues[0]?.message ?? "invalid value");
+  // `name` is a key from the client's own JSON, on both channels.
+  if (schema === undefined) {
+    fail(`${path}.${safeToken(name)}`, `unsupported field "${safeToken(name)}"`);
   }
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) fail(`${path}.${safeToken(name)}`, zodDetail(parsed.error.issues[0]));
   return parsed.data;
 }
 

@@ -1,5 +1,5 @@
 import type { CacheControl, ContentBlock } from "@omni/ir";
-import { cacheControlOf, GatewayError } from "@omni/ir";
+import { cacheControlOf, GatewayError, safeToken } from "@omni/ir";
 import { z } from "zod";
 
 /**
@@ -75,36 +75,28 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
 
   const issue = result.error.issues[0];
   const path = issue?.path.join(".") ?? "(root)";
-  throw new GatewayError("BAD_REQUEST", `${path}: ${issue?.message ?? "invalid request"}`);
+  throw new GatewayError("BAD_REQUEST", `${path}: ${zodDetail(issue)}`);
 }
 
 /**
- * A client-supplied token, bounded so a refusal may quote it.
+ * What a zod failure may say about the request that caused it.
  *
- * A parser's refusal carries no provider, so `reasonField` prints its message
- * to stdout at default level — which makes every value interpolated into one a
- * decision about the redaction boundary rather than a formatting choice.
- * `LogFields` states the rule for tool names on `cloakedTools`: client text can
- * hold anything a caller decided to put in it, and stdout is not where it goes.
- *
- * Bounded rather than dropped, because a client cannot fix a value it is not
- * told about, and a wire `type` is exactly the thing worth naming.
- *
- * Sixty-four characters, set by the vocabulary rather than by taste:
- * `text_editor_code_execution_tool_result` is 38 before Anthropic dates it, so
- * a 40-character bound rendered a real, current tool type as `(unprintable)` —
- * a diagnostic regression wearing a security fix's clothes. The security
- * property is unchanged at 64: a prompt is not 64 characters of this charset
- * with no spaces in it.
- *
- * `reason` is truncated at 200 characters on the way out, and that is not this:
- * truncation caps volume, not content, and the first 200 characters of a prompt
- * are still a prompt.
+ * Every arm reports the schema's own expectation — except `unrecognized_keys`,
+ * whose message is `Unrecognized key: "<the client's key>"`. That one is
+ * rewritten here rather than bounded in place, because the value rides zod's
+ * wording rather than ours, and there are twenty-five strict schemas on this
+ * surface for it to come out of. Checked against zod v4: no other arm echoes a
+ * received value.
  */
-export function safeToken(value: unknown): string {
-  const text = typeof value === "string" ? value : String(value);
-  return /^[A-Za-z0-9_.:/+-]{1,64}$/.test(text) ? text : "(unprintable)";
+export function zodDetail(issue: z.core.$ZodIssue | undefined): string {
+  if (issue === undefined) return "invalid request";
+  if (issue.code === "unrecognized_keys") {
+    return `unrecognized key "${safeToken(issue.keys[0])}"`;
+  }
+  return issue.message;
 }
+
+export { safeToken };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

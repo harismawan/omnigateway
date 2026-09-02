@@ -1,4 +1,4 @@
-import { GatewayError, type ProviderId } from "@omni/ir";
+import { GatewayError, type ProviderId, safeToken } from "@omni/ir";
 import { entryLimits, entryPricing } from "@omni/providers/catalog";
 import {
   PROVIDER_DESCRIPTORS,
@@ -128,7 +128,15 @@ export function resolveModel(
     if (descriptor !== undefined && prefix !== "custom" && rest.length > 0) {
       return synthesize(prefix, rest, descriptor);
     }
-    throw new GatewayError("NO_CANDIDATES", `unknown provider "${prefix}" in model "${name}"`);
+    // Both bounded. `model` is `z.string().min(1)` on every surface, and this
+    // split is on `/` and `:` — ordinary prose contains a colon, so a whole
+    // prompt can arrive here as a "model name". This refusal names no provider,
+    // so `reasonField` prints it, and unlike the allowlist check in `proxy.ts`
+    // this fires on the default configuration.
+    throw new GatewayError(
+      "NO_CANDIDATES",
+      `unknown provider "${safeToken(prefix)}" in model "${safeToken(name)}"`,
+    );
   }
 
   for (const [prefix, provider, descriptor] of prefixProviders(providers)) {
@@ -137,6 +145,6 @@ export function resolveModel(
 
   throw new GatewayError(
     "NO_CANDIDATES",
-    `model "${name}" is not a configured virtual model and its provider could not be inferred`,
+    `model "${safeToken(name)}" is not a configured virtual model and its provider could not be inferred`,
   );
 }
