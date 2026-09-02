@@ -57,6 +57,8 @@ type HarnessOptions = {
   store?: Store;
   /** Whether `OMNI_BODY_LOGGING_ALLOWED` was set at boot. */
   bodyLoggingAllowed?: boolean;
+  /** For the merged (`node=all`) console read, which needs more than one process. */
+  consoleFleet?: AdminDeps["consoleFleet"];
   /** For the routes whose only visible effect is a line on stdout. */
   logger?: AdminDeps["logger"];
 };
@@ -67,6 +69,7 @@ async function harness({
   now = NOW,
   store: provided,
   bodyLoggingAllowed,
+  consoleFleet,
   logger,
 }: HarnessOptions = {}) {
   const store = provided ?? (await memoryStore());
@@ -98,6 +101,7 @@ async function harness({
     sessionTtlMs: SESSION_TTL_MS,
     broadcaster: { invalidate: (topic) => void topics.push(topic) },
     ...(consoleDeps === undefined ? {} : { console: consoleDeps }),
+    ...(consoleFleet === undefined ? {} : { consoleFleet }),
     ...(bodyLoggingAllowed === undefined ? {} : { bodyLoggingAllowed }),
     ...(logger === undefined ? {} : { logger }),
   });
@@ -1228,6 +1232,54 @@ test("the console route ignores a level it does not recognise rather than failin
   const res = await call("GET", "/api/console?level=verbose");
   expect(res.status).toBe(200);
   expect(((await res.json()) as { lines: unknown[] }).lines).toHaveLength(3);
+});
+
+/** A store whose fleet is `ids`, for the merged console read. */
+async function fleetStore(ids: string[]): Promise<Store> {
+  const store = await memoryStore();
+  return {
+    ...store,
+    maintenance: { ...store.maintenance, nodes: async () => ids.map((id) => ({ id, seenAt: 0 })) },
+  };
+}
+
+test("the merged console read reports a fleet capturing nothing as `none`", async () => {
+  // What a container deployment looks like: stdout goes to the runtime, no
+  // process names an `OMNI_LOG_FILE`. `fleet` with no lines would tell the
+  // console the log is merely empty.
+  const store = await fleetStore(["test-node", "other"]);
+  const { call } = await harness({
+    store,
+    consoleFleet: { read: async () => ({ source: "none", lines: [] }), stop: () => {} },
+  });
+
+  const body = (await (await call("GET", "/api/console?node=all")).json()) as { source: string };
+  expect(body.source).toBe("none");
+});
+
+test("the merged console read stays a fleet when one process captures output", async () => {
+  const store = await fleetStore(["test-node", "other"]);
+  const { call } = await harness({
+    store,
+    consoleFleet: {
+      read: async (nodeId) =>
+        nodeId === "other"
+          ? {
+              source: "file",
+              path: "/tmp/other.log",
+              lines: [{ raw: "hi", at: 1, level: null, msg: null }],
+            }
+          : { source: "none", lines: [] },
+      stop: () => {},
+    },
+  });
+
+  const body = (await (await call("GET", "/api/console?node=all")).json()) as {
+    source: string;
+    lines: Array<{ raw: string; nodeId: string }>;
+  };
+  expect(body.source).toBe("fleet");
+  expect(body.lines.map((line) => [line.nodeId, line.raw])).toEqual([["other", "hi"]]);
 });
 
 test("the console route clamps the page size", async () => {

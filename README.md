@@ -516,6 +516,15 @@ bun apps/gateway/src/index.ts >> /var/log/omni.log 2>&1
 `omni start` does both for the gateway it supervises, and under systemd the journal needs no
 setup.
 
+In a fleet, capture is per process. Each replica can capture its own — tee its stdout to a file
+inside the container and point `OMNI_LOG_FILE` at the same path — and the Console screen then
+merges every process's tail and lets you pick one. That is worth having for an incident on a
+running pod, and it is not a log stack: the file dies with the container, nothing rotates it, and
+the screen reads one process at a time. Ship stdout to a collector for anything beyond that —
+Elasticsearch and Kibana, Loki and Grafana, or whatever already reads your containers — where the
+lines outlive the process that wrote them and can be searched across all of them at once. The
+Console screen says so itself when it finds a fleet capturing nothing.
+
 Everything else lives in the database rather than the environment, so it can be
 changed without a restart: the six routing weights, `maxAttempts`,
 `requestDeadlineMs`, the circuit breaker's `breakerThreshold` and

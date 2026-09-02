@@ -606,11 +606,25 @@ export function adminRoutes(deps: AdminDeps) {
           ),
         );
         const lines: Array<ConsoleLine & { nodeId: string }> = [];
+        // Whether any process that answered is capturing its output at all.
+        // A fleet where none is — the usual container deployment, stdout going
+        // to the runtime with no `OMNI_LOG_FILE` — must answer `none` like a
+        // single process would. Reporting `fleet` with no lines instead tells
+        // the console the log is merely empty, so it says the gateway will
+        // write here on the next boot or token refresh, and it never will.
+        let captured = false;
         for (const outcome of reads) {
           if (outcome.status !== "fulfilled") continue;
+          if (outcome.value.read.source !== "none") captured = true;
           for (const line of outcome.value.read.lines) {
             lines.push({ ...line, nodeId: outcome.value.nodeId });
           }
+        }
+        // Only when something answered: every process unreachable is a fleet
+        // that could not be read, which is not the same claim as one that
+        // captures nothing, and `TIMEOUT` is already how that is reported.
+        if (!captured && reads.some((outcome) => outcome.status === "fulfilled")) {
+          return { source: "none", lines: [] };
         }
         // Undated lines keep their place at the end: a merge that sorted them
         // first would put a process's banner above every other process's log.

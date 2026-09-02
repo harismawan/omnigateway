@@ -200,6 +200,28 @@ describe("ConsoleBoard source hint visibility", () => {
   });
 
   /**
+   * The advice for an uncaptured fleet is not the single-process advice with
+   * more words: `omni service install` is a machine's answer, and a fleet's is
+   * a collector outside it. Pinned because the wrong one reads as usable.
+   */
+  test("points an uncaptured fleet at a collector, not at systemd", async () => {
+    createFetchStub({
+      "GET /api/console": () => ({ source: "none", lines: [] }),
+      "GET /api/nodes": () => ({
+        nodes: [
+          { id: "aaaaaaaa-1", seenAt: 2, self: true },
+          { id: "bbbbbbbb-2", seenAt: 1, self: false },
+        ],
+      }),
+    });
+    renderWithProviders(<ConsoleBoard />);
+
+    expect(await screen.findByText("Nothing is capturing this gateway")).toBeTruthy();
+    expect(screen.getByText(/Elasticsearch and Kibana/)).toBeTruthy();
+    expect(screen.queryByText(/omni service install/)).toBeNull();
+  });
+
+  /**
    * A fleet shows a process selector, defaults to every process merged, and
    * asks for the chosen one by name. A single process shows no selector at
    * all — the control would offer a choice of one.
