@@ -84,9 +84,11 @@ export const anthropicCodec: ProviderCodec = {
     // collects events into a buffered body when the client wants one, so a
     // non-streaming request needs an event stream to collect. Asking for JSON
     // here and then parsing the reply as SSE yields no events at all.
+    const firstUser = input.request.messages.find((m) => m.role === "user");
+    const firstText = firstUser?.content.find((b) => b.type === "text");
     const withSystem: Record<string, unknown> = {
       ...body,
-      system: applyAnthropicSystem(body.system ?? []),
+      system: applyAnthropicSystem(body.system ?? [], firstText?.text ?? ""),
       stream: true,
     };
 

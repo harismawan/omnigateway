@@ -338,7 +338,7 @@ OMNI_UA_KIMI=
 OMNI_KIMI_CLI_VERSION=0.26.0
 OMNI_ORDER_KIMI=
 
-OMNI_ANTHROPIC_BUILD_REVISION=250            # cc_version suffix
+# cc_version suffix is derived per conversation (see `ccVersionSuffix`), not configurable
 ```
 
 `OMNI_UA_*` replaces the User-Agent outright and so can drift from the version

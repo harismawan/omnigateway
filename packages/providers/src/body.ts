@@ -1,4 +1,5 @@
-import { anthropicBodyOrder } from "./anthropic/profile.ts";
+import { createHash } from "node:crypto";
+import { ANTHROPIC_CLI_VERSION, anthropicBodyOrder } from "./anthropic/profile.ts";
 import { customBodyOrder } from "./custom/profile.ts";
 import { grokBodyOrder } from "./grok/profile.ts";
 import { kiloBodyOrder } from "./kilo/profile.ts";
@@ -53,25 +54,35 @@ export function orderFields(
   return out;
 }
 
-const BUILD_REVISION = envOr("OMNI_ANTHROPIC_BUILD_REVISION", "250");
-const CLI_VERSION = envOr("OMNI_ANTHROPIC_CLI_VERSION", "2.1.219");
-
 /** Placeholder is the same width as the real token, so substitution is safe. */
 const CCH_PLACEHOLDER = "00000";
 const CCH_SEED = 0x6e52736ac806831en;
 const CCH_MASK = 0xfffffn;
 
+/** Salt the CLI hashes its `cc_version` suffix with (2.1.258, `LFo`). */
+const CCV_SALT = "59cf53e54c78";
+
 const BILLING_PREFIX = "x-anthropic-billing-header:";
 const AGENT_PREAMBLE = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
-function envOr(name: string, fallback: string): string {
-  const raw = Bun.env[name];
-  return typeof raw === "string" && /^[\x20-\x7E]{1,200}$/.test(raw) ? raw : fallback;
+/**
+ * The suffix after the version in `cc_version` is not a build number. The CLI
+ * takes the text of the first user message, picks the characters at 4, 7 and
+ * 20 (`"0"` where the text is shorter), and hashes salt + those + version with
+ * SHA-256, keeping three hex digits. So it changes per conversation, and a
+ * fixed `250` was the right width and never the right value.
+ */
+export function ccVersionSuffix(firstUserText: string): string {
+  const picked = [4, 7, 20].map((i) => firstUserText[i] ?? "0").join("");
+  return createHash("sha256")
+    .update(`${CCV_SALT}${picked}${ANTHROPIC_CLI_VERSION}`)
+    .digest("hex")
+    .slice(0, 3);
 }
 
-function billingBlock(): string {
+function billingBlock(firstUserText: string): string {
   return (
-    `${BILLING_PREFIX} cc_version=${CLI_VERSION}.${BUILD_REVISION}; ` +
+    `${BILLING_PREFIX} cc_version=${ANTHROPIC_CLI_VERSION}.${ccVersionSuffix(firstUserText)}; ` +
     `cc_entrypoint=cli; cch=${CCH_PLACEHOLDER};`
   );
 }
@@ -118,8 +129,17 @@ const REWRITES: readonly (readonly [string, string])[] = [
  *
  * Idempotent — the billing block and the preamble are filtered out on the way
  * in, so re-running never stacks a second copy.
+ *
+ * `firstUserText` is what the CLI hashes into `cc_version`: the first text
+ * block of the first user message. The CLI skips its own meta messages there,
+ * and the gateway cannot tell which those were, so on a conversation opened by
+ * an attachment the suffix differs from the CLI's. Still one value per
+ * conversation, which a constant never was.
  */
-export function applyAnthropicSystem(system: readonly SystemBlock[]): SystemBlock[] {
+export function applyAnthropicSystem(
+  system: readonly SystemBlock[],
+  firstUserText: string,
+): SystemBlock[] {
   const kept: SystemBlock[] = [];
 
   for (const block of system) {
@@ -145,7 +165,11 @@ export function applyAnthropicSystem(system: readonly SystemBlock[]): SystemBloc
     }
   }
 
-  return [{ type: "text", text: billingBlock() }, { type: "text", text: AGENT_PREAMBLE }, ...kept];
+  return [
+    { type: "text", text: billingBlock(firstUserText) },
+    { type: "text", text: AGENT_PREAMBLE },
+    ...kept,
+  ];
 }
 
 /** xxHash64 of the body, masked to 20 bits, as five zero-padded hex digits. */
@@ -155,14 +179,30 @@ export function computeCch(body: string): string {
 }
 
 /**
+ * Where the billing block starts in the serialized body. The framing quotes
+ * are unescaped, so this sequence cannot occur inside any JSON string value —
+ * which is what makes it safe against a tool result that quotes the block.
+ */
+const BILLING_ANCHOR = `"system":[{"type":"text","text":"${BILLING_PREFIX}`;
+
+/**
  * Replaces the cch placeholder with a token computed over the serialized body.
  *
  * The token is computed over the body *containing the placeholder*, then
  * swapped in. Both are five characters, so the bytes on the wire are the bytes
  * that were hashed — length-preserving substitution is the whole trick.
+ *
+ * Only the placeholder inside the system billing block is replaced. `messages`
+ * serialize before `system`, and a first-match replace once landed on a tool
+ * result that quoted `cch=00000;` — rewriting that message with a fresh hash
+ * every request, which broke the prompt cache from that turn onward for the
+ * rest of the conversation.
  */
 export function signAnthropicBody(json: string): string {
   const needle = `cch=${CCH_PLACEHOLDER};`;
-  if (!json.includes(needle)) return json;
-  return json.replace(needle, `cch=${computeCch(json)};`);
+  const anchor = json.indexOf(BILLING_ANCHOR);
+  if (anchor < 0) return json;
+  const at = json.indexOf(needle, anchor);
+  if (at < 0) return json;
+  return `${json.slice(0, at)}cch=${computeCch(json)};${json.slice(at + needle.length)}`;
 }

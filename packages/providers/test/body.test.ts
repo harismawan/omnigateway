@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   applyAnthropicSystem,
   BODY_ORDER,
+  ccVersionSuffix,
   computeCch,
   orderFields,
   signAnthropicBody,
@@ -58,11 +59,31 @@ test("signAnthropicBody preserves the byte length", () => {
 
 test("signAnthropicBody substitutes the placeholder with a real token", () => {
   const json = JSON.stringify({
-    system: [{ type: "text", text: "cc_version=2.1.219.250; cc_entrypoint=cli; cch=00000;" }],
+    system: [
+      {
+        type: "text",
+        text: "x-anthropic-billing-header: cc_version=2.1.219.250; cc_entrypoint=cli; cch=00000;",
+      },
+    ],
   });
   const signed = signAnthropicBody(json);
   expect(signed).not.toContain("cch=00000");
   expect(signed).toMatch(/cch=[0-9a-f]{5};/);
+});
+
+test("signAnthropicBody leaves a tool result that quotes the placeholder alone", () => {
+  const quoted = "grep output: cch=00000; cc_entrypoint=cli;";
+  const json = JSON.stringify({
+    model: "claude-opus-4",
+    messages: [
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: quoted }] },
+    ],
+    system: [{ type: "text", text: "x-anthropic-billing-header: cch=00000;" }],
+  });
+  const signed = signAnthropicBody(json);
+  expect(signed).toContain(JSON.stringify(quoted));
+  expect(signed).toMatch(/"x-anthropic-billing-header: cch=[0-9a-f]{5};"/);
+  expect(signed).not.toMatch(/"x-anthropic-billing-header: cch=00000;"/);
 });
 
 test("signAnthropicBody is a no-op when there is no placeholder", () => {
@@ -71,7 +92,7 @@ test("signAnthropicBody is a no-op when there is no placeholder", () => {
 });
 
 test("applyAnthropicSystem puts the billing block first", () => {
-  const blocks = applyAnthropicSystem([{ type: "text", text: "Do the thing." }]);
+  const blocks = applyAnthropicSystem([{ type: "text", text: "Do the thing." }], "");
   expect(blocks[0]?.text).toContain("x-anthropic-billing-header:");
   expect(blocks[0]?.text).toContain("cch=00000;");
   expect(blocks[1]?.text).toBe("You are a Claude agent, built on Anthropic's Claude Agent SDK.");
@@ -79,18 +100,23 @@ test("applyAnthropicSystem puts the billing block first", () => {
 });
 
 test("applyAnthropicSystem handles an empty system", () => {
-  const blocks = applyAnthropicSystem([]);
+  const blocks = applyAnthropicSystem([], "");
   expect(blocks).toHaveLength(2);
   expect(blocks[0]?.text).toContain("cch=00000;");
 });
 
 test("applyAnthropicSystem drops paragraphs naming other agents", () => {
-  const blocks = applyAnthropicSystem([
-    {
-      type: "text",
-      text: ["Keep this.", "See https://opencode.ai/docs for help.", "Keep this too."].join("\n\n"),
-    },
-  ]);
+  const blocks = applyAnthropicSystem(
+    [
+      {
+        type: "text",
+        text: ["Keep this.", "See https://opencode.ai/docs for help.", "Keep this too."].join(
+          "\n\n",
+        ),
+      },
+    ],
+    "",
+  );
   const joined = blocks.map((b) => b.text).join("\n");
   expect(joined).toContain("Keep this.");
   expect(joined).toContain("Keep this too.");
@@ -98,24 +124,30 @@ test("applyAnthropicSystem drops paragraphs naming other agents", () => {
 });
 
 test("applyAnthropicSystem drops the OpenCode identity paragraph", () => {
-  const blocks = applyAnthropicSystem([
-    {
-      type: "text",
-      text: ["You are OpenCode, a coding agent.", "Follow the repository style."].join("\n\n"),
-    },
-  ]);
+  const blocks = applyAnthropicSystem(
+    [
+      {
+        type: "text",
+        text: ["You are OpenCode, a coding agent.", "Follow the repository style."].join("\n\n"),
+      },
+    ],
+    "",
+  );
   const joined = blocks.map((b) => b.text).join("\n");
   expect(joined).not.toContain("You are OpenCode");
   expect(joined).toContain("Follow the repository style.");
 });
 
 test("applyAnthropicSystem rewrites the known phrases", () => {
-  const blocks = applyAnthropicSystem([
-    {
-      type: "text",
-      text: "Answer if OpenCode honestly cannot.\n\nHere is some useful information about the environment you are running in:",
-    },
-  ]);
+  const blocks = applyAnthropicSystem(
+    [
+      {
+        type: "text",
+        text: "Answer if OpenCode honestly cannot.\n\nHere is some useful information about the environment you are running in:",
+      },
+    ],
+    "",
+  );
   const joined = blocks.map((b) => b.text).join("\n");
   expect(joined).toContain("if the assistant honestly");
   expect(joined).toContain("Environment context you are running in:");
@@ -137,9 +169,10 @@ const HERMES_HELP =
   "is your authoritative reference.";
 
 test("applyAnthropicSystem drops the Hermes identity paragraph", () => {
-  const blocks = applyAnthropicSystem([
-    { type: "text", text: [HERMES_IDENTITY, "Follow the user's coding style."].join("\n\n") },
-  ]);
+  const blocks = applyAnthropicSystem(
+    [{ type: "text", text: [HERMES_IDENTITY, "Follow the user's coding style."].join("\n\n") }],
+    "",
+  );
   const joined = blocks.map((b) => b.text).join("\n");
   expect(joined).not.toContain("You are Hermes Agent");
   expect(joined).toContain("Follow the user's coding style.");
@@ -148,9 +181,10 @@ test("applyAnthropicSystem drops the Hermes identity paragraph", () => {
 test("applyAnthropicSystem drops the Hermes help paragraph", () => {
   // Opens with "You run on", not "You are", so only the banned substring can
   // catch it — the prefix filter must not be what makes this pass.
-  const blocks = applyAnthropicSystem([
-    { type: "text", text: ["Keep this.", HERMES_HELP, "Keep this too."].join("\n\n") },
-  ]);
+  const blocks = applyAnthropicSystem(
+    [{ type: "text", text: ["Keep this.", HERMES_HELP, "Keep this too."].join("\n\n") }],
+    "",
+  );
   const joined = blocks.map((b) => b.text).join("\n");
   expect(joined).not.toContain("hermes-agent.nousresearch.com");
   expect(joined).toContain("Keep this.");
@@ -158,9 +192,10 @@ test("applyAnthropicSystem drops the Hermes help paragraph", () => {
 });
 
 test("applyAnthropicSystem keeps a paragraph that merely mentions Hermes", () => {
-  const blocks = applyAnthropicSystem([
-    { type: "text", text: "The user asked about Hermes and Nous Research earlier." },
-  ]);
+  const blocks = applyAnthropicSystem(
+    [{ type: "text", text: "The user asked about Hermes and Nous Research earlier." }],
+    "",
+  );
   const joined = blocks.map((b) => b.text).join("\n");
   expect(joined).toContain("The user asked about Hermes and Nous Research earlier.");
 });
@@ -187,9 +222,18 @@ test("the drop and rewrite tables contain no invisible characters", async () => 
 });
 
 test("applyAnthropicSystem is idempotent", () => {
-  const once = applyAnthropicSystem([{ type: "text", text: "Do the thing." }]);
-  const twice = applyAnthropicSystem(once);
+  const once = applyAnthropicSystem([{ type: "text", text: "Do the thing." }], "");
+  const twice = applyAnthropicSystem(once, "");
   expect(twice.filter((b) => b.text.includes("x-anthropic-billing-header:"))).toHaveLength(1);
   expect(twice.filter((b) => b.text.startsWith("You are a Claude agent"))).toHaveLength(1);
   expect(twice.map((b) => b.text)).toEqual(once.map((b) => b.text));
+});
+
+test("ccVersionSuffix matches the CLI's own derivation", () => {
+  // Characters 4, 7 and 20 of the first user text, salted and hashed with the
+  // version; recomputed by hand from the 2.1.258 bundle, not from this code.
+  expect(ccVersionSuffix("Fix the auth middleware, please. Thanks")).toBe("72a");
+  // Short text pads with "0", so empty and "hi" collapse to the same suffix.
+  expect(ccVersionSuffix("")).toBe("a21");
+  expect(ccVersionSuffix("hi")).toBe("a21");
 });
