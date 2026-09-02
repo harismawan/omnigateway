@@ -78,6 +78,28 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
   throw new GatewayError("BAD_REQUEST", `${path}: ${issue?.message ?? "invalid request"}`);
 }
 
+/**
+ * A client-supplied token, bounded so a refusal may quote it.
+ *
+ * A parser's refusal carries no provider, so `reasonField` prints its message
+ * to stdout at default level — which makes every value interpolated into one a
+ * decision about the redaction boundary rather than a formatting choice.
+ * `LogFields` states the rule for tool names on `cloakedTools`: client text can
+ * hold anything a caller decided to put in it, and stdout is not where it goes.
+ *
+ * Bounded rather than dropped, because a client cannot fix a value it is not
+ * told about, and a wire `type` is exactly the thing worth naming. Forty
+ * characters of a known charset is enough for every real discriminator and
+ * short of anything worth smuggling; anything else says so instead. `reason` is
+ * truncated at 200 characters on the way out, but truncation is a cap on
+ * volume, not on content — the first 200 characters of a prompt are still a
+ * prompt.
+ */
+export function safeToken(value: unknown): string {
+  const text = typeof value === "string" ? value : String(value);
+  return /^[A-Za-z0-9_.:/+-]{1,40}$/.test(text) ? text : "(unprintable)";
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -227,7 +249,7 @@ function readSidecarImage(raw: string, declaredMediaType: string | undefined): S
   // type, and `data:application/pdf;base64,` states it just as clearly as an
   // envelope does.
   if (!mediaType.startsWith("image/")) {
-    return { ok: false, reason: "not-an-image", detail: `${mediaType} is not an image` };
+    return { ok: false, reason: "not-an-image", detail: `${safeToken(mediaType)} is not an image` };
   }
   return { ok: true, mediaType, data: resolved.data };
 }

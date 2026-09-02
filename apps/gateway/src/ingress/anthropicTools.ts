@@ -6,7 +6,7 @@ import {
   anthropicToolSpec,
 } from "@omni/providers";
 import { z } from "zod";
-import { cacheControlSchema, irCacheControl } from "./schemas.ts";
+import { cacheControlSchema, irCacheControl, safeToken } from "./schemas.ts";
 
 /**
  * Per-field schemas for Anthropic tool definitions, named once and shared by
@@ -101,7 +101,7 @@ function parseAnthropicTool(
   mcpServerNames: ReadonlySet<string>,
 ): AnthropicToolDef {
   const spec = anthropicToolSpec(type);
-  if (spec === undefined) fail(`${path}.type`, `unrecognized tool type "${type}"`);
+  if (spec === undefined) fail(`${path}.type`, `unrecognized tool type "${safeToken(type)}"`);
 
   if (spec.name !== undefined && raw.name !== spec.name) {
     fail(`${path}.name`, `${type} must be declared with name "${spec.name}"`);

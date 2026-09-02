@@ -18,6 +18,7 @@ import {
   isRecord,
   parseOrThrow,
   readConversationHeader,
+  safeToken,
 } from "./schemas.ts";
 
 const textBlock = z.object({
@@ -460,7 +461,10 @@ function readBlock(raw: unknown, role: Message["role"], path: string): ContentBl
     if (issue?.code === "invalid_union" || issue?.path.at(-1) === "type") {
       const type = (raw as { type?: unknown } | null)?.type;
       if (typeof type === "string") {
-        throw new GatewayError("BAD_REQUEST", `${path}.type: unrecognized block type "${type}"`);
+        throw new GatewayError(
+          "BAD_REQUEST",
+          `${path}.type: unrecognized block type "${safeToken(type)}"`,
+        );
       }
     }
     const suffix = issue?.path.length ? `.${issue.path.join(".")}` : "";
