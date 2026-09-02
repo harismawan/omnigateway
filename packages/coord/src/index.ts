@@ -94,6 +94,12 @@ export interface Coord {
    */
   pubsub: {
     publish(topic: string, payload: string): Promise<void>;
+    /**
+     * Publishes with a number taken from `seqKey` in the same step, so two
+     * processes cannot take 5 and 6 and deliver 6 first. Subscribers receive
+     * `<seq>:<payload>`; `splitSequenced` reads it back.
+     */
+    publishSequenced(topic: string, payload: string, seqKey: string): Promise<number>;
     /** `pattern` may end in `*`, matching any suffix. Returns the unsubscribe. */
     subscribe(pattern: string, fn: (topic: string, payload: string) => void): () => void;
   };
@@ -116,6 +122,15 @@ export interface Coord {
 export type WindowClaim = { stamp: number; before: WindowCounter };
 
 export type Counts = { requests: number; tokens: number; costUsd: number };
+
+/** The two halves of a `publishSequenced` delivery, or `null` for an ordinary one. */
+export function splitSequenced(payload: string): { seq: number; payload: string } | null {
+  const sep = payload.indexOf(":");
+  if (sep <= 0) return null;
+  const seq = Number(payload.slice(0, sep));
+  if (!Number.isInteger(seq) || seq <= 0) return null;
+  return { seq, payload: payload.slice(sep + 1) };
+}
 
 export class LockUnavailable extends Error {
   constructor(key: string) {
@@ -147,7 +162,15 @@ export type MemoryCoordOptions = {
 export function memoryCoord(options: MemoryCoordOptions = {}): MemoryCoord {
   const now = options.now ?? (() => Date.now());
   const windows = new Map<string, SlidingWindow>();
-  const gauges = new Map<string, number>();
+  /** Slot expiries per key. A slot past its expiry is a holder that died. */
+  const gauges = new Map<string, number[]>();
+  const liveSlots = (key: string): number[] => {
+    const at = now();
+    const held = (gauges.get(key) ?? []).filter((expiresAt) => expiresAt > at);
+    if (held.length === 0) gauges.delete(key);
+    else gauges.set(key, held);
+    return held;
+  };
   const locks = new Map<string, Promise<void>>();
   const values = new Map<string, { value: string; expiresAt: number }>();
   const buckets = new Map<string, Map<number, Counts>>();
@@ -205,23 +228,31 @@ export function memoryCoord(options: MemoryCoordOptions = {}): MemoryCoord {
     },
 
     gauge: {
-      acquire(key) {
-        const before = gauges.get(key) ?? 0;
-        gauges.set(key, before + 1);
+      acquire(key, ttlMs) {
+        const held = liveSlots(key);
+        const before = held.length;
+        held.push(now() + ttlMs);
+        gauges.set(key, held);
         return Promise.resolve(before);
       },
       release(key) {
-        const next = (gauges.get(key) ?? 0) - 1;
-        if (next > 0) gauges.set(key, next);
-        else gauges.delete(key);
+        // The oldest slot goes: which slot is not a distinction the count
+        // carries, and the oldest is the one nearest its own expiry.
+        const held = liveSlots(key);
+        held.sort((x, y) => x - y).shift();
+        if (held.length === 0) gauges.delete(key);
         return Promise.resolve();
       },
       read(key) {
-        return Promise.resolve(gauges.get(key) ?? 0);
+        return Promise.resolve(liveSlots(key).length);
       },
       snapshot(prefix) {
         const out = new Map<string, number>();
-        for (const [key, count] of gauges) if (key.startsWith(prefix)) out.set(key, count);
+        for (const key of [...gauges.keys()]) {
+          if (!key.startsWith(prefix)) continue;
+          const count = liveSlots(key).length;
+          if (count > 0) out.set(key, count);
+        }
         return Promise.resolve(out);
       },
     },
@@ -289,6 +320,11 @@ export function memoryCoord(options: MemoryCoordOptions = {}): MemoryCoord {
           if (hit) sub.fn(topic, payload);
         }
         return Promise.resolve();
+      },
+      publishSequenced(topic, payload, seqKey) {
+        const seq = (counters.get(seqKey) ?? 0) + 1;
+        counters.set(seqKey, seq);
+        return this.publish(topic, `${seq}:${payload}`).then(() => seq);
       },
       subscribe(pattern, fn) {
         const sub = { pattern, fn };

@@ -52,6 +52,18 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
     throw new GatewayError("CONFLICT", "the target already holds data; copy into an empty store");
   }
 
+  // Every refusal the copy can make is made before anything is written, so a
+  // failure never leaves a half-filled target that the retry then refuses.
+  const keys_ = await source.keys.list();
+  for (const key of keys_) {
+    if (key.limits === null) {
+      throw new GatewayError(
+        "BAD_REQUEST",
+        `api key ${key.id} has unreadable limits; repair it first`,
+      );
+    }
+  }
+
   const counts: CopyCounts = {
     credentials: 0,
     apiKeys: 0,
@@ -90,7 +102,7 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
     counts.models += 1;
   }
 
-  for (const key of await source.keys.list()) {
+  for (const key of keys_) {
     await target.keys.importRow(key);
     counts.apiKeys += 1;
   }

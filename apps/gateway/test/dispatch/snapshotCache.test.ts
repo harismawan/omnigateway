@@ -260,3 +260,47 @@ test("an explicit invalidation rebuilds the snapshot even when the version agree
   cache.close();
   store.close();
 });
+
+/**
+ * A health write another process made, handed in through `applyRemote` the
+ * way the fan-out delivers it: patched in place, no rebuild — a rebuild per
+ * foreign request would be the cost the cache exists to remove.
+ */
+test("remote health writes patch cached health without rebuilding", async () => {
+  const store = await seedRoutingStore();
+  const listRouting = store.credentials.listRouting.bind(store.credentials);
+  let builds = 0;
+  store.credentials.listRouting = async () => {
+    builds++;
+    return listRouting();
+  };
+  const cache = createRoutingSnapshotCache(store);
+  const first = await cache.get(100);
+
+  cache.applyRemote({
+    type: "healthSaved",
+    rows: [
+      {
+        credentialId: "c1",
+        model: "claude-opus-4",
+        breakerState: "open",
+        consecutiveFailures: 3,
+        openedAt: 200,
+        rateLimitedUntil: null,
+        ewmaTtftMs: 300,
+        lastUsedAt: 200,
+      },
+    ],
+  });
+  const second = await cache.get(200);
+  expect(second).not.toBe(first);
+  expect(second.health.get(healthKey("c1", "claude-opus-4"))?.breakerState).toBe("open");
+  expect(builds).toBe(1);
+
+  // A remote configuration change is the one that rebuilds.
+  cache.applyRemote({ type: "credentialsChanged" });
+  await cache.get(300);
+  expect(builds).toBe(2);
+  cache.close();
+  store.close();
+});

@@ -15,7 +15,7 @@ import {
 import { type Coord, memoryCoord } from "@omni/coord";
 import { GatewayError, HTTP_STATUS, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from "@omni/providers";
-import type { Store } from "@omni/store";
+import type { RoutingChange, Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
 import type { LoadRegistry } from "./dispatch/loadRegistry.ts";
@@ -244,18 +244,18 @@ export function createApp(deps: AppDeps) {
   const rateLimiter =
     deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger, coord });
   const snapshots = createRoutingSnapshotCache(deps.store, logger);
-  // A routing write on another process reaches this one as an invalidation.
-  // Own writes are skipped — the local subscription already patched them in,
-  // and a full rebuild per health write would be the cost this cache exists to
-  // remove. In memory the fan-out delivers only to this process, so the filter
-  // makes it a no-op there.
+  // A routing write on another process reaches this one as the same change
+  // the local subscription would have seen, rows included, so a remote health
+  // or quota write patches the snapshot rather than rebuilding it — a rebuild
+  // per foreign request is the cost this cache exists to remove. Own writes
+  // are skipped: the local subscription already applied them.
   const ROUTING_TOPIC = "routing";
   deps.store.routing.subscribe((change) => {
-    void coord.pubsub.publish(ROUTING_TOPIC, JSON.stringify({ from: nodeId, type: change.type }));
+    void coord.pubsub.publish(ROUTING_TOPIC, JSON.stringify({ from: nodeId, change }));
   });
   coord.pubsub.subscribe(ROUTING_TOPIC, (_topic, raw) => {
-    const message = JSON.parse(raw) as { from: string };
-    if (message.from !== nodeId) snapshots.invalidate();
+    const message = JSON.parse(raw) as { from: string; change: RoutingChange };
+    if (message.from !== nodeId) snapshots.applyRemote(message.change);
   });
 
   const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS, coord });

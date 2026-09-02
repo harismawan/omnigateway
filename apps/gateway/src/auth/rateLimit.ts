@@ -39,15 +39,18 @@ const GRAIN_MS: Record<LongWindow, number> = { "5h": 60_000, "1w": 3_600_000 };
 const SEED_LOCK_MS = 5_000;
 
 /**
- * How long a shared gauge holds a slot for a process that never released it.
+ * How long a gauge holds a slot for a process that never released it.
  *
- * Only a shared `Coord` reads this: an in-memory gauge dies with its process.
- * A request may legitimately run for longer — the dispatch deadline can be
- * unlimited — so this is a floor on a leaked slot's life, not a bound on a
- * request's. ponytail: one constant; renew the slot from the stream loop if
- * hour-long requests ever meet a shared gauge.
+ * A slot leaks when its process dies mid-request, and when a release lands on
+ * the memory fallback because the coordinator faulted between acquire and
+ * release; either way the key is locked out for this long. Five minutes: past
+ * the default request deadline, short enough that a fault is not an hour of
+ * refusals on a `concurrency: 1` key. A request that runs longer frees its
+ * slot early and admits one more, which is the direction the limiter permits.
+ * ponytail: one constant; renew the slot from the stream loop if hour-long
+ * requests ever meet a shared gauge.
  */
-const GAUGE_TTL_MS = 3_600_000;
+const GAUGE_TTL_MS = 300_000;
 
 /** Where a key's long-window buckets live: `lim:<keyId>:<window>`. */
 function bucketKey(keyId: string, window: LongWindow): string {

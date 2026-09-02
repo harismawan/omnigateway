@@ -317,6 +317,10 @@ export function createCredentialRepo(
       // otherwise overwrite whatever arrived in the meantime, and here another
       // replica can land between the two.
       const written = await sql.begin(async (tx): Promise<CredentialHealth> => {
+        // `FOR UPDATE` locks nothing where no row exists, so the first-ever
+        // write for a pair on two replicas would be last-writer-wins. One
+        // advisory lock on the pair covers the absent-row case.
+        await tx.unsafe("SELECT pg_advisory_xact_lock(hashtext($1))", [`${credentialId}|${model}`]);
         const rows = await tx.unsafe<Rows<HealthRow>>(
           "SELECT * FROM credential_health WHERE credential_id = $1 AND model = $2 FOR UPDATE",
           [credentialId, model],

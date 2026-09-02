@@ -209,7 +209,12 @@ function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryB
 
 /**
  * Completion upserts, because it serves both a request that began and one that
- * failed before dispatch ever ran.
+ * failed before dispatch ever ran — and it is a **claim**: the update lands
+ * only on a row still `pending`. A row another process already retired as
+ * interrupted (its owner missed six heartbeats, or two replicas booted over
+ * the same dead node) is left as it is, because completing it again would roll
+ * it up again, and the rollups add. The owner's figures are lost in that
+ * case; a double count is the error this store must not make.
  *
  * Three columns are deliberately not overwritten. `at` is omitted entirely, so
  * a row keeps the start time it was filed under and does not jump position in
@@ -244,7 +249,8 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_original_code_units = excluded.rtk_original_code_units,
     rtk_compressed_code_units = excluded.rtk_compressed_code_units,
     rtk_estimated_tokens_saved = excluded.rtk_estimated_tokens_saved,
-    rtk_filters = excluded.rtk_filters`;
+    rtk_filters = excluded.rtk_filters
+  WHERE request_logs.state = 'pending'`;
 
 export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
   /**
@@ -258,7 +264,9 @@ export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
    * column the completing log did not carry.
    */
   const complete = db.transaction((log: RequestLog) => {
-    db.run(COMPLETE, values(log, "done", nodeId));
+    // Zero rows changed means the claim lost: the row was already done. No
+    // rollup then — it was rolled up by whoever completed it.
+    if (db.run(COMPLETE, values(log, "done", nodeId)).changes === 0) return;
     const stored = db.query<Row, [string]>("SELECT * FROM request_logs WHERE id = ?").get(log.id);
     if (stored !== null) {
       const restored = toLog(stored);

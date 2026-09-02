@@ -1,4 +1,4 @@
-import type { Coord } from "@omni/coord";
+import { type Coord, splitSequenced } from "@omni/coord";
 import { createCoalescer, type Schedule } from "./coalescer.ts";
 import type { ServerFrame } from "./protocol.ts";
 import type { SocketRegistry } from "./registry.ts";
@@ -98,11 +98,14 @@ export type BroadcasterDeps = {
 /** What crosses between processes. One channel, three shapes. */
 type Fanout =
   | { kind: "res"; topic: string; payload?: unknown }
-  | { kind: "stream"; topic: string; seq: number; payload: unknown }
+  | { kind: "stream"; topic: string; payload: unknown }
   | { kind: "declare"; topic: string; nodeId: string }
   | { kind: "hello"; nodeId: string };
 
 const CHANNEL = "broadcast";
+
+/** Where the Redis coordinator says the shared channel came (back) up. */
+const RECONNECTED = "coord:reconnected";
 
 export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
   const floors = deps.floors ?? INVALIDATION_FLOORS;
@@ -140,7 +143,10 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
   });
 
   const unsubscribe = deps.coord.pubsub.subscribe(CHANNEL, (_topic, raw) => {
-    const message = JSON.parse(raw) as Fanout;
+    // A stream frame is numbered by the coordinator in the same step it was
+    // published, and the number rides in front of the envelope.
+    const sequenced = splitSequenced(raw);
+    const message = JSON.parse(sequenced?.payload ?? raw) as Fanout;
     switch (message.kind) {
       case "res":
         if (message.topic === GLOBAL_INVALIDATE) {
@@ -156,18 +162,20 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
           inbound.emit(message.topic, message.payload);
         }
         return;
-      case "stream":
+      case "stream": {
+        if (sequenced === null) return;
         // Recorded before it is published, so a subscriber that arrives
         // mid-publish replays from the ring rather than from a number the ring
         // has not seen yet.
-        deps.ring.push(message.topic, message.payload, message.seq);
+        deps.ring.push(message.topic, message.payload, sequenced.seq);
         deps.registry.publish(message.topic, {
           type: "event",
           topic: message.topic,
-          seq: message.seq,
+          seq: sequenced.seq,
           payload: message.payload,
         });
         return;
+      }
       case "declare":
         streams.set(message.topic, message.nodeId);
         return;
@@ -181,7 +189,11 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
         return;
     }
   });
-  send({ kind: "hello", nodeId: deps.nodeId });
+  const hello = (): void => send({ kind: "hello", nodeId: deps.nodeId });
+  hello();
+  // Declarations live only in fan-out. A process whose shared channel dropped
+  // and came back missed every one made meanwhile, so it asks again.
+  const unsubscribeReconnected = deps.coord.pubsub.subscribe(RECONNECTED, hello);
 
   return {
     invalidate(topic, keys) {
@@ -203,12 +215,14 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
 
     stream(topic, payload) {
       // The sequence is the fleet's, so a client moving between processes
-      // carries a number every one of them recognises. Issued before the
-      // frame is sent, and sent in issue order: `incr` resolves in call order
-      // on one connection, and the publish that follows each one does too.
-      void deps.coord.incr(`seq:${topic}`).then((seq) => {
-        send({ kind: "stream", topic, seq, payload });
-      });
+      // carries a number every one of them recognises — and it is taken in
+      // the same step as the publish, so two processes cannot take 5 and 6
+      // and deliver 6 first.
+      void deps.coord.pubsub.publishSequenced(
+        CHANNEL,
+        JSON.stringify({ kind: "stream", topic, payload } satisfies Fanout),
+        `seq:${topic}`,
+      );
     },
 
     resetStream(topic) {
@@ -219,6 +233,7 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
       outbound.stop();
       inbound.stop();
       unsubscribe();
+      unsubscribeReconnected();
     },
   };
 }

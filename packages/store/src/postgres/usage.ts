@@ -228,7 +228,8 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_original_code_units = EXCLUDED.rtk_original_code_units,
     rtk_compressed_code_units = EXCLUDED.rtk_compressed_code_units,
     rtk_estimated_tokens_saved = EXCLUDED.rtk_estimated_tokens_saved,
-    rtk_filters = EXCLUDED.rtk_filters`;
+    rtk_filters = EXCLUDED.rtk_filters
+  WHERE request_logs.state = 'pending'`;
 
 const sum = (row: SumRow | undefined) => ({
   requests: row === undefined ? 0 : num(row.requests),
@@ -247,7 +248,11 @@ export function createUsageRepo(sql: SQL, nodeId: string): UsageRepo {
    * column the completing log did not carry.
    */
   const complete = async (conn: Conn, log: RequestLog): Promise<void> => {
-    await conn.unsafe(COMPLETE, values(log, "done", nodeId));
+    // A claim: the upsert updates only a row still pending, so a row another
+    // replica already retired is not rolled up a second time. See the sqlite
+    // repo's `COMPLETE` for why the owner's figures lose that race.
+    const written = (await conn.unsafe(COMPLETE, values(log, "done", nodeId))).count;
+    if (written === 0) return;
     const stored = (
       await conn.unsafe<Rows<Row>>("SELECT * FROM request_logs WHERE id = $1", [log.id])
     )[0];

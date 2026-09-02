@@ -135,13 +135,13 @@ export function coordContract(name: string, make: (now: () => number) => Promise
   test(`${name}: kv holds a value for its ttl and not past it`, async () => {
     let clock = T0;
     const coord = await make(() => clock);
-    await coord.kv.set("s", "v", 50);
+    await coord.kv.set("s", "v", 200);
     expect(await coord.kv.get("s")).toBe("v");
-    clock += 49;
-    await Bun.sleep(49);
+    clock += 100;
+    await Bun.sleep(100);
     expect(await coord.kv.get("s")).toBe("v");
-    clock += 1;
-    await Bun.sleep(2);
+    clock += 100;
+    await Bun.sleep(150);
     expect(await coord.kv.get("s")).toBeNull();
   });
 
@@ -236,5 +236,29 @@ export function coordContract(name: string, make: (now: () => number) => Promise
     expect(await coord.incr("seq")).toBe(1);
     expect(await coord.incr("seq")).toBe(2);
     expect(await coord.incr("other")).toBe(1);
+  });
+
+  test(`${name}: a gauge slot lapses at its ttl, so a dead holder frees it`, async () => {
+    let clock = T0;
+    const coord = await make(() => clock);
+    expect(await coord.gauge.acquire("g", 50)).toBe(0);
+    expect(await coord.gauge.read("g")).toBe(1);
+    clock += 60;
+    await Bun.sleep(60);
+    expect(await coord.gauge.read("g")).toBe(0);
+    expect(await coord.gauge.acquire("g", 50)).toBe(0);
+  });
+
+  test(`${name}: publishSequenced numbers deliveries in one step`, async () => {
+    const coord = await make(() => T0);
+    const seen: string[] = [];
+    const off = coord.pubsub.subscribe("s", (_topic, payload) => {
+      seen.push(payload);
+    });
+    expect(await coord.pubsub.publishSequenced("s", "a", "seq:s")).toBe(1);
+    expect(await coord.pubsub.publishSequenced("s", "b", "seq:s")).toBe(2);
+    await Bun.sleep(5);
+    off();
+    expect(seen).toEqual(["1:a", "2:b"]);
   });
 }

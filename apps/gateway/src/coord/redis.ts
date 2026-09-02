@@ -30,8 +30,12 @@ const FAULT_LOG_INTERVAL_MS = 30_000;
 /** How long the first call waits for the first connect before reading `connected`. */
 const CONNECT_WAIT_MS = 2_000;
 
-/** How often a dropped subscription is re-established. */
-const RELISTEN_INTERVAL_MS = 5_000;
+/**
+ * A local-only topic a subscriber may hold to learn the shared channel was
+ * (re)established, so state that lives only in fan-out — stream declarations —
+ * can be asked for again.
+ */
+const RECONNECTED = "coord:reconnected";
 
 // --- Lua -----------------------------------------------------------------
 //
@@ -56,18 +60,65 @@ const WINDOW_ROLLBACK = `
   return 0
 `;
 
-/** ZSET of slots scored by expiry. Prunes, reads before, adds. Returns before. */
+/**
+ * ZSET of slots scored by expiry, plus a SET indexing every key under its
+ * prefix so `snapshot` is one script and never a `SCAN` of the keyspace.
+ * Prunes, reads before, adds. Returns before.
+ */
 const GAUGE_ACQUIRE = `
   redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
   local before = redis.call('ZCARD', KEYS[1])
   redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + tonumber(ARGV[2]), ARGV[3])
   redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  redis.call('SADD', KEYS[2], KEYS[1])
   return before
 `;
 
 const GAUGE_READ = `
   redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
   return redis.call('ZCARD', KEYS[1])
+`;
+
+/** Prunes first, so a lapsed slot is never the one given back for a live one. */
+const GAUGE_RELEASE = `
+  redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+  redis.call('ZPOPMIN', KEYS[1])
+  return 0
+`;
+
+/** Every indexed key's live count; drops empty keys from the index as it goes. */
+const GAUGE_SNAPSHOT = `
+  local out = {}
+  for _, key in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+    redis.call('ZREMRANGEBYSCORE', key, '-inf', ARGV[1])
+    local count = redis.call('ZCARD', key)
+    if count > 0 then
+      out[#out + 1] = key
+      out[#out + 1] = count
+    else
+      redis.call('SREM', KEYS[1], key)
+    end
+  end
+  return out
+`;
+
+/** Replace the picture in one step, so no add lands between the delete and the write. */
+const BUCKETS_SEED = `
+  redis.call('DEL', KEYS[1])
+  redis.call('HSET', KEYS[1], unpack(ARGV, 2))
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+  return 0
+`;
+
+/**
+ * Number and publish in one step, so two processes cannot deliver out of
+ * order. The envelope is built here so the number rides inside the payload
+ * the way `splitSequenced` reads it.
+ */
+const PUBLISH_SEQUENCED = `
+  local seq = redis.call('INCR', KEYS[1])
+  redis.call('PUBLISH', ARGV[1], cjson.encode({ topic = ARGV[2], payload = seq .. ':' .. ARGV[3] }))
+  return seq
 `;
 
 /**
@@ -125,6 +176,21 @@ const LEASE_ACQUIRE = `
 
 const LEASE_RELEASE = MUTEX_RELEASE;
 
+const SCRIPTS = [
+  WINDOW_CLAIM,
+  WINDOW_ROLLBACK,
+  GAUGE_ACQUIRE,
+  GAUGE_READ,
+  GAUGE_RELEASE,
+  GAUGE_SNAPSHOT,
+  BUCKETS_ADD,
+  BUCKETS_SUM,
+  BUCKETS_SEED,
+  MUTEX_RELEASE,
+  LEASE_ACQUIRE,
+  PUBLISH_SEQUENCED,
+] as const;
+
 type Envelope = { topic: string; payload: string };
 
 /**
@@ -153,9 +219,20 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
     autoReconnect: true,
     enableOfflineQueue: false,
   });
-  let healthy = true;
+  // Unknown until the first connect settles, so `/health` does not report
+  // `ok` for a coordinator nothing has reached yet.
+  let healthy = false;
   let lastFault = Number.NEGATIVE_INFINITY;
   const key = (kind: string, name: string): string => `${NS}${kind}:${name}`;
+  /**
+   * The index set a gauge key is listed in: its prefix up to and including
+   * the first colon, so `load:<id>` keys share one set and `snapshot("load:")`
+   * reads it in one script. A key with no colon is its own set.
+   */
+  const indexOf = (name: string): string => {
+    const colon = name.indexOf(":");
+    return `${NS}gidx:${colon === -1 ? name : name.slice(0, colon + 1)}`;
+  };
 
   const fault = (error: unknown): void => {
     healthy = false;
@@ -169,20 +246,76 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
     });
   };
 
+  // Every script is loaded at connect and called by digest afterwards, so a
+  // call never waits on a load — which matters for ordering: a release sent
+  // without awaiting it must reach the server before the next acquire on
+  // this connection, and an extra round trip in front of it would let the
+  // acquire overtake. A server that lost its script cache (restart, FLUSH)
+  // answers NOSCRIPT and the script is sent whole once more.
+  const shas = new Map<string, string>();
+  const loadScripts = async (): Promise<void> => {
+    for (const script of SCRIPTS) {
+      shas.set(script, (await client.send("SCRIPT", ["LOAD", script])) as string);
+    }
+  };
+  const evalScript = async (
+    script: string,
+    keys: string[],
+    args: Array<string | number>,
+  ): Promise<unknown> => {
+    const tail = [String(keys.length), ...keys, ...args.map(String)];
+    const sha = shas.get(script);
+    if (sha === undefined) return client.send("EVAL", [script, ...tail]);
+    try {
+      return await client.send("EVALSHA", [sha, ...tail]);
+    } catch (error) {
+      if (!String(error).includes("NOSCRIPT")) throw error;
+      shas.delete(script);
+      return client.send("EVAL", [script, ...tail]);
+    }
+  };
+
   // With the offline queue off the client does not connect on first use, so
   // the connection is opened here. With reconnection on, `connect()` never
   // rejects — it retries with backoff for as long as the server is away — so
   // it is awaited for at most the connection timeout and then every call
   // reads `connected` instead. A call that finds it down is a fault answered
   // at once, never a wait on a connect that may take the whole timeout.
-  const ready = Promise.race([client.connect().catch(fault), Bun.sleep(CONNECT_WAIT_MS)]);
+  const ready = Promise.race([
+    client
+      .connect()
+      .then(loadScripts)
+      .then(
+        () => {
+          healthy = true;
+        },
+        (error: unknown) => fault(error),
+      ),
+    Bun.sleep(CONNECT_WAIT_MS),
+  ]);
 
   /** Runs `redis`; on a transport fault records it and runs `instead`. */
+  /**
+   * Debits made while Redis was away went to the embedded memory coordinator
+   * and were dropped there (an unseeded key ignores adds), so on recovery the
+   * shared picture is short by every one of them — an under-count, which is
+   * the direction the limiter forbids. Dropping every bucket hash makes the
+   * next admission reseed from the store, which has the rows.
+   */
+  const reseedAfterOutage = async (): Promise<void> => {
+    const keys = await scan(client, `${key("b", "")}*`);
+    if (keys.length > 0) await client.send("UNLINK", keys);
+  };
+
   const attempt = async <T>(redis: () => Promise<T>, instead: () => Promise<T>): Promise<T> => {
     try {
       await ready;
       if (!client.connected) throw new Error("not connected");
       const out = await redis();
+      if (!healthy && lastFault !== Number.NEGATIVE_INFINITY) {
+        healthy = true;
+        void reseedAfterOutage().catch(fault);
+      }
       healthy = true;
       return out;
     } catch (error) {
@@ -190,9 +323,6 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
       return instead();
     }
   };
-
-  const evalScript = (script: string, keys: string[], args: Array<string | number>) =>
-    client.send("EVAL", [script, String(keys.length), ...keys, ...args.map(String)]);
 
   // --- pubsub: one subscriber connection, dispatched locally ---------------
   const subscribers = new Set<{ pattern: string; fn: (topic: string, payload: string) => void }>();
@@ -206,42 +336,50 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
   };
   // A second connection, because a subscribed connection can issue nothing
   // else. Opened explicitly: without `connect()` a subscribe never settles.
+  //
+  // Re-subscribed from `onconnect`, which the client fires on the first
+  // connect and on every reconnect after a drop — and `onclose` is what it
+  // does *not* fire on a killed connection, measured. A subscribe issued
+  // after a reconnect without the unsubscribe delivers every frame twice.
   const subscriber = new RedisClient(deps.url, { connectionTimeout: 2_000, autoReconnect: true });
   // Own publishes reach own subscribers through the fallback whenever the
   // shared channel does not carry them; a process is always its own audience.
   fallback.pubsub.subscribe("*", dispatch);
   let listening = false;
-  let connecting = false;
-  const listen = (): Promise<void> => {
-    if (listening || connecting) return Promise.resolve();
-    connecting = true;
-    return subscriber
-      .connect()
-      .then(() =>
-        subscriber.subscribe(CHANNEL, (message) => {
-          const envelope = JSON.parse(message) as Envelope;
-          dispatch(envelope.topic, envelope.payload);
-        }),
-      )
-      .then(() => {
-        listening = true;
-      })
-      .catch(fault)
-      .finally(() => {
-        connecting = false;
-      });
+  let firstListen: () => void = () => {};
+  const listened = Promise.race([
+    new Promise<void>((resolve) => {
+      firstListen = resolve;
+    }),
+    Bun.sleep(CONNECT_WAIT_MS),
+  ]);
+  const onFrame = (message: string): void => {
+    const envelope = JSON.parse(message) as Envelope;
+    dispatch(envelope.topic, envelope.payload);
+  };
+  subscriber.onconnect = () => {
+    void (async () => {
+      try {
+        await subscriber.unsubscribe(CHANNEL);
+      } catch {
+        // Nothing was subscribed on a fresh connection; that is fine.
+      }
+      await subscriber.subscribe(CHANNEL, onFrame);
+      listening = true;
+      firstListen();
+      // Declarations made while this process was deaf are re-asked for by
+      // whoever it tells; the broadcaster answers a hello with its own.
+      dispatch(RECONNECTED, "");
+    })().catch(fault);
   };
   subscriber.onclose = () => {
     listening = false;
   };
-  const listened = Promise.race([listen(), Bun.sleep(CONNECT_WAIT_MS)]);
-  const relisten = setInterval(() => void listen(), RELISTEN_INTERVAL_MS);
-  relisten.unref?.();
+  subscriber.connect().catch(fault);
 
   return {
     healthy: () => healthy,
     close() {
-      clearInterval(relisten);
       subscriber.close();
       client.close();
     },
@@ -278,7 +416,7 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
           async () =>
             (await evalScript(
               GAUGE_ACQUIRE,
-              [key("g", name)],
+              [key("g", name), indexOf(name)],
               [now(), ttlMs, crypto.randomUUID()],
             )) as number,
           () => fallback.gauge.acquire(name, ttlMs),
@@ -287,9 +425,9 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
       release(name) {
         return attempt(
           async () => {
-            // The oldest slot goes. Which slot is not a distinction the count
-            // carries, and the oldest is the one nearest its own expiry.
-            await client.send("ZPOPMIN", [key("g", name)]);
+            // The oldest live slot goes. Which slot is not a distinction the
+            // count carries, and the oldest is the one nearest its own expiry.
+            await evalScript(GAUGE_RELEASE, [key("g", name)], [now()]);
           },
           () => fallback.gauge.release(name),
         );
@@ -303,11 +441,12 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
       snapshot(prefix) {
         return attempt(
           async () => {
+            const flat = (await evalScript(GAUGE_SNAPSHOT, [indexOf(prefix)], [now()])) as Array<
+              string | number
+            >;
             const out = new Map<string, number>();
-            const at = now();
-            for (const full of await scan(client, `${key("g", prefix)}*`)) {
-              const count = (await evalScript(GAUGE_READ, [full], [at])) as number;
-              if (count > 0) out.set(full.slice(key("g", "").length), count);
+            for (let i = 0; i + 1 < flat.length; i += 2) {
+              out.set(String(flat[i]).slice(key("g", "").length), Number(flat[i + 1]));
             }
             return out;
           },
@@ -361,11 +500,7 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
                 String(counts.costUsd),
               );
             }
-            // DEL then HSET rather than a transaction: a reader between the two
-            // sees "unseeded" and seeds again, which installs the same picture.
-            await client.del(full);
-            await client.send("HSET", [full, ...fields]);
-            await client.send("PEXPIRE", [full, String(windowMs * 2)]);
+            await evalScript(BUCKETS_SEED, [full], [windowMs * 2, ...fields]);
           },
           () => fallback.buckets.seed(name, grainMs, windowMs, at, rows),
         );
@@ -468,6 +603,20 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
             await client.publish(CHANNEL, JSON.stringify({ topic, payload } satisfies Envelope));
           },
           () => fallback.pubsub.publish(topic, payload),
+        );
+      },
+      publishSequenced(topic, payload, seqKey) {
+        return attempt(
+          async () => {
+            await listened;
+            if (!listening) throw new Error("not listening");
+            return (await evalScript(
+              PUBLISH_SEQUENCED,
+              [key("seq", seqKey)],
+              [CHANNEL, topic, payload],
+            )) as number;
+          },
+          () => fallback.pubsub.publishSequenced(topic, payload, seqKey),
         );
       },
       subscribe(pattern, fn) {

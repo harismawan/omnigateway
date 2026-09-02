@@ -182,7 +182,19 @@ run; when that file gain a step, this line gain one.
     closed `LogFields` keys `coord`/`coordFallback`. **`RedisClient.connect()` never reject with
     `autoReconnect` on** — it retry forever — so the first call race it against
     `CONNECT_WAIT_MS` and every call read `connected` instead; a subscriber need its own
-    connection and an explicit `connect()` or `subscribe` never settle. Contract suite run
+    connection and an explicit `connect()` or `subscribe` never settle. **`onclose` never fire
+    on a killed connection; `onconnect` fire on first connect and every reconnect** — measured
+    with `CLIENT KILL TYPE pubsub` — so the subscription is (re)established from `onconnect`,
+    `unsubscribe` first or every frame arrive twice, and the broadcaster re-`hello` on
+    `coord:reconnected` because declarations live only in fan-out. Scripts are `SCRIPT LOAD`ed
+    at connect and called by `EVALSHA`: a fire-and-forget release must reach the server before
+    the next acquire on the same connection, and a load in front of it let the acquire overtake
+    (measured: the two-replica concurrency test went 429). `complete()` in both usage repos is a
+    **claim** — `ON CONFLICT DO UPDATE … WHERE state = 'pending'`, rollup only when a row
+    changed — so a row swept as dead and then completed by its owner is billed once.
+    Remote routing changes reach a replica as the `RoutingChange` itself over the `routing`
+    topic and go through `snapshots.applyRemote`, so a foreign health write patch rather than
+    rebuild. Contract suite run
     against real Redis when `OMNI_TEST_REDIS_URL` set (CI set it; `valkey` service), and
     `test/cluster/sharedCoord.test.ts` run the two-replica suite over two **separate** Redis
     coords — what two pods actually hold. Design:

@@ -337,3 +337,23 @@ forEachStore((backend) => {
     expect(seen).toEqual(["c", "a", "b", "d", "p"]);
   });
 });
+
+forEachStore((backend) => {
+  /**
+   * A row retired as interrupted by another process and then completed by its
+   * owner is billed once. The rollups add, so completing it twice is the
+   * double-billing a false-dead verdict would otherwise cause.
+   */
+  test("completing a row that was already swept does not roll it up twice", async () => {
+    const a = await backend.fresh("node-a");
+    const b = await backend.sibling("node-b");
+    const t = 1_700_000_000_000;
+    await a.maintenance.heartbeat(t);
+    await a.usage.begin(logRow({ id: "r1", at: t, state: "pending" }));
+    expect(await b.usage.sweepPending(t + NODE_GRACE_MS + 1)).toBe(1);
+    await a.usage.append(logRow({ id: "r1", at: t, inputTokens: 100 }));
+    expect((await a.usage.sumSince("k1", 0)).requests).toBe(1);
+    const row = (await a.usage.recent(10)).find((r) => r.id === "r1");
+    expect(row?.status).toBe(499);
+  });
+});

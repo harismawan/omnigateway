@@ -42,7 +42,7 @@ const PREFIX = "load:";
  * Ignored in memory; see the same constant in `auth/rateLimit.ts` for why it
  * is a floor on a leaked slot's life rather than a bound on a request's.
  */
-const SLOT_TTL_MS = 3_600_000;
+const SLOT_TTL_MS = 300_000;
 
 export function createLoadRegistry(coord: Coord = memoryCoord()): LoadRegistry {
   const local = new Map<string, number>();

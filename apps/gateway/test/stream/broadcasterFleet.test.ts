@@ -82,3 +82,24 @@ test("a ring ignores a frame behind its head rather than reordering", () => {
   // Frames before this process subscribed are a gap, never a silent skip.
   expect(ring.since("t", 2).kind).toBe("gap");
 });
+
+/**
+ * The emit-side coalescer: N invalidations inside one floor publish once,
+ * plus one trailing frame — not N. Without it N processes at 100 req/s each
+ * publish uncoalesced, which is what the deliver-side floor cannot bound.
+ */
+test("rapid invalidations publish once per floor, not once each", async () => {
+  const coord = memoryCoord();
+  let publishes = 0;
+  const publish = coord.pubsub.publish.bind(coord.pubsub);
+  coord.pubsub.publish = (topic, payload) => {
+    if (payload.includes('"res"')) publishes += 1;
+    return publish(topic, payload);
+  };
+  const a = node(coord, "a");
+  for (let i = 0; i < 20; i++) a.broadcaster.invalidate("res:logs");
+  await Bun.sleep(1);
+  // One immediate; the rest fold into a trailing frame the injected
+  // scheduler never fires.
+  expect(publishes).toBe(1);
+});

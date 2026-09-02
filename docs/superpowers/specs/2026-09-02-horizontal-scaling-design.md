@@ -174,9 +174,9 @@ closed values, a security-reviewed addition of exactly two names — and then:
 | `pubsub`, `incr` | delegate to memory | push degrades to this-pod-only; nothing is lost that a refetch does not recover |
 | `lease` | return `false` | a lease you cannot confirm is one you do not hold; the loop skips this tick |
 | `mutex` | throw `LOCK_UNAVAILABLE` | the caller decides; refresh falls back to CAS (below) |
-| `kv` | throw `UNAVAILABLE` | a session verified against a fallback map is one a password change elsewhere cannot end |
+| `kv` | throw `OVERLOADED` (503) | a session verified against a fallback map is one a password change elsewhere cannot end |
 
-`kv` failing closed means the console and `/api/client/*` answer `503 UNAVAILABLE` while
+`kv` failing closed means the console and `/api/client/*` answer `503 OVERLOADED` while
 Redis is down — spelled differently from a bad cookie, so the login screen says "try
 again", not "wrong password". `/v1/*` is unaffected: API keys verify against the store and
 never touch `kv`.

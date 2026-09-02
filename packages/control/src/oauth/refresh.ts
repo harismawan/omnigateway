@@ -49,8 +49,8 @@ export function createRefresher(deps: RefreshDeps): Refresher {
    * The same rule across processes, which the map cannot see.
    *
    * The lock serialises; the re-read is the dedup. A process that waited on
-   * the lock re-reads the credential once it holds it, and an expiry that moved
-   * forward since its own view was taken means another process already
+   * the lock re-reads the credential once it holds it, and a token version
+   * that moved since its own view was taken means another process already
    * refreshed — so it returns those secrets and never calls the provider,
    * which for a rotating-token provider is the difference between a working
    * credential and one only a browser can recover.
@@ -68,7 +68,11 @@ export function createRefresher(deps: RefreshDeps): Refresher {
         REFRESH_LOCK_MS,
         async () => {
           const fresh = await deps.store.credentials.get(credential.id);
-          if (fresh !== null && (fresh.expiresAt ?? 0) > (credential.expiresAt ?? 0)) {
+          // `tokenVersion` moves on every secrets write, which is exactly
+          // "someone rotated since this view was taken" — where `expiresAt`
+          // is null for a provider whose tokens carry no expiry and would
+          // never dedup.
+          if (fresh !== null && fresh.tokenVersion > credential.tokenVersion) {
             return fresh.secrets();
           }
           // The row as it is now, so the version the write compares against is
