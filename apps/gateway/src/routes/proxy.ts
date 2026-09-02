@@ -46,6 +46,7 @@ import {
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
 import { customToolNames, parseResponsesRequest } from "../ingress/responses.ts";
+import { safeToken } from "../ingress/schemas.ts";
 import {
   type BodyWriter,
   beginLog,
@@ -570,7 +571,7 @@ async function handle(
     if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {
       throw new GatewayError(
         "AUTH",
-        `model "${chatRequest.model}" is not allowed for this API key`,
+        `model "${safeToken(chatRequest.model)}" is not allowed for this API key`,
       );
     }
 
@@ -885,7 +886,7 @@ export function proxyRoutes(deps: ProxyDeps) {
           if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {
             throw new GatewayError(
               "AUTH",
-              `model "${chatRequest.model}" is not allowed for this API key`,
+              `model "${safeToken(chatRequest.model)}" is not allowed for this API key`,
             );
           }
           // Counted against the request the gateway will actually send. This

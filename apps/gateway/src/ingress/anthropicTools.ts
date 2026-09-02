@@ -6,7 +6,7 @@ import {
   anthropicToolSpec,
 } from "@omni/providers";
 import { z } from "zod";
-import { cacheControlSchema, irCacheControl } from "./schemas.ts";
+import { cacheControlSchema, irCacheControl, safeToken, zodDetail } from "./schemas.ts";
 
 /**
  * Per-field schemas for Anthropic tool definitions, named once and shared by
@@ -77,11 +77,12 @@ function fail(path: string, message: string): never {
 /** Runs one field's schema, reporting the failure at that field's own path. */
 function field(path: string, name: string, value: unknown): unknown {
   const schema = TOOL_FIELDS[name];
-  if (schema === undefined) fail(`${path}.${name}`, `unsupported field "${name}"`);
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) {
-    fail(`${path}.${name}`, parsed.error.issues[0]?.message ?? "invalid value");
+  // `name` is a key from the client's own JSON, on both channels.
+  if (schema === undefined) {
+    fail(`${path}.${safeToken(name)}`, `unsupported field "${safeToken(name)}"`);
   }
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) fail(`${path}.${safeToken(name)}`, zodDetail(parsed.error.issues[0]));
   return parsed.data;
 }
 
@@ -101,7 +102,7 @@ function parseAnthropicTool(
   mcpServerNames: ReadonlySet<string>,
 ): AnthropicToolDef {
   const spec = anthropicToolSpec(type);
-  if (spec === undefined) fail(`${path}.type`, `unrecognized tool type "${type}"`);
+  if (spec === undefined) fail(`${path}.type`, `unrecognized tool type "${safeToken(type)}"`);
 
   if (spec.name !== undefined && raw.name !== spec.name) {
     fail(`${path}.name`, `${type} must be declared with name "${spec.name}"`);
@@ -120,7 +121,12 @@ function parseAnthropicTool(
 
   for (const [key, value] of Object.entries(raw)) {
     if (key === "type" || key === "name") continue;
-    if (!allowed.has(key)) fail(`${path}.${key}`, `${type} does not accept "${key}"`);
+    // Bounded on both channels. The message is the obvious one; the path is
+    // the one that gets missed, because it reads as structure rather than as
+    // content and it carries the same client-chosen key.
+    if (!allowed.has(key)) {
+      fail(`${path}.${safeToken(key)}`, `${type} does not accept "${safeToken(key)}"`);
+    }
     const parsed = field(path, key, value);
     // Lifted out of the wire payload: a breakpoint is caller intent the whole
     // gateway reads, and every encoder renders it from the canonical field.
@@ -147,7 +153,7 @@ function parseAnthropicTool(
   if (spec.family === "mcpToolset") {
     const server = wire.mcp_server_name;
     if (typeof server === "string" && !mcpServerNames.has(server)) {
-      fail(`${path}.mcp_server_name`, `no mcp_servers entry named "${server}"`);
+      fail(`${path}.mcp_server_name`, `no mcp_servers entry named "${safeToken(server)}"`);
     }
   }
 
@@ -176,7 +182,7 @@ function parseCustomTool(raw: Record<string, unknown>, path: string): CustomTool
   for (const [key, value] of Object.entries(raw)) {
     if (["type", "name", "description", "input_schema", "cache_control"].includes(key)) continue;
     if (!(ANTHROPIC_CUSTOM_TOOL_OPTIONS as readonly string[]).includes(key)) {
-      fail(`${path}.${key}`, `unsupported field "${key}"`);
+      fail(`${path}.${safeToken(key)}`, `unsupported field "${safeToken(key)}"`);
     }
     const value_ = field(path, key, value);
     if (value_ !== null) options[key] = value_;

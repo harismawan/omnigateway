@@ -1,5 +1,5 @@
 import type { CacheControl, ContentBlock } from "@omni/ir";
-import { cacheControlOf, GatewayError } from "@omni/ir";
+import { cacheControlOf, GatewayError, safeToken } from "@omni/ir";
 import { z } from "zod";
 
 /**
@@ -74,9 +74,43 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
   if (result.success) return result.data;
 
   const issue = result.error.issues[0];
-  const path = issue?.path.join(".") ?? "(root)";
-  throw new GatewayError("BAD_REQUEST", `${path}: ${issue?.message ?? "invalid request"}`);
+  throw new GatewayError("BAD_REQUEST", `${issuePath(issue)}: ${zodDetail(issue)}`);
 }
+
+/**
+ * What a zod failure may say about the request that caused it.
+ *
+ * Every arm reports the schema's own expectation — except `unrecognized_keys`,
+ * whose message is `Unrecognized key: "<the client's key>"`. That one is
+ * rewritten here rather than bounded in place, because the value rides zod's
+ * wording rather than ours, and there are twenty-five strict schemas on this
+ * surface for it to come out of. Checked against zod v4: no other arm echoes a
+ * received value.
+ */
+/**
+ * The field path of a zod failure, with every segment bounded.
+ *
+ * A path reads as structure, and mostly is — schema keys and array indices this
+ * repository named. The exception is real: zod's `invalid_key` arm puts the
+ * client's own key in `path`, so a `z.record` with a constrained key schema
+ * would put client text here while the message beside it stayed bounded. No
+ * such record exists today; the bound is what makes that stay true when one
+ * does.
+ */
+export function issuePath(issue: z.core.$ZodIssue | undefined): string {
+  const segments = issue?.path ?? [];
+  return segments.length === 0 ? "(root)" : segments.map((s) => safeToken(String(s))).join(".");
+}
+
+export function zodDetail(issue: z.core.$ZodIssue | undefined): string {
+  if (issue === undefined) return "invalid request";
+  if (issue.code === "unrecognized_keys") {
+    return `unrecognized key "${safeToken(issue.keys[0])}"`;
+  }
+  return issue.message;
+}
+
+export { safeToken };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -227,7 +261,7 @@ function readSidecarImage(raw: string, declaredMediaType: string | undefined): S
   // type, and `data:application/pdf;base64,` states it just as clearly as an
   // envelope does.
   if (!mediaType.startsWith("image/")) {
-    return { ok: false, reason: "not-an-image", detail: `${mediaType} is not an image` };
+    return { ok: false, reason: "not-an-image", detail: `${safeToken(mediaType)} is not an image` };
   }
   return { ok: true, mediaType, data: resolved.data };
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createLogger, type LogFields, type Logger } from "../src/logger.ts";
+import { createLogger, type LogFields, type Logger, safeToken } from "../src/logger.ts";
 
 /**
  * The redaction boundary, pinned at the compiler rather than at review.
@@ -91,4 +91,28 @@ test("the surface field names the three client dialects and nothing else", () =>
   // @ts-expect-error - "grpc" is not a client surface this gateway serves
   logger.info("invented", { surface: "grpc" });
   expect(sink).toHaveLength(4);
+});
+
+test("a model name is capped on the way out, like the reason beside it", () => {
+  sink.length = 0;
+  // `resolveModel` synthesizes a target from a prefixed model name, so
+  // `resolvedModel` can be the client's own string — and unlike `reason` this
+  // field had no cap at all, which made it the longer of the two channels onto
+  // the same line.
+  logger.info("routed", { model: `anthropic/${"x".repeat(4000)}`, reason: "y".repeat(4000) });
+  const line = sink[0] as string;
+  expect(line.length).toBeLessThan(700);
+});
+
+test("safeToken refuses what would forge a log line, at any length", () => {
+  // The charset is the half that matters, and for a narrower reason than it
+  // first appears: `renderValue` JSON-quotes a value containing whitespace or a
+  // quote, so a newline is escaped rather than writing a second line. What the
+  // charset buys is keeping such a value off the line at all. None of these is
+  // long enough for a length bound to catch.
+  const hostile = ['a"b', "a b", "a\nb", "a\rb", "a\u001b[31mb", "a=b"];
+  for (const value of hostile) expect(safeToken(value)).toBe("(unprintable)");
+  // And the length boundary itself, on a value the charset accepts.
+  expect(safeToken("a".repeat(64))).toBe("a".repeat(64));
+  expect(safeToken("a".repeat(65))).toBe("(unprintable)");
 });

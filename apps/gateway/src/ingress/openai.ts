@@ -1,7 +1,7 @@
 import type { CacheControl, ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
 import { GatewayError, REASONING_EFFORTS, validateRequest } from "@omni/ir";
 import { z } from "zod";
-import { normalizeClientModel } from "./model.ts";
+import { MODEL_NAME_MAX, normalizeClientModel } from "./model.ts";
 import {
   applyMessageCacheControl,
   extraFields,
@@ -106,7 +106,7 @@ function sidecarImages(m: z.infer<typeof message>): ContentBlock[] {
 }
 
 const schema = z.object({
-  model: z.string().min(1),
+  model: z.string().min(1).max(MODEL_NAME_MAX),
   messages: z.array(message).min(1),
   max_tokens: z.number().int().positive().optional(),
   max_completion_tokens: z.number().int().positive().optional(),

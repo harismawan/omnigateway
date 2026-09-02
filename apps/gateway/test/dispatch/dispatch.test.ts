@@ -3011,3 +3011,45 @@ test("records a moved cache breakpoint separately from the level", async () => {
   expect(outcome.log().degradations).toContain("ponytail:cache-marker-moved");
   store.close();
 });
+
+test("an in-stream upstream message is withheld from stdout, like a thrown one", async () => {
+  // The decoders build this message from the upstream's own body — a
+  // context-length refusal quotes prompt text back into it — and this rethrow
+  // reached `reasonField` with no provider, so it printed at default level.
+  // `httpError` avoids exactly that on the non-streaming path by naming the
+  // provider; the streaming path is the busiest client's default.
+  //
+  // `captureLogger("info")` and not the default: `captureLogger()` is `debug`,
+  // where `reasonField` prints unconditionally, so a test written with the
+  // default cannot tell withheld from printed.
+  // One credential, so the in-stream error is terminal: the retry line carries
+  // no `reason` at all, and the message only reaches stdout once the candidates
+  // are exhausted and `reasonField` decides whether to print `lastError`.
+  const store = await seeded(1);
+  const logger = captureLogger("info");
+  const upstreamBody = "IN_STREAM_UPSTREAM_SENTINEL";
+  const adapter = stubAdapter(() => {
+    return (async function* () {
+      yield { type: "start", id: "m", model: "claude-opus-4" } as StreamEvent;
+      yield {
+        type: "error",
+        code: "UPSTREAM",
+        message: upstreamBody,
+        retryable: true,
+      } as StreamEvent;
+    })();
+  });
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), logger },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(logger.lines.join("\n")).not.toContain(upstreamBody);
+  // The operator still learns which provider failed, and with what code.
+  expect(logger.lines.join("\n")).toContain("provider=anthropic");
+  store.close();
+});

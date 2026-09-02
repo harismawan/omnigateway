@@ -1894,3 +1894,48 @@ test("counts the ponytail ruleset the gateway will append", async () => {
 
   expect(after.input_tokens).toBeGreaterThan(before.input_tokens + 500);
 });
+
+test("a refused model name reaches neither the client nor the log unbounded", async () => {
+  // The allowlist refusal quotes the model back, and `reasonField` prints it:
+  // this error names no provider, so it is printed at default level. Both of
+  // these call sites had no test at all, so reverting them to raw
+  // interpolation passed the whole suite.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", provider: "anthropic" });
+  const { raw } = await seedApiKey(store, { label: "narrow", modelAllowlist: ["fast"] });
+  const logger = captureLogger();
+
+  const app = proxyRoutes({
+    store,
+    adapters: stubAdapters(EVENTS),
+    http: (() => {
+      throw new Error("unreachable");
+    }) as HttpClient,
+    now: () => 1_000_000,
+    rand: () => 0.5,
+    refresh: async (c) => await c.secrets(),
+    requestId: () => "req_1",
+    logger,
+  });
+
+  // Inside MODEL_NAME_MAX, so it passes the schema and reaches the allowlist
+  // check — which is the site under test. A longer one is now refused at parse,
+  // and that is a different guard with its own test.
+  const hostile = `SECRET_MARKER ${"x".repeat(120)}`;
+  const response = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({
+        model: hostile,
+        max_tokens: 10,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    }),
+  );
+
+  expect(response.status).toBe(401);
+  expect(JSON.stringify(await response.json())).not.toContain("SECRET_MARKER");
+  expect(logger.lines.join("\n")).not.toContain("SECRET_MARKER");
+  store.close();
+});

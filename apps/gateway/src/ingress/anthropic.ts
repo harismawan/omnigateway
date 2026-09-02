@@ -10,7 +10,7 @@ import { GatewayError, REASONING_EFFORTS, validateRequest } from "@omni/ir";
 import { ANTHROPIC_NATIVE_BLOCK_TYPES } from "@omni/providers";
 import { z } from "zod";
 import { mcpServerNames, parseTools } from "./anthropicTools.ts";
-import { normalizeClientModel } from "./model.ts";
+import { MODEL_NAME_MAX, normalizeClientModel } from "./model.ts";
 import {
   cacheControlSchema as cacheControl,
   extraFields,
@@ -18,6 +18,8 @@ import {
   isRecord,
   parseOrThrow,
   readConversationHeader,
+  safeToken,
+  zodDetail,
 } from "./schemas.ts";
 
 const textBlock = z.object({
@@ -256,7 +258,7 @@ const message = z.object({
 });
 
 const schema = z.object({
-  model: z.string().min(1),
+  model: z.string().min(1).max(MODEL_NAME_MAX),
   messages: z.array(message).min(1),
   system: z.union([z.string(), z.array(textBlock)]).optional(),
   max_tokens: z.number().int().positive().optional(),
@@ -429,13 +431,14 @@ function readBlock(raw: unknown, role: Message["role"], path: string): ContentBl
       const parsed = nativeSchema.safeParse(raw);
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
-        const issuePath =
-          issue?.code === "unrecognized_keys" ? [...issue.path, issue.keys[0]] : issue?.path;
+        // The key is bounded on the path as well as in the message: a key
+        // spliced into `${path}.${key}` reads as structure and carries exactly
+        // the same client bytes, which is the half a bound on the message alone
+        // does nothing about.
+        const unknownKey = issue?.code === "unrecognized_keys" ? safeToken(issue.keys[0]) : null;
+        const issuePath = unknownKey === null ? issue?.path : [...(issue?.path ?? []), unknownKey];
         const suffix = issuePath?.length ? `.${issuePath.join(".")}` : "";
-        throw new GatewayError(
-          "BAD_REQUEST",
-          `${path}${suffix}: ${issue?.message ?? "invalid native content block"}`,
-        );
+        throw new GatewayError("BAD_REQUEST", `${path}${suffix}: ${zodDetail(issue)}`);
       }
       const { type: _type, cache_control, ...data } = parsed.data;
       return {
@@ -460,14 +463,14 @@ function readBlock(raw: unknown, role: Message["role"], path: string): ContentBl
     if (issue?.code === "invalid_union" || issue?.path.at(-1) === "type") {
       const type = (raw as { type?: unknown } | null)?.type;
       if (typeof type === "string") {
-        throw new GatewayError("BAD_REQUEST", `${path}.type: unrecognized block type "${type}"`);
+        throw new GatewayError(
+          "BAD_REQUEST",
+          `${path}.type: unrecognized block type "${safeToken(type)}"`,
+        );
       }
     }
     const suffix = issue?.path.length ? `.${issue.path.join(".")}` : "";
-    throw new GatewayError(
-      "BAD_REQUEST",
-      `${path}${suffix}: ${issue?.message ?? "invalid content block"}`,
-    );
+    throw new GatewayError("BAD_REQUEST", `${path}${suffix}: ${zodDetail(issue)}`);
   }
   return toIrBlock(parsed.data);
 }

@@ -3,6 +3,29 @@ import type { ProviderId } from "./request.ts";
 
 export const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 } as const;
 
+/**
+ * A client-supplied token, bounded so an error message may quote it.
+ *
+ * It lives here, beside `LogFields`, because that is the boundary it serves: an
+ * error message reaches stdout through `reason`, so every value interpolated
+ * into one is the same decision this type exists to make. It is not in the
+ * gateway's ingress toolkit because the leak is not the parser's alone — the
+ * router and dispatch build refusals from the same client string, and
+ * `packages/router` is pure and cannot import an app.
+ *
+ * Sixty-four characters of a charset with no whitespace, quote or escape in it.
+ * The length is set by the vocabulary that must stay readable —
+ * `text_editor_code_execution_tool_result` is 38 before Anthropic dates it — and
+ * the charset is the half that matters most: it is what stops a value forging a
+ * second field or a second line. Stated exactly, because the looser claim is
+ * false: 64 characters of this charset is a whole URL, a JWT prefix, or 48
+ * bytes of base64url, so this bounds *shape*, not information.
+ */
+export function safeToken(value: unknown): string {
+  const text = typeof value === "string" ? value : String(value);
+  return /^[A-Za-z0-9_.:/+-]{1,64}$/.test(text) ? text : "(unprintable)";
+}
+
 export type LogLevel = keyof typeof LEVELS;
 
 /**
@@ -171,6 +194,28 @@ const FIELD_ORDER = [
  */
 const REASON_MAX = 200;
 
+/**
+ * How much of a model name survives.
+ *
+ * A model name is normally a short id this gateway or a catalog owns, and that
+ * is exactly why it went uncapped. But `resolveModel` synthesizes a target from
+ * a prefixed name — `anthropic/<rest>` — and keeps `rest` as the target's own
+ * model, so `resolvedModel` can be whatever the client put in the field. The
+ * split is on `/` and `:`, and prose contains a colon, so "whatever" can be a
+ * prompt. This was the longer of the two free-text channels on the same line,
+ * because `reason` at least had a cap.
+ *
+ * Wide enough for every real id, prefixed and pooled spellings included.
+ */
+const MODEL_MAX = 120;
+
+/** Fields that carry text a client can influence, and what survives of each. */
+const CAPS: Partial<Record<keyof LogFields, number>> = {
+  reason: REASON_MAX,
+  model: MODEL_MAX,
+  requestedModel: MODEL_MAX,
+};
+
 const LEVEL_COLOR: Readonly<Record<LogLevel, string>> = {
   debug: "\u001b[2;37m",
   info: "\u001b[36m",
@@ -204,9 +249,10 @@ export function formatLine(
   for (const key of FIELD_ORDER) {
     const value = fields[key];
     if (value === undefined) continue;
+    const cap = CAPS[key];
     const capped =
-      key === "reason" && typeof value === "string" && value.length > REASON_MAX
-        ? `${value.slice(0, REASON_MAX)}…`
+      cap !== undefined && typeof value === "string" && value.length > cap
+        ? `${value.slice(0, cap)}…`
         : value;
     parts.push(`${key}=${renderValue(capped)}`);
   }

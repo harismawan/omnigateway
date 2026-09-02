@@ -7,9 +7,9 @@ import type {
   ToolChoice,
   ToolDef,
 } from "@omni/ir";
-import { GatewayError, REASONING_EFFORTS, validateRequest } from "@omni/ir";
+import { GatewayError, REASONING_EFFORTS, safeToken, validateRequest } from "@omni/ir";
 import { z } from "zod";
-import { normalizeClientModel } from "./model.ts";
+import { MODEL_NAME_MAX, normalizeClientModel } from "./model.ts";
 import {
   extraFields,
   isRecord,
@@ -31,7 +31,7 @@ const reasoning = z.object({
 });
 
 const schema = z.object({
-  model: z.string().min(1),
+  model: z.string().min(1).max(MODEL_NAME_MAX),
   // Items are read by hand below rather than by a discriminated union, because
   // the vocabulary is open at the edges: an unknown item type must name itself
   // in the refusal, and a zod union reports every arm it tried instead.
@@ -333,23 +333,11 @@ function jsonArguments(raw: unknown, callId: string): Record<string, unknown> {
     // — and a tool name is text the client chose, which is the thing
     // `LogFields` is a closed allowlist to keep off that line. The call id is
     // this gateway's own correlation handle and enough to find the item.
-    throw new GatewayError("BAD_REQUEST", `input: arguments for call ${callId} are not valid JSON`);
+    throw new GatewayError(
+      "BAD_REQUEST",
+      `input: arguments for call ${safeToken(callId)} are not valid JSON`,
+    );
   }
-}
-
-/**
- * A client-supplied token, bounded so it can be named in a refusal.
- *
- * Refusals from this parser carry no provider, so `reasonField` prints them to
- * stdout at default level — which makes every interpolated value a decision
- * about the redaction boundary, not a formatting choice. A wire `type` is worth
- * naming, because a client cannot fix what it is not told; it is bounded here
- * so what lands on that line is short and of a known shape rather than whatever
- * arrived.
- */
-function safeToken(value: unknown): string {
-  const text = typeof value === "string" ? value : String(value);
-  return /^[A-Za-z0-9_.:-]{1,40}$/.test(text) ? text : "(unprintable)";
 }
 
 /** What the Responses API accepts as a tool name, and therefore what is stored. */

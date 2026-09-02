@@ -9,6 +9,7 @@ import {
   type ProviderId,
   RETRYABLE,
   type StreamEvent,
+  safeToken,
 } from "@omni/ir";
 import { injectPonytail, ponytailNotes } from "@omni/ponytail";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
@@ -319,7 +320,7 @@ export async function dispatch(
 
   if (candidates.length === 0) {
     clearDeadline();
-    return fail("NO_CANDIDATES", `no eligible credential for model "${request.model}"`);
+    return fail("NO_CANDIDATES", `no eligible credential for model "${safeToken(request.model)}"`);
   }
 
   const maxAttempts = Math.min(snapshot.settings.maxAttempts, candidates.length);
@@ -560,7 +561,16 @@ export async function dispatch(
                   terminal = true;
                   // An in-stream error before commit is retryable like a thrown one.
                   if (!committed && RETRYABLE[event.code]) {
-                    throw new GatewayError(event.code, event.message);
+                    // Named, because the message is the upstream's own words and
+                    // `reasonField` withholds a message whose error names a
+                    // provider. Unnamed, this printed the upstream body at
+                    // default level — the exact disclosure `httpError` avoids by
+                    // stamping the provider on the non-streaming path, on a path
+                    // that is the streaming default for the busiest client here.
+                    // A context-length refusal quotes prompt text back.
+                    throw new GatewayError(event.code, event.message, {
+                      provider: candidate.target.provider,
+                    });
                   }
                   // Not retried, so this attempt is terminal: yield the event, then
                   // record it as a failure and stop. Without this, an in-stream
