@@ -716,13 +716,13 @@ carries a `HEALTHCHECK` on `/health`.
 For a fleet, set `OMNI_DATABASE_URL` and `OMNI_REDIS_URL` and drop the volume;
 see [Running more than one gateway](#running-more-than-one-gateway). A
 Kubernetes deployment — Deployment, Service, Ingress with the timeouts streaming
-needs, HPA, and an example Secret — is under `apps/gateway/k8s/` as a kustomize
+needs, HPA, and an example Secret — is under `k8s/` as a kustomize
 base:
 
 ```bash
-cp apps/gateway/k8s/secret.example.yaml apps/gateway/k8s/secret.yaml   # edit it
-kubectl apply -f apps/gateway/k8s/secret.yaml
-kubectl apply -k apps/gateway/k8s
+cp k8s/secret.example.yaml k8s/secret.yaml   # edit it
+kubectl apply -f k8s/secret.yaml
+kubectl apply -k k8s
 ```
 
 Plugins in a fleet are baked into the image so every replica holds the same
