@@ -737,7 +737,9 @@ and the workflow commits that version into `k8s/kustomization.yaml` on `main`, w
 CD syncs. Rolling back is editing `newTag` by hand.
 
 Plugins in a fleet are baked into the image so every replica holds the same
-set: `COPY plugins/ /data/plugins/` in a derived Dockerfile.
+set: `COPY plugins/ /data/plugins/` in a derived Dockerfile. The image is
+public, so no pull secret is configured; a private fork adds
+`imagePullSecrets` to the Deployment.
 
 Give the container a restart policy — `--restart unless-stopped` — if you want a
 restart request to bring it back. A container cannot read its own policy, so
