@@ -658,3 +658,33 @@ test("a repeated start for the same block does not split it into two items", asy
     { type: "output_text", text: "half and half", annotations: [] },
   ]);
 });
+
+test("a block index reused after closing renders as a second item, not as nothing", async () => {
+  // Decoders key their IR index on `${output_index}:${content_index}`, and an
+  // upstream that omits `output_index` collapses every block onto 0 — so a
+  // second, genuinely different item arrives on an index the first one already
+  // used and closed. Treating that as a duplicate frame drops the model's
+  // answer inside a clean 200, which is worse than the split it was guarding.
+  const f = await stage(
+    responsesStream(
+      src(
+        { type: "blockStart", index: 0, block: { type: "thinking" } },
+        { type: "blockDelta", index: 0, delta: { type: "thinking", text: "weighing" } },
+        { type: "blockEnd", index: 0 },
+        { type: "blockStart", index: 0, block: { type: "text" } },
+        { type: "blockDelta", index: 0, delta: { type: "text", text: "THE ANSWER" } },
+        { type: "blockEnd", index: 0 },
+      ),
+      RENDER,
+    ),
+  );
+
+  const done = f
+    .map((x) => JSON.parse(x.data))
+    .filter((b) => b.type === "response.output_item.done");
+  expect(done.map((b) => b.item.type)).toEqual(["reasoning", "message"]);
+  expect(done.map((b) => b.output_index)).toEqual([0, 1]);
+  expect(done[1]?.item.content).toEqual([
+    { type: "output_text", text: "THE ANSWER", annotations: [] },
+  ]);
+});

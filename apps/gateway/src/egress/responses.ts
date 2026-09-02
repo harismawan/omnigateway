@@ -209,12 +209,6 @@ export async function* responsesStream(
   // branch guarded on it to `never`.
   let nextOutputIndex = 0;
   const state: { open: OpenItem | null } = { open: null };
-  // Every block index this stream has already opened. A repeated `blockStart`
-  // for one of them is a duplicate frame, not a second block: minting a fresh
-  // item for it would split one thing the model said across two items carrying
-  // half the content each. An IR index identifies a block within a response, so
-  // a repeat can only mean the same block.
-  const started = new Set<number>();
 
   const ID_PREFIX: Readonly<Record<ItemKind, string>> = {
     message: "msg",
@@ -345,8 +339,18 @@ export async function* responsesStream(
         break;
 
       case "blockStart": {
-        if (started.has(event.index)) break;
-        started.add(event.index);
+        // A repeated start for the block that is *still open* is a duplicate
+        // frame, and minting a second item for it would split one thing the
+        // model said across two items holding half the content each.
+        //
+        // Only while it is open. An index that was opened and closed can come
+        // back as a genuinely different block: decoders key their IR index on
+        // `${output_index}:${content_index}`, and an upstream that omits
+        // `output_index` collapses every block onto 0. Treating that as a
+        // duplicate discarded the model's answer — measured, and worse than the
+        // split it was guarding against, because the client sees a clean 200
+        // with the reasoning and nothing else.
+        if (state.open !== null && state.open.irIndex === event.index) break;
         // Whatever is still open ends here. A decoder that opens an item
         // without closing the last one is a bug upstream, and the single
         // counter below means the two can never share an index — but the
