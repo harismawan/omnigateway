@@ -21,7 +21,8 @@ Conventions governing changes — architectural boundaries, testing expectations
 
 ## What a request actually does
 
-`POST /v1/messages` and `POST /v1/chat/completions` same handler; dialect is parameter.
+`POST /v1/messages`, `POST /v1/chat/completions` and `POST /v1/responses` same handler; dialect
+is parameter.
 
 ```mermaid
 sequenceDiagram

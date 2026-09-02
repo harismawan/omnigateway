@@ -21,9 +21,10 @@ omni start
 
 ## What it does
 
-- **Speaks both dialects.** `POST /v1/messages` (Anthropic) and
-  `POST /v1/chat/completions` (OpenAI), including streaming, translated to
-  whichever provider actually serves the request.
+- **Speaks three dialects.** `POST /v1/messages` (Anthropic),
+  `POST /v1/chat/completions` (OpenAI) and `POST /v1/responses` (OpenAI
+  Responses, which is the only API Codex CLI speaks), including streaming,
+  translated to whichever provider actually serves the request.
 - **Filters bulky tool history, optionally.** Built-in RTK filters shorten
   eligible large or repetitive shell and recognizable command output before
   provider dispatch, preserve errors and non-tool-result content, and default off.
@@ -289,6 +290,7 @@ Everything above is also available in the browser at
 | --- | --- | --- |
 | `POST` | `/v1/messages` | Anthropic Messages API |
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions API |
+| `POST` | `/v1/responses` | OpenAI Responses API (stateless: no stored responses, no `previous_response_id`) |
 | `POST` | `/v1/messages/count_tokens` | Anthropic-compatible local token estimation (authenticated) |
 | `GET` | `/v1/models` | Listing in both dialects, filtered by your key's allowlist |
 | `GET` | `/health` | Unauthenticated liveness check |
@@ -315,7 +317,7 @@ Most tools that accept a custom base URL work unchanged: set it to
 
 Every response carries the limit headers of the surface you asked on, so an SDK
 backs off using the code it already ships — the Anthropic dialect on
-`/v1/messages`, the OpenAI one on `/v1/chat/completions`:
+`/v1/messages`, the OpenAI one on `/v1/chat/completions` and `/v1/responses`:
 
 ```http
 anthropic-ratelimit-requests-limit: 2000        x-ratelimit-limit-requests: 2000

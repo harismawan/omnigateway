@@ -1,6 +1,12 @@
 # OpenAI Responses ingress
 
-*Status: designed, not implemented.*
+*Status: implemented, except the `developer`-role change of step 5, which is gated on a live probe
+that has not been run — see* Build order.
+
+*Phase 0's capture has not been run either: it needs a real Codex pointed at a running gateway. The
+route, the schema and the refusal list were written from Codex's own source and both peer gateways,
+and the field list below is the one both peers converged on. What the capture is still owed is the
+key-set check — the specific discipline this repository has twice been burned for skipping.*
 
 `POST /v1/responses` becomes a third client surface, beside `POST /v1/messages` (Anthropic) and
 `POST /v1/chat/completions` (OpenAI chat). It is an ingress and an egress over the existing core, not

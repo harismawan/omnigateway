@@ -461,6 +461,13 @@ Client surface:
 
 - `POST /v1/messages`: Anthropic-compatible request, response, SSE, errors
 - `POST /v1/chat/completions`: OpenAI-compatible request, response, SSE, errors
+- `POST /v1/responses`: OpenAI Responses-compatible request, response, SSE, errors. **Stateless**:
+  `previous_response_id`, `item_reference` and an explicit `store: true` are refused rather than
+  normalized away, because answering a request for prior state with no prior state reads to the
+  client as a model that forgot. `background: true` is dropped instead — Codex agents set it
+  opportunistically and the turn is answerable without it. Keepalive on this surface is under five
+  seconds: Codex's HTTP client abandons a connection carrying no bytes for about that long, so the
+  shared ten-second cadence would lose every request with a slow first token.
 - `GET /v1/models`: authenticated, filtered by key model allowlist
 - `POST /v1/messages/count_tokens`: authenticated local estimate; no dispatch or usage row
 - `GET /health`: unauthenticated liveness
@@ -516,8 +523,17 @@ Preserve these translation invariants:
   who produced it — and that field is what routing read.
 - `ToolDef` discriminant is `kind`: `"portable"` (was `provider: "custom"`, colliding with the
   `custom` **provider id** and meaning something else) or `"provider"` plus a real `ProviderId`.
+  Provider arm is `ProviderToolDef`, and `AnthropicToolDef` is a **narrowing** of it requiring
+  `family` — the one Anthropic-specific field. Widening it that way is what let OpenAI hosted tool
+  in without a second shape, and it cost nothing at the Anthropic paths: they read `family` through
+  the narrowing exactly as before.
 - Provider-defined tool or `providerNative` history block admit **only** that provider's targets at
-  routing — today only Anthropic produce either. Replaced "exclude every provider whose
+  routing. Two provider produce them now, and the second arrive by two different door, which decide
+  *when* a conversation pin: OpenAI **hosted tool** (`tool_search`, `web_search`, `local_shell`)
+  are declared on the first request, so such a request pin from turn 1; OpenAI **reasoning item**
+  come back from upstream and are replayed by the client, so a Codex conversation pin from turn 2.
+  Neither is avoidable while carrying them, and both belong in operator-facing docs rather than in
+  a `capability:providerNative` exclusion an operator find after the fact. Replaced "exclude every provider whose
   `ANTHROPIC_NATIVE_TOOLS` entry false", which selected the same targets and needed a table.
   Degradation spelled `excluded:capability:providerNative`; rows written before the rename carry
   `excluded:capability:anthropicTools` and stay readable, because degradations are forensic text
@@ -633,10 +649,11 @@ Preserve these translation invariants:
   call it, and it is checked **after** the body field. Names measured from each client's source:
   `x-session-id` and `x-session-affinity` (opencode send both, with that casing disagreement, so
   match case-insensitively), `x-deepseek-harness-session-id` (dsh, whose design note say it keep
-  identity out of body deliberately). Neither of those two put anything in body at all. Codex
-  deliberately **absent** from list though it send `session-id`: it speak only Responses API —
-  `wire_api = "chat"` is hard error in it now — and this gateway expose no Responses ingress, so
-  it cannot arrive. Name listed for client that cannot connect is claim no test can check.
+  identity out of body deliberately). Neither of those two put anything in body at all. `session-id` is Codex's, and it
+  joined the list the day `POST /v1/responses` shipped — it was absent before that for a reason
+  worth keeping in mind when adding another: Codex speak only Responses API (`wire_api = "chat"` is
+  hard error in it now), so until that route existed the header could not arrive, and a name listed
+  for a client that cannot connect is a claim no test can check.
   Derived fallback is **weaker than it look**, so prefer any client-supplied id over improving it:
   measured per session on real traffic, system prompt take 4–9 distinct value and tool set 3–6, so
   a key hashing either rotate that many time within one conversation. Do **not** hash tool list or
