@@ -720,3 +720,18 @@ test("a revalidation that never settles does not disable re-verification for goo
   expect(calls).toBeGreaterThan(0);
   registry.stop();
 });
+
+test("subscribe reports whether the per-connection cap admitted the topic", () => {
+  const h = harness();
+  const a = socket();
+  h.registry.add("a", a, credential());
+  for (let i = 0; i < 256; i++) expect(h.registry.subscribe("a", `res:t${i}`)).toBe(true);
+
+  // Refused, and said so: an acked subscription nobody holds is a quiet topic.
+  expect(h.registry.subscribe("a", "res:one-more")).toBe(false);
+  expect(h.registry.has("a", "res:one-more")).toBe(false);
+  // Re-subscribing a held topic is not a new one.
+  expect(h.registry.subscribe("a", "res:t0")).toBe(true);
+  expect(h.registry.subscribe("missing", "res:t0")).toBe(false);
+  h.registry.stop();
+});

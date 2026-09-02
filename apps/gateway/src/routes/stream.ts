@@ -258,7 +258,13 @@ export function streamRoutes(deps: StreamDeps) {
           return;
         }
 
-        deps.registry.subscribe(id, frame.topic);
+        if (!deps.registry.subscribe(id, frame.topic)) {
+          // Refused by the per-connection cap. Said out loud for the same
+          // reason "no source" is: an ack over a subscription nobody holds is a
+          // topic that looks merely quiet.
+          send(ws, { ...head, type: "error", topic: frame.topic, message: "too many topics" });
+          return;
+        }
         send(ws, { ...head, type: "ack", topic: frame.topic });
 
         if (frame.sinceSeq !== undefined) {
