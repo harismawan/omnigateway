@@ -201,13 +201,13 @@ export async function createStore(opts: {
       // arrow assigned to a generic signature erases the parameter to `unknown`
       // at the point of implementation. The forwarding is the same — `handle` is
       // still read on every call, never captured.
-      all<T>(pluginId: string, sql: string, params?: unknown[]): T[] {
+      all<T>(pluginId: string, sql: string, params?: unknown[]): Promise<T[]> {
         return handle.plugins.all<T>(pluginId, sql, params);
       },
-      get<T>(pluginId: string, sql: string, params?: unknown[]): T | null {
+      get<T>(pluginId: string, sql: string, params?: unknown[]): Promise<T | null> {
         return handle.plugins.get<T>(pluginId, sql, params);
       },
-      transaction<T>(pluginId: string, fn: () => T): T {
+      transaction<T>(pluginId: string, fn: () => Promise<T>): Promise<T> {
         return handle.plugins.transaction(pluginId, fn);
       },
       listTables: (pluginId) => handle.plugins.listTables(pluginId),

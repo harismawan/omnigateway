@@ -104,10 +104,10 @@ const NOTES_SERVER = `export default {
     },
     { version: 2, sql: "CREATE TABLE {{visits}} (n INTEGER NOT NULL)" },
   ],
-  setup(ctx) {
-    ctx.storage.run("INSERT INTO {{visits}} (n) VALUES (0)");
-    ctx.events.onRequestCompleted((event) => {
-      ctx.storage.run(
+  async setup(ctx) {
+    await ctx.storage.run("INSERT INTO {{visits}} (n) VALUES (0)");
+    ctx.events.onRequestCompleted(async (event) => {
+      await ctx.storage.run(
         "INSERT OR REPLACE INTO {{entries}} (request_id, tokens) VALUES (?, ?)",
         [event.requestId, event.tokens.input],
       );
@@ -117,11 +117,11 @@ const NOTES_SERVER = `export default {
         {
           method: "GET",
           path: "/entries",
-          handler: () => {
-            ctx.storage.run("UPDATE {{visits}} SET n = n + 1");
+          handler: async () => {
+            await ctx.storage.run("UPDATE {{visits}} SET n = n + 1");
             return {
               json: {
-                entries: ctx.storage.all(
+                entries: await ctx.storage.all(
                   "SELECT request_id, tokens FROM {{entries}} ORDER BY request_id",
                 ),
               },
@@ -144,12 +144,12 @@ function notes(over: Partial<Fixture> = {}): Promise<void> {
 
 type Entry = { request_id: string; tokens: number };
 
-const entries = (id = "notes"): Entry[] =>
+const entries = (id = "notes"): Promise<Entry[]> =>
   store.plugins.all<Entry>(id, "SELECT request_id, tokens FROM {{entries}} ORDER BY request_id");
 
 /** `-1` rather than `0`, so "no row" cannot be read as "handler never ran". */
-const visits = (): number =>
-  store.plugins.get<{ n: number }>("notes", "SELECT n FROM {{visits}}")?.n ?? -1;
+const visits = async (): Promise<number> =>
+  (await store.plugins.get<{ n: number }>("notes", "SELECT n FROM {{visits}}"))?.n ?? -1;
 
 // -------------------------------------------------------------------- harness
 
@@ -242,7 +242,7 @@ test("a plugin's schema, route and subscription all come up in one boot", async 
   expect(result.plugins.map((p) => p.id)).toEqual(["notes"]);
 
   // Schema, under the prefix the storage contract names.
-  expect(store.plugins.listTables("notes")).toEqual([
+  expect(await store.plugins.listTables("notes")).toEqual([
     "plugin_notes_entries",
     "plugin_notes_visits",
   ]);
@@ -252,7 +252,7 @@ test("a plugin's schema, route and subscription all come up in one boot", async 
     completed({ requestId: "req_a", tokens: { input: 7, output: 0, cacheRead: 0, cacheWrite: 0 } }),
   );
   await settle();
-  expect(entries()).toEqual([{ request_id: "req_a", tokens: 7 }]);
+  expect(await entries()).toEqual([{ request_id: "req_a", tokens: 7 }]);
 
   // Route, mounted by the host and reading the rows the subscription wrote.
   const { call } = await appHarness(result.plugins);
@@ -281,16 +281,16 @@ test("the plugin's table is the real one, and its track is keyed to it alone", a
   expect(result.failures).toEqual([]);
   expect(result.plugins.map((p) => p.id)).toEqual(["ledger", "notes"]);
 
-  expect(store.plugins.listTables("ledger")).toEqual(["plugin_ledger_rows"]);
-  expect(store.plugins.listTables("notes")).toEqual([
+  expect(await store.plugins.listTables("ledger")).toEqual(["plugin_ledger_rows"]);
+  expect(await store.plugins.listTables("notes")).toEqual([
     "plugin_notes_entries",
     "plugin_notes_visits",
   ]);
 
   // Core's own ledger is not one of anybody's tables, and nothing here is an
   // orphan: every `plugin_*` table belongs to a plugin that is installed.
-  expect(store.plugins.listTables("notes")).not.toContain("plugin_migrations");
-  expect(store.plugins.orphanTables(["ledger", "notes"])).toEqual([]);
+  expect(await store.plugins.listTables("notes")).not.toContain("plugin_migrations");
+  expect(await store.plugins.orphanTables(["ledger", "notes"])).toEqual([]);
 });
 
 test("a failing migration keeps the ones before it and does not replay them next boot", async () => {
@@ -320,14 +320,14 @@ test("a failing migration keeps the ones before it and does not replay them next
   expect(first.result.failures[0]?.reason).toMatch(/^migration 3 failed/);
 
   // 1 and 2 survived the failure; 4 was never reached.
-  expect(store.plugins.listTables("notes")).toEqual([
+  expect(await store.plugins.listTables("notes")).toEqual([
     "plugin_notes_entries",
     "plugin_notes_visits",
   ]);
 
   // Data written against the surviving schema, so a silent revert is visible as
   // loss rather than only as an absent table.
-  store.plugins.run("notes", "INSERT INTO {{entries}} (request_id, tokens) VALUES (?, ?)", [
+  await store.plugins.run("notes", "INSERT INTO {{entries}} (request_id, tokens) VALUES (?, ?)", [
     "req_before",
     5,
   ]);
@@ -339,11 +339,11 @@ test("a failing migration keeps the ones before it and does not replay them next
   expect(second.result.failures[0]?.reason).toMatch(/^migration 3 failed/);
   expect(second.result.failures[0]?.reason).not.toContain("migration 1");
 
-  expect(store.plugins.listTables("notes")).toEqual([
+  expect(await store.plugins.listTables("notes")).toEqual([
     "plugin_notes_entries",
     "plugin_notes_visits",
   ]);
-  expect(entries()).toEqual([{ request_id: "req_before", tokens: 5 }]);
+  expect(await entries()).toEqual([{ request_id: "req_before", tokens: 5 }]);
 });
 
 // ------------------------------------------------------------------- routing
@@ -357,18 +357,18 @@ test("a declared route is mounted under the plugin prefix, behind the host's adm
   // 404 or a 500 would also be "not 200" while meaning something quite else.
   const denied = await call("GET", "/api/plugins/notes/entries", false);
   expect(denied.status).toBe(401);
-  expect(visits()).toBe(0);
+  expect(await visits()).toBe(0);
 
   const allowed = await call("GET", "/api/plugins/notes/entries");
   expect(allowed.status).toBe(200);
   expect(await allowed.json()).toEqual({ entries: [] });
-  expect(visits()).toBe(1);
+  expect(await visits()).toBe(1);
 
   // And it answers there and nowhere else.
   expect((await call("GET", "/api/notes/entries")).status).toBe(404);
   expect((await call("GET", "/api/plugins/entries")).status).toBe(404);
   expect((await call("GET", "/api/entries")).status).toBe(404);
-  expect(visits()).toBe(1);
+  expect(await visits()).toBe(1);
 });
 
 // -------------------------------------------------------------------- events
@@ -400,7 +400,7 @@ test("a throwing subscriber costs that plugin its event and nothing else", async
   );
   await settle();
 
-  expect(entries()).toEqual([
+  expect(await entries()).toEqual([
     { request_id: "req_a", tokens: 3 },
     { request_id: "req_b", tokens: 4 },
   ]);
@@ -439,8 +439,8 @@ test("a plugin that did not declare the event never sees it", async () => {
 
   // One subscriber wrote, one plugin has an identically named and shaped table
   // that stayed empty.
-  expect(entries("notes")).toEqual([{ request_id: "req_a", tokens: 9 }]);
-  expect(entries("deaf")).toEqual([]);
+  expect(await entries("notes")).toEqual([{ request_id: "req_a", tokens: 9 }]);
+  expect(await entries("deaf")).toEqual([]);
 });
 
 // ------------------------------------------------------- load failure is never fatal
@@ -467,7 +467,7 @@ test("a plugin whose setup throws is skipped and reported, and the gateway serve
 
   // Its migration had already committed, which is deliberate: a failed `setup`
   // is not a reason to tear down schema that may hold rows.
-  expect(store.plugins.listTables("broken")).toEqual(["plugin_broken_t"]);
+  expect(await store.plugins.listTables("broken")).toEqual(["plugin_broken_t"]);
 
   const { call } = await appHarness(result.plugins);
   expect((await call("GET", "/api/plugins/notes/entries")).status).toBe(200);
@@ -491,7 +491,7 @@ test("a placeholder resolves to the plugin's own table, never a neighbour's", as
         return { routes: [{
           method: "GET",
           path: "/entries",
-          handler: () => ({ json: { entries: ctx.storage.all("SELECT request_id, tokens FROM {{entries}}") } }),
+          handler: async () => ({ json: { entries: await ctx.storage.all("SELECT request_id, tokens FROM {{entries}}") } }),
         }] };
       },
     };`,
@@ -499,7 +499,7 @@ test("a placeholder resolves to the plugin's own table, never a neighbour's", as
 
   const { bus, result } = await boot();
   expect(result.failures).toEqual([]);
-  expect(store.plugins.listTables("sneaky")).toEqual(["plugin_sneaky_entries"]);
+  expect(await store.plugins.listTables("sneaky")).toEqual(["plugin_sneaky_entries"]);
 
   bus.emitRequestCompleted(
     completed({ requestId: "req_a", tokens: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 } }),
@@ -509,8 +509,8 @@ test("a placeholder resolves to the plugin's own table, never a neighbour's", as
   );
   await settle();
 
-  expect(entries("notes")).toHaveLength(2);
-  expect(entries("sneaky")).toEqual([]);
+  expect(await entries("notes")).toHaveLength(2);
+  expect(await entries("sneaky")).toEqual([]);
 
   // Through the plugin's own route as well, which is the reachable surface.
   const { call } = await appHarness(result.plugins);
@@ -540,7 +540,7 @@ test("sql naming a core table is refused, at migration and at runtime alike", as
         return { routes: [{
           method: "GET",
           path: "/peek",
-          handler: () => ({ json: { rows: ctx.storage.all("SELECT id FROM request_logs") } }),
+          handler: async () => ({ json: { rows: await ctx.storage.all("SELECT id FROM request_logs") } }),
         }] };
       },
     };`,
@@ -559,13 +559,13 @@ test("sql naming a core table is refused, at migration and at runtime alike", as
   // The migration is refused before it runs, and costs only its own plugin.
   expect(result.failures.map((f) => f.id)).toEqual(["greedy"]);
   expect(result.failures[0]?.reason).toContain("core table api_keys");
-  expect(store.plugins.listTables("greedy")).toEqual([]);
+  expect(await store.plugins.listTables("greedy")).toEqual([]);
   expect(result.plugins.map((p) => p.id)).toEqual(["peeker", "shadow"]);
 
   // `{{migrations}}` is the plugin's own `migrations`, not core's. Had it
   // expanded bare, the CREATE would have hit an existing table and this plugin
   // would be in `failures` instead.
-  expect(store.plugins.listTables("shadow")).toEqual(["plugin_shadow_migrations"]);
+  expect(await store.plugins.listTables("shadow")).toEqual(["plugin_shadow_migrations"]);
 
   const { call } = await appHarness(result.plugins);
 

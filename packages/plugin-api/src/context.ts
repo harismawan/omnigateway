@@ -39,10 +39,15 @@ export type PluginMigration = { version: number; sql: string };
  * accidentally address another plugin's table or a core one.
  */
 export type PluginStorage = {
-  run(sql: string, params?: readonly unknown[]): void;
-  all<T>(sql: string, params?: readonly unknown[]): T[];
-  get<T>(sql: string, params?: readonly unknown[]): T | null;
-  transaction<T>(fn: () => T): T;
+  run(sql: string, params?: readonly unknown[]): Promise<void>;
+  all<T>(sql: string, params?: readonly unknown[]): Promise<T[]>;
+  get<T>(sql: string, params?: readonly unknown[]): Promise<T | null>;
+  /**
+   * Runs `fn` in a transaction. Inside it, await storage calls and nothing
+   * else: a fetch or a timer awaited mid-transaction lets the host's own
+   * writes into it, and a rollback then takes them too.
+   */
+  transaction<T>(fn: () => Promise<T>): Promise<T>;
 };
 
 export type PluginFiles = {

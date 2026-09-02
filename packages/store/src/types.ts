@@ -1304,23 +1304,27 @@ export interface PluginRepo {
    * versions are not attempted, because a migration ordering exists precisely
    * so that later ones may assume earlier ones ran.
    */
-  migrate(pluginId: string, migrations: readonly PluginMigration[]): PluginMigrateResult;
+  migrate(pluginId: string, migrations: readonly PluginMigration[]): Promise<PluginMigrateResult>;
   /** Executes a statement. `sql` is placeholder-expanded and guarded first. */
-  run(pluginId: string, sql: string, params?: unknown[]): void;
+  run(pluginId: string, sql: string, params?: unknown[]): Promise<void>;
   /** Every matching row. Rows are shaped by the plugin's own query, not by us. */
-  all<T>(pluginId: string, sql: string, params?: unknown[]): T[];
+  all<T>(pluginId: string, sql: string, params?: unknown[]): Promise<T[]>;
   /** The first matching row, or `null` when there is none. */
-  get<T>(pluginId: string, sql: string, params?: unknown[]): T | null;
+  get<T>(pluginId: string, sql: string, params?: unknown[]): Promise<T | null>;
   /**
-   * Runs `fn` inside a transaction on the shared connection.
+   * Runs `fn` inside a transaction.
    *
-   * `bun:sqlite` is synchronous and there is one connection, so this is a real
-   * transaction and also a real stall: everything the gateway does is behind it
-   * for its duration. Plugin work belongs off the request path for that reason.
+   * Async, so a Postgres store can serve it on a connection of its own. On
+   * SQLite there is one connection and it is synchronous, so the transaction
+   * is real only for as long as `fn` awaits nothing but storage calls: those
+   * settle in the microtask queue, ahead of any I/O, so no other write can
+   * land inside it. An `fn` that awaits a fetch or a timer opens the
+   * transaction to every write the gateway makes meanwhile, and a rollback
+   * takes them with it. Plugin work belongs off the request path either way.
    */
-  transaction<T>(pluginId: string, fn: () => T): T;
+  transaction<T>(pluginId: string, fn: () => Promise<T>): Promise<T>;
   /** This plugin's tables, by their real names, sorted. */
-  listTables(pluginId: string): string[];
+  listTables(pluginId: string): Promise<string[]>;
   /**
    * Drops every table this plugin owns and forgets its migration history.
    * Returns how many tables went.
@@ -1329,7 +1333,7 @@ export interface PluginRepo {
    * tables, because a plugin being uninstalled is not evidence its data is
    * unwanted, and this operation has no undo.
    */
-  dropAll(pluginId: string): number;
+  dropAll(pluginId: string): Promise<number>;
   /**
    * `plugin_*` tables belonging to no installed plugin, sorted.
    *
@@ -1340,7 +1344,7 @@ export interface PluginRepo {
    * destroy the data the restore was performed to recover. `omni doctor` prints
    * what this returns and leaves the decision to a human.
    */
-  orphanTables(installedIds: readonly string[]): string[];
+  orphanTables(installedIds: readonly string[]): Promise<string[]>;
 }
 
 export type RoutingChange =

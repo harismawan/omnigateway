@@ -83,7 +83,7 @@ your plugin.
   "id": "pokemon",
   "name": "Pokémon Companion",
   "version": "1.0.0",
-  "api": 2,
+  "api": 3,
   "sdk": "^0.1.0",
   "server": "server/index.js",
   "ui": "ui/index.js",
@@ -137,14 +137,16 @@ export default definePlugin({
   migrations: [
     { version: 1, sql: "CREATE TABLE {{notes}} (id TEXT PRIMARY KEY, body TEXT)" },
   ],
-  setup(ctx) {
-    ctx.storage.run("INSERT INTO {{notes}} (id, body) VALUES (?, ?)", ["a", "hi"]);
+  async setup(ctx) {
+    await ctx.storage.run("INSERT INTO {{notes}} (id, body) VALUES (?, ?)", ["a", "hi"]);
     return {
       routes: [
         {
           method: "GET",
           path: "/notes",
-          handler: () => ({ json: { notes: ctx.storage.all("SELECT * FROM {{notes}}") } }),
+          handler: async () => ({
+            json: { notes: await ctx.storage.all("SELECT * FROM {{notes}}") },
+          }),
         },
       ],
     };
@@ -162,6 +164,15 @@ check. You cannot opt out, and you do not write the guard.
 
 `{{name}}` expands to `plugin_<id>_<name>`. You never write the prefix, and you
 cannot address another plugin's tables or a core one.
+
+Every storage call returns a promise (api generation 3; generation 2 was
+synchronous and a generation-2 plugin is refused at load with a message saying
+so). Your SQL is written in the dialect of the store the installation runs on —
+SQLite on a single-process install, Postgres on a cluster — so stick to the
+subset both accept, or read `GET /health`'s `mode` and branch. Inside
+`ctx.storage.transaction(async () => …)`, await storage calls and nothing else:
+on SQLite a fetch or a timer awaited mid-transaction lets the host's own writes
+into it, and a rollback then takes them too.
 
 Migrations apply in order, each in its own transaction, recorded as they commit.
 A failure stops there and skips the plugin; what already committed stays applied.

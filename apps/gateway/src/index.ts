@@ -313,7 +313,7 @@ async function main(): Promise<void> {
     reapplyPluginSchema: async () => {
       for (const plugin of loadedPlugins.plugins) {
         if (plugin.migrations.length === 0) continue;
-        const applied = store.plugins.migrate(plugin.id, plugin.migrations);
+        const applied = await store.plugins.migrate(plugin.id, plugin.migrations);
         if (applied.failed !== undefined) {
           throw new Error(
             `plugin ${plugin.id} migration ${applied.failed.version}: ${applied.failed.reason}`,

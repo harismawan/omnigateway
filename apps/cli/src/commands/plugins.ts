@@ -254,7 +254,7 @@ export const pluginRemove: Command = {
       ? { fs: nodePluginFs(), store: await ctx.store() }
       : { fs: nodePluginFs() };
 
-    const result = removePlugin(deps, ctx.root.root, id, { purge });
+    const result = await removePlugin(deps, ctx.root.root, id, { purge });
 
     emit(ctx, writer, result, () => {
       const lines: string[] = [];
