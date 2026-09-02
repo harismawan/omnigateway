@@ -1,6 +1,11 @@
 import { GatewayError } from "@omni/ir";
 import type { SQL } from "bun";
-import { type DatabaseStats, type MaintenanceRepo, NODE_GRACE_MS } from "../types.ts";
+import {
+  type DatabaseStats,
+  type MaintenanceRepo,
+  NODE_GRACE_MS,
+  type TableStats,
+} from "../types.ts";
 import { num, type Rows } from "./db.ts";
 
 /**
@@ -58,6 +63,29 @@ export function createMaintenanceRepo(sql: SQL, nodeId: string): MaintenanceRepo
         freelistCount: 0,
         schemaVersion: row?.version ?? 0,
       };
+    },
+    async tables(): Promise<TableStats[]> {
+      // Planner estimates, not counts: `reltuples` is what ANALYZE last saw
+      // and reads as -1 on a table never analysed, which is reported as 0.
+      const rows = await sql.unsafe<
+        Rows<{ name: string; bytes: string; rows: string; dead_rows: string }>
+      >(
+        `SELECT c.relname AS name,
+                pg_total_relation_size(c.oid) AS bytes,
+                GREATEST(c.reltuples, 0)::bigint AS rows,
+                COALESCE(s.n_dead_tup, 0) AS dead_rows
+           FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+          WHERE c.relkind = 'r' AND n.nspname = current_schema()
+          ORDER BY bytes DESC, name`,
+      );
+      return rows.map((row) => ({
+        name: row.name,
+        bytes: num(row.bytes),
+        rows: num(row.rows),
+        deadRows: num(row.dead_rows),
+      }));
     },
     vacuum: async () => unsupported(),
     snapshotTo: async () => unsupported(),

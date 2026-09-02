@@ -6,6 +6,8 @@ import {
   type DatabaseStats,
   type MaintenanceRepo,
   type Settings,
+  type Store,
+  type TableStats,
 } from "@omni/store";
 import { parseOrThrow, retentionSchema } from "./schemas.ts";
 
@@ -72,6 +74,7 @@ export type SnapshotReason = "manual" | "preRestore";
  * closures; a real store satisfies it without being told to.
  */
 export type DatabaseStore = {
+  engine: Store["engine"];
   databasePath: string;
   config: {
     getSettings(): Promise<Settings>;
@@ -806,12 +809,15 @@ export async function vacuum(
 }
 
 export type DatabaseOverview = {
+  engine: Store["engine"];
+  /** The file path, or the server URL with its password masked. */
+  location: string;
   stats: DatabaseStats;
   /** The database file itself, as the filesystem sees it. */
   fileBytes: number;
   /** The write-ahead log, which is zero for a freshly checkpointed database. */
   walBytes: number;
-  /** The captured-body tree, which snapshots deliberately exclude. */
+  /** The captured-body tree beside a SQLite file, or the `request_bodies` table on Postgres. */
   bodiesBytes: number;
   /** What SQLite believes it is using: `pageSize * pageCount`. */
   logicalBytes: number;
@@ -820,19 +826,29 @@ export type DatabaseOverview = {
   freeDiskBytes: number | null;
   retention: RetentionPolicy;
   snapshots: { count: number; totalBytes: number; latestAt: number | null };
+  /** Every table, largest first, as the engine accounts for it. */
+  tables: TableStats[];
 };
 
 export async function getDatabaseOverview(deps: DatabaseDeps): Promise<DatabaseOverview> {
   const live = deps.store.databasePath;
   const stats = await deps.store.maintenance.stats();
+  const tables = await deps.store.maintenance.tables();
   const settings = await deps.store.config.getSettings();
   const snapshots = listSnapshots(deps);
 
   return {
+    engine: deps.store.engine,
+    location: live,
     stats,
     fileBytes: deps.fs.stat(live)?.size ?? 0,
     walBytes: deps.fs.stat(`${live}-wal`)?.size ?? 0,
-    bodiesBytes: deps.fs.dirBytes(bodiesDirFor(live)),
+    // Bodies are files beside a SQLite database and rows of `request_bodies`
+    // on Postgres, so the figure comes from whichever holds them.
+    bodiesBytes:
+      deps.store.engine === "postgres"
+        ? (tables.find((table) => table.name === "request_bodies")?.bytes ?? 0)
+        : deps.fs.dirBytes(bodiesDirFor(live)),
     logicalBytes: stats.pageSize * stats.pageCount,
     freePageBytes: stats.pageSize * stats.freelistCount,
     freeDiskBytes: deps.fs.freeBytes(dirname(live)),
@@ -842,6 +858,7 @@ export async function getDatabaseOverview(deps: DatabaseDeps): Promise<DatabaseO
       totalBytes: snapshots.reduce((sum, snapshot) => sum + snapshot.sizeBytes, 0),
       latestAt: snapshots[0]?.createdAt ?? null,
     },
+    tables,
   };
 }
 

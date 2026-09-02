@@ -1223,11 +1223,29 @@ export type DatabaseInspection = {
  * therefore the caller's to serialise; this repo does not guard against a
  * second concurrent call.
  */
+/**
+ * One table as the database accounts for it.
+ *
+ * `bytes` includes the table's indexes (and, on Postgres, its TOAST), because
+ * that is what the table costs. `rows` is exact on SQLite and the planner's
+ * estimate on Postgres — an exact count there is a full scan of `request_logs`.
+ * `deadRows` is Postgres alone: tuples awaiting autovacuum. Null where the
+ * engine has no such number, which is not the same as zero.
+ */
+export type TableStats = {
+  name: string;
+  bytes: number;
+  rows: number;
+  deadRows: number | null;
+};
+
 /** How long a process may go without a heartbeat before its rows are retirable. */
 export const NODE_GRACE_MS = 60_000;
 
 export interface MaintenanceRepo {
   stats(): Promise<DatabaseStats>;
+  /** Every table of the schema, largest first. */
+  tables(): Promise<TableStats[]>;
   /** Records this process as alive at `now`; forgets nodes unseen for a day. */
   heartbeat(now: number): Promise<void>;
   /** Every process heard from within `NODE_GRACE_MS` of `now`, most recent first. */
@@ -1374,6 +1392,8 @@ export interface RoutingChangeSource {
 }
 
 export type Store = {
+  /** Which backend is behind the repos: a file this process holds, or a server it connects to. */
+  engine: "sqlite" | "postgres";
   /**
    * Where this store's database file is, as it was opened.
    *

@@ -110,6 +110,7 @@ export async function createStore(opts: {
   };
 
   return {
+    engine: "sqlite",
     databasePath: opts.path,
 
     // Every repo below is a stable object forwarding to the current handle.
@@ -189,6 +190,7 @@ export async function createStore(opts: {
 
     maintenance: {
       stats: () => handle.maintenance.stats(),
+      tables: () => handle.maintenance.tables(),
       heartbeat: (now) => handle.maintenance.heartbeat(now),
       nodes: (now) => handle.maintenance.nodes(now),
       vacuum: () => handle.maintenance.vacuum(),

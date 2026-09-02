@@ -4,13 +4,14 @@ import styled from "styled-components";
 import { useDatabaseOverview, useVacuum } from "../../api/queries.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
-import { formatBytes, formatMs, formatPercent } from "../../lib/format.ts";
+import { formatBytes, formatCount, formatMs, formatPercent } from "../../lib/format.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Grid } from "../../ui/primitives.ts";
 import { Readout } from "../../ui/Readout.tsx";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
+import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { RetentionModule } from "./RetentionModule.tsx";
 import { SnapshotsModule } from "./SnapshotsModule.tsx";
 
@@ -37,6 +38,10 @@ export function DatabaseBoard() {
   const vacuum = useVacuum();
   const [compacting, setCompacting] = useState(false);
   const data = overview.data;
+  // A Postgres store is a server this process connects to, not a file it holds:
+  // nothing here can compact it, copy it, or replace it, so those controls
+  // would be a promise the gateway cannot keep. `pg_dump` is the backup.
+  const postgres = data?.engine === "postgres";
 
   // Guarded rather than trusted: a database with no pages is not a state the
   // gateway can reach, but a division that produced NaN would render as one.
@@ -51,7 +56,9 @@ export function DatabaseBoard() {
         summary={
           overview.isLoading
             ? "Measuring the database…"
-            : "The one SQLite file this gateway runs from, the copies taken of it, and how long they are kept."
+            : postgres
+              ? "The Postgres database every replica of this cluster runs from. Back it up with pg_dump; nothing here copies or replaces it."
+              : "The one SQLite file this gateway runs from, the copies taken of it, and how long they are kept."
         }
       />
 
@@ -59,15 +66,17 @@ export function DatabaseBoard() {
         legend="Size"
         meta={data === undefined ? undefined : `schema v${data.stats.schemaVersion}`}
         actions={
-          <Button
-            type="button"
-            $size="sm"
-            disabled={vacuum.isPending || data === undefined}
-            onClick={() => setCompacting(true)}
-          >
-            <Minimize2 />
-            {vacuum.isPending ? "Compacting…" : "Compact"}
-          </Button>
+          postgres ? undefined : (
+            <Button
+              type="button"
+              $size="sm"
+              disabled={vacuum.isPending || data === undefined}
+              onClick={() => setCompacting(true)}
+            >
+              <Minimize2 />
+              {vacuum.isPending ? "Compacting…" : "Compact"}
+            </Button>
+          )
         }
         footer={
           vacuum.isError ? (
@@ -83,6 +92,20 @@ export function DatabaseBoard() {
           <Failure error={overview.error} onRetry={() => void overview.refetch()} />
         ) : data === undefined ? (
           <SkeletonRows rows={3} />
+        ) : postgres ? (
+          <Grid $min="180px" $stretch>
+            <Readout
+              legend="Database"
+              value={formatBytes(data.logicalBytes)}
+              unit={`${data.stats.pageCount} blocks of ${formatBytes(data.stats.pageSize)}`}
+            />
+            <Readout legend="Server" value={data.location} unit="password masked" />
+            <Readout
+              legend="Captured bodies"
+              value={formatBytes(data.bodiesBytes)}
+              unit="the request_bodies table"
+            />
+          </Grid>
         ) : (
           <Grid $min="180px" $stretch>
             <Readout
@@ -125,9 +148,46 @@ export function DatabaseBoard() {
         )}
       </Module>
 
-      <SnapshotsModule />
+      <Module
+        legend="Tables"
+        meta={
+          postgres
+            ? "row counts are the planner's estimates; dead rows await autovacuum"
+            : "size includes each table's indexes"
+        }
+      >
+        {data === undefined ? (
+          <SkeletonRows rows={4} />
+        ) : (
+          <Table>
+            <thead>
+              <Tr>
+                <Th>Table</Th>
+                <Th $align="right">Size</Th>
+                <Th $align="right">Rows</Th>
+                {postgres ? <Th $align="right">Dead rows</Th> : null}
+              </Tr>
+            </thead>
+            <tbody>
+              {data.tables.map((table) => (
+                <Tr key={table.name}>
+                  <Td>{table.name}</Td>
+                  <Td $align="right">{formatBytes(table.bytes)}</Td>
+                  <Td $align="right">{formatCount(table.rows)}</Td>
+                  {postgres ? <Td $align="right">{formatCount(table.deadRows ?? 0)}</Td> : null}
+                </Tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+      </Module>
 
-      <RetentionModule retention={data?.retention} />
+      {postgres ? null : (
+        <>
+          <SnapshotsModule />
+          <RetentionModule retention={data?.retention} />
+        </>
+      )}
 
       <Confirm
         open={compacting}

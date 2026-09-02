@@ -4,6 +4,7 @@ import {
   type DatabaseStats,
   type MaintenanceRepo,
   NODE_GRACE_MS,
+  type TableStats,
 } from "../types.ts";
 
 /**
@@ -73,6 +74,25 @@ export function createMaintenanceRepo(db: Database, nodeId: string): Maintenance
         freelistCount: freelist?.freelist_count ?? 0,
         schemaVersion: version?.version ?? 0,
       };
+    },
+
+    async tables(): Promise<TableStats[]> {
+      // `dbstat` walks every page, so this costs a read of the whole file.
+      // Leaf cells of a table's own b-tree are its rows, exactly; index pages
+      // are folded into the table they serve by `tbl_name`.
+      // ponytail: whole-file walk on every call; cache behind data_version if a screen ever polls it.
+      return db
+        .query<{ name: string; bytes: number; rows: number }, []>(
+          `SELECT m.tbl_name AS name,
+                  SUM(s.pgsize) AS bytes,
+                  SUM(CASE WHEN s.pagetype = 'leaf' AND s.name = m.tbl_name THEN s.ncell ELSE 0 END) AS rows
+             FROM dbstat s JOIN sqlite_master m ON m.name = s.name
+            WHERE m.tbl_name NOT LIKE 'sqlite_%'
+            GROUP BY m.tbl_name
+            ORDER BY bytes DESC, name`,
+        )
+        .all()
+        .map((row) => ({ ...row, deadRows: null }));
     },
 
     async vacuum(): Promise<void> {
