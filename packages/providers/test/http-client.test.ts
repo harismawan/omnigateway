@@ -44,7 +44,7 @@ test("writes headers in the given order with the given casing", async () => {
     url: s.url,
     method: "POST",
     headers: [
-      ["User-Agent", "claude-cli/2.1.219 (external, cli)"],
+      ["User-Agent", "claude-cli/2.1.258 (external, cli)"],
       ["x-app", "cli"],
       ["X-Stainless-Lang", "js"],
       ["anthropic-version", "2023-06-01"],

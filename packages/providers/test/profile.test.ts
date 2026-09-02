@@ -18,7 +18,7 @@ test("orderHeaders puts listed names first, in order, case-insensitively", () =>
   const pairs: [string, string][] = [
     ["anthropic-version", "2023-06-01"],
     ["Accept", "application/json"],
-    ["User-Agent", "claude-cli/2.1.219 (external, cli)"],
+    ["User-Agent", "claude-cli/2.1.258 (external, cli)"],
   ];
   const out = orderHeaders(pairs, ["Accept", "USER-AGENT"]);
   expect(out.map(([n]) => n)).toEqual(["Accept", "User-Agent", "anthropic-version"]);
