@@ -258,3 +258,22 @@ test("the quiesce latch does not gate /api/stream", async () => {
   expect(response.status).toBe(426);
   store.close();
 });
+
+test("a subscription the topic cap refuses answers error, not ack", async () => {
+  // Same failure "no source" exists for: an ack over a subscription the
+  // registry never held reads to the console as a topic that is merely quiet.
+  const h = await streamHarness();
+  try {
+    const socket = await h.connect({ cookie: h.cookie });
+    for (let i = 0; i < 256; i++) socket.send({ type: "subscribe", topic: `res:t${i}` });
+    socket.send({ id: "cap", type: "subscribe", topic: "res:one-more" });
+
+    const answer = await socket.waitFor(
+      (frame) => (frame as { id?: string }).id === "cap",
+      "the answer to the 257th subscribe",
+    );
+    expect(answer).toMatchObject({ type: "error", message: "too many topics" });
+  } finally {
+    await h.close();
+  }
+});

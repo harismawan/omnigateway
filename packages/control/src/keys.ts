@@ -213,9 +213,10 @@ export async function setKeyLimits(
   const body = parseOrThrow(keyLimitsSchema, input);
 
   // Looked up before the write so an unknown id is refused rather than becoming
-  // an UPDATE that matches no row and reports success.
-  const key = (await store.keys.list()).find((entry) => entry.id === id);
-  if (key === undefined) throw new GatewayError("BAD_REQUEST", "no such api key");
+  // an UPDATE that matches no row and reports success. `get`, not `list`: the
+  // latter parses every key on a synchronous database to look at one.
+  const key = await store.keys.get(id);
+  if (key === null) throw new GatewayError("BAD_REQUEST", "no such api key");
 
   await store.keys.setLimits(id, body.limits);
   return toSummary(store, { ...key, limits: body.limits }, now);
@@ -237,8 +238,8 @@ export async function setKeyModels(
 ): Promise<ApiKeySummary> {
   const body = parseOrThrow(keyModelsSchema, input);
 
-  const key = (await store.keys.list()).find((entry) => entry.id === id);
-  if (key === undefined) throw new GatewayError("BAD_REQUEST", "no such api key");
+  const key = await store.keys.get(id);
+  if (key === null) throw new GatewayError("BAD_REQUEST", "no such api key");
 
   await store.keys.setModelAllowlist(id, body.modelAllowlist);
   return toSummary(store, { ...key, modelAllowlist: body.modelAllowlist }, now);

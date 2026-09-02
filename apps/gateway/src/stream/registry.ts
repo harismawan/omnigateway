@@ -153,8 +153,12 @@ type Connection = {
 export type SocketRegistry = {
   add(id: string, socket: Socket, credential: Credential): void;
   remove(id: string): void;
-  /** Records a subscription. The caller has already authorised it. */
-  subscribe(id: string, topic: string): void;
+  /**
+   * Records a subscription. The caller has already authorised it. `false` when
+   * the per-connection topic cap refuses it — the caller must say so, because
+   * a subscription that was acked and never held reads as a quiet topic.
+   */
+  subscribe(id: string, topic: string): boolean;
   unsubscribe(id: string, topic: string): void;
   topics(id: string): readonly string[];
   /**
@@ -468,14 +472,15 @@ export function createSocketRegistry(deps: RegistryDeps = {}): SocketRegistry {
 
     subscribe(id, topic) {
       const connection = connections.get(id);
-      if (connection === undefined) return;
+      if (connection === undefined) return false;
       if (connection.topics.size >= MAX_TOPICS_PER_CONNECTION && !connection.topics.has(topic)) {
-        return;
+        return false;
       }
       connection.topics.add(topic);
       const subscribers = index.get(topic) ?? new Set<string>();
       subscribers.add(id);
       index.set(topic, subscribers);
+      return true;
     },
 
     unsubscribe(id, topic) {
