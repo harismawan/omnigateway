@@ -452,7 +452,13 @@ export function useDatabaseOverview(): UseQueryResult<DatabaseOverview> {
   return useQuery({
     queryKey: queryKeys.database,
     queryFn: ({ signal }) => get<DatabaseOverview>("/api/database", signal),
+    // The per-table figures come from `dbstat`, a synchronous walk of the
+    // whole SQLite file that blocks every in-flight request while it runs.
+    // Once per visit, never per window focus; the mutations on this screen
+    // invalidate the key themselves.
     refetchInterval: false,
+    refetchOnWindowFocus: false,
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }
 

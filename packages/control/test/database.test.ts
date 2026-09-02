@@ -1073,11 +1073,28 @@ describe("getDatabaseOverview", () => {
   test("on Postgres, captured bodies are the request_bodies table, not a directory", async () => {
     const d = deps();
     d.store.engine = "postgres";
+    d.store.databasePath = "postgres://omni:***@db:5432/omni";
     d.fs.dirBytes = () => 12_345;
+    // A URL is not a path: no probe may treat it as one.
+    const probed: string[] = [];
+    d.fs.stat = (path) => {
+      probed.push(path);
+      return null;
+    };
+    d.fs.freeBytes = (path) => {
+      probed.push(path);
+      return 1;
+    };
+    d.fs.readdir = (path) => {
+      probed.push(path);
+      return [];
+    };
     const overview = await getDatabaseOverview(d);
     expect(overview.engine).toBe("postgres");
     expect(overview.bodiesBytes).toBe(777);
     expect(overview.tables).toEqual([{ name: "request_bodies", bytes: 777, rows: 3, deadRows: 0 }]);
+    expect(overview.freeDiskBytes).toBeNull();
+    expect(probed).toEqual([]);
   });
 
   test("reads an absent -wal as zero bytes, which is the checkpointed case", async () => {

@@ -122,6 +122,17 @@ function SourceHint({ read }: { read: ConsoleResponse }) {
       </Hint>
     );
   }
+  // Silence from a process is not a verdict about it, so it is named rather
+  // than folded into whatever the others answered.
+  if (read.unreachable !== undefined && read.unreachable.length > 0) {
+    return (
+      <Hint>
+        {read.unreachable.length === 1 ? "One process" : `${read.unreachable.length} processes`} did
+        not answer in time and {read.unreachable.length === 1 ? "is" : "are"} not shown:{" "}
+        {read.unreachable.map((id) => id.slice(0, 8)).join(", ")}.
+      </Hint>
+    );
+  }
   return null;
 }
 
@@ -141,6 +152,10 @@ const NOT_CAPTURED = {
     "Its output is going to a terminal, so there is nothing to read back. To capture it, run the gateway under systemd with `omni service install`, or start it with `omni start`, which redirects output to a file and points OMNI_LOG_FILE at it.",
   fleet:
     "No process in this fleet is capturing its own output, so there is nothing to read back. Each one can capture its own — tee its stdout to a file and point OMNI_LOG_FILE at the same path — and this screen will then merge them. For a fleet, ship stdout to a collector instead: Elasticsearch and Kibana, Loki and Grafana, or whatever already reads your containers. This screen shows one process's tail at a time, and a process that is gone takes its log with it.",
+  // One chosen process in a fleet: a claim about it alone, since the others
+  // were not asked.
+  process:
+    "This process is not capturing its own output, so there is nothing to read back from it. Tee its stdout to a file and point OMNI_LOG_FILE at the same path, or pick another process.",
 } as const;
 
 /**
@@ -195,10 +210,13 @@ export function ConsoleBoard() {
   // process has always been shown and needs no selector; a fleet defaults to
   // every process merged, and the selector appears.
   const [chosen, setChosen] = useState<string>("");
-  const nodes = useNodes().data?.nodes ?? [];
+  const nodesQuery = useNodes();
+  const nodes = nodesQuery.data?.nodes ?? [];
   const fleet = nodes.length > 1;
-  const capture = fleet ? "fleet" : "single";
   const node = chosen === "" && fleet ? "all" : chosen;
+  // Keyed on what was asked, not on fleet size: a `none` from one chosen
+  // process says nothing about the others.
+  const capture = node === "all" ? "fleet" : fleet ? "process" : "single";
   // A chosen process holds its own topic; the answering one and the merged
   // view both read the shared topic, which every process publishes on.
   const heldTopic = node === "" || node === "all" ? null : `${CONSOLE_TOPIC}:${node}`;
@@ -331,7 +349,7 @@ export function ConsoleBoard() {
         >
           {consoleLog.isError ? (
             <Failure error={consoleLog.error} onRetry={() => void consoleLog.refetch()} />
-          ) : consoleLog.isLoading ? (
+          ) : consoleLog.isLoading || nodesQuery.isLoading ? (
             <div style={{ padding: 12 }}>
               <SkeletonRows rows={10} />
             </div>

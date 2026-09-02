@@ -120,31 +120,44 @@ export const dbStats: Command = {
     const { ctx, writer } = env;
     const overview = await getDatabaseOverview(await database(env));
 
-    emit(ctx, writer, overview, () =>
-      fields([
-        ["database", ctx.databasePath],
-        ["size", formatBytes(overview.fileBytes)],
-        ["write-ahead log", formatBytes(overview.walBytes)],
-        // Named as excluded here rather than only in the docs: this figure is
-        // part of what the installation occupies, and none of it is in a
-        // snapshot.
-        ["captured bodies", `${formatBytes(overview.bodiesBytes)} (never snapshotted)`],
-        ["free pages", `${formatBytes(overview.freePageBytes)} — reclaimed by omni db vacuum`],
-        ["schema version", String(overview.stats.schemaVersion)],
-        [
-          "snapshots",
-          `${overview.snapshots.count} (${formatBytes(overview.snapshots.totalBytes)}), latest ${formatTime(overview.snapshots.latestAt)}`,
-        ],
-        [
-          "retention",
-          `keep ${overview.retention.keepLatest}, up to ${overview.retention.maxAgeDays} days`,
-        ],
-        [
-          "free disk",
-          overview.freeDiskBytes === null ? "unknown" : formatBytes(overview.freeDiskBytes),
-        ],
-      ]),
+    const tables = table(
+      [{ header: "TABLE" }, { header: "SIZE", align: "right" }, { header: "ROWS", align: "right" }],
+      overview.tables.map((t) => [t.name, formatBytes(t.bytes), String(t.rows)]),
     );
+    // A Postgres database is a server, not a file: no size on disk, no
+    // write-ahead log the CLI can see, nothing to vacuum or snapshot.
+    const summary =
+      overview.engine === "postgres"
+        ? fields([
+            ["database", overview.location],
+            ["size", formatBytes(overview.logicalBytes)],
+            ["captured bodies", `${formatBytes(overview.bodiesBytes)} (request_bodies table)`],
+            ["schema version", String(overview.stats.schemaVersion)],
+          ])
+        : fields([
+            ["database", ctx.databasePath],
+            ["size", formatBytes(overview.fileBytes)],
+            ["write-ahead log", formatBytes(overview.walBytes)],
+            // Named as excluded here rather than only in the docs: this figure is
+            // part of what the installation occupies, and none of it is in a
+            // snapshot.
+            ["captured bodies", `${formatBytes(overview.bodiesBytes)} (never snapshotted)`],
+            ["free pages", `${formatBytes(overview.freePageBytes)} — reclaimed by omni db vacuum`],
+            ["schema version", String(overview.stats.schemaVersion)],
+            [
+              "snapshots",
+              `${overview.snapshots.count} (${formatBytes(overview.snapshots.totalBytes)}), latest ${formatTime(overview.snapshots.latestAt)}`,
+            ],
+            [
+              "retention",
+              `keep ${overview.retention.keepLatest}, up to ${overview.retention.maxAgeDays} days`,
+            ],
+            [
+              "free disk",
+              overview.freeDiskBytes === null ? "unknown" : formatBytes(overview.freeDiskBytes),
+            ],
+          ]);
+    emit(ctx, writer, overview, () => `${summary}\n\n${tables}`);
   },
 };
 

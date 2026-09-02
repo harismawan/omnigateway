@@ -80,7 +80,9 @@ export function createMaintenanceRepo(db: Database, nodeId: string): Maintenance
       // `dbstat` walks every page, so this costs a read of the whole file.
       // Leaf cells of a table's own b-tree are its rows, exactly; index pages
       // are folded into the table they serve by `tbl_name`.
-      // ponytail: whole-file walk on every call; cache behind data_version if a screen ever polls it.
+      // ponytail: whole-file walk on every call. The console reads it once per visit
+      // (`useDatabaseOverview` never refetches on focus) and `omni db stats` prints it;
+      // memoise behind `data_version` + `total_changes()` if a third caller polls.
       return db
         .query<{ name: string; bytes: number; rows: number }, []>(
           `SELECT m.tbl_name AS name,

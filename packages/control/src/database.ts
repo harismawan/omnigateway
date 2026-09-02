@@ -832,33 +832,48 @@ export type DatabaseOverview = {
 
 export async function getDatabaseOverview(deps: DatabaseDeps): Promise<DatabaseOverview> {
   const live = deps.store.databasePath;
-  const stats = await deps.store.maintenance.stats();
-  const tables = await deps.store.maintenance.tables();
-  const settings = await deps.store.config.getSettings();
-  const snapshots = listSnapshots(deps);
-
-  return {
+  // Independent reads, and three round-trips on Postgres if run in sequence.
+  const [stats, tables, settings] = await Promise.all([
+    deps.store.maintenance.stats(),
+    deps.store.maintenance.tables(),
+    deps.store.config.getSettings(),
+  ]);
+  const shared = {
     engine: deps.store.engine,
     location: live,
     stats,
-    fileBytes: deps.fs.stat(live)?.size ?? 0,
-    walBytes: deps.fs.stat(`${live}-wal`)?.size ?? 0,
-    // Bodies are files beside a SQLite database and rows of `request_bodies`
-    // on Postgres, so the figure comes from whichever holds them.
-    bodiesBytes:
-      deps.store.engine === "postgres"
-        ? (tables.find((table) => table.name === "request_bodies")?.bytes ?? 0)
-        : deps.fs.dirBytes(bodiesDirFor(live)),
     logicalBytes: stats.pageSize * stats.pageCount,
     freePageBytes: stats.pageSize * stats.freelistCount,
-    freeDiskBytes: deps.fs.freeBytes(dirname(live)),
     retention: retentionOf(settings),
+    tables,
+  };
+
+  // A Postgres `location` is a server URL, not a path: nothing on the
+  // filesystem answers to it, and probing it anyway returns zeros that read
+  // as measurements. Bodies there are rows of `request_bodies`.
+  if (deps.store.engine === "postgres") {
+    return {
+      ...shared,
+      fileBytes: 0,
+      walBytes: 0,
+      bodiesBytes: tables.find((table) => table.name === "request_bodies")?.bytes ?? 0,
+      freeDiskBytes: null,
+      snapshots: { count: 0, totalBytes: 0, latestAt: null },
+    };
+  }
+
+  const snapshots = listSnapshots(deps);
+  return {
+    ...shared,
+    fileBytes: deps.fs.stat(live)?.size ?? 0,
+    walBytes: deps.fs.stat(`${live}-wal`)?.size ?? 0,
+    bodiesBytes: deps.fs.dirBytes(bodiesDirFor(live)),
+    freeDiskBytes: deps.fs.freeBytes(dirname(live)),
     snapshots: {
       count: snapshots.length,
       totalBytes: snapshots.reduce((sum, snapshot) => sum + snapshot.sizeBytes, 0),
       latestAt: snapshots[0]?.createdAt ?? null,
     },
-    tables,
   };
 }
 

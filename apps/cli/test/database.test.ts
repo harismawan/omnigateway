@@ -27,6 +27,12 @@ test("db stats reports the database the CLI resolved, not a guess at one", async
   // A migrated installation has a schema, and no snapshots until one is taken.
   expect(body.stats.schemaVersion).toBeGreaterThan(0);
   expect(body.snapshots.count).toBe(0);
+
+  // The per-table listing is what the whole-file walk behind it pays for.
+  const human = await cli(["db", "stats"], { root });
+  expect(human.code).toBe(0);
+  expect(human.out).toContain("write-ahead log");
+  expect(human.out).toMatch(/^request_logs\s+[\d.]+ KB\s+0$/m);
 });
 
 /**
