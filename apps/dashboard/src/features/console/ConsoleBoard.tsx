@@ -126,6 +126,24 @@ function SourceHint({ read }: { read: ConsoleResponse }) {
 }
 
 /**
+ * What to do about output nothing is capturing, which differs by deployment.
+ *
+ * One process is a machine an operator can put a supervisor in front of. A
+ * fleet is not: capture there is per-process and per-container, so the same
+ * instruction repeated for each replica gives N tails that die with their pods
+ * and still have to be read one at a time — which is what this screen does, and
+ * what a collector already outside the fleet does better. Said here rather than
+ * left to the operator to discover, because the single-process advice is not
+ * merely incomplete in a fleet, it is the wrong shape.
+ */
+const NOT_CAPTURED = {
+  single:
+    "Its output is going to a terminal, so there is nothing to read back. To capture it, run the gateway under systemd with `omni service install`, or start it with `omni start`, which redirects output to a file and points OMNI_LOG_FILE at it.",
+  fleet:
+    "No process in this fleet is capturing its own output, so there is nothing to read back. Each one can capture its own — tee its stdout to a file and point OMNI_LOG_FILE at the same path — and this screen will then merge them. For a fleet, ship stdout to a collector instead: Elasticsearch and Kibana, Loki and Grafana, or whatever already reads your containers. This screen shows one process's tail at a time, and a process that is gone takes its log with it.",
+} as const;
+
+/**
  * Deltas received over `stream:console`, tagged with the REST read they sit on
  * top of. Tagged rather than bare, because the tag is what makes "this read has
  * been replaced" a comparison during render instead of a clearing effect.
@@ -179,6 +197,7 @@ export function ConsoleBoard() {
   const [chosen, setChosen] = useState<string>("");
   const nodes = useNodes().data?.nodes ?? [];
   const fleet = nodes.length > 1;
+  const capture = fleet ? "fleet" : "single";
   const node = chosen === "" && fleet ? "all" : chosen;
   // A chosen process holds its own topic; the answering one and the merged
   // view both read the shared topic, which every process publishes on.
@@ -317,10 +336,7 @@ export function ConsoleBoard() {
               <SkeletonRows rows={10} />
             </div>
           ) : read !== undefined && read.source === "none" ? (
-            <Empty
-              legend="Nothing is capturing this gateway"
-              message="Its output is going to a terminal, so there is nothing to read back. To capture it, run the gateway under systemd with `omni service install`, or start it with `omni start`, which redirects output to a file and points OMNI_LOG_FILE at it."
-            />
+            <Empty legend="Nothing is capturing this gateway" message={NOT_CAPTURED[capture]} />
           ) : rows.length === 0 ? (
             <Empty
               legend="Nothing to show"
