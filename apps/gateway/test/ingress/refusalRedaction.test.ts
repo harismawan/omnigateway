@@ -222,3 +222,35 @@ for (const { what, body } of POSITIONS) {
     expect(message.length).toBeLessThan(200);
   });
 }
+
+test("a model name longer than any real one is refused, not stored", () => {
+  // The storage channel, which capping stdout does nothing about.
+  // `requested_model` and `resolved_model` are columns, and both are ON CONFLICT
+  // keys of `usage_rollup` and `usage_daily` — so an unbounded model name
+  // persists prompt text on a *succeeding* request, keys three aggregate buckets
+  // with it, survives `bodyLoggingOptOut`, and rides into the snapshot. That
+  // last part contradicts an invariant this repository states outright: the
+  // snapshot is "never a prompt corpus". The bound therefore belongs at the
+  // write, not at the render.
+  const long = "a".repeat(201);
+  expect(() =>
+    parseAnthropicRequest({ ...base, messages: [{ role: "user", content: "hi" }], model: long }),
+  ).toThrow(GatewayError);
+  expect(() =>
+    parseOpenAIRequest({ model: long, messages: [{ role: "user", content: "hi" }] }),
+  ).toThrow(GatewayError);
+
+  // Every real spelling still passes: pooled, prefixed, dated, and suffixed.
+  for (const real of [
+    "claude-sonnet-4-5",
+    "anthropic/claude-sonnet-4-5",
+    "claude-sonnet-4-5[1m]",
+    "gpt-5.6-sol",
+    "openai/gpt-5.6-terra",
+  ]) {
+    expect(
+      parseAnthropicRequest({ ...base, messages: [{ role: "user", content: "hi" }], model: real })
+        .model.length,
+    ).toBeGreaterThan(0);
+  }
+});

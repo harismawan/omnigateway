@@ -1,3 +1,21 @@
+/**
+ * How long a model name may be.
+ *
+ * Not a formatting rule: `requested_model` and `resolved_model` are columns on
+ * `request_logs`, and both are `ON CONFLICT` key columns of `usage_rollup` and
+ * `usage_daily`. An unbounded name therefore persists whatever the client sent
+ * — on a *succeeding* request, past `bodyLoggingOptOut`, and into the snapshot,
+ * which this repository states is "never a prompt corpus". `resolveModel`
+ * splits on `/` and `:` and keeps the remainder as a synthesized target's
+ * model, so prose arrives here intact.
+ *
+ * Two hundred characters is far past every real spelling — pooled, prefixed,
+ * dated, `[1m]`-suffixed — and far short of a prompt. Capping the *render* was
+ * not enough and is not the fix: the bound has to be at the write, because the
+ * same value keys the rollup.
+ */
+export const MODEL_NAME_MAX = 200;
+
 import { CONTEXT_1M_BETA } from "@omni/ir";
 
 /**

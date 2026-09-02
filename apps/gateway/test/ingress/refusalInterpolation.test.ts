@@ -67,6 +67,18 @@ const GATEWAY_OWNED = new Set([
   "kind",
   "dimension",
   "window",
+  // A loop position.
+  "j",
+  // Operator-scoped, on admin routes a client cannot reach: a restore failure's
+  // own text and the database filename an operator named.
+  "error.message",
+  "database",
+  // The upstream's own words on the in-stream error path. Not bounded — it is
+  // *withheld*, because that throw stamps the provider and `reasonField` prints
+  // no message for an error that names one, exactly as `httpError` does on the
+  // non-streaming path. The stamp is what makes this entry true, and
+  // `dispatch.test.ts` pins it: removing the stamp fails there, not here.
+  "event.message",
   // Already bounded, by the two functions that exist to do it.
   "safeToken",
   "zodDetail",
@@ -89,24 +101,69 @@ function sources(dir: string): string[] {
   return out;
 }
 
-/** Every `${…}` inside a template literal that is an argument to a refusal. */
+/**
+ * The text of a refusal call, from its opening paren to its balanced close.
+ *
+ * Balanced rather than a fixed window: the first shape of this check read 600
+ * characters and a message beginning past that was invisible, which is a hole
+ * you close by counting parens rather than by choosing a bigger number.
+ */
+function callRegion(source: string, from: number): string {
+  let depth = 0;
+  for (let i = from; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return source.slice(from, i + 1);
+    }
+  }
+  return source.slice(from);
+}
+
+/**
+ * Names that build a refusal in this file: the constructor, `fail`, and any
+ * local helper that throws one.
+ *
+ * Discovered rather than listed, because a helper wrapping `new GatewayError`
+ * is the natural way to write a multi-branch message and the check was blind to
+ * exactly that — it knew `fail` by name and nothing else.
+ */
+function refusalCallers(source: string): RegExp {
+  const names = new Set(["fail"]);
+  for (const declaration of source.matchAll(
+    /function\s+(\w+)\s*\([^)]*\)[^{]*\{[\s\S]{0,400}?throw new GatewayError/g,
+  )) {
+    if (declaration[1] !== undefined) names.add(declaration[1]);
+  }
+  return new RegExp(`(?:new GatewayError\\(|\\b(?:${[...names].join("|")})\\()`, "g");
+}
+
+/** Every interpolation, and every non-literal message, a refusal can carry. */
 function interpolations(source: string): { expression: string; line: number }[] {
   const found: { expression: string; line: number }[] = [];
-  // Templates belonging to a refusal: the call spans lines, so the scan starts
-  // at the call and takes every backtick string until its closing paren.
-  const calls = /(?:new GatewayError\(|\bfail\()/g;
-  for (const match of source.matchAll(calls)) {
-    const start = match.index;
-    const region = source.slice(start, start + 600);
-    const end = region.indexOf(");");
-    const body = region.slice(0, end === -1 ? region.length : end);
-    for (const template of body.matchAll(/`[^`]*`/g)) {
-      for (const expr of template[0].matchAll(/\$\{([^}]*)\}/g)) {
-        found.push({
-          expression: (expr[1] ?? "").trim(),
-          line: source.slice(0, start).split("\n").length,
-        });
+  for (const match of source.matchAll(refusalCallers(source))) {
+    const start = match.index + match[0].length - 1;
+    const region = callRegion(source, start);
+    const line = source.slice(0, start).split("\n").length;
+
+    for (const template of region.matchAll(/`(?:[^`\\]|\\.)*`/g)) {
+      for (const expr of template[0].matchAll(/\$\{([^{}]*)\}/g)) {
+        found.push({ expression: (expr[1] ?? "").trim(), line });
       }
+    }
+
+    // A message built by concatenation carries the same values a template
+    // would, and the template scan above cannot see it.
+    for (const concat of region.matchAll(/"[^"]*"\s*\+\s*([A-Za-z_$][\w.$]*)/g)) {
+      found.push({ expression: (concat[1] ?? "").trim(), line });
+    }
+
+    // A message assembled elsewhere and passed as an identifier. The value is
+    // opaque here, so it is reported rather than assumed safe.
+    for (const arg of region.matchAll(/,\s*([A-Za-z_$][\w.$]*)\s*[,)]/g)) {
+      const name = (arg[1] ?? "").trim();
+      if (!/^(?:undefined|true|false)$/.test(name)) found.push({ expression: name, line });
     }
   }
   return found;
@@ -119,9 +176,13 @@ test("every value a refusal interpolates is this gateway's own or bounded", () =
     for (const file of sources(root)) {
       const source = readFileSync(file, "utf8");
       for (const { expression, line } of interpolations(source)) {
-        const owned = [...GATEWAY_OWNED].some(
-          (safe) => expression === safe || expression.includes(`${safe}(`),
-        );
+        // Exact name, or a bare call to one of the two functions that bound a
+        // value. A substring match let `${safeToken("a") + " " + key}` through:
+        // one interpolation can both call the bounding function and concatenate
+        // the raw value beside it, and `includes` cannot tell those apart.
+        const owned =
+          GATEWAY_OWNED.has(expression) ||
+          /^(?:safeToken|zodDetail|issuePath)\([^+]*\)$/.test(expression);
         if (!owned) unowned.push(`${file}:${line}  \${${expression}}`);
       }
     }

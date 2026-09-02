@@ -74,8 +74,7 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
   if (result.success) return result.data;
 
   const issue = result.error.issues[0];
-  const path = issue?.path.join(".") ?? "(root)";
-  throw new GatewayError("BAD_REQUEST", `${path}: ${zodDetail(issue)}`);
+  throw new GatewayError("BAD_REQUEST", `${issuePath(issue)}: ${zodDetail(issue)}`);
 }
 
 /**
@@ -88,6 +87,21 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
  * surface for it to come out of. Checked against zod v4: no other arm echoes a
  * received value.
  */
+/**
+ * The field path of a zod failure, with every segment bounded.
+ *
+ * A path reads as structure, and mostly is — schema keys and array indices this
+ * repository named. The exception is real: zod's `invalid_key` arm puts the
+ * client's own key in `path`, so a `z.record` with a constrained key schema
+ * would put client text here while the message beside it stayed bounded. No
+ * such record exists today; the bound is what makes that stay true when one
+ * does.
+ */
+export function issuePath(issue: z.core.$ZodIssue | undefined): string {
+  const segments = issue?.path ?? [];
+  return segments.length === 0 ? "(root)" : segments.map((s) => safeToken(String(s))).join(".");
+}
+
 export function zodDetail(issue: z.core.$ZodIssue | undefined): string {
   if (issue === undefined) return "invalid request";
   if (issue.code === "unrecognized_keys") {

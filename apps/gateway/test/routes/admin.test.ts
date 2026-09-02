@@ -418,7 +418,7 @@ test("patching a credential cannot inject a token", async () => {
   expect((await rejected.json()) as { error: { code: string; message: string } }).toEqual({
     error: {
       code: "BAD_REQUEST",
-      message: ': Unrecognized key: "accessToken"',
+      message: '(root): unrecognized key "accessToken"',
     },
   });
   const view = await store.credentials.get("c1");

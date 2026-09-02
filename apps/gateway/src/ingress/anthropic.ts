@@ -10,7 +10,7 @@ import { GatewayError, REASONING_EFFORTS, validateRequest } from "@omni/ir";
 import { ANTHROPIC_NATIVE_BLOCK_TYPES } from "@omni/providers";
 import { z } from "zod";
 import { mcpServerNames, parseTools } from "./anthropicTools.ts";
-import { normalizeClientModel } from "./model.ts";
+import { MODEL_NAME_MAX, normalizeClientModel } from "./model.ts";
 import {
   cacheControlSchema as cacheControl,
   extraFields,
@@ -258,7 +258,7 @@ const message = z.object({
 });
 
 const schema = z.object({
-  model: z.string().min(1),
+  model: z.string().min(1).max(MODEL_NAME_MAX),
   messages: z.array(message).min(1),
   system: z.union([z.string(), z.array(textBlock)]).optional(),
   max_tokens: z.number().int().positive().optional(),

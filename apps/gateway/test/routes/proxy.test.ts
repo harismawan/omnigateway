@@ -1918,7 +1918,10 @@ test("a refused model name reaches neither the client nor the log unbounded", as
     logger,
   });
 
-  const hostile = `SECRET_MARKER${"x".repeat(4000)}`;
+  // Inside MODEL_NAME_MAX, so it passes the schema and reaches the allowlist
+  // check — which is the site under test. A longer one is now refused at parse,
+  // and that is a different guard with its own test.
+  const hostile = `SECRET_MARKER ${"x".repeat(120)}`;
   const response = await app.handle(
     new Request("http://localhost/v1/messages", {
       method: "POST",

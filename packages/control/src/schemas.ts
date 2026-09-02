@@ -1,4 +1,4 @@
-import { GatewayError } from "@omni/ir";
+import { GatewayError, safeToken } from "@omni/ir";
 import { PONYTAIL_MODES } from "@omni/ponytail/catalog";
 import { PROVIDER_ID_PATTERN } from "@omni/providers/descriptors";
 import { limitConfigSchema } from "@omni/ratelimit/catalog";
@@ -17,9 +17,22 @@ export function parseOrThrow<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
   if (result.success) return result.data;
 
+  // The same rule the ingress copy follows, restated rather than imported:
+  // `@omni/control` knows nothing about the gateway's app. `unrecognized_keys`
+  // is the one zod arm whose message quotes the offending key, and `invalid_key`
+  // is the one that puts it in the path — operator text on this surface rather
+  // than a client's, and bounded on the same terms regardless.
   const issue = result.error.issues[0];
-  const path = issue?.path.join(".") ?? "(root)";
-  throw new GatewayError("BAD_REQUEST", `${path}: ${issue?.message ?? "invalid request"}`);
+  const segments = issue?.path ?? [];
+  const path =
+    segments.length === 0 ? "(root)" : segments.map((s) => safeToken(String(s))).join(".");
+  const detail =
+    issue === undefined
+      ? "invalid request"
+      : issue.code === "unrecognized_keys"
+        ? `unrecognized key "${safeToken(issue.keys[0])}"`
+        : issue.message;
+  throw new GatewayError("BAD_REQUEST", `${path}: ${detail}`);
 }
 
 /**
