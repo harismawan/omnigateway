@@ -487,6 +487,9 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](#recording-bodies) |
 | `OMNI_ROOT` | No | the installation in the current directory, else `~/.config/omnigateway` | Which installation the CLI acts on, when `--root` is not passed |
 | `OMNI_PLUGIN_REGISTRY` | No | the public npm registry | Registry `omni plugin install <name>` resolves through; must be `https://` |
+| `OMNI_CLUSTER_MODE` | No | unset | `true` selects [cluster mode](#running-more-than-one-gateway) and requires the two URLs below; unset is one process on SQLite, and then the URLs must be unset too |
+| `OMNI_DATABASE_URL` | In cluster mode | — | The shared Postgres store |
+| `OMNI_REDIS_URL` | In cluster mode | — | The coordinator every process of a cluster shares: rate-limit counters, sessions, leases, push fan-out |
 
 `OMNI_ROOT` is the one variable read from your shell and never from a root's `.env`, for the
 reason it has to be: a variable that selects the installation cannot live inside the installation
@@ -524,6 +527,70 @@ boot, so a change to it takes a restart. Snapshot retention —
 `snapshotKeepLatest` and `snapshotMaxAgeDays` — is stored alongside them but
 deliberately edited on the Database screen instead; see
 [Snapshots and restore](#snapshots-and-restore) for why.
+
+## Running more than one gateway
+
+One process on SQLite is the default and is what every command in this document assumes. A
+fleet — several replicas behind a load balancer, on Kubernetes or otherwise — is **cluster
+mode**, switched on by `OMNI_CLUSTER_MODE=true` and needing two things beside the gateway:
+
+- **Postgres** as the store, named by `OMNI_DATABASE_URL`. Every replica reads and writes one
+  database; there is no SQLite file, no snapshot, no restore, and no `omni db vacuum` — those are
+  `pg_dump`'s job now, and the Database screen says so.
+- **Redis** (or Valkey) as the coordinator, named by `OMNI_REDIS_URL`. It holds what a fleet must
+  agree on and a database is the wrong shape for: the per-minute request ring and the concurrency
+  gauge, the long-window counters, admin sessions, pending OAuth flows, quota-probe cooldowns, the
+  leases that make the background loops run once rather than N times, and the fan-out that lets a
+  console on one replica hear a change made on another.
+
+```bash
+OMNI_CLUSTER_MODE=true
+OMNI_DATABASE_URL=postgres://omni:secret@db.internal:5432/omni
+OMNI_REDIS_URL=redis://cache.internal:6379
+OMNI_ENCRYPTION_KEY=…   # the same on every replica
+```
+
+Boot refuses the switch without both URLs, and refuses either URL without the switch: a
+replica that believes it is clustered and is not is the failure this variable exists to make
+loud.
+
+What holds across the fleet, exactly: every API-key limit at every window and dimension; token
+refresh, which one replica performs while the others wait and reuse the result; a cookie issued
+by one replica, which every other verifies and a password change ends everywhere. What is
+per-replica and says so: the console's **Console** screen shows one process's stdout, so it grows
+a selector when there is more than one, and its default view is every process merged by time.
+What is per-replica and does not say so: the routing `load` weight is one round trip stale
+between replicas, so a burst arriving at once on two of them can stack for that long.
+
+**No sticky sessions are needed.** The WebSocket the console holds may land on any replica; the
+ingress only needs to pass upgrades and hold an idle timeout above ten seconds. A rolling deploy
+closes each replica's sockets with `1001`, the console reconnects to a live one and refetches
+once.
+
+**When Redis is unreachable**, the request path keeps serving: each replica falls back to its
+own in-memory counters, so limits degrade to N-fold until Redis returns, and one line per thirty
+seconds says so (`coord=redis coordFallback=true`). The console does not: a session that cannot
+be checked against the shared store is refused with `503`, because a session verified locally is
+one a password change on another replica cannot end. `GET /health` reports `mode`, `nodeId` and
+`coord` (`ok` or `fallback`) for a readiness probe to read.
+
+Plugins are loaded from each replica's own `<root>/plugins/`; bake them into the image so every
+replica holds the same set. Plugin storage is Postgres in cluster mode, so a plugin's SQL is
+written for it. `POST /api/restart` refuses in cluster mode — roll the deployment instead.
+
+Moving an existing SQLite installation onto Postgres:
+
+```bash
+omni stop
+omni db migrate --to postgres://omni:secret@db.internal:5432/omni
+```
+
+It copies credentials (re-encrypted with the same `OMNI_ENCRYPTION_KEY`), API keys, virtual
+models, settings, both passwords and every completed request log into an **empty** Postgres
+database, rebuilds the rollups, and prints what it did not carry: request bodies, `usage_daily`
+older than the retained logs, quota readings and breaker state (re-measured within a poll
+interval), sessions, and `plugin_*` tables, whose SQL is the source dialect's. It refuses while a
+gateway is running and refuses a target that holds anything.
 
 ## Recording bodies
 
@@ -648,10 +715,29 @@ docker run --rm \
   omnigateway
 ```
 
-The container listens on `0.0.0.0:9000` and keeps its database at
-`/data/omnigateway.db`. Note that **the image builds the gateway only**: it
-serves the APIs and returns 404 for the console. Use the CLI or the control API
-against it, or install the npm package if you want the console.
+The container listens on `0.0.0.0:9000`, serves the console, and keeps its
+database and plugins under `/data`. It runs as the unprivileged `bun` user and
+carries a `HEALTHCHECK` on `/health`.
+
+For a fleet, set `OMNI_CLUSTER_MODE=true` with `OMNI_DATABASE_URL` and `OMNI_REDIS_URL` and
+drop the volume;
+see [Running more than one gateway](#running-more-than-one-gateway). A
+Kubernetes deployment — Deployment, Service, Ingress with the timeouts streaming
+needs, HPA, and an example Secret — is under `k8s/` as a kustomize
+base:
+
+```bash
+cp k8s/secret.example.yaml k8s/secret.yaml   # edit it
+kubectl apply -f k8s/secret.yaml
+kubectl apply -k k8s
+```
+
+Releases deploy by GitOps: a `v*` tag publishes `ghcr.io/harismawan/omnigateway:<version>`
+and the workflow commits that version into `k8s/kustomization.yaml` on `main`, which Argo
+CD syncs. Rolling back is editing `newTag` by hand.
+
+Plugins in a fleet are baked into the image so every replica holds the same
+set: `COPY plugins/ /data/plugins/` in a derived Dockerfile.
 
 Give the container a restart policy — `--restart unless-stopped` — if you want a
 restart request to bring it back. A container cannot read its own policy, so

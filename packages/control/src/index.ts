@@ -49,6 +49,7 @@ export {
   resolveConsoleSource,
   UNIT_NAME,
 } from "./console.ts";
+export { type CopyCounts, type CopyReport, copyStore, NOT_CARRIED } from "./copyStore.ts";
 export {
   type CredentialPatch,
   type CredentialStatus,
@@ -209,7 +210,6 @@ export {
   poll,
   probe,
   RATE_LIMIT_COOLDOWN_MS,
-  resetQuotaCooldowns,
 } from "./quota/poll.ts";
 export {
   credentialPatchSchema,

@@ -1,0 +1,264 @@
+import { expect, test } from "bun:test";
+import type { Coord } from "../src/index.ts";
+
+const T0 = 1_700_000_000_000;
+
+/**
+ * The one suite every `Coord` implementation runs.
+ *
+ * A second implementation that passes this and drifts from the first drifts in
+ * a way no consumer can see, so the properties here are the ones consumers
+ * lean on: a claim is visible to every concurrent claimant the instant it is
+ * taken, a rollback gives back exactly one stamp, and a gauge never goes
+ * negative.
+ *
+ * `make` receives a clock; an implementation that expires `kv` against its own
+ * clock ignores it, and the expiry test then waits out a real TTL instead.
+ */
+export function coordContract(name: string, make: (now: () => number) => Promise<Coord>): void {
+  test(`${name}: window claim reports what was held before it`, async () => {
+    const coord = await make(() => T0);
+    const a = await coord.window.claim("k", 60_000, T0);
+    const b = await coord.window.claim("k", 60_000, T0 + 1);
+    expect(a.before).toEqual({ used: 0, resetAt: T0 });
+    expect(b.before).toEqual({ used: 1, resetAt: T0 + 60_000 });
+  });
+
+  test(`${name}: window ages a stamp out at exactly the window`, async () => {
+    const coord = await make(() => T0);
+    await coord.window.claim("k", 60_000, T0);
+    expect((await coord.window.claim("k", 60_000, T0 + 60_000)).before.used).toBe(0);
+  });
+
+  test(`${name}: window rollback gives back exactly one stamp`, async () => {
+    const coord = await make(() => T0);
+    const first = await coord.window.claim("k", 60_000, T0);
+    await coord.window.claim("k", 60_000, T0 + 1);
+    await coord.window.rollback("k", first.stamp);
+    expect((await coord.window.claim("k", 60_000, T0 + 2)).before.used).toBe(1);
+    // A stamp already given back is silently nothing: exactly one goes.
+    await coord.window.rollback("k", first.stamp);
+    expect((await coord.window.claim("k", 60_000, T0 + 3)).before.used).toBe(2);
+  });
+
+  /**
+   * The seam. Ten claims issued without awaiting between them must each see
+   * the ones before it — a claim recorded only after a yield lets every
+   * concurrent check judge the same pre-burst snapshot.
+   */
+  test(`${name}: concurrent window claims see each other`, async () => {
+    const coord = await make(() => T0);
+    const claims = await Promise.all(
+      Array.from({ length: 10 }, () => coord.window.claim("k", 60_000, T0)),
+    );
+    const seen = claims.map((claim) => claim.before.used).sort((x, y) => x - y);
+    expect(seen).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  test(`${name}: gauge counts acquisitions and never goes negative`, async () => {
+    const coord = await make(() => T0);
+    expect(await coord.gauge.acquire("g", 1_000)).toBe(0);
+    expect(await coord.gauge.acquire("g", 1_000)).toBe(1);
+    expect(await coord.gauge.read("g")).toBe(2);
+    await coord.gauge.release("g");
+    await coord.gauge.release("g");
+    await coord.gauge.release("g");
+    expect(await coord.gauge.read("g")).toBe(0);
+    expect(await coord.gauge.read("never")).toBe(0);
+  });
+
+  test(`${name}: concurrent gauge acquisitions see each other`, async () => {
+    const coord = await make(() => T0);
+    const before = await Promise.all(
+      Array.from({ length: 10 }, () => coord.gauge.acquire("g", 1_000)),
+    );
+    expect(before.sort((x, y) => x - y)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  test(`${name}: gauge snapshot lists every held key under a prefix`, async () => {
+    const coord = await make(() => T0);
+    await coord.gauge.acquire("load:a", 1_000);
+    await coord.gauge.acquire("load:a", 1_000);
+    await coord.gauge.acquire("load:b", 1_000);
+    await coord.gauge.acquire("other:c", 1_000);
+    await coord.gauge.release("load:b");
+    expect(await coord.gauge.snapshot("load:")).toEqual(new Map([["load:a", 2]]));
+  });
+
+  test(`${name}: mutex serialises holders of one key`, async () => {
+    const coord = await make(() => T0);
+    const order: string[] = [];
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = coord.mutex.withLock("m", 1_000, 1_000, async () => {
+      order.push("first:in");
+      await held;
+      order.push("first:out");
+    });
+    const second = coord.mutex.withLock("m", 1_000, 1_000, async () => {
+      order.push("second:in");
+    });
+    // Let the second contend, then let the first finish.
+    await Promise.resolve();
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first:in", "first:out", "second:in"]);
+  });
+
+  test(`${name}: mutex gives up after waitMs`, async () => {
+    const coord = await make(() => T0);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = coord.mutex.withLock("m", 10_000, 10_000, () => held);
+    await expect(coord.mutex.withLock("m", 10_000, 20, async () => "x")).rejects.toThrow(
+      "LOCK_UNAVAILABLE",
+    );
+    release();
+    await first;
+    expect(await coord.mutex.withLock("m", 10_000, 20, async () => "x")).toBe("x");
+  });
+
+  test(`${name}: mutex releases on throw`, async () => {
+    const coord = await make(() => T0);
+    await expect(
+      coord.mutex.withLock("m", 1_000, 1_000, async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect(await coord.mutex.withLock("m", 1_000, 20, async () => 1)).toBe(1);
+  });
+
+  test(`${name}: kv holds a value for its ttl and not past it`, async () => {
+    let clock = T0;
+    const coord = await make(() => clock);
+    await coord.kv.set("s", "v", 200);
+    expect(await coord.kv.get("s")).toBe("v");
+    clock += 100;
+    await Bun.sleep(100);
+    expect(await coord.kv.get("s")).toBe("v");
+    clock += 100;
+    await Bun.sleep(150);
+    expect(await coord.kv.get("s")).toBeNull();
+  });
+
+  test(`${name}: kv del and delPrefix remove exactly what they name`, async () => {
+    const coord = await make(() => T0);
+    await coord.kv.set("sess:admin:1", "a", 10_000);
+    await coord.kv.set("sess:admin:2", "b", 10_000);
+    await coord.kv.set("sess:viewer:1", "c", 10_000);
+    await coord.kv.set("other:1", "d", 10_000);
+    await coord.kv.del("sess:admin:1");
+    expect(await coord.kv.get("sess:admin:1")).toBeNull();
+    await coord.kv.delPrefix("sess:admin:");
+    expect(await coord.kv.get("sess:admin:2")).toBeNull();
+    expect(await coord.kv.get("sess:viewer:1")).toBe("c");
+    await coord.kv.delPrefix("sess:");
+    expect(await coord.kv.get("sess:viewer:1")).toBeNull();
+    expect(await coord.kv.get("other:1")).toBe("d");
+  });
+
+  test(`${name}: buckets sum live buckets and drop the aged edge`, async () => {
+    const coord = await make(() => T0);
+    const one = { requests: 1, tokens: 10, costUsd: 0.5 };
+    expect(await coord.buckets.sum("b", 60_000, 300_000, T0)).toBeNull();
+    // An unseeded key ignores adds and stays unseeded.
+    await coord.buckets.add("b", 60_000, 300_000, T0, one);
+    expect(await coord.buckets.sum("b", 60_000, 300_000, T0)).toBeNull();
+    await coord.buckets.seed("b", 60_000, 300_000, T0, []);
+    await coord.buckets.add("b", 60_000, 300_000, T0, one);
+    await coord.buckets.add("b", 60_000, 300_000, T0 + 30_000, one);
+    await coord.buckets.add("b", 60_000, 300_000, T0 + 120_000, one);
+    expect(await coord.buckets.sum("b", 60_000, 300_000, T0 + 120_000)).toEqual({
+      requests: 3,
+      tokens: 30,
+      costUsd: 1.5,
+    });
+    // The first bucket starts at T0; it leaves once the window's oldest
+    // bucket start passes it.
+    expect((await coord.buckets.sum("b", 60_000, 300_000, T0 + 360_000))?.requests).toBe(1);
+  });
+
+  test(`${name}: buckets seed replaces and is then added to`, async () => {
+    const coord = await make(() => T0);
+    const one = { requests: 1, tokens: 1, costUsd: 1 };
+    await coord.buckets.seed("b", 60_000, 300_000, T0, []);
+    await coord.buckets.add("b", 60_000, 300_000, T0, one);
+    await coord.buckets.seed("b", 60_000, 300_000, T0, [
+      [T0 - 120_000, { requests: 5, tokens: 5, costUsd: 5 }],
+      [T0 - 900_000, { requests: 99, tokens: 99, costUsd: 99 }],
+    ]);
+    await coord.buckets.add("b", 60_000, 300_000, T0, one);
+    expect((await coord.buckets.sum("b", 60_000, 300_000, T0))?.requests).toBe(6);
+  });
+
+  test(`${name}: lease is held by one holder until it lapses or is released`, async () => {
+    let clock = T0;
+    const coord = await make(() => clock);
+    expect(await coord.lease.acquire("job", "a", 1_000)).toBe(true);
+    expect(await coord.lease.acquire("job", "b", 1_000)).toBe(false);
+    // The holder may renew.
+    expect(await coord.lease.acquire("job", "a", 1_000)).toBe(true);
+    await coord.lease.release("job", "b");
+    expect(await coord.lease.acquire("job", "b", 1_000)).toBe(false);
+    await coord.lease.release("job", "a");
+    expect(await coord.lease.acquire("job", "b", 50)).toBe(true);
+    clock += 51;
+    await Bun.sleep(51);
+    expect(await coord.lease.acquire("job", "a", 1_000)).toBe(true);
+  });
+
+  test(`${name}: pubsub delivers to exact and pattern subscribers`, async () => {
+    const coord = await make(() => T0);
+    const seen: string[] = [];
+    const offExact = coord.pubsub.subscribe("res", (topic, payload) => {
+      seen.push(`exact:${topic}:${payload}`);
+    });
+    const offPattern = coord.pubsub.subscribe("console:*", (topic, payload) => {
+      seen.push(`pattern:${topic}:${payload}`);
+    });
+    await coord.pubsub.publish("res", "1");
+    await coord.pubsub.publish("console:node-a", "2");
+    await coord.pubsub.publish("other", "3");
+    await Bun.sleep(5);
+    offExact();
+    await coord.pubsub.publish("res", "4");
+    await Bun.sleep(5);
+    offPattern();
+    expect(seen.sort()).toEqual(["exact:res:1", "pattern:console:node-a:2"]);
+  });
+
+  test(`${name}: incr is monotonic from 1`, async () => {
+    const coord = await make(() => T0);
+    expect(await coord.incr("seq")).toBe(1);
+    expect(await coord.incr("seq")).toBe(2);
+    expect(await coord.incr("other")).toBe(1);
+  });
+
+  test(`${name}: a gauge slot lapses at its ttl, so a dead holder frees it`, async () => {
+    let clock = T0;
+    const coord = await make(() => clock);
+    expect(await coord.gauge.acquire("g", 50)).toBe(0);
+    expect(await coord.gauge.read("g")).toBe(1);
+    clock += 60;
+    await Bun.sleep(60);
+    expect(await coord.gauge.read("g")).toBe(0);
+    expect(await coord.gauge.acquire("g", 50)).toBe(0);
+  });
+
+  test(`${name}: publishSequenced numbers deliveries in one step`, async () => {
+    const coord = await make(() => T0);
+    const seen: string[] = [];
+    const off = coord.pubsub.subscribe("s", (_topic, payload) => {
+      seen.push(payload);
+    });
+    expect(await coord.pubsub.publishSequenced("s", "a", "seq:s")).toBe(1);
+    expect(await coord.pubsub.publishSequenced("s", "b", "seq:s")).toBe(2);
+    await Bun.sleep(5);
+    off();
+    expect(seen).toEqual(["1:a", "2:b"]);
+  });
+}

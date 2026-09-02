@@ -822,3 +822,19 @@ test("listQuotaSamples honours a limit by dropping the oldest readings", async (
   expect([...keys].sort()).toEqual(keys);
   db.close();
 });
+
+test("updateSecrets with a stale version is refused and moves nothing", async () => {
+  const { repo, db } = await setup();
+  await repo.create(input);
+  const before = (await repo.get("c1"))?.tokenVersion ?? -1;
+
+  expect(await repo.updateSecrets("c1", { accessToken: "test-token-b" }, null, before)).toBe(true);
+  expect(await repo.updateSecrets("c1", { accessToken: "test-token-c" }, null, before)).toBe(false);
+  const row = await repo.get("c1");
+  expect(row?.tokenVersion).toBe(before + 1);
+  expect((await row?.secrets())?.accessToken).toBe("test-token-b");
+  // Unconditional writes still land, and still move the version.
+  expect(await repo.updateSecrets("c1", { accessToken: "test-token-d" }, null)).toBe(true);
+  expect((await repo.get("c1"))?.tokenVersion).toBe(before + 2);
+  db.close();
+});

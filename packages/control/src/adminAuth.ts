@@ -1,4 +1,5 @@
 import { hash, verify } from "@node-rs/argon2";
+import { type Coord, memoryCoord } from "@omni/coord";
 import { hashApiKey, type Store } from "@omni/store";
 import type { Principal } from "./principal.ts";
 
@@ -65,7 +66,7 @@ export type AdminAuth = {
    * every `/api/*` route mean "the operator" without saying so.
    */
   verify(token: string): Promise<Principal | null>;
-  logout(token: string): void;
+  logout(token: string): Promise<void>;
   /**
    * Ends every session without changing any password.
    *
@@ -73,14 +74,16 @@ export type AdminAuth = {
    * restore can bring different hashes in without going through `setPassword`,
    * and the sessions in memory were issued against the hashes that just left.
    */
-  invalidateSessions(): void;
+  invalidateSessions(): Promise<void>;
   /** Ends the sessions of one kind, leaving the others alone. */
-  invalidateKind(kind: Principal["kind"]): void;
+  invalidateKind(kind: Principal["kind"]): Promise<void>;
 };
 
 export type AdminAuthOptions = {
   now: () => number;
   sessionTtlMs: number;
+  /** Where sessions live. In-memory when absent. */
+  coord?: Coord;
 };
 
 /**
@@ -94,21 +97,51 @@ const ARGON2 = { memoryCost: 19_456, timeCost: 2, parallelism: 1 } as const;
 
 type Session = { expiresAt: number; principal: Principal };
 
-export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth {
-  // Sessions live in memory only: a restart logs everyone out, and there is
-  // nothing on disk for an attacker with the database file to replay.
-  const sessions = new Map<string, Session>();
+/** Where a session lives: `sess:<kind>:<sha256(token)>`. */
+const PREFIX = "sess:";
 
-  const issue = (principal: Principal): string => {
+/**
+ * The token never reaches the store: what is keyed on is its digest, so a
+ * dump of whatever holds sessions yields nothing a browser could present.
+ */
+function sessionKey(kind: Principal["kind"], token: string): string {
+  return `${PREFIX}${kind}:${new Bun.CryptoHasher("sha256").update(token).digest("hex")}`;
+}
+
+export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth {
+  // Sessions live behind `coord.kv` with a TTL. In memory that is a map a
+  // restart empties, so nothing on disk can be replayed; in a fleet it is
+  // whatever the coordinator holds, so a cookie issued by one process is
+  // known to every other and a password change ends it everywhere.
+  const coord = opts.coord ?? memoryCoord({ now: opts.now });
+
+  const issue = async (principal: Principal): Promise<string> => {
     const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
-    sessions.set(token, { expiresAt: opts.now() + opts.sessionTtlMs, principal });
+    const session: Session = { expiresAt: opts.now() + opts.sessionTtlMs, principal };
+    await coord.kv.set(
+      sessionKey(principal.kind, token),
+      JSON.stringify(session),
+      opts.sessionTtlMs,
+    );
     return token;
   };
 
-  const dropKind = (kind: Principal["kind"]): void => {
-    for (const [token, session] of sessions) {
-      if (session.principal.kind === kind) sessions.delete(token);
+  const dropKind = (kind: Principal["kind"]): Promise<void> =>
+    coord.kv.delPrefix(`${PREFIX}${kind}:`);
+
+  /**
+   * The session behind a token, looked up under each kind in turn.
+   *
+   * The token does not say which kind it is, and three reads per verify is
+   * the price of `delPrefix` being able to end one kind without a scan.
+   */
+  const lookup = async (token: string): Promise<{ key: string; session: Session } | null> => {
+    for (const kind of ["admin", "viewer", "client"] as const) {
+      const key = sessionKey(kind, token);
+      const raw = await coord.kv.get(key);
+      if (raw !== null) return { key, session: JSON.parse(raw) as Session };
     }
+    return null;
   };
 
   /** Verifies a password against a stored hash, treating absent as "no". */
@@ -155,7 +188,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
     // A password change is also a "log everyone out" event — every kind of
     // session, because the operator changing their own password is the one
     // action that should not leave someone else's window open.
-    sessions.clear();
+    await coord.kv.delPrefix(PREFIX);
   };
 
   return {
@@ -215,7 +248,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
       );
       // Viewer sessions only. Changing who else may look does not log the
       // operator out of their own console.
-      dropKind("viewer");
+      await dropKind("viewer");
     },
 
     async loginViewer(password) {
@@ -235,31 +268,35 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
     },
 
     async verify(token) {
-      const session = sessions.get(token);
-      if (session === undefined) return null;
+      const found = await lookup(token);
+      if (found === null) return null;
+      const { key, session } = found;
+      // The TTL already bounds this; checked again against the injected clock
+      // so the answer is the same whichever clock the coordinator expires on.
       if (session.expiresAt <= opts.now()) {
-        sessions.delete(token);
+        await coord.kv.del(key);
         return null;
       }
       if (session.principal.kind === "client") {
         if (!(await keyStillValid(session.principal.apiKeyId))) {
-          sessions.delete(token);
+          await coord.kv.del(key);
           return null;
         }
       }
       return session.principal;
     },
 
-    logout(token) {
-      sessions.delete(token);
+    async logout(token) {
+      const found = await lookup(token);
+      if (found !== null) await coord.kv.del(found.key);
     },
 
     invalidateSessions() {
-      sessions.clear();
+      return coord.kv.delPrefix(PREFIX);
     },
 
     invalidateKind(kind) {
-      dropKind(kind);
+      return dropKind(kind);
     },
   };
 }

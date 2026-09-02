@@ -100,14 +100,14 @@ function fakeStore(tables: Record<string, string[]>): PluginStore & { dropped: s
   return {
     dropped,
     plugins: {
-      listTables: (id) => [...(tables[id] ?? [])],
-      dropAll: (id) => {
+      listTables: async (id) => [...(tables[id] ?? [])],
+      dropAll: async (id) => {
         dropped.push(id);
         const count = (tables[id] ?? []).length;
         delete tables[id];
         return count;
       },
-      orphanTables: (installed) =>
+      orphanTables: async (installed) =>
         Object.keys(tables)
           .filter((id) => !installed.includes(id))
           .flatMap((id) => tables[id] ?? [])
@@ -1329,12 +1329,12 @@ describe("nodeFetchBytes", () => {
 /* -------------------------------------------------------------------- remove */
 
 describe("removePlugin", () => {
-  test("without purge the directory goes and the data stays", () => {
+  test("without purge the directory goes and the data stays", async () => {
     const root = makeRoot();
     place(root, "poke-dex", MANIFEST);
     const store = fakeStore({ "poke-dex": ["plugin_poke-dex_caught"] });
 
-    const result = removePlugin({ ...deps, store }, root, "poke-dex");
+    const result = await removePlugin({ ...deps, store }, root, "poke-dex");
 
     expect(result.removed).toBe(true);
     expect(result.droppedTables).toEqual([]);
@@ -1342,10 +1342,10 @@ describe("removePlugin", () => {
     // Uninstalling a plugin is not evidence its data is unwanted, and the
     // commonest reason to do it is to install another build a minute later.
     expect(store.dropped).toEqual([]);
-    expect(store.plugins.listTables("poke-dex")).toEqual(["plugin_poke-dex_caught"]);
+    expect(await store.plugins.listTables("poke-dex")).toEqual(["plugin_poke-dex_caught"]);
   });
 
-  test("with purge the directory and only that plugin's tables go", () => {
+  test("with purge the directory and only that plugin's tables go", async () => {
     const root = makeRoot();
     place(root, "poke-dex", MANIFEST);
     place(root, "other", { ...MANIFEST, id: "other" });
@@ -1354,37 +1354,39 @@ describe("removePlugin", () => {
       other: ["plugin_other_rows"],
     });
 
-    const result = removePlugin({ ...deps, store }, root, "poke-dex", { purge: true });
+    const result = await removePlugin({ ...deps, store }, root, "poke-dex", { purge: true });
 
     expect(result.removed).toBe(true);
     expect(result.droppedTables).toEqual(["plugin_poke-dex_caught", "plugin_poke-dex_seen"]);
     expect(store.dropped).toEqual(["poke-dex"]);
-    expect(store.plugins.listTables("other")).toEqual(["plugin_other_rows"]);
+    expect(await store.plugins.listTables("other")).toEqual(["plugin_other_rows"]);
     expect(existsSync(join(root, "plugins", "other"))).toBe(true);
   });
 
-  test("purging needs a database, and says so rather than half-working", () => {
+  test("purging needs a database, and says so rather than half-working", async () => {
     const root = makeRoot();
     place(root, "poke-dex", MANIFEST);
 
-    expect(() => removePlugin(deps, root, "poke-dex", { purge: true })).toThrow(GatewayError);
+    await expect(removePlugin(deps, root, "poke-dex", { purge: true })).rejects.toThrow(
+      GatewayError,
+    );
     // The refusal comes before anything is removed: a purge that dropped the
     // directory and then discovered it had no database would be the worst half.
     expect(existsSync(join(root, "plugins", "poke-dex"))).toBe(true);
   });
 
-  test("purge still runs when only the tables are left, which is the orphan case", () => {
+  test("purge still runs when only the tables are left, which is the orphan case", async () => {
     const root = makeRoot();
     const store = fakeStore({ "poke-dex": ["plugin_poke-dex_caught"] });
 
-    const result = removePlugin({ ...deps, store }, root, "poke-dex", { purge: true });
+    const result = await removePlugin({ ...deps, store }, root, "poke-dex", { purge: true });
 
     expect(result.removed).toBe(false);
     expect(result.droppedTables).toEqual(["plugin_poke-dex_caught"]);
     expect(store.dropped).toEqual(["poke-dex"]);
   });
 
-  test("an id that could never be a plugin is refused before any path is built", () => {
+  test("an id that could never be a plugin is refused before any path is built", async () => {
     const root = makeRoot();
     place(root, "poke-dex", MANIFEST);
 
@@ -1393,22 +1395,22 @@ describe("removePlugin", () => {
     // exist" check downstream says yes and the removal takes the whole
     // installation with it. The pattern check is what stands between an operator
     // fat-fingering an argument and that.
-    expect(() => removePlugin(deps, root, "..")).toThrow(/not a valid plugin id/);
+    await expect(removePlugin(deps, root, "..")).rejects.toThrow(/not a valid plugin id/);
     expect(existsSync(root)).toBe(true);
     expect(existsSync(join(root, "plugins", "poke-dex"))).toBe(true);
 
-    expect(() => removePlugin(deps, root, "../../etc")).toThrow(/not a valid plugin id/);
+    await expect(removePlugin(deps, root, "../../etc")).rejects.toThrow(/not a valid plugin id/);
   });
 
-  test("a plugin that is not installed is refused", () => {
-    expect(() => removePlugin(deps, makeRoot(), "poke-dex")).toThrow(GatewayError);
+  test("a plugin that is not installed is refused", async () => {
+    await expect(removePlugin(deps, makeRoot(), "poke-dex")).rejects.toThrow(GatewayError);
   });
 });
 
 /* ------------------------------------------------------------------- orphans */
 
 describe("orphanPluginTables", () => {
-  test("reports tables belonging to nothing installed, and drops nothing", () => {
+  test("reports tables belonging to nothing installed, and drops nothing", async () => {
     const root = makeRoot();
     place(root, "poke-dex", MANIFEST);
     const store = fakeStore({
@@ -1416,21 +1418,21 @@ describe("orphanPluginTables", () => {
       gone: ["plugin_gone_rows"],
     });
 
-    const orphans = orphanPluginTables(deps, root, store);
+    const orphans = await orphanPluginTables(deps, root, store);
 
     expect(orphans).toEqual(["plugin_gone_rows"]);
     expect(store.dropped).toEqual([]);
-    expect(store.plugins.listTables("gone")).toEqual(["plugin_gone_rows"]);
+    expect(await store.plugins.listTables("gone")).toEqual(["plugin_gone_rows"]);
   });
 
-  test("a plugin that will not load still counts as installed", () => {
+  test("a plugin that will not load still counts as installed", async () => {
     const root = makeRoot();
     // Broken, but present. Dropping its tables because it is currently skipped
     // would destroy the data an operator is about to repair the manifest for.
     place(root, "poke-dex", { ...MANIFEST, api: 99 });
     const store = fakeStore({ "poke-dex": ["plugin_poke-dex_caught"] });
 
-    expect(orphanPluginTables(deps, root, store)).toEqual([]);
+    expect(await orphanPluginTables(deps, root, store)).toEqual([]);
   });
 });
 

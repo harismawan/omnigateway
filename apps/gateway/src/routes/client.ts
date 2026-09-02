@@ -77,7 +77,7 @@ export function clientRoutes(deps: ClientDeps) {
 
       .post("/api/client/logout", async ({ request, set }) => {
         const token = readCookie(request, ADMIN_COOKIE);
-        if (token !== null) deps.admin.logout(token);
+        if (token !== null) await deps.admin.logout(token);
         set.headers["set-cookie"] = sessionCookie(request, "", 0);
         return { ok: true };
       })

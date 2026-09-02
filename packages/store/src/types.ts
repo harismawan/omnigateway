@@ -206,6 +206,11 @@ export type Credential = {
    * expired credential can be revived without decrypting anything.
    */
   hasRefreshToken: boolean;
+  /**
+   * Moves on every `updateSecrets`. A caller that read the credential before
+   * refreshing passes it back, and a write whose version has moved is refused.
+   */
+  tokenVersion: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -722,14 +727,24 @@ export interface CredentialRepo {
   listRouting(): Promise<CredentialView[]>;
   get(id: string): Promise<CredentialView | null>;
   create(
-    input: Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken"> & CredentialSecrets,
+    input: Omit<Credential, "createdAt" | "updatedAt" | "hasRefreshToken" | "tokenVersion"> &
+      CredentialSecrets,
   ): Promise<Credential>;
   update(id: string, patch: Partial<Credential>): Promise<void>;
+  /**
+   * Writes token material, and reports whether it was written.
+   *
+   * With `expectedVersion`, the write lands only if `tokenVersion` still
+   * equals it — the compare-and-swap that keeps two processes from each
+   * rotating a refresh token the provider will honour only once. Without it,
+   * the write is unconditional, which is what the connect flow wants.
+   */
   updateSecrets(
     id: string,
     secrets: Partial<CredentialSecrets>,
     expiresAt: number | null,
-  ): Promise<void>;
+    expectedVersion?: number,
+  ): Promise<boolean>;
   remove(id: string): Promise<void>;
   listHealth(): Promise<CredentialHealth[]>;
   /**
@@ -929,6 +944,13 @@ export interface KeyRepo {
   /** Throws on a `limits` shape no reader could parse, rather than storing it. */
   create(input: ApiKeyInput): Promise<ApiKey>;
   /**
+   * Writes a row exactly as read from another store — `createdAt` and
+   * `revokedAt` included. For copying an installation between backends and
+   * nothing else; a key minted here goes through `create`. A row whose
+   * `limits` are `null` is refused, because nothing could read it back.
+   */
+  importRow(row: ApiKey): Promise<void>;
+  /**
    * Replaces one key's limit matrix, whole.
    *
    * One of two fields editable after minting — the allowlist via
@@ -1057,11 +1079,15 @@ export interface UsageRepo {
    */
   append(log: RequestLog): Promise<void>;
   /**
-   * Completes every row left pending, as `interrupted`. The gateway is one
-   * process, so anything still pending at startup died with the last one.
-   * Returns how many were swept.
+   * Completes every pending row whose owner is gone, as `interrupted`.
+   *
+   * Own rows — this process's `nodeId` — are always swept, because at boot
+   * there are none and anything under that id is a fresh id's leftovers;
+   * another process's rows are swept only once its heartbeat is older than
+   * `NODE_GRACE_MS`, or it never wrote one. On one node this is every pending
+   * row at startup, which is what it was before. Returns how many were swept.
    */
-  sweepPending(): Promise<number>;
+  sweepPending(now: number): Promise<number>;
   /**
    * The newest rows, newest first, optionally restricted to one API key.
    *
@@ -1070,6 +1096,12 @@ export interface UsageRepo {
    * cannot see. Anonymous rows carry a NULL `api_key_id` and match no scope.
    */
   recent(limit: number, apiKeyId?: string): Promise<RequestLog[]>;
+  /**
+   * Every row in `(at, id)` order, `limit` at a time, from just after `cursor`.
+   * For copying an installation between backends: `recent` is a page with no
+   * way to ask for the next one.
+   */
+  scan(cursor: { at: number; id: string } | null, limit: number): Promise<RequestLog[]>;
   aggregate(q: UsageQuery): Promise<UsageBucket[]>;
   /**
    * What one API key has consumed since an instant, for the sliding windows a
@@ -1090,6 +1122,20 @@ export interface UsageRepo {
    * is exactly when the limit matters.
    */
   sumSince(apiKeyId: string, sinceMs: number): Promise<UsageSums>;
+  /**
+   * The same sums, one row per `grainMs`-wide bucket since `sinceMs`, keyed by
+   * bucket start. What seeds the limiter's shared counters after a restart.
+   *
+   * At the hour grain this reads `usage_rollup` and is flat in window length;
+   * at any finer grain it groups `request_logs`, which is one key's rows over
+   * the window — a seed-time cost, paid once per key per process, never on
+   * the request path.
+   */
+  sumBuckets(
+    apiKeyId: string,
+    sinceMs: number,
+    grainMs: number,
+  ): Promise<Array<[bucketStart: number, sums: UsageSums]>>;
   /**
    * Recomputes the hourly rollup from `request_logs`, whole.
    *
@@ -1177,8 +1223,15 @@ export type DatabaseInspection = {
  * therefore the caller's to serialise; this repo does not guard against a
  * second concurrent call.
  */
+/** How long a process may go without a heartbeat before its rows are retirable. */
+export const NODE_GRACE_MS = 60_000;
+
 export interface MaintenanceRepo {
   stats(): Promise<DatabaseStats>;
+  /** Records this process as alive at `now`; forgets nodes unseen for a day. */
+  heartbeat(now: number): Promise<void>;
+  /** Every process heard from within `NODE_GRACE_MS` of `now`, most recent first. */
+  nodes(now: number): Promise<Array<{ id: string; seenAt: number }>>;
   /** Rewrites the file, reclaiming freelist pages. Blocking. */
   vacuum(): Promise<void>;
   /**
@@ -1264,23 +1317,27 @@ export interface PluginRepo {
    * versions are not attempted, because a migration ordering exists precisely
    * so that later ones may assume earlier ones ran.
    */
-  migrate(pluginId: string, migrations: readonly PluginMigration[]): PluginMigrateResult;
+  migrate(pluginId: string, migrations: readonly PluginMigration[]): Promise<PluginMigrateResult>;
   /** Executes a statement. `sql` is placeholder-expanded and guarded first. */
-  run(pluginId: string, sql: string, params?: unknown[]): void;
+  run(pluginId: string, sql: string, params?: unknown[]): Promise<void>;
   /** Every matching row. Rows are shaped by the plugin's own query, not by us. */
-  all<T>(pluginId: string, sql: string, params?: unknown[]): T[];
+  all<T>(pluginId: string, sql: string, params?: unknown[]): Promise<T[]>;
   /** The first matching row, or `null` when there is none. */
-  get<T>(pluginId: string, sql: string, params?: unknown[]): T | null;
+  get<T>(pluginId: string, sql: string, params?: unknown[]): Promise<T | null>;
   /**
-   * Runs `fn` inside a transaction on the shared connection.
+   * Runs `fn` inside a transaction.
    *
-   * `bun:sqlite` is synchronous and there is one connection, so this is a real
-   * transaction and also a real stall: everything the gateway does is behind it
-   * for its duration. Plugin work belongs off the request path for that reason.
+   * Async, so a Postgres store can serve it on a connection of its own. On
+   * SQLite there is one connection and it is synchronous, so the transaction
+   * is real only for as long as `fn` awaits nothing but storage calls: those
+   * settle in the microtask queue, ahead of any I/O, so no other write can
+   * land inside it. An `fn` that awaits a fetch or a timer opens the
+   * transaction to every write the gateway makes meanwhile, and a rollback
+   * takes them with it. Plugin work belongs off the request path either way.
    */
-  transaction<T>(pluginId: string, fn: () => T): T;
+  transaction<T>(pluginId: string, fn: () => Promise<T>): Promise<T>;
   /** This plugin's tables, by their real names, sorted. */
-  listTables(pluginId: string): string[];
+  listTables(pluginId: string): Promise<string[]>;
   /**
    * Drops every table this plugin owns and forgets its migration history.
    * Returns how many tables went.
@@ -1289,7 +1346,7 @@ export interface PluginRepo {
    * tables, because a plugin being uninstalled is not evidence its data is
    * unwanted, and this operation has no undo.
    */
-  dropAll(pluginId: string): number;
+  dropAll(pluginId: string): Promise<number>;
   /**
    * `plugin_*` tables belonging to no installed plugin, sorted.
    *
@@ -1300,7 +1357,7 @@ export interface PluginRepo {
    * destroy the data the restore was performed to recover. `omni doctor` prints
    * what this returns and leaves the decision to a human.
    */
-  orphanTables(installedIds: readonly string[]): string[];
+  orphanTables(installedIds: readonly string[]): Promise<string[]>;
 }
 
 export type RoutingChange =

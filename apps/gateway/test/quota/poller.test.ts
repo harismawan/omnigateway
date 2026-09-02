@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { type OAuthProvider, resetQuotaCooldowns } from "@omni/control";
+import type { OAuthProvider } from "@omni/control";
+import { memoryCoord } from "@omni/coord";
 import { nodeHttpClient } from "@omni/providers";
 import type { CredentialSecrets } from "@omni/store";
 import { memoryStore, seedCredential } from "@omni/testkit";
@@ -37,16 +38,13 @@ test("a pass runs at startup, not only after the first interval", async () => {
   // A gateway that restarts more often than the interval — a watched dev
   // server, a container that cycles, a unit with Restart=on-failure — would
   // otherwise never poll at all, and its quota would read permanently stale.
-  // Cooldowns are process-local and shared with every other suite in this run,
-  // so a credential parked by someone else's rate-limit test would silently be
-  // skipped here.
-  resetQuotaCooldowns();
   const store = await memoryStore();
   await seedCredential(store, { id: "startup-poll" });
 
   let probes = 0;
   const stop = await startQuotaPoller({
     store,
+    coord: memoryCoord(),
     providers: probingProviders(() => {
       probes += 1;
       return { windows: [{ windowType: "weekly", used: 10, limit: 100, resetsAt: null }] };
@@ -71,7 +69,6 @@ test("a pass announces its readings when it finishes, not when it starts", async
   // the top of a pass has the console refetch readings the probes have not
   // written yet — it would render the previous pass's numbers and then go quiet
   // until the next interval, leaving every chart a full poll interval behind.
-  resetQuotaCooldowns();
   const store = await memoryStore();
   await seedCredential(store, { id: "completion-poll" });
 
@@ -81,6 +78,7 @@ test("a pass announces its readings when it finishes, not when it starts", async
 
   const stop = await startQuotaPoller({
     store,
+    coord: memoryCoord(),
     providers: probingProviders(() => {
       atProbe.push([...topics]);
       return { windows: [{ windowType: "weekly", used: 10, limit: 100, resetsAt: null }] };
@@ -106,6 +104,7 @@ test("an interval of zero arms no timer at all", async () => {
 
   const stop = await startQuotaPoller({
     store,
+    coord: memoryCoord(),
     providers,
     http: nodeHttpClient(),
     refresh: async (): Promise<CredentialSecrets> => {

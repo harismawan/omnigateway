@@ -36,3 +36,4 @@ snapshots/
 # bug by "restoring" it.
 *.bak
 *.bak[0-9]*
+k8s/secret.yaml

@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - hpa.yaml
+
+# `newTag` is written by the release workflow's promote job on every `v*`
+# tag, and Argo CD syncs `main`. Edit by hand only to roll back.
+images:
+  - name: ghcr.io/harismawan/omnigateway
+    newTag: 0.7.3

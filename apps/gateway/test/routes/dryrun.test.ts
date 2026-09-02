@@ -16,6 +16,7 @@ async function harness() {
     store,
     admin,
     baseUrl: "http://localhost:9000",
+    nodeId: "test-node",
     now: () => NOW,
     sessionTtlMs: 60_000,
   });

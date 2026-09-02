@@ -289,7 +289,7 @@ export async function loadPlugins(deps: {
 
       migrations = definition.migrations ?? [];
       if (migrations.length > 0) {
-        const applied = deps.store.plugins.migrate(id, migrations);
+        const applied = await deps.store.plugins.migrate(id, migrations);
         if (applied.failed !== undefined) {
           // Whatever committed before the failure stays applied and stays
           // recorded — see the store's migrate for why a batch transaction here

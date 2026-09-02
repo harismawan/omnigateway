@@ -275,6 +275,8 @@ describe("the field allowlist and the render order stay in step", () => {
    */
   const everyField: Required<LogFields> = {
     requestId: "req_1",
+    coord: "redis",
+    coordFallback: true,
     surface: "anthropic",
     status: 200,
     provider: "anthropic",

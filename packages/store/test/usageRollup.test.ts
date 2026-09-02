@@ -39,7 +39,7 @@ function log(patch: Partial<RequestLog> & { id: string; at: number }): RequestLo
 
 function repo(): { db: Database; usage: UsageRepo } {
   const db = openDb(":memory:");
-  return { db, usage: createUsageRepo(db) };
+  return { db, usage: createUsageRepo(db, "node-test") };
 }
 
 /**
@@ -258,6 +258,12 @@ test("append writes one bucket per request id, exactly where the daily rollup is
   // Two, absolutely, in both tables. Asserting only that the two agree passes
   // at `1 === 1` as readily as at `2 === 2`, which is exactly the case where the
   // hourly bucket had stopped being written beside the daily row.
+  await usage.append(log({ id: "r2", at }));
+  expect(requests()).toBe(2);
+  expect(daily()).toBe(2);
+
+  // A second completion of a done row is a lost claim: nothing moves. That is
+  // the guard against a row retired by one process and completed by another.
   await usage.append(log({ id: "r1", at }));
   expect(requests()).toBe(2);
   expect(daily()).toBe(2);

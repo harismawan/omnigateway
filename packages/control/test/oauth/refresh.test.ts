@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { memoryCoord } from "@omni/coord";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
 import type { CredentialView, Store } from "@omni/store";
@@ -180,8 +181,34 @@ test("allows a later refresh once the in-flight one settles", async () => {
   });
 
   await refresh(view);
-  await refresh(view);
+  // Re-read, because a view whose expiry sits behind the store's is the signal
+  // that someone else already refreshed, and it is answered from the store.
+  await refresh((await store.credentials.get("c1")) as CredentialView);
   expect(calls).toBe(2);
+});
+
+/**
+ * The re-read behind the lock: a caller holding a view older than the row
+ * gets the row's secrets and no provider call, which is how a second process
+ * that lost the race — or a first one retrying on a stale snapshot — is kept
+ * from rotating a token that was rotated a moment ago.
+ */
+test("answers a stale view from the store without calling the provider", async () => {
+  const { store, view } = await seed();
+  let calls = 0;
+  const refresh = createRefresher({
+    store,
+    providers: fakeProvider(async () => {
+      calls += 1;
+      return result(`test-token-${calls + 2}`);
+    }),
+    http: nodeHttpClient(),
+    now: () => NOW,
+  });
+
+  await refresh(view);
+  expect((await refresh(view)).accessToken).toBe("test-token-3");
+  expect(calls).toBe(1);
 });
 
 test("throws when the credential has no refresh token", async () => {
@@ -329,4 +356,66 @@ test("a provider that does have a refresh still reaches it", async () => {
     "kimi",
     "openai",
   ]);
+});
+
+/**
+ * Two processes — two refreshers sharing one store and one `Coord` — refresh
+ * the same expired credential at once. The in-flight map cannot see across
+ * them; the lock and the re-read behind it must. A provider that rotates
+ * refresh tokens is broken by exactly one extra call here.
+ */
+test("serialises refreshes across refreshers sharing a coord", async () => {
+  const { store, view } = await seed();
+  const coord = memoryCoord();
+  let calls = 0;
+  const providers = fakeProvider(async () => {
+    calls += 1;
+    await Bun.sleep(5);
+    return result(`test-token-${calls + 2}`);
+  });
+  const a = createRefresher({ store, providers, http: nodeHttpClient(), now: () => NOW, coord });
+  const b = createRefresher({ store, providers, http: nodeHttpClient(), now: () => NOW, coord });
+
+  const results = await Promise.all([a(view), b(view)]);
+  expect(calls).toBe(1);
+  expect(results.map((r) => r.accessToken)).toEqual(["test-token-3", "test-token-3"]);
+});
+
+/** Without a shared coord the two refreshers cannot see each other — the baseline. */
+test("two refreshers with separate coords both call the provider", async () => {
+  const { store, view } = await seed();
+  let calls = 0;
+  const providers = fakeProvider(async () => {
+    calls += 1;
+    await Bun.sleep(5);
+    return result("test-token-3");
+  });
+  const a = createRefresher({ store, providers, http: nodeHttpClient(), now: () => NOW });
+  const b = createRefresher({ store, providers, http: nodeHttpClient(), now: () => NOW });
+  await Promise.all([a(view), b(view)]);
+  expect(calls).toBe(2);
+});
+
+/**
+ * The compare-and-swap, exercised without the lock: two refreshers with
+ * separate coords both call the provider, but only the first write lands.
+ * The loser is answered with the winner's rotation — the token the provider
+ * now honours — rather than writing a second one over it.
+ */
+test("a refresh that lost the write race returns the stored rotation", async () => {
+  const { store, view } = await seed();
+  let calls = 0;
+  const providers = fakeProvider(async () => {
+    calls += 1;
+    await Bun.sleep(5);
+    return result(`test-token-${calls + 2}`);
+  });
+  const a = createRefresher({ store, providers, http: nodeHttpClient(), now: () => NOW });
+  const b = createRefresher({ store, providers, http: nodeHttpClient(), now: () => NOW });
+  const results = await Promise.all([a(view), b(view)]);
+  expect(calls).toBe(2);
+  // Whichever wrote first is what both callers hold, and the row agrees.
+  const stored = (await (await store.credentials.get("c1"))?.secrets())?.accessToken ?? "";
+  expect(results.map((r) => r.accessToken)).toEqual([stored, stored]);
+  expect((await store.credentials.get("c1"))?.tokenVersion).toBe(1);
 });

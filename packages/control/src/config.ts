@@ -41,6 +41,19 @@ export type Config = {
    */
   logFile: string | null;
   /**
+   * `OMNI_CLUSTER_MODE=true`: several replicas serve one installation. The
+   * store is Postgres (`databaseUrl`) and the coordinator is Redis
+   * (`redisUrl`), and both are required. False — the default — is one
+   * process on SQLite, which is every install there was before cluster mode
+   * existed, and then the two URLs must be unset: a URL present with the
+   * switch off is a configuration that means one thing and does another.
+   */
+  clusterMode: boolean;
+  /** `OMNI_DATABASE_URL`: the Postgres store of a cluster. Null single-node. */
+  databaseUrl: string | null;
+  /** `OMNI_REDIS_URL`: the coordinator every process of a cluster shares. Null single-node. */
+  redisUrl: string | null;
+  /**
    * Set when `OMNI_LOG_LEVEL` held something unrecognised.
    *
    * The boot line reports it, so a typo is visible rather than silent.
@@ -87,6 +100,23 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
 
   const staticDir = env.OMNI_STATIC_DIR?.trim();
   const logFile = env.OMNI_LOG_FILE?.trim();
+  const clusterMode = TRUTHY.has((env.OMNI_CLUSTER_MODE ?? "").trim().toLowerCase());
+  const databaseUrl = env.OMNI_DATABASE_URL?.trim() || undefined;
+  const redisUrl = env.OMNI_REDIS_URL?.trim() || undefined;
+  // One sentence each, at boot. A Postgres store with in-memory coordination
+  // would be a fleet with N-fold limits and one working console, which is the
+  // shape cluster mode exists to remove; and a URL set with the switch off is
+  // an operator who believes they are clustered and is not.
+  if (clusterMode) {
+    if (databaseUrl === undefined || !databaseUrl.startsWith("postgres")) {
+      throw new Error("OMNI_CLUSTER_MODE=true needs OMNI_DATABASE_URL to be a postgres:// URL");
+    }
+    if (redisUrl === undefined) throw new Error("OMNI_CLUSTER_MODE=true needs OMNI_REDIS_URL");
+  } else if (databaseUrl !== undefined || redisUrl !== undefined) {
+    throw new Error(
+      "OMNI_DATABASE_URL and OMNI_REDIS_URL are cluster-mode settings; set OMNI_CLUSTER_MODE=true or unset them",
+    );
+  }
 
   const bodyLoggingAllowed = TRUTHY.has((env.OMNI_BODY_LOGGING_ALLOWED ?? "").trim().toLowerCase());
 
@@ -107,5 +137,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     staticDir: staticDir === undefined || staticDir.length === 0 ? null : staticDir,
     bodyLoggingAllowed,
     logFile: logFile === undefined || logFile.length === 0 ? null : logFile,
+    clusterMode,
+    databaseUrl: clusterMode ? (databaseUrl ?? null) : null,
+    redisUrl: clusterMode ? (redisUrl ?? null) : null,
   };
 }

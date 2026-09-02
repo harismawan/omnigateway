@@ -57,8 +57,11 @@ export async function createStore(opts: {
   path: string;
   encryptionKey: CryptoKey;
   logger?: Logger;
+  /** This process's identity on `request_logs.node_id`. Fresh per boot when absent. */
+  nodeId?: string;
 }): Promise<Store> {
   const logger = opts.logger ?? noopLogger;
+  const nodeId = opts.nodeId ?? crypto.randomUUID();
   const listeners = new Set<(change: RoutingChange) => void>();
   const emit = (change: RoutingChange): void => {
     for (const listener of listeners) {
@@ -81,13 +84,13 @@ export async function createStore(opts: {
       // The one repo handed the logger: an unreadable `limits` column is
       // reported rather than thrown, so this is where that trail is written.
       keys: createKeyRepo(db, logger),
-      usage: createUsageRepo(db),
+      usage: createUsageRepo(db, nodeId),
       // Derived from the database path rather than configured. One installation
       // is one directory: an artifact tree that could be pointed elsewhere is one
       // an operator can lose track of, and a prompt corpus is the last thing that
       // should end up somewhere nobody backs up or nobody prunes.
       bodies: createBodyRepo(db, opts.encryptionKey, bodiesDirFor(opts.path)),
-      maintenance: createMaintenanceRepo(db),
+      maintenance: createMaintenanceRepo(db, nodeId),
       // Plugin tables live in this same file, so they ride snapshots, restores,
       // and `vacuum()` with everything else — and are closed and reopened by a
       // swap with everything else, which is why this is a handle repo and not
@@ -118,8 +121,8 @@ export async function createStore(opts: {
       get: (id) => handle.credentials.get(id),
       create: (input) => handle.credentials.create(input),
       update: (id, patch) => handle.credentials.update(id, patch),
-      updateSecrets: (id, secrets, expiresAt) =>
-        handle.credentials.updateSecrets(id, secrets, expiresAt),
+      updateSecrets: (id, secrets, expiresAt, expectedVersion) =>
+        handle.credentials.updateSecrets(id, secrets, expiresAt, expectedVersion),
       remove: (id) => handle.credentials.remove(id),
       listHealth: () => handle.credentials.listHealth(),
       saveHealth: (rows) => handle.credentials.saveHealth(rows),
@@ -148,6 +151,7 @@ export async function createStore(opts: {
       findByHash: (hash) => handle.keys.findByHash(hash),
       get: (id) => handle.keys.get(id),
       create: (input) => handle.keys.create(input),
+      importRow: (row) => handle.keys.importRow(row),
       setLimits: (id, limits) => handle.keys.setLimits(id, limits),
       setModelAllowlist: (id, modelAllowlist) => handle.keys.setModelAllowlist(id, modelAllowlist),
       revoke: (id) => handle.keys.revoke(id),
@@ -157,14 +161,17 @@ export async function createStore(opts: {
       begin: (log) => handle.usage.begin(log),
       route: (id, target) => handle.usage.route(id, target),
       append: (log) => handle.usage.append(log),
-      sweepPending: () => handle.usage.sweepPending(),
+      sweepPending: (now) => handle.usage.sweepPending(now),
       // Both arguments, spelled out. An optional parameter dropped here is not a
       // type error — the forwarder still satisfies the interface — and this one
       // carries the scope that keeps one API key's logs away from another's, so
       // dropping it would serve every row and report no fault.
       recent: (limit, apiKeyId) => handle.usage.recent(limit, apiKeyId),
+      scan: (cursor, limit) => handle.usage.scan(cursor, limit),
       aggregate: (q) => handle.usage.aggregate(q),
       sumSince: (apiKeyId, sinceMs) => handle.usage.sumSince(apiKeyId, sinceMs),
+      sumBuckets: (apiKeyId, sinceMs, grainMs) =>
+        handle.usage.sumBuckets(apiKeyId, sinceMs, grainMs),
       oldestSince: (apiKeyId, sinceMs) => handle.usage.oldestSince(apiKeyId, sinceMs),
       rebuildRollup: () => handle.usage.rebuildRollup(),
       auditRollup: () => handle.usage.auditRollup(),
@@ -182,6 +189,8 @@ export async function createStore(opts: {
 
     maintenance: {
       stats: () => handle.maintenance.stats(),
+      heartbeat: (now) => handle.maintenance.heartbeat(now),
+      nodes: (now) => handle.maintenance.nodes(now),
       vacuum: () => handle.maintenance.vacuum(),
       snapshotTo: (path) => handle.maintenance.snapshotTo(path),
       inspect: (path) => handle.maintenance.inspect(path),
@@ -194,13 +203,13 @@ export async function createStore(opts: {
       // arrow assigned to a generic signature erases the parameter to `unknown`
       // at the point of implementation. The forwarding is the same — `handle` is
       // still read on every call, never captured.
-      all<T>(pluginId: string, sql: string, params?: unknown[]): T[] {
+      all<T>(pluginId: string, sql: string, params?: unknown[]): Promise<T[]> {
         return handle.plugins.all<T>(pluginId, sql, params);
       },
-      get<T>(pluginId: string, sql: string, params?: unknown[]): T | null {
+      get<T>(pluginId: string, sql: string, params?: unknown[]): Promise<T | null> {
         return handle.plugins.get<T>(pluginId, sql, params);
       },
-      transaction<T>(pluginId: string, fn: () => T): T {
+      transaction<T>(pluginId: string, fn: () => Promise<T>): Promise<T> {
         return handle.plugins.transaction(pluginId, fn);
       },
       listTables: (pluginId) => handle.plugins.listTables(pluginId),

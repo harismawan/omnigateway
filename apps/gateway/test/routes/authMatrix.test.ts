@@ -170,6 +170,7 @@ const ROUTES: ReadonlyArray<{
   // Stdout is a diagnostic, and a viewer is the operator minus mutations and
   // secrets. Argued for in the source; asserted here.
   { method: "GET", path: "/api/console", allow: ["admin", "viewer"] },
+  { method: "GET", path: "/api/nodes", allow: ["admin", "viewer"] },
 
   // Operator-only reads. A snapshot carries encrypted credentials and API-key
   // hashes, so it is the sharpest row in the table.

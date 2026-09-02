@@ -143,15 +143,15 @@ const pluginRepo = createPluginRepo(db);
  * that stopped consulting it fails here rather than passing a comparison of two
  * regexes neither of which is read.
  */
-const JUDGES: Readonly<Record<string, (id: string) => boolean>> = {
+const JUDGES: Readonly<Record<string, (id: string) => boolean | Promise<boolean>>> = {
   "plugin-api manifest": (id) =>
     safeParseManifest({ id, name: "n", version: "1.0.0", api: 1, server: "index.ts" }).ok,
 
   "gateway route mount": (id) => mountPath(id, "/") !== null,
 
-  "store table prefix": (id) => {
+  "store table prefix": async (id) => {
     try {
-      pluginRepo.migrate(id, []);
+      await pluginRepo.migrate(id, []);
       return true;
     } catch {
       // `assertPluginId` is the only thing an empty migration list can throw
@@ -186,11 +186,11 @@ describe("the plugin-id grammar mirrors the provider-id grammar", () => {
   });
 
   for (const [site, judge] of Object.entries(JUDGES)) {
-    test(`${site} admits exactly the ids a provider may be named`, () => {
+    test(`${site} admits exactly the ids a provider may be named`, async () => {
       for (const id of CORPUS) {
         // The id is carried into the assertion so a failure names the string
         // rather than reporting that `false` was not `true`.
-        expect([id, judge(id)]).toEqual([id, PROVIDER_ID_PATTERN.test(id)]);
+        expect([id, await judge(id)]).toEqual([id, PROVIDER_ID_PATTERN.test(id)]);
       }
     });
   }

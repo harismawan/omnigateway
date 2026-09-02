@@ -1,6 +1,7 @@
 import { type DatabaseDeps, nodeDatabaseFs, pruneSnapshots, sweepStaging } from "@omni/control";
 import { describeError, type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
+import { type LeaseDeps, underLease } from "./lease.ts";
 
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -83,11 +84,28 @@ export type MaintenanceDeps = {
   logger?: Logger;
   /** The filesystem the file sweeps run against. The real one, unless a test says otherwise. */
   fs?: DatabaseDeps["fs"];
+  /** One process prunes at a time; the heartbeat is every process's own. */
+  lease?: LeaseDeps;
 };
 
-/** Starts the hourly sweep. Returns a function that stops it. */
+/** How often this process says it is alive; a sixth of the grace a sweep allows. */
+const HEARTBEAT_INTERVAL_MS = 10_000;
+
+/** Starts the hourly sweep and the heartbeat. Returns a function that stops both. */
 export function startMaintenance(deps: MaintenanceDeps): () => void {
   const logger = deps.logger ?? noopLogger;
+
+  // The heartbeat is what keeps this process's pending rows out of another
+  // process's `sweepPending`. Ten seconds against a sixty-second grace, so five
+  // missed beats — a stalled event loop, a store that would not answer — are
+  // survivable and a sixth is the honest verdict.
+  const heartbeat = setInterval(() => {
+    void deps.store.maintenance.heartbeat(deps.now()).catch((error: unknown) => {
+      logger.warn("heartbeat failed", { reason: describeError(error, "unknown") });
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+  heartbeat.unref?.();
+
   const files: DatabaseDeps = {
     store: deps.store,
     fs: deps.fs ?? nodeDatabaseFs(),
@@ -95,6 +113,26 @@ export function startMaintenance(deps: MaintenanceDeps): () => void {
   };
 
   const timer = setInterval(() => {
+    void underLease(deps.lease, "maintenance", 2 * SWEEP_INTERVAL_MS, () => prune()).catch(
+      (error: unknown) => {
+        logger.error("maintenance lease failed", { reason: describeError(error, "unknown") });
+      },
+    );
+  }, SWEEP_INTERVAL_MS);
+
+  const prune = async (): Promise<void> => {
+    // The dead-node sweep rides here rather than in its own loop: a process that
+    // died mid-request leaves a row only its heartbeat's absence can retire, and
+    // this is the one loop a single process runs.
+    await deps.store.usage
+      .sweepPending(deps.now())
+      .then((count) => {
+        if (count > 0) logger.info("retired interrupted requests", { count });
+      })
+      .catch((error: unknown) => {
+        logger.error("pending sweep failed", { reason: describeError(error, "unknown") });
+      });
+
     void pruneFiles(files)
       .then(({ snapshots, staging }) =>
         // One number, under a field `LogFields` already has, for the same
@@ -129,10 +167,13 @@ export function startMaintenance(deps: MaintenanceDeps): () => void {
           reason: describeError(error, "unknown"),
         });
       });
-  }, SWEEP_INTERVAL_MS);
+  };
 
   // Do not hold the process open for a maintenance timer.
   timer.unref?.();
 
-  return () => clearInterval(timer);
+  return () => {
+    clearInterval(timer);
+    clearInterval(heartbeat);
+  };
 }

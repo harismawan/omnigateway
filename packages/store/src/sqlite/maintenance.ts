@@ -1,5 +1,10 @@
 import { Database } from "bun:sqlite";
-import type { DatabaseInspection, DatabaseStats, MaintenanceRepo } from "../types.ts";
+import {
+  type DatabaseInspection,
+  type DatabaseStats,
+  type MaintenanceRepo,
+  NODE_GRACE_MS,
+} from "../types.ts";
 
 /**
  * The tables a file must have to be one of ours.
@@ -36,8 +41,23 @@ function sqlLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-export function createMaintenanceRepo(db: Database): MaintenanceRepo {
+export function createMaintenanceRepo(db: Database, nodeId: string): MaintenanceRepo {
   return {
+    async heartbeat(now) {
+      db.run("INSERT OR REPLACE INTO nodes (id, seen_at) VALUES (?, ?)", [nodeId, now]);
+      // A day, not the grace period: `sweepPending` reads absence as death, so
+      // a row here is only ever evidence of life and can go once it is stale
+      // beyond any question.
+      db.run("DELETE FROM nodes WHERE seen_at < ?", [now - 86_400_000]);
+    },
+    async nodes(now) {
+      return db
+        .query<{ id: string; seen_at: number }, [number]>(
+          "SELECT id, seen_at FROM nodes WHERE seen_at > ? ORDER BY seen_at DESC",
+        )
+        .all(now - NODE_GRACE_MS)
+        .map((row) => ({ id: row.id, seenAt: row.seen_at }));
+    },
     async stats(): Promise<DatabaseStats> {
       // Raw pragmas through the query API, as the `data_version` read in
       // `store.ts` already does: there is no other way to ask SQLite this.

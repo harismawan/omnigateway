@@ -154,9 +154,9 @@ export type PluginFs = {
  */
 export type PluginStore = {
   plugins: {
-    listTables(pluginId: string): string[];
-    dropAll(pluginId: string): number;
-    orphanTables(installedIds: readonly string[]): string[];
+    listTables(pluginId: string): Promise<string[]>;
+    dropAll(pluginId: string): Promise<number>;
+    orphanTables(installedIds: readonly string[]): Promise<string[]>;
   };
 };
 
@@ -1333,12 +1333,12 @@ export type PluginRemoveOptions = {
   purge?: boolean;
 };
 
-export function removePlugin(
+export async function removePlugin(
   deps: PluginDeps,
   root: string,
   id: string,
   options: PluginRemoveOptions = {},
-): PluginRemoveResult {
+): Promise<PluginRemoveResult> {
   // Checked before anything is joined onto a path or handed to the store. An id
   // that fails this could never have created a table and could never have been
   // loaded, so there is nothing it names.
@@ -1357,13 +1357,13 @@ export function removePlugin(
   // With `--purge` an absent directory is still worth acting on: that is exactly
   // the state `doctor` reports as orphan tables, and refusing here would leave
   // the one command that can clear them unable to run.
-  const tables = purge && deps.store !== undefined ? deps.store.plugins.listTables(id) : [];
+  const tables = purge && deps.store !== undefined ? await deps.store.plugins.listTables(id) : [];
   if (!present && tables.length === 0) {
     throw new GatewayError("BAD_REQUEST", `no plugin "${id}" installed under ${pluginsDir(root)}`);
   }
 
   if (present) deps.fs.rm(target);
-  if (purge && deps.store !== undefined) deps.store.plugins.dropAll(id);
+  if (purge && deps.store !== undefined) await deps.store.plugins.dropAll(id);
 
   return { id, removed: present, droppedTables: tables };
 }
@@ -1377,7 +1377,11 @@ export function removePlugin(
  * changes that: a restore is exactly when a plugin is most likely to be
  * temporarily missing.
  */
-export function orphanPluginTables(deps: PluginDeps, root: string, store: PluginStore): string[] {
+export function orphanPluginTables(
+  deps: PluginDeps,
+  root: string,
+  store: PluginStore,
+): Promise<string[]> {
   const installed = listPlugins(deps, root).map((plugin) => plugin.id);
   return store.plugins.orphanTables(installed);
 }

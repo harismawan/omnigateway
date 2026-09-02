@@ -1,17 +1,13 @@
-import { beforeEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
+import { memoryCoord } from "@omni/coord";
 import { GatewayError } from "@omni/ir";
 import { nodeHttpClient, parseOpenAIUsage } from "@omni/providers";
 import { type CredentialSecrets, type Store, sameWindow, type UsageSecrets } from "@omni/store";
 import { captureLogger, memoryStore, seedCredential } from "@omni/testkit";
 import type { OAuthProvider, UsageReport } from "../../src/oauth/types.ts";
-import { poll, probe, RATE_LIMIT_COOLDOWN_MS, resetQuotaCooldowns } from "../../src/quota/poll.ts";
+import { poll, probe, RATE_LIMIT_COOLDOWN_MS } from "../../src/quota/poll.ts";
 
 const NOW = 1_000_000;
-
-beforeEach(() => {
-  // Cooldowns are process-local state shared across tests in this file.
-  resetQuotaCooldowns();
-});
 
 type UsageImpl = (secrets: UsageSecrets) => Promise<UsageReport | null>;
 
@@ -39,15 +35,16 @@ function providers(usage?: UsageImpl): Readonly<Record<string, OAuthProvider>> {
   };
 }
 
-function deps(store: Store, usage?: UsageImpl) {
+function deps(store: Store, usage?: UsageImpl, now: () => number = () => NOW) {
   return {
     store,
+    coord: memoryCoord({ now }),
     providers: providers(usage),
     http: nodeHttpClient(),
     refresh: async (): Promise<CredentialSecrets> => {
       throw new Error("refresh not expected");
     },
-    now: () => NOW,
+    now,
   };
 }
 
@@ -237,10 +234,15 @@ test("a rate-limited usage endpoint is left alone until its cooldown expires", a
   await seedCredential(store, { id: "c1" });
 
   let calls = 0;
-  const throttled = deps(store, async () => {
-    calls += 1;
-    throw new GatewayError("RATE_LIMIT", "anthropic usage endpoint is rate limited");
-  });
+  let clock = NOW;
+  const throttled = deps(
+    store,
+    async () => {
+      calls += 1;
+      throw new GatewayError("RATE_LIMIT", "anthropic usage endpoint is rate limited");
+    },
+    () => clock,
+  );
 
   await poll(throttled);
   expect(calls).toBe(1);
@@ -251,8 +253,8 @@ test("a rate-limited usage endpoint is left alone until its cooldown expires", a
   await poll(throttled);
   expect(calls).toBe(1);
 
-  const later = { ...throttled, now: () => NOW + RATE_LIMIT_COOLDOWN_MS + 1 };
-  await poll(later);
+  clock = NOW + RATE_LIMIT_COOLDOWN_MS + 1;
+  await poll(throttled);
   expect(calls).toBe(2);
 });
 

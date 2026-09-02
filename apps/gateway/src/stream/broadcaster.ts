@@ -1,4 +1,5 @@
-import type { Coalescer } from "./coalescer.ts";
+import { type Coord, splitSequenced } from "@omni/coord";
+import { createCoalescer, type Schedule } from "./coalescer.ts";
 import type { ServerFrame } from "./protocol.ts";
 import type { SocketRegistry } from "./registry.ts";
 import type { Ring } from "./ring.ts";
@@ -80,29 +81,132 @@ export const GLOBAL_INVALIDATE = "res:*";
 export type BroadcasterDeps = {
   registry: SocketRegistry;
   ring: Ring;
-  coalescer: Coalescer;
+  /**
+   * Fan-out between processes. Every frame goes out through it and comes back
+   * in through the subscription — this process's own included — so there is
+   * one delivery path, and in memory it is the direct publish it was.
+   */
+  coord: Coord;
+  /** Names this process's declarations, so another can tell whose they are. */
+  nodeId: string;
+  now: () => number;
+  floors?: Readonly<Record<string, number>>;
+  defaultFloorMs?: number;
+  schedule?: Schedule;
 };
 
+/** What crosses between processes. One channel, three shapes. */
+type Fanout =
+  | { kind: "res"; topic: string; payload?: unknown }
+  | { kind: "stream"; topic: string; payload: unknown }
+  | { kind: "declare"; topic: string; nodeId: string }
+  | { kind: "hello"; nodeId: string };
+
+const CHANNEL = "broadcast";
+
+/** Where the Redis coordinator says the shared channel came (back) up. */
+const RECONNECTED = "coord:reconnected";
+
 export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
-  const streams = new Set<string>();
+  const floors = deps.floors ?? INVALIDATION_FLOORS;
+  const defaultFloorMs = deps.defaultFloorMs ?? DEFAULT_FLOOR_MS;
+  /** Topics with a source behind them, and which process holds it. */
+  const streams = new Map<string, string>();
+
+  const send = (message: Fanout): void => {
+    void deps.coord.pubsub.publish(CHANNEL, JSON.stringify(message));
+  };
+
+  // Two coalescers with one floor table. The first bounds what this process
+  // publishes, or N processes at 100 req/s each publish uncoalesced; the second
+  // bounds what any one client receives, or N floored streams arrive N times
+  // the floor. In series they add no delay: a frame the first passes at once
+  // the second passes at once too.
+  const outbound = createCoalescer({
+    floors,
+    defaultFloorMs,
+    now: deps.now,
+    ...(deps.schedule === undefined ? {} : { schedule: deps.schedule }),
+    sink: (topic, payload) => send({ kind: "res", topic, payload }),
+  });
+  const inbound = createCoalescer({
+    floors,
+    defaultFloorMs,
+    now: deps.now,
+    ...(deps.schedule === undefined ? {} : { schedule: deps.schedule }),
+    sink: (topic, payload) =>
+      deps.registry.publish(topic, {
+        type: "event",
+        topic,
+        ...(payload === undefined ? {} : { payload }),
+      } satisfies ServerFrame),
+  });
+
+  const unsubscribe = deps.coord.pubsub.subscribe(CHANNEL, (_topic, raw) => {
+    // A stream frame is numbered by the coordinator in the same step it was
+    // published, and the number rides in front of the envelope.
+    const sequenced = splitSequenced(raw);
+    const message = JSON.parse(sequenced?.payload ?? raw) as Fanout;
+    switch (message.kind) {
+      case "res":
+        if (message.topic === GLOBAL_INVALIDATE) {
+          // Not coalesced. There is exactly one sender — the far side of a
+          // database swap — and delaying it by a floor would leave every
+          // console rendering the previous database for a second after the
+          // new one is live.
+          deps.registry.publish(GLOBAL_INVALIDATE, {
+            type: "event",
+            topic: GLOBAL_INVALIDATE,
+          } satisfies ServerFrame);
+        } else {
+          inbound.emit(message.topic, message.payload);
+        }
+        return;
+      case "stream": {
+        if (sequenced === null) return;
+        // Recorded before it is published, so a subscriber that arrives
+        // mid-publish replays from the ring rather than from a number the ring
+        // has not seen yet.
+        deps.ring.push(message.topic, message.payload, sequenced.seq);
+        deps.registry.publish(message.topic, {
+          type: "event",
+          topic: message.topic,
+          seq: sequenced.seq,
+          payload: message.payload,
+        });
+        return;
+      }
+      case "declare":
+        streams.set(message.topic, message.nodeId);
+        return;
+      case "hello":
+        // A process that joined after this one declared its streams asks to
+        // hear them again; every process answers for its own.
+        if (message.nodeId === deps.nodeId) return;
+        for (const [topic, owner] of streams) {
+          if (owner === deps.nodeId) send({ kind: "declare", topic, nodeId: deps.nodeId });
+        }
+        return;
+    }
+  });
+  const hello = (): void => send({ kind: "hello", nodeId: deps.nodeId });
+  hello();
+  // Declarations live only in fan-out. A process whose shared channel dropped
+  // and came back missed every one made meanwhile, so it asks again.
+  const unsubscribeReconnected = deps.coord.pubsub.subscribe(RECONNECTED, hello);
 
   return {
     invalidate(topic, keys) {
-      deps.coalescer.emit(topic, keys === undefined ? undefined : { keys });
+      outbound.emit(topic, keys === undefined ? undefined : { keys });
     },
 
     invalidateAll() {
-      // Not coalesced. There is exactly one caller — the far side of a database
-      // swap — and delaying it by a floor would leave every console rendering
-      // the previous database for a second after the new one is live.
-      deps.registry.publish(GLOBAL_INVALIDATE, {
-        type: "event",
-        topic: GLOBAL_INVALIDATE,
-      } satisfies ServerFrame);
+      send({ kind: "res", topic: GLOBAL_INVALIDATE });
     },
 
     declareStream(topic) {
-      streams.add(topic);
+      streams.set(topic, deps.nodeId);
+      send({ kind: "declare", topic, nodeId: deps.nodeId });
     },
 
     declared(topic) {
@@ -110,11 +214,15 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
     },
 
     stream(topic, payload) {
-      // Sequenced and recorded before it is published, so a subscriber that
-      // arrives mid-publish replays from the ring rather than from a number the
-      // ring has not seen yet.
-      const seq = deps.ring.push(topic, payload);
-      deps.registry.publish(topic, { type: "event", topic, seq, payload });
+      // The sequence is the fleet's, so a client moving between processes
+      // carries a number every one of them recognises — and it is taken in
+      // the same step as the publish, so two processes cannot take 5 and 6
+      // and deliver 6 first.
+      void deps.coord.pubsub.publishSequenced(
+        CHANNEL,
+        JSON.stringify({ kind: "stream", topic, payload } satisfies Fanout),
+        `seq:${topic}`,
+      );
     },
 
     resetStream(topic) {
@@ -122,7 +230,10 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
     },
 
     stop() {
-      deps.coalescer.stop();
+      outbound.stop();
+      inbound.stop();
+      unsubscribe();
+      unsubscribeReconnected();
     },
   };
 }

@@ -1786,7 +1786,7 @@ test("failover counts the credential it moves to, and frees it after", async () 
     ...adapter,
     async send(r) {
       // Which credential the registry believes is busy while this attempt runs.
-      for (const [key, n] of registry.counts()) seen.push([key, n]);
+      for (const [key, n] of await registry.counts()) seen.push([key, n]);
       return adapter.send(r);
     },
   };

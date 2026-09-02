@@ -18,6 +18,7 @@ Conventions governing changes — architectural boundaries, testing expectations
 - [Push transport](#push-transport)
 - [The console and the CLI](#the-console-and-the-cli)
 - [Plugins](#plugins)
+- [Clustering](#clustering)
 
 ## What a request actually does
 
@@ -659,3 +660,85 @@ Plugins render inline in console, so both halves must hold same React instance �
 `@omnigateway/dashboard-sdk` is on that list too, and it is worth separating from the other four rather than reading as one more of them. Those are shared for instance identity, and every breach announces itself — a thrown hook error, a component drawing from the wrong stylesheet. The SDK is shared for **context identity**: it holds the chassis LIVE switch, so a second copy is a second `createContext` result, and a panel reading it finds no provider above it, takes the "polling is off" default, and never polls again. Nothing throws and nothing is logged; the only symptom is a panel that stopped updating, which is indistinguishable from the pause working. A plugin bundle must mark the SDK external exactly as it marks React.
 
 `sdk` range shipped console does not satisfy disables only UI, and nav entry renders disabled carrying reason. Plugin collecting data should not go dark because console's React moved, and operator should get sentence rather than blank page.
+
+## Clustering
+
+One process was the premise everywhere: rate-limit rings, the concurrency gauge, admin sessions,
+the refresh-coalescing map, the boot-time sweep of pending rows, the socket registry — each a
+module-scope `Map`, each correct because nothing else held one. Cluster mode keeps that code and
+moves the maps behind one interface.
+
+```mermaid
+flowchart LR
+  subgraph replicaA["replica A"]
+    limA[limiter] --> coordA[Coord]
+    loadA[load registry] --> coordA
+    refA[refresher] --> coordA
+    authA[admin auth] --> coordA
+    bcA[broadcaster] --> coordA
+    loopsA[loops] -->|lease| coordA
+  end
+  subgraph replicaB["replica B"]
+    coordB[Coord]
+  end
+  coordA --> redis[(Redis)]
+  coordB --> redis
+  replicaA --> pg[(Postgres)]
+  replicaB --> pg
+```
+
+**`@omni/coord`** is the interface (`packages/coord`): `window` (the `1m` ring), `gauge`
+(concurrency and routing load), `buckets` (the `5h`/`1w` counters), `mutex`, `lease`, `kv`,
+`pubsub`, `incr`. Pure like `@omni/ratelimit` — no clock, `now` a parameter — with one in-memory
+implementation that is the maps the gateway held before. The Redis implementation lives in
+`apps/gateway/src/coord/redis.ts`, each primitive one Lua script. The property every
+implementation must hold: a claim is visible to every concurrent claimant **at call time**,
+before the promise settles. In memory that is "mutate, then `Promise.resolve`"; in Redis it is the
+script. Two consumers depend on it in a way that is easy to break: the limiter raises its claim
+before its first yield, and the load registry keeps a synchronous local map and only *samples* the
+shared gauge before ranking — an `await` between `counts()` and `acquire()`, even on a resolved
+promise, let nine simultaneous dispatches rank on one snapshot.
+
+**What moved where.**
+
+| Was | Now | Exact across replicas? |
+| --- | --- | --- |
+| `1m` ring, concurrency gauge | `coord.window`, `coord.gauge` | yes |
+| `5h`/`1w` store cache + debit delta | `coord.buckets`, seeded from `usage.sumBuckets` under a lock | yes, sliding at the grain (minute, hour) |
+| routing load counts | local map + `coord.gauge` sample per rank | one round trip stale |
+| refresh coalescing | local map + `coord.mutex` + re-read + `updateSecrets` CAS | yes — three layers, each covering the last's hole |
+| admin sessions, pending OAuth flows, probe cooldowns | `coord.kv` with TTL | yes |
+| background loops | each tick under `coord.lease` | one holder at a time |
+| boot-time `sweepPending` | own node's rows, or a node whose heartbeat lapsed | yes — `request_logs.node_id`, `nodes` heartbeat |
+| socket registry, ring, coalescer | per replica; every frame goes out through `coord.pubsub` and back in | one delivery path |
+
+**Push.** Every emitter's frame is published and re-delivered through the subscription — the
+emitting replica's own included — so a single process and a fleet run one path. Two coalescers
+in series, emit side and deliver side, bound what a replica publishes and what a client receives;
+they add no delay. Stream sequence numbers come from `coord.incr`, so a client reconnecting to
+another replica carries a number every replica recognises; each ring holds only what it saw, and
+answers `gap` for the rest, which the client already treats as "refetch". Plugin channels are
+pod-local by construction: every connection id a plugin ever sees is one whose socket is on the
+replica running that plugin instance.
+
+**Console.** One stdout per process. Each publishes its lines on the shared `stream:console` —
+which through the fan-out is every replica's lines merged — and on its own
+`stream:console:<nodeId>`. The REST backlog of another replica is an ask over `pubsub` answered
+on a topic minted per ask; `GET /api/nodes` lists who is alive.
+
+**Failure.** Redis unreachable: the proxy-path primitives fall through to an embedded in-memory
+coordinator, so limits degrade to per-replica and no request is refused over it; a lease that
+cannot be confirmed is not held; a lock that cannot be taken throws; `kv` refuses, because a
+session verified against a fallback map is one a password change elsewhere cannot end. Logged
+once per thirty seconds under two closed `LogFields` keys, `coord` and `coordFallback`.
+Postgres unreachable is the same as SQLite locked: the request fails.
+
+**The store.** `OMNI_CLUSTER_MODE=true` selects `packages/store/src/postgres/` at
+`OMNI_DATABASE_URL`, a second
+implementation of the same `Store` interface over `Bun.SQL`. Migrations are its own numbered
+list under an advisory lock. Request bodies are `bytea` rows rather than files. `vacuum`,
+`snapshotTo`, `inspect`, restore and the quiesce latch are SQLite's and are refused; plugin
+storage is Postgres, and its SQL is the plugin's to write for it — which is why `ctx.storage`
+became asynchronous at plugin-api generation 3.
+
+Design: `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.

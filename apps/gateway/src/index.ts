@@ -10,11 +10,13 @@ import {
   resolveConsoleSource,
   tailFile,
 } from "@omni/control";
+import { memoryCoord } from "@omni/coord";
 import { createLogger, describeError, type Logger } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
-import { createStore, deriveKey } from "@omni/store";
+import { deriveKey, openStore } from "@omni/store";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { createApp } from "./app.ts";
+import { redisCoord } from "./coord/redis.ts";
 import { createDeferredStop, createShutdown, type Shutdown } from "./lifecycle.ts";
 import { startMaintenance } from "./maintenance.ts";
 import { startRefreshScheduler } from "./oauth/scheduler.ts";
@@ -22,9 +24,8 @@ import { createPluginEventBus } from "./plugins/events.ts";
 import { installPluginProviders } from "./plugins/install.ts";
 import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
-import { createBroadcaster, DEFAULT_FLOOR_MS, INVALIDATION_FLOORS } from "./stream/broadcaster.ts";
+import { createBroadcaster } from "./stream/broadcaster.ts";
 import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
-import { createCoalescer } from "./stream/coalescer.ts";
 import { startConsoleStream } from "./stream/console.ts";
 import { createSocketRegistry } from "./stream/registry.ts";
 import { createRing } from "./stream/ring.ts";
@@ -126,16 +127,24 @@ async function main(): Promise<void> {
   }
 
   const encryptionKey = await deriveKey(config.encryptionKey);
-  const store = await createStore({
-    path: config.databasePath,
+  const now = () => Date.now();
+  // This process's name on every row it owns and every lease it holds.
+  const nodeId = crypto.randomUUID();
+  const store = await openStore({
+    ...(config.clusterMode && config.databaseUrl !== null
+      ? { url: config.databaseUrl }
+      : { path: config.databasePath }),
     encryptionKey,
     logger,
+    nodeId,
   });
 
-  // The gateway is one process, so a request still marked in-flight at startup
-  // died with the last one. Retiring them here is what stops a crash leaving a
-  // row that spins in the console forever.
-  const swept = await store.usage.sweepPending();
+  // A request still marked in-flight under a process nobody has heard from
+  // died with it. Retiring those here is what stops a crash leaving a row that
+  // spins in the console forever — and the heartbeat first, so a replica
+  // joining a live fleet never reads its own silence as another's death.
+  await store.maintenance.heartbeat(now());
+  const swept = await store.usage.sweepPending(now());
   if (swept > 0) logger.info("retired interrupted requests", { count: swept });
 
   /**
@@ -147,7 +156,6 @@ async function main(): Promise<void> {
   const console = consoleSource(config.logFile);
   logger.info("console log source resolved", { reason: console.source.kind });
 
-  const now = () => Date.now();
   const http = nodeHttpClient({ logger, now });
 
   // `OAUTH_PROVIDERS` is empty at this point and is filled by
@@ -157,7 +165,17 @@ async function main(): Promise<void> {
   // refresh, so it sees whatever is installed by the time a credential is
   // actually refreshed. The seed does not live on this line because nothing in
   // `main()` is reachable from a test — see `installPluginProviders`.
-  const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger });
+  // One per process, shared by the limiter, the load registry and the
+  // refresher: the counters a fleet must agree on all live behind it.
+  // The coordinator is what makes N processes one installation. Named by
+  // `OMNI_REDIS_URL`; in memory otherwise, which is the single process it was.
+  const shared =
+    config.clusterMode && config.redisUrl !== null
+      ? redisCoord({ url: config.redisUrl, logger, now })
+      : null;
+  const coord = shared ?? memoryCoord({ now });
+  const lease = { coord, nodeId };
+  const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger, coord });
   const staticDir = dashboardDir();
   logger.info(
     existsSync(staticDir) ? "dashboard directory resolved" : "dashboard directory absent",
@@ -261,21 +279,17 @@ async function main(): Promise<void> {
   const broadcaster = createBroadcaster({
     registry: streamRegistry,
     ring: streamRing,
-    coalescer: createCoalescer({
-      floors: INVALIDATION_FLOORS,
-      defaultFloorMs: DEFAULT_FLOOR_MS,
-      now,
-      sink: (topic, payload) =>
-        streamRegistry.publish(topic, {
-          type: "event",
-          topic,
-          ...(payload === undefined ? {} : { payload }),
-        }),
-    }),
+    coord,
+    nodeId,
+    now,
   });
 
   const app = createApp({
     store,
+    coord,
+    nodeId,
+    mode: config.clusterMode ? "cluster" : "single",
+    ...(shared === null ? {} : { coordHealthy: shared.healthy }),
     baseUrl: config.baseUrl,
     http,
     now,
@@ -303,7 +317,7 @@ async function main(): Promise<void> {
     reapplyPluginSchema: async () => {
       for (const plugin of loadedPlugins.plugins) {
         if (plugin.migrations.length === 0) continue;
-        const applied = store.plugins.migrate(plugin.id, plugin.migrations);
+        const applied = await store.plugins.migrate(plugin.id, plugin.migrations);
         if (applied.failed !== undefined) {
           throw new Error(
             `plugin ${plugin.id} migration ${applied.failed.version}: ${applied.failed.reason}`,
@@ -319,10 +333,19 @@ async function main(): Promise<void> {
     },
   });
 
-  const stopMaintenance = startMaintenance({ store, now, logger });
-  const stopRefreshScheduler = startRefreshScheduler({ store, refresh, now, logger, broadcaster });
+  const stopMaintenance = startMaintenance({ store, now, logger, lease });
+  const stopRefreshScheduler = startRefreshScheduler({
+    store,
+    refresh,
+    now,
+    logger,
+    broadcaster,
+    lease,
+  });
   const stopQuotaPoller = await startQuotaPoller({
     store,
+    coord,
+    lease,
     providers: OAUTH_PROVIDERS,
     http,
     refresh,
@@ -334,7 +357,7 @@ async function main(): Promise<void> {
   // than invalidations, and because a source that cannot start declares no
   // topic: whether `stream:console` exists at all is decided here, and nothing
   // downstream should be able to observe it half-decided.
-  const stopConsoleStream = startConsoleStream({ console, broadcaster, logger, now });
+  const stopConsoleStream = startConsoleStream({ console, broadcaster, logger, now, nodeId });
 
   // Elysia defaults Bun's socket `idleTimeout` to 30 seconds, which is shorter
   // than a request is allowed to take: `requestDeadlineMs` is 120s by default,

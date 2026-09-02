@@ -8,6 +8,13 @@ export type RoutingSnapshotSource = {
 
 export type RoutingSnapshotCache = RoutingSnapshotSource & {
   /**
+   * A change another process made, handed in as if the local store had
+   * emitted it: health and quota rows patch the held snapshot in place, and a
+   * configuration change marks it stale. What the local subscription does for
+   * local writes, for writes the fan-out carried.
+   */
+  applyRemote(change: RoutingChange): void;
+  /**
    * Drops what is held, for a change the version check cannot see.
    *
    * Staleness is otherwise decided by SQLite's `data_version`, which belongs to
@@ -87,6 +94,7 @@ export function createRoutingSnapshotCache(
 
   return {
     get,
+    applyRemote: apply,
     invalidate() {
       // The generation bump is what discards a build already in flight: it
       // began against the file that has just been replaced.

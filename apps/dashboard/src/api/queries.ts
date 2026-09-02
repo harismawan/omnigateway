@@ -39,6 +39,7 @@ import type {
   LogsResponse,
   MintedKey,
   ModelsResponse,
+  NodesResponse,
   PluginCatalogEntry,
   PluginsResponse,
   ProviderId,
@@ -109,7 +110,8 @@ export const queryKeys = {
   clientQuota: ["client", "quota"] as const,
   clientQuotaHistory: (query: ClientQuotaHistoryQuery) =>
     ["client", "quota-history", query.since, query.until ?? null] as const,
-  console: (lines: number, level: string) => ["console", lines, level] as const,
+  console: (lines: number, level: string, node: string) => ["console", lines, level, node] as const,
+  nodes: ["nodes"] as const,
   database: ["database"] as const,
   snapshots: ["database", "snapshots"] as const,
   lifecycle: ["lifecycle"] as const,
@@ -408,15 +410,32 @@ export function useConsole(
   lines = 200,
   level = "",
   cadence: Cadence = CONSOLE_CADENCE_MS,
+  node = "",
 ): UseQueryResult<ConsoleResponse> {
   return useQuery({
-    queryKey: queryKeys.console(lines, level),
+    queryKey: queryKeys.console(lines, level, node),
     queryFn: async ({ signal }) =>
       get<ConsoleResponse>(
-        withQuery("/api/console", { lines, ...(level === "" ? {} : { level }) }),
+        withQuery("/api/console", {
+          lines,
+          ...(level === "" ? {} : { level }),
+          ...(node === "" ? {} : { node }),
+        }),
         signal,
       ),
     refetchInterval: cadence,
+  });
+}
+
+/** How often the process list is re-read. Nothing here moves at request speed. */
+const NODES_CADENCE_MS = 30_000;
+
+/** The processes serving this installation. One entry on a single-process install. */
+export function useNodes(): UseQueryResult<NodesResponse> {
+  return useQuery({
+    queryKey: queryKeys.nodes,
+    queryFn: async ({ signal }) => get<NodesResponse>("/api/nodes", signal),
+    refetchInterval: NODES_CADENCE_MS,
   });
 }
 

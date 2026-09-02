@@ -1,5 +1,6 @@
 import { type PollerDeps, poll } from "@omni/control";
 import { describeError, noopLogger } from "@omni/ir";
+import { type LeaseDeps, underLease } from "../lease.ts";
 import type { Invalidator } from "../stream/broadcaster.ts";
 
 /**
@@ -9,7 +10,7 @@ import type { Invalidator } from "../stream/broadcaster.ts";
  * and must not learn that a socket exists — so the broadcaster is added here
  * rather than there, and `poll` never sees it.
  */
-export type QuotaPollerDeps = PollerDeps & { broadcaster?: Invalidator };
+export type QuotaPollerDeps = PollerDeps & { broadcaster?: Invalidator; lease?: LeaseDeps };
 
 /**
  * Starts the poll loop at the interval in settings.
@@ -30,7 +31,7 @@ export async function startQuotaPoller(deps: QuotaPollerDeps): Promise<() => voi
   const pass = (): void => {
     if (running) return;
     running = true;
-    void poll(deps)
+    void underLease(deps.lease, "quota-poll", 2 * quotaPollIntervalMs, () => poll(deps).then())
       .catch((error: unknown) => {
         logger.error("quota poll failed", {
           reason: describeError(error, "unknown"),

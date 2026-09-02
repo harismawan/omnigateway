@@ -39,6 +39,7 @@ type Row = {
   id_token: string | null;
   created_at: number;
   updated_at: number;
+  token_version: number;
 };
 
 type HealthRow = {
@@ -168,6 +169,7 @@ export function createCredentialRepo(
     disabledReason: row.disabled_reason as DisabledReason | null,
     disabledAt: row.disabled_at,
     hasRefreshToken: row.refresh_token !== null,
+    tokenVersion: row.token_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     secrets: () => (loadCurrentSecrets ? currentSecrets(row.id) : secretsFrom(row)),
@@ -206,7 +208,7 @@ export function createCredentialRepo(
                   account_email, provider_data, disabled_reason, disabled_at,
                   NULL AS access_token,
                   CASE WHEN refresh_token IS NULL THEN NULL ELSE 'present' END AS refresh_token,
-                  NULL AS api_key, NULL AS id_token, created_at, updated_at
+                  NULL AS api_key, NULL AS id_token, created_at, updated_at, token_version
              FROM credentials
             ORDER BY tier, label`,
         )
@@ -253,6 +255,7 @@ export function createCredentialRepo(
       return {
         ...meta,
         hasRefreshToken: refreshToken != null,
+        tokenVersion: 0,
         createdAt: now,
         updatedAt: now,
       } satisfies Credential;
@@ -281,7 +284,7 @@ export function createCredentialRepo(
       emit({ type: "credentialsChanged" });
     },
 
-    async updateSecrets(id, secrets, expiresAt) {
+    async updateSecrets(id, secrets, expiresAt, expectedVersion) {
       const sets: string[] = [];
       const vals: (string | number | null)[] = [];
       if (secrets.accessToken !== undefined) {
@@ -300,10 +303,14 @@ export function createCredentialRepo(
         sets.push("id_token = ?");
         vals.push(await seal(secrets.idToken));
       }
-      sets.push("expires_at = ?", "updated_at = ?");
+      sets.push("expires_at = ?", "updated_at = ?", "token_version = token_version + 1");
       vals.push(expiresAt, Date.now());
-      db.run(`UPDATE credentials SET ${sets.join(", ")} WHERE id = ?`, [...vals, id]);
-      emit({ type: "credentialsChanged" });
+      const where =
+        expectedVersion === undefined ? "WHERE id = ?" : "WHERE id = ? AND token_version = ?";
+      const args = expectedVersion === undefined ? [...vals, id] : [...vals, id, expectedVersion];
+      const written = db.run(`UPDATE credentials SET ${sets.join(", ")} ${where}`, args).changes;
+      if (written > 0) emit({ type: "credentialsChanged" });
+      return written > 0;
     },
 
     async remove(id) {

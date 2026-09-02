@@ -18,9 +18,12 @@ OmniGateway = Bun/TypeScript monorepo for self-hosted AI gateway:
 - `packages/providers`: provider adapters + catalog
 - `packages/router`: pure routing
 - `packages/ratelimit`: pure API-key limit eval + sliding-window counting
+- `packages/coord`: pure coordination interface (window, gauge, mutex) + in-memory impl; every
+  counter a fleet must share live behind it
 - `packages/rtk`: tool-result filters, applied in dispatch before routing
 - `packages/ponytail`: vendored lazy-senior-dev ruleset, appended to system prompt in dispatch
-- `packages/store`: persistence + encryption
+- `packages/store`: persistence + encryption; two `Store` impls, `sqlite/` (default) and
+  `postgres/` (cluster), one contract suite in `test/contract/` run against both
 - `packages/testkit`: shared test fixtures
 
 Approved designs in `docs/superpowers/specs/`; matching plans in `docs/superpowers/plans/`. Read
@@ -82,6 +85,13 @@ run; when that file gain a step, this line gain one.
 6. `packages/control` know nothing about caller type: no Elysia, cookies, argv, terminal, timers.
    Long-lived schedulers stay in `apps/gateway`.
 7. Store rows + secrets stay behind `@omni/store`; never expose encrypted or raw provider secrets.
+   Two implementations of one interface: `sqlite/` and `postgres/`. A repo method added to
+   `types.ts` is added to **both** and to the sqlite forwarder, and gets a test in
+   `test/contract/` — the only place a behaviour proven on one backend is proven on the other.
+   Plugin SQL passthrough is dialect-specific by design (`writing-a-plugin.md` say so). Postgres
+   `routing.version()` is read-behind (interface sync, read async), so cross-process routing
+   writes reach a replica through the `routing` pubsub topic wired in `app.ts`, filtered to
+   other nodes so own writes still patch rather than rebuild.
 8. All outbound provider HTTP use `HttpClient`; no direct production `fetch`.
 9. `@omni/providers/catalog` and `/descriptors` must stay leaves: model lists, presentation, types.
    No longer because a browser import them — console read provider data over `GET /api/catalog`
@@ -119,7 +129,7 @@ run; when that file gain a step, this line gain one.
     validated manifest and plugin cannot reach another's namespace, here a panel spelling another
     plugin's topic by hand is **authorised** — `authorised` grant admin every *opened* plugin topic
     and ask nothing else. Not a hole hook could close: panel bundle already run in console's page
-    with operator's cookie and can open own socket, which is rule 15's guardrail-not-sandbox one
+    with operator's cookie and can open own socket, which is rule 16's guardrail-not-sandbox one
     step further out. Say it that way; earlier version of this line claimed host would refuse, and a
     contributor who believe it treat cross-plugin subscribe as impossible when it is one line.
     It ride `LiveContextValue.channels`, **not** a second
@@ -143,7 +153,53 @@ run; when that file gain a step, this line gain one.
     import that subpath alone and re-export `PonytailMode` from `@omni/store/types`, the import
     dashboard already permitted. Ruleset text **vendored and pinned**, never fetched: a prompt that
     change under an installation is one no operator can reproduce a bill from.
-14. `packages/ratelimit` stay pure same way; `now` always a parameter, counters supplied by caller,
+14. `packages/coord` stay pure same way: interface + memory impl, `now` a parameter, the one timer
+    it own is the mutex wait. Invariant every impl must hold: a claim is visible to every
+    concurrent claimant **at call time, before the promise settle** — memory impl mutate then
+    return `Promise.resolve`. Consumers rely on it: `rateLimit.ts` raise `deciding` and claim
+    before its first yield; `loadRegistry.ts` keep a **synchronous local map** and read the shared
+    gauge only through `refresh()` before rank, because an `await` between `counts()` and
+    `acquire()` — even on a resolved promise — let a burst rank on one snapshot, and the burst
+    test in `dispatch.test.ts` catch exactly that. Thread `coord` through **all** of a call
+    graph; `apps/gateway/test/cluster/sharedCoord.test.ts` stand up two route trees over one
+    memory coord and fail on any site still reading a module-scope map. Refresh serialisation is
+    three layers — local `inFlight` map, `coord.mutex`, and the **re-read** behind the lock — and
+    the re-read is the dedup: a view whose `expiresAt` sit behind the row's is answered from the
+    store, never the provider. Long windows (`5h`, `1w`) are `coord.buckets`, seeded from
+    `usage.sumBuckets` under a lock; **`add` on an unseeded key is a no-op** because the row is
+    already in the store the seed read, and the two tests named "before the seed" pin both
+    directions of that. Background loops run under `coord.lease` via `underLease`; the heartbeat
+    is every process's own and is what keep its pending rows out of another's `sweepPending`.
+    Push transport: every frame go out through `coord.pubsub` and come back in through the
+    subscription — own included — so there is one delivery path; two coalescers in series, emit
+    side and deliver side, and they add no delay. `stream()` take its `seq` from `coord.incr`, so
+    a client moving between processes carry a number every one recognise; ring `push` accept
+    that seq and drop a frame behind its head. Plugin channels are **pod-local by construction**
+    — each pod's plugin instance serve that pod's sockets — and that is not a gap. Redis impl
+    live in `apps/gateway/src/coord/redis.ts` (host own transport); every primitive is one Lua
+    script, `attempt()` decide fail-open per table (proxy-path primitives fall to an embedded
+    memory coord, `lease` false, `mutex` throw, `kv` refuse `OVERLOADED`), logged through the two
+    closed `LogFields` keys `coord`/`coordFallback`. **`RedisClient.connect()` never reject with
+    `autoReconnect` on** — it retry forever — so the first call race it against
+    `CONNECT_WAIT_MS` and every call read `connected` instead; a subscriber need its own
+    connection and an explicit `connect()` or `subscribe` never settle. **`onclose` never fire
+    on a killed connection; `onconnect` fire on first connect and every reconnect** — measured
+    with `CLIENT KILL TYPE pubsub` — so the subscription is (re)established from `onconnect`,
+    `unsubscribe` first or every frame arrive twice, and the broadcaster re-`hello` on
+    `coord:reconnected` because declarations live only in fan-out. Scripts are `SCRIPT LOAD`ed
+    at connect and called by `EVALSHA`: a fire-and-forget release must reach the server before
+    the next acquire on the same connection, and a load in front of it let the acquire overtake
+    (measured: the two-replica concurrency test went 429). `complete()` in both usage repos is a
+    **claim** — `ON CONFLICT DO UPDATE … WHERE state = 'pending'`, rollup only when a row
+    changed — so a row swept as dead and then completed by its owner is billed once.
+    Remote routing changes reach a replica as the `RoutingChange` itself over the `routing`
+    topic and go through `snapshots.applyRemote`, so a foreign health write patch rather than
+    rebuild. Contract suite run
+    against real Redis when `OMNI_TEST_REDIS_URL` set (CI set it; `valkey` service), and
+    `test/cluster/sharedCoord.test.ts` run the two-replica suite over two **separate** Redis
+    coords — what two pods actually hold. Design:
+    `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
+15. `packages/ratelimit` stay pure same way; `now` always a parameter, counters supplied by caller,
     so package never learn where they came from. `@omni/ratelimit/catalog` is leaf holding dimension
     + window unions, `LimitConfig`, its zod schema; `@omni/store` import that subpath alone and
     re-export `LimitConfig` from `@omni/store/types`, the import dashboard already permitted.
@@ -151,7 +207,7 @@ run; when that file gain a step, this line gain one.
     `@omnigateway/plugin-api/events` **mirrors** the unions and `WINDOW_MS` rather than importing
     them, because that package published and this one not. This package stay source of truth; mirror
     pinned by `apps/gateway/test/plugins/limitVocabulary.test.ts`, only place that may import both.
-15. Plugins load from `<root>/plugins/` at boot, receive capability-scoped `PluginContext`: never
+16. Plugins load from `<root>/plugins/` at boot, receive capability-scoped `PluginContext`: never
     `Store`, `HttpClient`, `AdminAuth`, `process.env`. **It is a guardrail,
     not a sandbox** — plugin share gateway's process and can import past all of it. What it buy:
     accidental overreach impossible, plugin's intent auditable from manifest. Say that plainly
@@ -179,7 +235,7 @@ run; when that file gain a step, this line gain one.
     `routes/stream.ts` decide who may hold it, so opening channel never widen plugin's own reach.
     Outbound frame reuse socket registry's own bounded per-connection queue — no second queue, and
     nothing here touch `Store`.
-16. **No provider-specific code in a core module.** Aim, not achieved state, and the difference is
+17. **No provider-specific code in a core module.** Aim, not achieved state, and the difference is
     stated here because an earlier version of this bullet claimed the clean version and a reader can
     disprove it in one grep — after which the rest of this file reads as decoration.
     Measured, package by package, because "clean" written from memory is how the last version got it
@@ -263,10 +319,10 @@ run; when that file gain a step, this line gain one.
     already take as parameter.
     Adapter is host's because it hold the transport, enforce origin check, yield cap and
     return-shape validation, and stamp `gatewayAuthored`. A package adapting its own flow would need
-    the client rule 15 exist to keep out of it.
+    the client rule 16 exist to keep out of it.
     Plugin flow follow the codec's inversion: each
     step is an async generator that **yield described requests**, host perform every one, so plugin
-    never hold `HttpClient` and rule 15 need no second footnote. Generator not build/parse pair
+    never hold `HttpClient` and rule 16 need no second footnote. Generator not build/parse pair
     because `kilo.exchange` is two request where second carry a token read from first — measured,
     not assumed. Yield **capped** per step: generator can loop, and device poll already looped by
     host. `fail`, `keepPolling`, `pkce`, `randomState` supplied by host — `keepPolling` named that
@@ -339,7 +395,7 @@ run; when that file gain a step, this line gain one.
     small. Design:
     [core/provider decoupling](docs/superpowers/specs/2026-08-27-core-provider-decoupling-design.md),
     [descriptor registry](docs/superpowers/specs/2026-08-26-provider-descriptor-registry-design.md).
-17. **`Principal` and `Scope` in `@omni/control` are the only copy of "who is asking" and "what may
+18. **`Principal` and `Scope` in `@omni/control` are the only copy of "who is asking" and "what may
     they read".** Four principals — `admin`, `viewer`, `client`, `machine` — share **one cookie**,
     so `AdminAuth.verify` return the principal, never a boolean: a caller that forget to check the
     kind then hold a value it cannot mistake for permission. `stream/registry.ts` re-export the
@@ -1087,7 +1143,9 @@ Detailed compatibility rules + measured client behavior belong in relevant specs
   per-request access lines. `requestId` join both.
 - Console can read only captured stdout: `OMNI_LOG_FILE`, journald, or none. `OMNI_LOG_FILE` name
   existing capture; it not create one.
-- Docker image contain gateway only; npm package contain CLI, gateway, dashboard.
+- Docker image contain gateway + built console (multi-stage, non-root `bun`, `HEALTHCHECK` on
+  `/health`); npm package contain CLI, gateway, dashboard. Kustomize base in `k8s/`,
+  same shape as sibling projects; `secret.yaml` gitignored, `secret.example.yaml` committed.
 - OpenAI OAuth route to narrower Codex surface. OAuth-specific encoding stay behind existing `oauth`
   flag.
 - Snapshot is database alone. `request_bodies/` excluded, so downloaded snapshot never a prompt

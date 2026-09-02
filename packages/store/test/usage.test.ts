@@ -365,8 +365,8 @@ test("sweepPending retires rows the last process left behind", async () => {
   await s.usage.begin(log({ id: "r1", at: noon(0), state: "pending" }));
   await s.usage.append(log({ id: "r2", at: noon(0) }));
 
-  expect(await s.usage.sweepPending()).toBe(1);
-  expect(await s.usage.sweepPending()).toBe(0);
+  expect(await s.usage.sweepPending(noon(0))).toBe(1);
+  expect(await s.usage.sweepPending(noon(0))).toBe(0);
 
   const rows = await s.usage.recent(10);
   expect(rows.every((row) => row.state === "done")).toBe(true);
@@ -704,4 +704,40 @@ test("a scoped aggregate splitting by apiKey cannot report another key", async (
   });
   expect(buckets.map((b) => b.key)).toEqual(["k1"]);
   s.close();
+});
+
+/**
+ * Two processes over one database. A replica booting into a live fleet must
+ * not retire the other replica's in-flight requests: with additive rollups,
+ * a row completed twice is billed twice. Only a node whose heartbeat has
+ * lapsed — or that never wrote one — has its rows swept.
+ */
+test("sweepPending leaves a live node's rows alone and retires a dead node's", async () => {
+  const path = `/tmp/omni-sweep-${crypto.randomUUID()}.sqlite`;
+  const encryptionKey = await deriveKey("test-encryption-key-0123456789");
+  const a = await createStore({ path, encryptionKey, nodeId: "node-a" });
+  const b = await createStore({ path, encryptionKey, nodeId: "node-b" });
+  const t = noon(0);
+
+  await a.maintenance.heartbeat(t);
+  await a.usage.begin(log({ id: "a1", at: t, state: "pending" }));
+  await b.usage.begin(log({ id: "b1", at: t, state: "pending" }));
+
+  // B boots: A is alive, so only B's own leftovers go.
+  await b.maintenance.heartbeat(t + 1);
+  expect(await b.usage.sweepPending(t + 1)).toBe(1);
+  expect((await a.usage.recent(10)).find((row) => row.id === "a1")?.state).toBe("pending");
+
+  // A goes quiet past the grace period, and its row is retirable by B.
+  expect(await b.usage.sweepPending(t + 60_001)).toBe(1);
+  expect((await a.usage.recent(10)).find((row) => row.id === "a1")?.state).toBe("done");
+
+  // A row with no owner at all — written before ownership existed — is dead.
+  await a.usage.begin(log({ id: "old", at: t, state: "pending" }));
+  const { Database } = await import("bun:sqlite");
+  new Database(path).run("UPDATE request_logs SET node_id = '' WHERE id = 'old'");
+  expect(await b.usage.sweepPending(t + 2)).toBe(1);
+
+  a.close();
+  b.close();
 });

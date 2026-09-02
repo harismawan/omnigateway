@@ -187,7 +187,7 @@ test("a failing migration skips the plugin but leaves earlier ones applied", asy
   // The first migration committed on its own, so it must still be recorded —
   // otherwise every boot replays it and a plugin author debugging migration 2
   // silently loses the table migration 1 made.
-  expect(store.plugins.listTables("migrator")).toContain("plugin_migrator_good");
+  expect(await store.plugins.listTables("migrator")).toContain("plugin_migrator_good");
 });
 
 // -------------------------------------------------- capabilities
@@ -295,8 +295,8 @@ test("a plugin's storage is namespaced to it without the plugin naming a prefix"
     manifest: { capabilities: ["storage"] },
     server: `export default {
       migrations: [{ version: 1, sql: "CREATE TABLE {{notes}} (body TEXT)" }],
-      setup(ctx) {
-        ctx.storage.run("INSERT INTO {{notes}} (body) VALUES (?)", ["hi"]);
+      async setup(ctx) {
+        await ctx.storage.run("INSERT INTO {{notes}} (body) VALUES (?)", ["hi"]);
         return {};
       },
     };`,
@@ -304,7 +304,7 @@ test("a plugin's storage is namespaced to it without the plugin naming a prefix"
 
   const result = await load();
   expect(result.failures).toEqual([]);
-  expect(store.plugins.listTables("store-user")).toEqual(["plugin_store-user_notes"]);
+  expect(await store.plugins.listTables("store-user")).toEqual(["plugin_store-user_notes"]);
 });
 
 // -------------------------------------------------- ui compatibility

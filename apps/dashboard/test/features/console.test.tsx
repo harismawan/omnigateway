@@ -198,4 +198,46 @@ describe("ConsoleBoard source hint visibility", () => {
     expect(await screen.findByText(/No line in this window is at that level/)).toBeTruthy();
     expect(screen.getByText("/var/log/omni.log")).toBeTruthy();
   });
+
+  /**
+   * A fleet shows a process selector, defaults to every process merged, and
+   * asks for the chosen one by name. A single process shows no selector at
+   * all — the control would offer a choice of one.
+   */
+  test("a fleet gets a process selector; one process does not", async () => {
+    const single = createFetchStub({
+      "GET /api/console": () => ({ source: "file", path: "/var/log/omni.log", lines: LINES }),
+      "GET /api/nodes": () => ({ nodes: [{ id: "aaaaaaaa-1", seenAt: 1, self: true }] }),
+    });
+    const { unmount } = renderWithProviders(<ConsoleBoard />);
+    await screen.findByText(/omnigateway listening/);
+    expect(screen.queryByLabelText("Which process to show")).toBeNull();
+    expect(single.calls.some((call) => call.url.includes("node="))).toBe(false);
+    unmount();
+
+    const fleet = createFetchStub({
+      "GET /api/console": ({ url }) =>
+        url.includes("node=bbbbbbbb")
+          ? { source: "file", path: "/var/log/b.log", lines: [FIRST_LINE] }
+          : {
+              source: "fleet",
+              lines: LINES.map((line) => ({ ...line, nodeId: "aaaaaaaa-1" })),
+            },
+      "GET /api/nodes": () => ({
+        nodes: [
+          { id: "aaaaaaaa-1", seenAt: 2, self: true },
+          { id: "bbbbbbbb-2", seenAt: 1, self: false },
+        ],
+      }),
+    });
+    renderWithProviders(<ConsoleBoard />);
+    const selector = await screen.findByLabelText("Which process to show");
+    expect(await screen.findByText("every process, merged")).toBeTruthy();
+    expect(await screen.findByText(/\[aaaaaaaa\] .*omnigateway listening/)).toBeTruthy();
+    expect(fleet.calls.some((call) => call.url.includes("node=all"))).toBe(true);
+
+    await userEvent.selectOptions(selector, "bbbbbbbb-2");
+    expect(await screen.findByText("/var/log/b.log")).toBeTruthy();
+    expect(fleet.calls.some((call) => call.url.includes("node=bbbbbbbb-2"))).toBe(true);
+  });
 });

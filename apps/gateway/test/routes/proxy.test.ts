@@ -1013,6 +1013,7 @@ test("reports a stream that broke after dispatch recorded its outcome", async ()
     logger,
     loadRegistry: {
       counts: () => inner.counts(),
+      refresh: () => inner.refresh(),
       acquire: (credentialId, model) => {
         const release = inner.acquire(credentialId, model);
         return () => {

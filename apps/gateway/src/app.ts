@@ -10,10 +10,12 @@ import {
   nodeDatabaseFs,
   OAUTH_PROVIDERS,
   type Refresher,
+  readConsole,
 } from "@omni/control";
+import { type Coord, memoryCoord } from "@omni/coord";
 import { GatewayError, HTTP_STATUS, type Logger, noopLogger, type ProviderId } from "@omni/ir";
 import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from "@omni/providers";
-import type { Store } from "@omni/store";
+import type { RoutingChange, Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
 import type { LoadRegistry } from "./dispatch/loadRegistry.ts";
@@ -32,14 +34,9 @@ import { connectRoutes } from "./routes/connect.ts";
 import { databaseRoutes } from "./routes/database.ts";
 import { proxyRoutes } from "./routes/proxy.ts";
 import { streamRoutes } from "./routes/stream.ts";
-import {
-  type Broadcaster,
-  createBroadcaster,
-  DEFAULT_FLOOR_MS,
-  INVALIDATION_FLOORS,
-} from "./stream/broadcaster.ts";
+import { type Broadcaster, createBroadcaster } from "./stream/broadcaster.ts";
 import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
-import { createCoalescer } from "./stream/coalescer.ts";
+import { createConsoleFleet } from "./stream/consoleFleet.ts";
 import { createSocketRegistry, type SocketRegistry } from "./stream/registry.ts";
 import { createRing, type Ring } from "./stream/ring.ts";
 
@@ -52,6 +49,18 @@ export type AppDeps = {
   http?: HttpClient;
   adapters?: Readonly<Record<ProviderId, ProviderAdapter>>;
   requestId?: () => string;
+  /**
+   * Where every counter a fleet must share lives: the `1m` ring, the
+   * concurrency gauge, routing load, the refresh lock. In-memory when absent,
+   * which is the single-process installation.
+   */
+  coord?: Coord;
+  /** This process's name on leases and stream declarations. Fresh when absent. */
+  nodeId?: string;
+  /** Reported on `/health`. `cluster` when the store is shared. */
+  mode?: "single" | "cluster";
+  /** Whether the coordinator's last call reached it. Absent means in memory, which is always up. */
+  coordHealthy?: () => boolean;
   /** Overridden by tests that assert in-flight accounting; one per process otherwise. */
   loadRegistry?: LoadRegistry;
   /** Overridden by tests that read the concurrency gauge; one per process otherwise. */
@@ -219,6 +228,8 @@ function absentLifecycle(): LifecycleDeps {
 
 export function createApp(deps: AppDeps) {
   const now = deps.now ?? (() => Date.now());
+  const coord = deps.coord ?? memoryCoord();
+  const nodeId = deps.nodeId ?? crypto.randomUUID();
   const logger = deps.logger ?? noopLogger;
   const rand = deps.rand ?? Math.random;
   const http = deps.http ?? nodeHttpClient({ logger, now });
@@ -230,10 +241,24 @@ export function createApp(deps: AppDeps) {
   // `dispatch/index.ts`, which is on the path however the map was built.
   const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
-  const rateLimiter = deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger });
+  const rateLimiter =
+    deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger, coord });
   const snapshots = createRoutingSnapshotCache(deps.store, logger);
+  // A routing write on another process reaches this one as the same change
+  // the local subscription would have seen, rows included, so a remote health
+  // or quota write patches the snapshot rather than rebuilding it — a rebuild
+  // per foreign request is the cost this cache exists to remove. Own writes
+  // are skipped: the local subscription already applied them.
+  const ROUTING_TOPIC = "routing";
+  deps.store.routing.subscribe((change) => {
+    void coord.pubsub.publish(ROUTING_TOPIC, JSON.stringify({ from: nodeId, change }));
+  });
+  coord.pubsub.subscribe(ROUTING_TOPIC, (_topic, raw) => {
+    const message = JSON.parse(raw) as { from: string; change: RoutingChange };
+    if (message.from !== nodeId) snapshots.applyRemote(message.change);
+  });
 
-  const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS });
+  const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS, coord });
   const refresh =
     deps.refresh ??
     createRefresher({
@@ -242,6 +267,7 @@ export function createApp(deps: AppDeps) {
       http,
       now,
       logger,
+      coord,
     });
 
   const staticDir = deps.staticDir ? resolve(deps.staticDir) : undefined;
@@ -270,23 +296,16 @@ export function createApp(deps: AppDeps) {
   const channels = deps.channels ?? createChannelRegistry({ sockets: registry, logger });
   channelsRef = channels;
   const ring = deps.ring ?? createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
-  const broadcaster =
-    deps.broadcaster ??
-    createBroadcaster({
-      registry,
-      ring,
-      coalescer: createCoalescer({
-        floors: INVALIDATION_FLOORS,
-        defaultFloorMs: DEFAULT_FLOOR_MS,
-        now,
-        sink: (topic, payload) =>
-          registry.publish(topic, {
-            type: "event",
-            topic,
-            ...(payload === undefined ? {} : { payload }),
-          }),
-      }),
-    });
+  const broadcaster = deps.broadcaster ?? createBroadcaster({ registry, ring, coord, nodeId, now });
+  const capture = deps.console;
+  const consoleFleet = createConsoleFleet({
+    coord,
+    nodeId,
+    local:
+      capture === undefined
+        ? undefined
+        : (query) => readConsole(capture.deps, capture.source, query),
+  });
   /**
    * The release for each admitted request, keyed by the request itself.
    *
@@ -320,7 +339,16 @@ export function createApp(deps: AppDeps) {
         admitted.get(request)?.();
         admitted.delete(request);
       })
-      .get("/health", () => ({ ok: true }))
+      // `mode`, `nodeId` and `coord` are for a readiness probe and an operator
+      // with curl; the console's own watcher reads `ok` alone and must keep
+      // to it, because during a restart there is nothing else to read.
+      .get("/health", () => ({
+        ok: true,
+        mode: deps.mode ?? "single",
+        nodeId,
+        coord:
+          "healthy" in coord && !(coord as { healthy(): boolean }).healthy() ? "fallback" : "ok",
+      }))
       .use(
         proxyRoutes({
           store: deps.store,
@@ -333,6 +361,7 @@ export function createApp(deps: AppDeps) {
           requestId,
           rateLimiter,
           logger,
+          coord,
           ...(deps.loadRegistry === undefined ? {} : { loadRegistry: deps.loadRegistry }),
           bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
           ...(deps.emit === undefined ? {} : { emit: deps.emit }),
@@ -349,6 +378,8 @@ export function createApp(deps: AppDeps) {
           sessionTtlMs: ADMIN_SESSION_TTL_MS,
           logger,
           broadcaster,
+          nodeId,
+          consoleFleet,
           ...(deps.console === undefined ? {} : { console: deps.console }),
         }),
       )
@@ -367,6 +398,7 @@ export function createApp(deps: AppDeps) {
       .use(
         databaseRoutes({
           store: deps.store,
+          ...(deps.mode === undefined ? {} : { mode: deps.mode }),
           ...(deps.reapplyPluginSchema === undefined
             ? {}
             : { reapplyPluginSchema: deps.reapplyPluginSchema }),
@@ -388,6 +420,7 @@ export function createApp(deps: AppDeps) {
           http,
           now,
           logger,
+          coord,
         }),
       )
       .use(

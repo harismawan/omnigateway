@@ -37,8 +37,15 @@
  * The rule above is easy to read as being about *additions* to the context and
  * to skip for a removal. Both directions break an existing plugin; a removal
  * breaks it louder.
+ *
+ * **`3` because `ctx.storage` became asynchronous.** Every method returns a
+ * promise, and `transaction` takes an async function. A plugin written
+ * against generation 2 reads a promise where it expects rows and finds
+ * `undefined` members on it — a shape change, not a removal, and the counter
+ * covers both. The change is what lets a store other than SQLite serve
+ * plugin storage at all.
  */
-export const PLUGIN_API_VERSION = 2;
+export const PLUGIN_API_VERSION = 3;
 
 /**
  * The dashboard SDK version the shipped console provides.
@@ -99,4 +106,4 @@ export const PLUGIN_API_VERSION = 2;
  * advertised. `publishable.test.ts` now refuses a state where this package
  * trails the SDK.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.4";
+export const DASHBOARD_SDK_VERSION = "0.1.5";

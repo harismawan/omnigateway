@@ -1,14 +1,15 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
-import type {
-  RequestLog,
-  RequestState,
-  UsageBucket,
-  UsageDimension,
-  UsageGrain,
-  UsageQuery,
-  UsageRepo,
+import {
+  NODE_GRACE_MS,
+  type RequestLog,
+  type RequestState,
+  type UsageBucket,
+  type UsageDimension,
+  type UsageGrain,
+  type UsageQuery,
+  type UsageRepo,
 } from "../types.ts";
 import {
   auditRollup,
@@ -167,18 +168,19 @@ function label(value: string | number | null): string {
   return text.length === 0 ? "unknown" : text;
 }
 
-const COLUMNS = `(id, state, at, api_key_id, requested_model, resolved_provider, resolved_model,
-                  credential_id, attempts, status, error_code, input_tokens, output_tokens,
-                  cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms, cost_usd,
-                  degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
+const COLUMNS = `(id, state, node_id, at, api_key_id, requested_model, resolved_provider,
+                  resolved_model, credential_id, attempts, status, error_code, input_tokens,
+                  output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms,
+                  cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
                   rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters)`;
 
-const PLACEHOLDERS = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+const PLACEHOLDERS = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
-function values(log: RequestLog, state: RequestState): SQLQueryBindings[] {
+function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryBindings[] {
   return [
     log.id,
     state,
+    nodeId,
     log.at,
     log.apiKeyId,
     log.requestedModel,
@@ -207,7 +209,12 @@ function values(log: RequestLog, state: RequestState): SQLQueryBindings[] {
 
 /**
  * Completion upserts, because it serves both a request that began and one that
- * failed before dispatch ever ran.
+ * failed before dispatch ever ran — and it is a **claim**: the update lands
+ * only on a row still `pending`. A row another process already retired as
+ * interrupted (its owner missed six heartbeats, or two replicas booted over
+ * the same dead node) is left as it is, because completing it again would roll
+ * it up again, and the rollups add. The owner's figures are lost in that
+ * case; a double count is the error this store must not make.
  *
  * Three columns are deliberately not overwritten. `at` is omitted entirely, so
  * a row keeps the start time it was filed under and does not jump position in
@@ -242,9 +249,10 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_original_code_units = excluded.rtk_original_code_units,
     rtk_compressed_code_units = excluded.rtk_compressed_code_units,
     rtk_estimated_tokens_saved = excluded.rtk_estimated_tokens_saved,
-    rtk_filters = excluded.rtk_filters`;
+    rtk_filters = excluded.rtk_filters
+  WHERE request_logs.state = 'pending'`;
 
-export function createUsageRepo(db: Database): UsageRepo {
+export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
   /**
    * The raw row and both rollups are written together: a crash between them
    * would leave the year view, or a key's hourly counters, quietly disagreeing
@@ -256,7 +264,9 @@ export function createUsageRepo(db: Database): UsageRepo {
    * column the completing log did not carry.
    */
   const complete = db.transaction((log: RequestLog) => {
-    db.run(COMPLETE, values(log, "done"));
+    // Zero rows changed means the claim lost: the row was already done. No
+    // rollup then — it was rolled up by whoever completed it.
+    if (db.run(COMPLETE, values(log, "done", nodeId)).changes === 0) return;
     const stored = db.query<Row, [string]>("SELECT * FROM request_logs WHERE id = ?").get(log.id);
     if (stored !== null) {
       const restored = toLog(stored);
@@ -300,7 +310,10 @@ export function createUsageRepo(db: Database): UsageRepo {
 
   return {
     async begin(log: RequestLog) {
-      db.run(`INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}`, values(log, "pending"));
+      db.run(
+        `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}`,
+        values(log, "pending", nodeId),
+      );
     },
 
     async route(id, target) {
@@ -316,10 +329,17 @@ export function createUsageRepo(db: Database): UsageRepo {
       complete(log);
     },
 
-    async sweepPending() {
+    async sweepPending(now) {
+      // Own rows, or rows of a node with no live heartbeat. `NOT IN` against
+      // the live set rather than a join on the dead set, because a node that
+      // never wrote a heartbeat has no row to join against and is dead too.
       const stale = db
-        .query<Row, []>("SELECT * FROM request_logs WHERE state = 'pending'")
-        .all()
+        .query<Row, [string, number]>(
+          `SELECT * FROM request_logs
+            WHERE state = 'pending'
+              AND (node_id = ? OR node_id NOT IN (SELECT id FROM nodes WHERE seen_at > ?))`,
+        )
+        .all(nodeId, now - NODE_GRACE_MS)
         .map(toLog);
       for (const log of stale) {
         // Through the same path as a real completion, so the daily rollup keeps
@@ -349,6 +369,20 @@ export function createUsageRepo(db: Database): UsageRepo {
         )
         .all(apiKeyId, limit)
         .map(toLog);
+    },
+
+    async scan(cursor, limit) {
+      const rows =
+        cursor === null
+          ? db.query<Row, [number]>("SELECT * FROM request_logs ORDER BY at, id LIMIT ?").all(limit)
+          : db
+              .query<Row, [number, number, string, number]>(
+                `SELECT * FROM request_logs
+                  WHERE at > ? OR (at = ? AND id > ?)
+                  ORDER BY at, id LIMIT ?`,
+              )
+              .all(cursor.at, cursor.at, cursor.id, limit);
+      return rows.map(toLog);
     },
 
     async sumSince(apiKeyId: string, sinceMs: number) {
@@ -395,6 +429,37 @@ export function createUsageRepo(db: Database): UsageRepo {
         tokens: (whole?.tokens ?? 0) + (edge?.tokens ?? 0),
         costUsd: (whole?.cost_usd ?? 0) + (edge?.cost_usd ?? 0),
       };
+    },
+
+    async sumBuckets(apiKeyId, sinceMs, grainMs) {
+      type BucketRow = SumRow & { bucket: number };
+      const rows =
+        grainMs === HOUR_MS
+          ? db
+              .query<BucketRow, [string, number]>(
+                `SELECT hour * ${HOUR_MS} AS bucket, requests,
+                        input_tokens + output_tokens + cache_read_tokens + cache_write_tokens
+                          AS tokens,
+                        cost_usd
+                   FROM usage_rollup
+                  WHERE api_key_id = ? AND hour >= ?`,
+              )
+              .all(apiKeyId, hourOf(sinceMs))
+          : db
+              .query<BucketRow, [number, number, string, number]>(
+                `SELECT (at / ?) * ? AS bucket, COUNT(*) AS requests,
+                        COALESCE(SUM(input_tokens + output_tokens
+                                     + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                        COALESCE(SUM(cost_usd), 0) AS cost_usd
+                   FROM request_logs
+                  WHERE api_key_id = ? AND state = 'done' AND at >= ?
+                  GROUP BY bucket`,
+              )
+              .all(grainMs, grainMs, apiKeyId, sinceMs);
+      return rows.map((row) => [
+        row.bucket,
+        { requests: row.requests, tokens: row.tokens, costUsd: row.cost_usd },
+      ]);
     },
 
     async rebuildRollup() {

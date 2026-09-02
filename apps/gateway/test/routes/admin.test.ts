@@ -93,6 +93,7 @@ async function harness({
     store,
     admin,
     baseUrl: "http://localhost:9000",
+    nodeId: "test-node",
     now: () => now,
     sessionTtlMs: SESSION_TTL_MS,
     broadcaster: { invalidate: (topic) => void topics.push(topic) },

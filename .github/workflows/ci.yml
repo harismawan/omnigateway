@@ -13,6 +13,39 @@ jobs:
   verify:
     runs-on: ubuntu-latest
 
+    # The coordinator contract and the two-replica cluster suite run against a
+    # real Redis when one is named, and skip otherwise. Named here, so a skip
+    # on a developer's machine is never a skip in CI — a check that skips and a
+    # check that passes are the same green.
+    services:
+      redis:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      # The store contract suite runs every repo test twice, SQLite and
+      # Postgres, when this is named; same rule as Redis above.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: omni
+          POSTGRES_DB: omni
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      OMNI_TEST_REDIS_URL: redis://127.0.0.1:6379
+      OMNI_TEST_DATABASE_URL: postgres://postgres:omni@127.0.0.1:5432/omni
+
     steps:
       # Full history and tags, not the default depth-1 tagless checkout.
       # Three checks compare against `main` or the newest `v*` tag:

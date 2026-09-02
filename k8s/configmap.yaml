@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: omnigateway-config
+data:
+  OMNI_HOST: "0.0.0.0"
+  OMNI_PORT: "9000"
+  OMNI_LOG_LEVEL: "info"
+
+  # Several replicas, one installation. Requires OMNI_DATABASE_URL and
+  # OMNI_REDIS_URL, which live in the Secret.
+  OMNI_CLUSTER_MODE: "true"
+
+  # Public origin: what OAuth callbacks and generated client configs point at.
+  # Must be the ingress host, not the Service.
+  OMNI_BASE_URL: "https://omni.harismawan.com"
+
+  # Plugins are read from $OMNI_ROOT/plugins at boot. In a fleet every replica
+  # must hold the same set, so bake them into the image rather than mounting.
+  OMNI_ROOT: "/data"
+
+  # Off in a fleet by default: bodies are bytea rows in Postgres in cluster
+  # mode and grow the database with prompt volume. Flip on for an incident.
+  OMNI_BODY_LOGGING_ALLOWED: "false"

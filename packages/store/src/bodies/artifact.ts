@@ -256,7 +256,19 @@ export async function readArtifact(
   } catch {
     return { ok: false, failure: "missing" };
   }
+  return decodeArtifact(key, bytes, expectedSha256);
+}
 
+/**
+ * The half of a read that is about the bytes rather than where they came from:
+ * digest check, decryption, and the shape check on the plaintext. Shared with
+ * the Postgres repo, which reads the same envelope out of a `bytea` column.
+ */
+export async function decodeArtifact(
+  key: CryptoKey,
+  bytes: Uint8Array,
+  expectedSha256: string | null,
+): Promise<ArtifactRead> {
   try {
     if (expectedSha256 !== null && (await sha256Hex(bytes)) !== expectedSha256) {
       return { ok: false, failure: "corrupt" };

@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnigateway
+spec:
+  selector:
+    matchLabels:
+      app: omnigateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # One up before one down: the surviving replica keeps serving while the
+      # new one boots, migrates under the advisory lock, and turns ready.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: omnigateway
+    spec:
+      imagePullSecrets:
+        - name: ghcr-creds
+      # Long enough for in-flight streams to finish: the gateway drains on
+      # SIGTERM and closes consoles with 1001 so they reconnect elsewhere.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: omnigateway
+          image: ghcr.io/harismawan/omnigateway
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9000
+          resources:
+            limits:
+              memory: "512Mi"
+              cpu: 1
+            requests:
+              memory: "128Mi"
+              cpu: 0.1
+          envFrom:
+            - configMapRef:
+                name: omnigateway-config
+            - secretRef:
+                name: omnigateway-secrets
+          # /health is unauthenticated liveness and answers before the store is
+          # asked anything, so a store or coordinator outage does not restart
+          # pods — the request path fails open on the coordinator and reports
+          # `coord: fallback` here for an operator to read.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3

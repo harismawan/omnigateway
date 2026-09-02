@@ -193,7 +193,7 @@ async function rollupState(ctx: Context): Promise<string | null> {
 async function orphanTables(ctx: Context): Promise<string[] | null> {
   if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
   try {
-    return orphanPluginTables(doctorPluginDeps(), ctx.root.root, await ctx.store());
+    return await orphanPluginTables(doctorPluginDeps(), ctx.root.root, await ctx.store());
   } catch {
     // Already reported by `config` or `database` above.
     return null;

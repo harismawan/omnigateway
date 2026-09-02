@@ -103,13 +103,13 @@ test("a concurrency ceiling refuses the request that would exceed it", async () 
   // is judged while the gauge is up.
   const first = await call({ ...BODY, stream: true });
   expect(first.status).toBe(200);
-  expect(rateLimiter.inFlight(keyId)).toBe(1);
+  expect(await rateLimiter.inFlight(keyId)).toBe(1);
 
   const second = await call(BODY);
   expect(second.status).toBe(429);
 
   await first.text();
-  expect(rateLimiter.inFlight(keyId)).toBe(0);
+  expect(await rateLimiter.inFlight(keyId)).toBe(0);
   store.close();
 });
 
@@ -117,7 +117,7 @@ test("frees the concurrency slot when a non-streaming request completes", async 
   const { store, call, rateLimiter, keyId } = await harness();
   const response = await call(BODY);
   expect(response.status).toBe(200);
-  expect(rateLimiter.inFlight(keyId)).toBe(0);
+  expect(await rateLimiter.inFlight(keyId)).toBe(0);
   store.close();
 });
 
@@ -126,10 +126,10 @@ test("frees the concurrency slot when a stream drains", async () => {
   const response = await call({ ...BODY, stream: true });
   expect(response.status).toBe(200);
   // Still held: the head is out, the request is not over.
-  expect(rateLimiter.inFlight(keyId)).toBe(1);
+  expect(await rateLimiter.inFlight(keyId)).toBe(1);
 
   await response.text();
-  expect(rateLimiter.inFlight(keyId)).toBe(0);
+  expect(await rateLimiter.inFlight(keyId)).toBe(0);
   store.close();
 });
 
@@ -149,7 +149,7 @@ test("frees the concurrency slot when the gateway deadline expires", async () =>
 
   const response = await call(BODY);
   expect(response.status).toBe(504);
-  expect(rateLimiter.inFlight(keyId)).toBe(0);
+  expect(await rateLimiter.inFlight(keyId)).toBe(0);
   store.close();
 });
 
@@ -157,7 +157,7 @@ test("frees the concurrency slot when a request is refused before dispatch", asy
   const { store, call, rateLimiter, keyId } = await harness({ modelAllowlist: [] });
   const response = await call(BODY);
   expect(response.status).toBe(401);
-  expect(rateLimiter.inFlight(keyId)).toBe(0);
+  expect(await rateLimiter.inFlight(keyId)).toBe(0);
   store.close();
 });
 
@@ -179,10 +179,10 @@ test("frees the concurrency slot when a client hangs up mid-stream, leaving no t
     const reader = response.body?.getReader();
     if (reader === undefined) throw new Error("expected a streamed body");
     await reader.read();
-    expect(rateLimiter.inFlight(keyId)).toBe(1);
+    expect(await rateLimiter.inFlight(keyId)).toBe(1);
 
     await reader.cancel();
-    expect(rateLimiter.inFlight(keyId)).toBe(0);
+    expect(await rateLimiter.inFlight(keyId)).toBe(0);
     // Before `restore`, which uninstalls the patched `clearTimeout` and so
     // freezes the set. The keepalive timer is cleared in a `.finally` that runs
     // after the cancel resolves.
@@ -203,11 +203,11 @@ test("frees the concurrency slot when a client aborts a stream, leaving no liste
   const reader = response.body?.getReader();
   if (reader === undefined) throw new Error("expected a streamed body");
   await reader.read();
-  expect(rateLimiter.inFlight(keyId)).toBe(1);
+  expect(await rateLimiter.inFlight(keyId)).toBe(1);
 
   controller.abort();
   await reader.cancel().catch(() => undefined);
-  expect(rateLimiter.inFlight(keyId)).toBe(0);
+  expect(await rateLimiter.inFlight(keyId)).toBe(0);
   expect(listeners.live()).toBe(0);
   store.close();
 });
@@ -228,7 +228,7 @@ test("a row write that never returns does not strand the concurrency slot", asyn
   const response = await call({ ...BODY, stream: true });
   await response.text();
 
-  expect(rateLimiter.inFlight(keyId)).toBe(0);
+  expect(await rateLimiter.inFlight(keyId)).toBe(0);
   store.close();
 });
 

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { memoryCoord } from "@omni/coord";
 import { memoryStore } from "@omni/testkit";
 import { createAdminAuth } from "../src/adminAuth.ts";
 
@@ -56,7 +57,7 @@ test("logout invalidates a session immediately", async () => {
   const auth = createAdminAuth(await memoryStore(), opts);
   await auth.setPassword("hunter2hunter2");
   const token = (await auth.login("hunter2hunter2")) as string;
-  auth.logout(token);
+  await auth.logout(token);
   expect(await auth.verify(token)).toBeNull();
 });
 
@@ -73,7 +74,7 @@ test("invalidating sessions ends them without touching the stored password", asy
   await auth.setPassword("hunter2hunter2");
   const token = (await auth.login("hunter2hunter2")) as string;
 
-  auth.invalidateSessions();
+  await auth.invalidateSessions();
 
   expect(await auth.verify(token)).toBeNull();
   // The password itself is untouched: this is for the caller that replaced the
@@ -166,4 +167,24 @@ test("a short viewer password is refused, and null is not a short password", asy
   const auth = createAdminAuth(await memoryStore(), opts);
   expect(auth.setViewerPassword("short")).rejects.toThrow();
   expect(auth.setViewerPassword(null)).resolves.toBeUndefined();
+});
+
+/**
+ * Two processes sharing one store and one `Coord`: a cookie issued by one is
+ * known to the other, and a password change on one ends it on both. This is
+ * the property the in-memory map could not have, and the reason sessions
+ * moved.
+ */
+test("sessions issued by one process verify on another, and end on both", async () => {
+  const store = await memoryStore();
+  const coord = memoryCoord({ now: opts.now });
+  const a = createAdminAuth(store, { ...opts, coord });
+  const b = createAdminAuth(store, { ...opts, coord });
+  await a.setPassword("hunter2hunter2");
+  const token = (await a.login("hunter2hunter2")) as string;
+
+  expect(await b.verify(token)).toEqual({ kind: "admin" });
+
+  await b.setPassword("correct-horse-battery");
+  expect(await a.verify(token)).toBeNull();
 });
