@@ -409,6 +409,37 @@ export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
       };
     },
 
+    async sumBuckets(apiKeyId, sinceMs, grainMs) {
+      type BucketRow = SumRow & { bucket: number };
+      const rows =
+        grainMs === HOUR_MS
+          ? db
+              .query<BucketRow, [string, number]>(
+                `SELECT hour * ${HOUR_MS} AS bucket, requests,
+                        input_tokens + output_tokens + cache_read_tokens + cache_write_tokens
+                          AS tokens,
+                        cost_usd
+                   FROM usage_rollup
+                  WHERE api_key_id = ? AND hour >= ?`,
+              )
+              .all(apiKeyId, hourOf(sinceMs))
+          : db
+              .query<BucketRow, [number, number, string, number]>(
+                `SELECT (at / ?) * ? AS bucket, COUNT(*) AS requests,
+                        COALESCE(SUM(input_tokens + output_tokens
+                                     + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                        COALESCE(SUM(cost_usd), 0) AS cost_usd
+                   FROM request_logs
+                  WHERE api_key_id = ? AND state = 'done' AND at >= ?
+                  GROUP BY bucket`,
+              )
+              .all(grainMs, grainMs, apiKeyId, sinceMs);
+      return rows.map((row) => [
+        row.bucket,
+        { requests: row.requests, tokens: row.tokens, costUsd: row.cost_usd },
+      ]);
+    },
+
     async rebuildRollup() {
       rebuildRollup(db);
     },

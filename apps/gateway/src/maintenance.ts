@@ -1,6 +1,7 @@
 import { type DatabaseDeps, nodeDatabaseFs, pruneSnapshots, sweepStaging } from "@omni/control";
 import { describeError, type Logger, noopLogger } from "@omni/ir";
 import type { Store } from "@omni/store";
+import { type LeaseDeps, underLease } from "./lease.ts";
 
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -83,6 +84,8 @@ export type MaintenanceDeps = {
   logger?: Logger;
   /** The filesystem the file sweeps run against. The real one, unless a test says otherwise. */
   fs?: DatabaseDeps["fs"];
+  /** One process prunes at a time; the heartbeat is every process's own. */
+  lease?: LeaseDeps;
 };
 
 /** How often this process says it is alive; a sixth of the grace a sweep allows. */
@@ -110,6 +113,26 @@ export function startMaintenance(deps: MaintenanceDeps): () => void {
   };
 
   const timer = setInterval(() => {
+    void underLease(deps.lease, "maintenance", 2 * SWEEP_INTERVAL_MS, () => prune()).catch(
+      (error: unknown) => {
+        logger.error("maintenance lease failed", { reason: describeError(error, "unknown") });
+      },
+    );
+  }, SWEEP_INTERVAL_MS);
+
+  const prune = async (): Promise<void> => {
+    // The dead-node sweep rides here rather than in its own loop: a process that
+    // died mid-request leaves a row only its heartbeat's absence can retire, and
+    // this is the one loop a single process runs.
+    await deps.store.usage
+      .sweepPending(deps.now())
+      .then((count) => {
+        if (count > 0) logger.info("retired interrupted requests", { count });
+      })
+      .catch((error: unknown) => {
+        logger.error("pending sweep failed", { reason: describeError(error, "unknown") });
+      });
+
     void pruneFiles(files)
       .then(({ snapshots, staging }) =>
         // One number, under a field `LogFields` already has, for the same
@@ -144,7 +167,7 @@ export function startMaintenance(deps: MaintenanceDeps): () => void {
           reason: describeError(error, "unknown"),
         });
       });
-  }, SWEEP_INTERVAL_MS);
+  };
 
   // Do not hold the process open for a maintenance timer.
   timer.unref?.();

@@ -325,24 +325,25 @@ polling within one pod, and a cross-pod duplicate poll is harmless.
   A Redis-backed ring (`XADD`/`XRANGE`) that would make reconnects gap-free was considered
   and deferred: `gap` → refetch already exists and is one round-trip.
 - `declareStream` publishes on `pubsub` as well, so any pod answers `declared`.
-- Plugin channels: `send(connectionId, …)` to a connection id whose prefix is another
-  node's publishes a `plugin:<id>:<name>` frame carrying the target id; the owning pod
-  delivers. Subscribe-before-send is unchanged because the registry entry lives where the
-  socket lives.
+- Plugin channels stay **pod-local**, and that is not a gap: a plugin's handlers run on the
+  pod whose socket delivered the message, so every connection id a plugin ever sees is a
+  local one. Cross-pod `send` was in the first draft and was dropped when that became
+  clear — there is no id to send to.
 - **No sticky sessions are required.** Cookie verification reads `kv`; everything else is
   fan-out. The ingress must pass WebSocket upgrades and hold an idle timeout above the
   keepalive cadence (10 s; 5 s on `/v1/responses`).
 
 ### Per-pod console log
 
-Each pod publishes its console batches to `console:<nodeId>`; every pod pattern-subscribes
-`console:*` and serves `stream:console:<nodeId>` from its own socket, with `seq` from
-`coord.incr("seq:console:<nodeId>")` and a per-topic local ring. `GET /api/nodes`
-(`requireReader`) lists the `nodes` table. The console panel gains a pod selector,
-defaulting to the pod that served the page (`/health.nodeId`); "all" merges by timestamp
-with a `nodeId` badge. On one node the selector is hidden. With Redis down the panel shows
-its own pod and disables the selector with a reason — the "declared or error, never silent"
-rule.
+Each pod publishes every console batch on **two** topics: the shared `stream:console`,
+which through the fan-out is every pod's lines merged — the "all" view, for free — and its
+own `stream:console:<nodeId>`. The REST backlog for another pod is an ask over
+`coord.pubsub` (`console:read`) answered on a topic minted per ask, three-second timeout
+into `TIMEOUT`; `node=all` asks every live node and merges by timestamp, tagging each line
+with its `nodeId`. `GET /api/nodes` (`requireReader`) lists the live `nodes` rows with
+`self`. The console panel shows a selector only when there is more than one node, defaults
+to "every process", and holds the chosen pod's topic the way a plugin channel is held.
+Absent `node=` is the answering pod, which is what one process was always shown.
 
 ### Restart — `apps/gateway/src/lifecycle.ts`
 

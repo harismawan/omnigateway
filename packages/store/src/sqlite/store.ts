@@ -168,6 +168,8 @@ export async function createStore(opts: {
       recent: (limit, apiKeyId) => handle.usage.recent(limit, apiKeyId),
       aggregate: (q) => handle.usage.aggregate(q),
       sumSince: (apiKeyId, sinceMs) => handle.usage.sumSince(apiKeyId, sinceMs),
+      sumBuckets: (apiKeyId, sinceMs, grainMs) =>
+        handle.usage.sumBuckets(apiKeyId, sinceMs, grainMs),
       oldestSince: (apiKeyId, sinceMs) => handle.usage.oldestSince(apiKeyId, sinceMs),
       rebuildRollup: () => handle.usage.rebuildRollup(),
       auditRollup: () => handle.usage.auditRollup(),
@@ -186,6 +188,7 @@ export async function createStore(opts: {
     maintenance: {
       stats: () => handle.maintenance.stats(),
       heartbeat: (now) => handle.maintenance.heartbeat(now),
+      nodes: (now) => handle.maintenance.nodes(now),
       vacuum: () => handle.maintenance.vacuum(),
       snapshotTo: (path) => handle.maintenance.snapshotTo(path),
       inspect: (path) => handle.maintenance.inspect(path),

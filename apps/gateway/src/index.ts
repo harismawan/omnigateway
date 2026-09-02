@@ -23,9 +23,8 @@ import { createPluginEventBus } from "./plugins/events.ts";
 import { installPluginProviders } from "./plugins/install.ts";
 import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
-import { createBroadcaster, DEFAULT_FLOOR_MS, INVALIDATION_FLOORS } from "./stream/broadcaster.ts";
+import { createBroadcaster } from "./stream/broadcaster.ts";
 import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
-import { createCoalescer } from "./stream/coalescer.ts";
 import { startConsoleStream } from "./stream/console.ts";
 import { createSocketRegistry } from "./stream/registry.ts";
 import { createRing } from "./stream/ring.ts";
@@ -128,10 +127,13 @@ async function main(): Promise<void> {
 
   const encryptionKey = await deriveKey(config.encryptionKey);
   const now = () => Date.now();
+  // This process's name on every row it owns and every lease it holds.
+  const nodeId = crypto.randomUUID();
   const store = await createStore({
     path: config.databasePath,
     encryptionKey,
     logger,
+    nodeId,
   });
 
   // A request still marked in-flight under a process nobody has heard from
@@ -163,6 +165,7 @@ async function main(): Promise<void> {
   // One per process, shared by the limiter, the load registry and the
   // refresher: the counters a fleet must agree on all live behind it.
   const coord = memoryCoord();
+  const lease = { coord, nodeId };
   const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger, coord });
   const staticDir = dashboardDir();
   logger.info(
@@ -267,22 +270,15 @@ async function main(): Promise<void> {
   const broadcaster = createBroadcaster({
     registry: streamRegistry,
     ring: streamRing,
-    coalescer: createCoalescer({
-      floors: INVALIDATION_FLOORS,
-      defaultFloorMs: DEFAULT_FLOOR_MS,
-      now,
-      sink: (topic, payload) =>
-        streamRegistry.publish(topic, {
-          type: "event",
-          topic,
-          ...(payload === undefined ? {} : { payload }),
-        }),
-    }),
+    coord,
+    nodeId,
+    now,
   });
 
   const app = createApp({
     store,
     coord,
+    nodeId,
     baseUrl: config.baseUrl,
     http,
     now,
@@ -326,11 +322,19 @@ async function main(): Promise<void> {
     },
   });
 
-  const stopMaintenance = startMaintenance({ store, now, logger });
-  const stopRefreshScheduler = startRefreshScheduler({ store, refresh, now, logger, broadcaster });
+  const stopMaintenance = startMaintenance({ store, now, logger, lease });
+  const stopRefreshScheduler = startRefreshScheduler({
+    store,
+    refresh,
+    now,
+    logger,
+    broadcaster,
+    lease,
+  });
   const stopQuotaPoller = await startQuotaPoller({
     store,
     coord,
+    lease,
     providers: OAUTH_PROVIDERS,
     http,
     refresh,
@@ -342,7 +346,7 @@ async function main(): Promise<void> {
   // than invalidations, and because a source that cannot start declares no
   // topic: whether `stream:console` exists at all is decided here, and nothing
   // downstream should be able to observe it half-decided.
-  const stopConsoleStream = startConsoleStream({ console, broadcaster, logger, now });
+  const stopConsoleStream = startConsoleStream({ console, broadcaster, logger, now, nodeId });
 
   // Elysia defaults Bun's socket `idleTimeout` to 30 seconds, which is shorter
   // than a request is allowed to take: `requestDeadlineMs` is 120s by default,

@@ -25,6 +25,18 @@ import { createCoalescer } from "./coalescer.ts";
 export const CONSOLE_TOPIC = "stream:console";
 
 /**
+ * One process's own log, beside the shared topic.
+ *
+ * `stream:console` carries every process's lines once frames fan out through
+ * the coordinator, which is the "all" view a console wants by default; this is
+ * the one a console wants when it picks a process. Both are published, so a
+ * subscriber holds one topic either way rather than merging N.
+ */
+export function consoleTopic(nodeId: string): string {
+  return `${CONSOLE_TOPIC}:${nodeId}`;
+}
+
+/**
  * The floor on how often a file source publishes.
  *
  * `fs.watch` fires per write, and a gateway under load writes a line per
@@ -74,6 +86,8 @@ export type ConsoleStreamDeps = {
   /** Where stdout ended up, and how to read it back. Built once, in `index.ts`. */
   console: { source: ConsoleSource; deps: ConsoleDeps };
   broadcaster: Broadcaster;
+  /** Names this process's own topic. Absent in tests that read the shared one. */
+  nodeId?: string;
   logger?: Logger;
   now?: Clock;
   schedule?: Schedule;
@@ -108,6 +122,22 @@ const defaultSchedule: Schedule = (run, ms) => {
  * added — a second rule saying the same thing is a rule that ends up true in
  * one place.
  */
+
+/** The topics one process publishes on, and a publish that hits every one. */
+function outlets(deps: ConsoleStreamDeps): {
+  topics: readonly string[];
+  publish: (frame: ConsoleFrame) => void;
+} {
+  const topics =
+    deps.nodeId === undefined ? [CONSOLE_TOPIC] : [CONSOLE_TOPIC, consoleTopic(deps.nodeId)];
+  return {
+    topics,
+    publish: (frame) => {
+      for (const topic of topics) deps.broadcaster.stream(topic, frame);
+    },
+  };
+}
+
 export function startConsoleStream(deps: ConsoleStreamDeps): () => void {
   const logger = deps.logger ?? noopLogger;
   const { source } = deps.console;
@@ -123,6 +153,7 @@ function startFileWatch(
   logger: Logger,
 ): () => void {
   const { broadcaster } = deps;
+  const { topics, publish } = outlets(deps);
   const read = deps.read ?? readFrom;
   const size = deps.size ?? fileSize;
   const floorMs = deps.floorMs ?? CONSOLE_FLOOR_MS;
@@ -155,7 +186,7 @@ function startFileWatch(
 
     offset = delta.offset;
     const lines = parseConsoleLines(delta.text, { lines: MAX_CONSOLE_LINES });
-    if (lines.length > 0) broadcaster.stream(CONSOLE_TOPIC, { lines } satisfies ConsoleFrame);
+    if (lines.length > 0) publish({ lines });
 
     if (delta.gap || rotated) {
       rotated = false;
@@ -168,7 +199,7 @@ function startFileWatch(
       // which is exactly what happened, stated in the vocabulary that already
       // exists. Sequence numbers keep climbing, so a subscriber that received
       // this frame live is still current and is told so.
-      broadcaster.resetStream(CONSOLE_TOPIC);
+      for (const topic of topics) broadcaster.resetStream(topic);
     }
   };
 
@@ -245,7 +276,7 @@ function startFileWatch(
     return () => {};
   }
 
-  broadcaster.declareStream(CONSOLE_TOPIC);
+  for (const topic of topics) broadcaster.declareStream(topic);
   logger.info("console stream watching", { path: source.path });
 
   return () => {
@@ -295,6 +326,7 @@ function startJournalPoll(
   logger: Logger,
 ): () => void {
   const { broadcaster } = deps;
+  const { topics, publish } = outlets(deps);
   const now = deps.now ?? Date.now;
   const schedule = deps.schedule ?? defaultSchedule;
   const pollMs = deps.pollMs ?? JOURNAL_POLL_MS;
@@ -364,7 +396,7 @@ function startJournalPoll(
         for (const line of fresh) {
           if (line.at === cursor) publishedAtCursor.add(line.raw);
         }
-        broadcaster.stream(CONSOLE_TOPIC, { lines: fresh } satisfies ConsoleFrame);
+        publish({ lines: fresh });
       }
     } catch (error) {
       logger.error("console poll failed", { reason: describeError(error, "unknown") });
@@ -375,7 +407,7 @@ function startJournalPoll(
     }
   };
 
-  broadcaster.declareStream(CONSOLE_TOPIC);
+  for (const topic of topics) broadcaster.declareStream(topic);
   arm();
 
   return () => {

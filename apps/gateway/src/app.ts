@@ -10,6 +10,7 @@ import {
   nodeDatabaseFs,
   OAUTH_PROVIDERS,
   type Refresher,
+  readConsole,
 } from "@omni/control";
 import { type Coord, memoryCoord } from "@omni/coord";
 import { GatewayError, HTTP_STATUS, type Logger, noopLogger, type ProviderId } from "@omni/ir";
@@ -33,14 +34,9 @@ import { connectRoutes } from "./routes/connect.ts";
 import { databaseRoutes } from "./routes/database.ts";
 import { proxyRoutes } from "./routes/proxy.ts";
 import { streamRoutes } from "./routes/stream.ts";
-import {
-  type Broadcaster,
-  createBroadcaster,
-  DEFAULT_FLOOR_MS,
-  INVALIDATION_FLOORS,
-} from "./stream/broadcaster.ts";
+import { type Broadcaster, createBroadcaster } from "./stream/broadcaster.ts";
 import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
-import { createCoalescer } from "./stream/coalescer.ts";
+import { createConsoleFleet } from "./stream/consoleFleet.ts";
 import { createSocketRegistry, type SocketRegistry } from "./stream/registry.ts";
 import { createRing, type Ring } from "./stream/ring.ts";
 
@@ -59,6 +55,8 @@ export type AppDeps = {
    * which is the single-process installation.
    */
   coord?: Coord;
+  /** This process's name on leases and stream declarations. Fresh when absent. */
+  nodeId?: string;
   /** Overridden by tests that assert in-flight accounting; one per process otherwise. */
   loadRegistry?: LoadRegistry;
   /** Overridden by tests that read the concurrency gauge; one per process otherwise. */
@@ -227,6 +225,7 @@ function absentLifecycle(): LifecycleDeps {
 export function createApp(deps: AppDeps) {
   const now = deps.now ?? (() => Date.now());
   const coord = deps.coord ?? memoryCoord();
+  const nodeId = deps.nodeId ?? crypto.randomUUID();
   const logger = deps.logger ?? noopLogger;
   const rand = deps.rand ?? Math.random;
   const http = deps.http ?? nodeHttpClient({ logger, now });
@@ -280,23 +279,16 @@ export function createApp(deps: AppDeps) {
   const channels = deps.channels ?? createChannelRegistry({ sockets: registry, logger });
   channelsRef = channels;
   const ring = deps.ring ?? createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
-  const broadcaster =
-    deps.broadcaster ??
-    createBroadcaster({
-      registry,
-      ring,
-      coalescer: createCoalescer({
-        floors: INVALIDATION_FLOORS,
-        defaultFloorMs: DEFAULT_FLOOR_MS,
-        now,
-        sink: (topic, payload) =>
-          registry.publish(topic, {
-            type: "event",
-            topic,
-            ...(payload === undefined ? {} : { payload }),
-          }),
-      }),
-    });
+  const broadcaster = deps.broadcaster ?? createBroadcaster({ registry, ring, coord, nodeId, now });
+  const capture = deps.console;
+  const consoleFleet = createConsoleFleet({
+    coord,
+    nodeId,
+    local:
+      capture === undefined
+        ? undefined
+        : (query) => readConsole(capture.deps, capture.source, query),
+  });
   /**
    * The release for each admitted request, keyed by the request itself.
    *
@@ -360,6 +352,8 @@ export function createApp(deps: AppDeps) {
           sessionTtlMs: ADMIN_SESSION_TTL_MS,
           logger,
           broadcaster,
+          nodeId,
+          consoleFleet,
           ...(deps.console === undefined ? {} : { console: deps.console }),
         }),
       )

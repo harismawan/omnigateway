@@ -1,34 +1,36 @@
 import { expect, test } from "bun:test";
+import { memoryCoord } from "@omni/coord";
 import { GatewayError } from "@omni/ir";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
 import type { Store } from "@omni/store";
 import { captureLogger, memoryStore, requestLog, seedApiKey } from "@omni/testkit";
-import { ApiKeyRateLimiter, type Debit, MAX_DEBITS, trimDebits } from "../../src/auth/rateLimit.ts";
+import { ApiKeyRateLimiter } from "../../src/auth/rateLimit.ts";
 
-const T0 = 10_000_000;
+/** Minute-aligned, so a bucket's edge is where the arithmetic says it is. */
+const T0 = 10_020_000;
 const FIVE_HOURS = 5 * 60 * 60 * 1000;
-const ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
+const _ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * A limiter over a real store, with the one read it makes on the hot path
+ * A limiter over a real store, with the one read it makes — the seed —
  * observable.
  *
- * The store is real rather than stubbed because `sumSince` is where the
+ * The store is real rather than stubbed because `sumBuckets` is where the
  * pending-row filter and the four-column token sum live, and a fake would agree
  * with whatever this file assumed about them.
  */
-async function harness(limits: LimitConfig) {
+async function harness(limits: LimitConfig, coord = memoryCoord()) {
   const store = await memoryStore();
   const { key } = await seedApiKey(store, { limits });
   const logger = captureLogger();
   let clock = T0;
   const reads: number[] = [];
-  const real = store.usage.sumSince.bind(store.usage);
-  store.usage.sumSince = async (id, since) => {
+  const real = store.usage.sumBuckets.bind(store.usage);
+  store.usage.sumBuckets = async (id, since, grain) => {
     reads.push(since);
-    return await real(id, since);
+    return await real(id, since, grain);
   };
-  const limiter = new ApiKeyRateLimiter({ store, now: () => clock, logger });
+  const limiter = new ApiKeyRateLimiter({ store, now: () => clock, logger, coord });
 
   return {
     store,
@@ -37,7 +39,7 @@ async function harness(limits: LimitConfig) {
     limits,
     keyId: key.id,
     reads,
-    /** Every `sumSince` a read-through issues, one per long window. */
+    /** Every seed issued, one per long window. */
     readThroughs: () => reads.length / 2,
     at(ms: number) {
       clock = ms;
@@ -243,7 +245,7 @@ test("a burst of count_tokens checks consumes exactly the ceiling", async () => 
   store.close();
 });
 
-test("a long window counts the store sum plus what has been debited since it was read", async () => {
+test("a long window counts the seeded store sum plus what has been debited since", async () => {
   const { store, keyId, limiter, admit, at } = await harness({ tokens: { "5h": 100 } });
   await seedRow(store, keyId, T0 - 1000, { tokens: 40 });
 
@@ -251,7 +253,7 @@ test("a long window counts the store sum plus what has been debited since it was
   expect(await admit()).toBeInstanceOf(Function);
 
   // A finished request the store has not been asked about again. Only the
-  // in-memory delta knows about it, and without it the key reads as 40.
+  // buckets know about it, and without the debit the key reads as 40.
   limiter.debit(keyId, { tokens: 60, costUsd: 0 });
 
   expect((await denied(admit)).code).toBe("RATE_LIMIT");
@@ -262,16 +264,11 @@ test("a long window counts the store sum plus what has been debited since it was
  * A long `requests` ceiling is enforced by the debit, not by the ring.
  *
  * `requests` at `1m` is claimed at admission, but at `5h` and `1w` the count is
- * `sumSince` plus the delta — and `sumSince` counts committed rows only, so a
- * long window sees a request when `finishLog` debits it. Ten requests inside one
- * cache TTL is the arrangement that separates the two: the store sum is read
- * once and then reused, so the delta is the only thing that moves, and a debit
- * carrying no request at all leaves the ceiling reading zero forever. Asserted
- * at exactly the ceiling rather than at "fewer than ten", because the debit is
- * also what trips the eager read-through that turns the third admission into the
- * refusal of the fourth.
+ * the buckets — and the buckets are debited on completion, so a long window
+ * sees a request when `finishLog` debits it. A debit carrying no request at all
+ * would leave the ceiling reading zero forever.
  */
-test("a long requests ceiling is reached inside one cache TTL, because every debit carries its request", async () => {
+test("a long requests ceiling is reached because every debit carries its request", async () => {
   const { store, admit, complete, at } = await harness({ requests: { "5h": 3 } });
   let admitted = 0;
   for (let i = 0; i < 10; i++) {
@@ -292,102 +289,65 @@ test("a long requests ceiling is reached inside one cache TTL, because every deb
   store.close();
 });
 
-test("the store sum is reused inside the cache TTL and read again after it", async () => {
+test("the store seeds a key once and is not asked again while the buckets live", async () => {
   // A ceiling nothing reaches, so every admission is allowed and the only thing
   // under test is how often the store is asked.
   const { store, keyId, admit, at, readThroughs } = await harness({ tokens: { "5h": 1_000_000 } });
   await seedRow(store, keyId, T0 - 1000, { tokens: 40 });
 
   at(T0);
-  await admit();
+  (await admit())();
   expect(readThroughs()).toBe(1);
-
-  at(T0 + 29_999);
-  await admit();
+  (await admit())();
+  at(T0 + 3_600_000);
+  (await admit())();
   expect(readThroughs()).toBe(1);
-
-  // The TTL is a half-open interval like every window here: thirty seconds old
-  // is stale, and not a tick before.
-  at(T0 + 30_000);
-  await admit();
-  expect(readThroughs()).toBe(2);
   store.close();
 });
 
 /**
- * The direction of the composition's one inaccuracy, pinned.
- *
- * Events that age out of a window between the cached read and now are not
- * subtracted, so the count runs high and never low. A limiter whose error ran
- * the other way could be walked through by timing the cache refresh, which is a
- * property an attacker can discover and an operator cannot.
+ * A window slides at its grain, and the trailing bucket counts until the whole
+ * of it has aged out. A row exactly five hours old is over-counted for up to a
+ * minute, which is the direction the composition may err — under-counting is
+ * the one it must never take.
  */
-test("a window that aged out inside the TTL still counts, so the error runs high", async () => {
+test("a trailing bucket counts until its whole grain has aged out", async () => {
   const { store, keyId, admit, at } = await harness({ tokens: { "5h": 100 } });
-  // Ages out of the five-hour window ten seconds after T0.
-  await seedRow(store, keyId, T0 - FIVE_HOURS + 10_000, { tokens: 60 });
-  await seedRow(store, keyId, T0, { tokens: 60 });
+  await seedRow(store, keyId, T0 - FIVE_HOURS, { tokens: 100 });
 
   at(T0);
   expect((await denied(admit)).code).toBe("RATE_LIMIT");
-
-  // Twenty seconds on, the older row has left the window and the true sum is
-  // 60. The cached read still holds 120, so the key is refused early — the
-  // safe direction, and bounded by the TTL.
-  at(T0 + 20_000);
+  at(T0 + 59_999);
   expect((await denied(admit)).code).toBe("RATE_LIMIT");
-
-  // And it recovers on the next read rather than staying wrong.
-  at(T0 + 30_000);
+  at(T0 + 60_000);
   expect(await admit()).toBeInstanceOf(Function);
   store.close();
 });
 
 /**
- * The other half of the same direction: a row committed while a read was in
- * flight lands in both the sum and the delta and is counted twice, rather than
- * falling between the two and being counted nowhere.
+ * A debit before the key is seeded is ignored, and the seed that follows reads
+ * the row instead — never both, which would count the request twice, and never
+ * neither, which is the error this design must not make.
  */
-test("a debit recorded at the instant of a read survives the prune", async () => {
-  const { store, keyId, limiter, admit, at } = await harness({ tokens: { "5h": 100 } });
-
+test("a debit before the seed is counted once, by the seed", async () => {
+  const { store, keyId, admit, complete, at } = await harness({ tokens: { "5h": 100 } });
+  await seedRow(store, keyId, T0 - 1000, { tokens: 40 });
   at(T0);
-  expect(await admit()).toBeInstanceOf(Function);
-
-  // The row lands, then the debit is recorded at the same instant the next
-  // read is issued at. The read already sees the row; keeping the debit as well
-  // double-counts it, which is the tolerated error.
-  at(T0 + 30_000);
-  await seedRow(store, keyId, T0 + 30_000, { tokens: 60 });
-  limiter.debit(keyId, { tokens: 60, costUsd: 0 });
-
+  // A debit that installed its own picture would read 60 and admit; one
+  // counted by both the debit and the seed would read 160 — allowed, but the
+  // next assertion at 99 catches it.
+  await complete({ tokens: 60 });
   expect((await denied(admit)).code).toBe("RATE_LIMIT");
   store.close();
 });
 
-test("a debit near a ceiling reads through eagerly instead of waiting out the TTL", async () => {
-  const { store, keyId, limiter, admit, at, readThroughs } = await harness({
-    tokens: { "5h": 100 },
-  });
-
+test("a debit before the seed is not counted twice", async () => {
+  const { store, keyId, admit, complete, at } = await harness({ tokens: { "5h": 100 } });
+  await seedRow(store, keyId, T0 - 1000, { tokens: 40 });
   at(T0);
-  await admit();
-  expect(readThroughs()).toBe(1);
-
-  // Comfortably clear of the ceiling: the cache is left alone.
-  at(T0 + 1_000);
-  limiter.debit(keyId, { tokens: 50, costUsd: 0 });
-  at(T0 + 2_000);
-  await admit();
-  expect(readThroughs()).toBe(1);
-
-  // Inside the last tenth of the ceiling, where precision is about to matter.
-  at(T0 + 3_000);
-  await seedRow(store, keyId, T0 + 3_000, { tokens: 40 });
-  limiter.debit(keyId, { tokens: 40, costUsd: 0 });
-  at(T0 + 4_000);
-  await admit();
-  expect(readThroughs()).toBe(2);
+  await complete({ tokens: 30 });
+  // 70 in the store; a double count would read 100 and refuse.
+  expect(await admit()).toBeInstanceOf(Function);
   store.close();
 });
 
@@ -397,7 +357,7 @@ test("a failing store read serves the request, logs it, and still enforces 1m an
   // Enough recorded usage that an answered read would refuse every request
   // below, so an assertion here cannot pass by the counters being empty.
   await seedRow(store, keyId, T0 - 1000, { tokens: 5000 });
-  store.usage.sumSince = async () => {
+  store.usage.sumBuckets = async () => {
     throw new Error("database is locked");
   };
 
@@ -412,9 +372,9 @@ test("a failing store read serves the request, logs it, and still enforces 1m an
   );
   expect(logger.lines.join("\n")).not.toContain("5000");
 
-  // Concurrency is pure memory and never reached the store, so it enforces
-  // exactly through the fault. This is the whole justification for failing
-  // open on the long windows.
+  // Concurrency never reached the store, so it enforces exactly through the
+  // fault. This is the whole justification for failing open on the long
+  // windows.
   expect((await denied(admit)).code).toBe("RATE_LIMIT");
 
   first();
@@ -428,6 +388,30 @@ test("a failing store read serves the request, logs it, and still enforces 1m an
   at(T0 + 60_000);
   expect(await admit()).toBeInstanceOf(Function);
   store.close();
+});
+
+/**
+ * Two processes over one store and one coordinator. The second never reads
+ * the store for what the first debited: the buckets carry it, which is the
+ * exactness the per-process cache could not have.
+ */
+test("a long window is exact across limiters sharing a coord", async () => {
+  const coord = memoryCoord();
+  const a = await harness({ tokens: { "5h": 100 } }, coord);
+  const b = new ApiKeyRateLimiter({ store: a.store, now: () => T0, coord });
+  const admitB = () => b.admit(a.keyId, a.limits, "req_b");
+
+  a.at(T0);
+  (await a.admit())();
+  await a.complete({ tokens: 60 });
+  // B is seeded already — A's admit seeded the shared buckets — and A's
+  // debit is in them, so B reads 60 with no store read of its own.
+  (await admitB()).release();
+  expect(a.readThroughs()).toBe(1);
+  await a.complete({ tokens: 50 });
+  expect((await denied(admitB)).code).toBe("RATE_LIMIT");
+  expect(a.readThroughs()).toBe(1);
+  a.store.close();
 });
 
 test("count_tokens consumes requests and never tokens, spend, or a concurrency slot", async () => {
@@ -451,143 +435,6 @@ test("count_tokens consumes requests and never tokens, spend, or a concurrency s
   store.close();
 });
 
-/**
- * Two read-throughs in flight at once, resolving in the wrong order.
- *
- * Nothing holds a lock across the yield, so an older read can come back after a
- * newer one — and the older one used to overwrite the newer sums *after* the
- * newer had already pruned the delta covering the difference. The usage between
- * the two reads is then counted in neither place, and the cache it left behind
- * is believed for the rest of its TTL. Under-counting is the one direction this
- * design must never take.
- *
- * Not reachable through `bun:sqlite`, whose reads settle in the same tick — but
- * reachable for any decorated or genuinely async store, and this file decorates
- * `sumSince` a few lines up.
- */
-test("a store read that resolves behind a newer one is discarded rather than installed", async () => {
-  const { store, keyId, limiter, limits, at } = await harness({ tokens: { "5h": 100 } });
-  const real = store.usage.sumSince.bind(store.usage);
-  /** One release per issued read, so the test chooses the order they land in. */
-  const gates: Array<() => void> = [];
-  store.usage.sumSince = async (id, since) => {
-    // Read now and deliver later: the point is a read that answered for an
-    // earlier instant, not one that ran against a later store.
-    const sums = await real(id, since);
-    await new Promise<void>((resolve) => gates.push(resolve));
-    return sums;
-  };
-
-  // The older read, issued while the window is empty.
-  at(T0);
-  const older = limiter.admit(keyId, limits, "req_older");
-  await Bun.sleep(0);
-
-  // Usage the older read cannot have seen, recorded as `finishLog` records it.
-  at(T0 + 2_000);
-  await seedRow(store, keyId, T0 + 2_000, { tokens: 120 });
-  limiter.debit(keyId, { tokens: 120, costUsd: 0 });
-
-  // The newer read, which does see it.
-  at(T0 + 5_000);
-  const newer = limiter.admit(keyId, limits, "req_newer");
-  await Bun.sleep(0);
-  expect(gates).toHaveLength(4);
-
-  // The newer pair lands first and prunes the delta it has absorbed; the older
-  // pair lands second, with sums from before any of it happened.
-  for (const gate of gates.slice(2)) gate();
-  await Promise.allSettled([newer]);
-  for (const gate of gates.slice(0, 2)) gate();
-  await Promise.allSettled([older]);
-
-  // 120 tokens against a ceiling of 100, and no read is due for another TTL.
-  at(T0 + 6_000);
-  expect((await denied(() => limiter.admit(keyId, limits, "req_after"))).code).toBe("RATE_LIMIT");
-  expect(gates).toHaveLength(4);
-  store.close();
-});
-
-/**
- * The delta list is emptied by a store read, so a store that cannot answer
- * leaves nothing emptying it.
- *
- * Unbounded growth is the visible half; the invisible half is that `cleanup`
- * never drops a key holding debits and `markEager` walks the whole list once per
- * debit, which is quadratic in the requests served during the fault.
- */
-test("folding a delta list bounds it without lowering what it reports", () => {
-  const now = T0 + ONE_WEEK;
-  const debits: Debit[] = [
-    // Older than the longest window, so no window can still count it. Absurd
-    // figures, so dropping it shows up as a number rather than as a rounding.
-    { at: now - ONE_WEEK - 1, requests: 1, tokens: 1_000_000, costUsd: 1_000 },
-    ...Array.from({ length: MAX_DEBITS + 5_000 }, (_, i) => ({
-      at: T0 + i,
-      requests: 1,
-      tokens: 10,
-      costUsd: 0.01,
-    })),
-  ];
-
-  const trimmed = trimDebits(debits, now);
-  expect(trimmed.length).toBeLessThanOrEqual(MAX_DEBITS);
-  expect(trimmed.some((debit) => debit.at < now - ONE_WEEK)).toBe(false);
-
-  /** `sinceRead`'s arithmetic, restated so the property is checked against it. */
-  const delta = (entries: readonly Debit[], readAt: number): number =>
-    entries.reduce((sum, entry) => (entry.at < readAt ? sum : sum + entry.tokens), 0);
-
-  // Instants a cached read could carry, sampled either side of the fold rather
-  // than swept: the fold is where the two lists can differ, and a readAt inside
-  // it is the only one that can differ downward. Folding may keep a
-  // contribution in the delta longer than it belonged there — the direction
-  // `sinceRead` already chooses — and may never drop one that still belongs.
-  const cut = debits.length - MAX_DEBITS;
-  for (const readAt of [
-    now - ONE_WEEK,
-    T0,
-    T0 + 1,
-    T0 + Math.floor(cut / 2),
-    T0 + cut - 1,
-    T0 + cut,
-    T0 + cut + 1,
-    T0 + debits.length - 1,
-    T0 + debits.length,
-    now,
-  ]) {
-    expect(delta(trimmed, readAt)).toBeGreaterThanOrEqual(delta(debits, readAt));
-  }
-  // And it is a fold rather than a discard: nothing inside the window is lost.
-  expect(delta(trimmed, now - ONE_WEEK)).toBe(delta(debits, now - ONE_WEEK));
-});
-
-test("a store that cannot answer stops the delta list growing without bound", async () => {
-  const { store, keyId, limiter, admit, at } = await harness({ tokens: { "5h": 1_000_000 } });
-  store.usage.sumSince = async () => {
-    throw new Error("database is locked");
-  };
-
-  at(T0);
-  (await admit())();
-  for (let i = 0; i < MAX_DEBITS + 500; i++) {
-    at(T0 + i);
-    limiter.debit(keyId, { tokens: 1, costUsd: 0 });
-  }
-  expect(limiter.pendingDebits(keyId)).toBeGreaterThan(MAX_DEBITS);
-
-  at(T0 + MAX_DEBITS + 500);
-  (await admit())();
-  expect(limiter.pendingDebits(keyId)).toBeLessThanOrEqual(MAX_DEBITS);
-
-  // A week on, every entry is outside every window and the key can be dropped
-  // again rather than held for the life of the process.
-  at(T0 + ONE_WEEK + FIVE_HOURS);
-  (await admit())();
-  expect(limiter.pendingDebits(keyId)).toBe(0);
-  store.close();
-});
-
 test("an unlimited key allocates nothing and holds no gauge", async () => {
   const { keyId, limiter, admit, reads, store } = await harness({});
   const release = await admit();
@@ -595,144 +442,4 @@ test("an unlimited key allocates nothing and holds no gauge", async () => {
   expect(reads).toHaveLength(0);
   release();
   store.close();
-});
-
-// ---------------------------------------------------------------------------
-// The idle-key sweep
-// ---------------------------------------------------------------------------
-
-/**
- * A limiter over several keys, with only a long window so every key holds a
- * store-sum cache and nothing else.
- *
- * Key ids are arbitrary strings on purpose: `memoryStore` sums zero rows for
- * a key it never saw, so the sweep can be exercised without seeding one per
- * key. The `1m` ring and the gauge live behind `Coord` and are swept there;
- * what this limiter drops is an entry whose cache has expired.
- */
-async function sweepHarness() {
-  const store = await memoryStore();
-  const logger = captureLogger();
-  let clock = T0;
-  const limiter = new ApiKeyRateLimiter({ store, now: () => clock, logger });
-  const limits: LimitConfig = { tokens: { "5h": 1_000_000 } };
-  return {
-    store,
-    limiter,
-    at: (ms: number) => {
-      clock = ms;
-    },
-    /** One complete request for a key: admitted, then released. */
-    async pass(keyId: string) {
-      (await limiter.admit(keyId, limits, "req_sweep")).release();
-    },
-  };
-}
-
-/** The cache TTL, past which an idle entry is droppable. */
-const TTL = 30_000;
-
-/**
- * The sweep is time-gated, and the gate must not turn into "never".
- *
- * `cleanup` walked every live key on every `admit` and `consume`. Gating it is
- * only safe if it still runs, and the drop is invisible through every other
- * answer this class gives — which is what `liveKeys` exists for.
- */
-test("drops an idle key once its cache has expired", async () => {
-  const h = await sweepHarness();
-  await h.pass("k_old");
-  expect(h.limiter.liveKeys()).toBe(1);
-
-  // A TTL on, `k_old` holds nothing: no debits, an expired cache.
-  h.at(T0 + TTL + 1);
-  await h.pass("k_live");
-
-  expect(h.limiter.liveKeys()).toBe(1);
-  h.store.close();
-});
-
-/**
- * The gate's own arithmetic, which is the mutation target: an interval that
- * compares the wrong way round, or against the wrong instant, either sweeps on
- * every call (the cost this removes) or stops sweeping (an unbounded map).
- */
-test("sweeps at most once per interval, and again after it", async () => {
-  const h = await sweepHarness();
-  await h.pass("k_a");
-  h.at(T0 + 500);
-  await h.pass("k_b");
-
-  // First sweep: `k_a`'s cache has expired, `k_b`'s has not.
-  h.at(T0 + TTL + 1);
-  await h.pass("k_c");
-  expect(h.limiter.liveKeys()).toBe(2);
-
-  // `k_b` becomes droppable here, but this call is inside the interval that
-  // just swept, so it walks nothing and `k_b` is held over.
-  h.at(T0 + TTL + 501);
-  await h.pass("k_c");
-  expect(h.limiter.liveKeys()).toBe(2);
-
-  // Past the gate, and `k_b` goes.
-  h.at(T0 + TTL + 1_002);
-  await h.pass("k_c");
-  expect(h.limiter.liveKeys()).toBe(1);
-  h.store.close();
-});
-
-/**
- * The gate is a wall-clock latch and the clock is `Date.now()`, so it has to
- * survive the clock going backwards.
- *
- * A backward NTP step or a VM restore leaves `lastCleanup` in the future. The
- * elapsed figure is then negative, which compares as "swept recently" against
- * the interval and holds the sweep off for the length of the step. Every other
- * piece of limiter state is compared against a window and self-corrects; a
- * latch does not.
- */
-test("sweeps again after the clock steps backwards", async () => {
-  const h = await sweepHarness();
-  const back = T0 - 3_600_000;
-
-  await h.pass("k_old");
-  // One sweep, which sets the latch to this instant and drops `k_old`.
-  h.at(T0 + TTL + 1);
-  await h.pass("k_probe");
-  expect(h.limiter.liveKeys()).toBe(1);
-
-  // The clock jumps back an hour, leaving the latch an hour in the future.
-  h.at(back);
-  await h.pass("k_x");
-
-  // `k_x` has now expired on the stepped-back clock. The key being passed here
-  // is deliberately a different one: a droppable key that is also the key of the
-  // call would be re-created by `state()` in the same call, so the sweep running
-  // and the sweep not running would look identical.
-  h.at(back + TTL + 1);
-  await h.pass("k_y");
-
-  // `k_probe`'s cache was read in the future relative to this clock, so it is
-  // retained either way; `k_x` is the one whose fate differs. Held off for the
-  // length of the step, this is 3.
-  expect(h.limiter.liveKeys()).toBe(2);
-  h.store.close();
-});
-
-/** The gate fires at exactly the interval, which `<` and `<=` disagree about. */
-test("sweeps when exactly the interval has elapsed", async () => {
-  const h = await sweepHarness();
-  await h.pass("k_a");
-  h.at(T0 + 500);
-  await h.pass("k_b");
-
-  h.at(T0 + TTL + 1);
-  await h.pass("k_c");
-  expect(h.limiter.liveKeys()).toBe(2);
-
-  // Exactly 1000ms after that sweep, and `k_b` is droppable by now.
-  h.at(T0 + TTL + 1_001);
-  await h.pass("k_c");
-  expect(h.limiter.liveKeys()).toBe(1);
-  h.store.close();
 });

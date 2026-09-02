@@ -52,6 +52,54 @@ export interface Coord {
     withLock<T>(key: string, ttlMs: number, waitMs: number, fn: () => Promise<T>): Promise<T>;
   };
   /**
+   * Counters in time buckets, for the long rate-limit windows.
+   *
+   * A window is the sum of its live buckets — those whose start is within
+   * `windowMs` of `now` — so it slides at the grain and over-counts by at most
+   * one bucket at the trailing edge, which is the direction the limiter
+   * permits. `sum` answers `null` for a key nothing has seeded, and that is a
+   * distinct answer from zero: the caller seeds from the store and asks again.
+   */
+  buckets: {
+    add(key: string, grainMs: number, windowMs: number, now: number, delta: Counts): Promise<void>;
+    sum(key: string, grainMs: number, windowMs: number, now: number): Promise<Counts | null>;
+    /**
+     * Installs a starting picture, replacing whatever was there. Until a key
+     * is seeded, `add` on it is ignored: the row behind the debit is already in
+     * the store the seed reads, and a picture holding one request must not
+     * pass for a complete one.
+     */
+    seed(
+      key: string,
+      grainMs: number,
+      windowMs: number,
+      now: number,
+      rows: ReadonlyArray<readonly [bucketStart: number, counts: Counts]>,
+    ): Promise<void>;
+  };
+  /**
+   * One holder at a time for a named job, for the background loops.
+   *
+   * A lease that cannot be confirmed is one the caller does not hold; the
+   * in-memory implementation always grants, because one process is always the
+   * one.
+   */
+  lease: {
+    acquire(name: string, holderId: string, ttlMs: number): Promise<boolean>;
+    release(name: string, holderId: string): Promise<void>;
+  };
+  /**
+   * Fan-out between processes. In memory it is an emitter; the subscriber sees
+   * every publish, its own included, so a consumer must be written for that.
+   */
+  pubsub: {
+    publish(topic: string, payload: string): Promise<void>;
+    /** `pattern` may end in `*`, matching any suffix. Returns the unsubscribe. */
+    subscribe(pattern: string, fn: (topic: string, payload: string) => void): () => void;
+  };
+  /** A counter shared by every process, starting at 1. */
+  incr(key: string): Promise<number>;
+  /**
    * Small values with a lifetime: sessions, pending OAuth flows, probe
    * cooldowns. Nothing here is durable, and a value that outlives its TTL is
    * the one thing an implementation must never serve.
@@ -66,6 +114,8 @@ export interface Coord {
 }
 
 export type WindowClaim = { stamp: number; before: WindowCounter };
+
+export type Counts = { requests: number; tokens: number; costUsd: number };
 
 export class LockUnavailable extends Error {
   constructor(key: string) {
@@ -100,7 +150,21 @@ export function memoryCoord(options: MemoryCoordOptions = {}): MemoryCoord {
   const gauges = new Map<string, number>();
   const locks = new Map<string, Promise<void>>();
   const values = new Map<string, { value: string; expiresAt: number }>();
+  const buckets = new Map<string, Map<number, Counts>>();
+  const leases = new Map<string, { holder: string; expiresAt: number }>();
+  const subscribers = new Set<{ pattern: string; fn: (topic: string, payload: string) => void }>();
+  const counters = new Map<string, number>();
   let lastSweep = Number.NEGATIVE_INFINITY;
+
+  const bucketOf = (grainMs: number, at: number): number => Math.floor(at / grainMs) * grainMs;
+
+  /** Drops buckets outside the window. A key keeps its seeded status even when empty. */
+  const trimBuckets = (key: string, grainMs: number, windowMs: number, now: number): void => {
+    const held = buckets.get(key);
+    if (held === undefined) return;
+    const oldest = bucketOf(grainMs, now - windowMs);
+    for (const start of held.keys()) if (start < oldest) held.delete(start);
+  };
 
   /**
    * Drops rings that drained, at most once per interval.
@@ -160,6 +224,85 @@ export function memoryCoord(options: MemoryCoordOptions = {}): MemoryCoord {
         for (const [key, count] of gauges) if (key.startsWith(prefix)) out.set(key, count);
         return Promise.resolve(out);
       },
+    },
+
+    buckets: {
+      add(key, grainMs, windowMs, now, delta) {
+        trimBuckets(key, grainMs, windowMs, now);
+        const held = buckets.get(key);
+        // An unseeded key stays unseeded. The row this debit describes is
+        // already in the store, so the seed that follows will count it; adding
+        // it here would make a picture holding one request look complete.
+        if (held === undefined) return Promise.resolve();
+        const start = bucketOf(grainMs, now);
+        const current = held.get(start) ?? { requests: 0, tokens: 0, costUsd: 0 };
+        held.set(start, {
+          requests: current.requests + delta.requests,
+          tokens: current.tokens + delta.tokens,
+          costUsd: current.costUsd + delta.costUsd,
+        });
+        return Promise.resolve();
+      },
+      sum(key, grainMs, windowMs, now) {
+        trimBuckets(key, grainMs, windowMs, now);
+        const held = buckets.get(key);
+        if (held === undefined) return Promise.resolve(null);
+        const total: Counts = { requests: 0, tokens: 0, costUsd: 0 };
+        for (const counts of held.values()) {
+          total.requests += counts.requests;
+          total.tokens += counts.tokens;
+          total.costUsd += counts.costUsd;
+        }
+        return Promise.resolve(total);
+      },
+      seed(key, grainMs, windowMs, now, rows) {
+        const held = new Map<number, Counts>();
+        for (const [start, counts] of rows) held.set(bucketOf(grainMs, start), { ...counts });
+        buckets.set(key, held);
+        trimBuckets(key, grainMs, windowMs, now);
+        return Promise.resolve();
+      },
+    },
+
+    lease: {
+      acquire(name, holderId, ttlMs) {
+        const held = leases.get(name);
+        const at = now();
+        if (held !== undefined && held.holder !== holderId && held.expiresAt > at) {
+          return Promise.resolve(false);
+        }
+        leases.set(name, { holder: holderId, expiresAt: at + ttlMs });
+        return Promise.resolve(true);
+      },
+      release(name, holderId) {
+        if (leases.get(name)?.holder === holderId) leases.delete(name);
+        return Promise.resolve();
+      },
+    },
+
+    pubsub: {
+      publish(topic, payload) {
+        for (const sub of subscribers) {
+          const hit = sub.pattern.endsWith("*")
+            ? topic.startsWith(sub.pattern.slice(0, -1))
+            : topic === sub.pattern;
+          if (hit) sub.fn(topic, payload);
+        }
+        return Promise.resolve();
+      },
+      subscribe(pattern, fn) {
+        const sub = { pattern, fn };
+        subscribers.add(sub);
+        return () => {
+          subscribers.delete(sub);
+        };
+      },
+    },
+
+    incr(key) {
+      const next = (counters.get(key) ?? 0) + 1;
+      counters.set(key, next);
+      return Promise.resolve(next);
     },
 
     kv: {

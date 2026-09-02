@@ -101,6 +101,7 @@ function deps(
       },
       maintenance: {
         heartbeat: async () => {},
+        nodes: async () => [],
         stats: async () => ({
           pageSize: 4_096,
           pageCount: 100,

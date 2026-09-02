@@ -1,4 +1,4 @@
-import { type Coord, memoryCoord } from "@omni/coord";
+import { type Coord, type Counts, LockUnavailable, memoryCoord } from "@omni/coord";
 import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
 import {
   type CounterSnapshot,
@@ -10,43 +10,33 @@ import {
   type WindowCounter,
 } from "@omni/ratelimit";
 import { type LimitConfig, WINDOW_MS, type Window } from "@omni/ratelimit/catalog";
-import type { Store, UsageSums } from "@omni/store";
+import type { Store } from "@omni/store";
 
 /**
- * The windows counted from `request_logs` rather than from memory.
+ * The windows counted in shared time buckets rather than in the ring.
  *
  * A minute of timestamps is sixty numbers and is held exactly; five hours or a
- * week of them is not, and the rows are already there.
+ * week of them is not. Those are summed from `Coord.buckets`, one bucket per
+ * grain, seeded from the store the first time a key is asked about.
  */
 const LONG_WINDOWS = ["5h", "1w"] as const;
 
 type LongWindow = (typeof LONG_WINDOWS)[number];
 
 /**
- * How long a store sum is reused before it is read again.
+ * How finely each long window slides.
  *
- * The bound on how stale a long-window count may be, and therefore on how far
- * it may run high — see `sinceRead` for why it can only run high.
+ * A window is the sum of its live buckets and over-counts by at most one
+ * bucket at its trailing edge: a minute of a five-hour window, an hour of a
+ * week. Finer than the thirty-second store cache this replaced, and in the one
+ * direction the composition may err — see `evaluate` for why high is the safe
+ * side. The hour grain is also `usage_rollup`'s own, so a week seeds from the
+ * rollup in one flat read.
  */
-const CACHE_TTL_MS = 30_000;
+const GRAIN_MS: Record<LongWindow, number> = { "5h": 60_000, "1w": 3_600_000 };
 
-/**
- * How often the idle-key sweep may run.
- *
- * One second, because the sweep only reclaims memory: a key that goes idle is
- * held at most this much longer than it was before, and the shortest window
- * this limiter serves is a minute. Anything shorter buys nothing and puts the
- * O(active keys) walk back on a meaningful share of requests.
- */
-const CLEANUP_INTERVAL_MS = 1_000;
-
-/**
- * The fraction of a ceiling past which a key stops waiting out the TTL.
- *
- * Precision rises exactly where a decision is close, and an idle key pays
- * nothing for it.
- */
-const EAGER_FRACTION = 0.9;
+/** How long one seed may hold the seed lock, and how long a second asker waits. */
+const SEED_LOCK_MS = 5_000;
 
 /**
  * How long a shared gauge holds a slot for a process that never released it.
@@ -59,46 +49,10 @@ const EAGER_FRACTION = 0.9;
  */
 const GAUGE_TTL_MS = 3_600_000;
 
-/**
- * How many delta entries one key may hold before the oldest are folded together.
- *
- * A successful store read is what normally empties this list, so a store that
- * cannot answer leaves nothing emptying it: it grows with every completed
- * request for as long as the fault lasts, `cleanup` can never drop the key
- * because a key holding debits is not idle, and `markEager` walks the whole
- * list once per debit. See `trimDebits` for why folding rather than dropping.
- */
-export const MAX_DEBITS = 10_000;
-
-/** One completed request's contribution, held until a store read absorbs it. */
-export type Debit = { at: number; requests: number; tokens: number; costUsd: number };
-
-/** The last store read for one key, and the instant it was issued at. */
-type StoreCounts = { readAt: number; sums: Record<LongWindow, UsageSums> };
-
-/**
- * What this class still holds per key: the long-window side.
- *
- * The `1m` ring and the concurrency gauge live behind `Coord`, because they are
- * the two counters a fleet must share exactly. What is left is the store-sum
- * cache and the delta of rows debited since it was read.
- */
-type KeyState = {
-  /**
-   * Checks sitting between claiming their place and being judged.
-   *
-   * A check yields on a store read, and until it returns this entry must not be
-   * dropped: a suspended check recording a debit onto an orphaned entry is a
-   * request counted nowhere.
-   */
-  deciding: number;
-  debits: Debit[];
-  counts: StoreCounts | null;
-  /** Set by a debit that lands near a ceiling; forces the next read through. */
-  stale: boolean;
-  /** The limits last seen at admission, so a debit can judge its own nearness. */
-  limits: LimitConfig;
-};
+/** Where a key's long-window buckets live: `lim:<keyId>:<window>`. */
+function bucketKey(keyId: string, window: LongWindow): string {
+  return `lim:${keyId}:${window}`;
+}
 
 /**
  * What an admitted request carries away from the check.
@@ -189,100 +143,29 @@ function anyLongLimit(limits: LimitConfig): boolean {
 }
 
 /**
- * What has been debited since a store read was issued.
- *
- * `>=` rather than `>` on purpose. A row committed while the read was in flight
- * lands in both the sum and this delta and is counted twice; the alternative
- * boundary drops it from both, which is the one error this composition must
- * never make. Over-counting denies a key early, which an operator can see and
- * raise; under-counting lets a key past a ceiling by timing the refresh, which
- * an attacker can discover and an operator cannot.
- */
-function sinceRead(debits: readonly Debit[], readAt: number): UsageSums {
-  let requests = 0;
-  let tokens = 0;
-  let costUsd = 0;
-  for (const debit of debits) {
-    if (debit.at < readAt) continue;
-    requests += debit.requests;
-    tokens += debit.tokens;
-    costUsd += debit.costUsd;
-  }
-  return { requests, tokens, costUsd };
-}
-
-/** The far edge of the longest window, past which nothing can still be counted. */
-const LONGEST_WINDOW_MS = Math.max(...LONG_WINDOWS.map((window) => WINDOW_MS[window]));
-
-/**
- * Bounds one key's delta list without ever lowering what it reports.
- *
- * Two bounds, applied in that order, because they fail in different directions
- * and only one of them is free:
- *
- * - A debit older than the longest window is outside every window there is, so
- *   dropping it changes no count at all. This is also what lets `cleanup` drop
- *   a key that went quiet during a fault, rather than holding its entry for the
- *   life of the process.
- * - Past `MAX_DEBITS` the oldest entries are folded into one, stamped at the
- *   newest instant among them — not discarded. A dropped debit is a request
- *   counted nowhere, which is the one direction this design must never take; a
- *   folded one is counted for longer than it belonged, which is the direction
- *   `sinceRead` already chooses and for the same reason.
- *
- * Pure and exported so the second bound can be tested for what it promises,
- * which is a property of the arithmetic rather than of any store fault.
- */
-export function trimDebits(debits: readonly Debit[], now: number): Debit[] {
-  const live = debits.filter((debit) => debit.at >= now - LONGEST_WINDOW_MS);
-  if (live.length <= MAX_DEBITS) return live;
-
-  const folded: Debit = { at: 0, requests: 0, tokens: 0, costUsd: 0 };
-  const cut = live.length - MAX_DEBITS + 1;
-  for (const debit of live.slice(0, cut)) {
-    folded.at = Math.max(folded.at, debit.at);
-    folded.requests += debit.requests;
-    folded.tokens += debit.tokens;
-    folded.costUsd += debit.costUsd;
-  }
-  return [folded, ...live.slice(cut)];
-}
-
-/**
- * Every dimension and every window of one key's limits, counted per process.
+ * Every dimension and every window of one key's limits.
  *
  * The arithmetic lives in `@omni/ratelimit`, which holds no state and no clock;
- * the counters live here, because a counter is state. This class is the half
- * that knows where a number came from: `requests` at `1m` from an exact ring,
- * the long windows from `usage.sumSince` plus everything debited since that
- * read, and `concurrency` from a gauge raised at admission and lowered at the
- * true end of the request.
+ * the counters live behind `Coord`, because a counter is state and a fleet
+ * must share it. This class is the half that knows where a number came from:
+ * `requests` at `1m` from an exact ring, `concurrency` from a gauge raised at
+ * admission and lowered at the true end of the request, and the long windows
+ * from time buckets that every process debits into and that are seeded from
+ * the store the first time a key is asked about.
  *
- * The ring and the gauge live behind `Coord`, so a fleet shares them exactly
- * and one process holds them in memory; the long-window cache is per process
- * and reset on restart, rehydrating from the store on the next read, so a
- * restart costs at most the delta since the last one.
+ * The store stays the truth. Buckets are a picture of it that every completed
+ * request updates in place, and a picture nothing holds — a fresh process, a
+ * coordinator that restarted, a key idle past its window — is rebuilt from
+ * `sumBuckets` under a lock so one process pays the read.
  */
 export class ApiKeyRateLimiter {
-  private readonly keys = new Map<string, KeyState>();
-  private readonly coord: Coord;
   /**
-   * When the sweep last ran, so it runs at most once per `CLEANUP_INTERVAL_MS`.
-   *
-   * `cleanup` walks every live key, and both `admit` and `consume` opened with
-   * it — O(active keys) on every request, for a sweep whose only job is to free
-   * memory. Gating it changes nothing about *what* is droppable: an entry that
-   * becomes droppable mid-interval is dropped at the next gate instead, and
-   * nothing reads a droppable entry in between — a request naming that key
-   * re-uses the entry, and every other reader is holding a claim, which is
-   * what makes an entry undroppable.
-   *
-   * Negative infinity rather than zero states "has never run" outright. It is
-   * not load-bearing — at any clock value a real or injected one starts from,
-   * the first call is already past the gate, and at zero the map is empty — so
-   * do not expect a test to fail if it is changed.
+   * The limits last seen at admission, so a debit knows whether a long window
+   * is configured at all. ponytail: never pruned; bounded by the keys an
+   * operator has minted, which is dozens.
    */
-  private lastCleanup = Number.NEGATIVE_INFINITY;
+  private readonly limits = new Map<string, LimitConfig>();
+  private readonly coord: Coord;
   private readonly store: Store;
   private readonly now: () => number;
   private readonly logger: Logger;
@@ -309,13 +192,12 @@ export class ApiKeyRateLimiter {
     if (!anyLimit(limits)) return { release: () => {}, headroom: {} };
 
     const now = this.now();
-    this.cleanup(now);
-    const state = this.state(keyId, limits);
-    const claim = await this.claim(state, keyId, now, true);
+    this.limits.set(keyId, limits);
+    const claim = await this.claim(keyId, now, true);
 
     let admitted = false;
     try {
-      const counters = await this.counters(state, keyId, limits, claim, now, requestId);
+      const counters = await this.counters(keyId, limits, claim, now, requestId);
       const decision = evaluate(limits, counters, now);
       await this.refuse(keyId, decision, now, requestId);
       admitted = true;
@@ -332,7 +214,6 @@ export class ApiKeyRateLimiter {
       // until its release; anything else — a refusal, or a failure while judging
       // — gives every part of it back, because no window expires a gauge and a
       // slot leaked here locks the key out permanently and silently.
-      state.deciding--;
       if (!admitted) await this.rollback(keyId, claim);
     }
   }
@@ -350,17 +231,15 @@ export class ApiKeyRateLimiter {
     if (requests === undefined || !anyRequestLimit(limits)) return;
 
     const now = this.now();
-    this.cleanup(now);
-    const state = this.state(keyId, limits);
-    const claim = await this.claim(state, keyId, now, false);
+    this.limits.set(keyId, limits);
+    const claim = await this.claim(keyId, now, false);
 
     let consumed = false;
     try {
-      const counters = await this.counters(state, keyId, { requests }, claim, now, requestId);
+      const counters = await this.counters(keyId, { requests }, claim, now, requestId);
       await this.refuse(keyId, evaluate({ requests }, counters, now), now, requestId);
       consumed = true;
     } finally {
-      state.deciding--;
       if (!consumed) await this.rollback(keyId, claim);
     }
   }
@@ -377,12 +256,7 @@ export class ApiKeyRateLimiter {
    * burst. `Coord` promises each claim is visible the instant the call is
    * made, so the `await`s here yield after the record, never before it.
    */
-  private async claim(state: KeyState, keyId: string, now: number, gauge: boolean): Promise<Claim> {
-    // Held for the length of the check, and raised before the first yield.
-    // Without it `cleanup` can drop an entry that looks idle and leave a
-    // suspended check recording onto an orphan, and a request counted nowhere
-    // is the one error direction this design must never take.
-    state.deciding++;
+  private async claim(keyId: string, now: number, gauge: boolean): Promise<Claim> {
     const ring = await this.coord.window.claim(keyId, WINDOW_MS["1m"], now);
     const concurrency = gauge
       ? await this.coord.gauge.acquire(keyId, GAUGE_TTL_MS)
@@ -401,57 +275,34 @@ export class ApiKeyRateLimiter {
    *
    * Called from `finishLog`, beside the `usage.append` that writes the row, so
    * it inherits that site's at-most-once-per-request-id guarantee rather than
-   * needing a second one. It stays outside `@omni/store`: store rows live
-   * behind that package and the store has no business knowing a gateway
-   * limiter exists.
+   * needing a second one. Row first, then this: a key nothing has seeded
+   * ignores the debit, and the seed that follows reads the row instead.
    *
    * `requests` is debited here rather than at admission because the store sum
-   * counts finished rows only, and a delta entry pruned before its row was
-   * committed would leave the request counted nowhere.
+   * counts finished rows only, and the buckets must agree with what a seed
+   * would read.
    */
   debit(keyId: string, usage: { tokens: number; costUsd: number }): void {
-    const state = this.keys.get(keyId);
-    // A key this process never admitted has nothing in memory to correct, and
-    // its row is already written, so the next store read counts it.
-    if (state === undefined) return;
-    if (!anyLongLimit(state.limits)) return;
-    state.debits.push({
-      at: this.now(),
-      requests: 1,
-      tokens: usage.tokens,
-      costUsd: usage.costUsd,
-    });
-    this.markEager(state);
+    const limits = this.limits.get(keyId);
+    // A key this process never admitted has nothing to add to: its row is
+    // written, and whoever seeds the key next counts it.
+    if (limits === undefined || !anyLongLimit(limits)) return;
+    const now = this.now();
+    const delta = { requests: 1, tokens: usage.tokens, costUsd: usage.costUsd };
+    for (const window of LONG_WINDOWS) {
+      void this.coord.buckets.add(
+        bucketKey(keyId, window),
+        GRAIN_MS[window],
+        WINDOW_MS[window],
+        now,
+        delta,
+      );
+    }
   }
 
   /** In-flight requests for one key. Zero for a key holding nothing. */
   inFlight(keyId: string): Promise<number> {
     return this.coord.gauge.read(keyId);
-  }
-
-  /**
-   * Delta entries waiting for a store read to absorb them. Zero for a key
-   * holding nothing.
-   *
-   * A store read is what empties this, so its length is a fact about how long
-   * the store has been unable to answer rather than about traffic — which is
-   * why `trimDebits` bounds it and why the bound is observable.
-   */
-  pendingDebits(keyId: string): number {
-    return this.keys.get(keyId)?.debits.length ?? 0;
-  }
-
-  /**
-   * Keys currently holding state, which is everything this limiter can grow.
-   *
-   * Exposed because the sweep that bounds it is otherwise unobservable: an
-   * entry is only droppable once nothing reads it, so its removal changes no
-   * other answer this class gives. That makes "the sweep still runs" a claim
-   * with no behavioural witness — and the sweep is now time-gated, which is
-   * exactly the kind of change that can silently turn into "never".
-   */
-  liveKeys(): number {
-    return this.keys.size;
   }
 
   private async refuse(
@@ -531,38 +382,18 @@ export class ApiKeyRateLimiter {
     }
   }
 
-  private state(keyId: string, limits: LimitConfig): KeyState {
-    const existing = this.keys.get(keyId);
-    if (existing !== undefined) {
-      // Limits are editable after creation, so the newest ones win; a debit
-      // judges its own nearness to a ceiling against whatever was last seen.
-      existing.limits = limits;
-      return existing;
-    }
-    const created: KeyState = {
-      deciding: 0,
-      debits: [],
-      counts: null,
-      stale: false,
-      limits,
-    };
-    this.keys.set(keyId, created);
-    return created;
-  }
-
   /**
    * Assembles what this key has used, from the two sources that know.
    *
-   * `requests` at `1m` and `concurrency` are pure memory and come off the claim,
-   * which read them the instant before this request joined them — so they
-   * include every claim taken ahead of this one and never this one itself. The
-   * long windows are omitted entirely when the store cannot answer, which
-   * `evaluate` reads as nothing used — see `longCounts` for why that is the
-   * chosen failure. They need no such correction: a long window's `requests`
-   * debits on completion, so this request is not in it either.
+   * `requests` at `1m` and `concurrency` come off the claim, which read them
+   * the instant before this request joined them — so they include every claim
+   * taken ahead of this one and never this one itself. The long windows are
+   * omitted entirely when neither the coordinator nor the store can answer,
+   * which `evaluate` reads as nothing used — see `longCounts` for why that is
+   * the chosen failure. They need no such correction: a long window's
+   * `requests` debits on completion, so this request is not in it either.
    */
   private async counters(
-    state: KeyState,
     keyId: string,
     limits: LimitConfig,
     claim: Claim,
@@ -573,22 +404,21 @@ export class ApiKeyRateLimiter {
     const snapshot: CounterSnapshot = { requests, concurrency: claim.before.concurrency };
     if (!anyLongLimit(limits)) return snapshot;
 
-    const counts = await this.longCounts(state, keyId, now, requestId);
+    const counts = await this.longCounts(keyId, now, requestId);
     if (counts === null) return snapshot;
 
     const tokens: DimensionCounters = {};
     const spend: DimensionCounters = {};
-    const delta = sinceRead(state.debits, counts.readAt);
     for (const window of LONG_WINDOWS) {
-      const sums = counts.sums[window];
+      const sums = counts[window];
       // The far end of the window. The instant a long window actually frees a
       // slot is the oldest retained row's timestamp plus its length, which is a
       // second query on every request; this over-states the wait rather than
       // sending a client back at an instant the limit is still refusing it.
       const resetAt = now + WINDOW_MS[window];
-      requests[window] = { used: sums.requests + delta.requests, resetAt };
-      tokens[window] = { used: sums.tokens + delta.tokens, resetAt };
-      spend[window] = { used: sums.costUsd + delta.costUsd, resetAt };
+      requests[window] = { used: sums.requests, resetAt };
+      tokens[window] = { used: sums.tokens, resetAt };
+      spend[window] = { used: sums.costUsd, resetAt };
     }
     snapshot.tokens = tokens;
     snapshot.spend = spend;
@@ -596,132 +426,81 @@ export class ApiKeyRateLimiter {
   }
 
   /**
-   * The cached store sums, read through when they are stale or missing.
+   * Both long windows, summed from the buckets and seeded where there are none.
    *
-   * Null where the read failed, which serves the request. The reasoning is
-   * proportionality: this is a self-hosted gateway, and a transient store fault
-   * that 429s all traffic is a worse outage than briefly under-enforcing a
-   * weekly budget. The limits that stop abuse fastest — `requests` at `1m` and
-   * `concurrency` — are pure memory and keep enforcing exactly through the
-   * fault, because they never reach this function.
+   * Null where the store could not seed, which serves the request. The
+   * reasoning is proportionality: this is a self-hosted gateway, and a
+   * transient store fault that 429s all traffic is a worse outage than briefly
+   * under-enforcing a weekly budget. The limits that stop abuse fastest —
+   * `requests` at `1m` and `concurrency` — never reach the store, and keep
+   * enforcing exactly through the fault.
    *
-   * There is deliberately no timeout on the reads. `bun:sqlite` is synchronous:
-   * the timer that would fire cannot run until the query it is bounding has
-   * returned, so a deadline here is a promise the runtime cannot keep. The
-   * bound that does exist is `sumSince` reading a rollup instead of scanning a
-   * window, which is flat in the size of the window.
+   * There is deliberately no timeout on the seed read. `bun:sqlite` is
+   * synchronous: the timer that would fire cannot run until the query it is
+   * bounding has returned, so a deadline here is a promise the runtime cannot
+   * keep.
    */
   private async longCounts(
-    state: KeyState,
     keyId: string,
     now: number,
     requestId: string | undefined,
-  ): Promise<StoreCounts | null> {
-    const cached = state.counts;
-    if (cached !== null && !state.stale && now - cached.readAt < CACHE_TTL_MS) return cached;
-
-    // Captured before the reads are issued and never after: everything recorded
-    // from this instant on stays in the delta, so a row committed while a read
-    // was in flight is counted twice rather than lost between the two.
-    const readAt = now;
-    try {
-      const [fiveHour, oneWeek] = await Promise.all([
-        this.store.usage.sumSince(keyId, readAt - WINDOW_MS["5h"]),
-        this.store.usage.sumSince(keyId, readAt - WINDOW_MS["1w"]),
-      ]);
-      // A read that comes back behind a newer one is discarded rather than
-      // installed. Two read-throughs can be in flight at once — nothing here
-      // holds a lock across the yield — and against a store whose reads settle
-      // out of order the older one would overwrite the newer sums *after* the
-      // newer had already pruned the debits covering the difference, so the
-      // usage between the two reads would be counted in neither place. An equal
-      // `readAt` still installs: both asked about the same instant, and the one
-      // that resolved later saw at least as many committed rows.
-      const newer = state.counts;
-      if (newer !== null && newer.readAt > readAt) return newer;
-
-      state.counts = { readAt, sums: { "5h": fiveHour, "1w": oneWeek } };
-      state.stale = false;
-      // Anything debited before the read was issued is in the sums now, and
-      // holding it in both would keep inflating the count for as long as the
-      // key stayed busy.
-      state.debits = state.debits.filter((debit) => debit.at >= readAt);
-      return state.counts;
-    } catch (error) {
-      this.logger.warn("rate limit counters unavailable", {
-        ...(requestId === undefined ? {} : { requestId }),
-        apiKeyId: keyId,
-        // The message only. A store failure must not drag a row's contents,
-        // let alone a key, into stdout.
-        reason: describeError(error, "unknown"),
-      });
-      // Nothing absorbed the list this time, and nothing will until the store
-      // answers again, so it is bounded here instead. Without this the fault
-      // costs memory that only a restart gives back and turns `markEager` into
-      // a walk of every request served since it began.
-      state.debits = trimDebits(state.debits, now);
-      return null;
-    }
-  }
-
-  /**
-   * Marks the cache for read-through when a debit lands the key near a ceiling.
-   *
-   * The TTL is what keeps an idle key from costing a query per request, but it
-   * is also thirty seconds of blindness, and blindness only matters where a
-   * decision is close. A key inside the last tenth of any long-window ceiling
-   * buys the precision it is about to need; every other key buys nothing.
-   */
-  private markEager(state: KeyState): void {
-    const counts = state.counts;
-    if (counts === null || state.stale) return;
-    const delta = sinceRead(state.debits, counts.readAt);
+  ): Promise<Record<LongWindow, Counts> | null> {
+    const out = {} as Record<LongWindow, Counts>;
     for (const window of LONG_WINDOWS) {
-      const sums = counts.sums[window];
-      if (
-        near(state.limits.requests?.[window], sums.requests + delta.requests) ||
-        near(state.limits.tokens?.[window], sums.tokens + delta.tokens) ||
-        near(state.limits.spend?.[window], sums.costUsd + delta.costUsd)
-      ) {
-        state.stale = true;
-        return;
+      const key = bucketKey(keyId, window);
+      const grain = GRAIN_MS[window];
+      const length = WINDOW_MS[window];
+      let sum = await this.coord.buckets.sum(key, grain, length, now);
+      if (sum === null) {
+        try {
+          sum = await this.seed(keyId, window, now);
+        } catch (error) {
+          this.logger.warn("rate limit counters unavailable", {
+            ...(requestId === undefined ? {} : { requestId }),
+            apiKeyId: keyId,
+            // The message only. A store failure must not drag a row's
+            // contents, let alone a key, into stdout.
+            reason: describeError(error, "unknown"),
+          });
+          return null;
+        }
       }
+      out[window] = sum;
     }
+    return out;
   }
 
   /**
-   * Drops keys holding nothing, so a key that stopped calling stops costing
-   * anything. A key is only droppable once no check is inside it, nothing is
-   * waiting to be absorbed by a store read, and its cached sums have expired
-   * anyway — dropping it earlier would lose a debit or orphan the entry a
-   * suspended check is still holding.
+   * Rebuilds one window's buckets from the store, under a lock so that a
+   * fleet asking about the same key at once pays one read.
    *
-   * The ring and the gauge used to be part of this condition; they live behind
-   * `Coord` now, which sweeps its own drained rings, so `deciding` is what
-   * keeps an entry alive across the check and nothing else does.
+   * Re-checked inside the lock: the process that waited finds the picture the
+   * holder installed and returns it. A lock that cannot be taken seeds
+   * anyway — two seeds install the same picture, and the alternative is a
+   * request refused over a coordination fault.
    */
-  private cleanup(now: number): void {
-    // A latch on wall-clock time, and `now` is `Date.now()` — so a backward NTP
-    // step or a VM restore leaves `lastCleanup` in the future and the elapsed
-    // figure negative. Comparing that against the interval alone would read as
-    // "swept recently" and hold the sweep off for the whole of the step. Every
-    // other piece of limiter state self-corrects under a clock step because it
-    // is compared against a window; a latch does not, and turning the sweep
-    // *off* is the one direction this gate must not fail in.
-    const since = now - this.lastCleanup;
-    if (since >= 0 && since < CLEANUP_INTERVAL_MS) return;
-    this.lastCleanup = now;
-    for (const [keyId, state] of this.keys) {
-      if (state.deciding > 0 || state.debits.length > 0) continue;
-      if (state.counts !== null && now - state.counts.readAt < CACHE_TTL_MS) continue;
-      this.keys.delete(keyId);
+  private async seed(keyId: string, window: LongWindow, now: number): Promise<Counts> {
+    const key = bucketKey(keyId, window);
+    const grain = GRAIN_MS[window];
+    const length = WINDOW_MS[window];
+    const install = async (): Promise<Counts> => {
+      const already = await this.coord.buckets.sum(key, grain, length, now);
+      if (already !== null) return already;
+      const rows = await this.store.usage.sumBuckets(keyId, now - length, grain);
+      await this.coord.buckets.seed(key, grain, length, now, rows);
+      return (await this.coord.buckets.sum(key, grain, length, now)) ?? zero();
+    };
+    try {
+      return await this.coord.mutex.withLock(`seed:${key}`, SEED_LOCK_MS, SEED_LOCK_MS, install);
+    } catch (error) {
+      if (!(error instanceof LockUnavailable)) throw error;
+      return install();
     }
   }
 }
 
-/** Whether an observed figure has reached the eager-refresh fraction of a limit. */
-function near(limit: number | null | undefined, used: number): boolean {
-  return configured(limit) && used >= limit * EAGER_FRACTION;
+function zero(): Counts {
+  return { requests: 0, tokens: 0, costUsd: 0 };
 }
 
 /**

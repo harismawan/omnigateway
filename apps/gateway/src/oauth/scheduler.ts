@@ -1,6 +1,7 @@
 import { type Refresher, SCHEDULER_REFRESH_LEAD_MS } from "@omni/control";
 import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
 import type { CredentialView, Store } from "@omni/store";
+import { type LeaseDeps, underLease } from "../lease.ts";
 import type { Invalidator } from "../stream/broadcaster.ts";
 
 /**
@@ -16,6 +17,8 @@ export type SchedulerDeps = {
   logger?: Logger;
   /** Told after a sweep that moved a credential. Absent in most tests. */
   broadcaster?: Invalidator;
+  /** One process sweeps at a time. */
+  lease?: LeaseDeps;
 };
 
 /** OAuth credentials that are enabled and inside the refresh lead. */
@@ -114,7 +117,7 @@ export function startRefreshScheduler(deps: SchedulerDeps): () => void {
     // credential list.
     if (running) return;
     running = true;
-    void sweep(deps)
+    void underLease(deps.lease, "refresh-sweep", 2 * SWEEP_INTERVAL_MS, () => sweep(deps).then())
       .catch((error: unknown) => {
         logger.error("token refresh sweep failed", {
           reason: describeError(error, "unknown"),

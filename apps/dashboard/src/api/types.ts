@@ -439,7 +439,13 @@ export type ConsoleLine = {
   at: number | null;
   level: "debug" | "info" | "warn" | "error" | null;
   msg: string | null;
+  /** Which process wrote it. Only on a merged (`fleet`) read. */
+  nodeId?: string;
 };
+
+/** One process serving this installation, as `/api/nodes` reports it. */
+export type NodeEntry = { id: string; seenAt: number; self: boolean };
+export type NodesResponse = { nodes: NodeEntry[] };
 
 /**
  * Which log the gateway found, and what it holds.
@@ -450,7 +456,8 @@ export type ConsoleLine = {
  * an error.
  */
 export type ConsoleResponse = {
-  source: "file" | "journal" | "none";
+  /** `fleet` is every live process merged by timestamp. */
+  source: "file" | "journal" | "none" | "fleet";
   /** Only for `file`. A journal has no path to name. */
   path?: string;
   lines: ConsoleLine[];

@@ -3,6 +3,9 @@ import {
   type AdminAuth,
   type CatalogProblem,
   type ConsoleDeps,
+  type ConsoleLine,
+  type ConsoleQuery,
+  type ConsoleRead,
   type ConsoleSource,
   consoleLimit,
   createApiKeyCredential,
@@ -33,6 +36,7 @@ import { describeError, GatewayError, type Logger, noopLogger, parseLogLevel } f
 import type { Store } from "@omni/store";
 import { Elysia } from "elysia";
 import type { Invalidator } from "../stream/broadcaster.ts";
+import type { ConsoleFleet } from "../stream/consoleFleet.ts";
 import {
   apiErrorHandler,
   readCookie,
@@ -70,6 +74,13 @@ export type AdminDeps = {
    * captured stdout — the ordinary state under `bun run dev`.
    */
   console?: { source: ConsoleSource; deps: ConsoleDeps };
+  /**
+   * Reads another process's console. Absent in tests that have one process;
+   * the route then answers for this one alone.
+   */
+  consoleFleet?: ConsoleFleet;
+  /** This process's name, so `/api/nodes` can say which entry is the one answering. */
+  nodeId: string;
   /**
    * Tells every open console that one of these routes changed a resource.
    *
@@ -568,15 +579,55 @@ export function adminRoutes(deps: AdminDeps) {
        */
       .get("/api/console", async ({ request, query }) => {
         await requireReader(request, deps.admin);
-        if (deps.console === undefined) return { source: "none", lines: [] };
-
         const level = parseLogLevel(query.level);
         const since = Number(query.since);
-        return readConsole(deps.console.deps, deps.console.source, {
+        const consoleQuery: ConsoleQuery = {
           lines: consoleLimit(query.lines),
           ...(level === null ? {} : { level }),
           ...(Number.isFinite(since) && since > 0 ? { since } : {}),
-        });
+        };
+        const local = async (): Promise<ConsoleRead> =>
+          deps.console === undefined
+            ? { source: "none", lines: [] }
+            : readConsole(deps.console.deps, deps.console.source, consoleQuery);
+
+        // `node` names a process; absent means this one, which is what a
+        // single-process install has always been shown. `all` merges every
+        // live process by timestamp, the view a fleet's operator wants first.
+        const node = typeof query.node === "string" ? query.node : "";
+        if (node === "" || node === deps.nodeId || deps.consoleFleet === undefined) return local();
+        if (node !== "all") return deps.consoleFleet.read(node, consoleQuery);
+
+        const fleet = deps.consoleFleet;
+        const live = await deps.store.maintenance.nodes(deps.now());
+        const reads = await Promise.allSettled(
+          live.map((entry) =>
+            fleet.read(entry.id, consoleQuery).then((read) => ({ nodeId: entry.id, read })),
+          ),
+        );
+        const lines: Array<ConsoleLine & { nodeId: string }> = [];
+        for (const outcome of reads) {
+          if (outcome.status !== "fulfilled") continue;
+          for (const line of outcome.value.read.lines) {
+            lines.push({ ...line, nodeId: outcome.value.nodeId });
+          }
+        }
+        // Undated lines keep their place at the end: a merge that sorted them
+        // first would put a process's banner above every other process's log.
+        lines.sort(
+          (a, b) => (a.at ?? Number.POSITIVE_INFINITY) - (b.at ?? Number.POSITIVE_INFINITY),
+        );
+        return { source: "fleet", lines: lines.slice(-consoleQuery.lines) };
+      })
+      /**
+       * The processes serving this installation, most recently heard from
+       * first. One entry on a single-process install, and that entry is
+       * `self`.
+       */
+      .get("/api/nodes", async ({ request }) => {
+        await requireReader(request, deps.admin);
+        const nodes = await deps.store.maintenance.nodes(deps.now());
+        return { nodes: nodes.map((node) => ({ ...node, self: node.id === deps.nodeId })) };
       })
   );
 }

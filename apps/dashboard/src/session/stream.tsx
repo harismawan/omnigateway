@@ -695,6 +695,32 @@ export function useStreamTopic(topic: string, onMessage: (message: TopicMessage)
 }
 
 /**
+ * `useStreamTopic` for a topic outside the compile-time table.
+ *
+ * A per-process console topic is minted from a node id the table cannot hold,
+ * so it is held the way a plugin channel is — subscribed on mount, released
+ * on unmount — and read through the same transport. `gap` arrives as `closed`
+ * through that transport, which a reader of this hook treats the same way: a
+ * hole it cannot append past.
+ */
+export function useHeldStreamTopic(
+  topic: string | null,
+  onMessage: (message: TopicMessage) => void,
+): void {
+  const transport = use(ChannelContext);
+  const latest = useRef(onMessage);
+
+  useEffect(() => {
+    latest.current = onMessage;
+  });
+
+  useEffect(() => {
+    if (transport === null || topic === null) return undefined;
+    return transport.subscribe(topic, (message) => latest.current(message));
+  }, [transport, topic]);
+}
+
+/**
  * `LiveProvider` fed by the socket above it.
  *
  * A component of its own because the reading has to happen *below* the

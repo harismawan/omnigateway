@@ -160,4 +160,81 @@ export function coordContract(name: string, make: (now: () => number) => Promise
     expect(await coord.kv.get("sess:viewer:1")).toBeNull();
     expect(await coord.kv.get("other:1")).toBe("d");
   });
+
+  test(`${name}: buckets sum live buckets and drop the aged edge`, async () => {
+    const coord = await make(() => T0);
+    const one = { requests: 1, tokens: 10, costUsd: 0.5 };
+    expect(await coord.buckets.sum("b", 60_000, 300_000, T0)).toBeNull();
+    // An unseeded key ignores adds and stays unseeded.
+    await coord.buckets.add("b", 60_000, 300_000, T0, one);
+    expect(await coord.buckets.sum("b", 60_000, 300_000, T0)).toBeNull();
+    await coord.buckets.seed("b", 60_000, 300_000, T0, []);
+    await coord.buckets.add("b", 60_000, 300_000, T0, one);
+    await coord.buckets.add("b", 60_000, 300_000, T0 + 30_000, one);
+    await coord.buckets.add("b", 60_000, 300_000, T0 + 120_000, one);
+    expect(await coord.buckets.sum("b", 60_000, 300_000, T0 + 120_000)).toEqual({
+      requests: 3,
+      tokens: 30,
+      costUsd: 1.5,
+    });
+    // The first bucket starts at T0; it leaves once the window's oldest
+    // bucket start passes it.
+    expect((await coord.buckets.sum("b", 60_000, 300_000, T0 + 360_000))?.requests).toBe(1);
+  });
+
+  test(`${name}: buckets seed replaces and is then added to`, async () => {
+    const coord = await make(() => T0);
+    const one = { requests: 1, tokens: 1, costUsd: 1 };
+    await coord.buckets.seed("b", 60_000, 300_000, T0, []);
+    await coord.buckets.add("b", 60_000, 300_000, T0, one);
+    await coord.buckets.seed("b", 60_000, 300_000, T0, [
+      [T0 - 120_000, { requests: 5, tokens: 5, costUsd: 5 }],
+      [T0 - 900_000, { requests: 99, tokens: 99, costUsd: 99 }],
+    ]);
+    await coord.buckets.add("b", 60_000, 300_000, T0, one);
+    expect((await coord.buckets.sum("b", 60_000, 300_000, T0))?.requests).toBe(6);
+  });
+
+  test(`${name}: lease is held by one holder until it lapses or is released`, async () => {
+    let clock = T0;
+    const coord = await make(() => clock);
+    expect(await coord.lease.acquire("job", "a", 1_000)).toBe(true);
+    expect(await coord.lease.acquire("job", "b", 1_000)).toBe(false);
+    // The holder may renew.
+    expect(await coord.lease.acquire("job", "a", 1_000)).toBe(true);
+    await coord.lease.release("job", "b");
+    expect(await coord.lease.acquire("job", "b", 1_000)).toBe(false);
+    await coord.lease.release("job", "a");
+    expect(await coord.lease.acquire("job", "b", 50)).toBe(true);
+    clock += 51;
+    await Bun.sleep(51);
+    expect(await coord.lease.acquire("job", "a", 1_000)).toBe(true);
+  });
+
+  test(`${name}: pubsub delivers to exact and pattern subscribers`, async () => {
+    const coord = await make(() => T0);
+    const seen: string[] = [];
+    const offExact = coord.pubsub.subscribe("res", (topic, payload) => {
+      seen.push(`exact:${topic}:${payload}`);
+    });
+    const offPattern = coord.pubsub.subscribe("console:*", (topic, payload) => {
+      seen.push(`pattern:${topic}:${payload}`);
+    });
+    await coord.pubsub.publish("res", "1");
+    await coord.pubsub.publish("console:node-a", "2");
+    await coord.pubsub.publish("other", "3");
+    await Bun.sleep(5);
+    offExact();
+    await coord.pubsub.publish("res", "4");
+    await Bun.sleep(5);
+    offPattern();
+    expect(seen.sort()).toEqual(["exact:res:1", "pattern:console:node-a:2"]);
+  });
+
+  test(`${name}: incr is monotonic from 1`, async () => {
+    const coord = await make(() => T0);
+    expect(await coord.incr("seq")).toBe(1);
+    expect(await coord.incr("seq")).toBe(2);
+    expect(await coord.incr("other")).toBe(1);
+  });
 }

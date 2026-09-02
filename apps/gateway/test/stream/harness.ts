@@ -1,15 +1,12 @@
 import { createAdminAuth } from "@omni/control";
+import { memoryCoord } from "@omni/coord";
 import type { Store } from "@omni/store";
 import { captureLogger, memoryStore, seedApiKey } from "@omni/testkit";
 import { createApp } from "../../src/app.ts";
 import type { Broadcaster } from "../../src/stream/broadcaster.ts";
-import {
-  createBroadcaster,
-  DEFAULT_FLOOR_MS,
-  INVALIDATION_FLOORS,
-} from "../../src/stream/broadcaster.ts";
+import { createBroadcaster } from "../../src/stream/broadcaster.ts";
 import { type ChannelRegistry, createChannelRegistry } from "../../src/stream/channels.ts";
-import { createCoalescer, type Schedule } from "../../src/stream/coalescer.ts";
+import type { Schedule } from "../../src/stream/coalescer.ts";
 import { createSocketRegistry, type SocketRegistry } from "../../src/stream/registry.ts";
 import { createRing, type Ring } from "../../src/stream/ring.ts";
 
@@ -113,18 +110,10 @@ export async function streamHarness(
   const broadcaster = createBroadcaster({
     registry,
     ring,
-    coalescer: createCoalescer({
-      floors: INVALIDATION_FLOORS,
-      defaultFloorMs: DEFAULT_FLOOR_MS,
-      now: () => clock,
-      schedule,
-      sink: (topic, payload) =>
-        registry.publish(topic, {
-          type: "event",
-          topic,
-          ...(payload === undefined ? {} : { payload }),
-        }),
-    }),
+    coord: memoryCoord({ now: () => clock }),
+    nodeId: "test-node",
+    now: () => clock,
+    schedule,
   });
 
   // The app builds its own AdminAuth, so a session is minted through a second

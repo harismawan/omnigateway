@@ -157,7 +157,17 @@ run; when that file gain a step, this line gain one.
     memory coord and fail on any site still reading a module-scope map. Refresh serialisation is
     three layers — local `inFlight` map, `coord.mutex`, and the **re-read** behind the lock — and
     the re-read is the dedup: a view whose `expiresAt` sit behind the row's is answered from the
-    store, never the provider. Design:
+    store, never the provider. Long windows (`5h`, `1w`) are `coord.buckets`, seeded from
+    `usage.sumBuckets` under a lock; **`add` on an unseeded key is a no-op** because the row is
+    already in the store the seed read, and the two tests named "before the seed" pin both
+    directions of that. Background loops run under `coord.lease` via `underLease`; the heartbeat
+    is every process's own and is what keep its pending rows out of another's `sweepPending`.
+    Push transport: every frame go out through `coord.pubsub` and come back in through the
+    subscription — own included — so there is one delivery path; two coalescers in series, emit
+    side and deliver side, and they add no delay. `stream()` take its `seq` from `coord.incr`, so
+    a client moving between processes carry a number every one recognise; ring `push` accept
+    that seq and drop a frame behind its head. Plugin channels are **pod-local by construction**
+    — each pod's plugin instance serve that pod's sockets — and that is not a gap. Design:
     `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
 15. `packages/ratelimit` stay pure same way; `now` always a parameter, counters supplied by caller,
     so package never learn where they came from. `@omni/ratelimit/catalog` is leaf holding dimension

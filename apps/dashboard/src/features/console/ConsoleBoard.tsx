@@ -1,13 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import styled from "styled-components";
-import { CONSOLE_CADENCE_MS, useConsole } from "../../api/queries.ts";
+import { CONSOLE_CADENCE_MS, useConsole, useNodes } from "../../api/queries.ts";
 import type { ConsoleLine, ConsoleResponse } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount } from "../../lib/format.ts";
 import { CONSOLE_TOPIC, invalidateTopic } from "../../session/invalidation.ts";
 import { useLive } from "../../session/live.tsx";
-import { useStreamTopic } from "../../session/stream.tsx";
+import { type TopicMessage, useHeldStreamTopic, useStreamTopic } from "../../session/stream.tsx";
 import { Select } from "../../ui/Field.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Muted, Row } from "../../ui/primitives.ts";
@@ -173,8 +173,19 @@ export function ConsoleBoard() {
   const queryClient = useQueryClient();
   const [lines, setLines] = useState<number>(200);
   const [level, setLevel] = useState<string>("");
+  // Which process. `""` is the one that answered, which is what a single
+  // process has always been shown and needs no selector; a fleet defaults to
+  // every process merged, and the selector appears.
+  const [chosen, setChosen] = useState<string>("");
+  const nodes = useNodes().data?.nodes ?? [];
+  const fleet = nodes.length > 1;
+  const node = chosen === "" && fleet ? "all" : chosen;
+  // A chosen process holds its own topic; the answering one and the merged
+  // view both read the shared topic, which every process publishes on.
+  const heldTopic = node === "" || node === "all" ? null : `${CONSOLE_TOPIC}:${node}`;
+  const topic = heldTopic ?? CONSOLE_TOPIC;
 
-  const consoleLog = useConsole(lines, level, cadence(CONSOLE_CADENCE_MS, CONSOLE_TOPIC));
+  const consoleLog = useConsole(lines, level, cadence(CONSOLE_CADENCE_MS, topic), node);
   const read = consoleLog.data;
   const [pushed, setPushed] = useState<Pushed>(NOTHING_PUSHED);
   const appended = pushed.read === read ? pushed.lines : NO_LINES;
@@ -190,14 +201,15 @@ export function ConsoleBoard() {
   const terminalRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
 
-  useStreamTopic(CONSOLE_TOPIC, (message) => {
-    // `open`, `refused` and `closed` are transport status, delivered by topic to
-    // every reader — they exist for plugin channels, which can be refused, and
-    // this board is not one. Ignored explicitly rather than by falling through:
-    // the arm below treats anything that is not a readable frame as a hole and
+  const onMessage = (message: TopicMessage): void => {
+    // `open` and `refused` are transport status, delivered by topic to every
+    // reader — they exist for plugin channels, which can be refused, and this
+    // board is not one. Ignored explicitly rather than by falling through: the
+    // arm below treats anything that is not a readable frame as a hole and
     // drops the accumulated tail, so an unhandled status arm would clear the
-    // terminal on every reconnect and on every ack.
-    if (message.kind !== "frame" && message.kind !== "gap") return;
+    // terminal on every reconnect and on every ack. `closed` is how a held
+    // topic reports a gap, so it is read as one.
+    if (message.kind !== "frame" && message.kind !== "gap" && message.kind !== "closed") return;
     const incoming = message.kind === "frame" ? readConsoleFrame(message.payload) : null;
     if (incoming === null) {
       // A `gap`, or a frame that could not be read whole. Both mean the same
@@ -218,7 +230,11 @@ export function ConsoleBoard() {
       read,
       lines: [...(current.read === read ? current.lines : []), ...kept].slice(-lines),
     }));
+  };
+  useStreamTopic(CONSOLE_TOPIC, (message) => {
+    if (heldTopic === null) onMessage(message);
   });
+  useHeldStreamTopic(heldTopic, onMessage);
 
   useLayoutEffect(() => {
     const terminal = terminalRef.current;
@@ -239,6 +255,20 @@ export function ConsoleBoard() {
         }
         actions={
           <Controls>
+            {fleet ? (
+              <Narrow
+                value={node}
+                aria-label="Which process to show"
+                onChange={(event) => setChosen(event.target.value)}
+              >
+                <option value="all">every process</option>
+                {nodes.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.self ? `${entry.id.slice(0, 8)} (this one)` : entry.id.slice(0, 8)}
+                  </option>
+                ))}
+              </Narrow>
+            ) : null}
             <Narrow
               value={level}
               aria-label="Which levels to show"
@@ -307,7 +337,9 @@ export function ConsoleBoard() {
                 // the same millisecond — so position is the only honest key.
                 // biome-ignore lint/suspicious/noArrayIndexKey: no stable id exists
                 <Line key={`${line.at ?? 0}-${index}`} $level={line.level}>
-                  {line.raw}
+                  {line.nodeId === undefined
+                    ? line.raw
+                    : `[${line.nodeId.slice(0, 8)}] ${line.raw}`}
                 </Line>
               ))}
             </Lines>
@@ -321,5 +353,6 @@ export function ConsoleBoard() {
 function sourceLabel(read: ConsoleResponse): string {
   if (read.source === "file") return "log file";
   if (read.source === "journal") return "systemd journal";
+  if (read.source === "fleet") return "every process, merged";
   return "not captured";
 }

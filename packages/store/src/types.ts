@@ -1110,6 +1110,20 @@ export interface UsageRepo {
    */
   sumSince(apiKeyId: string, sinceMs: number): Promise<UsageSums>;
   /**
+   * The same sums, one row per `grainMs`-wide bucket since `sinceMs`, keyed by
+   * bucket start. What seeds the limiter's shared counters after a restart.
+   *
+   * At the hour grain this reads `usage_rollup` and is flat in window length;
+   * at any finer grain it groups `request_logs`, which is one key's rows over
+   * the window — a seed-time cost, paid once per key per process, never on
+   * the request path.
+   */
+  sumBuckets(
+    apiKeyId: string,
+    sinceMs: number,
+    grainMs: number,
+  ): Promise<Array<[bucketStart: number, sums: UsageSums]>>;
+  /**
    * Recomputes the hourly rollup from `request_logs`, whole.
    *
    * The rollup is derived, never authoritative: the log is the source of truth
@@ -1203,6 +1217,8 @@ export interface MaintenanceRepo {
   stats(): Promise<DatabaseStats>;
   /** Records this process as alive at `now`; forgets nodes unseen for a day. */
   heartbeat(now: number): Promise<void>;
+  /** Every process heard from within `NODE_GRACE_MS` of `now`, most recent first. */
+  nodes(now: number): Promise<Array<{ id: string; seenAt: number }>>;
   /** Rewrites the file, reclaiming freelist pages. Blocking. */
   vacuum(): Promise<void>;
   /**

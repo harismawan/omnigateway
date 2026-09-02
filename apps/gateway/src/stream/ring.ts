@@ -28,8 +28,15 @@ export type RingLimits = {
 };
 
 export type Ring = {
-  /** Appends and returns the sequence number assigned. */
-  push(topic: string, payload: unknown): number;
+  /**
+   * Appends and returns the sequence number assigned.
+   *
+   * With `seq`, records under a number issued elsewhere — the fleet's counter
+   * — and moves the topic's head to it. A frame behind the head is dropped:
+   * it was delivered before this process subscribed, and recording it would
+   * put the ring out of order.
+   */
+  push(topic: string, payload: unknown, seq?: number): number;
   /** What a subscriber that last saw `sinceSeq` has missed. */
   since(topic: string, sinceSeq: number): RingSlice;
   /** The highest sequence number issued for a topic; 0 when it has none. */
@@ -76,9 +83,10 @@ export function createRing(limits: RingLimits): Ring {
   };
 
   return {
-    push(topic, payload) {
+    push(topic, payload, seq) {
       const state = stateFor(topic);
-      state.seq += 1;
+      if (seq !== undefined && seq <= state.seq) return state.seq;
+      state.seq = seq ?? state.seq + 1;
       const bytes = sizeOf(payload);
       state.entries.push({ seq: state.seq, payload, bytes });
       state.bytes += bytes;
