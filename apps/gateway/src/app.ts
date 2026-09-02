@@ -244,6 +244,19 @@ export function createApp(deps: AppDeps) {
   const rateLimiter =
     deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger, coord });
   const snapshots = createRoutingSnapshotCache(deps.store, logger);
+  // A routing write on another process reaches this one as an invalidation.
+  // Own writes are skipped — the local subscription already patched them in,
+  // and a full rebuild per health write would be the cost this cache exists to
+  // remove. In memory the fan-out delivers only to this process, so the filter
+  // makes it a no-op there.
+  const ROUTING_TOPIC = "routing";
+  deps.store.routing.subscribe((change) => {
+    void coord.pubsub.publish(ROUTING_TOPIC, JSON.stringify({ from: nodeId, type: change.type }));
+  });
+  coord.pubsub.subscribe(ROUTING_TOPIC, (_topic, raw) => {
+    const message = JSON.parse(raw) as { from: string };
+    if (message.from !== nodeId) snapshots.invalidate();
+  });
 
   const admin = createAdminAuth(deps.store, { now, sessionTtlMs: ADMIN_SESSION_TTL_MS, coord });
   const refresh =
@@ -385,6 +398,7 @@ export function createApp(deps: AppDeps) {
       .use(
         databaseRoutes({
           store: deps.store,
+          ...(deps.mode === undefined ? {} : { mode: deps.mode }),
           ...(deps.reapplyPluginSchema === undefined
             ? {}
             : { reapplyPluginSchema: deps.reapplyPluginSchema }),

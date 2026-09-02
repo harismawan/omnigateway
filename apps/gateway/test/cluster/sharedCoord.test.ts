@@ -3,6 +3,7 @@ import { type Coord, memoryCoord } from "@omni/coord";
 import type { StreamEvent } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
+import { createPostgresStore, deriveKey, type Store } from "@omni/store";
 import {
   captureLogger,
   memoryStore,
@@ -12,7 +13,7 @@ import {
   target,
   virtualModel,
 } from "@omni/testkit";
-import { RedisClient } from "bun";
+import { RedisClient, SQL } from "bun";
 import { redisCoord } from "../../src/coord/redis.ts";
 import { proxyRoutes } from "../../src/routes/proxy.ts";
 
@@ -42,8 +43,12 @@ const EVENTS: StreamEvent[] = [
 
 const BODY = { model: "fast", max_tokens: 100, messages: [{ role: "user", content: "hi" }] };
 
-async function fleet(limits: LimitConfig, coords: () => [Coord, Coord] = shared) {
-  const store = await memoryStore();
+async function fleet(
+  limits: LimitConfig,
+  coords: () => [Coord, Coord] = shared,
+  openStore: () => Promise<Store> = memoryStore,
+) {
+  const store = await openStore();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
   await store.config.putModel(
     virtualModel({
@@ -88,10 +93,14 @@ function shared(): [Coord, Coord] {
   return [coord, coord];
 }
 
-function suite(name: string, coords: () => [Coord, Coord]) {
+function suite(
+  name: string,
+  coords: () => [Coord, Coord],
+  openStore: () => Promise<Store> = memoryStore,
+) {
   describe(name, () => {
     test("a concurrency ceiling holds across replicas", async () => {
-      const { store, a, b, call } = await fleet({ concurrency: 1 }, coords);
+      const { store, a, b, call } = await fleet({ concurrency: 1 }, coords, openStore);
 
       const held = await call(a, { ...BODY, stream: true });
       expect(held.status).toBe(200);
@@ -104,7 +113,7 @@ function suite(name: string, coords: () => [Coord, Coord]) {
     });
 
     test("a per-minute request ceiling holds across replicas", async () => {
-      const { store, a, b, call } = await fleet({ requests: { "1m": 2 } }, coords);
+      const { store, a, b, call } = await fleet({ requests: { "1m": 2 } }, coords, openStore);
 
       expect((await call(a, BODY)).status).toBe(200);
       expect((await call(b, BODY)).status).toBe(200);
@@ -114,7 +123,7 @@ function suite(name: string, coords: () => [Coord, Coord]) {
     });
 
     test("a long window holds across replicas", async () => {
-      const { store, a, b, call } = await fleet({ requests: { "5h": 2 } }, coords);
+      const { store, a, b, call } = await fleet({ requests: { "5h": 2 } }, coords, openStore);
 
       expect((await call(a, BODY)).status).toBe(200);
       expect((await call(b, BODY)).status).toBe(200);
@@ -133,12 +142,31 @@ suite("two replicas over one memory coord", shared);
  * what two pods actually hold. Skipped without a Redis to hand; CI names one.
  */
 const url = process.env.OMNI_TEST_REDIS_URL;
-if (url !== undefined) {
-  const base = url.replace(/\/\d+$/, "");
-  suite("two replicas over two redis coords", () => {
-    const db = `${base}/14`;
-    const admin = new RedisClient(db);
-    void admin.send("FLUSHDB", []).finally(() => admin.close());
-    return [redisCoord({ url: db }), redisCoord({ url: db })];
+const twoRedis = (): [Coord, Coord] => {
+  const db = `${(url ?? "").replace(/\/\d+$/, "")}/14`;
+  const admin = new RedisClient(db);
+  void admin.send("FLUSHDB", []).finally(() => admin.close());
+  return [redisCoord({ url: db }), redisCoord({ url: db })];
+};
+if (url !== undefined) suite("two replicas over two redis coords", twoRedis);
+
+/**
+ * The deployment itself: two replicas, two Redis coordinators, one Postgres.
+ * Every earlier suite proves a slice; this one proves the request path over
+ * exactly the parts a fleet runs on. Skipped without both services; CI has both.
+ */
+const pg = process.env.OMNI_TEST_DATABASE_URL;
+if (url !== undefined && pg !== undefined) {
+  suite("two replicas over redis and postgres", twoRedis, async () => {
+    const admin = new SQL({ url: pg, max: 1 });
+    try {
+      await admin.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+    } finally {
+      await admin.close();
+    }
+    return createPostgresStore({
+      url: pg,
+      encryptionKey: await deriveKey("test-encryption-key-0123456789"),
+    });
   });
 }

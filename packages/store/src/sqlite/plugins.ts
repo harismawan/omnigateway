@@ -5,7 +5,7 @@ import {
   PLUGIN_ID,
   PLUGIN_TABLE_PREFIX,
   prefixFor,
-  preparePluginSql as prepare,
+  preparePluginSql,
   toBindings,
 } from "../plugins/guard.ts";
 import type { PluginMigrateResult, PluginMigration, PluginRepo } from "../types.ts";
@@ -16,6 +16,8 @@ import type { PluginMigrateResult, PluginMigration, PluginRepo } from "../types.
  * in `test/plugins.test.ts` keeps reading it from beside the migrations it pins.
  */
 export { CORE_TABLES } from "../plugins/guard.ts";
+
+const prepare = preparePluginSql;
 
 const PREFIX = PLUGIN_TABLE_PREFIX;
 

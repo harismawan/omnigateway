@@ -13,7 +13,7 @@ import {
 import { memoryCoord } from "@omni/coord";
 import { createLogger, describeError, type Logger } from "@omni/ir";
 import { nodeHttpClient } from "@omni/providers";
-import { createStore, deriveKey } from "@omni/store";
+import { deriveKey, openStore } from "@omni/store";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { createApp } from "./app.ts";
 import { redisCoord } from "./coord/redis.ts";
@@ -130,8 +130,8 @@ async function main(): Promise<void> {
   const now = () => Date.now();
   // This process's name on every row it owns and every lease it holds.
   const nodeId = crypto.randomUUID();
-  const store = await createStore({
-    path: config.databasePath,
+  const store = await openStore({
+    ...(config.databaseUrl === null ? { path: config.databasePath } : { url: config.databaseUrl }),
     encryptionKey,
     logger,
     nodeId,

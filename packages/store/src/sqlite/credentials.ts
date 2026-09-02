@@ -208,7 +208,7 @@ export function createCredentialRepo(
                   account_email, provider_data, disabled_reason, disabled_at,
                   NULL AS access_token,
                   CASE WHEN refresh_token IS NULL THEN NULL ELSE 'present' END AS refresh_token,
-                  NULL AS api_key, NULL AS id_token, created_at, updated_at
+                  NULL AS api_key, NULL AS id_token, created_at, updated_at, token_version
              FROM credentials
             ORDER BY tier, label`,
         )

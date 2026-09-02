@@ -22,7 +22,8 @@ OmniGateway = Bun/TypeScript monorepo for self-hosted AI gateway:
   counter a fleet must share live behind it
 - `packages/rtk`: tool-result filters, applied in dispatch before routing
 - `packages/ponytail`: vendored lazy-senior-dev ruleset, appended to system prompt in dispatch
-- `packages/store`: persistence + encryption
+- `packages/store`: persistence + encryption; two `Store` impls, `sqlite/` (default) and
+  `postgres/` (cluster), one contract suite in `test/contract/` run against both
 - `packages/testkit`: shared test fixtures
 
 Approved designs in `docs/superpowers/specs/`; matching plans in `docs/superpowers/plans/`. Read
@@ -84,6 +85,13 @@ run; when that file gain a step, this line gain one.
 6. `packages/control` know nothing about caller type: no Elysia, cookies, argv, terminal, timers.
    Long-lived schedulers stay in `apps/gateway`.
 7. Store rows + secrets stay behind `@omni/store`; never expose encrypted or raw provider secrets.
+   Two implementations of one interface: `sqlite/` and `postgres/`. A repo method added to
+   `types.ts` is added to **both** and to the sqlite forwarder, and gets a test in
+   `test/contract/` — the only place a behaviour proven on one backend is proven on the other.
+   Plugin SQL passthrough is dialect-specific by design (`writing-a-plugin.md` say so). Postgres
+   `routing.version()` is read-behind (interface sync, read async), so cross-process routing
+   writes reach a replica through the `routing` pubsub topic wired in `app.ts`, filtered to
+   other nodes so own writes still patch rather than rebuild.
 8. All outbound provider HTTP use `HttpClient`; no direct production `fetch`.
 9. `@omni/providers/catalog` and `/descriptors` must stay leaves: model lists, presentation, types.
    No longer because a browser import them — console read provider data over `GET /api/catalog`

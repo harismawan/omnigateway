@@ -31,6 +31,11 @@ import { apiErrorHandler, readJson, requireAdmin } from "./http.ts";
 export type DatabaseRouteDeps = {
   store: DatabaseStore;
   admin: AdminAuth;
+  /**
+   * `cluster` refuses the restart route: a `systemctl restart` of one replica
+   * is not a fleet restart, and pretending it is would be worse than saying so.
+   */
+  mode?: "single" | "cluster";
   /** Shared with `createApp`, which is what applies it to `/v1/*`. */
   latch: QuiesceLatch;
   fs: DatabaseDeps["fs"];
@@ -413,6 +418,12 @@ export function databaseRoutes(deps: DatabaseRouteDeps) {
        */
       .post("/api/lifecycle/restart", async ({ request }) => {
         await requireAdmin(request, deps.admin);
+        if (deps.mode === "cluster") {
+          throw new GatewayError(
+            "BAD_REQUEST",
+            "this is one replica of a cluster; roll the deployment to restart the fleet",
+          );
+        }
         const capability = describeLifecycle(deps.lifecycle.env, deps.lifecycle.fileExists);
         logger.warn("restart requested", { supervisor: capability.supervisor });
         await requestRestart(deps.lifecycle);
