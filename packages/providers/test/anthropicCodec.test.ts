@@ -125,8 +125,8 @@ test("an API key request is signed over exactly these bytes", async () => {
 
   expect(sent.body).toBe(
     '{"model":"claude-opus-4","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],' +
-      '"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.219.a21; ' +
-      'cc_entrypoint=cli; cch=d2536;"},{"type":"text","text":"You are a Claude agent, built on ' +
+      '"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.258.1e2; ' +
+      'cc_entrypoint=cli; cch=abd52;"},{"type":"text","text":"You are a Claude agent, built on ' +
       'Anthropic\'s Claude Agent SDK."}],"max_tokens":4096,"stream":true}',
   );
   expect(result.degradations).toEqual([]);
@@ -160,7 +160,7 @@ test("an OAuth request adds the beta, the preamble, and its own signature", asyn
 
   // The OAuth leg carries a second system block the API-key leg does not, and a
   // different `cch` because the token is computed over the finished bytes.
-  expect(sent.body).toContain("cch=04449;");
+  expect(sent.body).toContain("cch=b3d1d;");
   expect(sent.body).toContain("You are Claude Code, Anthropic's official CLI for Claude.");
   expect(result.degradations).toEqual(["anthropic:oauth-system-prefix"]);
 });

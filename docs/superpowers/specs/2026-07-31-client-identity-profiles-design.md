@@ -93,7 +93,7 @@ binaries. `${...}` marks an environment-substitutable value.
 
 | Header | Value |
 | --- | --- |
-| `User-Agent` | `claude-cli/${2.1.219} (external, cli)` |
+| `User-Agent` | `claude-cli/${2.1.258} (external, cli)` |
 | `x-app` | `cli` |
 | `anthropic-dangerous-direct-browser-access` | `true` |
 | `X-Stainless-Lang` | `js` |
@@ -320,8 +320,8 @@ a header no real client would emit.
 
 ```
 OMNI_UA_ANTHROPIC=                          # replaces the whole User-Agent string
-OMNI_ANTHROPIC_CLI_VERSION=2.1.219
-OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION=0.94.0
+OMNI_ANTHROPIC_CLI_VERSION=2.1.258
+OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION=0.112.1
 OMNI_ANTHROPIC_STAINLESS_RUNTIME_VERSION=v26.3.0
 OMNI_ANTHROPIC_STAINLESS_OS=                # blank = derive from host
 OMNI_ANTHROPIC_STAINLESS_ARCH=              # blank = derive from host

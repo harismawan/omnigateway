@@ -8,7 +8,7 @@ const host = stainlessHost(process.platform, process.arch);
  * usage with plain axios, so that request reports `claude-code/<version>`
  * rather than `claude-cli/<version> (external, cli)`.
  */
-export const ANTHROPIC_CLI_VERSION = env("OMNI_ANTHROPIC_CLI_VERSION", "2.1.219");
+export const ANTHROPIC_CLI_VERSION = env("OMNI_ANTHROPIC_CLI_VERSION", "2.1.258");
 
 export const anthropicProfile: ClientProfile = {
   headers: [
@@ -16,7 +16,7 @@ export const anthropicProfile: ClientProfile = {
     ["x-app", "cli"],
     ["anthropic-dangerous-direct-browser-access", "true"],
     ["X-Stainless-Lang", "js"],
-    ["X-Stainless-Package-Version", env("OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION", "0.94.0")],
+    ["X-Stainless-Package-Version", env("OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION", "0.112.1")],
     ["X-Stainless-OS", envOrNull("OMNI_ANTHROPIC_STAINLESS_OS") ?? host.os],
     ["X-Stainless-Arch", envOrNull("OMNI_ANTHROPIC_STAINLESS_ARCH") ?? host.arch],
     // Forced to node: this is what the real CLI reports, and reporting "bun"
