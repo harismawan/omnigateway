@@ -209,6 +209,12 @@ export async function* responsesStream(
   // branch guarded on it to `never`.
   let nextOutputIndex = 0;
   const state: { open: OpenItem | null } = { open: null };
+  // Every block index this stream has already opened. A repeated `blockStart`
+  // for one of them is a duplicate frame, not a second block: minting a fresh
+  // item for it would split one thing the model said across two items carrying
+  // half the content each. An IR index identifies a block within a response, so
+  // a repeat can only mean the same block.
+  const started = new Set<number>();
 
   const ID_PREFIX: Readonly<Record<ItemKind, string>> = {
     message: "msg",
@@ -306,22 +312,27 @@ export async function* responsesStream(
   }
 
   /**
-   * Closes on the IR's say-so.
+   * Closes on the IR's say-so, and only the item the IR named.
    *
-   * Nothing open is nothing to close — an upstream may end a part it never
-   * opened, and that is not worth a frame. A *different* item being open means
-   * the two sides disagree about what is being written, and the open one is
-   * closed anyway: it has to end at some point, and the alternative is leaving
-   * a client holding an item that never completes.
+   * Three cases, and the middle one is the trap. Nothing open is nothing to
+   * close. The named item being open closes it. A *different* item being open
+   * means this close is stale — a duplicate `content_part.done` for a block
+   * that already ended, which no decoder in this repository guards against the
+   * way they all guard a duplicate `output_item.done` — and closing on it would
+   * finish the live item early: a tool call reported `completed` carrying
+   * truncated arguments, delivered inside a clean 200.
    *
-   * Neither case throws, and that is deliberate. This runs inside a live SSE
-   * stream, so an exception here does not surface as an error the client can
-   * read — it truncates the response mid-flight, which is the worst reading of
-   * a mistake made on the far side of the network.
+   * Dropping it loses nothing, because closure is guaranteed elsewhere: the
+   * next `blockStart` closes whatever is open, and `end`, `error` and the
+   * unterminated fallback all close unconditionally.
+   *
+   * Nothing here throws. This runs inside a live SSE stream, where an exception
+   * is not an error a client can read — it truncates the response mid-flight,
+   * which is the worst possible reading of a mistake made on the far side of
+   * the network.
    */
   function* closeChecked(irIndex: number): Generator<SseFrame> {
-    if (state.open === null) return;
-    void irIndex;
+    if (state.open === null || state.open.irIndex !== irIndex) return;
     yield* closeCurrent();
   }
 
@@ -334,6 +345,8 @@ export async function* responsesStream(
         break;
 
       case "blockStart": {
+        if (started.has(event.index)) break;
+        started.add(event.index);
         // Whatever is still open ends here. A decoder that opens an item
         // without closing the last one is a bug upstream, and the single
         // counter below means the two can never share an index — but the

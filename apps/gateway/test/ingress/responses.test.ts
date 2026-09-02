@@ -539,9 +539,11 @@ test("a hosted tool with no name of its own is named by its type", () => {
 
 test("a tool name outside the accepted grammar is refused", () => {
   // 128 characters of [A-Za-z0-9_-], which is what the Responses API enforces.
+  // The refusal states the rule and does not quote the value: the value is the
+  // client's own text and this message reaches stdout.
   expect(() =>
     parseResponsesRequest({ ...minimal, tools: [{ type: "function", name: "bad name!" }] }),
-  ).toThrow(/bad name!/);
+  ).toThrow(/a tool name must match/);
   expect(() =>
     parseResponsesRequest({
       ...minimal,
@@ -563,4 +565,39 @@ test("names the freeform tools so the egress can render their calls back", () =>
   };
   expect([...customToolNames(body)]).toEqual(["apply_patch"]);
   expect([...customToolNames(minimal)]).toEqual([]);
+});
+
+test("a refusal never echoes client-chosen text back into the log line", () => {
+  // `reasonField` prints a message whose error names no provider, and every
+  // refusal here is one — so an interpolated tool name would reach the
+  // operator's stdout, chosen by whoever holds the key, and would do it even
+  // for a key that opted out of body retention. That is exactly the breach
+  // `LogFields` is a closed allowlist to prevent, and it is why
+  // `LogFields.cloakedTools` is a count rather than a list.
+  const marker = "CLIENT_CHOSEN_MARKER";
+
+  const messages: string[] = [];
+  const collect = (fn: () => void): void => {
+    try {
+      fn();
+    } catch (error) {
+      messages.push(error instanceof GatewayError ? error.message : String(error));
+    }
+  };
+
+  collect(() =>
+    parseResponsesRequest({
+      ...minimal,
+      input: [{ type: "function_call", call_id: "c1", name: marker, arguments: "not json" }],
+    }),
+  );
+  collect(() =>
+    parseResponsesRequest({ ...minimal, tools: [{ type: "function", name: `${marker} !` }] }),
+  );
+  collect(() =>
+    parseResponsesRequest({ ...minimal, tools: [{ type: marker, name: `${marker}!` }] }),
+  );
+
+  expect(messages).toHaveLength(3);
+  for (const message of messages) expect(message).not.toContain(marker);
 });

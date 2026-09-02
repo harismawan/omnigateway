@@ -202,7 +202,10 @@ function contentPart(part: unknown): ContentBlock | null {
     const { mediaType, data } = parseDataUrl(url);
     return { type: "image", mediaType, data };
   }
-  throw new GatewayError("BAD_REQUEST", `input: unsupported content part type "${String(type)}"`);
+  throw new GatewayError(
+    "BAD_REQUEST",
+    `input: unsupported content part type "${safeToken(type)}"`,
+  );
 }
 
 /** A message item's content, which the API allows to be a bare string. */
@@ -270,7 +273,7 @@ function readInputItems(items: readonly unknown[]): Message[] {
         const input =
           type === "custom_tool_call"
             ? { input: typeof raw.input === "string" ? raw.input : "" }
-            : jsonArguments(raw.arguments, name);
+            : jsonArguments(raw.arguments, clampCallId(callId));
         push("assistant", [{ type: "toolUse", id: clampCallId(callId), name, input }]);
         break;
       }
@@ -306,7 +309,7 @@ function readInputItems(items: readonly unknown[]): Message[] {
         );
 
       default:
-        throw new GatewayError("BAD_REQUEST", `input: unsupported item type "${String(type)}"`);
+        throw new GatewayError("BAD_REQUEST", `input: unsupported item type "${safeToken(type)}"`);
     }
   }
 
@@ -319,14 +322,34 @@ function readInputItems(items: readonly unknown[]): Message[] {
  * Refused rather than defaulted to `{}`: a call dispatched with no arguments is
  * a different call, and the failure belongs at the client that wrote it.
  */
-function jsonArguments(raw: unknown, name: string): Record<string, unknown> {
+function jsonArguments(raw: unknown, callId: string): Record<string, unknown> {
   const text = typeof raw === "string" ? raw : "";
   try {
     const parsed: unknown = text === "" ? {} : JSON.parse(text);
     return isRecord(parsed) ? parsed : { value: parsed };
   } catch {
-    throw new GatewayError("BAD_REQUEST", `input: ${name} arguments are not valid JSON`);
+    // Named by `call_id`, never by tool name. A refusal built here carries no
+    // provider, so `reasonField` prints its message to stdout at default level
+    // — and a tool name is text the client chose, which is the thing
+    // `LogFields` is a closed allowlist to keep off that line. The call id is
+    // this gateway's own correlation handle and enough to find the item.
+    throw new GatewayError("BAD_REQUEST", `input: arguments for call ${callId} are not valid JSON`);
   }
+}
+
+/**
+ * A client-supplied token, bounded so it can be named in a refusal.
+ *
+ * Refusals from this parser carry no provider, so `reasonField` prints them to
+ * stdout at default level — which makes every interpolated value a decision
+ * about the redaction boundary, not a formatting choice. A wire `type` is worth
+ * naming, because a client cannot fix what it is not told; it is bounded here
+ * so what lands on that line is short and of a known shape rather than whatever
+ * arrived.
+ */
+function safeToken(value: unknown): string {
+  const text = typeof value === "string" ? value : String(value);
+  return /^[A-Za-z0-9_.:-]{1,40}$/.test(text) ? text : "(unprintable)";
 }
 
 /** What the Responses API accepts as a tool name, and therefore what is stored. */
@@ -355,7 +378,11 @@ function readTools(raw: readonly unknown[]): ToolDef[] {
 
     if (type === "function" || type === "custom") {
       if (!TOOL_NAME.test(declared)) {
-        throw new GatewayError("BAD_REQUEST", `tools: unusable tool name "${declared}"`);
+        // The offending value is deliberately absent: it is the client's own
+        // text, it just failed the length and charset rule so it is unbounded
+        // in both, and this message reaches stdout. The rule is stated instead,
+        // which is what a client needs to fix its request anyway.
+        throw new GatewayError("BAD_REQUEST", `tools: a tool name must match ${TOOL_NAME.source}`);
       }
       const description = typeof entry.description === "string" ? entry.description : undefined;
       tools.push({
@@ -380,7 +407,7 @@ function readTools(raw: readonly unknown[]): ToolDef[] {
     // every log line and encoder that identifies tools by name.
     const name = declared === "" ? type : declared;
     if (!TOOL_NAME.test(name)) {
-      throw new GatewayError("BAD_REQUEST", `tools: unusable tool name "${name}"`);
+      throw new GatewayError("BAD_REQUEST", `tools: a tool name must match ${TOOL_NAME.source}`);
     }
     const { type: _type, name: _name, ...wire } = entry;
     tools.push({ kind: "provider", provider: "openai", type, name, wire });

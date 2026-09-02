@@ -603,3 +603,58 @@ test("a block that ends without having started is ignored, not fatal", async () 
   const f = await stage(responsesStream(src({ type: "blockEnd", index: 7 }), RENDER));
   expect(f).toEqual([]);
 });
+
+test("a stale close for an already-closed block leaves the open item alone", async () => {
+  // The dangerous shape, and it is reachable: a decoder guards a duplicate
+  // `output_item.done` through its own bookkeeping but nothing guards a
+  // duplicate `content_part.done`, so a second close for a block that already
+  // ended can arrive while the *next* item is mid-flight. Closing whatever
+  // happens to be open would finish a tool call on truncated arguments and
+  // report it completed — a wrong document, delivered with a clean 200.
+  const f = await stage(
+    responsesStream(
+      src(
+        { type: "blockStart", index: 0, block: { type: "text" } },
+        { type: "blockDelta", index: 0, delta: { type: "text", text: "one moment" } },
+        { type: "blockEnd", index: 0 },
+        { type: "blockStart", index: 1, block: { type: "toolUse", id: "call_1", name: "run" } },
+        { type: "blockDelta", index: 1, delta: { type: "toolJson", partial: '{"cmd":' } },
+        { type: "blockEnd", index: 0 },
+        { type: "blockDelta", index: 1, delta: { type: "toolJson", partial: '"ls"}' } },
+        { type: "blockEnd", index: 1 },
+      ),
+      RENDER,
+    ),
+  );
+
+  const bodies = f.map((x) => JSON.parse(x.data));
+  const call = bodies.filter((b) => b.type === "response.output_item.done").at(-1);
+  expect(call?.item.type).toBe("function_call");
+  expect(call?.item.arguments).toBe('{"cmd":"ls"}');
+  // One close per item, and the stale one produced nothing.
+  expect(bodies.filter((b) => b.type === "response.output_item.done")).toHaveLength(2);
+});
+
+test("a repeated start for the same block does not split it into two items", async () => {
+  // A duplicate `output_item.added` — a reconnect, a retried frame — must not
+  // become two items carrying half the content each.
+  const f = await stage(
+    responsesStream(
+      src(
+        { type: "blockStart", index: 0, block: { type: "text" } },
+        { type: "blockDelta", index: 0, delta: { type: "text", text: "half " } },
+        { type: "blockStart", index: 0, block: { type: "text" } },
+        { type: "blockDelta", index: 0, delta: { type: "text", text: "and half" } },
+        { type: "blockEnd", index: 0 },
+      ),
+      RENDER,
+    ),
+  );
+
+  const bodies = f.map((x) => JSON.parse(x.data));
+  const done = bodies.filter((b) => b.type === "response.output_item.done");
+  expect(done).toHaveLength(1);
+  expect(done[0]?.item.content).toEqual([
+    { type: "output_text", text: "half and half", annotations: [] },
+  ]);
+});
