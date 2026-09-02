@@ -626,7 +626,91 @@ test("lets vendor passthrough override a promoted system-turn breakpoint", () =>
     { oauth: false },
   );
   expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  // Override, not addition: the client asked for automatic placement, so no
+  // inline breakpoint it never wrote may join the top-level one.
+  expect(markedHistoryBlocks(body)).toEqual([]);
+  expect(degradations).not.toContain("anthropic:system-turn-cache-control-retargeted");
   expect(degradations).not.toContain("anthropic:system-turn-cache-control-dropped");
+});
+
+/**
+ * The trailing-turn marker is dead wherever it sits inside that turn, so a
+ * marked text block followed by an image is stripped and moved like any other.
+ * This shape once recorded `dropped` while sending the marker anyway.
+ */
+test("moves a marker that is not the last block of a mixed trailing system turn", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "system",
+          content: [
+            { type: "text", text: "Write Go.", cacheControl: { type: "ephemeral" } },
+            { type: "image", mediaType: "image/png", data: "AAAA" },
+          ],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(markedHistoryBlocks(body)).toEqual(["messages[0].content[0]"]);
+  expect(degradations).toContain("anthropic:system-turn-cache-control-retargeted");
+  expect(degradations).not.toContain("anthropic:system-turn-cache-control-dropped");
+});
+
+test("records a trailing-turn marker with nowhere to land as dropped", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        {
+          role: "system",
+          content: [
+            { type: "image", mediaType: "image/png", data: "AAAA" },
+            { type: "text", text: "Write Go.", cacheControl: { type: "ephemeral" } },
+          ],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(markedHistoryBlocks(body)).toEqual([]);
+  expect(degradations).toContain("anthropic:system-turn-cache-control-dropped");
+});
+
+/**
+ * A signed assistant turn after the marked system turn means that turn is not
+ * trailing: the next request keeps it at the same position, so its marker is a
+ * live prefix and stays put.
+ */
+test("leaves a marked system turn alone when a signed assistant turn follows it", () => {
+  const { body, degradations } = toWire(
+    {
+      ...base,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "system",
+          content: [
+            { type: "image", mediaType: "image/png", data: "AAAA" },
+            { type: "text", text: "Write Go.", cacheControl: { type: "ephemeral" } },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "thinking", text: "…", signature: "sig" }],
+        },
+      ],
+    },
+    "m",
+    { oauth: false },
+  );
+  expect(markedHistoryBlocks(body)).toEqual(["messages[1].content[1]"]);
+  expect(degradations).not.toContain("anthropic:system-turn-cache-control-retargeted");
 });
 
 test("leaves an unmarked system turn free of degradations", () => {

@@ -157,32 +157,33 @@ function encodeSystemTurn(content: ContentBlock[], cloak: ToolCloak | null): str
  * Measured against the account rather than reasoned about, because the first
  * two readings of this were both wrong. Four requests, each the previous one
  * plus an exchange: marked on the trailing turn, every request read 0 and wrote
- * the whole prefix (11,820 tokens, then 11,831, then 11,842); marked on the
- * last block *before* it, every request read the previous total and wrote 11.
+ * the whole prefix (14,329 tokens, then 14,340, then 14,351); marked on the
+ * last block *before* it, the second request read 13,896 and wrote 11.
  * Request-level `cache_control` — which this function used to promote it to —
  * behaves exactly like marking the turn itself, so that path was not a
  * workaround for anything. It is where the marker went to die.
  *
- * `retarget` is where the marker is *taken from*; `toWire` decides where it
- * lands, because that is a question about the wire body and this walks the IR.
+ * `retarget` is where the marker is *taken from*: the last marked block of the
+ * trailing turn when that turn is a system one, wherever in the turn it sits —
+ * the whole turn moves, so every marker inside it is equally dead. `toWire`
+ * decides where it lands and whether it could, because that is a question
+ * about the wire body and this walks the IR.
  */
 function systemCacheControl(req: ChatRequest): {
   retarget?: CacheControl;
   lost: boolean;
 } {
-  const cacheable = req.messages.flatMap((message) =>
-    message.content.flatMap((block) =>
-      block.type === "thinking" ? [] : [{ role: message.role, block }],
-    ),
+  const markedSystemBlocks = req.messages.flatMap((message) =>
+    message.role === "system"
+      ? message.content.filter((block) => cacheControlOf(block) !== undefined)
+      : [],
   );
-  const markedSystemBlocks = cacheable.filter(
-    ({ role, block }) => role === "system" && cacheControlOf(block) !== undefined,
-  );
-  const final = markedSystemBlocks.at(-1);
-  const retarget =
-    final !== undefined && final.block.type === "text" && cacheable.at(-1) === final
-      ? cacheControlOf(final.block)
+  const trailing = req.messages.at(-1);
+  const marked =
+    trailing?.role === "system"
+      ? trailing.content.findLast((block) => cacheControlOf(block) !== undefined)
       : undefined;
+  const retarget = marked === undefined ? undefined : cacheControlOf(marked);
   return {
     ...(retarget === undefined ? {} : { retarget }),
     lost: markedSystemBlocks.length > (retarget === undefined ? 0 : 1),
@@ -610,8 +611,12 @@ export function toWire(
   //
   // Skipped when the block already carries one — the client marked it itself,
   // and a second marker on the same block is the same boundary written twice.
-  // Nothing left to move it onto (a history of nothing but system turns) means
-  // no marker: there is no prefix worth a breakpoint.
+  // Nothing left to move it onto (a history of nothing but system turns) is
+  // recorded as dropped: the client asked for a breakpoint and got none.
+  // Skipped too when the vendor bag carries a request-level `cache_control`:
+  // that client asked for automatic placement, and a marker it never put on a
+  // history block is one it cannot account for. The strip still runs — the
+  // dead marker is dead under either regime.
   if (systemCache.retarget !== undefined) {
     // A mixed system turn is encoded block-for-block, so the marker `encodeBlock`
     // already copied onto it is still there — at the one position that cannot be
@@ -624,13 +629,14 @@ export function toWire(
         if (isRecord(block)) delete block.cache_control;
       }
     }
-    const target = lastCacheableHistoryBlock(body.messages.slice(0, -1));
-    if (target !== undefined && target.cache_control === undefined) {
-      target.cache_control = {
-        type: systemCache.retarget.type,
-        ...(systemCache.retarget.ttl === undefined ? {} : { ttl: systemCache.retarget.ttl }),
-      };
-      note("anthropic:system-turn-cache-control-retargeted");
+    if (!hasVendorCacheControl(req)) {
+      const target = lastCacheableHistoryBlock(body.messages.slice(0, -1));
+      if (target === undefined) {
+        note("anthropic:system-turn-cache-control-dropped");
+      } else if (target.cache_control === undefined) {
+        Object.assign(target, wireCacheControl(systemCache.retarget));
+        note("anthropic:system-turn-cache-control-retargeted");
+      }
     }
   }
 

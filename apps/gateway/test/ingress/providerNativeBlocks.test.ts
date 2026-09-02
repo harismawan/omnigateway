@@ -448,7 +448,15 @@ test("mid-conversation system block preserves nested text and cache markers", ()
     ],
   });
   const { body } = toWire(request, "claude-opus-5", { oauth: false });
-  expect(body.messages[1]).toEqual({ role: "system", content: [block] });
+  // The nested marker is payload and travels verbatim. The block's own is the
+  // trailing system turn's breakpoint, which is dead at that position whatever
+  // the block's type, so it moves onto the turn before — see `systemCacheControl`.
+  const { cache_control: moved, ...verbatim } = block;
+  expect(body.messages[1]).toEqual({ role: "system", content: [verbatim] });
+  expect(body.messages[0]).toEqual({
+    role: "user",
+    content: [{ type: "text", text: "before", cache_control: moved }],
+  });
 });
 
 test("mid-conversation system block preserves null nested text cache control", () => {

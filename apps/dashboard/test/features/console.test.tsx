@@ -222,6 +222,47 @@ describe("ConsoleBoard source hint visibility", () => {
   });
 
   /**
+   * One chosen process answering `none` is a fact about that process; the
+   * fleet-wide copy would claim the others capture nothing without asking.
+   */
+  test("an uncaptured chosen process is described alone, not as the fleet", async () => {
+    createFetchStub({
+      "GET /api/console": ({ url }) =>
+        url.includes("node=bbbbbbbb")
+          ? { source: "none", lines: [] }
+          : { source: "fleet", lines: LINES.map((line) => ({ ...line, nodeId: "aaaaaaaa-1" })) },
+      "GET /api/nodes": () => ({
+        nodes: [
+          { id: "aaaaaaaa-1", seenAt: 2, self: true },
+          { id: "bbbbbbbb-2", seenAt: 1, self: false },
+        ],
+      }),
+    });
+    renderWithProviders(<ConsoleBoard />);
+    const selector = await screen.findByLabelText("Which process to show");
+    await userEvent.selectOptions(selector, "bbbbbbbb-2");
+
+    expect(await screen.findByText(/This process is not capturing/)).toBeTruthy();
+    expect(screen.queryByText(/No process in this fleet/)).toBeNull();
+  });
+
+  test("names the processes a merged read could not reach", async () => {
+    createFetchStub({
+      "GET /api/console": () => ({ source: "none", lines: [], unreachable: ["bbbbbbbb-2"] }),
+      "GET /api/nodes": () => ({
+        nodes: [
+          { id: "aaaaaaaa-1", seenAt: 2, self: true },
+          { id: "bbbbbbbb-2", seenAt: 1, self: false },
+        ],
+      }),
+    });
+    renderWithProviders(<ConsoleBoard />);
+
+    expect(await screen.findByText(/One process did not answer in time/)).toBeTruthy();
+    expect(screen.getByText(/bbbbbbbb\./)).toBeTruthy();
+  });
+
+  /**
    * A fleet shows a process selector, defaults to every process merged, and
    * asks for the chosen one by name. A single process shows no selector at
    * all — the control would offer a choice of one.

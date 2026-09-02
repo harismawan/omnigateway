@@ -461,6 +461,11 @@ export type ConsoleResponse = {
   /** Only for `file`. A journal has no path to name. */
   path?: string;
   lines: ConsoleLine[];
+  /**
+   * Only on a merged read: processes that did not answer in time. Their
+   * capture is unknown, so `source` is the verdict of the others alone.
+   */
+  unreachable?: string[];
 };
 
 /** A capability-only probe: no prompt content ever reaches the control API. */

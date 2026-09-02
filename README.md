@@ -650,9 +650,12 @@ format, structural bounds, and masking rules.
 ## Snapshots and restore
 
 The console's Database screen reports what this installation occupies — the
-database file, its write-ahead log, the captured-body tree, and the free pages a
-compaction would give back — and takes snapshots. `omni db stats` prints the same
-figures.
+database file, its write-ahead log, the captured-body tree, the free pages a
+compaction would give back, and every table by size — and takes snapshots.
+`omni db stats` prints the same figures. On Postgres both show the server's own
+size, the `request_bodies` table and the per-table listing instead; there is no
+file, so nothing here compacts, snapshots or restores it — `pg_dump` is the
+backup.
 
 **What a snapshot is.** One self-contained SQLite file, written into a
 `snapshots/` directory beside the database. The write-ahead log is folded in, so

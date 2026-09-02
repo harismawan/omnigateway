@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CatalogProvider as ServerCatalogProvider } from "@omni/control";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
+import { GatewayError } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type BodyArtifact, createStore, deriveKey, type Store } from "@omni/store";
 import {
@@ -1280,6 +1281,46 @@ test("the merged console read stays a fleet when one process captures output", a
   };
   expect(body.source).toBe("fleet");
   expect(body.lines.map((line) => [line.nodeId, line.raw])).toEqual([["other", "hi"]]);
+});
+
+test("the merged console read names a process that did not answer", async () => {
+  // The one capturing process timing out must not read as a fleet capturing
+  // nothing: the verdict is the answering processes' own, and the silent one
+  // is listed rather than folded into it.
+  const store = await fleetStore(["test-node", "other"]);
+  const { call } = await harness({
+    store,
+    consoleFleet: {
+      read: async (nodeId) => {
+        if (nodeId === "other") throw new GatewayError("TIMEOUT", "no answer");
+        return { source: "none", lines: [] };
+      },
+      stop: () => {},
+    },
+  });
+
+  const body = (await (await call("GET", "/api/console?node=all")).json()) as {
+    source: string;
+    unreachable?: string[];
+  };
+  expect(body.source).toBe("none");
+  expect(body.unreachable).toEqual(["other"]);
+});
+
+test("the merged console read times out when no process answers", async () => {
+  const store = await fleetStore(["test-node", "other"]);
+  const { call } = await harness({
+    store,
+    consoleFleet: {
+      read: async () => {
+        throw new GatewayError("TIMEOUT", "no answer");
+      },
+      stop: () => {},
+    },
+  });
+
+  const res = await call("GET", "/api/console?node=all");
+  expect(res.status).toBe(504);
 });
 
 test("the console route clamps the page size", async () => {

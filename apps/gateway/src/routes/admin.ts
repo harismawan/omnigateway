@@ -612,26 +612,35 @@ export function adminRoutes(deps: AdminDeps) {
         // single process would. Reporting `fleet` with no lines instead tells
         // the console the log is merely empty, so it says the gateway will
         // write here on the next boot or token refresh, and it never will.
+        //
+        // A process that did not answer is neither: `allSettled` swallows its
+        // `TIMEOUT`, so the ids are carried as `unreachable` and the console
+        // says so beside whichever verdict the answering ones earned. Every
+        // process unreachable is a fleet that could not be read at all, and
+        // that is the timeout it would have been on a single process.
         let captured = false;
-        for (const outcome of reads) {
-          if (outcome.status !== "fulfilled") continue;
+        const unreachable: string[] = [];
+        for (const [index, outcome] of reads.entries()) {
+          if (outcome.status !== "fulfilled") {
+            unreachable.push(live[index]?.id ?? "");
+            continue;
+          }
           if (outcome.value.read.source !== "none") captured = true;
           for (const line of outcome.value.read.lines) {
             lines.push({ ...line, nodeId: outcome.value.nodeId });
           }
         }
-        // Only when something answered: every process unreachable is a fleet
-        // that could not be read, which is not the same claim as one that
-        // captures nothing, and `TIMEOUT` is already how that is reported.
-        if (!captured && reads.some((outcome) => outcome.status === "fulfilled")) {
-          return { source: "none", lines: [] };
+        if (unreachable.length === reads.length) {
+          throw new GatewayError("TIMEOUT", "no process in the fleet answered a console read");
         }
+        const reach = unreachable.length === 0 ? {} : { unreachable };
+        if (!captured) return { source: "none", lines: [], ...reach };
         // Undated lines keep their place at the end: a merge that sorted them
         // first would put a process's banner above every other process's log.
         lines.sort(
           (a, b) => (a.at ?? Number.POSITIVE_INFINITY) - (b.at ?? Number.POSITIVE_INFINITY),
         );
-        return { source: "fleet", lines: lines.slice(-consoleQuery.lines) };
+        return { source: "fleet", lines: lines.slice(-consoleQuery.lines), ...reach };
       })
       /**
        * The processes serving this installation, most recently heard from
