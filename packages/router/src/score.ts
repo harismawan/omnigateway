@@ -60,11 +60,20 @@ const EXPECTED_OUTPUT_TOKENS = 1000;
  * Only ever compared against other targets for the same request, so the units
  * cancel and the absolute number does not need to mean currency.
  */
-function requestCost(target: Target, request: ChatRequest): number {
+type TokenEstimate = { cachedTok: number; freshTok: number; outTok: number };
+
+/**
+ * Walked once per request, not once per candidate: the estimate depends on the
+ * request alone, and both walks visit every block of every message.
+ */
+function estimateTokens(request: ChatRequest): TokenEstimate {
   const cachedTok = estimateCachedInputTokens(request);
   const freshTok = Math.max(0, estimateInputTokens(request) - cachedTok);
   const outTok = Math.min(request.maxTokens ?? EXPECTED_OUTPUT_TOKENS, EXPECTED_OUTPUT_TOKENS);
+  return { cachedTok, freshTok, outTok };
+}
 
+function requestCost(target: Target, { cachedTok, freshTok, outTok }: TokenEstimate): number {
   // Cache reads are priced at their own rate rather than at fresh input, which
   // is how the request will actually bill. Charging a cached prefix at full
   // input price overstates a long conversation by roughly ten times, and hides
@@ -96,7 +105,8 @@ export function score(pairs: Pair[], input: RankInput): Candidate[] {
   const minTier = Math.min(...tiers);
   const maxTier = Math.max(...tiers);
 
-  const costs = pairs.map((p) => requestCost(p.target, input.request));
+  const tokens = estimateTokens(input.request);
+  const costs = pairs.map((p) => requestCost(p.target, tokens));
   const bestCost = bestPositive(costs);
 
   const bestLatency = bestPositive(
