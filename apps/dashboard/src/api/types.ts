@@ -535,10 +535,13 @@ export type SnapshotInfo = {
 };
 
 export type DatabaseOverview = {
+  engine: "sqlite" | "postgres";
+  /** The file path, or the server URL with its password masked. */
+  location: string;
   stats: DatabaseStats;
   fileBytes: number;
   walBytes: number;
-  /** The captured-body tree, which snapshots deliberately exclude. */
+  /** The captured-body tree beside a SQLite file, or the `request_bodies` table on Postgres. */
   bodiesBytes: number;
   logicalBytes: number;
   /** The part of the logical size a vacuum would give back. */
@@ -546,6 +549,17 @@ export type DatabaseOverview = {
   freeDiskBytes: number | null;
   retention: RetentionPolicy;
   snapshots: { count: number; totalBytes: number; latestAt: number | null };
+  /** Every table, largest first. `rows` is exact on SQLite, an estimate on Postgres. */
+  tables: TableStats[];
+};
+
+export type TableStats = {
+  name: string;
+  /** Table plus its indexes (and TOAST on Postgres). */
+  bytes: number;
+  rows: number;
+  /** Postgres tuples awaiting autovacuum; null where the engine has no such number. */
+  deadRows: number | null;
 };
 
 export type SnapshotsResponse = { snapshots: SnapshotInfo[] };

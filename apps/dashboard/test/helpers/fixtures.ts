@@ -405,6 +405,8 @@ export function snapshot(patch: Partial<SnapshotInfo> = {}): SnapshotInfo {
  */
 export function databaseOverview(patch: Partial<DatabaseOverview> = {}): DatabaseOverview {
   return {
+    engine: "sqlite",
+    location: "/var/lib/omnigateway/omnigateway.db",
     stats: { pageSize: 4096, pageCount: 3072, freelistCount: 768, schemaVersion: 14 },
     fileBytes: 12_582_912,
     walBytes: 1_048_576,
@@ -414,6 +416,10 @@ export function databaseOverview(patch: Partial<DatabaseOverview> = {}): Databas
     freeDiskBytes: 10_737_418_240,
     retention: { keepLatest: 5, maxAgeDays: 30 },
     snapshots: { count: 1, totalBytes: 10_485_760, latestAt: NOW - 3_600_000 },
+    tables: [
+      { name: "request_logs", bytes: 8_388_608, rows: 41_203, deadRows: null },
+      { name: "usage_daily", bytes: 1_048_576, rows: 912, deadRows: null },
+    ],
     ...patch,
   };
 }

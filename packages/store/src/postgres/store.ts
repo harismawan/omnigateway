@@ -85,6 +85,7 @@ export async function createPostgresStore(opts: {
   };
 
   return {
+    engine: "postgres",
     databasePath: redacted(opts.url),
     credentials: createCredentialRepo(sql, opts.encryptionKey, emit),
     config: createConfigRepo(sql, emit),

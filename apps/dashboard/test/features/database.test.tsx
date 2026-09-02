@@ -44,6 +44,37 @@ describe("DatabaseBoard", () => {
     expect(await screen.findByText("12.0 MiB")).toBeTruthy();
     expect(screen.getByText("Database file")).toBeTruthy();
     expect(screen.getByRole("meter", { name: /25% of the file is reclaimable/i })).toBeTruthy();
+    expect(screen.getByText("request_logs")).toBeTruthy();
+    expect(screen.queryByText("Dead rows")).toBeNull();
+  });
+
+  test("a Postgres store shows the server and hides every file operation", async () => {
+    stubDatabase({
+      "GET /api/database": () =>
+        databaseOverview({
+          engine: "postgres",
+          location: "postgres://omni:***@db.internal:5432/omni",
+          stats: { pageSize: 8192, pageCount: 1536, freelistCount: 0, schemaVersion: 14 },
+          logicalBytes: 12_582_912,
+          bodiesBytes: 5_242_880,
+          tables: [{ name: "request_bodies", bytes: 5_242_880, rows: 1_200, deadRows: 37 }],
+        }),
+    });
+    renderWithProviders(<DatabaseBoard />);
+
+    expect(await screen.findByText("postgres://omni:***@db.internal:5432/omni")).toBeTruthy();
+    expect(screen.getByText("1536 blocks of 8.0 KiB")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Compact" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Take a snapshot" })).toBeNull();
+    expect(screen.queryByText("Reclaimable")).toBeNull();
+    expect(screen.queryByText(/pg_dump/)).toBeTruthy();
+    // The table list reads from the server: per-table size, estimated rows,
+    // and the dead-tuple column SQLite has no number for.
+    expect(screen.getByText("request_bodies")).toBeTruthy();
+    expect(screen.getAllByText("5.0 MiB")).toHaveLength(2);
+    expect(screen.getByText("Captured bodies")).toBeTruthy();
+    expect(screen.getByText("Dead rows")).toBeTruthy();
+    expect(screen.getByText("37")).toBeTruthy();
   });
 
   test("a failed read offers a retry", async () => {

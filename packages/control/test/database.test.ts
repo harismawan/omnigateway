@@ -92,6 +92,7 @@ function deps(
     logger,
     now: () => input.now ?? AT,
     store: {
+      engine: "sqlite",
       databasePath: DB,
       config: {
         getSettings: async () => settings,
@@ -102,6 +103,7 @@ function deps(
       maintenance: {
         heartbeat: async () => {},
         nodes: async () => [],
+        tables: async () => [{ name: "request_bodies", bytes: 777, rows: 3, deadRows: 0 }],
         stats: async () => ({
           pageSize: 4_096,
           pageCount: 100,
@@ -1066,6 +1068,16 @@ describe("getDatabaseOverview", () => {
     expect(overview.stats.schemaVersion).toBe(7);
     expect(overview.retention).toEqual({ keepLatest: 3, maxAgeDays: 7 });
     expect(overview.snapshots).toEqual({ count: 1, totalBytes: 1_000, latestAt: AT - DAY });
+  });
+
+  test("on Postgres, captured bodies are the request_bodies table, not a directory", async () => {
+    const d = deps();
+    d.store.engine = "postgres";
+    d.fs.dirBytes = () => 12_345;
+    const overview = await getDatabaseOverview(d);
+    expect(overview.engine).toBe("postgres");
+    expect(overview.bodiesBytes).toBe(777);
+    expect(overview.tables).toEqual([{ name: "request_bodies", bytes: 777, rows: 3, deadRows: 0 }]);
   });
 
   test("reads an absent -wal as zero bytes, which is the checkpointed case", async () => {
