@@ -40,6 +40,16 @@ export type Broadcaster = {
   declared(topic: string): boolean;
   /** Publishes a sequenced payload frame and records it in the ring for replay. */
   stream(topic: string, payload: unknown): void;
+  /**
+   * Publishes one plugin channel frame to every process's subscribers.
+   *
+   * Behind `PluginChannel.broadcast`. Neither coalesced nor sequenced, and both
+   * omissions are deliberate: a plugin's payload identifies which thing changed,
+   * so folding by topic would drop every frame but the last, and there is no
+   * replay to number for — a channel has no ring and nothing here survives a
+   * restart, which is what the capability already promises.
+   */
+  channel(topic: string, payload: unknown): void;
   /** Forgets a stream topic's history without rewinding its sequence. */
   resetStream(topic: string): void;
   stop(): void;
@@ -99,6 +109,7 @@ export type BroadcasterDeps = {
 type Fanout =
   | { kind: "res"; topic: string; payload?: unknown }
   | { kind: "stream"; topic: string; payload: unknown }
+  | { kind: "channel"; topic: string; payload: unknown }
   | { kind: "declare"; topic: string; nodeId: string }
   | { kind: "hello"; nodeId: string };
 
@@ -176,6 +187,16 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
         });
         return;
       }
+      case "channel":
+        // Straight to the sockets: no coalescer, no ring, no sequence. The
+        // registry delivers to whoever holds the topic, which on this process
+        // is exactly the set the host authorised.
+        deps.registry.publish(message.topic, {
+          type: "event",
+          topic: message.topic,
+          payload: message.payload,
+        } satisfies ServerFrame);
+        return;
       case "declare":
         streams.set(message.topic, message.nodeId);
         return;
@@ -223,6 +244,10 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
         JSON.stringify({ kind: "stream", topic, payload } satisfies Fanout),
         `seq:${topic}`,
       );
+    },
+
+    channel(topic, payload) {
+      send({ kind: "channel", topic, payload });
     },
 
     resetStream(topic) {

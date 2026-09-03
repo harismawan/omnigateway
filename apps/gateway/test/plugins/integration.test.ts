@@ -162,7 +162,10 @@ function boot(logger?: Logger): Promise<{ bus: PluginEventBus; result: PluginLoa
     events: bus,
     // No sockets behind it: these tests exercise routes and storage, so every
     // connection lookup honestly answers "nobody is connected".
-    channels: createChannelRegistry({ sockets: { has: () => false, sendTo: () => {} } }),
+    channels: createChannelRegistry({
+      sockets: { has: () => false, sendTo: () => {} },
+      fanout: () => {},
+    }),
     sdkVersion: "1.0.0",
     ...(logger === undefined ? {} : { logger }),
   }).then((result) => ({ bus, result }));

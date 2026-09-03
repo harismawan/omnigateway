@@ -103,3 +103,51 @@ test("rapid invalidations publish once per floor, not once each", async () => {
   // scheduler never fires.
   expect(publishes).toBe(1);
 });
+/**
+ * The plugin-channel half of the fan-out.
+ *
+ * A plugin's `send` names a connection, which is meaningful only on the process
+ * that holds it — so a plugin whose panel is connected to another replica could
+ * reach nobody. `broadcast` names the topic instead, which every process can
+ * resolve against its own sockets.
+ */
+test("a plugin channel broadcast on one process reaches the other's subscribers", async () => {
+  const coord = memoryCoord();
+  const a = node(coord, "a");
+  const b = node(coord, "b");
+  a.broadcaster.channel("plugin:pokemon:activity", { apiKeyId: "k1" });
+  await Bun.sleep(1);
+  const frame: ServerFrame = {
+    type: "event",
+    topic: "plugin:pokemon:activity",
+    payload: { apiKeyId: "k1" },
+  };
+  expect(b.published).toContainEqual(frame);
+  // The emitting process delivers through the same loop-back rather than
+  // locally, so there is one delivery path and no frame arrives twice.
+  expect(a.published).toEqual([frame]);
+});
+
+/**
+ * Deliberately not coalesced, which is the one place this differs from
+ * `invalidate`.
+ *
+ * A `res:*` frame names a resource and the newest one says everything its
+ * predecessors did. A channel frame carries a plugin's own payload, and the
+ * payload is routinely the identity of the thing that changed — so replacing
+ * the pending frame with the newest drops every other key. The rate is the
+ * plugin's to bound, exactly as it already is for `send`.
+ */
+test("channel frames are not folded together: a frame per key survives one floor", async () => {
+  const coord = memoryCoord();
+  const a = node(coord, "a");
+  for (const apiKeyId of ["k1", "k2", "k3"]) {
+    a.broadcaster.channel("plugin:pokemon:activity", { apiKeyId });
+  }
+  await Bun.sleep(1);
+  expect(a.published.map((frame) => ("payload" in frame ? frame.payload : null))).toEqual([
+    { apiKeyId: "k1" },
+    { apiKeyId: "k2" },
+    { apiKeyId: "k3" },
+  ]);
+});

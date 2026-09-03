@@ -224,6 +224,8 @@ const session = ctx.channels.open("session");
 session.onMessage(({ connectionId, payload }) => {
   session.send(connectionId, { echo: payload });
 });
+// Everyone holding this channel, on every process in the fleet.
+session.broadcast?.({ changed: "k1" });
 session.onClose((connectionId) => {
   // The connection is gone. Anything you were holding for it can go too.
 });
@@ -237,6 +239,16 @@ Four things to design around:
   you cannot name another plugin's topic — the same rule `{{name}}` follows for
   your tables. Interior colons are fine, so `open("session:" + id)` is the way to
   run a topic per thing rather than one topic with a discriminator inside it.
+- **`send` reaches one connection; `broadcast` reaches the topic.** A
+  `connectionId` is meaningful only on the process whose socket produced it, so
+  on a cluster `send` reaches whoever happens to share a replica with the code
+  calling it — and a write made while serving a request on another replica
+  reaches nobody. `broadcast` names your topic and fans out to every process.
+  It is **not coalesced**: your payload usually says which thing changed, so
+  folding frames by topic would drop all but the last, and bounding your own
+  rate is yours either way. It arrived in `@omnigateway/plugin-api@0.4.0`
+  without a generation bump, so call it as `channel.broadcast?.(payload)` and
+  keep `send` as the fallback if your plugin must load on an older gateway.
 - **Delivery is best-effort and bounded.** Each subscriber has a queue that
   **drops rather than grows**: a client that cannot keep up loses its oldest
   frames, and the drop is counted rather than reported to you. There is no retry

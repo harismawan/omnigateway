@@ -16,6 +16,21 @@ import type { SocketRegistry } from "./registry.ts";
 export type ChannelSockets = Pick<SocketRegistry, "has" | "sendTo">;
 
 /**
+ * How a broadcast leaves this process.
+ *
+ * A function rather than the `Broadcaster` for the reason `ChannelSockets`
+ * narrows the registry: a path that could reach `stream`, `invalidateAll` or
+ * `stop` is a path that could be made to do any of them. `Broadcaster.channel`
+ * satisfies it structurally.
+ *
+ * Required rather than optional, and that is the whole guarantee: a registry
+ * built without one would broadcast into nothing, which presents to an operator
+ * as a channel that is merely quiet — the failure the rest of this file exists
+ * to prevent.
+ */
+export type ChannelFanout = (topic: string, payload: unknown) => void;
+
+/**
  * The channel-name pattern, which is two constraints wearing one coat.
  *
  * The value becomes the tail of a wire topic, so it is bounded and reduced to a
@@ -79,6 +94,7 @@ export type ChannelRegistry = {
 
 export type ChannelRegistryDeps = {
   sockets: ChannelSockets;
+  fanout: ChannelFanout;
   logger?: Logger;
   scheduler?: DrainScheduler;
 };
@@ -192,7 +208,7 @@ export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistr
       onClose: [],
       // Replaced immediately below; declared here so the facade can close over
       // the channel it belongs to.
-      facade: { onMessage: () => {}, send: () => {}, onClose: () => {} },
+      facade: { onMessage: () => {}, send: () => {}, broadcast: () => {}, onClose: () => {} },
     };
     channel.facade = {
       onMessage(handler) {
@@ -208,6 +224,13 @@ export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistr
         // and will have frames in flight for one that has already left.
         if (!holds(connectionId, topic)) return;
         deps.sockets.sendTo(connectionId, { type: "event", topic, payload });
+      },
+      broadcast(payload) {
+        if (!live) return;
+        // Out through the fan-out and back in through this process's own
+        // subscription, the way an invalidation travels. Delivering locally
+        // here as well would send every frame twice to a panel on this pod.
+        deps.fanout(topic, payload);
       },
     };
     channels.set(topic, channel);

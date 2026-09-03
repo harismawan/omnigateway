@@ -295,10 +295,17 @@ export function createApp(deps: AppDeps) {
       now,
       onDetach: (id, topics) => channelsRef?.closed(id, topics),
     });
-  const channels = deps.channels ?? createChannelRegistry({ sockets: registry, logger });
-  channelsRef = channels;
   const ring = deps.ring ?? createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
   const broadcaster = deps.broadcaster ?? createBroadcaster({ registry, ring, coord, nodeId, now });
+  // After the broadcaster, because a channel's `broadcast` leaves through it.
+  const channels =
+    deps.channels ??
+    createChannelRegistry({
+      sockets: registry,
+      fanout: (topic, payload) => broadcaster.channel(topic, payload),
+      logger,
+    });
+  channelsRef = channels;
   const capture = deps.console;
   const consoleFleet = createConsoleFleet({
     coord,

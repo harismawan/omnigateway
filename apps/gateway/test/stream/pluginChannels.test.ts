@@ -49,7 +49,7 @@ test("a channel is namespaced with the host's plugin id, and reaches no other pl
   // The plugin supplies the tail of a topic and never the head. Everything else
   // in this feature — the authorisation check, the delivery lookup — reads the
   // topic string, so if this half is wrong nothing downstream can notice.
-  const registry = createChannelRegistry({ sockets: sockets() });
+  const registry = createChannelRegistry({ sockets: sockets(), fanout: () => {} });
 
   registry.for("alpha").open("session");
   registry.for("beta").open("session");
@@ -64,7 +64,7 @@ test("a plugin cannot name another plugin's topic through the channel name", () 
   // The interesting attempt, because interior colons are legal: `session:<id>`
   // is the shape the remote-control design uses. A name that looks like a
   // qualified topic still lands under the caller's own id.
-  const registry = createChannelRegistry({ sockets: sockets() });
+  const registry = createChannelRegistry({ sockets: sockets(), fanout: () => {} });
 
   registry.for("alpha").open("beta:session");
 
@@ -77,7 +77,7 @@ test("a channel name outside the pattern throws rather than opening something un
   // Thrown from `setup`, where the loader turns it into one skipped plugin and
   // one reported reason. A silently mangled name is a channel a client can
   // never subscribe to, which presents as a topic that is merely quiet.
-  const registry = createChannelRegistry({ sockets: sockets() });
+  const registry = createChannelRegistry({ sockets: sockets(), fanout: () => {} });
   const channels = registry.for("alpha");
 
   for (const name of ["", "Session", "sess ion", "../escape", "a".repeat(65)]) {
@@ -88,7 +88,10 @@ test("a channel name outside the pattern throws rather than opening something un
 });
 
 test("opening the same name twice is the same channel, not a second handler list", () => {
-  const registry = createChannelRegistry({ sockets: sockets({ c1: ["plugin:alpha:s"] }) });
+  const registry = createChannelRegistry({
+    sockets: sockets({ c1: ["plugin:alpha:s"] }),
+    fanout: () => {},
+  });
   const seen: unknown[] = [];
   registry
     .for("alpha")
@@ -110,7 +113,7 @@ test("opening the same name twice is the same channel, not a second handler list
 
 test("a plugin send reaches only a connection that holds the topic", () => {
   const s = sockets({ subscribed: ["plugin:alpha:s"], stranger: ["res:usage"] });
-  const registry = createChannelRegistry({ sockets: s });
+  const registry = createChannelRegistry({ sockets: s, fanout: () => {} });
   const channel = registry.for("alpha").open("s");
 
   channel.send("subscribed", { n: 1 });
@@ -125,7 +128,10 @@ test("a plugin send reaches only a connection that holds the topic", () => {
 });
 
 test("delivery to a topic nothing opened, or from a connection that did not subscribe, is refused", () => {
-  const registry = createChannelRegistry({ sockets: sockets({ c1: ["plugin:alpha:s"] }) });
+  const registry = createChannelRegistry({
+    sockets: sockets({ c1: ["plugin:alpha:s"] }),
+    fanout: () => {},
+  });
   registry.for("alpha").open("s");
 
   expect(registry.deliver("plugin:alpha:s", "c1", "yes")).toBe(true);
@@ -135,7 +141,7 @@ test("delivery to a topic nothing opened, or from a connection that did not subs
 });
 
 test("a departing connection reaches only the channels it actually held", () => {
-  const registry = createChannelRegistry({ sockets: sockets() });
+  const registry = createChannelRegistry({ sockets: sockets(), fanout: () => {} });
   const closedA: string[] = [];
   const closedB: string[] = [];
   registry
@@ -188,7 +194,7 @@ test("per-subscriber channel queues drop rather than grow", () => {
   });
   registry.subscribe("slow", "plugin:alpha:s");
 
-  const channels = createChannelRegistry({ sockets: registry });
+  const channels = createChannelRegistry({ sockets: registry, fanout: () => {} });
   const channel = channels.for("alpha").open("s");
   for (let n = 0; n < 100; n++) channel.send("slow", { n });
 
@@ -203,6 +209,7 @@ test("per-subscriber channel queues drop rather than grow", () => {
 
 test("a throwing message handler is caught and counted against its own plugin", () => {
   const registry = createChannelRegistry({
+    fanout: () => {},
     sockets: sockets({ c1: ["plugin:alpha:s", "plugin:beta:s"] }),
   });
   const after: unknown[] = [];
@@ -235,6 +242,7 @@ test("handler failures are reported one batched line per plugin, not one per fai
   const logger = captureLogger();
   const manual = manualScheduler();
   const registry = createChannelRegistry({
+    fanout: () => {},
     sockets: sockets({ c1: ["plugin:alpha:s", "plugin:beta:s"] }),
     logger,
     scheduler: manual.scheduler,
@@ -654,4 +662,50 @@ test("a pong deadline close fires the plugin's onClose handler", async () => {
   } finally {
     await h.close();
   }
+});
+// ------------------------------------------------------------------ broadcast
+
+test("a broadcast leaves through the fan-out and is not also delivered locally", () => {
+  // The fan-out loops back into this process's own socket registry, so a local
+  // send here as well would deliver every frame twice to a panel on this pod.
+  const s = sockets({ subscribed: ["plugin:alpha:s"] });
+  const fanned: { topic: string; payload: unknown }[] = [];
+  const registry = createChannelRegistry({
+    sockets: s,
+    fanout: (topic, payload) => fanned.push({ topic, payload }),
+  });
+
+  registry.for("alpha").open("s").broadcast({ n: 1 });
+
+  expect(fanned).toEqual([{ topic: "plugin:alpha:s", payload: { n: 1 } }]);
+  expect(s.sent).toEqual([]);
+  registry.stop();
+});
+
+test("a broadcast carries the plugin's own topic and no other's", () => {
+  const fanned: string[] = [];
+  const registry = createChannelRegistry({
+    sockets: sockets(),
+    fanout: (topic) => fanned.push(topic),
+  });
+
+  registry.for("alpha").open("beta:s").broadcast({});
+  registry.for("beta").open("s").broadcast({});
+
+  expect(fanned).toEqual(["plugin:alpha:beta:s", "plugin:beta:s"]);
+  registry.stop();
+});
+
+test("a stopped registry broadcasts nothing", () => {
+  const fanned: string[] = [];
+  const registry = createChannelRegistry({
+    sockets: sockets(),
+    fanout: (topic) => fanned.push(topic),
+  });
+  const channel = registry.for("alpha").open("s");
+
+  registry.stop();
+  channel.broadcast({ n: 1 });
+
+  expect(fanned).toEqual([]);
 });

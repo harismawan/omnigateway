@@ -333,7 +333,10 @@ test("a spec-shaped plugin's advertised ui url actually serves", async () => {
       root: dir,
       store,
       events: bus,
-      channels: createChannelRegistry({ sockets: { has: () => false, sendTo: () => {} } }),
+      channels: createChannelRegistry({
+        sockets: { has: () => false, sendTo: () => {} },
+        fanout: () => {},
+      }),
       sdkVersion: "1.0.0",
     });
     expect(loaded.failures).toEqual([]);

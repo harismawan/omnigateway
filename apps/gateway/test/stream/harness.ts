@@ -98,14 +98,6 @@ export async function streamHarness(
     heartbeatMs: over.heartbeatMs ?? 20_000,
     ...(over.pongDeadlineMs === undefined ? {} : { pongDeadlineMs: over.pongDeadlineMs }),
   });
-  // The error report is drained by the same injected scheduler the heartbeat
-  // uses, so a test can assert one batched line rather than sleeping for it.
-  const channels = createChannelRegistry({
-    sockets: registry,
-    logger,
-    scheduler: (run) => schedule(run, 0),
-  });
-  channelsRef = channels;
   const ring = createRing({ frames: 100, bytes: 1024 * 1024 });
   const broadcaster = createBroadcaster({
     registry,
@@ -115,6 +107,15 @@ export async function streamHarness(
     now: () => clock,
     schedule,
   });
+  // The error report is drained by the same injected scheduler the heartbeat
+  // uses, so a test can assert one batched line rather than sleeping for it.
+  const channels = createChannelRegistry({
+    sockets: registry,
+    fanout: (topic, payload) => broadcaster.channel(topic, payload),
+    logger,
+    scheduler: (run) => schedule(run, 0),
+  });
+  channelsRef = channels;
 
   // The app builds its own AdminAuth, so a session is minted through a second
   // one over the same store rather than by reaching into the app.

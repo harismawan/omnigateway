@@ -89,6 +89,27 @@ export type PluginChannel = {
   onMessage(handler: (message: PluginChannelMessage) => void): void;
   /** Pushes a payload to one connection. A connection that is gone is a no-op, never an error. */
   send(connectionId: string, payload: unknown): void;
+  /**
+   * Pushes a payload to every connection holding this channel, on every process.
+   *
+   * The counterpart to `send` and the only one of the two that is correct on a
+   * cluster. A `connectionId` is meaningful on the process whose socket
+   * produced it and nowhere else, so a plugin answering its panel with `send`
+   * alone reaches whoever happens to share a replica with it — and a write made
+   * while serving a request on another replica reaches nobody. This names the
+   * topic instead, which every process resolves against its own sockets.
+   *
+   * Not coalesced, unlike the host's own `res:*` invalidations. Those name a
+   * resource, where the newest frame says everything its predecessors did; a
+   * plugin's payload routinely identifies *which* thing changed, so folding
+   * them would drop every frame but the last. Bounding the rate stays the
+   * plugin's job, exactly as it already is for `send`.
+   *
+   * Delivery is best-effort and bounded the way `send` is, and authorisation is
+   * unchanged: a frame reaches a connection only where the host already
+   * authorised it to hold this topic.
+   */
+  broadcast(payload: unknown): void;
   /** Called when a connection holding this channel goes away. */
   onClose(handler: (connectionId: string) => void): void;
 };
