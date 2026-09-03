@@ -94,6 +94,19 @@ const Watching = styled.p`
   ${pulsing}
 `;
 
+/** Sits on the rule that closes the rail, so it reads as the rail's colophon. */
+const Version = styled.span`
+  flex: none;
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: ${({ theme }) => theme.color.inkFaint};
+  padding: 0 ${({ theme }) => theme.space(2)} 6px;
+
+  @media (max-width: 720px) {
+    padding: 0 ${({ theme }) => theme.space(2)};
+  }
+`;
+
 const Stopped = styled.p`
   font-size: 10.5px;
   line-height: 1.3;
@@ -222,6 +235,7 @@ export function LifecycleControls({ pollMs = RESTART_POLL_MS }: { pollMs?: numbe
     return (
       <>
         <Spacer />
+        {capability === undefined ? null : <Version>v{capability.version}</Version>}
         <Rule />
         <Foot>
           <Stack $gap={1}>
@@ -242,6 +256,7 @@ export function LifecycleControls({ pollMs = RESTART_POLL_MS }: { pollMs?: numbe
   return (
     <>
       <Spacer />
+      {capability === undefined ? null : <Version>v{capability.version}</Version>}
       <Rule />
       <Foot title={capability === undefined ? undefined : SUPERVISOR_BLURB[capability.supervisor]}>
         <RailButton

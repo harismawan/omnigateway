@@ -61,6 +61,8 @@ function systemdScope(env: Record<string, string | undefined>): "user" | "system
 
 export type LifecycleDeps = {
   env: Record<string, string | undefined>;
+  /** What the rail prints above its controls; a release tag or `0.0.0-dev`. */
+  version: string;
   fileExists: (path: string) => boolean;
   run: CommandRunner;
   /**

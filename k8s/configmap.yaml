@@ -19,6 +19,7 @@ data:
   # must hold the same set, so bake them into the image rather than mounting.
   OMNI_ROOT: "/data"
 
-  # Off in a fleet by default: bodies are bytea rows in Postgres in cluster
-  # mode and grow the database with prompt volume. Flip on for an incident.
-  OMNI_BODY_LOGGING_ALLOWED: "false"
+  # Boot-time permission only. Capture still needs the runtime setting
+  # (`bodyLoggingEnabled`), and in cluster mode bodies are bytea rows in
+  # Postgres that grow with prompt volume — watch retention.
+  OMNI_BODY_LOGGING_ALLOWED: "true"

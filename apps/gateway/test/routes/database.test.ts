@@ -121,6 +121,7 @@ async function harness(options: HarnessOptions = {}) {
     ...(options.maxImportBytes === undefined ? {} : { maxImportBytes: options.maxImportBytes }),
     lifecycle: {
       env: {},
+      version: "1.2.3",
       fileExists: () => false,
       run: async (argv) => {
         runs.push([...argv]);
@@ -802,6 +803,7 @@ test("lifecycle reports what would restart this process", async () => {
     supervisor: "none",
     canRestart: false,
     canShutdown: true,
+    version: "1.2.3",
   });
 
   cleanup();
