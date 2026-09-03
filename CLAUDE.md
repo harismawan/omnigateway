@@ -2,8 +2,16 @@
 
 Agent guidance for repo work: architecture, boundaries, conventions, durable traps.
 `README.md` serve operators; `ARCHITECTURE.md` explain how system fit together; this file serve
-contributors. Update all that change touch. Forensic history behind rule — how found, what
-measured — live under `## History` in matching spec, not here.
+contributors. Update all that change touch.
+
+**This file is loaded every session; keep it lean.** Add here only an invariant a contributor
+break by not knowing it, in the fewest lines that name the file, symbol and test that pin it. Anything
+else go where its subject already live: how a subsystem work → `ARCHITECTURE.md`; operator-facing
+behaviour → `README.md` / `docs/*.md`; procedure → `docs/adding-a-provider.md`,
+`docs/writing-a-plugin.md`; design rationale → `docs/superpowers/specs/`; forensic history behind
+rule — how found, what measured, earlier wrong drafts — under `## History` in matching spec. One
+line here with a pointer beat a paragraph. Never restate what a test already pin, and never
+narrate a fix: state the rule that survive it.
 
 ## Scope
 
