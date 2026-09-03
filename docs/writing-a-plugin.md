@@ -245,10 +245,18 @@ Four things to design around:
   calling it — and a write made while serving a request on another replica
   reaches nobody. `broadcast` names your topic and fans out to every process.
   It is **not coalesced**: your payload usually says which thing changed, so
-  folding frames by topic would drop all but the last, and bounding your own
-  rate is yours either way. It arrived in `@omnigateway/plugin-api@0.4.0`
-  without a generation bump, so call it as `channel.broadcast?.(payload)` and
-  keep `send` as the fallback if your plugin must load on an older gateway.
+  folding frames by topic would drop all but the last. It is **capped** instead —
+  fifty a second per channel, the excess dropped and reported as one batched
+  line — because one broadcast is a publish on the shared bus plus work on every
+  replica. Floor your own rate; the cap is a backstop.
+  Delivery is **at-least-once**: a coordinator that times out on a publish that
+  landed delivers that frame twice here, and while it is unreachable a broadcast
+  reaches this process only. A payload that will not serialise is dropped rather
+  than thrown, because from your own timer a throw is an uncaught exception in
+  the gateway.
+  It arrived in `@omnigateway/plugin-api@0.4.0` without a generation bump, so the
+  member is optional: call it as `channel.broadcast?.(payload)` and keep `send`
+  as the fallback if your plugin must load on an older gateway.
 - **Delivery is best-effort and bounded.** Each subscriber has a queue that
   **drops rather than grows**: a client that cannot keep up loses its oldest
   frames, and the drop is counted rather than reported to you. There is no retry

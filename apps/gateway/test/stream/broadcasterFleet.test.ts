@@ -151,3 +151,29 @@ test("channel frames are not folded together: a frame per key survives one floor
     { apiKeyId: "k3" },
   ]);
 });
+test("a payload that will not serialise is dropped, never thrown back at the plugin", () => {
+  /*
+    The frame is stringified synchronously inside `PluginChannel.broadcast`, so
+    without this a `BigInt` or a circular object throws in the plugin's own
+    stack — a 500 from a route, and from a plugin's own timer an uncaught
+    exception with the gateway process behind it. `registry.ts` refuses the same
+    throw at the same boundary; this path never reaches that encoder, because it
+    encodes its own envelope first.
+  */
+  const a = node(memoryCoord(), "a");
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+
+  expect(() => a.broadcaster.channel("plugin:alpha:s", { n: 1n })).not.toThrow();
+  expect(() => a.broadcaster.channel("plugin:alpha:s", circular)).not.toThrow();
+  expect(a.published).toEqual([]);
+});
+
+test("a stopped broadcaster publishes nothing", () => {
+  const a = node(memoryCoord(), "a");
+  a.broadcaster.stop();
+
+  a.broadcaster.channel("plugin:alpha:s", { n: 1 });
+
+  expect(a.published).toEqual([]);
+});

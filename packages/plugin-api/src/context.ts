@@ -102,14 +102,35 @@ export type PluginChannel = {
    * Not coalesced, unlike the host's own `res:*` invalidations. Those name a
    * resource, where the newest frame says everything its predecessors did; a
    * plugin's payload routinely identifies *which* thing changed, so folding
-   * them would drop every frame but the last. Bounding the rate stays the
-   * plugin's job, exactly as it already is for `send`.
+   * them would drop every frame but the last.
    *
-   * Delivery is best-effort and bounded the way `send` is, and authorisation is
-   * unchanged: a frame reaches a connection only where the host already
-   * authorised it to hold this topic.
+   * **Costlier than `send`, and bounded differently.** One `send` is a push into
+   * one bounded queue on one process; one broadcast is a publish on the shared
+   * bus plus a fan-out on every replica. The host therefore caps a channel's
+   * broadcasts per second and drops the excess, counted and reported as one
+   * batched line — well above what a panel-facing plugin does, and well below a
+   * per-request loop. Flooring your own rate is still yours: the cap is a
+   * backstop, not a scheduler.
+   *
+   * **Delivery is at-least-once, not exactly-once.** A coordinator that times out
+   * on a publish that in fact landed will deliver that frame twice on this
+   * process, and while the coordinator is unreachable a broadcast reaches this
+   * process only. Design for a payload that says what changed rather than one
+   * that must be applied exactly once — the same rule the rest of this transport
+   * follows.
+   *
+   * A payload that will not serialise is dropped, never thrown: it would
+   * otherwise throw inside your own call, and from a timer that is an uncaught
+   * exception in the gateway's process.
+   *
+   * Authorisation is unchanged: a frame reaches a connection only where the host
+   * already authorised it to hold this topic.
+   *
+   * **Optional, because it arrived in 0.4.0 without a generation bump.** A host
+   * on 0.3.x is `api: 3` too and does not have it, so the compiler asks you for
+   * `channel.broadcast?.(payload)` and `send` remains the fallback.
    */
-  broadcast(payload: unknown): void;
+  broadcast?(payload: unknown): void;
   /** Called when a connection holding this channel goes away. */
   onClose(handler: (connectionId: string) => void): void;
 };

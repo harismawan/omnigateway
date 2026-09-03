@@ -174,10 +174,13 @@ it", which cover `custom` without saying so.
     `apps/gateway`. Every load failure skipped and reported, never fatal: proxy path depend on no
     plugin. `channels` capability give plugin `open(name)`, nothing else — never socket,
     upgrade request, header or `Principal`. Channel facade offer `send` (one connection,
-    this process) and `broadcast` (topic, every process, over `coord.pubsub`, **never
+    this process) and optional `broadcast` (topic, every process, over `coord.pubsub`, **never
     coalesced** — plugin payload name which thing changed, so folding by topic drop all but
-    last). `ChannelFanout` required dep: registry without one broadcast into nothing, which
-    read as quiet channel. Topic `plugin:<id>:<name>` with `<id>` from
+    last — but **capped** per channel, `BROADCAST_BURST`, drop counted + batched, since one
+    broadcast cost publish plus fan-out on every replica). Envelope encoded in `try` at
+    `broadcaster.channel`: payload is plugin-authored `unknown`, and a throw from plugin's own
+    timer kill process. Member optional in type because it land in 0.4.0 with no generation
+    bump, so compiler force `?.` — host always supply it. Topic `plugin:<id>:<name>` with `<id>` from
     validated manifest, same rule `{{name}}` follow for tables. Registry answer what **exist**;
     `authorised` in `routes/stream.ts` decide who may hold it. Outbound frame reuse socket
     registry's bounded per-connection queue.

@@ -675,7 +675,7 @@ test("a broadcast leaves through the fan-out and is not also delivered locally",
     fanout: (topic, payload) => fanned.push({ topic, payload }),
   });
 
-  registry.for("alpha").open("s").broadcast({ n: 1 });
+  registry.for("alpha").open("s").broadcast?.({ n: 1 });
 
   expect(fanned).toEqual([{ topic: "plugin:alpha:s", payload: { n: 1 } }]);
   expect(s.sent).toEqual([]);
@@ -689,8 +689,8 @@ test("a broadcast carries the plugin's own topic and no other's", () => {
     fanout: (topic) => fanned.push(topic),
   });
 
-  registry.for("alpha").open("beta:s").broadcast({});
-  registry.for("beta").open("s").broadcast({});
+  registry.for("alpha").open("beta:s").broadcast?.({});
+  registry.for("beta").open("s").broadcast?.({});
 
   expect(fanned).toEqual(["plugin:alpha:beta:s", "plugin:beta:s"]);
   registry.stop();
@@ -705,7 +705,70 @@ test("a stopped registry broadcasts nothing", () => {
   const channel = registry.for("alpha").open("s");
 
   registry.stop();
-  channel.broadcast({ n: 1 });
+  channel.broadcast?.({ n: 1 });
 
   expect(fanned).toEqual([]);
+});
+test("a channel over its budget drops the excess and reports it once", () => {
+  // `send` is one push into one bounded queue on this process; a broadcast is a
+  // publish plus work on every replica, and it deliberately goes past the
+  // emit-side coalescer. The cap is what keeps "past the coalescer" from meaning
+  // "unbounded".
+  const logger = captureLogger();
+  const manual = manualScheduler();
+  let clock = 1_000;
+  const fanned: unknown[] = [];
+  const registry = createChannelRegistry({
+    sockets: sockets(),
+    fanout: (_topic, payload) => fanned.push(payload),
+    logger,
+    scheduler: manual.scheduler,
+    now: () => clock,
+    burst: 3,
+  });
+  const channel = registry.for("alpha").open("s");
+
+  for (let i = 0; i < 10; i++) channel.broadcast?.({ i });
+
+  expect(fanned).toHaveLength(3);
+  expect(registry.stats().broadcastDrops).toBe(7);
+  // One line for the burst, not seven.
+  manual.run();
+  expect(
+    logger.records.filter((record) => record.msg === "plugin channel broadcast dropped"),
+  ).toEqual([
+    {
+      level: "warn",
+      msg: "plugin channel broadcast dropped",
+      fields: { plugin: "alpha", count: 7 },
+    },
+  ]);
+
+  // Refilled continuously rather than per window, so a plugin holding at its
+  // budget is never cut off for the tail of a second — the frame a panel is
+  // waiting for is the last of a burst.
+  clock += 1_000;
+  channel.broadcast?.({ i: "later" });
+  expect(fanned).toHaveLength(4);
+  registry.stop();
+});
+
+test("one channel's budget is not another's", () => {
+  const fanned: string[] = [];
+  const registry = createChannelRegistry({
+    sockets: sockets(),
+    fanout: (topic) => fanned.push(topic),
+    // Frozen, so neither channel refills: the budgets are separate or this test
+    // cannot tell the difference.
+    now: () => 0,
+    burst: 1,
+  });
+
+  registry.for("alpha").open("s").broadcast?.({});
+  registry.for("alpha").open("s").broadcast?.({});
+  registry.for("beta").open("s").broadcast?.({});
+
+  // A noisy plugin cannot spend a quiet one's budget.
+  expect(fanned).toEqual(["plugin:alpha:s", "plugin:beta:s"]);
+  registry.stop();
 });

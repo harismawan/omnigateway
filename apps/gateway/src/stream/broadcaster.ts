@@ -121,6 +121,8 @@ const RECONNECTED = "coord:reconnected";
 export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
   const floors = deps.floors ?? INVALIDATION_FLOORS;
   const defaultFloorMs = deps.defaultFloorMs ?? DEFAULT_FLOOR_MS;
+  /** Disarms emission, as `ChannelRegistry`'s own flag does. */
+  let live = true;
   /** Topics with a source behind them, and which process holds it. */
   const streams = new Map<string, string>();
 
@@ -247,7 +249,28 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
     },
 
     channel(topic, payload) {
-      send({ kind: "channel", topic, payload });
+      if (!live) return;
+      /*
+        Encoded here, in a `try`, because this payload is plugin-authored
+        `unknown` and `send` below stringifies synchronously — so a `BigInt` or a
+        circular object would throw back out through `PluginChannel.broadcast`
+        into the plugin's own stack. From a route that is a 500; from a plugin's
+        own timer, which is the ordinary shape for a push floor, it is an
+        uncaught exception and the gateway process with it.
+
+        `registry.ts` refuses the same throw at the same boundary for the same
+        reason, and this path does not reach that encoder: it stringifies its own
+        envelope first. Dropped rather than reported, exactly as an unencodable
+        frame is dropped there — the plugin is told nothing because there is
+        nothing it could be told through.
+      */
+      let message: string;
+      try {
+        message = JSON.stringify({ kind: "channel", topic, payload } satisfies Fanout);
+      } catch {
+        return;
+      }
+      void deps.coord.pubsub.publish(CHANNEL, message);
     },
 
     resetStream(topic) {
@@ -255,6 +278,7 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
     },
 
     stop() {
+      live = false;
       outbound.stop();
       inbound.stop();
       unsubscribe();
