@@ -1,4 +1,4 @@
-FROM oven/bun:1.4-slim AS base
+FROM oven/bun:1.4-alpine AS base
 WORKDIR /app
 
 # Manifests first: this layer is cached until a dependency actually changes,
@@ -39,12 +39,41 @@ COPY apps/dashboard apps/dashboard
 # import-boundary tests, which do not ship; CI typechecks, the image compiles.
 RUN cd apps/dashboard && bun run generate:routes && bunx vite build && bun run build:shared
 
-# Runtime: production dependencies only, the gateway's source, the built console.
+# Runtime: the gateway's production dependencies, its source, the built console.
 FROM base AS runner
-RUN bun install --frozen-lockfile --production
 COPY tsconfig.base.json ./
 COPY --from=build /app/packages packages
 COPY --from=build /app/apps/gateway apps/gateway
+# `--filter` scopes the install to the gateway: a plain root `--production`
+# installs every workspace's production dependencies, and the console's are
+# production ones, so lucide-react, recharts, react-dom and @reduxjs/toolkit
+# landed in the runtime image -- ~115MB to serve a `dist/` that was already
+# built. The name, not the path: `--filter=./apps/gateway` matches nothing here
+# and installs a tree without elysia in it.
+#
+# The install has to come after those COPYs, which costs the dependency layer
+# its cache. `--filter` resolves into per-workspace `node_modules` symlinks, and
+# `COPY --from=build /app/apps/gateway` writes that directory -- installing
+# first means the build stage's own tree lands on top and the gateway boots
+# without elysia. The `find` clears those copied trees for the same reason.
+#
+# Dropping the cache is the other half: bun fills ~/.bun/install with every
+# tarball it unpacked, which is a build input that would otherwise ship. It has
+# to go in this RUN -- a later layer cannot shrink an earlier one.
+#
+# tsc arrives as an optional peer of elysia and nothing invokes it -- the
+# gateway runs its TypeScript through bun. Both deletions are needed to be rid
+# of it and neither works alone: the store entry and the cache entry are
+# hardlinks to one copy, so the layer keeps that copy until the last link goes.
+# Dropping just one frees ~0.1MB and reads like the removal did nothing.
+#
+# `--omit` cannot reach tsc: `=peer` also drops @sinclair/typebox, which elysia
+# requires at runtime, and `=optional` drops @node-rs/argon2's native binding,
+# so every password hash throws.
+RUN find packages apps -maxdepth 2 -name node_modules -type d -exec rm -rf {} + \
+ && bun install --frozen-lockfile --production --filter=@omni/gateway \
+ && rm -rf node_modules/.bun/typescript@* node_modules/.bun/@typescript+* \
+ && rm -rf /root/.bun/install
 # `dashboardDir()` looks here second, after `apps/gateway/src/public`; the
 # path is the one a checkout would have, so no OMNI_STATIC_DIR is needed.
 COPY --from=build /app/apps/dashboard/dist apps/dashboard/dist
