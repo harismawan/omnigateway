@@ -1,7 +1,7 @@
-import { Minimize2 } from "lucide-react";
+import { Minimize2, Trash2 } from "lucide-react";
 import { useState } from "react";
 import styled from "styled-components";
-import { useDatabaseOverview, useVacuum } from "../../api/queries.ts";
+import { useClearBodies, useDatabaseOverview, useVacuum } from "../../api/queries.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatBytes, formatCount, formatMs, formatPercent } from "../../lib/format.ts";
@@ -59,6 +59,8 @@ export function DatabaseBoard() {
   const overview = useDatabaseOverview();
   const vacuum = useVacuum();
   const [compacting, setCompacting] = useState(false);
+  const clearBodies = useClearBodies();
+  const [clearing, setClearing] = useState(false);
   const data = overview.data;
   // A Postgres store is a server this process connects to, not a file it holds:
   // nothing here can compact it, copy it, or replace it, so those controls
@@ -88,24 +90,41 @@ export function DatabaseBoard() {
         legend="Size"
         meta={data === undefined ? undefined : `schema v${data.stats.schemaVersion}`}
         actions={
-          postgres ? undefined : (
+          <>
             <Button
               type="button"
               $size="sm"
-              disabled={vacuum.isPending || data === undefined}
-              onClick={() => setCompacting(true)}
+              disabled={clearBodies.isPending || data === undefined || data.bodiesBytes === 0}
+              onClick={() => setClearing(true)}
             >
-              <Minimize2 />
-              {vacuum.isPending ? "Compacting…" : "Compact"}
+              <Trash2 />
+              {clearBodies.isPending ? "Clearing…" : "Clear bodies"}
             </Button>
-          )
+            {postgres ? null : (
+              <Button
+                type="button"
+                $size="sm"
+                disabled={vacuum.isPending || data === undefined}
+                onClick={() => setCompacting(true)}
+              >
+                <Minimize2 />
+                {vacuum.isPending ? "Compacting…" : "Compact"}
+              </Button>
+            )}
+          </>
         }
         footer={
           vacuum.isError ? (
             <Problem role="alert">{describeError(vacuum.error)}</Problem>
-          ) : vacuum.data === undefined ? undefined : (
+          ) : clearBodies.isError ? (
+            <Problem role="alert">{describeError(clearBodies.error)}</Problem>
+          ) : vacuum.data !== undefined ? (
             <Outcome role="status">
               {`Compacted, reclaiming ${formatBytes(vacuum.data.reclaimedBytes)} in ${formatMs(vacuum.data.durationMs)}.`}
+            </Outcome>
+          ) : clearBodies.data === undefined ? undefined : (
+            <Outcome role="status">
+              {`Cleared ${formatCount(clearBodies.data.removed)} captured bodies.`}
             </Outcome>
           )
         }
@@ -215,6 +234,15 @@ export function DatabaseBoard() {
         </>
       )}
 
+      <Confirm
+        open={clearing}
+        onOpenChange={setClearing}
+        title="Clear every captured body?"
+        body="Every stored prompt and completion is deleted. The requests themselves stay in the log, with their bodies marked pruned. There is no undo: bodies are never in a snapshot."
+        confirmLabel="Clear captured bodies"
+        busy={clearBodies.isPending}
+        onConfirm={() => clearBodies.mutate(undefined, { onSettled: () => setClearing(false) })}
+      />
       <Confirm
         open={compacting}
         onOpenChange={setCompacting}

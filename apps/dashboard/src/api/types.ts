@@ -570,6 +570,7 @@ export type TableStats = {
 export type SnapshotsResponse = { snapshots: SnapshotInfo[] };
 
 export type VacuumResult = { ok: true; reclaimedBytes: number; durationMs: number };
+export type ClearBodiesResult = { ok: true; removed: number; orphans: number };
 
 /**
  * What a restore or an import answers with.

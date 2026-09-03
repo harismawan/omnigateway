@@ -1,6 +1,7 @@
 import { dirname } from "node:path";
 import {
   type AdminAuth,
+  clearBodies,
   createSnapshot,
   type DatabaseDeps,
   type DatabaseStore,
@@ -314,6 +315,13 @@ export function databaseRoutes(deps: DatabaseRouteDeps) {
           sizeBytes: result.reclaimedBytes,
           durationMs: result.durationMs,
         });
+        return { ok: true, ...result };
+      })
+
+      .delete("/api/database/bodies", async ({ request }) => {
+        await requireAdmin(request, deps.admin);
+        const result = await clearBodies(database);
+        logger.info("captured bodies cleared", { count: result.removed });
         return { ok: true, ...result };
       })
 

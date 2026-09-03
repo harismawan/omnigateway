@@ -13,7 +13,15 @@ import {
   credentialsSet,
   credentialsShow,
 } from "./commands/credentials.ts";
-import { dbBackup, dbMigrate, dbRestore, dbSnapshots, dbStats, dbVacuum } from "./commands/db.ts";
+import {
+  dbBackup,
+  dbClearBodies,
+  dbMigrate,
+  dbRestore,
+  dbSnapshots,
+  dbStats,
+  dbVacuum,
+} from "./commands/db.ts";
 import { keysCreate, keysLimits, keysList, keysModels, keysRevoke } from "./commands/keys.ts";
 import {
   modelsCatalog,
@@ -109,6 +117,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "db backup": dbBackup,
   "db restore": dbRestore,
   "db vacuum": dbVacuum,
+  "db clear-bodies": dbClearBodies,
 };
 
 export type Resolved = { name: string; command: Command; rest: string[] };

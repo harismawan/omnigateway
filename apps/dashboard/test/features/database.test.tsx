@@ -266,6 +266,21 @@ describe("DatabaseBoard", () => {
     expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
   });
 
+  test("clearing bodies asks first and then says how many went", async () => {
+    const user = userEvent.setup();
+    const stub = stubDatabase({
+      "DELETE /api/database/bodies": () => ({ ok: true, removed: 42, orphans: 0 }),
+    });
+    renderWithProviders(<DatabaseBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Clear bodies" }));
+    expect(stub.calls.some((call) => call.url.includes("bodies"))).toBe(false);
+
+    await user.click(await screen.findByRole("button", { name: "Clear captured bodies" }));
+
+    expect((await screen.findByRole("status")).textContent).toContain("42");
+  });
+
   test("compacting asks first and then says what it gave back", async () => {
     const user = userEvent.setup();
     const stub = stubDatabase({

@@ -237,6 +237,33 @@ test("a vacuum reports what it reclaimed and how long it took", async () => {
   cleanup();
 });
 
+test("clearing bodies deletes every row and file, and leaves the request logged", async () => {
+  const { call, store, dir, cleanup } = await harness();
+  await store.bodies.put({
+    schemaVersion: 1,
+    requestId: "req_11111111-2222-4333-8444-555555555555",
+    at: NOW - 1,
+    client: { request: { model: "fast" }, response: { ok: true }, truncated: false },
+    attempts: [],
+    error: null,
+  });
+  const bodiesDir = join(dir, "request_bodies");
+  const artifacts = () => [...new Bun.Glob("**/*.json.enc").scanSync(bodiesDir)];
+  expect(artifacts()).toHaveLength(1);
+
+  const body = (await (await call("DELETE", "/api/database/bodies")).json()) as {
+    ok: boolean;
+    removed: number;
+    orphans: number;
+  };
+  expect(body).toEqual({ ok: true, removed: 1, orphans: 0 });
+  expect(await store.bodies.get("req_11111111-2222-4333-8444-555555555555")).toBeNull();
+  // The tree is empty of artifacts, not merely of rows.
+  expect(artifacts()).toEqual([]);
+
+  cleanup();
+});
+
 test("a created snapshot is listed, downloadable, and deletable", async () => {
   const { call, snapshot, cleanup } = await harness();
 
@@ -825,6 +852,7 @@ test("every route requires an admin session", async () => {
   const routes: [string, string][] = [
     ["GET", "/api/database"],
     ["POST", "/api/database/vacuum"],
+    ["DELETE", "/api/database/bodies"],
     ["GET", "/api/database/snapshots"],
     ["POST", "/api/database/snapshots"],
     ["GET", `/api/database/snapshots/${SNAPSHOT_ID}/download`],

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import {
+  clearBodies,
   copyStore,
   createSnapshot,
   type DatabaseDeps,
@@ -242,6 +243,25 @@ export const dbVacuum: Command = {
       fields([
         ["reclaimed", formatBytes(result.reclaimedBytes)],
         ["took", `${result.durationMs} ms`],
+      ]),
+    );
+  },
+};
+
+export const dbClearBodies: Command = {
+  usage: "db clear-bodies",
+  summary: "Delete every captured request and response body; the requests stay logged",
+  async run(_args, env) {
+    const { ctx, writer, prompt } = env;
+    // Irreversible and never in a snapshot, so it asks like a restore does.
+    if (!(await prompt.confirm("delete every captured body? there is no snapshot of them"))) {
+      throw new CliError("cancelled");
+    }
+    const result = await clearBodies(await database(env));
+    emit(ctx, writer, result, () =>
+      fields([
+        ["removed", String(result.removed)],
+        ["orphaned files removed", String(result.orphans)],
       ]),
     );
   },

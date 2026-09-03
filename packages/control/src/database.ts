@@ -1,6 +1,7 @@
 import { basename, dirname, join, resolve } from "node:path";
 import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
 import {
+  type BodyRepo,
   bodiesDirFor,
   type DatabaseInspection,
   type DatabaseStats,
@@ -84,6 +85,8 @@ export type DatabaseStore = {
   };
   /** The one derived table a swap has to put back in step with its rows. */
   usage: { rebuildRollup(): Promise<void> };
+  /** The two halves of a clear: rows and files, then the files a crash left rowless. */
+  bodies: Pick<BodyRepo, "prune" | "sweepOrphans">;
   maintenance: MaintenanceRepo;
   reopen(): Promise<void>;
   close(): void;
@@ -788,6 +791,23 @@ export async function importSnapshot(
       throw error;
     }
   });
+}
+
+/**
+ * Deletes every captured body, on either engine.
+ *
+ * `prune` with the present instant as the cutoff: it is the retention sweep's
+ * own path, so the rows and the files behind them go together, and the orphan
+ * sweep after it takes any file a crash once left without a row. Nothing here
+ * touches `request_logs` — the request is still on record, only its prompt
+ * and completion are gone, which is what "clear the bodies" means.
+ */
+export async function clearBodies(
+  deps: DatabaseDeps,
+): Promise<{ removed: number; orphans: number }> {
+  const removed = await deps.store.bodies.prune(deps.now());
+  const orphans = await deps.store.bodies.sweepOrphans();
+  return { removed, orphans };
 }
 
 /** Reclaims free pages, and says how much that was worth. */
