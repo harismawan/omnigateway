@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@node-rs/argon2": "2.0.2",
+    "@node-rs/argon2": "2.2.0",
     "@omni/coord": "workspace:*",
     "@omni/ir": "workspace:*",
     "@omni/ponytail": "workspace:*",
@@ -16,7 +16,7 @@
     "@omni/ratelimit": "workspace:*",
     "@omni/router": "workspace:*",
     "@omni/store": "workspace:*",
-    "zod": "4.4.3"
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "@omni/testkit": "workspace:*"
