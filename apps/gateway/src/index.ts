@@ -250,7 +250,25 @@ async function main(): Promise<void> {
     now,
     onDetach: (id, topics) => pluginChannelsRef?.closed(id, topics),
   });
-  const pluginChannels = createChannelRegistry({ sockets: streamRegistry, logger });
+  const streamRing = createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
+  const broadcaster = createBroadcaster({
+    registry: streamRegistry,
+    ring: streamRing,
+    coord,
+    nodeId,
+    now,
+  });
+  // Both before `loadPlugins`, because a plugin opens its channels inside
+  // `setup` and a channel's `broadcast` leaves through the broadcaster.
+  const pluginChannels = createChannelRegistry({
+    sockets: streamRegistry,
+    fanout: (topic, payload) => broadcaster.channel(topic, payload),
+    // The same clock the broadcaster beside it takes. Without it the broadcast
+    // budget would be the one wall-clock read left in the stream stack, and a
+    // test that drives time could not move it.
+    now,
+    logger,
+  });
   pluginChannelsRef = pluginChannels;
 
   const loadedPlugins = await loadPlugins({
@@ -274,15 +292,6 @@ async function main(): Promise<void> {
   logger.info("plugins resolved", {
     count: loadedPlugins.plugins.length,
     path: pluginRoot,
-  });
-
-  const streamRing = createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
-  const broadcaster = createBroadcaster({
-    registry: streamRegistry,
-    ring: streamRing,
-    coord,
-    nodeId,
-    now,
   });
 
   const app = createApp({

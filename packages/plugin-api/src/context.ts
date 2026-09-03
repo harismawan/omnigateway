@@ -89,6 +89,50 @@ export type PluginChannel = {
   onMessage(handler: (message: PluginChannelMessage) => void): void;
   /** Pushes a payload to one connection. A connection that is gone is a no-op, never an error. */
   send(connectionId: string, payload: unknown): void;
+  /**
+   * Pushes a payload to every connection holding this channel, on every process.
+   *
+   * The counterpart to `send` and the only one of the two that is correct on a
+   * cluster. A `connectionId` is meaningful on the process whose socket
+   * produced it and nowhere else, so a plugin answering its panel with `send`
+   * alone reaches whoever happens to share a replica with it — and a write made
+   * while serving a request on another replica reaches nobody. This names the
+   * topic instead, which every process resolves against its own sockets.
+   *
+   * Not coalesced, unlike the host's own `res:*` invalidations. Those name a
+   * resource, where the newest frame says everything its predecessors did; a
+   * plugin's payload routinely identifies *which* thing changed, so folding
+   * them would drop every frame but the last.
+   *
+   * **Costlier than `send`, and bounded differently.** One `send` is a push into
+   * one bounded queue on one process; one broadcast is a publish on the shared
+   * bus plus a fan-out on every replica. The host therefore caps a channel's
+   * broadcasts per second and drops the excess, counted and reported — well
+   * above what a panel-facing plugin does, and well below a per-request loop.
+   * The cap is per *channel*, which is not per thing you push about: a plugin
+   * flooring itself per key and publishing every key onto one channel reaches
+   * the ceiling at that many simultaneously busy keys. Flooring your own rate is
+   * still yours; the cap is a backstop, not a scheduler.
+   *
+   * **Delivery is at-least-once, not exactly-once.** A coordinator that times out
+   * on a publish that in fact landed will deliver that frame twice on this
+   * process, and while the coordinator is unreachable a broadcast reaches this
+   * process only. Design for a payload that says what changed rather than one
+   * that must be applied exactly once — the same rule the rest of this transport
+   * follows.
+   *
+   * A payload that will not serialise is dropped, never thrown: it would
+   * otherwise throw inside your own call, and from a timer that is an uncaught
+   * exception in the gateway's process.
+   *
+   * Authorisation is unchanged: a frame reaches a connection only where the host
+   * already authorised it to hold this topic.
+   *
+   * **Optional, because it arrived in 0.4.0 without a generation bump.** A host
+   * on 0.3.x is `api: 3` too and does not have it, so the compiler asks you for
+   * `channel.broadcast?.(payload)` and `send` remains the fallback.
+   */
+  broadcast?(payload: unknown): void;
   /** Called when a connection holding this channel goes away. */
   onClose(handler: (connectionId: string) => void): void;
 };

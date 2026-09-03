@@ -224,6 +224,8 @@ const session = ctx.channels.open("session");
 session.onMessage(({ connectionId, payload }) => {
   session.send(connectionId, { echo: payload });
 });
+// Everyone holding this channel, on every process in the fleet.
+session.broadcast?.({ changed: "k1" });
 session.onClose((connectionId) => {
   // The connection is gone. Anything you were holding for it can go too.
 });
@@ -237,6 +239,27 @@ Four things to design around:
   you cannot name another plugin's topic — the same rule `{{name}}` follows for
   your tables. Interior colons are fine, so `open("session:" + id)` is the way to
   run a topic per thing rather than one topic with a discriminator inside it.
+- **`send` reaches one connection; `broadcast` reaches the topic.** A
+  `connectionId` is meaningful only on the process whose socket produced it, so
+  on a cluster `send` reaches whoever happens to share a replica with the code
+  calling it — and a write made while serving a request on another replica
+  reaches nobody. `broadcast` names your topic and fans out to every process.
+  It is **not coalesced**: your payload usually says which thing changed, so
+  folding frames by topic would drop all but the last. It is **capped** instead —
+  five hundred a second **per channel**, the excess dropped and reported —
+  because one broadcast is a publish on the shared bus plus work on every
+  replica. Per channel is not per thing you push about: if you floor yourself per
+  key and publish every key onto one channel, the ceiling arrives at five hundred
+  simultaneously busy keys. Floor your own rate; the cap is a backstop.
+  Delivery is **at-least-once**: a coordinator that times out on a publish that
+  landed delivers that frame twice here, and while it is unreachable a broadcast
+  reaches this process only. A payload that will not serialise is dropped rather
+  than thrown — because from your own timer a throw is an uncaught exception in
+  the gateway — and counted separately from one over budget, so an operator can
+  tell the two apart.
+  It arrived in `@omnigateway/plugin-api@0.4.0` without a generation bump, so the
+  member is optional: call it as `channel.broadcast?.(payload)` and keep `send`
+  as the fallback if your plugin must load on an older gateway.
 - **Delivery is best-effort and bounded.** Each subscriber has a queue that
   **drops rather than grows**: a client that cannot keep up loses its oldest
   frames, and the drop is counted rather than reported to you. There is no retry

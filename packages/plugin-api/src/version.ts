@@ -44,6 +44,14 @@
  * `undefined` members on it — a shape change, not a removal, and the counter
  * covers both. The change is what lets a store other than SQLite serve
  * plugin storage at all.
+ *
+ * **Still `3` after `PluginChannel.broadcast`**, which is the rule above read
+ * literally: an existing plugin survives an addition. One written against a
+ * host that has it and run against one that does not calls a member that is
+ * absent, so a plugin using it feature-detects — the same posture it already
+ * has to take for a capability its manifest declared and the host did not
+ * supply. What a generation may not do is rise for every addition, because
+ * every bump refuses every plugin published against the one before it.
  */
 export const PLUGIN_API_VERSION = 3;
 
@@ -94,6 +102,13 @@ export const PLUGIN_API_VERSION = 3;
  * doing exactly what it did. Reserve the minor for the first genuine
  * narrowing, with a deprecation window.
  *
+ * `0.1.6` changed no API either, and exists for the reason `0.1.3` did: this
+ * package moved to `0.4.0` for `PluginChannel.broadcast`, and the SDK's own
+ * dependency range on it — `^0.3.0`, which under 0.x excludes `0.4.0` — had to
+ * widen with it. A range corrected in the repository is invisible from a
+ * stranger's `node_modules`; the version is the only part of that repair a
+ * consumer can see.
+ *
  * **Changing this line means republishing _this_ package, not just the SDK.**
  * It reads as an SDK fact and it lives here, so the obvious move — bump
  * `packages/dashboard-sdk`, tag, done — leaves the registry with a
@@ -106,4 +121,4 @@ export const PLUGIN_API_VERSION = 3;
  * advertised. `publishable.test.ts` now refuses a state where this package
  * trails the SDK.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.5";
+export const DASHBOARD_SDK_VERSION = "0.1.6";

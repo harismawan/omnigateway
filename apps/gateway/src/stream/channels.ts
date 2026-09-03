@@ -16,6 +16,21 @@ import type { SocketRegistry } from "./registry.ts";
 export type ChannelSockets = Pick<SocketRegistry, "has" | "sendTo">;
 
 /**
+ * How a broadcast leaves this process.
+ *
+ * A function rather than the `Broadcaster` for the reason `ChannelSockets`
+ * narrows the registry: a path that could reach `stream`, `invalidateAll` or
+ * `stop` is a path that could be made to do any of them. `Broadcaster.channel`
+ * satisfies it structurally.
+ *
+ * Required rather than optional, so a registry cannot be built without deciding
+ * where its frames go. That is all the type buys — a `() => {}` satisfies it, as
+ * every test here does — but it makes the omission a compile error at the two
+ * production call sites rather than a channel that is merely quiet.
+ */
+export type ChannelFanout = (topic: string, payload: unknown) => boolean;
+
+/**
  * The channel-name pattern, which is two constraints wearing one coat.
  *
  * The value becomes the tail of a wire topic, so it is bounded and reduced to a
@@ -36,6 +51,9 @@ const NAME_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,63}$/;
 type Channel = {
   pluginId: string;
   topic: string;
+  /** Budget left, and when it was last refilled. See `BROADCAST_BURST`. */
+  tokens: number;
+  refilledAt: number;
   onMessage: ((message: PluginChannelMessage) => void)[];
   onClose: ((connectionId: string) => void)[];
   /** The facade handed to the plugin, so a second `open` is the same channel. */
@@ -47,7 +65,44 @@ export type ChannelStats = {
   channels: number;
   /** Handler invocations that threw. */
   handlerErrors: number;
+  /** Broadcasts refused because a channel was over its budget. */
+  broadcastDrops: number;
+  /** Broadcasts refused because the payload would not serialise. */
+  broadcastUnencodable: number;
 };
+
+/**
+ * Broadcasts one channel may publish per second before the rest are dropped.
+ *
+ * `send` costs one push into a bounded, drop-oldest, counted queue on this
+ * process. A broadcast costs a publish on the shared bus plus a parse and a
+ * fan-out on *every* replica, and it deliberately goes past the emit-side
+ * coalescer — a plugin's payload names which thing changed, so folding by topic
+ * would drop all but the last. "Do not fold" and "do not bound" are different
+ * decisions, and only the first one was argued for.
+ *
+ * **Per channel, which is not per key, and the first number here was chosen as
+ * though it were.** A plugin floors its own rate against whatever it pushes
+ * *about* — the reference consumer allows one frame per API key per second — and
+ * then publishes every one of them onto a single channel. So the ceiling is
+ * reached by concurrently busy keys, and fifty was inside what an ordinary
+ * installation reaches. That is the worst way for this to be wrong: the plugin
+ * whose panel switches its poll off while the channel is live is the one whose
+ * dropped frame is a screen that stops updating, so a cap set too low is quieter
+ * than no cap at all.
+ *
+ * Five hundred leaves an installation with hundreds of simultaneously earning
+ * keys inside the budget, and still refuses a plugin publishing per request:
+ * that is the shape this exists to stop, and it is orders of magnitude away
+ * rather than a factor of two. The contract already says delivery is best-effort
+ * and bounded, so dropping over budget is inside it rather than a new failure
+ * mode.
+ *
+ * ponytail: one budget per channel, refilled continuously, so a plugin can still
+ * take N × this by opening N channels. Per-plugin budgets if a second plugin
+ * ever competes for the bus.
+ */
+export const BROADCAST_BURST = 500;
 
 export type ChannelRegistry = {
   /**
@@ -79,8 +134,12 @@ export type ChannelRegistry = {
 
 export type ChannelRegistryDeps = {
   sockets: ChannelSockets;
+  fanout: ChannelFanout;
   logger?: Logger;
   scheduler?: DrainScheduler;
+  /** Reads the current instant, for the broadcast budget. Injected like every clock here. */
+  now?: () => number;
+  burst?: number;
 };
 
 const defaultScheduler: DrainScheduler = (run) => {
@@ -119,11 +178,15 @@ const defaultScheduler: DrainScheduler = (run) => {
 export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistry {
   const logger = deps.logger ?? noopLogger;
   const scheduler = deps.scheduler ?? defaultScheduler;
+  const now = deps.now ?? Date.now;
+  const burst = deps.burst ?? BROADCAST_BURST;
 
   /** topic → channel. One flat map, because a topic is globally unique by construction. */
   const channels = new Map<string, Channel>();
 
   let handlerErrors = 0;
+  let broadcastDrops = 0;
+  let broadcastUnencodable = 0;
   let live = true;
   /** Cancels the pending report. One outliving the registry is a timer leak. */
   let cancelReport: (() => void) | undefined;
@@ -139,9 +202,42 @@ export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistr
    */
   const errorsSinceReport = new Map<string, number>();
 
+  /** Broadcasts refused since the last report, by plugin. Batched like the above. */
+  const dropsSinceReport = new Map<string, number>();
+
+  /** Payloads that would not serialise since the last report, by plugin. */
+  const unencodableSinceReport = new Map<string, number>();
+
+  /** Arms the batched report, which both counters share. */
+  const scheduleReport = (): void => {
+    if (cancelReport !== undefined || !live) return;
+    cancelReport = scheduler(report);
+  };
+
   const report = (): void => {
     cancelReport = undefined;
     if (!live) return;
+    /*
+      One line per drain rather than one per drop, which folds a burst raised
+      inside a single tick.
+
+      **It does not fold a plugin that drops steadily from its own timer**, and
+      that is worth stating rather than implying: each tick with a drop in it
+      produces its own line. A plugin publishing on an interval therefore gets a
+      line per interval, and one publishing in a tight asynchronous loop gets one
+      per iteration — noisy, and the plugin is broken. What this rules out is the
+      case a working plugin can reach, a burst inside one tick.
+    */
+    for (const [pluginId, count] of dropsSinceReport) {
+      logger.warn("plugin channel broadcast dropped", { plugin: pluginId, count });
+    }
+    dropsSinceReport.clear();
+    for (const [pluginId, count] of unencodableSinceReport) {
+      // A different diagnosis from the line above, so a different line: over
+      // budget is a rate, and this is a payload that can never be sent.
+      logger.warn("plugin channel payload could not be serialised", { plugin: pluginId, count });
+    }
+    unencodableSinceReport.clear();
     for (const [pluginId, count] of errorsSinceReport) {
       // No error body and no payload: this line reports on code authored
       // outside the repository, and `LogFields` is a closed allowlist. The
@@ -154,8 +250,33 @@ export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistr
   const countFailure = (pluginId: string): void => {
     handlerErrors++;
     errorsSinceReport.set(pluginId, (errorsSinceReport.get(pluginId) ?? 0) + 1);
-    if (cancelReport !== undefined || !live) return;
-    cancelReport = scheduler(report);
+    scheduleReport();
+  };
+
+  /**
+   * Spends one broadcast from a channel's budget, or reports that it cannot.
+   *
+   * Continuous refill rather than a window, so a plugin pushing steadily at its
+   * budget is never cut off for the tail of a second — a windowed counter would
+   * drop the last frame of every burst, which is the one a panel is waiting for.
+   */
+  const affordBroadcast = (channel: Channel): boolean => {
+    const at = now();
+    // A clock that is not a number would make `tokens` `NaN`, and `NaN < 1` is
+    // false — so the bucket would allow everything forever, which is the one
+    // direction a cap may not fail. Treated as no elapsed time instead: the
+    // channel spends what it holds and then stops.
+    const elapsed = Number.isFinite(at) ? Math.max(0, at - channel.refilledAt) : 0;
+    channel.tokens = Math.min(burst, channel.tokens + (elapsed * burst) / 1_000);
+    channel.refilledAt = at;
+    if (channel.tokens < 1) {
+      broadcastDrops++;
+      dropsSinceReport.set(channel.pluginId, (dropsSinceReport.get(channel.pluginId) ?? 0) + 1);
+      scheduleReport();
+      return false;
+    }
+    channel.tokens -= 1;
+    return true;
   };
 
   /**
@@ -188,11 +309,13 @@ export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistr
     const channel: Channel = {
       pluginId,
       topic,
+      tokens: burst,
+      refilledAt: now(),
       onMessage: [],
       onClose: [],
       // Replaced immediately below; declared here so the facade can close over
       // the channel it belongs to.
-      facade: { onMessage: () => {}, send: () => {}, onClose: () => {} },
+      facade: { onMessage: () => {}, send: () => {}, broadcast: () => {}, onClose: () => {} },
     };
     channel.facade = {
       onMessage(handler) {
@@ -208,6 +331,20 @@ export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistr
         // and will have frames in flight for one that has already left.
         if (!holds(connectionId, topic)) return;
         deps.sockets.sendTo(connectionId, { type: "event", topic, payload });
+      },
+      broadcast(payload) {
+        if (!live) return;
+        if (!affordBroadcast(channel)) return;
+        if (deps.fanout(channel.topic, payload)) return;
+        // Refused by the transport: the payload would not serialise. Counted
+        // here because the fan-out has no logger and the plugin has no channel
+        // to be told through.
+        broadcastUnencodable++;
+        unencodableSinceReport.set(
+          channel.pluginId,
+          (unencodableSinceReport.get(channel.pluginId) ?? 0) + 1,
+        );
+        scheduleReport();
       },
     };
     channels.set(topic, channel);
@@ -257,7 +394,7 @@ export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistr
     },
 
     stats() {
-      return { channels: channels.size, handlerErrors };
+      return { channels: channels.size, handlerErrors, broadcastDrops, broadcastUnencodable };
     },
 
     stop() {
@@ -269,6 +406,8 @@ export function createChannelRegistry(deps: ChannelRegistryDeps): ChannelRegistr
       cancelReport?.();
       cancelReport = undefined;
       errorsSinceReport.clear();
+      dropsSinceReport.clear();
+      unencodableSinceReport.clear();
     },
   };
 }

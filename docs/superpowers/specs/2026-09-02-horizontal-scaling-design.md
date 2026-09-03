@@ -328,10 +328,16 @@ polling within one pod, and a cross-pod duplicate poll is harmless.
   A Redis-backed ring (`XADD`/`XRANGE`) that would make reconnects gap-free was considered
   and deferred: `gap` → refetch already exists and is one round-trip.
 - `declareStream` publishes on `pubsub` as well, so any pod answers `declared`.
-- Plugin channels stay **pod-local**, and that is not a gap: a plugin's handlers run on the
-  pod whose socket delivered the message, so every connection id a plugin ever sees is a
-  local one. Cross-pod `send` was in the first draft and was dropped when that became
-  clear — there is no id to send to.
+- Plugin channels stay **pod-local** *for `send`*: a plugin's handlers run on the pod whose
+  socket delivered the message, so every connection id a plugin ever sees is a local one.
+  Cross-pod `send` was in the first draft and was dropped when that became clear — there is
+  no id to send to. **Amended 2026-09-03: `PluginChannel.broadcast` names the topic rather
+  than a connection and goes over `coord.pubsub` like `res:*`.** The reasoning above was
+  right about ids and wrong about the conclusion drawn from it — a plugin whose panel is on
+  another replica was unreachable, and the plugin that found it had switched its poll off
+  because the channel was live. Not coalesced, unlike `res:*`: a plugin's payload identifies
+  *which* thing changed, so folding by topic drops every frame but the last. Bounding the
+  rate stays the plugin's, as it already is for `send`.
 - **No sticky sessions are required.** Cookie verification reads `kv`; everything else is
   fan-out. The ingress must pass WebSocket upgrades and hold an idle timeout above the
   keepalive cadence (10 s; 5 s on `/v1/responses`).

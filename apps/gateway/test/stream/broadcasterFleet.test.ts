@@ -103,3 +103,90 @@ test("rapid invalidations publish once per floor, not once each", async () => {
   // scheduler never fires.
   expect(publishes).toBe(1);
 });
+/**
+ * The plugin-channel half of the fan-out.
+ *
+ * A plugin's `send` names a connection, which is meaningful only on the process
+ * that holds it — so a plugin whose panel is connected to another replica could
+ * reach nobody. `broadcast` names the topic instead, which every process can
+ * resolve against its own sockets.
+ */
+test("a plugin channel broadcast on one process reaches the other's subscribers", async () => {
+  const coord = memoryCoord();
+  const a = node(coord, "a");
+  const b = node(coord, "b");
+  a.broadcaster.channel("plugin:pokemon:activity", { apiKeyId: "k1" });
+  await Bun.sleep(1);
+  const frame: ServerFrame = {
+    type: "event",
+    topic: "plugin:pokemon:activity",
+    payload: { apiKeyId: "k1" },
+  };
+  expect(b.published).toContainEqual(frame);
+  // The emitting process delivers through the same loop-back rather than
+  // locally, so there is one delivery path and no frame arrives twice.
+  expect(a.published).toEqual([frame]);
+});
+
+/**
+ * Deliberately not coalesced, which is the one place this differs from
+ * `invalidate`.
+ *
+ * A `res:*` frame names a resource and the newest one says everything its
+ * predecessors did. A channel frame carries a plugin's own payload, and the
+ * payload is routinely the identity of the thing that changed — so replacing
+ * the pending frame with the newest drops every other key. The rate is the
+ * plugin's to bound, exactly as it already is for `send`.
+ */
+test("channel frames are not folded together: a frame per key survives one floor", async () => {
+  const coord = memoryCoord();
+  const a = node(coord, "a");
+  for (const apiKeyId of ["k1", "k2", "k3"]) {
+    a.broadcaster.channel("plugin:pokemon:activity", { apiKeyId });
+  }
+  await Bun.sleep(1);
+  expect(a.published.map((frame) => ("payload" in frame ? frame.payload : null))).toEqual([
+    { apiKeyId: "k1" },
+    { apiKeyId: "k2" },
+    { apiKeyId: "k3" },
+  ]);
+});
+test("a payload that will not serialise is dropped, never thrown back at the plugin", () => {
+  /*
+    The frame is stringified synchronously inside `PluginChannel.broadcast`, so
+    without this a `BigInt` or a circular object throws in the plugin's own
+    stack — a 500 from a route, and from a plugin's own timer an uncaught
+    exception with the gateway process behind it. `registry.ts` refuses the same
+    throw at the same boundary; this path never reaches that encoder, because it
+    encodes its own envelope first.
+  */
+  const a = node(memoryCoord(), "a");
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+
+  expect(() => a.broadcaster.channel("plugin:alpha:s", { n: 1n })).not.toThrow();
+  expect(() => a.broadcaster.channel("plugin:alpha:s", circular)).not.toThrow();
+  expect(a.published).toEqual([]);
+  // Answered to the caller rather than silently dropped, so the channel
+  // registry can count it: an operator diagnosing a channel that publishes
+  // nothing should not have to tell this from a quiet plugin by elimination.
+  expect(a.broadcaster.channel("plugin:alpha:s", { n: 1n })).toBe(false);
+  expect(a.broadcaster.channel("plugin:alpha:s", { fine: true })).toBe(true);
+});
+
+test("a stopped broadcaster publishes nothing, as the other process can see", async () => {
+  // Asserted on the *other* node, because that is the only observer the flag
+  // changes: `stop()` also unsubscribes, so this process delivers nothing to
+  // itself whether the guard exists or not. The first version of this asserted
+  // the emitting side, and passed with the guard deleted.
+  const coord = memoryCoord();
+  const a = node(coord, "a");
+  const b = node(coord, "b");
+  a.broadcaster.stop();
+
+  const sent = a.broadcaster.channel("plugin:alpha:s", { n: 1 });
+  await Bun.sleep(1);
+
+  expect(sent).toBe(false);
+  expect(b.published).toEqual([]);
+});
