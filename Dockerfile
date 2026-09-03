@@ -57,6 +57,11 @@ COPY --from=build /app/apps/dashboard/dist apps/dashboard/dist
 RUN mkdir -p /data/plugins && chown -R bun:bun /data
 USER bun
 
+# The tag, handed in by the release workflow: the image runs source, not the
+# npm bundle, so nothing substituted a version and the console would print
+# `0.0.0-dev` for every deployed release.
+ARG OMNI_VERSION=0.0.0-dev
+ENV OMNI_VERSION=$OMNI_VERSION
 ENV OMNI_HOST=0.0.0.0 \
     OMNI_PORT=9000 \
     OMNI_ROOT=/data \

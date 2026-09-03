@@ -39,6 +39,7 @@ import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.t
 import { createConsoleFleet } from "./stream/consoleFleet.ts";
 import { createSocketRegistry, type SocketRegistry } from "./stream/registry.ts";
 import { createRing, type Ring } from "./stream/ring.ts";
+import { VERSION } from "./version.ts";
 
 export type AppDeps = {
   store: Store;
@@ -220,6 +221,7 @@ function absentLifecycle(): LifecycleDeps {
   };
   return {
     env: process.env,
+    version: VERSION,
     fileExists: (path) => existsSync(path),
     run: async () => refuse(),
     stop: refuse,

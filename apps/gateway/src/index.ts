@@ -29,6 +29,7 @@ import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.t
 import { startConsoleStream } from "./stream/console.ts";
 import { createSocketRegistry } from "./stream/registry.ts";
 import { createRing } from "./stream/ring.ts";
+import { VERSION } from "./version.ts";
 
 function stdoutLogger(level: "debug" | "info" | "warn" | "error"): Logger {
   return createLogger({
@@ -327,6 +328,7 @@ async function main(): Promise<void> {
     },
     lifecycle: {
       env: process.env,
+      version: VERSION,
       fileExists: (path) => existsSync(path),
       run: commandRunner,
       stop: createDeferredStop((reason, mode) => shutdown(reason, mode)),

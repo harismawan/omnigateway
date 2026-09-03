@@ -413,7 +413,10 @@ export function databaseRoutes(deps: DatabaseRouteDeps) {
 
       .get("/api/lifecycle", async ({ request }) => {
         await requireAdmin(request, deps.admin);
-        return describeLifecycle(deps.lifecycle.env, deps.lifecycle.fileExists);
+        return {
+          ...describeLifecycle(deps.lifecycle.env, deps.lifecycle.fileExists),
+          version: deps.lifecycle.version,
+        };
       })
 
       /**

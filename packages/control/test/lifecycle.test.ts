@@ -29,6 +29,7 @@ function deps(
     argv,
     stopped,
     env: input.env ?? {},
+    version: "0.0.0-test",
     fileExists: (path) => input.dockerenv === true && path === "/.dockerenv",
     run: async (args) => {
       argv.push([...args]);

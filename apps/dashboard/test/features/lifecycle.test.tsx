@@ -11,6 +11,13 @@ function stubLifecycle(overrides: Parameters<typeof createFetchStub>[0] = {}) {
 }
 
 describe("LifecycleControls", () => {
+  test("the rail prints the gateway's version above its controls", async () => {
+    stubLifecycle({ "GET /api/lifecycle": () => lifecycle({ version: "1.2.3" }) });
+    renderWithProviders(<LifecycleControls />);
+
+    expect(await screen.findByText("v1.2.3")).toBeTruthy();
+  });
+
   /**
    * The rail is 168px wide, so the visible labels are shortened. What a screen
    * reader announces and what the confirm dialog is titled must still name the

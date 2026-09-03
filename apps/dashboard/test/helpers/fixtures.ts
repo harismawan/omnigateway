@@ -426,7 +426,7 @@ export function databaseOverview(patch: Partial<DatabaseOverview> = {}): Databas
 
 /** systemd by default: the shape where both controls are real. */
 export function lifecycle(patch: Partial<LifecycleCapability> = {}): LifecycleCapability {
-  return { supervisor: "systemd", canRestart: true, canShutdown: true, ...patch };
+  return { supervisor: "systemd", canRestart: true, canShutdown: true, version: "0.8.1", ...patch };
 }
 
 /**

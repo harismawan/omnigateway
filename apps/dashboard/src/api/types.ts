@@ -594,6 +594,8 @@ export type LifecycleCapability = {
   canShutdown: boolean;
   /** Why the capability is what it is, when that is not obvious. */
   note?: string;
+  /** The running gateway's release version, or `0.0.0-dev` from a checkout. */
+  version: string;
 };
 
 /** What a plugin asks for in the rail. Absent when the plugin adds no screen. */
