@@ -17,7 +17,7 @@ const Center = styled.div`
 const Line = styled.p`
   /* Wide enough for the console's uncaptured-fleet advice to read as a paragraph
      rather than a column; the horizontal padding keeps it off the card edge. */
-  max-width: min(72ch, 100%);
+  max-width: min(96ch, 100%);
   font-size: 13px;
   color: ${({ theme }) => theme.color.inkDim};
 `;
