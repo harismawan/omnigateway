@@ -1,11 +1,12 @@
 # Architecture
 
-How OmniGateway put together, for contributors and design auditors. [README](README.md#how-it-is-built) has package map and layering rules; this doc detail behind them.
+How OmniGateway put together, for contributors and design auditors. [How it is built](#how-it-is-built) below has package map and layering rules; rest of this doc detail behind them.
 
 Conventions governing changes — architectural boundaries, testing expectations, traps — see [CLAUDE.md](CLAUDE.md). Approved designs live in `docs/superpowers/specs/`.
 
 ## Contents
 
+- [How it is built](#how-it-is-built)
 - [What a request actually does](#what-a-request-actually-does)
 - [Rate limiting](#rate-limiting)
 - [Routing](#routing)
@@ -19,6 +20,88 @@ Conventions governing changes — architectural boundaries, testing expectations
 - [The console and the CLI](#the-console-and-the-cli)
 - [Plugins](#plugins)
 - [Clustering](#clustering)
+
+## How it is built
+
+A Bun workspace monorepo. The layering is deliberate and enforced by what each
+package is allowed to import: a provider-neutral core at the bottom, provider
+knowledge in one place, pure routing above that, and every side effect pushed up
+into the gateway process.
+
+```mermaid
+graph TD
+  subgraph frontends[Front ends]
+    gateway["apps/gateway<br/><i>Elysia server, dispatch, loops</i>"]
+    cli["apps/cli<br/><i>the omni binary</i>"]
+    dashboard["apps/dashboard<br/><i>React console</i>"]
+  end
+
+  control["@omni/control<br/><i>every operator action;<br/>no HTTP, argv or terminal</i>"]
+  router["@omni/router<br/><i>pure ranking;<br/>no I/O, no timers</i>"]
+  store["@omni/store<br/><i>SQLite + field encryption</i>"]
+  providers["@omni/providers<br/><i>adapters, wire codecs,<br/>catalog, HTTP client</i>"]
+  rtk["@omni/rtk<br/><i>tool-result filters</i>"]
+  ponytail["@omni/ponytail<br/><i>vendored coding ruleset</i>"]
+  ratelimit["@omni/ratelimit<br/><i>key limit arithmetic;<br/>no clock, no state</i>"]
+  ir["@omni/ir<br/><i>domain model — depends on nothing</i>"]
+
+  gateway --> control
+  gateway --> rtk
+  gateway --> ponytail
+  gateway --> ratelimit
+  cli --> control
+  dashboard -. "types only" .-> ir
+  dashboard -. "types only" .-> store
+  control --> router
+  control --> ponytail
+  control --> ratelimit
+  router -. "types + 2 pure helpers,<br/>via /types subpath" .-> store
+  router --> providers
+  store --> rtk
+  store --> ponytail
+  store --> ratelimit
+  providers --> ir
+  rtk --> ir
+  ponytail --> ir
+  store --> ir
+```
+
+Arrows read *depends on*, and the direction never reverses. Two rules do most of
+the work: `@omni/ir` is side-effect free and imports nothing, and `@omni/router`
+is a pure function — no network, no database, no timers. Everything that has to
+touch the world is pushed up into the gateway process.
+
+`@omni/ratelimit` is the same shape applied to key limits: it decides whether a
+request is over a ceiling, and it holds no clock and no counters — `now` is a
+parameter and the counts are handed to it, so it never learns whether a number
+came from memory or from SQLite. It imports nothing but its schema validator, not
+even `@omni/ir`. The rings and the in-flight gauge live in the gateway, because
+state is not the package's job, and that split is what lets sliding-window
+arithmetic be tested without a gateway, a store, or a clock.
+
+The dashboard's edges are dotted because they are type-level only. It has no edge
+to `@omni/providers` at all: provider names, colours, order and model lists reach
+the console over `GET /api/catalog`, because a provider loaded from
+`<root>/plugins/` exists only at runtime and no build-time import could see one.
+
+`@omni/providers/catalog` and `/descriptors` are still deliberately import-free,
+for a different reason than they used to be: the pure router imports
+`descriptors`, and the leaf property is what lets it.
+
+The router's dotted edge into `@omni/store` is nearly the same story: its
+package-root imports are all `import type`. Two pure arithmetic helpers,
+`durationFor` and `cacheReadRate`, do run at runtime — imported through the
+`@omni/store/types` leaf subpath, so neither SQLite nor crypto enters the
+router's module graph and the no-I/O rule holds.
+
+The gateway and the CLI are two front ends over the same `@omni/control`
+functions. The CLI does not call the running server's API — it opens the same
+SQLite file directly, which is why it still works when the gateway is down.
+
+The rest of this document goes a level deeper: a request traced end to end, how
+routing ranks and excludes accounts, the commit point that decides whether
+failover is still possible, the provider adapter shape, the database schema and
+its encryption boundary, and the background loops.
 
 ## What a request actually does
 
@@ -438,7 +521,17 @@ Two topic classes, and class **is** delivery contract rather than hint about one
 serializer, so no second rendering of any resource exist and no bug where socket show one number and
 reload show another. Client map topic to query key by **prefix**, because `["logs", limit]` and
 `["usage", …6]` are parameterised — enumerated table go stale silently, which is the failure mode
-this whole design keep avoiding.
+this whole design keep avoiding. One exception is real: `res:logs` must exclude
+`["logs","body",…]`, a prefix collision on immutable data.
+
+A topic name a resource, and every branch reading that resource must be in its entry. Console and
+client surface hold different query keys for the same rows — `["usage",…]` and
+`["client","usage",…]` — so `res:usage` and `res:logs` cover both. An entry covering one branch
+leave the other subscribed to a frame that do nothing, and the symptom is silence, which look
+exactly like a quiet gateway. Client's key summary ride `res:usage`, not `res:keys`: its
+`limitUsage` is computed from usage rows, and a client cannot hold `res:keys` anyway. A panel whose
+topic its principal cannot hold must poll with **no** topic — naming one switch polling off in
+favour of a push that never arrive.
 
 `stream:*` **never claim gapless**. Bounded ring plus explicit `gap` is entire contract; silent skip
 is the failure the class exist to prevent. Subscribe to `stream:*` topic no source declared answer
@@ -453,8 +546,11 @@ the case socket was added for. Floor 1s for `res:usage` and `res:logs`, 5s for `
 `res:credentials`, all in one place so they readable against each other.
 
 Emitters sit where state change, and must cover **every** change to what a topic name, because push
-replace polling rather than supplement it: panel refetch a pushed topic on nothing else, so a
-transition emitting nothing is one nobody see. Request log change three times — `beginLog` when row
+replace polling rather than supplement it: `cadence(ms, topic)` return `false` once the socket
+declare that topic pushed, so panel refetch a pushed topic on nothing else, and a
+transition emitting nothing is one nobody see. When adding a topic, enumerate the writes to the
+resource and check each one emits — the count of emitters should match the count of writers.
+Request log change three times — `beginLog` when row
 appear, `routeLog` when failover rewrite its target, `finishLog` when it complete — and all three
 emit `res:logs`. Only `finishLog` also emit `res:usage`, because only there has anything been
 counted. Shipping with the completion emitter alone made in-flight request invisible until it was no
@@ -481,8 +577,15 @@ ones behind it, because on `stream:*` sequence is the contract. Past queue capac
 — on transport whose point is currency, newest is one worth keeping — counted, and reported once per
 tick rather than once per drop.
 
-Third class `plugin:<id>:<name>` sit in either of the two, owned by plugin through `channels`
-capability. Plugin receive `open(name)` and nothing more — no socket, no upgrade request, no header,
+Third class `plugin:<id>:<name>` sit in neither of the two, owned by plugin through `channels`
+capability. It carry no `seq`, so it can never `gap`: `channels.send` emit `{type,topic,payload}`
+and nothing more — no ring behind it, nothing to fall off the back of — so console `hold`
+resubscribe **without** `sinceSeq` and SDK `ChannelMessage` carry no `gap` arm. Adding one would
+be a case every panel author write and none reach. What panel do get is `open`/`refused`/`closed`,
+because plugin topic is the one class a principal can be refused: `authorised` give it to admin
+alone, so viewer's panel must be able to say so. Console `hold` is refcounted and unsubscribe on
+last release — that frame is what fire plugin's `onClose`, so panel unmounting with tab still open
+is a session plugin may drop. Plugin receive `open(name)` and nothing more — no socket, no upgrade request, no header,
 no `Principal` — and `<id>` come from manifest host validated against directory name, so plugin
 supply tail of topic and never head. Split load-bearing: channel registry answer what **exist**,
 `authorised` decide who may hold it, so opening channel never widen plugin's own reach. Admin
@@ -611,11 +714,11 @@ flowchart TB
   rmp["omni plugin remove --purge"] -.-> drop["tables dropped, after confirming"]
 ```
 
-Plugin tables live in gateway's own SQLite file, so plugin data moves with snapshot and restore like everything else. Named `plugin_<id>_<name>` by host from `{{name}}` placeholder plugin writes, tracked in `plugin_migrations` independently of core's numbering — core's next migration unaffected by anything plugin does.
+Plugin tables live in gateway's own SQLite file, so plugin data moves with snapshot and restore like everything else. Named `plugin_<id>_<name>` by host from `{{name}}` placeholder plugin writes, tracked in `plugin_migrations` on a track independent of core's `001..` — core's next migration number unaffected by anything plugin does.
 
 Plugin migrations apply one transaction each rather than one for batch. Single transaction reads tidier and is wrong: plugin failing on migration 5 would silently revert 1 through 4 on every subsequent boot, turning one bad migration into repeated data loss.
 
-Restoring onto install lacking a plugin leaves orphan `plugin_*` tables. They stay, `omni doctor` reports them, nothing drops them automatically — restore is precisely when plugin may not be installed yet, and drop is irreversible.
+Restoring onto install lacking a plugin leaves orphan `plugin_*` tables. They stay, `omni doctor` reports them, nothing drops them automatically — restore is precisely when plugin may not be installed yet, and drop is irreversible. `omni plugin remove` keeps the tables too; only `--purge` drops them, and it confirms first.
 
 ### Events are at-most-once, and say so
 
@@ -634,6 +737,8 @@ flowchart LR
 `RequestCompleted` emitted from `finishLog`, already the one site running at most once per request id — same guarantee, same reason, that put rate-limiter's token debit there. Handlers run off request path through bounded queue: nothing runs on caller's stack, throwing handler costs that plugin its event and nothing else, and full queue drops rather than grows, because unbounded queue behind slow handler is memory leak appearing only under load.
 
 Delivery explicitly **not durable**. Event queued when process dies is gone, so anything needing exact accounting reconciles from its own storage instead. Fine for counter, wrong for ledger, and distinction documented rather than left for someone to assume wrong half.
+
+Plugin channels carry the same promise and one more: a client must **subscribe before it sends**, because the plugin's only way to answer is `send(connectionId, …)` on that topic, so a frame from an unsubscribed connection is refused rather than handed over. A plugin topic nothing opened is refused like a `stream:*` topic nothing `declareStream`d — a topic with no owner must not read as a topic that is merely quiet. Two orderings are load-bearing and both fail silently when reversed. The channel registry is built **before** `loadPlugins` in `apps/gateway/src/index.ts`, because a plugin opens its channel inside `setup`; one built after leaves every plugin holding a live-looking handle onto nothing. And the route's `close` reads `registry.topics(id)` **before** `registry.remove(id)` — reverse it and every `onClose` handler goes unfired. A throwing handler is caught, counted per plugin, reported as one batched line per plugin, never one per failure and never with the error body: `LogFields` is a closed allowlist and that code was authored outside this repository.
 
 ### The console shares one React
 
@@ -658,6 +763,8 @@ flowchart TB
 Plugins render inline in console, so both halves must hold same React instance — two copies make every plugin hook throw. So console externalises `react`, `react-dom`, `styled-components`, `@tanstack/react-query` and `@omnigateway/dashboard-sdk` rather than bundling them, and import map in `index.html` resolves those bare specifiers to shared runtime built beside it. Specifier list, import map and shared build's entry points are one object in `apps/dashboard/shared/manifest.ts`, because those three drifting apart fails in three different and equally unhelpful ways.
 
 `@omnigateway/dashboard-sdk` is on that list too, and it is worth separating from the other four rather than reading as one more of them. Those are shared for instance identity, and every breach announces itself — a thrown hook error, a component drawing from the wrong stylesheet. The SDK is shared for **context identity**: it holds the chassis LIVE switch, so a second copy is a second `createContext` result, and a panel reading it finds no provider above it, takes the "polling is off" default, and never polls again. Nothing throws and nothing is logged; the only symptom is a panel that stopped updating, which is indistinguishable from the pause working. A plugin bundle must mark the SDK external exactly as it marks React.
+
+Two build facts hide inside that list. `export * from "react"` does not work and does not warn — React is CommonJS, so the re-export compiles to a module exporting only `default`; the shims destructure the default instead. The SDK is ESM, so `export *` is correct for it. And plugin UI assets are served at `/plugin-assets/<id>/…`, not `/plugins/<id>/…`, which would collide with the console's own client-side routes; bundles are unauthenticated like the console's own JavaScript, and the catalog at `/api/plugins` is admin-gated, because what is gated is data.
 
 `sdk` range shipped console does not satisfy disables only UI, and nav entry renders disabled carrying reason. Plugin collecting data should not go dark because console's React moved, and operator should get sentence rather than blank page.
 
@@ -697,7 +804,25 @@ before the promise settles. In memory that is "mutate, then `Promise.resolve`"; 
 script. Two consumers depend on it in a way that is easy to break: the limiter raises its claim
 before its first yield, and the load registry keeps a synchronous local map and only *samples* the
 shared gauge before ranking — an `await` between `counts()` and `acquire()`, even on a resolved
-promise, let nine simultaneous dispatches rank on one snapshot.
+promise, let nine simultaneous dispatches rank on one snapshot. Concretely: `rateLimit.ts`
+raises `deciding` and claims before its first yield, and `loadRegistry.ts` reads the shared gauge
+only through `refresh()` before it ranks; the burst test in `dispatch.test.ts` catches the
+`await` version. `coord` is threaded through **all** of a call graph or none —
+`apps/gateway/test/cluster/sharedCoord.test.ts` stands up two route trees over one memory coord
+and fails on any site still reading a module-scope map.
+
+**Invariants the table below relies on.** Refresh serialisation is three layers — the local
+`inFlight` map, `coord.mutex`, and a **re-read** behind the lock — and the re-read is the dedup:
+a view whose `expiresAt` sits behind the row's is answered from the store, never the provider.
+The long windows (`5h`, `1w`) are `coord.buckets`, seeded from `usage.sumBuckets` under a lock,
+and **`add` on an unseeded key is a no-op**, because the row is already in the store the seed
+will read; the two tests named "before the seed" pin both directions. Background loops run under
+`coord.lease` via `underLease`, and the heartbeat is every process's own — it is what keeps its
+pending rows out of another's `sweepPending`. `complete()` in both usage repositories is a
+**claim** — `ON CONFLICT DO UPDATE … WHERE state = 'pending'`, rollup only when a row changed —
+so a row swept as dead and then completed by its owner is billed once. A remote routing change
+arrives as the `RoutingChange` itself over the `routing` topic and goes through
+`snapshots.applyRemote`, so a foreign health write patches rather than rebuilds.
 
 **What moved where.**
 
@@ -715,9 +840,10 @@ promise, let nine simultaneous dispatches rank on one snapshot.
 **Push.** Every emitter's frame is published and re-delivered through the subscription — the
 emitting replica's own included — so a single process and a fleet run one path. Two coalescers
 in series, emit side and deliver side, bound what a replica publishes and what a client receives;
-they add no delay. Stream sequence numbers come from `coord.incr`, so a client reconnecting to
+they add no delay. `stream()` takes its sequence numbers from `coord.incr`, so a client reconnecting to
 another replica carries a number every replica recognises; each ring holds only what it saw, and
-answers `gap` for the rest, which the client already treats as "refetch". Plugin channels are
+answers `gap` for the rest, which the client already treats as "refetch"; the ring's `push`
+accepts that seq and drops a frame behind its head. Plugin channels are
 pod-local by construction: every connection id a plugin ever sees is one whose socket is on the
 replica running that plugin instance.
 
@@ -726,12 +852,22 @@ which through the fan-out is every replica's lines merged — and on its own
 `stream:console:<nodeId>`. The REST backlog of another replica is an ask over `pubsub` answered
 on a topic minted per ask; `GET /api/nodes` lists who is alive.
 
-**Failure.** Redis unreachable: the proxy-path primitives fall through to an embedded in-memory
+**Failure.** Redis unreachable: `attempt()` decides fail-open per table. The proxy-path
+primitives fall through to an embedded in-memory
 coordinator, so limits degrade to per-replica and no request is refused over it; a lease that
-cannot be confirmed is not held; a lock that cannot be taken throws; `kv` refuses, because a
+cannot be confirmed is not held (`lease` false); a lock that cannot be taken throws (`mutex`);
+`kv` refuses with `OVERLOADED`, because a
 session verified against a fallback map is one a password change elsewhere cannot end. Logged
 once per thirty seconds under two closed `LogFields` keys, `coord` and `coordFallback`.
-Postgres unreachable is the same as SQLite locked: the request fails.
+Postgres unreachable is the same as SQLite locked: the request fails. The Redis client's own
+quirks — `connect()` never rejects with `autoReconnect` on, `onclose` never fires on a killed
+connection, scripts are `SCRIPT LOAD`ed at connect and called by `EVALSHA` so a release cannot
+be overtaken by the next acquire — are documented in `apps/gateway/src/coord/redis.ts` and in the
+design spec's History section.
+
+**Tests.** The contract suite runs against real Redis when `OMNI_TEST_REDIS_URL` is set (CI sets
+it, through a `valkey` service), and `test/cluster/sharedCoord.test.ts` runs the two-replica suite
+over two **separate** Redis coordinators — which is what two pods actually hold.
 
 **The store.** `OMNI_CLUSTER_MODE=true` selects `packages/store/src/postgres/` at
 `OMNI_DATABASE_URL`, a second
