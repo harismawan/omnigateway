@@ -1,4 +1,4 @@
-FROM oven/bun:1.4-slim AS base
+FROM oven/bun:1.4-alpine AS base
 WORKDIR /app
 
 # Manifests first: this layer is cached until a dependency actually changes,
@@ -70,7 +70,7 @@ COPY --from=build /app/apps/gateway apps/gateway
 # `--omit` cannot reach tsc: `=peer` also drops @sinclair/typebox, which elysia
 # requires at runtime, and `=optional` drops @node-rs/argon2's native binding,
 # so every password hash throws.
-RUN find packages apps -name node_modules -maxdepth 2 -type d -exec rm -rf {} + \
+RUN find packages apps -maxdepth 2 -name node_modules -type d -exec rm -rf {} + \
  && bun install --frozen-lockfile --production --filter=@omni/gateway \
  && rm -rf node_modules/.bun/typescript@* node_modules/.bun/@typescript+* \
  && rm -rf /root/.bun/install
