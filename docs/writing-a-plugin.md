@@ -574,6 +574,41 @@ React context, and a bundled copy is a second context object — the panel finds
 no provider, takes the "polling is off" default, and stops refreshing without
 throwing anything. Unlike the React case there is no error to search for.
 
+### How the SDK is wired, for anyone changing it
+
+The SDK is on the console's `SHARED_IMPORTS` list — one copy served to the
+console and every panel — for a different reason than the other four externals.
+Those are shared for instance identity and every breach announces itself; the
+SDK is shared for **context identity**, and an SDK holding a context but
+bundled per plugin gives each its own `createContext`, so the panel reading it
+finds no provider, takes the "polling off" default, and never polls again,
+silently. That is also why `export * from "react"` is not how the shared shims
+are built: React is CommonJS, so a star re-export compiles to a module exporting
+only `default`, and it neither works nor warns — the shims destructure the
+default instead. The SDK itself is ESM, so `export *` is correct for it. Never
+ship half of this arrangement.
+
+Three things the console permits the SDK to hold, because the alternative was a
+second copy of the same rule somewhere else: the one statement of what may
+leave a plugin's own API prefix, the LIVE switch, and `usePluginChannel`. The
+hook composes `plugin:<id>:<name>` from the `pluginId` it is handed, and that is
+**ergonomics, not a boundary** — it resembles the server-side rule closely
+enough to be read as one, but a panel spelling another plugin's topic by hand is
+*authorised*: `authorised` grants an admin every opened plugin topic and asks
+nothing else, and a panel bundle already runs in the console's page with the
+operator's cookie and can open its own socket. Say it that way; an earlier
+description claimed the host would refuse, and a contributor who believes that
+treats cross-plugin subscribe as impossible when it is one line.
+
+The hook rides `LiveContextValue.channels`, **not** a second SDK context and
+**not** `LiveConnection`: that object is rebuilt on every transition to defeat
+`useSyncExternalStore`'s identity bail-out, so a subscribe function hung on it
+would re-subscribe every reader on every drop. `channel.ts` therefore imports
+React and holds no `createContext`, and
+`packages/dashboard-sdk/test/package.test.ts` pins **both** halves — the
+allowlist of modules that may import React, and the separate rule that exactly
+one module creates a context. The second is the silent one.
+
 ### Polling, and the switch that pauses it
 
 The console has one LIVE control in its chassis bar, and it governs every screen

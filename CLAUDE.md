@@ -120,19 +120,10 @@ it", which cover `custom` without saying so.
     mount, so `--p-<id>` exist at first paint. Gate all-or-nothing, so its `errorComponent`
     render error **with retry** — never spinner, never blank — and must not swallow `redirect`
     expired session throw. Pinned by `apps/dashboard/test/routes/appGate.test.tsx`.
-    SDK permitted because it hold one copy of what may leave plugin's own API prefix,
-    LIVE switch, and `usePluginChannel`. That hook compose `plugin:<id>:<name>` from `pluginId`
-    handed — **ergonomics, not boundary**: panel spelling other plugin's topic by hand is
-    authorised, since `authorised` grant admin every opened plugin topic, and panel bundle already
-    run in console's page with operator's cookie. It ride `LiveContextValue.channels`, not
-    second context, not `LiveConnection` (rebuilt per transition to defeat
-    `useSyncExternalStore` identity bail-out, so subscribe on it re-subscribe every reader on every
-    drop). `channel.ts` import React, hold no `createContext`;
-    `packages/dashboard-sdk/test/package.test.ts` pin both allowlist of React-importing modules
-    and rule that exactly one module create context. SDK in `SHARED_IMPORTS` — one copy for
-    console and every panel — because SDK holding context but bundled per plugin give each own
-    `createContext`; panel reading that one find no provider, take "polling off" default,
-    never poll again, silently. Never ship half.
+    SDK permitted: it hold one copy of plugin API-prefix rule, LIVE switch, `usePluginChannel`
+    (ergonomics, not boundary). SDK in `SHARED_IMPORTS` — bundled per plugin it duplicate
+    `LiveContext` and panel pause forever silently. Internals + pins:
+    `docs/writing-a-plugin.md#how-the-sdk-is-wired-for-anyone-changing-it`.
 13. `packages/rtk` stay pure like `ir` and `router`: no I/O, clocks, randomness. Rewrite tool-result
     content only, preserve errors + non-tool-result blocks. `@omni/rtk/catalog` leaf holding
     filter-id union; `@omni/store` import that subpath alone. `packages/ponytail` sit beside it
@@ -144,30 +135,14 @@ it", which cover `custom` without saying so.
 14. `packages/coord` stay pure same way: interface + memory impl, `now` parameter, one timer
     it own is mutex wait. Invariant every impl must hold: claim visible to every concurrent
     claimant **at call time, before promise settle** — memory impl mutate then return
-    `Promise.resolve`. Consumers rely on it: `rateLimit.ts` raise `deciding` and claim before
-    first yield; `loadRegistry.ts` keep synchronous local map, read shared gauge only
-    through `refresh()` before rank (burst test in `dispatch.test.ts`). Thread `coord` through
-    **all** of call graph; `apps/gateway/test/cluster/sharedCoord.test.ts` stand up two route
-    trees over one memory coord, fail on any site still reading module-scope map. Refresh
-    serialisation = three layers — local `inFlight` map, `coord.mutex`, **re-read** behind
-    lock — re-read is dedup. Long windows (`5h`, `1w`) are `coord.buckets`, seeded
-    from `usage.sumBuckets` under lock; **`add` on unseeded key is no-op** (two tests named
-    "before the seed" pin both directions). Background loops run under `coord.lease` via
-    `underLease`; heartbeat keep process's pending rows out of another's `sweepPending`. Every
-    push frame go out through `coord.pubsub`, come back through subscription — own
-    included — one delivery path. `stream()` take `seq` from `coord.incr`; ring `push`
-    accept that seq, drop frame behind its head. Plugin channels pod-local by construction.
-    Redis impl in `apps/gateway/src/coord/redis.ts` (host own transport); every primitive
-    one Lua script, `attempt()` decide fail-open per table (proxy-path primitives fall to
-    embedded memory coord, `lease` false, `mutex` throw, `kv` refuse `OVERLOADED`), logged through
-    closed `LogFields` keys `coord`/`coordFallback`. Client quirks (`connect()` never reject,
-    `onclose` never fire on kill, `SCRIPT LOAD` then `EVALSHA` ordering) documented in that file's
-    comments and spec History. `complete()` in both usage repos is **claim** — `ON CONFLICT
-    DO UPDATE … WHERE state = 'pending'` — so row swept dead then completed by owner
-    billed once. Remote routing changes arrive as `RoutingChange` over `routing` topic,
-    go through `snapshots.applyRemote`. Contract suite run against real Redis when
-    `OMNI_TEST_REDIS_URL` set (CI: `valkey` service); `test/cluster/sharedCoord.test.ts` run
-    two-replica suite over two **separate** Redis coords. Design:
+    `Promise.resolve`. Consumers rely on it: `rateLimit.ts` claim before first yield;
+    `loadRegistry.ts` keep synchronous local map, read shared gauge only through `refresh()`
+    before rank. Thread `coord` through **all** of call graph;
+    `apps/gateway/test/cluster/sharedCoord.test.ts` fail on any site still reading module-scope
+    map. **`add` on unseeded bucket is no-op** (row already in store the seed read). Redis impl
+    in `apps/gateway/src/coord/redis.ts` fail-open per table via `attempt()`, logged through
+    closed `LogFields` keys `coord`/`coordFallback`. Layers, seeding, lease, pubsub, claim
+    semantics: `ARCHITECTURE.md#clustering`. Design:
     `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
 15. `packages/ratelimit` stay pure same way; `now` always parameter, counters supplied by caller.
     `@omni/ratelimit/catalog` leaf holding dimension + window unions, `LimitConfig`, its zod
@@ -649,22 +624,11 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Elysia call `.ws()` route's `beforeHandle` **twice**, guarded by `typeof === "function"`, so it
   must be single idempotent function, never array. Register companion plain `GET` on
   same path, else browser hit 404 on endpoint that exists.
-- `res:*` frame carry at most `{ keys }`; client map **topic to query-key prefix**, never
-  enumerated key list. One exception: `res:logs` must exclude `["logs","body",…]`.
-- **`plugin:*` third class, carry no `seq`, so can never `gap`.** Console `hold`
-  resubscribe **without** `sinceSeq`; SDK `ChannelMessage` carry no `gap` arm. Panels do get
-  `open`/`refused`/`closed`, because plugin topic is one class principal can be refused.
-  Console `hold` refcounted, unsubscribe on last release — that frame fire plugin's
-  `onClose`.
-- **Topic name resource; every branch reading that resource must be in its entry.**
-  `res:usage` and `res:logs` cover both `["usage",…]` and `["client","usage",…]`. Client's key
-  summary ride `res:usage`, not `res:keys`. Panel whose topic its principal cannot hold must poll
-  with **no** topic.
-- **Pushed topic replaces polling, so must emit on *every* transition of what it covers.**
-  `cadence(ms, topic)` return `false` once socket declare that topic pushed. `res:logs` emit
-  from `beginLog`, `routeLog`, `finishLog` — emitter count should match writer count; `res:usage`
-  pairing only with `finishLog` correct because nothing else count tokens.
-- Coalescing on `res:*` load-bearing: uncoalesced push at 100 req/s = 100 refetch per second.
+- **Pushed topic replace polling, so emitter count must match writer count** (`res:logs`:
+  `beginLog`, `routeLog`, `finishLog`; `res:usage` only `finishLog`, nothing else count tokens).
+- **Topic name resource; every query-key branch reading it in its entry** (`res:usage` cover
+  console `["usage",…]` and `["client","usage",…]`). Topic classes, `res:*` prefix mapping,
+  `plugin:*` no-`seq` contract, coalescing: `ARCHITECTURE.md#push-transport`.
 - Stdout hold operational events; `request_logs` hold completed requests. Do not restore duplicate
   per-request access lines. `requestId` join both.
 - Console read only captured stdout: `OMNI_LOG_FILE`, journald, or none. `OMNI_LOG_FILE` name
@@ -693,25 +657,10 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   **Nothing may sit between swap and that comparison.** `swapIn` rebuild `usage_rollup` last
   and guarded, for that reason; cost documented in `README.md`.
 - `omni db restore` refuse while gateway running, no override.
-- Plugin tables `plugin_<id>_<name>`, written by host from `{{name}}`, tracked in
-  `plugin_migrations` independent of core's `001..`. Plugin migrations apply **one transaction
-  each**. Restore onto install without that plugin leave orphan `plugin_*` tables; `omni doctor`
-  report them, **nothing auto-drops them**; `omni plugin remove` keep tables, only `--purge` drop.
-- Plugin events **at-most-once, not durable**. `RequestCompleted` emitted from `finishLog`
-  because that is one site running at most once per request id.
-- Plugin channels: client must **subscribe before send**, else frame refused. Plugin topic
-  nothing opened refused like `stream:*` topic nothing `declareStream`d. Channel registry build
-  **before** `loadPlugins` in `apps/gateway/src/index.ts`. Route's `close` read
-  `registry.topics(id)` **before** `registry.remove(id)`. Throwing handler caught, counted per
-  plugin, reported one batched line, never with error body.
-- Console externalise `react`, `react-dom`, `styled-components`, `@tanstack/react-query`,
-  `@omnigateway/dashboard-sdk` through import map; `apps/dashboard/shared/manifest.ts` is single
-  list. **`export * from "react"` not work, not warn** — React is CommonJS; shims
-  destructure default. SDK on list for different reason: duplicate is duplicate *context
-  object* — panel find no provider, pause forever, nothing thrown. Plugin bundle must mark SDK
-  external exactly like React.
-- Plugin UI assets served at `/plugin-assets/<id>/…`, not `/plugins/<id>/…` (console routes).
-  Bundles unauthenticated like console's own JavaScript; catalog at `/api/plugins` admin-gated.
+- Plugin ordering traps, both silent when reversed: channel registry build **before**
+  `loadPlugins` in `apps/gateway/src/index.ts`; route's `close` read `registry.topics(id)`
+  **before** `registry.remove(id)`. Tables, migrations, events, channels, externals, asset
+  paths: `ARCHITECTURE.md#plugins`.
 - Literal `../` never reach route handler — `URL` normalise first, so test asserting 404 for
   it prove nothing. Only percent-encoded forms reach guard; `realpath` already decide every case.
 
