@@ -8,16 +8,16 @@ subscriptions. Point any compatible client at it, ask for a model you defined,
 and the gateway picks an account that can serve it — falling back to another
 when one is rate-limited, expired, or out of quota.
 
-It runs on one machine, stores everything in a local SQLite file, and never
-logs the contents of your prompts or replies.
+It runs as one process on a local SQLite file by default, scales out onto
+Postgres and Redis when you need a fleet, and never logs the contents of your
+prompts or replies.
 
 ```bash
 bun install -g omnigateway
 omni start
 ```
 
-> Status: in use and complete for its scope. Version 1 targets a single
-> machine and a single operator — see [Scope](#scope-and-limits).
+> Status: in use and complete for its scope — see [Scope](#scope-and-limits).
 
 **Further reading**, once the gateway is up:
 
@@ -342,28 +342,34 @@ GitOps releases and restart policy are in
 
 Worth knowing before you deploy it:
 
-- **One machine, one operator.** No multi-tenancy, no clustering, no shared
-  state. The `1m` window and the `concurrency` gauge are counted in the gateway
-  process and reset when it restarts; `5h` and `1w` are counted from the database
-  and survive one. Two gateways over one database would not see each other's
-  short-window counts.
+- **One process on SQLite by default; a fleet is opt-in.** Cluster mode on
+  Postgres and Redis shares every limit, session and lease across replicas.
+  Without it, the `1m` window and the `concurrency` gauge are counted in the
+  gateway process and reset when it restarts; `5h` and `1w` are counted from
+  the database and survive one. Two gateways over one SQLite file are not a
+  cluster and would not see each other's short-window counts.
+- **One operator, with two narrower views.** An optional read-only console
+  password and a per-key client dashboard exist; there is no multi-tenancy —
+  every provider account is the operator's, whoever is looking.
 - **Two grains of usage history.** Detailed request logs are pruned after 30
   days by default; a daily rollup is kept for 400 days. A day is your host's
   local midnight, fixed when the row is written.
 - **Body capture is forensics, not an archive.** It is off unless you turn it on
   with both keys, it expires on the request-log window, and it is capped at
-  100,000 rows. It is not a searchable prompt history and there is no CLI for it.
+  100,000 rows. `omni bodies` reads one request's capture; nothing searches
+  across them.
 - **Snapshots are manual, and local.** Nothing takes one on a schedule and there
   is no off-host target; retention bounds what you have taken, and a restore
   always takes one first. Copy them somewhere else yourself if the disk failing
-  is what you are guarding against.
+  is what you are guarding against. On Postgres there are none; `pg_dump` is
+  the backup.
 - **Quota readings come from the providers**, and their usage endpoints are
   undocumented. An account with nothing reported is treated as unknown, never
   as unlimited.
 - **The gateway does not know which model accepts which request shape.** An
   unsupported combination surfaces as the provider's own 400 rather than being
   caught earlier.
-- Not in scope for version 1: semantic caching, billing, horizontal scaling.
+- Not in scope: semantic caching, billing.
 
 ## Security
 
