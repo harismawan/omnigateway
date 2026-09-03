@@ -350,3 +350,16 @@ Store, control, CLI, dashboard:
 ## Open questions
 
 None. The hardware-paragraph trade under *The text* is recorded as a decision, not a question.
+
+## History
+
+Moved here from `CLAUDE.md` on 2026-09-03.
+
+The header first said the vendored text was v4.8.2, read off a release page rather than the
+repository, and that tag carries a different blob. Pin the blob (`a3e4d94b…`, tag v4.9.0), not
+the release note.
+
+`ponytail:cache-marker-not-last` is reported rather than absorbed because it otherwise reads
+exactly like the cheap case: a breakpoint the client put on a system block that is not the final
+one stays where it is, so the ruleset lands outside the prefix and is billed fresh, ~1,240 tokens
+every request.

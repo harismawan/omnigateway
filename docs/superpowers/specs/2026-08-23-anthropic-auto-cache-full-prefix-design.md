@@ -291,3 +291,33 @@ red teaches the next reader to ignore a green result:
 Two mutations survived a green suite during the 2026-08-22 review — dispatch reading the setting, and
 `attempt` forwarding it through a spread that fails silently open. Nothing in this change touches
 that path, so those tests stand as written; do not assume they cover the new markers.
+
+## History
+
+Measurements moved here from `CLAUDE.md` on 2026-09-03.
+
+### System-turn retarget
+
+Four requests each the previous plus an exchange, marked on the trailing turn, read **0** and
+wrote the whole prefix every time (14,329 then 14,340 then 14,351); moved one block back, the
+second request wrote **11** and read 13,896. The code used to hoist the marker to request-level
+`cache_control` instead, and that behaved identically — the probe says root marker and marker on
+the turn itself are both dead. Cost in production before the fix: one session of 21 consecutive
+requests each rewriting ~190k tokens, 09-02 alone 5.96M cache-write tokens and $70.53, with
+`cache_read_tokens` pinned at exactly the end-of-system prefix (37,960 / 38,062) — the signature
+to recognise.
+
+### Marker gating
+
+Gating each marker on the prefix it caches is what shipped first and was wrong:
+`estimateInputTokens` sums non-negative terms, so tools ≤ tools+system ≤ whole and gate 1 passing
+implies the other two — a big tool set under a 1-token system prompt took 3 slots and 2 cache
+writes to re-store the same bytes. The last-placed-marker rule also removed the `OAUTH_IDENTITY`
+special case: the injected line is ~15 tokens, not in IR, so the system tier adds nothing and
+never gets marked.
+
+The IR-not-wire rule is pinned by deep-freezing the module fixture in
+`packages/providers/test/anthropic.test.ts`, not by cloning and diffing: the fixture is handed to
+`toWire` unclone by an earlier test, so a leaked marker is already inside the clone and the
+assertion compares polluted to polluted. An earlier claim that `systemCacheControl` could see
+wire-side markers was wrong — it walks IR.

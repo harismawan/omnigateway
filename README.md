@@ -19,6 +19,14 @@ omni start
 > Status: in use and complete for its scope. Version 1 targets a single
 > machine and a single operator — see [Scope](#scope-and-limits).
 
+**Further reading**, once the gateway is up:
+
+- [docs/client-api.md](docs/client-api.md) — endpoints, authentication, rate-limit headers, and how tools decide where a request can go
+- [docs/operations.md](docs/operations.md) — key limits, logs, recording bodies, snapshots and restore
+- [docs/deploying.md](docs/deploying.md) — systemd, reverse proxies, cluster mode, Docker and Kubernetes
+- [docs/plugins.md](docs/plugins.md) — installing, verifying and removing plugins
+- [ARCHITECTURE.md](ARCHITECTURE.md) — how it is built
+
 ## What it does
 
 - **Speaks three dialects.** `POST /v1/messages` (Anthropic),
@@ -59,85 +67,17 @@ omni start
 
 ## How it is built
 
-A Bun workspace monorepo. The layering is deliberate and enforced by what each
-package is allowed to import: a provider-neutral core at the bottom, provider
+A Bun workspace monorepo: a provider-neutral core at the bottom, provider
 knowledge in one place, pure routing above that, and every side effect pushed up
-into the gateway process.
+into the gateway process. The gateway and the CLI are two front ends over the
+same `@omni/control` functions — the CLI opens the SQLite file directly, so it
+works when the gateway is down.
 
-```mermaid
-graph TD
-  subgraph frontends[Front ends]
-    gateway["apps/gateway<br/><i>Elysia server, dispatch, loops</i>"]
-    cli["apps/cli<br/><i>the omni binary</i>"]
-    dashboard["apps/dashboard<br/><i>React console</i>"]
-  end
-
-  control["@omni/control<br/><i>every operator action;<br/>no HTTP, argv or terminal</i>"]
-  router["@omni/router<br/><i>pure ranking;<br/>no I/O, no timers</i>"]
-  store["@omni/store<br/><i>SQLite + field encryption</i>"]
-  providers["@omni/providers<br/><i>adapters, wire codecs,<br/>catalog, HTTP client</i>"]
-  rtk["@omni/rtk<br/><i>tool-result filters</i>"]
-  ponytail["@omni/ponytail<br/><i>vendored coding ruleset</i>"]
-  ratelimit["@omni/ratelimit<br/><i>key limit arithmetic;<br/>no clock, no state</i>"]
-  ir["@omni/ir<br/><i>domain model — depends on nothing</i>"]
-
-  gateway --> control
-  gateway --> rtk
-  gateway --> ponytail
-  gateway --> ratelimit
-  cli --> control
-  dashboard -. "types only" .-> ir
-  dashboard -. "types only" .-> store
-  control --> router
-  control --> ponytail
-  control --> ratelimit
-  router -. "types + 2 pure helpers,<br/>via /types subpath" .-> store
-  router --> providers
-  store --> rtk
-  store --> ponytail
-  store --> ratelimit
-  providers --> ir
-  rtk --> ir
-  ponytail --> ir
-  store --> ir
-```
-
-Arrows read *depends on*, and the direction never reverses. Two rules do most of
-the work: `@omni/ir` is side-effect free and imports nothing, and `@omni/router`
-is a pure function — no network, no database, no timers. Everything that has to
-touch the world is pushed up into the gateway process.
-
-`@omni/ratelimit` is the same shape applied to key limits: it decides whether a
-request is over a ceiling, and it holds no clock and no counters — `now` is a
-parameter and the counts are handed to it, so it never learns whether a number
-came from memory or from SQLite. It imports nothing but its schema validator, not
-even `@omni/ir`. The rings and the in-flight gauge live in the gateway, because
-state is not the package's job, and that split is what lets sliding-window
-arithmetic be tested without a gateway, a store, or a clock.
-
-The dashboard's edges are dotted because they are type-level only. It has no edge
-to `@omni/providers` at all: provider names, colours, order and model lists reach
-the console over `GET /api/catalog`, because a provider loaded from
-`<root>/plugins/` exists only at runtime and no build-time import could see one.
-
-`@omni/providers/catalog` and `/descriptors` are still deliberately import-free,
-for a different reason than they used to be: the pure router imports
-`descriptors`, and the leaf property is what lets it.
-
-The router's dotted edge into `@omni/store` is nearly the same story: its
-package-root imports are all `import type`. Two pure arithmetic helpers,
-`durationFor` and `cacheReadRate`, do run at runtime — imported through the
-`@omni/store/types` leaf subpath, so neither SQLite nor crypto enters the
-router's module graph and the no-I/O rule holds.
-
-The gateway and the CLI are two front ends over the same `@omni/control`
-functions. The CLI does not call the running server's API — it opens the same
-SQLite file directly, which is why it still works when the gateway is down.
-
-**[ARCHITECTURE.md](ARCHITECTURE.md)** goes a level deeper: a request traced end
-to end, how routing ranks and excludes accounts, the commit point that decides
-whether failover is still possible, the provider adapter shape, the database
-schema and its encryption boundary, and the background loops.
+**[ARCHITECTURE.md](ARCHITECTURE.md)** has the package map and layering rules,
+then goes a level deeper: a request traced end to end, how routing ranks and
+excludes accounts, the commit point that decides whether failover is still
+possible, the provider adapter shape, the database schema and its encryption
+boundary, and the background loops.
 
 ## Requirements
 
@@ -218,12 +158,9 @@ omni models catalog                                  # what is available
 omni models put fast --from-catalog anthropic:claude-sonnet-5
 ```
 
-Two catalog pricing caveats: xAI doubles its rate at or above 200K context —
-the higher rate applies to every token, but a target holds one flat price, so
-edit the saved target if you run grok long-context; and Kilo's `kilo-auto/*`
-routers carry no published rate, so the router treats them as unpriced rather
-than free — set a real `costPerMTok` on the saved target to have one ranked.
-Details in [docs/adding-a-provider.md](docs/adding-a-provider.md).
+Two providers price in ways a flat per-target rate cannot express — xAI above
+200K context and Kilo's `kilo-auto/*` routers; the caveats are in
+[docs/adding-a-provider.md](docs/adding-a-provider.md).
 
 Mint a key for your client. **It is printed once and stored only as a hash:**
 
@@ -232,45 +169,10 @@ omni keys create --label laptop
 ```
 
 Bound what the key can do with `--limit <dimension>:<window>=<value>`, repeated
-once per pair. An unset pair is unlimited:
-
-```bash
-omni keys create --label ci --limit requests:1m=60
-```
-
-Every window is *sliding*, so a key cannot spend two windows' allowance either
-side of a clock edge. `requests` and `tokens` take `1m`, `5h`, and `1w`; `spend`
-takes `5h` and `1w`; `concurrency` is not a window at all but a ceiling on
-requests in flight at once.
-
-`tokens` and `spend` are debited once a response completes, because an exact
-count exists only then — a key at its ceiling is refused on its *next* request.
-The `5h` and `1w` counts derive from `request_logs`, so a `1w` limit on an
-installation that prunes logs after three days really enforces three days. They
-are cached for thirty seconds and so can read slightly high, never low: refused
-early rather than let past a ceiling you set. If the database cannot answer they
-stop enforcing and the gateway logs it, while `1m` and `concurrency` are held in
-memory and go on enforcing exactly.
-
-> **Breaking:** `--rate-limit N` is removed, not aliased. Use
-> `--limit requests:1m=N`. A script still passing the old flag stops with an
-> unknown-flag error rather than quietly taking a deprecated path.
-
-Limits are editable after the key exists, unlike `--no-bodies` below. `omni keys
-list` prints a compact summary; the full matrix and what has gone against it
-need one key's id:
-
-```bash
-omni keys limits <id>
-omni keys limits <id> --set tokens:1w=50000000
-omni keys limits <id> --unset spend:5h
-```
-
-`--unset` names a pair that is actually set, so a typo fails rather than
-reporting a change it did not make. The usage shown counts completed requests
-only, so it reads at or below what the gateway is enforcing, and `concurrency`
-shows no figure — that gauge lives in the process, not the database. The
-console's Keys screen shows and edits the same matrix.
+once per pair — `omni keys create --label ci --limit requests:1m=60`. An unset
+pair is unlimited. Windows slide, `tokens` and `spend` are debited on
+completion, and limits are editable afterwards with `omni keys limits`; the
+semantics are in [docs/operations.md](docs/operations.md#key-limits).
 
 Now use it:
 
@@ -303,56 +205,13 @@ x-api-key: <gateway-key>
 ```
 
 Ask for one of your virtual models by name. A bare provider model
-(`claude-sonnet-5`, `gpt-5`) also works if an account can serve it.
+(`claude-sonnet-5`, `gpt-5`) also works if an account can serve it. Most tools
+that accept a custom base URL work unchanged: set it to `http://127.0.0.1:9000`
+and use a gateway key where the provider key goes.
 
-`GET /v1/models` answers both client families from one listing: each entry
-carries the OpenAI keys (`object`, `created`, `owned_by`) and the Anthropic ones
-(`type`, `display_name`, `created_at`, `max_input_tokens`, `max_tokens`) at
-once.
-
-Most tools that accept a custom base URL work unchanged: set it to
-`http://127.0.0.1:9000` and use a gateway key where the provider key goes.
-
-### Rate-limit headers
-
-Every response carries the limit headers of the surface you asked on, so an SDK
-backs off using the code it already ships — the Anthropic dialect on
-`/v1/messages`, the OpenAI one on `/v1/chat/completions` and `/v1/responses`:
-
-```http
-anthropic-ratelimit-requests-limit: 2000        x-ratelimit-limit-requests: 2000
-anthropic-ratelimit-requests-remaining: 1841    x-ratelimit-remaining-requests: 1841
-anthropic-ratelimit-requests-reset: 2026-08-19T14:32:07Z   x-ratelimit-reset-requests: 4h51m22s
-```
-
-`requests-remaining` counts the request being answered; `tokens-remaining` does
-not and cannot — the response is still being written when the header goes out.
-Where a key has several windows on one dimension, the headers report the one
-**nearest exhaustion**, not the reassuring ones. `spend` and `concurrency`
-render on neither dialect, because no vendor defines a header for them. A
-refusal is `429` with `Retry-After` in seconds, computed from the oldest request
-still inside the window that refused you.
-
-### Tools and routing
-
-Two kinds of tool behave differently, and the difference decides where a
-request can go.
-
-A **custom tool** — a name, a description, and a JSON Schema — is portable. It
-translates to every provider, so a request using one routes across your whole
-pool as usual.
-
-An **Anthropic-defined tool** — web search, web fetch, code execution, Bash,
-text editor, computer use, memory, tool search, advisor, or an MCP toolset —
-has a schema Anthropic owns. No other provider can express it, so any request
-declaring one, *or replaying the blocks a previous one produced*, is routed to
-an Anthropic account only. If the virtual model you asked for has no Anthropic
-target, the request fails at routing with the unsupported requirement named,
-rather than quietly losing the tool.
-
-The gateway forwards the tool version you send and never upgrades it. Betas
-stay yours: send `anthropic-beta` yourself, as the tool requires — the gateway
-carries the header through but does not add one on your behalf.
+Rate-limit headers, the `/v1/models` listing shape, and why an Anthropic-defined
+tool pins a request to an Anthropic account are in
+[docs/client-api.md](docs/client-api.md).
 
 ## The CLI
 
@@ -398,78 +257,13 @@ each candidate's score, and every account that was excluded with the reason.
 `omni status` is the "is anything wrong" command: process state, per-account
 health, and how much provider quota each account has left.
 
-## Running it as a service
+## Running it somewhere other than your laptop
 
-On a machine with systemd:
-
-```bash
-omni service install --enable    # writes a user unit for this installation
-omni start                       # from here on, start/stop delegate to systemctl
-omni console                     # reads the journal (or the log file, without systemd)
-```
-
-Use `--system` for a system-wide unit (needs root). Without systemd, `omni
-start` supervises the process itself with a pidfile under
-`~/.local/state/omnigateway`. Either way, `omni start` returns only once
-`/health` actually answers.
-
-### Restarting and stopping from the console
-
-The console can restart and shut down the gateway from the foot of its sidebar.
-Restart works under systemd — the gateway asks the manager rather than
-signalling itself, because a handled SIGTERM exits cleanly, which systemd's
-`Restart=on-failure` reads as success — reports uncertainty in a container,
-whose restart policy cannot be read from inside, and disables itself with no
-supervisor; use `omni restart` from a terminal there. Shutdown is offered in
-every shape. In a container it is a one-way door: bring the process back from
-the host.
-
-### Behind a reverse proxy
-
-Set `OMNI_BASE_URL` to the public HTTPS origin, or OAuth callbacks come back to
-the wrong host.
-
-Beyond that, two things travel badly through a proxy, and both are streams.
-Client responses on `/v1/*` are server-sent events, and the console keeps one
-WebSocket open on `/api/stream`. Neither is optional: buffer the first and every
-token of an agent's reply arrives at once at the end, and drop the second and
-the console silently falls back to polling.
-
-Caddy and Cloudflare pass WebSockets and unbuffered responses by default and
-need nothing. nginx needs telling:
-
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:9000;
-    proxy_http_version 1.1;
-
-    # Without these two the Upgrade handshake never reaches the gateway and the
-    # console shows LIVE·POLL instead of LIVE·PUSH. It keeps working — the
-    # fallback exists for exactly this — but you paid for a socket you are not
-    # getting.
-    proxy_set_header Upgrade    $http_upgrade;
-    proxy_set_header Connection "upgrade";
-
-    proxy_set_header Host              $host;
-    proxy_set_header X-Forwarded-Proto $scheme;
-
-    # The socket's heartbeat is 20s and it gives up on a missed pong at 60s.
-    # A read timeout below that closes a healthy connection from the outside,
-    # and the console reconnects in a loop that looks like an unstable gateway.
-    proxy_read_timeout 300s;
-
-    # SSE must not be buffered. The gateway already sends
-    # `x-accel-buffering: no` on streaming responses, which nginx honours on its
-    # own, so this line is belt and braces for a proxy chain where something
-    # else strips that header before nginx sees it.
-    proxy_buffering off;
-}
-```
-
-The gateway sends downstream `: keepalive` comments on streaming responses
-because provider heartbeats are decoded away, so an idle stream still looks
-alive to whatever sits in between. Keep any idle timeout in the proxy above
-your longest expected request.
+`omni service install --enable` writes a systemd unit; behind a reverse proxy,
+set `OMNI_BASE_URL` and pass WebSocket upgrades and unbuffered SSE through.
+Several replicas behind a load balancer are **cluster mode** on Postgres and
+Redis. All of it, with the nginx block and the Kubernetes base, is in
+[docs/deploying.md](docs/deploying.md).
 
 ## Configuration
 
@@ -485,10 +279,10 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_STATIC_DIR` | No | the console shipped with the server | Serve a different console build |
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
-| `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](#recording-bodies) |
+| `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](docs/operations.md#recording-bodies) |
 | `OMNI_ROOT` | No | the installation in the current directory, else `~/.config/omnigateway` | Which installation the CLI acts on, when `--root` is not passed |
 | `OMNI_PLUGIN_REGISTRY` | No | the public npm registry | Registry `omni plugin install <name>` resolves through; must be `https://` |
-| `OMNI_CLUSTER_MODE` | No | unset | `true` selects [cluster mode](#running-more-than-one-gateway) and requires the two URLs below; unset is one process on SQLite, and then the URLs must be unset too |
+| `OMNI_CLUSTER_MODE` | No | unset | `true` selects [cluster mode](docs/deploying.md#running-more-than-one-gateway) and requires the two URLs below; unset is one process on SQLite, and then the URLs must be unset too |
 | `OMNI_DATABASE_URL` | In cluster mode | — | The shared Postgres store |
 | `OMNI_REDIS_URL` | In cluster mode | — | The coordinator every process of a cluster shares: rate-limit counters, sessions, leases, push fan-out |
 
@@ -503,28 +297,9 @@ version pins — are deliberately left out of this table and documented in `.env
 change how the gateway identifies itself to a provider, which is not configuration in the sense
 the rest of this table is.
 
-Gateway events are written to stdout as one greppable line each: process lifecycle, OAuth
-refreshes, quota probes, failover, and errors.
-
-`OMNI_LOG_FILE` *names* where output was captured; it does not redirect it. Setting it alone
-leaves the log empty, because the gateway still writes to stdout. Redirect the output and name
-the same path:
-
-```bash
-bun apps/gateway/src/index.ts >> /var/log/omni.log 2>&1
-```
-
-`omni start` does both for the gateway it supervises, and under systemd the journal needs no
-setup.
-
-In a fleet, capture is per process. Each replica can capture its own — tee its stdout to a file
-inside the container and point `OMNI_LOG_FILE` at the same path — and the Console screen then
-merges every process's tail and lets you pick one. That is worth having for an incident on a
-running pod, and it is not a log stack: the file dies with the container, nothing rotates it, and
-the screen reads one process at a time. Ship stdout to a collector for anything beyond that —
-Elasticsearch and Kibana, Loki and Grafana, or whatever already reads your containers — where the
-lines outlive the process that wrote them and can be searched across all of them at once. The
-Console screen says so itself when it finds a fleet capturing nothing.
+Gateway events are written to stdout as one greppable line each. `OMNI_LOG_FILE` *names* where
+that output was captured; it does not redirect it — see
+[docs/operations.md](docs/operations.md#logs).
 
 Everything else lives in the database rather than the environment, so it can be
 changed without a restart: the six routing weights, `maxAttempts`,
@@ -536,192 +311,16 @@ console. `quotaPollIntervalMs` is the one exception: the poller reads it once at
 boot, so a change to it takes a restart. Snapshot retention —
 `snapshotKeepLatest` and `snapshotMaxAgeDays` — is stored alongside them but
 deliberately edited on the Database screen instead; see
-[Snapshots and restore](#snapshots-and-restore) for why.
+[Snapshots and restore](docs/operations.md#snapshots-and-restore) for why.
 
-## Running more than one gateway
+## Recording bodies, snapshots, and the database
 
-One process on SQLite is the default and is what every command in this document assumes. A
-fleet — several replicas behind a load balancer, on Kubernetes or otherwise — is **cluster
-mode**, switched on by `OMNI_CLUSTER_MODE=true` and needing two things beside the gateway:
-
-- **Postgres** as the store, named by `OMNI_DATABASE_URL`. Every replica reads and writes one
-  database; there is no SQLite file, no snapshot, no restore, and no `omni db vacuum` — those are
-  `pg_dump`'s job now, and the Database screen says so.
-- **Redis** (or Valkey) as the coordinator, named by `OMNI_REDIS_URL`. It holds what a fleet must
-  agree on and a database is the wrong shape for: the per-minute request ring and the concurrency
-  gauge, the long-window counters, admin sessions, pending OAuth flows, quota-probe cooldowns, the
-  leases that make the background loops run once rather than N times, and the fan-out that lets a
-  console on one replica hear a change made on another.
-
-```bash
-OMNI_CLUSTER_MODE=true
-OMNI_DATABASE_URL=postgres://omni:secret@db.internal:5432/omni
-OMNI_REDIS_URL=redis://cache.internal:6379
-OMNI_ENCRYPTION_KEY=…   # the same on every replica
-```
-
-Boot refuses the switch without both URLs, and refuses either URL without the switch: a
-replica that believes it is clustered and is not is the failure this variable exists to make
-loud.
-
-What holds across the fleet, exactly: every API-key limit at every window and dimension; token
-refresh, which one replica performs while the others wait and reuse the result; a cookie issued
-by one replica, which every other verifies and a password change ends everywhere. What is
-per-replica and says so: the console's **Console** screen shows one process's stdout, so it grows
-a selector when there is more than one, and its default view is every process merged by time.
-What is per-replica and does not say so: the routing `load` weight is one round trip stale
-between replicas, so a burst arriving at once on two of them can stack for that long.
-
-**No sticky sessions are needed.** The WebSocket the console holds may land on any replica; the
-ingress only needs to pass upgrades and hold an idle timeout above ten seconds. A rolling deploy
-closes each replica's sockets with `1001`, the console reconnects to a live one and refetches
-once.
-
-**When Redis is unreachable**, the request path keeps serving: each replica falls back to its
-own in-memory counters, so limits degrade to N-fold until Redis returns, and one line per thirty
-seconds says so (`coord=redis coordFallback=true`). The console does not: a session that cannot
-be checked against the shared store is refused with `503`, because a session verified locally is
-one a password change on another replica cannot end. `GET /health` reports `mode`, `nodeId` and
-`coord` (`ok` or `fallback`) for a readiness probe to read.
-
-Plugins are loaded from each replica's own `<root>/plugins/`; bake them into the image so every
-replica holds the same set. Plugin storage is Postgres in cluster mode, so a plugin's SQL is
-written for it. `POST /api/restart` refuses in cluster mode — roll the deployment instead.
-
-Moving an existing SQLite installation onto Postgres:
-
-```bash
-omni stop
-omni db migrate --to postgres://omni:secret@db.internal:5432/omni
-```
-
-It copies credentials (re-encrypted with the same `OMNI_ENCRYPTION_KEY`), API keys, virtual
-models, settings, both passwords and every completed request log into an **empty** Postgres
-database, rebuilds the rollups, and prints what it did not carry: request bodies, `usage_daily`
-older than the retained logs, quota readings and breaker state (re-measured within a poll
-interval), sessions, and `plugin_*` tables, whose SQL is the source dialect's. It refuses while a
-gateway is running and refuses a target that holds anything.
-
-## Recording bodies
-
-By default the gateway records no prompts and no responses. For incident
-forensics, capture is opt-in and needs **two independent keys, both required**:
-`OMNI_BODY_LOGGING_ALLOWED=1` read at boot, plus the **Capture request and
-response bodies** setting (console Settings, or `omni settings set
-bodyLoggingEnabled true`). An admin session alone cannot start recording your
-users' prompts; with the variable unset the console says the switch does
-nothing rather than letting you flip it. Capture can be toggled mid-incident;
-turning it off stops new capture and does not delete what was written.
-
-A gateway key created with `--no-bodies` is never captured whatever the setting
-says — made at issue time, not reversible afterwards; reissue instead. Raw SSE
-frames are captured separately, under `bodyLoggingCaptureStreamChunks`, and are
-far the larger store.
-
-What is captured: what arrived at `/v1/*` and what was returned, plus every
-provider attempt in dispatch order — the client side pre-RTK, attempts post-RTK,
-labelled as such in console and CLI. Headers are never captured, at any layer.
-Read them from the console's Logs screen or:
-
-```bash
-omni bodies req_550e8400-…          # the frame: state, size, one line per attempt
-omni bodies req_550e8400-… --full   # the payloads themselves
-omni bodies req_550e8400-… --json   # the artifact, for a script
-```
-
-The bare command prints only the frame, never conversations — asking costs one
-flag. A missing artifact answers rather than errors: `not captured`, `captured,
-then lost` (retention or the row cap), or `captured, but unreadable` (usually a
-changed `OMNI_ENCRYPTION_KEY`). There is no command to delete a captured body;
-a second path that erases forensic evidence on request loses incident records.
-
-Artifacts live at `request_bodies/YYYY/MM/DD/<requestId>.json.enc` beside the
-database, AES-256-GCM under `OMNI_ENCRYPTION_KEY`; changing that key invalidates
-every artifact. Bounds: log-retention expiry plus a hard **100,000-row cap**, so
-capture is forensics, not an archive — size a volume against roughly 100 GB
-worst case, though most artifacts are kilobytes.
-
-Masking is best-effort — bearer tokens, vendor-prefixed keys, long opaque
-tokens are elided before write — a reduction in exposure, not a guarantee, and
-it costs fidelity. Treat the tree as you would the prompts themselves: encrypted
-at rest, on a volume you control, never pasted into a ticket.
-[ARCHITECTURE.md](ARCHITECTURE.md#body-capture-forensics) documents the storage
-format, structural bounds, and masking rules.
-
-## Snapshots and restore
-
-The console's Database screen reports what this installation occupies — the
-database file, its write-ahead log, the captured-body tree, the free pages a
-compaction would give back, and every table by size — and takes snapshots.
-`omni db stats` prints the same figures. On Postgres both show the server's own
-size, the `request_bodies` table and the per-table listing instead; there is no
-file, so nothing here compacts, snapshots or restores it — `pg_dump` is the
-backup.
-
-**What a snapshot is.** One self-contained SQLite file, written into a
-`snapshots/` directory beside the database. The write-ahead log is folded in, so
-there is nothing else to copy alongside it, and taking one is safe while the
-gateway is running: it reads through SQLite rather than copying bytes off disk.
-
-**What it is not.** The sibling `request_bodies/` tree is excluded, always. A
-snapshot is never a prompt corpus, and its size tracks your configuration and
-usage history rather than your traffic. The cost is that a restore leaves the
-captured-body tree out of step with the table: files the restored database has no
-row for are collected by the hourly sweep, and a row whose file is gone reads back
-as `captured, then lost`.
-
-**A snapshot does carry secrets** — encrypted provider credentials and gateway
-key hashes — inert only because `OMNI_ENCRYPTION_KEY` is not in the file.
-Anyone holding both the file and the key holds your provider accounts; treat a
-downloaded snapshot as the database itself.
-
-**Retention** bounds the directory: at most `keepLatest` snapshots are kept, and
-nothing older than `maxAgeDays` — 5 and 30 by default. Both bounds have to pass,
-so an old snapshot goes even while the count is under the limit, and the newest is
-always kept whatever the numbers say. Pruning runs when a snapshot is taken rather
-than on a timer, so a quiet installation keeps what it already has. **Edit the
-policy on the Database screen**, not on Settings: it is deliberately not part of
-the settings form, so a settings save from a client that has never heard of
-retention leaves your policy alone instead of resetting it.
-
-The copy taken automatically on the way into a restore is exempt from retention.
-It is the undo.
-
-**Restoring from the console** happens inside the running gateway. Client traffic
-on `/v1/*` is refused with a retryable 503 while the file is replaced; `/api/*`
-and `/health` keep answering. The screen also uploads a database file from
-elsewhere, up to 2 GiB — bring `OMNI_ENCRYPTION_KEY` with it, or the credentials
-in it are unreadable. The file is integrity-checked before anything is touched,
-and a copy of what was there is taken first. A restore ends by rebuilding the
-usage rollup, which briefly blocks even `/api/*`: roughly 0.4 s per 500k
-request-log rows, 1.6 s at 2M, 6.5 s at 8M. A failure is logged rather than
-raised — the database is live either way, and `omni doctor` reports a rollup
-that disagrees with its rows.
-
-Before it asks, `restore` prints one row per table with what the snapshot holds
-against what is live, so the confirmation is informed rather than a judgement on
-an id and an mtime. `--dry-run` prints the same table and exits without asking.
-The counts cover the tables the integrity check reads, so they are a floor on
-what a restore replaces rather than the whole of it.
-
-**`omni db restore <id>` refuses while a gateway is running** against that
-installation, and there is no override flag. A second process can open its own
-handle but cannot quiesce the gateway's, and moving the file out from under a live
-SQLite connection corrupts the database you were trying to rescue. Run `omni stop`
-first, or restore from the console, which swaps the file behind its own quiesce
-latch.
-
-**Compaction.** `omni db vacuum`, or the console's equivalent, rewrites the
-database and reclaims the pages deletion left free. It holds SQLite's write lock
-for the rewrite, so a busy gateway stalls on its writes until it finishes — but
-nothing is lost by running it live, and it reports what it actually gave back to
-the filesystem.
-
-**Clearing bodies.** `omni db clear-bodies`, or the Database screen's *Clear
-bodies*, deletes every captured prompt and completion on either engine — the
-files beside a SQLite database, the `request_bodies` rows on Postgres. The
-requests stay in the log with their bodies marked pruned. There is no undo:
-bodies are never in a snapshot.
+By default the gateway records no prompts and no responses; capture is opt-in
+and needs both `OMNI_BODY_LOGGING_ALLOWED=1` at boot and a runtime setting, and
+a key created with `--no-bodies` is never captured. Snapshots are one SQLite
+file each, taken live, never carrying captured bodies, and restorable without
+stopping the gateway. Both, with compaction and clearing bodies, are in
+[docs/operations.md](docs/operations.md).
 
 ## Docker
 
@@ -735,35 +334,9 @@ docker run --rm \
 ```
 
 The container listens on `0.0.0.0:9000`, serves the console, and keeps its
-database and plugins under `/data`. It runs as the unprivileged `bun` user and
-carries a `HEALTHCHECK` on `/health`.
-
-For a fleet, set `OMNI_CLUSTER_MODE=true` with `OMNI_DATABASE_URL` and `OMNI_REDIS_URL` and
-drop the volume;
-see [Running more than one gateway](#running-more-than-one-gateway). A
-Kubernetes deployment — Deployment, Service, Ingress with the timeouts streaming
-needs, HPA, and an example Secret — is under `k8s/` as a kustomize
-base:
-
-```bash
-cp k8s/secret.example.yaml k8s/secret.yaml   # edit it
-kubectl apply -f k8s/secret.yaml
-kubectl apply -k k8s
-```
-
-Releases deploy by GitOps: a `v*` tag publishes `ghcr.io/harismawan/omnigateway:<version>`
-and the workflow commits that version into `k8s/kustomization.yaml` on `main`, which Argo
-CD syncs. Rolling back is editing `newTag` by hand.
-
-Plugins in a fleet are baked into the image so every replica holds the same
-set: `COPY plugins/ /data/plugins/` in a derived Dockerfile. The image is
-public, so no pull secret is configured; a private fork adds
-`imagePullSecrets` to the Deployment.
-
-Give the container a restart policy — `--restart unless-stopped` — if you want a
-restart request to bring it back. A container cannot read its own policy, so
-without one an exit is simply the end of the installation until you start it
-again from the host.
+database and plugins under `/data`. Fleets, the Kubernetes base under `k8s/`,
+GitOps releases and restart policy are in
+[docs/deploying.md](docs/deploying.md#docker).
 
 ## Scope and limits
 
@@ -799,10 +372,10 @@ Worth knowing before you deploy it:
 - Prompts and responses are never logged. Request logs hold metadata and token
   counts only, and no body ever reaches stdout, the journal, or the Console
   screen. Bodies are stored only if you opt in to
-  [body capture](#recording-bodies), which needs both an environment variable
+  [body capture](docs/operations.md#recording-bodies), which needs both an environment variable
   and a setting, encrypts what it writes, and can be refused per key.
 - Gateway keys are stored as hashes. A lost key is reissued, not recovered.
-- A [snapshot](#snapshots-and-restore) carries whatever the database does —
+- A [snapshot](docs/operations.md#snapshots-and-restore) carries whatever the database does —
   encrypted provider credentials, gateway key hashes — and is inert only because
   `OMNI_ENCRYPTION_KEY` is not in it. Captured bodies are excluded, so a snapshot
   is never a prompt corpus.
@@ -834,80 +407,15 @@ omni plugin update some-plugin        # reinstall from whatever it was installed
 omni restart                          # plugins load at boot, so this is required
 ```
 
-`update` needs no spec: `install` records the one you typed in
-`.omni-install.json` beside the plugin, so picking up a patch release is the
-plugin's id and nothing else. A bare package name re-resolves to the current
-release; `name@1.2.3` reinstalls that version exactly. A plugin copied in by
-hand has no record and `update` says so rather than guessing.
-
 **Nothing in the package is executed by any of these.** There is no dependency
 resolution, no `node_modules`, and no lifecycle script — the installer fetches,
 checks, and unpacks, and the plugin's own code is first imported at the next boot.
+How a spec is resolved, what installing by name refuses, what `list` and
+`verify` report, and what `remove` keeps are in
+[docs/plugins.md](docs/plugins.md).
 
-A spec is resolved filesystem-first: directory, then local tarball, then URL,
-then registry. That order is the safe one. The reverse would let a published
-package shadow the directory you are standing in and turn `omni plugin install
-some-plugin` into a download nobody asked for.
-
-Installing by name refuses more than it accepts, and each refusal happens before
-any bytes are fetched: the tarball must be served from the registry's own host,
-the registry must advertise an integrity hash or a shasum, and only an exact
-version or the registry's `latest` resolves — no ranges, no other dist-tags. Use
-`--registry` (or `OMNI_PLUGIN_REGISTRY`) for a private registry; it must be
-`https://`.
-
-A URL you type is different, and the difference is the point: nothing downstream
-has a digest to check it against, so TLS to the host you named is the only
-assurance there is. That is why `http://` is refused rather than upgraded.
-
-`omni plugin list` prints what this installation has — id, name, version, the
-plugin API and console SDK it was built against, the capabilities it declared,
-and whether the gateway would load it:
-
-```
-ID       NAME               VERSION  API  SDK     CAPABILITIES                    STATE
-pokemon  Pokémon Companion  1.0.0    2    ^1.0.0  storage,files,net:outbound,…    ok
-```
-
-The API column is the plugin API generation, and it is matched **exactly** — a
-plugin built against an older one is listed with that as its reason rather than
-loaded.
-
-The capabilities a manifest may declare are `storage`, `files`, `net:outbound`,
-`events:request`, `events:limit`, `channels` and `provider`. `channels` is
-namespaced topics on the gateway's push socket, which a plugin owns without ever
-touching a connection. `provider` lets a plugin supply a provider of its own —
-the models, the wire format, and optionally the OAuth flow, so
-`omni connect <plugin-id>` works for it exactly as it does for a built-in.
-Anything a plugin did not declare is absent from what it is handed.
-
-`net:outbound` and `provider` each require the manifest to declare `origins`,
-and both are enforced: a plugin's own `fetch` and the requests the gateway makes
-on a provider plugin's behalf are both refused outside them. That is what makes
-`omni plugin verify <id>` worth reading before you install one — where your
-prompts can be sent is in the manifest, not only in the code.
-
-A plugin that would *not* load is listed with the reason rather than hidden,
-because a plugin missing from the console is exactly what you are trying to
-explain. For one plugin's full detail — its entry points and the outbound
-origins it declared — use `omni plugin verify <id>`.
-
-### Available plugins
-
-There is no curated directory to browse, and there is no plan for one. A plugin
-is a directory, a tarball, a URL or a package name you point `omni plugin
-install` at, and you are expected to know where it came from — see the
-[security note](#security) for why that is the model rather than an omission.
-
-Resolving a name through npm makes distribution easier; it does not make an
-unknown plugin safer. Integrity checking proves you received the bytes the
-registry advertised, and nothing about who wrote them or what they do once the
-gateway imports them.
-
-None ship in this repository, deliberately. The first one did, and moving it out
-is what proved the plugin API actually works from outside: while it built as a
-workspace sibling it could reach internal packages no published plugin can, and
-two bugs hid in exactly that gap.
+There is no curated directory to browse. None ship in this repository; one is
+published:
 
 | Plugin | What it does |
 | --- | --- |
@@ -924,47 +432,6 @@ species data and sprites, which its manifest declares and `omni plugin verify
 pokemon` prints back. Those assets are Nintendo and Game Freak intellectual
 property, fetched at runtime and never vendored — into that repository, this one,
 or anything either publishes.
-
-`verify` is the one to run before restarting a gateway that people are using: it
-reaches the same verdict the next boot will, from the same code, without loading
-the plugin.
-
-### Installing on a machine with no checkout
-
-A published plugin installs by name — no checkout, no build toolchain:
-
-```bash
-omni plugin install omnigateway-plugin-example
-omni plugin verify example && omni restart
-```
-
-Building and shipping your own plugin — tarball layout, the manifest-at-root
-rule, why plaintext `http://` stays refused, Docker mounting — is covered in
-[docs/writing-a-plugin.md](docs/writing-a-plugin.md).
-
-**In Docker**, mount the plugin at `<root>/plugins/<id>` on a volume — the same
-layout `install` writes — and restart the container; read-write, not `:ro`,
-because a plugin declaring `files` writes its cache inside its own directory.
-See [docs/writing-a-plugin.md](docs/writing-a-plugin.md).
-
-Removing one keeps its data:
-
-```bash
-omni plugin remove some-plugin          # directory goes, database tables stay
-omni plugin remove some-plugin --purge  # tables too, after confirming
-```
-
-That default is deliberate. A plugin directory can be reinstalled from the
-package it came from; whatever it accumulated in your database cannot be
-reinstalled from anything.
-
-Note what "directory goes" includes: a plugin's `data/` directory is removed
-with it. That directory holds cached files a plugin can rebuild — it is excluded
-from [snapshots](#snapshots-and-restore) for that reason, so it has no restore
-path and is not meant to need one. Only the database tables are kept, and only
-those are what `--purge` additionally drops. For the same reason, restoring a snapshot onto an
-installation that no longer has a plugin leaves that plugin's tables in place —
-`omni doctor` reports them, and nothing removes them for you.
 
 Read the [security note](#security) on what a plugin can reach before installing
 one you did not write. To write one, see

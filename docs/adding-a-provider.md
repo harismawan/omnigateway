@@ -132,7 +132,11 @@ shape and why the HTTP client is built on `node:http`.
    from the request to the stream, `cloakedTools` to report a count the redaction boundary permits,
    `classifyError` to relabel a refusal the status alone cannot name.
 8. A provider that prices by request size cannot be expressed in `ProviderModelPricing`. Pick a
-   tier, say so in a comment, and warn operators in `README.md`.
+   tier, say so in a comment, and warn operators here. Two such caveats already hold: xAI doubles
+   its rate at or above 200K context — the higher rate applies to every token, but a target holds
+   one flat price, so edit the saved target if you run grok long-context; and Kilo's `kilo-auto/*`
+   routers carry no published rate, so the router treats them as unpriced rather than free — set a
+   real `costPerMTok` on the saved target to have one ranked.
 9. Cover streaming and non-streaming, and mutation-test the load-bearing assertions — URL selection,
    usage-token arithmetic, tool call and result round-trip, mid-conversation system placement.
    Verify each anchor fails when its behaviour is broken; a green suite is not evidence of coverage.

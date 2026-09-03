@@ -317,3 +317,112 @@ provider-specific *logic* from core, not provider-shaped *vocabulary*.
   vocabulary listed above.
 - The ingress `surface` union. A provider cannot register a client-facing dialect;
   that is a much larger decision about the client contract.
+
+## History
+
+Forensic narrative moved here from `CLAUDE.md` rule 17 on 2026-09-03. The rule keeps the
+invariants; this section keeps how they were found.
+
+### OAuth seeding
+
+`seedBuiltinOAuth()` sat inline in gateway `main()` first, and that is the trap: **no test calls
+`main()`**, so the only guard was a test grepping the source, and a substring match passes on a
+commented-out call — measured, commenting it out left all 3347 tests green while a booted gateway
+would have had no OAuth at all. It now lives on `installPluginProviders` because that function is
+called unconditionally at boot and is reachable from a harness.
+
+Moving it there was not enough, and the second failure is the more instructive one. The
+replacement guard read `OAUTH_PROVIDERS` — process-wide module state, one Bun process for the
+whole suite — so `logging.test.ts` and `apps/cli/test/connect.test.ts` seeded first and the
+assertion passed on *their* seed. Measured: deleting the seed left `bun test`,
+`bun test apps/gateway` and `bun test packages/control` green; only that one file alone caught
+it. A module-scope `seeded` boolean made it unfixable in place — it latches, so clearing the table
+does not help. The registry is therefore threaded: `registerOAuthProvider`, `seedBuiltinOAuth` and
+`installPluginProviders` all take one, defaulting to the global, and the test drives
+`Object.create(null)`.
+
+Idempotence is a `WeakMap` of which id we installed into which registry, and the second iteration
+matters: a `WeakSet` of seeded *registries* makes a deleted built-in unrecoverable — measured, a
+reseed leaves it at four providers — so "nothing ever deletes a built-in" became a load-bearing
+unstated invariant while two test files delete from the shared registry in `afterEach`. Recording
+the id lets a reseed tell three cases apart: ours and present (skip), ours and gone (reinstall),
+someone else's (throw). Repair restores membership, not position — object key order is insertion
+order, so a repaired id lands last; production never deletes one, so the order an operator sees is
+the seed's own.
+
+`installPluginProviders` must stay unconditional: wrapping it in `if (providers.length > 0)` kills
+OAuth on every plugin-less install, which is most of them — a tidy-up the function's own name
+invites. That edit left the suite green when first measured; `oauthSeed.test.ts` now catches it,
+single-line and block form both, by asserting the call sits at two-space indent — a top-level
+statement of `main()`. Its `|| Object.hasOwn(registry, id)` disjunct is defence-in-depth, not
+coverage: every seeded id is in `PROVIDER_DESCRIPTORS` too and a plugin enters both tables in one
+iteration, so the first disjunct always fires first. An earlier version of the rule claimed that
+check "stopped being vacuous"; measured false.
+
+`providerCoverage.test.ts` broke the "seed first" rule in the very commit that wrote it and passed
+green over an empty set when run alone.
+
+### Porting the five OAuth flows
+
+Porting the five flows found three things the fixture could not, each because a fixture written
+to fit a contract cannot disagree with it. Built-ins use two deadlines — 30s for a token call an
+operator waits on, 15s for a usage probe nothing waits on — so `AuthRequest.timeoutMs` is optional
+and clamps to the host ceiling; one constant would have quadrupled the second silently. A
+delegated step must be `async function*`: a sync generator yielded through from an async one runs
+fine, every test passes, but `TNext` widens to `AuthResponse | undefined` and only the compiler
+sees it. And `PluginOAuthFlow` is a discriminated union with `oauthAdapter` overloaded on `kind`,
+because the flat shape flattens the return type — `kiloOAuth` stops being a `DeviceOAuthProvider`
+and every consumer reading `begin`/`needsDeviceId` loses it.
+
+`requests.ts` holds pure builders that replaced `postJson`/`getJson` — same profile, same merge
+and order, stopping before the send — so ported flows emit the bytes their own golden tests
+already pin. Those two were deleted once the last flow stopped calling them: an exported, tested
+way to send with `deps.http` directly is a way to bypass the yield cap, the origin check and the
+return-shape validation the adapter exists to impose.
+
+Each provider's test file is unchanged, which is the proof; mutants against all five (dropped
+`client_id`, dropped beta header, state check off, kilo's second request unauthenticated, kilo's
+org read skipped, grok's host check off, kimi's device headers dropped, openai's content type
+changed) each kill tests — verified by mutation from the new location. Two files changed beyond
+their import line: kimi's registry test, which now reads the seed's own result, and grok's, whose
+`OAUTH_PROVIDERS.grok === grokOAuth` became `x === x` once `builtins.ts` defined one as the other.
+They stay in `control/test/oauth/` because they drive the *adapted* provider and `oauthAdapter` is
+control's — a test in `packages/providers` reaching for it would invert the package graph. They
+read the five through `test/oauth/builtins.ts`, off the seeded registry: strictly stronger than the
+named import it replaced, since a seed that drops one, installs the wrong flow or forgets `trusted`
+now fails all five suites.
+
+An earlier version of the type-only rule claimed `leafSubpaths.test.ts` would catch a value import
+of `@omni/store`; measured false — turning one into a value import left the whole suite green,
+because those modules are outside both leaf graphs regardless of import kind. What enforces it is
+`packages/providers/test/oauthStoreEdge.test.ts`.
+
+### Registry threading sweeps
+
+Three review rounds in a row each found partial threading in the previous round's fix: the
+prototype sweep covered `@omni/providers` and left `OAUTH_PROVIDERS`, `CALLBACKS` and the
+console's `heldAuths`; injection covered `resolveModel` and `rank` and left `priceOf`, so a $12.50
+cache write billed $0.00 with no throw and no log; then the test pinning *that* covered the
+injected path and not the default, because `??` only fires on `undefined`. Every one found by
+hand, by someone thinking to try that one site. The sentinel-registry test in
+`apps/gateway/test/dispatch/dispatch.test.ts` replaced per-site tests for that reason.
+
+The module-scope snapshot count went three, then five, then six, because each sweep stopped at
+the sites the previous bug had made visible: `providerCatalog` served a console missing every
+plugin provider, `providerIdSchema` was `z.enum(PROVIDER_IDS)` and would have refused their
+credentials, `isProviderId` reported them as not existing, `PREFIX_PROVIDER` made a provider's own
+`modelPrefixes` unreachable while `provider/model` for the same provider resolved, `CALLBACKS`
+redirected nowhere, and `OAUTH_PROVIDER_IDS` gated `omni connect`.
+
+### Prototype-keyed provider ids
+
+`resolveModel` replaced a `Set.has` — which never consults a prototype — with an index check, and
+`model: "constructor/foo"` returned 500 carrying an internal source expression where `nope/foo`
+correctly returned 503. Same keys defeated four more readers including the `provider:missing`
+guard and `omni doctor`'s check. An `Object.hasOwn`-at-readers version was written, and every one
+of its mutants survived removal. An earlier version of the rule enumerated the tables, and
+`OAUTH_PROVIDERS` in `@omni/control` went on leaking for another review round — a raw `TypeError`
+out of `refresh.ts` — plus `CALLBACKS` and the console's `heldAuths` map.
+
+An earlier version of the `ProviderId` rule claimed deleting a built-in's line from a provider
+table was a compile error. Measured false for all five hand-written tables.

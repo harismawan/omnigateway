@@ -1,11 +1,12 @@
 # Architecture
 
-How OmniGateway put together, for contributors and design auditors. [README](README.md#how-it-is-built) has package map and layering rules; this doc detail behind them.
+How OmniGateway put together, for contributors and design auditors. [How it is built](#how-it-is-built) below has package map and layering rules; rest of this doc detail behind them.
 
 Conventions governing changes — architectural boundaries, testing expectations, traps — see [CLAUDE.md](CLAUDE.md). Approved designs live in `docs/superpowers/specs/`.
 
 ## Contents
 
+- [How it is built](#how-it-is-built)
 - [What a request actually does](#what-a-request-actually-does)
 - [Rate limiting](#rate-limiting)
 - [Routing](#routing)
@@ -19,6 +20,88 @@ Conventions governing changes — architectural boundaries, testing expectations
 - [The console and the CLI](#the-console-and-the-cli)
 - [Plugins](#plugins)
 - [Clustering](#clustering)
+
+## How it is built
+
+A Bun workspace monorepo. The layering is deliberate and enforced by what each
+package is allowed to import: a provider-neutral core at the bottom, provider
+knowledge in one place, pure routing above that, and every side effect pushed up
+into the gateway process.
+
+```mermaid
+graph TD
+  subgraph frontends[Front ends]
+    gateway["apps/gateway<br/><i>Elysia server, dispatch, loops</i>"]
+    cli["apps/cli<br/><i>the omni binary</i>"]
+    dashboard["apps/dashboard<br/><i>React console</i>"]
+  end
+
+  control["@omni/control<br/><i>every operator action;<br/>no HTTP, argv or terminal</i>"]
+  router["@omni/router<br/><i>pure ranking;<br/>no I/O, no timers</i>"]
+  store["@omni/store<br/><i>SQLite + field encryption</i>"]
+  providers["@omni/providers<br/><i>adapters, wire codecs,<br/>catalog, HTTP client</i>"]
+  rtk["@omni/rtk<br/><i>tool-result filters</i>"]
+  ponytail["@omni/ponytail<br/><i>vendored coding ruleset</i>"]
+  ratelimit["@omni/ratelimit<br/><i>key limit arithmetic;<br/>no clock, no state</i>"]
+  ir["@omni/ir<br/><i>domain model — depends on nothing</i>"]
+
+  gateway --> control
+  gateway --> rtk
+  gateway --> ponytail
+  gateway --> ratelimit
+  cli --> control
+  dashboard -. "types only" .-> ir
+  dashboard -. "types only" .-> store
+  control --> router
+  control --> ponytail
+  control --> ratelimit
+  router -. "types + 2 pure helpers,<br/>via /types subpath" .-> store
+  router --> providers
+  store --> rtk
+  store --> ponytail
+  store --> ratelimit
+  providers --> ir
+  rtk --> ir
+  ponytail --> ir
+  store --> ir
+```
+
+Arrows read *depends on*, and the direction never reverses. Two rules do most of
+the work: `@omni/ir` is side-effect free and imports nothing, and `@omni/router`
+is a pure function — no network, no database, no timers. Everything that has to
+touch the world is pushed up into the gateway process.
+
+`@omni/ratelimit` is the same shape applied to key limits: it decides whether a
+request is over a ceiling, and it holds no clock and no counters — `now` is a
+parameter and the counts are handed to it, so it never learns whether a number
+came from memory or from SQLite. It imports nothing but its schema validator, not
+even `@omni/ir`. The rings and the in-flight gauge live in the gateway, because
+state is not the package's job, and that split is what lets sliding-window
+arithmetic be tested without a gateway, a store, or a clock.
+
+The dashboard's edges are dotted because they are type-level only. It has no edge
+to `@omni/providers` at all: provider names, colours, order and model lists reach
+the console over `GET /api/catalog`, because a provider loaded from
+`<root>/plugins/` exists only at runtime and no build-time import could see one.
+
+`@omni/providers/catalog` and `/descriptors` are still deliberately import-free,
+for a different reason than they used to be: the pure router imports
+`descriptors`, and the leaf property is what lets it.
+
+The router's dotted edge into `@omni/store` is nearly the same story: its
+package-root imports are all `import type`. Two pure arithmetic helpers,
+`durationFor` and `cacheReadRate`, do run at runtime — imported through the
+`@omni/store/types` leaf subpath, so neither SQLite nor crypto enters the
+router's module graph and the no-I/O rule holds.
+
+The gateway and the CLI are two front ends over the same `@omni/control`
+functions. The CLI does not call the running server's API — it opens the same
+SQLite file directly, which is why it still works when the gateway is down.
+
+The rest of this document goes a level deeper: a request traced end to end, how
+routing ranks and excludes accounts, the commit point that decides whether
+failover is still possible, the provider adapter shape, the database schema and
+its encryption boundary, and the background loops.
 
 ## What a request actually does
 

@@ -656,3 +656,38 @@ and needs no new block type. Rejected because `signature` means "Anthropic signa
 else, and Anthropic replay preserves signatures rather than dropping them — so a foreign blob would
 be replayed at Anthropic and rejected upstream. Making this work would mean growing the field to
 carry provenance, which is a larger change than the one it avoids.
+
+## History: conversation id and Codex cache affinity
+
+Measurements moved here from `CLAUDE.md` on 2026-09-03.
+
+`metadata` sat in `KNOWN` with no schema entry, so it was parsed by nothing and dropped, and no
+ingress test noticed. Cost measured: `request_logs` held **2 cache reads in 21** OpenAI requests,
+against 9,373 in 9,637 for a second gateway on the same account and model. That 2-in-21 is a
+*post-change* baseline, not a standing property: the same credential at the same request density
+read **70.0% over 7,367 requests** in August and **16.7%** on 1 September. Encoder changes in that
+window are ruled out by probe: an August-shaped body — `reasoning` field included — caches **0 of
+3** today, and a byte-identical body caches 0 of 5 without a session id. So Codex began requiring
+session affinity for cache routing somewhere in that window, and prefix alone stopped being
+enough. A byte-identical 10k-token body 75s apart read back **0 of 5** without a session id and
+**14 of 15** with one, so it is neither prefix drift nor `instructions` placement — each disproved
+separately.
+
+Measured across 1,240 captured Claude Code requests: every one carries a 96-character
+`metadata.user_id` that is itself JSON, `{account_uuid, device_id, session_id}`. The nested
+`session_id` is what makes the whole string conversation-scoped.
+
+The `CLAUDE.md` bullet twice stated a field name that was wrong, in both directions, each time
+from a half-read capture — first `user_id` believed absent, then `session_id` believed top-level.
+Both survived typecheck and the full suite, because reading a name no client sends falls through
+to the derived key, and a fallback is not an error. When checking what a client sends, print the
+key set of the object, not one member's value.
+
+Derived fallback is weaker than it looks: measured per session on real traffic, the system prompt
+takes 4–9 distinct values and the tool set 3–6, so a key hashing either rotates that many times
+within one conversation.
+
+`session-id` joined the header list the day `POST /v1/responses` shipped: Codex speaks only the
+Responses API (`wire_api = "chat"` is a hard error in it now), so until that route existed the
+header could not arrive, and a name listed for a client that cannot connect is a claim no test
+can check.

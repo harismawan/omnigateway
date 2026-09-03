@@ -418,3 +418,19 @@ All seven landed on `feat/horizontal-scaling-spec`, 2026-09-02.
 - Plugin filesystem parity across pods: the operator bakes plugins into the image.
 - Migrating `plugin_*` tables between dialects.
 - Postgres-to-SQLite migration.
+
+## History
+
+Measurements moved here from `CLAUDE.md` rule 14 on 2026-09-03.
+
+- `RedisClient.connect()` never rejects with `autoReconnect` on — it retries forever — so the
+  first call races it against `CONNECT_WAIT_MS` and every call reads `connected` instead.
+- `onclose` never fires on a killed connection; `onconnect` fires on first connect and every
+  reconnect — measured with `CLIENT KILL TYPE pubsub`. Subscription is (re)established from
+  `onconnect`, `unsubscribe` first or every frame arrives twice.
+- Scripts are `SCRIPT LOAD`ed at connect and called by `EVALSHA`: a fire-and-forget release must
+  reach the server before the next acquire on the same connection, and a load in front of it let
+  the acquire overtake — measured, the two-replica concurrency test went 429.
+- `loadRegistry.ts` keeps a synchronous local map because an `await` between `counts()` and
+  `acquire()` — even on a resolved promise — let a burst rank on one snapshot; the burst test in
+  `dispatch.test.ts` catches exactly that.
