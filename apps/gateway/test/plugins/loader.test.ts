@@ -20,7 +20,7 @@ import { createChannelRegistry } from "../../src/stream/channels.ts";
 function channelRegistry() {
   return createChannelRegistry({
     sockets: { has: () => false, sendTo: () => {} },
-    fanout: () => {},
+    fanout: () => true,
   });
 }
 
@@ -236,7 +236,7 @@ test("a plugin channel is namespaced with the host's plugin id, not the plugin's
   // the socket-side shape of the storage-prefix rule.
   const registry = createChannelRegistry({
     sockets: { has: () => false, sendTo: () => {} },
-    fanout: () => {},
+    fanout: () => true,
   });
   await plugin({
     id: "chatty",

@@ -107,10 +107,12 @@ export type PluginChannel = {
    * **Costlier than `send`, and bounded differently.** One `send` is a push into
    * one bounded queue on one process; one broadcast is a publish on the shared
    * bus plus a fan-out on every replica. The host therefore caps a channel's
-   * broadcasts per second and drops the excess, counted and reported as one
-   * batched line — well above what a panel-facing plugin does, and well below a
-   * per-request loop. Flooring your own rate is still yours: the cap is a
-   * backstop, not a scheduler.
+   * broadcasts per second and drops the excess, counted and reported — well
+   * above what a panel-facing plugin does, and well below a per-request loop.
+   * The cap is per *channel*, which is not per thing you push about: a plugin
+   * flooring itself per key and publishing every key onto one channel reaches
+   * the ceiling at that many simultaneously busy keys. Flooring your own rate is
+   * still yours; the cap is a backstop, not a scheduler.
    *
    * **Delivery is at-least-once, not exactly-once.** A coordinator that times out
    * on a publish that in fact landed will deliver that frame twice on this

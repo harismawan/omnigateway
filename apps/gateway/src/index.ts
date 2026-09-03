@@ -263,6 +263,10 @@ async function main(): Promise<void> {
   const pluginChannels = createChannelRegistry({
     sockets: streamRegistry,
     fanout: (topic, payload) => broadcaster.channel(topic, payload),
+    // The same clock the broadcaster beside it takes. Without it the broadcast
+    // budget would be the one wall-clock read left in the stream stack, and a
+    // test that drives time could not move it.
+    now,
     logger,
   });
   pluginChannelsRef = pluginChannels;

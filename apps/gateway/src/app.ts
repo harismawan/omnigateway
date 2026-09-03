@@ -303,6 +303,8 @@ export function createApp(deps: AppDeps) {
     createChannelRegistry({
       sockets: registry,
       fanout: (topic, payload) => broadcaster.channel(topic, payload),
+      // The same clock everything else here takes; see the note in `index.ts`.
+      now,
       logger,
     });
   channelsRef = channels;

@@ -92,7 +92,7 @@ function harness(
   const broadcaster: Broadcaster = {
     invalidate() {},
     invalidateAll() {},
-    channel() {},
+    channel: () => true,
     declareStream: (topic) => {
       declared.add(topic);
     },

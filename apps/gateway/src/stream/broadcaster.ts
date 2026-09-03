@@ -41,15 +41,19 @@ export type Broadcaster = {
   /** Publishes a sequenced payload frame and records it in the ring for replay. */
   stream(topic: string, payload: unknown): void;
   /**
-   * Publishes one plugin channel frame to every process's subscribers.
+   * Publishes one plugin channel frame to every process's subscribers, and
+   * reports whether it went.
    *
    * Behind `PluginChannel.broadcast`. Neither coalesced nor sequenced, and both
    * omissions are deliberate: a plugin's payload identifies which thing changed,
    * so folding by topic would drop every frame but the last, and there is no
    * replay to number for — a channel has no ring and nothing here survives a
    * restart, which is what the capability already promises.
+   *
+   * `false` means the payload would not serialise and nothing was published, so
+   * the caller can count a drop the operator would otherwise never hear about.
    */
-  channel(topic: string, payload: unknown): void;
+  channel(topic: string, payload: unknown): boolean;
   /** Forgets a stream topic's history without rewinding its sequence. */
   resetStream(topic: string): void;
   stop(): void;
@@ -121,7 +125,14 @@ const RECONNECTED = "coord:reconnected";
 export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
   const floors = deps.floors ?? INVALIDATION_FLOORS;
   const defaultFloorMs = deps.defaultFloorMs ?? DEFAULT_FLOOR_MS;
-  /** Disarms emission, as `ChannelRegistry`'s own flag does. */
+  /**
+   * Disarms plugin-channel emission after `stop()`.
+   *
+   * Narrower than `ChannelRegistry`'s flag of the same name, which gates
+   * everything it owns. This one is read in `channel()` alone: `invalidate`,
+   * `stream` and `declareStream` still publish after `stop()`, which is
+   * behaviour this flag deliberately does not change.
+   */
   let live = true;
   /** Topics with a source behind them, and which process holds it. */
   const streams = new Map<string, string>();
@@ -249,7 +260,7 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
     },
 
     channel(topic, payload) {
-      if (!live) return;
+      if (!live) return false;
       /*
         Encoded here, in a `try`, because this payload is plugin-authored
         `unknown` and `send` below stringifies synchronously — so a `BigInt` or a
@@ -260,17 +271,24 @@ export function createBroadcaster(deps: BroadcasterDeps): Broadcaster {
 
         `registry.ts` refuses the same throw at the same boundary for the same
         reason, and this path does not reach that encoder: it stringifies its own
-        envelope first. Dropped rather than reported, exactly as an unencodable
-        frame is dropped there — the plugin is told nothing because there is
-        nothing it could be told through.
+        envelope first. Where this differs from that one is the answer: `false`
+        rather than silence, so the caller can count a drop. An operator
+        diagnosing a channel that publishes nothing should not have to tell an
+        unserialisable payload from a quiet plugin by elimination — and the
+        counter beside this one, for a frame over budget, already sets that bar.
       */
       let message: string;
       try {
         message = JSON.stringify({ kind: "channel", topic, payload } satisfies Fanout);
       } catch {
-        return;
+        // Reported rather than merely swallowed. The plugin cannot be told —
+        // there is nothing to tell it through — but an operator diagnosing a
+        // silent channel deserves better than the same silence a frame over
+        // budget used to get, and the caller has a counter for it.
+        return false;
       }
       void deps.coord.pubsub.publish(CHANNEL, message);
+      return true;
     },
 
     resetStream(topic) {

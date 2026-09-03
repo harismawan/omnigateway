@@ -202,7 +202,7 @@ async function bootPlugin(
     events: bus,
     channels: createChannelRegistry({
       sockets: { has: () => false, sendTo: () => {} },
-      fanout: () => {},
+      fanout: () => true,
     }),
     sdkVersion: "1.0.0",
   });

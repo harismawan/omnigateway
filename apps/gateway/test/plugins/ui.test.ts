@@ -335,7 +335,7 @@ test("a spec-shaped plugin's advertised ui url actually serves", async () => {
       events: bus,
       channels: createChannelRegistry({
         sockets: { has: () => false, sendTo: () => {} },
-        fanout: () => {},
+        fanout: () => true,
       }),
       sdkVersion: "1.0.0",
     });

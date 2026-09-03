@@ -167,13 +167,26 @@ test("a payload that will not serialise is dropped, never thrown back at the plu
   expect(() => a.broadcaster.channel("plugin:alpha:s", { n: 1n })).not.toThrow();
   expect(() => a.broadcaster.channel("plugin:alpha:s", circular)).not.toThrow();
   expect(a.published).toEqual([]);
+  // Answered to the caller rather than silently dropped, so the channel
+  // registry can count it: an operator diagnosing a channel that publishes
+  // nothing should not have to tell this from a quiet plugin by elimination.
+  expect(a.broadcaster.channel("plugin:alpha:s", { n: 1n })).toBe(false);
+  expect(a.broadcaster.channel("plugin:alpha:s", { fine: true })).toBe(true);
 });
 
-test("a stopped broadcaster publishes nothing", () => {
-  const a = node(memoryCoord(), "a");
+test("a stopped broadcaster publishes nothing, as the other process can see", async () => {
+  // Asserted on the *other* node, because that is the only observer the flag
+  // changes: `stop()` also unsubscribes, so this process delivers nothing to
+  // itself whether the guard exists or not. The first version of this asserted
+  // the emitting side, and passed with the guard deleted.
+  const coord = memoryCoord();
+  const a = node(coord, "a");
+  const b = node(coord, "b");
   a.broadcaster.stop();
 
-  a.broadcaster.channel("plugin:alpha:s", { n: 1 });
+  const sent = a.broadcaster.channel("plugin:alpha:s", { n: 1 });
+  await Bun.sleep(1);
 
-  expect(a.published).toEqual([]);
+  expect(sent).toBe(false);
+  expect(b.published).toEqual([]);
 });

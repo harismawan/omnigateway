@@ -112,6 +112,7 @@ export async function streamHarness(
   const channels = createChannelRegistry({
     sockets: registry,
     fanout: (topic, payload) => broadcaster.channel(topic, payload),
+    now: () => clock,
     logger,
     scheduler: (run) => schedule(run, 0),
   });
