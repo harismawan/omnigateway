@@ -371,6 +371,9 @@ Worth knowing before you deploy it:
   caught earlier.
 - Not in scope: semantic caching, billing.
 
+What is missing on purpose, what is missing for now, and what is designed but not
+built: [docs/roadmap.md](docs/roadmap.md).
+
 ## Security
 
 - Treat `OMNI_ENCRYPTION_KEY`, gateway keys, and the SQLite file as secrets.
