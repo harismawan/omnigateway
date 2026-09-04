@@ -447,7 +447,11 @@ Translation invariants:
 - Adapters stream upstream. OpenAI chat usage need `stream_options.include_usage`; Responses API
   report usage on `response.completed`.
 - `/v1/models` report smallest target window in pool. Limits advertised, not enforced.
-- Normalize `[1m]` before key allowlist checks. `claude/` **not** reserved, not rewritten.
+- Normalize `[1m]` before key allowlist checks. `claude/` **is** reserved (`modelSchema`) and
+  unwound at ingress **unconditionally**, before the allowlist runs — stripping later make
+  mirror a way around key policy. `/v1/models` append one `claude/<id>` mirror per listed pool
+  whose id not already start `claude`/`anthropic`, built from **filtered** list so it never
+  widen what key see.
 - Gateway not validate request-shape support per model; unsupported combos surface as upstream
   errors.
 - **`ChatRequest.conversationId` is client's own name for its conversation; Codex

@@ -1372,8 +1372,10 @@ test("agent setup returns one Claude settings file for the explicit mapping", as
 
   expect(body.client).toBe("claude");
   expect(body.files.map((file) => file.path)).toEqual(["settings.json"]);
-  expect(body.files[0]?.contents).toContain('"ANTHROPIC_MODEL": "opus"');
-  expect(body.files[0]?.contents).toContain('"ANTHROPIC_DEFAULT_FABLE_MODEL": "opus"');
+  // Written as the mirrored id: the picker this file configures lists nothing
+  // else, and ingress unwinds the prefix before the allowlist runs.
+  expect(body.files[0]?.contents).toContain('"ANTHROPIC_MODEL": "claude/opus"');
+  expect(body.files[0]?.contents).toContain('"ANTHROPIC_DEFAULT_FABLE_MODEL": "claude/opus"');
   expect(body.files[0]?.contents).not.toContain("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
 });
 

@@ -1595,7 +1595,9 @@ test("models route returns only models in the calling key allowlist", async () =
   );
   const body = (await response.json()) as { data: Array<{ id: string }> };
   expect(response.status).toBe(200);
-  expect(body.data.map((model) => model.id)).toEqual(["fast"]);
+  // The mirror is built from the filtered list, so it never widens the set: the
+  // key is denied `other`, and so `claude/other` is absent too.
+  expect(body.data.map((model) => model.id)).toEqual(["fast", "claude/fast"]);
 });
 
 test("models route returns all models for a null allowlist", async () => {
@@ -1609,7 +1611,15 @@ test("models route returns all models for a null allowlist", async () => {
   );
   const body = (await response.json()) as { data: Array<{ id: string }> };
   expect(response.status).toBe(200);
-  expect(body.data.map((model) => model.id).sort()).toEqual(["fast", "other"]);
+  // Both pools, each followed by its discovery mirror: neither id starts with
+  // `claude` or `anthropic`, so both are invisible to Claude Code's picker
+  // without one.
+  expect(body.data.map((model) => model.id).sort()).toEqual([
+    "claude/fast",
+    "claude/other",
+    "fast",
+    "other",
+  ]);
 });
 
 test("models route returns no models for an empty allowlist", async () => {
@@ -1711,6 +1721,35 @@ test("a suffixed id routes to the pool it names", async () => {
   const { call } = await harness();
   const res = await call("/v1/messages", {
     model: "fast[1m]",
+    max_tokens: 16,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  expect(res.status).toBe(200);
+});
+
+// The mirror exists so Claude Code can see the pool. It must not also be a way
+// around the policy that governs the pool.
+test("a key denied a model is denied its discovery mirror too", async () => {
+  const { store, app } = await harness();
+  const { raw } = await seedApiKey(store, { label: "limited", modelAllowlist: ["slow"] });
+  const res = await app.handle(
+    new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({
+        model: "claude/fast",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    }),
+  );
+  expect(res.status).toBe(401);
+});
+
+test("a mirrored id routes to the pool it stands for", async () => {
+  const { call } = await harness();
+  const res = await call("/v1/messages", {
+    model: "claude/fast",
     max_tokens: 16,
     messages: [{ role: "user", content: "hi" }],
   });

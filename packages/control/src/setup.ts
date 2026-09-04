@@ -108,7 +108,12 @@ export function claudeSettings(
   const ids = new Set(described.map(({ model }) => model.id));
   const visibleId = (slot: keyof AgentModelMapping, id: string): string => {
     if (!ids.has(id)) throw new Error(`${slot} names unknown virtual model "${id}"`);
-    return id;
+    // The mirrored id, because it is the one Claude Code's picker shows. A pool
+    // already named for Claude or Anthropic passes that filter on its own and is
+    // never mirrored, so naming it here would name a model `/v1/models` does not
+    // list. Same test as `discoveryMirrors`, restated rather than shared: this
+    // package cannot import the gateway's route module.
+    return /^(?:claude|anthropic)/i.test(id) ? id : `claude/${id}`;
   };
 
   const settings = settingsObject(existing);
