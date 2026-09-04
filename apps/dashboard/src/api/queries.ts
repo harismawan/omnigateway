@@ -802,7 +802,8 @@ export function useDeleteCredential(): UseMutationResult<{ ok: true }, Error, st
 export function useSaveModel(): UseMutationResult<{ ok: true }, Error, VirtualModel> {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (model: VirtualModel) => put<{ ok: true }>(`/api/models/${model.id}`, model),
+    mutationFn: (model: VirtualModel) =>
+      put<{ ok: true }>(`/api/models/${encodeURIComponent(model.id)}`, model),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.models }),
   });
 }
@@ -810,7 +811,7 @@ export function useSaveModel(): UseMutationResult<{ ok: true }, Error, VirtualMo
 export function useDeleteModel(): UseMutationResult<{ ok: true }, Error, string> {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => del<{ ok: true }>(`/api/models/${id}`),
+    mutationFn: (id: string) => del<{ ok: true }>(`/api/models/${encodeURIComponent(id)}`),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.models }),
   });
 }
@@ -821,7 +822,8 @@ export function useDryRun(): UseMutationResult<
   { modelId: string; need: DryRunNeed }
 > {
   return useMutation({
-    mutationFn: ({ modelId, need }) => post<DryRunResult>(`/api/models/${modelId}/dry-run`, need),
+    mutationFn: ({ modelId, need }) =>
+      post<DryRunResult>(`/api/models/${encodeURIComponent(modelId)}/dry-run`, need),
   });
 }
 
