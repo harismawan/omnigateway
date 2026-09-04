@@ -2,6 +2,7 @@ import { DISPATCH_REFRESH_LEAD_MS } from "@omni/control";
 import {
   type ChatRequest,
   describeError,
+  type ErrorCode,
   GatewayError,
   HTTP_STATUS,
   type Logger,
@@ -32,6 +33,8 @@ import type {
   VirtualModel,
 } from "@omni/store";
 import { newCompletedRequestLog, reasonField, reportRejection } from "../logging.ts";
+import type { Telemetry } from "../telemetry/index.ts";
+import { addSpan, type TraceRecord } from "../telemetry/spans.ts";
 import { attempt } from "./attempt.ts";
 import { classify } from "./classify.ts";
 import type { LoadRegistry } from "./loadRegistry.ts";
@@ -65,6 +68,9 @@ export type DispatchDeps = {
     model: string;
     credentialId: string;
   }) => Promise<void>;
+  /** Per-request trace allocated only when OTLP collection sampled this request. */
+  trace?: TraceRecord | null;
+  telemetry?: Telemetry;
 };
 
 export type DispatchOutcome = {
@@ -268,6 +274,7 @@ export async function dispatch(
   // `acquire` are synchronous, so a burst on this process ranks and claims
   // without another request slipping in between the two.
   await deps.loadRegistry.refresh();
+  const routeStartedAt = deps.now();
   const { candidates, excluded } = rank({
     request: dispatchRequest,
     model,
@@ -283,6 +290,24 @@ export async function dispatch(
     // one costs.
     providers: deps.providers,
   });
+  if (deps.trace !== null && deps.trace !== undefined) {
+    deps.trace.routeSpan = addSpan(
+      deps.trace,
+      "dispatch.route",
+      0,
+      routeStartedAt - startedAt,
+      deps.now() - startedAt,
+      {
+        candidates: candidates.length,
+        ...(candidates[0] === undefined
+          ? {}
+          : {
+              chosen_provider: candidates[0].target.provider,
+              chosen_model: candidates[0].target.model,
+            }),
+      },
+    );
+  }
 
   logger.debug("routing candidates ranked", {
     requestId,
@@ -342,7 +367,7 @@ export async function dispatch(
   const eager = {
     credentialId: head.credential.id,
     model: head.target.model,
-    release: deps.loadRegistry.acquire(head.credential.id, head.target.model),
+    release: deps.loadRegistry.acquire(head.credential.id, head.target.model, head.target.provider),
   };
   let eagerHeld = true;
 
@@ -372,9 +397,16 @@ export async function dispatch(
   ): Promise<void> => {
     const credentialId = candidate.credential.id;
     const { model } = candidate.target;
-    await deps.store.credentials.updateHealth(credentialId, model, (current) =>
-      transition(current ?? blankHealth(credentialId, model)),
-    );
+    await deps.store.credentials.updateHealth(credentialId, model, (current) => {
+      const before = current ?? blankHealth(credentialId, model);
+      const after = transition(before);
+      try {
+        deps.telemetry?.breaker(candidate.target.provider, before.breakerState, after.breakerState);
+      } catch {
+        // Observability cannot change health persistence.
+      }
+      return after;
+    });
   };
 
   async function* run(): AsyncGenerator<StreamEvent, void, undefined> {
@@ -409,13 +441,34 @@ export async function dispatch(
         if (adoptable) eagerHeld = false;
         const releaseSlot = adoptable
           ? eager.release
-          : deps.loadRegistry.acquire(candidate.credential.id, candidate.target.model);
+          : deps.loadRegistry.acquire(
+              candidate.credential.id,
+              candidate.target.model,
+              candidate.target.provider,
+            );
 
         // Held for the whole attempt, including the stream drain, so ranking
         // sees this request as in flight until the last byte. Every way out of
         // the block below unwinds through the `finally` — return, break and
         // continue to the labelled loop, a throw from `onRoute` or a missing
         // adapter, and the generator being closed early mid-stream.
+        const attemptStartedAt = deps.now();
+        let attemptCode: ErrorCode | undefined;
+        if (deps.trace !== null && deps.trace !== undefined) {
+          deps.trace.activeAttempt = addSpan(
+            deps.trace,
+            "dispatch.attempt",
+            0,
+            attemptStartedAt - startedAt,
+            attemptStartedAt - startedAt,
+            {
+              attempt: i + 1,
+              provider: candidate.target.provider,
+              model: candidate.target.model,
+              credential_id: candidate.credential.id,
+            },
+          );
+        }
         try {
           log.attempts = i + 1;
           log.credentialId = candidate.credential.id;
@@ -525,6 +578,20 @@ export async function dispatch(
                   // failover is impossible and errors must be forwarded in-stream.
                   committed = true;
                   log.ttftMs = deps.now() - startedAt;
+                  if (
+                    deps.trace !== null &&
+                    deps.trace !== undefined &&
+                    deps.trace.activeAttempt !== null
+                  ) {
+                    addSpan(
+                      deps.trace,
+                      "stream.commit",
+                      deps.trace.activeAttempt,
+                      log.ttftMs,
+                      log.ttftMs,
+                      { provider: candidate.target.provider, model: candidate.target.model },
+                    );
+                  }
                   logger.debug("stream committed", {
                     requestId,
                     provider: candidate.target.provider,
@@ -665,6 +732,7 @@ export async function dispatch(
                   ? { code: "TIMEOUT" as const }
                   : classify(error);
               const { code } = classifiedError;
+              attemptCode = code;
               const message = describeError(error, "attempt failed");
               lastError = rewrap(classifiedError, message);
 
@@ -772,6 +840,18 @@ export async function dispatch(
             }
           }
         } finally {
+          if (
+            deps.trace !== null &&
+            deps.trace !== undefined &&
+            deps.trace.activeAttempt !== null
+          ) {
+            const span = deps.trace.spans[deps.trace.activeAttempt];
+            if (span !== undefined) {
+              span.endMs = deps.now() - startedAt;
+              if (attemptCode !== undefined) span.attrs = { ...span.attrs, code: attemptCode };
+            }
+            deps.trace.activeAttempt = null;
+          }
           releaseSlot();
         }
       }

@@ -14,6 +14,7 @@ import { createStore, deriveKey } from "@omni/store";
 import { captureLogger, entryOf } from "@omni/testkit";
 import { dispatch } from "../../src/dispatch/index.ts";
 import { createLoadRegistry } from "../../src/dispatch/loadRegistry.ts";
+import { createTrace } from "../../src/telemetry/spans.ts";
 
 const req: ChatRequest = {
   model: "fast",
@@ -423,6 +424,30 @@ test("fails over to the next credential before the commit point", async () => {
   store.close();
 });
 
+test("a failover trace has sibling attempts and the failed attempt's code", async () => {
+  const store = await seeded(2);
+  const trace = createTrace({ startedAt: 1_000_000, traceparent: null });
+  const adapter = stubAdapter((call) =>
+    call === 1
+      ? new GatewayError("RATE_LIMIT", "slow down", { retryAfterMs: 1_000 })
+      : textStream("recovered"),
+  );
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), trace },
+    new AbortController().signal,
+    "req_trace",
+  );
+  await drain(outcome.events);
+
+  const attempts = trace.spans.filter((span) => span.name === "dispatch.attempt");
+  expect(attempts).toHaveLength(2);
+  expect(attempts.map((span) => span.parent)).toEqual([0, 0]);
+  expect(attempts[0]?.attrs.code).toBe("RATE_LIMIT");
+  expect(trace.spans.filter((span) => span.name === "stream.commit")).toHaveLength(1);
+  store.close();
+});
+
 test("custom failover stays within the target endpoint", async () => {
   const store = await createStore({
     path: ":memory:",
@@ -499,6 +524,7 @@ test("custom failover stays within the target endpoint", async () => {
 
 test("a failure after the commit point surfaces as an error event, not a retry", async () => {
   const store = await seeded(2);
+  const trace = createTrace({ startedAt: 1_000_000, traceparent: null });
   const adapter = stubAdapter((call) => {
     if (call > 1) return textStream("should not be reached");
     return (async function* () {
@@ -515,7 +541,7 @@ test("a failure after the commit point surfaces as an error event, not a retry",
 
   const outcome = await dispatch(
     req,
-    deps(store, adapter),
+    { ...deps(store, adapter), trace },
     new AbortController().signal,
     "req_test",
   );
@@ -524,6 +550,8 @@ test("a failure after the commit point surfaces as an error event, not a retry",
   expect(adapter.calls).toHaveLength(1);
   expect(events.at(-1)).toMatchObject({ type: "error", code: "UPSTREAM" });
   expect(outcome.log().status).toBe(502);
+  expect(trace.spans.filter((span) => span.name === "stream.commit")).toHaveLength(1);
+  expect(trace.spans.filter((span) => span.name === "dispatch.attempt")).toHaveLength(1);
   store.close();
 });
 

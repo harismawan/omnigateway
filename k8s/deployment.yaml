@@ -17,6 +17,12 @@ spec:
     metadata:
       labels:
         app: omnigateway
+      # Uncomment only when OMNI_METRICS_TOKEN is supplied to the pod and the
+      # scraper can send it as an Authorization bearer token.
+      # annotations:
+      #   prometheus.io/scrape: "true"
+      #   prometheus.io/path: /metrics
+      #   prometheus.io/port: "9000"
     spec:
       # No imagePullSecrets: the package is public. Naming a secret that does
       # not exist fails the pull on some runtimes rather than being ignored.

@@ -9,7 +9,7 @@ import {
   retryAfterMs,
   type WindowCounter,
 } from "@omni/ratelimit";
-import { type LimitConfig, WINDOW_MS, type Window } from "@omni/ratelimit/catalog";
+import { type Dimension, type LimitConfig, WINDOW_MS, type Window } from "@omni/ratelimit/catalog";
 import type { Store } from "@omni/store";
 
 /**
@@ -111,6 +111,8 @@ export type RateLimiterDeps = {
   logger?: Logger;
   /** Where the `1m` ring and the gauge live. In-memory when absent. */
   coord?: Coord;
+  /** Process-local observability hook, called only for a refused decision. */
+  onRejected?: (dimension: Dimension, window: Window | null) => void;
 };
 
 /** A configured ceiling, as opposed to an absent one or an explicit `null`. */
@@ -172,12 +174,14 @@ export class ApiKeyRateLimiter {
   private readonly store: Store;
   private readonly now: () => number;
   private readonly logger: Logger;
+  private readonly onRejected: ((dimension: Dimension, window: Window | null) => void) | undefined;
 
   constructor(deps: RateLimiterDeps) {
     this.store = deps.store;
     this.now = deps.now;
     this.logger = deps.logger ?? noopLogger;
     this.coord = deps.coord ?? memoryCoord();
+    this.onRejected = deps.onRejected;
   }
 
   /**
@@ -331,6 +335,11 @@ export class ApiKeyRateLimiter {
     // A denied request keeps nothing: its caller rolls back the ring stamp and
     // the gauge slot the check claimed before it ran, so a key hammering its own
     // ceiling does not push itself further past it.
+    try {
+      this.onRejected?.(violation.dimension, violation.window);
+    } catch {
+      // Observability cannot turn a refusal into a different failure.
+    }
     throw new RateLimitExceeded(retryAfterMs(resolved, now), headroom);
   }
 

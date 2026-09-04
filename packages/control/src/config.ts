@@ -59,6 +59,11 @@ export type Config = {
    * The boot line reports it, so a typo is visible rather than silent.
    */
   logLevelFallbackFrom: string | null;
+  metricsToken: string | null;
+  metricsMaxSeries: number;
+  otlpEndpoint: string | null;
+  otlpHeaders: string | null;
+  traceSample: number;
 };
 
 const MIN_KEY_LENGTH = 16;
@@ -125,6 +130,19 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   // ignored, so the mistake is still visible.
   const rawLogLevel = env.OMNI_LOG_LEVEL?.trim();
   const logLevel = parseLogLevel(rawLogLevel);
+  const metricsToken = env.OMNI_METRICS_TOKEN?.trim() || null;
+  const rawMaxSeries = env.OMNI_METRICS_MAX_SERIES ?? "5000";
+  const metricsMaxSeries = Number(rawMaxSeries);
+  if (!DECIMAL_INTEGER.test(rawMaxSeries) || metricsMaxSeries < 1) {
+    throw new Error(`OMNI_METRICS_MAX_SERIES must be a positive integer, got "${rawMaxSeries}"`);
+  }
+  const otlpEndpoint = env.OMNI_OTLP_ENDPOINT?.trim().replace(/\/+$/, "") || null;
+  const otlpHeaders = env.OMNI_OTLP_HEADERS?.trim() || null;
+  const rawTraceSample = env.OMNI_TRACE_SAMPLE ?? "1.0";
+  const traceSample = Number(rawTraceSample);
+  if (!Number.isFinite(traceSample) || traceSample < 0 || traceSample > 1) {
+    throw new Error(`OMNI_TRACE_SAMPLE must be between 0 and 1, got "${rawTraceSample}"`);
+  }
 
   return {
     logLevel: logLevel ?? "info",
@@ -140,5 +158,10 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     clusterMode,
     databaseUrl: clusterMode ? (databaseUrl ?? null) : null,
     redisUrl: clusterMode ? (redisUrl ?? null) : null,
+    metricsToken,
+    metricsMaxSeries,
+    otlpEndpoint,
+    otlpHeaders,
+    traceSample,
   };
 }

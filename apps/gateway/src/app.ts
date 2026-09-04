@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import {
@@ -18,7 +19,7 @@ import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from 
 import type { RoutingChange, Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
-import type { LoadRegistry } from "./dispatch/loadRegistry.ts";
+import { createLoadRegistry, type LoadRegistry } from "./dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "./egress/anthropic.ts";
 import { openaiErrorBody } from "./egress/openai.ts";
@@ -39,6 +40,7 @@ import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.t
 import { createConsoleFleet } from "./stream/consoleFleet.ts";
 import { createSocketRegistry, type SocketRegistry } from "./stream/registry.ts";
 import { createRing, type Ring } from "./stream/ring.ts";
+import type { Telemetry } from "./telemetry/index.ts";
 import { VERSION } from "./version.ts";
 
 export type AppDeps = {
@@ -155,6 +157,10 @@ export type AppDeps = {
    * every plugin topic is then a topic nobody opened, and refused.
    */
   channels?: ChannelRegistry;
+  /** Present only when either observability surface is configured at boot. */
+  telemetry?: Telemetry;
+  /** Registers `/metrics`; absent means the route does not exist. */
+  metricsToken?: string;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -234,7 +240,13 @@ export function createApp(deps: AppDeps) {
   const nodeId = deps.nodeId ?? crypto.randomUUID();
   const logger = deps.logger ?? noopLogger;
   const rand = deps.rand ?? Math.random;
-  const http = deps.http ?? nodeHttpClient({ logger, now });
+  const http =
+    deps.http ??
+    nodeHttpClient({
+      logger,
+      now,
+      ...(deps.telemetry === undefined ? {} : { onResponseHead: deps.telemetry.httpHead }),
+    });
   // Not normalised here. An earlier version spread an injected map onto a null
   // prototype at this line, which guarded `createApp` and nothing else —
   // `DispatchDeps` and `ProxyDeps` are public injection points that callers and
@@ -243,8 +255,17 @@ export function createApp(deps: AppDeps) {
   // `dispatch/index.ts`, which is on the path however the map was built.
   const adapters = deps.adapters ?? ADAPTERS;
   const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
+  const loadRegistry = deps.loadRegistry ?? createLoadRegistry(coord);
+  const telemetry = deps.telemetry;
   const rateLimiter =
-    deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now, logger, coord });
+    deps.rateLimiter ??
+    new ApiKeyRateLimiter({
+      store: deps.store,
+      now,
+      logger,
+      coord,
+      ...(telemetry === undefined ? {} : { onRejected: telemetry.rateLimit }),
+    });
   const snapshots = createRoutingSnapshotCache(deps.store, logger);
   // A routing write on another process reaches this one as the same change
   // the local subscription would have seen, rows included, so a remote health
@@ -357,9 +378,33 @@ export function createApp(deps: AppDeps) {
         ok: true,
         mode: deps.mode ?? "single",
         nodeId,
-        coord:
-          "healthy" in coord && !(coord as { healthy(): boolean }).healthy() ? "fallback" : "ok",
+        coord: deps.coordHealthy?.() === false ? "fallback" : "ok",
       }))
+      .use(
+        deps.metricsToken === undefined || telemetry === undefined
+          ? new Elysia()
+          : new Elysia().get("/metrics", ({ request }) => {
+              const supplied = request.headers.get("authorization");
+              const expected = `Bearer ${deps.metricsToken}`;
+              const actualBytes = Buffer.from(supplied ?? "");
+              const expectedBytes = Buffer.from(expected);
+              if (
+                actualBytes.length !== expectedBytes.length ||
+                !timingSafeEqual(actualBytes, expectedBytes)
+              ) {
+                return new Response(null, { status: 401 });
+              }
+              const coordFallback = deps.coordHealthy?.() === false;
+              return new Response(
+                telemetry.scrape(
+                  loadRegistry.localCounts?.() ?? new Map(),
+                  registry.stats(),
+                  coordFallback,
+                ),
+                { headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" } },
+              );
+            }),
+      )
       .use(
         proxyRoutes({
           store: deps.store,
@@ -373,9 +418,10 @@ export function createApp(deps: AppDeps) {
           rateLimiter,
           logger,
           coord,
-          ...(deps.loadRegistry === undefined ? {} : { loadRegistry: deps.loadRegistry }),
+          loadRegistry,
           bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
           ...(deps.emit === undefined ? {} : { emit: deps.emit }),
+          ...(telemetry === undefined ? {} : { telemetry: telemetry }),
           broadcaster,
         }),
       )
