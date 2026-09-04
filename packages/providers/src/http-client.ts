@@ -29,6 +29,15 @@ export const CONNECT_ATTEMPT_TIMEOUT_MS = 3000;
 export type HttpClientOptions = {
   logger?: Logger;
   now?: () => number;
+  /** Called once when the response head or transport failure arrives. */
+  onResponseHead?: (event: {
+    provider: HttpRequest["provider"];
+    host: string;
+    path: string;
+    status?: number;
+    durationMs: number;
+    requestId?: string;
+  }) => void;
 };
 
 /**
@@ -53,14 +62,28 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
       const startedAt = now();
       let traced = false;
       const trace = (status: number | undefined, failed = false): void => {
-        if (traced || !logger.enabled("debug")) return;
+        if (traced) return;
         traced = true;
+        const durationMs = now() - startedAt;
+        try {
+          options.onResponseHead?.({
+            provider: req.provider,
+            host: url.host,
+            path: url.pathname,
+            ...(status === undefined ? {} : { status }),
+            durationMs,
+            ...(req.requestId === undefined ? {} : { requestId: req.requestId }),
+          });
+        } catch {
+          // Observability cannot change a provider request's outcome.
+        }
+        if (!logger.enabled("debug")) return;
         logger.debug("upstream http", {
           provider: req.provider,
           status,
           host: url.host,
           path: url.pathname,
-          durationMs: now() - startedAt,
+          durationMs,
           reason: failed ? "transport error" : undefined,
         });
       };

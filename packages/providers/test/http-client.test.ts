@@ -91,6 +91,41 @@ test("sends the body verbatim", async () => {
   s.stop();
 });
 
+test("reports response-head timing without changing outbound headers", async () => {
+  const s = rawServer();
+  const heads: unknown[] = [];
+  let time = 1_000;
+  const http = nodeHttpClient({
+    now: () => time,
+    onResponseHead: (head) => heads.push(head),
+  });
+  time = 1_025;
+  await http({
+    provider: "anthropic",
+    requestId: "req_1",
+    url: s.url,
+    method: "POST",
+    headers: [["X-Only", "one"]],
+    body: "{}",
+    signal: AbortSignal.timeout(5_000),
+  });
+
+  expect(heads).toEqual([
+    {
+      provider: "anthropic",
+      requestId: "req_1",
+      host: expect.any(String),
+      path: "/v1/messages",
+      status: 200,
+      durationMs: 0,
+    },
+  ]);
+  const head = await s.head();
+  expect(head).not.toContain("traceparent");
+  expect(head).not.toContain("req_1");
+  s.stop();
+});
+
 test("logs safe upstream metadata without query or body", async () => {
   const s = rawServer();
   const lines: string[] = [];
