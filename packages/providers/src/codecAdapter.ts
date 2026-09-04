@@ -322,6 +322,7 @@ export function codecAdapter(
         provider: id,
         ...sendable,
         signal: req.signal,
+        ...(req.requestId === undefined ? {} : { requestId: req.requestId }),
       });
 
       if (res.status < 200 || res.status >= 300) {

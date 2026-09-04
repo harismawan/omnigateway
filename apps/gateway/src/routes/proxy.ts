@@ -60,6 +60,8 @@ import {
   type UsageDebit,
 } from "../logging.ts";
 import type { Invalidator } from "../stream/broadcaster.ts";
+import type { Telemetry } from "../telemetry/index.ts";
+import type { TraceRecord } from "../telemetry/spans.ts";
 import { modelListBody } from "./models.ts";
 
 export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
@@ -104,10 +106,14 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
    * completion pair however it ended.
    */
   broadcaster?: Invalidator;
+  telemetry?: Telemetry;
 };
 
 type ResolvedProxyDeps = DispatchDeps &
-  Pick<ProxyDeps, "requestId" | "rateLimiter" | "bodyLoggingAllowed" | "emit" | "broadcaster"> & {
+  Pick<
+    ProxyDeps,
+    "requestId" | "rateLimiter" | "bodyLoggingAllowed" | "emit" | "broadcaster" | "telemetry"
+  > & {
     keepaliveMs: number;
     logger: Logger;
   };
@@ -392,6 +398,14 @@ async function handle(
 ): Promise<Response> {
   const requestId = deps.requestId();
   const startedAt = deps.now();
+  const trace: TraceRecord | null =
+    deps.telemetry?.startRequest(
+      requestId,
+      startedAt,
+      request.headers.get("traceparent"),
+      surface,
+      deps.rand(),
+    ) ?? null;
   let keyId: string | null = null;
   let requestedModel = "";
   // Held out here so the terminal catch can complete dispatch's own log rather
@@ -591,6 +605,7 @@ async function handle(
         // lifetime is this handler's — there is no registry keyed by request id
         // to leak or to look a request up in.
         ...(captured === null ? {} : { http: captured.wrap(deps.http) }),
+        trace,
         async onRoute(target) {
           if (began) {
             await routeLog(deps.store, requestId, target, deps.logger, deps.broadcaster);
@@ -663,6 +678,8 @@ async function handle(
         debit,
         deps.emit,
         deps.broadcaster,
+        deps.telemetry,
+        trace,
       );
     };
 
@@ -792,6 +809,8 @@ async function handle(
         debit,
         deps.emit,
         deps.broadcaster,
+        deps.telemetry,
+        trace,
       );
     // Not an access line: this fires only when a request failed outright, which
     // a busy gateway does rarely. It exists because the row cannot hold the

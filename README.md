@@ -280,6 +280,11 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
 | `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](docs/operations.md#recording-bodies) |
+| `OMNI_METRICS_TOKEN` | No | unset | Registers authenticated `GET /metrics`; unset means no route |
+| `OMNI_METRICS_MAX_SERIES` | No | `5000` | Series cap before new `api_key_id` values fold to `other` |
+| `OMNI_OTLP_ENDPOINT` | No | unset | Enables OTLP/HTTP span export to `<endpoint>/v1/traces` |
+| `OMNI_OTLP_HEADERS` | No | unset | Comma-separated `k=v` headers sent to the collector |
+| `OMNI_TRACE_SAMPLE` | No | `1.0` | Head sampling ratio from `0` to `1`; inbound sampled trace context is honoured |
 | `OMNI_ROOT` | No | the installation in the current directory, else `~/.config/omnigateway` | Which installation the CLI acts on, when `--root` is not passed |
 | `OMNI_PLUGIN_REGISTRY` | No | the public npm registry | Registry `omni plugin install <name>` resolves through; must be `https://` |
 | `OMNI_CLUSTER_MODE` | No | unset | `true` selects [cluster mode](docs/deploying.md#running-more-than-one-gateway) and requires the two URLs below; unset is one process on SQLite, and then the URLs must be unset too |
@@ -371,6 +376,9 @@ Worth knowing before you deploy it:
   caught earlier.
 - Not in scope: semantic caching, billing.
 
+What is missing on purpose, what is missing for now, and what is designed but not
+built: [docs/roadmap.md](docs/roadmap.md).
+
 ## Security
 
 - Treat `OMNI_ENCRYPTION_KEY`, gateway keys, and the SQLite file as secrets.
@@ -389,10 +397,10 @@ Worth knowing before you deploy it:
   reads stdin — so they stay out of your shell history and the process table.
 - Behind a reverse proxy, set `OMNI_BASE_URL` to the public HTTPS origin so
   OAuth callbacks match what the providers have registered.
-- The gateway talks to your providers and to nobody else. No telemetry, no CDN
-  fonts, no third-party origins. A plugin may declare outbound origins of its
-  own, and `omni plugin verify <id>` shows exactly which ones it asked for — as
-  does its manifest, which is a plain file you can read before installing.
+- The gateway talks to your providers and to nobody else — except your collector, if you name
+  one with `OMNI_OTLP_ENDPOINT`. No CDN fonts or undeclared third-party origins. A plugin may
+  declare outbound origins of its own, and `omni plugin verify <id>` shows exactly which ones it
+  asked for — as does its manifest, which is a plain file you can read before installing.
 - **Plugins run inside the gateway process, with its privileges** — the
   capability context is a guardrail, not a sandbox. Read the
   [security note](#plugins) before installing one you did not write.

@@ -50,6 +50,36 @@ test.each(["debug", "info", "warn", "error"] as const)("reads %s from OMNI_LOG_L
   expect(config.logLevelFallbackFrom).toBeNull();
 });
 
+test("reads observability settings with off-by-default and bounded defaults", () => {
+  const defaults = loadConfig(base);
+  expect(defaults.metricsToken).toBeNull();
+  expect(defaults.metricsMaxSeries).toBe(5_000);
+  expect(defaults.otlpEndpoint).toBeNull();
+  expect(defaults.otlpHeaders).toBeNull();
+  expect(defaults.traceSample).toBe(1);
+
+  const configured = loadConfig({
+    ...base,
+    OMNI_METRICS_TOKEN: "scrape-token",
+    OMNI_METRICS_MAX_SERIES: "12",
+    OMNI_OTLP_ENDPOINT: "https://collector.example/",
+    OMNI_OTLP_HEADERS: "x-api-key=secret,tenant=one",
+    OMNI_TRACE_SAMPLE: "0.25",
+  });
+  expect(configured.metricsToken).toBe("scrape-token");
+  expect(configured.metricsMaxSeries).toBe(12);
+  expect(configured.otlpEndpoint).toBe("https://collector.example");
+  expect(configured.otlpHeaders).toBe("x-api-key=secret,tenant=one");
+  expect(configured.traceSample).toBe(0.25);
+});
+
+test("refuses invalid observability number settings", () => {
+  expect(() => loadConfig({ ...base, OMNI_METRICS_MAX_SERIES: "0" })).toThrow(
+    "OMNI_METRICS_MAX_SERIES",
+  );
+  expect(() => loadConfig({ ...base, OMNI_TRACE_SAMPLE: "1.1" })).toThrow("OMNI_TRACE_SAMPLE");
+});
+
 test("falls back to info for an invalid log level without refusing to boot", () => {
   const config = loadConfig({ ...base, OMNI_LOG_LEVEL: "verbose" });
   expect(config.logLevel).toBe("info");

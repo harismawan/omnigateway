@@ -3,6 +3,8 @@ import { describeError, type Logger, noopLogger, type ProviderId } from "@omni/i
 import type { RequestLog, Store } from "@omni/store";
 import type { RequestCompleted } from "@omnigateway/plugin-api";
 import type { Invalidator } from "./stream/broadcaster.ts";
+import type { Telemetry } from "./telemetry/index.ts";
+import type { TraceRecord } from "./telemetry/spans.ts";
 
 type CompletedOverrides = Pick<RequestLog, "status"> &
   Partial<Omit<RequestLog, "id" | "state" | "at" | "status">>;
@@ -294,6 +296,8 @@ export async function finishLog(
   debit?: UsageDebit,
   emit?: PluginEmit,
   broadcast?: Invalidator,
+  telemetry?: Telemetry,
+  trace?: TraceRecord | null,
 ): Promise<void> {
   /** Whether there is a new row for a console to go and read. See the emit below. */
   let appended = true;
@@ -389,10 +393,21 @@ export async function finishLog(
       report(logger, "failed to publish a resource invalidation", log.id, error);
     }
   }
-  if (bodies === undefined) return;
+  if (bodies !== undefined) {
+    try {
+      await bodies(log);
+    } catch (error) {
+      report(logger, "failed to persist request bodies", log.id, error);
+    }
+  }
   try {
-    await bodies(log);
+    telemetry?.record(log, keyId, trace ?? null);
   } catch (error) {
-    report(logger, "failed to persist request bodies", log.id, error);
+    report(logger, "failed to record request telemetry", log.id, error);
+  }
+  try {
+    telemetry?.flush(log.id, trace ?? null);
+  } catch (error) {
+    report(logger, "failed to export request telemetry", log.id, error);
   }
 }

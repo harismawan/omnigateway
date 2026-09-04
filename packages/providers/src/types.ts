@@ -18,6 +18,8 @@ export type HttpRequest = {
   headers: readonly HeaderPair[];
   body: string;
   signal: AbortSignal;
+  /** Gateway correlation for an optional local timing callback. Never sent on the wire. */
+  requestId?: string;
 };
 
 export type HttpResponse = {

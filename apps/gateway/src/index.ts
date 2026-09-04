@@ -29,6 +29,7 @@ import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.t
 import { startConsoleStream } from "./stream/console.ts";
 import { createSocketRegistry } from "./stream/registry.ts";
 import { createRing } from "./stream/ring.ts";
+import { createTelemetry, parseOtlpHeaders } from "./telemetry/index.ts";
 import { VERSION } from "./version.ts";
 
 function stdoutLogger(level: "debug" | "info" | "warn" | "error"): Logger {
@@ -156,8 +157,18 @@ async function main(): Promise<void> {
    */
   const console = consoleSource(config.logFile);
   logger.info("console log source resolved", { reason: console.source.kind });
+  const telemetry = createTelemetry({
+    metricsEnabled: config.metricsToken !== null,
+    maxSeries: config.metricsMaxSeries,
+    otlpEndpoint: config.otlpEndpoint,
+    otlpHeaders: parseOtlpHeaders(config.otlpHeaders),
+    traceSample: config.traceSample,
+    now,
+    version: VERSION,
+    logger,
+  });
 
-  const http = nodeHttpClient({ logger, now });
+  const http = nodeHttpClient({ logger, now, onResponseHead: telemetry.httpHead });
 
   // `OAUTH_PROVIDERS` is empty at this point and is filled by
   // `installPluginProviders` below, which seeds the five built-ins before it
@@ -311,6 +322,8 @@ async function main(): Promise<void> {
     broadcaster,
     ring: streamRing,
     channels: pluginChannels,
+    telemetry,
+    ...(config.metricsToken === null ? {} : { metricsToken: config.metricsToken }),
     bodyLoggingAllowed: config.bodyLoggingAllowed,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
     pluginUi: loadedPlugins.plugins,
@@ -400,6 +413,7 @@ async function main(): Promise<void> {
         streamRegistry.closeAll(1001, "restart");
         streamRegistry.stop();
         broadcaster.stop();
+        telemetry.stop();
         // After the registry, because it holds a pending error report and
         // nothing else: a plugin handler running against a closed socket is the
         // failure this ordering avoids, not one it would create.

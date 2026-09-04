@@ -1,4 +1,5 @@
 import { type Coord, memoryCoord } from "@omni/coord";
+import type { ProviderId } from "@omni/ir";
 import { healthKey } from "@omni/router";
 
 /**
@@ -27,9 +28,11 @@ export type LoadRegistry = {
    * because a leaked or double-counted slot has no visible symptom — it
    * silently deranks a credential until the process restarts.
    */
-  acquire(credentialId: string, model: string): () => void;
+  acquire(credentialId: string, model: string, provider?: ProviderId): () => void;
   /** In-flight count per `healthKey`. A missing key means zero. */
   counts(): ReadonlyMap<string, number>;
+  /** Synchronous process-local provider totals, for per-instance observability only. */
+  localCounts?(): ReadonlyMap<ProviderId, number>;
   /** Samples the fleet's gauge. Call before `counts`, on a path that may yield. */
   refresh(): Promise<void>;
 };
@@ -46,12 +49,14 @@ const SLOT_TTL_MS = 300_000;
 
 export function createLoadRegistry(coord: Coord = memoryCoord()): LoadRegistry {
   const local = new Map<string, number>();
+  const providers = new Map<ProviderId, number>();
   let remote: ReadonlyMap<string, number> = new Map();
 
   return {
-    acquire(credentialId, model) {
+    acquire(credentialId, model, provider) {
       const key = healthKey(credentialId, model);
       local.set(key, (local.get(key) ?? 0) + 1);
+      if (provider !== undefined) providers.set(provider, (providers.get(provider) ?? 0) + 1);
       void coord.gauge.acquire(PREFIX + key, SLOT_TTL_MS);
 
       let released = false;
@@ -61,6 +66,11 @@ export function createLoadRegistry(coord: Coord = memoryCoord()): LoadRegistry {
         const next = (local.get(key) ?? 0) - 1;
         if (next > 0) local.set(key, next);
         else local.delete(key);
+        if (provider !== undefined) {
+          const providerCount = (providers.get(provider) ?? 0) - 1;
+          if (providerCount > 0) providers.set(provider, providerCount);
+          else providers.delete(provider);
+        }
         void coord.gauge.release(PREFIX + key);
       };
     },
@@ -73,6 +83,10 @@ export function createLoadRegistry(coord: Coord = memoryCoord()): LoadRegistry {
         if (count > (out.get(key) ?? 0)) out.set(key, count);
       }
       return out;
+    },
+
+    localCounts() {
+      return new Map(providers);
     },
 
     async refresh() {
