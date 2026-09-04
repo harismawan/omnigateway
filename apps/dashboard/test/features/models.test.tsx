@@ -488,6 +488,27 @@ describe("ModelsBoard", () => {
     expect(await screen.findByText("Saved.")).toBeTruthy();
   });
 
+  test("an id containing a slash is encoded, not split into path segments", async () => {
+    // `claude/…` is what Claude Code's model picker shows, so it is an ordinary
+    // pool name; a bare `/` in the URL hits `/api/models/claude/opus` — 404.
+    const user = userEvent.setup();
+    const stub = createFetchStub({
+      "GET /api/models": () => ({ models: [model({ id: "claude/opus" })] }),
+      "GET /api/settings": () => ({ settings }),
+      "PUT /api/models/claude%2Fopus": () => ({ ok: true }),
+    });
+    renderWithProviders(<ModelsBoard />);
+
+    await openEditor();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.url).toBe("/api/models/claude%2Fopus");
+    });
+    expect(await screen.findByText("Saved.")).toBeTruthy();
+  });
+
   test("a new model needs a name before it is sent", async () => {
     const user = userEvent.setup();
     const stub = stubModels();
