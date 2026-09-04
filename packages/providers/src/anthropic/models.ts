@@ -3,22 +3,33 @@ import type { ProviderModelCatalogEntry, ProviderReasoningForm } from "../catalo
 /**
  * Anthropic's curated models and their list prices.
  *
- * Prices checked 2026-08-08 against Anthropic's published API pricing. Cache
- * reads are a flat 0.1x of base input across the range, expanded here into
- * absolute figures because a target stores a number, not a multiplier.
+ * Prices checked 2026-09-04 against Anthropic's published API pricing. Cache
+ * reads are 0.1x of base input across the range *except* on Claude Fable 5.1,
+ * which reads at 0.025x; the figures below are absolute because a target stores
+ * a number, not a multiplier.
  *
- * Note: Claude Sonnet 5 carries an introductory $2.00 / $10.00 rate through
- * 2026-08-31. The standard rate is used here so a model configured today still
- * prices correctly in September; edit the target if the intro rate applies.
+ * Claude Sonnet 5's $2.00 / $10.00 launch rate is now its standard price — the
+ * increase to $3.00 / $15.00 scheduled for 2026-09-01 was cancelled.
+ *
+ * Claude Mythos 5.1 is deliberately absent: it prices identically to Fable 5.1
+ * but is limited-availability, so an operator offered it can add a target by
+ * hand rather than have every console list a model it cannot reach.
  *
  * Context and output limits are the published maxima; the 1M window on the
- * Opus, Sonnet and Fable entries is the default there, not an opt-in tier.
+ * Fable, Opus and Sonnet entries is the default there, not an opt-in tier.
  */
 export const ANTHROPIC_MODELS: ProviderModelCatalogEntry = {
   defaultModel: "claude-opus-5",
   // A subscription token, or a console API key sent as `x-api-key`.
   authTypes: ["oauth", "apiKey"],
   models: [
+    {
+      id: "claude-fable-5-1",
+      label: "Claude Fable 5.1",
+      // Cache reads are 0.025x here, not the 0.1x every other entry pays.
+      pricing: { input: 10, output: 50, cacheRead: 0.25, cacheWrite5m: 12.5, cacheWrite1h: 20 },
+      limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+    },
     {
       id: "claude-fable-5",
       label: "Claude Fable 5",
@@ -34,7 +45,7 @@ export const ANTHROPIC_MODELS: ProviderModelCatalogEntry = {
     {
       id: "claude-sonnet-5",
       label: "Claude Sonnet 5",
-      pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 3.75, cacheWrite1h: 6 },
+      pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 4 },
       limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
     },
     {

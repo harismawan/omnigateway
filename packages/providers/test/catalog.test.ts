@@ -17,11 +17,17 @@ const PROVIDERS = [
 const EXPECTED = {
   anthropic: {
     defaultModel: "claude-opus-5",
-    ids: ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+    ids: [
+      "claude-fable-5-1",
+      "claude-fable-5",
+      "claude-opus-5",
+      "claude-sonnet-5",
+      "claude-haiku-4-5",
+    ],
   },
   openai: {
     defaultModel: "gpt-5.6",
-    ids: ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+    ids: ["gpt-6-astra", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
   },
   kimi: {
     defaultModel: "k3-256k",
