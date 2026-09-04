@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { requestLog } from "@omni/testkit";
 import { createTelemetry } from "../../src/telemetry/index.ts";
 import { createOtlpExporter } from "../../src/telemetry/otlp.ts";
 import { createMetricRegistry } from "../../src/telemetry/registry.ts";
@@ -81,5 +82,31 @@ test("tracing off allocates no trace, even for a sampled inbound traceparent", (
   expect(telemetry.tracingEnabled).toBe(false);
   const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
   expect(telemetry.startRequest("req_1", 0, traceparent, "openai", 0)).toBeNull();
+  telemetry.stop();
+});
+
+test("the root span's code attribute takes error codes, never free text", () => {
+  const telemetry = createTelemetry({
+    metricsEnabled: false,
+    maxSeries: 10,
+    otlpEndpoint: "https://collector.example",
+    otlpHeaders: {},
+    traceSample: 1,
+    now: () => 0,
+    version: "test",
+    exporter: { enqueue: () => {}, flush: async () => {}, queued: () => 0, stop: () => {} },
+  });
+  const rootCode = (id: string, errorCode: string | null): unknown => {
+    const trace = telemetry.startRequest(id, 0, null, "openai", 0);
+    if (trace === null) throw new Error("tracing should be on");
+    telemetry.record(requestLog({ id, errorCode }), null, trace);
+    telemetry.flush(id, trace);
+    return trace.spans[0]?.attrs.code;
+  };
+  expect(rootCode("req_1", "RATE_LIMIT")).toBe("RATE_LIMIT");
+  expect(rootCode("req_2", "interrupted")).toBe("interrupted");
+  expect(rootCode("req_3", null)).toBeUndefined();
+  // An upstream body fragment must not become a span attribute.
+  expect(rootCode("req_4", "invalid_request_error: your prompt was ...")).toBeUndefined();
   telemetry.stop();
 });

@@ -48,14 +48,17 @@ test("metrics bearer auth returns an empty 401 and accepts the exact token", asy
 
 test("scrape reads neither store nor coordinator", async () => {
   const base = await memoryStore();
+  // Both proxies open only while `createApp` runs — it subscribes to
+  // `store.routing` and seeds coord — and throw on everything afterwards, so
+  // the scrape is proven against the whole store, `routing` included.
+  let armed = false;
   const store = new Proxy(base, {
     get(target, property, receiver) {
-      if (property === "routing") return Reflect.get(target, property, receiver);
-      throw new Error(`store read: ${String(property)}`);
+      if (armed) throw new Error(`store read: ${String(property)}`);
+      return Reflect.get(target, property, receiver);
     },
   }) as Store;
   const baseCoord = memoryCoord();
-  let armed = false;
   const coord = new Proxy(baseCoord, {
     get(target, property, receiver) {
       if (armed) throw new Error(`coord read: ${String(property)}`);

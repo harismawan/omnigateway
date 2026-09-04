@@ -55,6 +55,19 @@ export function parseOtlpHeaders(value: string | null): Record<string, string> {
   return headers;
 }
 
+/**
+ * `RequestLog.errorCode` is typed `string | null`; every writer today stores a
+ * `GatewayError.code` or `"interrupted"`, but nothing near this line enforces
+ * that. A bare cast would carry any future free text straight into a span
+ * attribute, which is the boundary `SpanAttrs` exists to close.
+ */
+// ponytail: shape guard, not membership; a runtime list of ErrorCode would be a second copy of the union.
+function codeAttr(value: string): { code?: ErrorCode | "interrupted" } {
+  return value === "interrupted" || /^[A-Z_]{1,32}$/.test(value)
+    ? { code: value as ErrorCode | "interrupted" }
+    : {};
+}
+
 export function createTelemetry(opts: {
   metricsEnabled: boolean;
   maxSeries: number;
@@ -135,7 +148,7 @@ export function createTelemetry(opts: {
             requested_model: log.requestedModel,
             api_key_id: keyId ?? "",
             status: log.status,
-            ...(log.errorCode === null ? {} : { code: log.errorCode as ErrorCode | "interrupted" }),
+            ...(log.errorCode === null ? {} : codeAttr(log.errorCode)),
           };
         }
       }
