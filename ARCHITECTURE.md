@@ -8,6 +8,7 @@ Conventions governing changes — architectural boundaries, testing expectations
 
 - [How it is built](#how-it-is-built)
 - [What a request actually does](#what-a-request-actually-does)
+- [Observability](#observability)
 - [Rate limiting](#rate-limiting)
 - [Routing](#routing)
 - [Dispatch](#dispatch)
@@ -149,6 +150,20 @@ sequenceDiagram
 Two details diagram flattens. Credentials decrypt at step 13, not sooner — ranking ten candidates costs zero decryptions. Log row opens before first attempt, closes exactly once — client hanging up mid-stream recorded as such, not success.
 
 `GET /v1/models` answered from routing snapshot, no provider call. `POST /v1/messages/count_tokens` estimated locally — deliberately writes no usage row. It reads the routing snapshot too, and applies the ponytail injection by hand before estimating: it never dispatches, so a count that skipped it would under-report by the whole ruleset on every call while the real request paid for it. No degradation is recorded there, because there is no row to record it on.
+
+## Observability
+
+Observability lives in `apps/gateway/src/telemetry`, with a pure registry, renderer and span
+encoder separated from the OTLP queue and timer. Three constraints determine the shape:
+
+1. `/metrics` reads no store and calls no coordinator; every exported value is process-local.
+2. Trace context is inbound only. Provider headers remain ordered and unchanged, so no
+   `traceparent` is propagated upstream.
+3. Both surfaces are absent by default. Without an OTLP endpoint no span array is allocated, and
+   a bounded exporter drops rather than delaying or failing a request.
+
+The full rationale and metric/span vocabulary are in
+[the observability design](docs/superpowers/specs/2026-09-04-observability-design.md).
 
 ## Rate limiting
 

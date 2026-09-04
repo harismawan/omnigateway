@@ -47,6 +47,32 @@ console's Keys screen shows and edits the same matrix.
 The headers a client sees for these limits are in
 [client-api.md](client-api.md#rate-limit-headers).
 
+## Metrics and traces
+
+Both observability surfaces are off until configured. Set `OMNI_METRICS_TOKEN` to register
+`GET /metrics`, then scrape it with the same bearer token:
+
+```bash
+curl -H "Authorization: Bearer $OMNI_METRICS_TOKEN" http://127.0.0.1:9000/metrics
+```
+
+The endpoint is process-local and reads only in-memory state: it never queries the database or
+coordinator. Prometheus combines replicas. For example, request rate by provider:
+
+```promql
+sum by (provider) (rate(omni_requests_total[5m]))
+```
+
+`api_key_id` attribution is bounded by `OMNI_METRICS_MAX_SERIES` (5000 by default). Once the cap
+is reached, new key series accumulate under `api_key_id="other"` rather than disappearing;
+`omni_metrics_series_folded_total` counts that loss of attribution.
+
+Set `OMNI_OTLP_ENDPOINT` to collect request spans and POST OTLP/HTTP JSON to its `/v1/traces`
+path. `OMNI_OTLP_HEADERS` supplies comma-separated `k=v` collector headers and
+`OMNI_TRACE_SAMPLE` controls head sampling. Well-formed inbound `traceparent` is joined; no trace
+header is ever added to a provider request. Export is bounded and fire-and-forget, with dropped
+spans reported by `omni_otlp_spans_dropped_total`.
+
 ## Logs
 
 Gateway events are written to stdout as one greppable line each: process lifecycle, OAuth

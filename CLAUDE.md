@@ -647,6 +647,8 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - **Topic name resource; every query-key branch reading it in its entry** (`res:usage` cover
   console `["usage",…]` and `["client","usage",…]`). Topic classes, `res:*` prefix mapping,
   `plugin:*` no-`seq` contract, coalescing: `ARCHITECTURE.md#push-transport`.
+- Telemetry is process-local: `/metrics` reads neither store nor `coord`; provider HTTP gains no
+  trace header; tracing off allocates no spans. See the [observability design](docs/superpowers/specs/2026-09-04-observability-design.md).
 - Stdout hold operational events; `request_logs` hold completed requests. Do not restore duplicate
   per-request access lines. `requestId` join both.
 - Console read only captured stdout: `OMNI_LOG_FILE`, journald, or none. `OMNI_LOG_FILE` name
