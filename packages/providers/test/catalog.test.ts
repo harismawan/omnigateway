@@ -11,6 +11,7 @@ const PROVIDERS = [
   "kimi",
   "kilo",
   "grok",
+  "antigravity",
   "custom",
 ] as const satisfies readonly ProviderId[];
 
@@ -76,6 +77,23 @@ const EXPECTED = {
       "grok-4.20-multi-agent-0309",
     ],
   },
+  antigravity: {
+    defaultModel: "gemini-3.6-flash-high",
+    ids: [
+      "gemini-3.6-flash-high",
+      "gemini-3.6-flash-medium",
+      "gemini-3.6-flash-low",
+      "gemini-pro-agent",
+      "gemini-3.1-pro-low",
+      "gemini-3-flash-agent",
+      "gemini-3.5-flash-low",
+      "gemini-3.5-flash-extra-low",
+      "gemini-3.1-flash-lite",
+      "gemini-2.5-flash-thinking",
+      "gemini-2.5-flash",
+      "gemini-2.5-flash-lite",
+    ],
+  },
   custom: { defaultModel: "", ids: [] },
 } as const;
 
@@ -138,6 +156,12 @@ const KILO_UNPRICED: readonly string[] = [
 
 test("every model carries a usable price", () => {
   for (const provider of PROVIDERS) {
+    // Antigravity is unpriced **as a provider**, not per model the way kilo's
+    // routers are: it is sold as a subscription and states no per-token rate
+    // anywhere, so there is no row here to exempt individually. Skipped whole,
+    // with the test below as the positive control — without that, this skip
+    // would also hide a row that quietly gained a price.
+    if (provider === "antigravity") continue;
     for (const model of tableEntry(PROVIDER_MODEL_CATALOG, provider, "PROVIDER_MODEL_CATALOG")
       .models) {
       if (provider === "kilo" && KILO_UNPRICED.includes(model.id)) continue;
@@ -152,6 +176,20 @@ test("every model carries a usable price", () => {
       expect(output).toBeGreaterThanOrEqual(input);
       expect(cacheRead).toBeLessThanOrEqual(input);
     }
+  }
+});
+
+test("antigravity states no price at all, on every row", () => {
+  // The positive control for the whole-provider skip above. A row that gained a
+  // figure would fail here, and a row that lost one on a *priced* provider still
+  // fails there — the two together are what the kilo exemption gets from its
+  // named list.
+  for (const model of tableEntry(PROVIDER_MODEL_CATALOG, "antigravity", "PROVIDER_MODEL_CATALOG")
+    .models) {
+    expect({ id: model.id, pricing: model.pricing }).toEqual({
+      id: model.id,
+      pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 },
+    });
   }
 });
 
@@ -355,6 +393,9 @@ test("every provider states which credentials it can hold", () => {
     kimi: ["apiKey", "oauth"],
     kilo: ["apiKey", "oauth"],
     grok: ["apiKey", "oauth"],
+    // The one provider with no key way in: `v1internal` is the Antigravity
+    // IDE's own surface and authenticates with a Google account.
+    antigravity: ["oauth"],
     // The one provider with no authorization flow behind it.
     custom: ["apiKey"],
   });

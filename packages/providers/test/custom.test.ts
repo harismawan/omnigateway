@@ -680,6 +680,7 @@ describe("custom adapter joins stored base paths", () => {
 test("registry includes custom provider", () => {
   expect(Object.keys(ADAPTERS).sort()).toEqual([
     "anthropic",
+    "antigravity",
     "custom",
     "grok",
     "kilo",

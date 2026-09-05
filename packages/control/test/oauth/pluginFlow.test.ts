@@ -661,16 +661,39 @@ async function tokenUrlOf(provider: OAuthProvider): Promise<string | undefined> 
   return sent[0]?.url;
 }
 
+/**
+ * What a probe needs on `providerData` before it will make its call.
+ *
+ * Most read nothing and get `{}`. Antigravity's quota RPC is scoped to the Cloud
+ * Code project the connect flow minted, and the probe **returns null rather than
+ * calling** when there is none — an account still bootstrapping reads as unknown
+ * instead of as a failed read. Without this the walk below would record zero
+ * calls for it and conclude the probe was missing.
+ */
+const PROBE_STATE: Readonly<Record<string, Record<string, unknown>>> = {
+  antigravity: { projectId: "projects/p-1" },
+};
+
+/** The HTTP method each probe uses, where it is not the GET every other one is. */
+const PROBE_METHOD: Readonly<Record<string, string>> = { antigravity: "POST" };
+
 test("every usage probe reads a usage endpoint, authenticated, and gates on status", async () => {
   for (const [id, provider] of Object.entries(OAUTH_PROVIDERS)) {
     if (provider.usage === undefined) continue;
 
     const { sent, deps } = recorder();
-    await provider.usage({ accessToken: "tok" }, deps, {});
+    const state = Object.hasOwn(PROBE_STATE, id) ? (PROBE_STATE[id] ?? {}) : {};
+    await provider.usage({ accessToken: "tok" }, deps, state);
 
     expect({ id, calls: sent.length }).toEqual({ id, calls: 1 });
     const call = sent[0];
-    expect({ id, method: call?.method }).toEqual({ id, method: "GET" });
+    // **A map rather than one method, and rather than nothing.** All five flows
+    // this test was written against use GET; Google's quota RPC is a POST
+    // carrying the project id in its body. Dropping the assertion outright
+    // would have let the existing four silently switch method — their own
+    // suites do not pin it — so the contract is kept and antigravity states its
+    // exception.
+    expect({ id, method: call?.method }).toEqual({ id, method: PROBE_METHOD[id] ?? "GET" });
 
     // **The URL, which is the assertion that matters.** A probe pointed at the
     // *token* endpoint sends a bearer token to the credential-minting URL, and

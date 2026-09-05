@@ -109,6 +109,12 @@ export const PLUGIN_API_VERSION = 3;
  * stranger's `node_modules`; the version is the only part of that repair a
  * consumer can see.
  *
+ * `0.1.7` changed no API either. It exists because `--p-antigravity` joined
+ * `CSS_VARIABLES` — the list of palette names the console guarantees are
+ * defined — which is an addition a panel can rely on and therefore a version a
+ * panel can ask for. This package moved to `0.4.1` alongside it, for the reason
+ * the paragraph below gives.
+ *
  * **Changing this line means republishing _this_ package, not just the SDK.**
  * It reads as an SDK fact and it lives here, so the obvious move — bump
  * `packages/dashboard-sdk`, tag, done — leaves the registry with a
@@ -121,4 +127,4 @@ export const PLUGIN_API_VERSION = 3;
  * advertised. `publishable.test.ts` now refuses a state where this package
  * trails the SDK.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.6";
+export const DASHBOARD_SDK_VERSION = "0.1.7";

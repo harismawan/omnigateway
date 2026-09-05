@@ -12,7 +12,9 @@ export const customDescriptor: ProviderDescriptor = {
   modelPrefixes: [],
   presentation: {
     label: "OpenAI Compatible",
-    order: 6,
+    // Last, and it moves down whenever a vendor is added: this row is "none of
+    // the above" rather than a provider, so it belongs after every named one.
+    order: 7,
     tone: "cyan",
     colour: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
     pasteHint: "Enter endpoint metadata and API key.",

@@ -21,6 +21,7 @@ const IDS = [
   "kimi",
   "kilo",
   "grok",
+  "antigravity",
   "custom",
 ] as const satisfies readonly ProviderId[];
 
@@ -52,6 +53,11 @@ const WRITE_OVER_INPUT_BEFORE: Readonly<Record<BuiltIn, { fiveMinute: number; on
     kimi: { fiveMinute: 0, oneHour: 0 },
     kilo: { fiveMinute: 0, oneHour: 0 },
     grok: { fiveMinute: 0, oneHour: 0 },
+    // No "before" for antigravity — it postdates the table these fixtures
+    // record. The line is here because each fixture is keyed on `BuiltIn` and so
+    // must be total: a provider added without one stops this file compiling,
+    // which is the property that keeps the literals honest.
+    antigravity: { fiveMinute: 0, oneHour: 0 },
     custom: { fiveMinute: 0, oneHour: 0 },
   };
 
@@ -64,6 +70,7 @@ const CAPABILITIES_BEFORE: Readonly<
   kimi: { tools: true, images: false, reasoning: false },
   kilo: { tools: true, images: true, reasoning: true },
   grok: { tools: true, images: true, reasoning: true },
+  antigravity: { tools: true, images: true, reasoning: true },
   custom: { tools: true, images: true, reasoning: true },
 };
 
@@ -196,6 +203,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: ["kimi-", "moonshot"],
     kilo: [],
     grok: ["grok-"],
+    antigravity: ["gemini-"],
     custom: [],
   };
 
@@ -203,6 +211,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
   const CALLBACKS_BEFORE: Readonly<Partial<Record<BuiltIn, { uri: string; label: string }>>> = {
     openai: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
     grok: { uri: "http://127.0.0.1:56121/callback", label: "Grok" },
+    antigravity: { uri: "http://127.0.0.1:51121/callback", label: "Antigravity" },
   };
 
   /** `PROVIDER_LABEL`, which existed in three separate copies. */
@@ -212,6 +221,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: "Kimi",
     kilo: "Kilo",
     grok: "Grok",
+    antigravity: "Antigravity",
     custom: "OpenAI Compatible",
   };
 
@@ -222,6 +232,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: "blue",
     kilo: "orange",
     grok: "yellow",
+    antigravity: "violet",
     custom: "cyan",
   };
 
@@ -232,6 +243,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: { light: "oklch(0.53 0.17 330)", dark: "oklch(0.72 0.16 330)" },
     kilo: { light: "oklch(0.52 0.14 224)", dark: "oklch(0.74 0.14 224)" },
     grok: { light: "oklch(0.52 0.14 125)", dark: "oklch(0.74 0.14 125)" },
+    antigravity: { light: "oklch(0.52 0.14 277)", dark: "oklch(0.74 0.14 277)" },
     custom: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
   };
 
@@ -251,6 +263,8 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: "Enter the code on Kimi's device page. This dialog finishes on its own.",
     kilo: "Approve the code on Kilo's device page. This dialog finishes on its own.",
     grok: "Authorize in the browser. When it redirects to 127.0.0.1, paste the whole URL.",
+    antigravity:
+      "Approve in a browser on the gateway's own machine — or SSH-forward port 51121 first. When it redirects to 127.0.0.1, paste the whole URL.",
     custom: "Enter endpoint metadata and API key.",
   };
 
@@ -261,6 +275,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     "kimi",
     "kilo",
     "grok",
+    "antigravity",
     "custom",
   ];
 
