@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ChatRequest, StreamEvent } from "@omni/ir";
+import { type ChatRequest, promptTokens, type StreamEvent } from "@omni/ir";
 import { buildToolCloak } from "../src/antigravity/cloak.ts";
 import { decodeAntigravityStream } from "../src/antigravity/decode.ts";
 import type { SseMessage } from "../src/sse.ts";
@@ -294,5 +294,52 @@ describe("the tool cloak on the way back", () => {
     expect(out.find((e) => e.type === "blockStart")).toMatchObject({
       block: { type: "toolUse", name: "Unrelated" },
     });
+  });
+});
+
+describe("the implicit prompt cache", () => {
+  /**
+   * A frame carrying the exact counts one live cache hit reported.
+   *
+   * Measured 2026-09-05 on `gemini-3.8-flash-high`: the same 61,244-token
+   * prefix asked a new question, answered `cachedContentTokenCount: 57309`.
+   * Synthetic round numbers cannot show that `cachedContentTokenCount` is
+   * counted **inside** `promptTokenCount` rather than beside it — a real pair
+   * can, because 57,309 exceeds any plausible standalone input for a prompt of
+   * that size.
+   */
+  const hit = {
+    response: {
+      candidates: [{ finishReason: "STOP" }],
+      usageMetadata: {
+        promptTokenCount: 61_244,
+        candidatesTokenCount: 12,
+        cachedContentTokenCount: 57_309,
+      },
+    },
+  };
+
+  test("a cache read is subtracted from input rather than billed twice", async () => {
+    const out: StreamEvent[] = [];
+    for await (const event of decodeAntigravityStream(frames(hit))) out.push(event);
+    const end = out.find((e) => e.type === "end");
+    expect(end?.type === "end" && end.usage).toEqual({
+      // 61,244 − 57,309. Leaving the cached tokens in `inputTokens` would bill
+      // them at the input rate and again at the cache rate.
+      inputTokens: 3_935,
+      outputTokens: 12,
+      cacheReadTokens: 57_309,
+      // **Always zero, and measured so**: Google bills implicit-cache storage
+      // by the hour and reports no per-write token count at all, which is why
+      // the catalog's `cacheWrite5m`/`cacheWrite1h` are a real zero.
+      cacheWriteTokens: 0,
+    });
+  });
+
+  test("the whole prompt is still recoverable for a client that reports one number", async () => {
+    const out: StreamEvent[] = [];
+    for await (const event of decodeAntigravityStream(frames(hit))) out.push(event);
+    const end = out.find((e) => e.type === "end");
+    expect(end?.type === "end" && promptTokens(end.usage)).toBe(61_244);
   });
 });

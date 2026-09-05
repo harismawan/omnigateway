@@ -346,6 +346,49 @@ walk rather than inside it. Where a repair has a choice, it infers rather than
 deletes — a node carrying `properties` *is* an object — except against a client's
 explicitly stated contradicting type, which is not the encoder's to overrule.
 
+### The prompt cache is real, implicit, and not steerable
+
+`wire.ts` records `antigravity:cache-control-dropped` for a breakpoint the
+envelope cannot carry, and that degradation is easy to misread as "this provider
+does not cache". It caches. Measured 2026-09-05 against the live backend, with a
+fresh random prefix per run so the first send is genuinely cold and a separate
+prefix as the control:
+
+| send | prompt | cached | notes |
+| --- | --- | --- | --- |
+| 1 (cold) | 61,244 | 0 | |
+| 2 (same prefix, new question) | 61,244 | 0 | |
+| 3 (same prefix, new question) | 61,244 | **57,309** | 94% of the prompt |
+| control, fresh prefix | 62,445 | 0 | it is the prefix, not global warmth |
+
+What that establishes, and the shape of each claim:
+
+- **The gateway has no say in it.** No marker appears anywhere in the request;
+  the backend decides. `autoCacheEnabled` exists for a provider whose markers the
+  gateway can place, so there is nothing here for it to switch on.
+- **`cachedContentTokenCount` is counted inside `promptTokenCount`.** The decoder
+  already assumed this and nothing had tested it: 61,244 − 57,309 = 3,935 of
+  fresh input, and a cache read larger than any plausible standalone prompt is
+  what makes the direction unambiguous. Pinned in `antigravityDecode.test.ts`
+  with these numbers rather than round synthetic ones.
+- **No write tokens, ever.** Google bills implicit-cache storage by the hour and
+  reports no per-write count, which is the measurement behind the catalog's
+  `cacheWrite5m`/`cacheWrite1h` being a real zero rather than a missing figure.
+- **The first hit lands on send 2 or 3, and is not monotonic.** Four of five
+  fresh prefixes hit on send 2 and one on send 3; a 45-second idle between sends
+  1 and 2 did not help, so it is repetition rather than write latency. One run
+  read `0 / 24,545 / 0 / 24,545` — a hit, a miss, then a hit again. **Do not
+  write a test, a heuristic or a projection that assumes a warm cache stays
+  warm.**
+- **There is a size floor**, between measured prompts of 15,646 (never cached
+  over four sends) and 18,246 (cached). Below it the cache never engages, so a
+  short-prompt workload sees none of this.
+- **Every family caches** — Flash high and low, `gemini-pro-agent`, Flash Lite
+  all behaved the same way.
+
+The cached fraction runs 67–96% of the prompt, so `cacheRead` is the price that
+matters most on this provider once a prompt clears the floor.
+
 ### The catalog carries list prices nobody is billed
 
 The rows shipped unpriced, on the reasoning that Antigravity is a flat

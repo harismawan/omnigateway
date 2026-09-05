@@ -605,6 +605,14 @@ export function toAntigravityWire(
       // breakpoint the client placed cannot be expressed. Recorded rather than
       // dropped in silence, which is the standing rule for a requested feature a
       // provider cannot express.
+      //
+      // **This is "your breakpoint is ignored", not "nothing is cached".** The
+      // backend caches implicitly and the gateway has no say in it: measured
+      // 2026-09-05, resending a ~61K-token prefix under a new question returned
+      // `cachedContentTokenCount: 57309` with no marker anywhere in the request.
+      // So there is nothing to add here for `autoCacheEnabled` to switch on —
+      // that flag exists for a provider whose markers the gateway can place, and
+      // this one has none. Behaviour and thresholds: the antigravity spec.
       if (hasCacheControl(block)) note("antigravity:cache-control-dropped");
 
       switch (block.type) {
