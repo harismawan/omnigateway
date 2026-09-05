@@ -296,16 +296,45 @@ async function* mint(accessToken: string, fail: AuthHelpers["fail"]): AuthStep<M
 /**
  * One token grant plus one mint, as the credential the store holds.
  *
- * **Meta issues neither a refresh token nor an expiry**, measured: a completed
- * device grant carries `access_token` and `token_type` and nothing else, though
- * the client's own `TokenGrant` type has a `refresh_token` field. So
- * `expiresAt` is null on every muse credential, and the refresher — which wakes
- * on a non-null expiry — never runs. `refresh` below is kept because the token
- * endpoint does accept the grant, and a scope or a plan that starts issuing one
- * would make it live; it is simply unreachable today, exactly as kilo's is.
+ * **Muse does not refresh. It re-logs in.** Three independent readings agree:
  *
- * The practical consequence is worth stating where an operator will meet it: a
- * muse account is reconnected by hand when its token dies, not renewed.
+ * - A completed device grant carries `access_token` and `token_type` and
+ *   nothing else — no `refresh_token`, no `expires_in`. Measured against a live
+ *   account, not inferred.
+ * - The shipped binary contains the string
+ *   `urn:ietf:params:oauth:grant-type:device_code` and **no
+ *   `grant_type=refresh_token` anywhere**. `refresh_token` survives in it only
+ *   as a *field name*: on `TokenGrant`, which would parse one if it arrived,
+ *   and on the credential struct it shares with the other vendors Muse Code can
+ *   drive (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` sit in the same blob), so
+ *   that field is those providers' OAuth rather than Meta's.
+ * - The launcher's `read_credential` looks for `mechanism`, `access_token` and
+ *   `expires_at`, never a refresh token, and `ensure_access_token` reads
+ *   `expires_at` into a variable it then never uses. `device_login` is the only
+ *   token source in the script.
+ *
+ * What exists instead is revocation: `muse-code/logout`, a `RevokeBody`, and an
+ * `invalidated_count` in the reply. The client's stated recovery is "your saved
+ * login is no longer valid. Log in again or use a different account."
+ *
+ * So `expiresAt` is null on every muse credential and the refresher — which
+ * wakes on a non-null expiry — never runs. `refresh` below is kept rather than
+ * made to throw, because it costs nothing and the token endpoint would accept
+ * the grant the day Meta issues a refresh token; a `refreshToken` this flow
+ * never stores is also one the host can never hand back, so there is no path
+ * that reaches it by accident.
+ *
+ * The operator-facing consequence is narrower than "the account stops working",
+ * and worth stating exactly. Inference does **not** depend on the OAuth token:
+ * the codec authenticates with the minted `LLM|…` key, which is a Model API
+ * credential in its own right and outlives the grant that fetched it. So when
+ * the login dies, traffic keeps flowing and only the usage probe — the one
+ * caller that still presents the token — starts answering 401. `usageReadable`
+ * turns that into a null report, so the quota reads *unknown* rather than
+ * disabling anything, which is right: a probe reports and never judges.
+ *
+ * Reconnecting is therefore about restoring quota visibility, not about
+ * restoring service. Service ends only when Meta revokes the key itself.
  */
 function toResult(
   token: TokenResponse,

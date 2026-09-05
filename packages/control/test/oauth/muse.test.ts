@@ -379,3 +379,33 @@ test("the usage probe never judges the credential it reads", async () => {
     null,
   );
 });
+
+test("a dead login degrades the quota read, and nothing else", async () => {
+  // Muse issues no refresh token, so a muse credential's OAuth grant simply
+  // dies one day. That must not read as a verdict on the account: the codec
+  // authenticates with the minted key, which outlives the grant, so the probe
+  // is the only caller still presenting the token. It reports unknown and the
+  // credential stays enabled.
+  const http = sequence({ status: 401, body: { title: "Unauthorized" } });
+
+  expect(await museOAuth.usage?.({ accessToken: "dead-tok" }, { http, now: () => NOW }, {})).toBe(
+    null,
+  );
+});
+
+test("a grant with no refresh token or expiry is stored as exactly that", async () => {
+  // The live shape: `access_token` and `token_type`, nothing else. A null
+  // `expiresAt` is what keeps the refresher asleep, and a null `refreshToken`
+  // is what makes `refresh` unreachable rather than merely unused — the host
+  // has nothing to hand it.
+  const http = sequence(
+    { status: 200, body: { access_token: "oauth-tok", token_type: "Bearer" } },
+    MINTED,
+  );
+  const result = await museOAuth.exchange({ code: "", pending: PENDING }, { http, now: () => NOW });
+
+  expect(result.expiresAt).toBe(null);
+  expect(result.secrets.refreshToken).toBe(null);
+  // The key is what serves traffic, and it is present regardless.
+  expect(result.secrets.apiKey).toBe("meta-key");
+});
