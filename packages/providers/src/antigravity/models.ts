@@ -26,8 +26,9 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  * are **deliberately absent though they answer**: the probe reports all three
  * with the displayName "Gemini 3.1 Flash Lite", so they are old names aliased
  * onto a model already listed below and carrying them would offer four spellings
- * of one row. `gemini-pro-agent` is left out for the same reason — it is
- * `gemini-3.1-pro-high` under a name that does not say which model it is.
+ * of one row. `gemini-pro-agent` is **not** one of these: it names the same
+ * model as `gemini-3.1-pro-high`, and it is the only one of the two the backend
+ * will actually serve. See the row below.
  *
  * **Everything here is unpriced**, which is a deliberate zero and not a missing
  * figure. Antigravity is sold as a subscription and states no per-token rate at
@@ -167,7 +168,19 @@ export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
       limits: PRO_LIMITS,
     },
     {
-      id: "gemini-3.1-pro-high",
+      // **The catalog lists `gemini-3.1-pro-high` and the backend will not
+      // serve it.** Measured 2026-09-05, twice: every request shape answers
+      // `400 Request contains an invalid argument.` under that id while
+      // `gemini-3.1-pro-low` answers 200 — so it is the id, not the tier, the
+      // entitlement or the request. `gemini-pro-agent` carries the displayName
+      // "Gemini 3.1 Pro (High)" and serves, so it is the same model under the
+      // spelling that works.
+      //
+      // An earlier reading of this file left `gemini-pro-agent` out as "the
+      // same row under a name that does not say which model it is". That was
+      // right about the model and wrong about which id the backend takes, and
+      // the probe cannot show it: `fetchAvailableModels` reports both.
+      id: "gemini-pro-agent",
       label: "Gemini 3.1 Pro (High)",
       pricing: FREE,
       limits: PRO_LIMITS,

@@ -75,6 +75,9 @@ describe("message mapping", () => {
     expect(body.request.contents).toEqual([
       { role: "user", parts: [{ text: "hi" }] },
       { role: "model", parts: [{ text: "hello" }] },
+      // Appended by `closingTurn`, which has its own test: this history ends on
+      // a model turn, and the upstream refuses those outright.
+      { role: "user", parts: [{ text: " " }] },
     ]);
   });
 
@@ -212,6 +215,51 @@ describe("message mapping", () => {
     // client never wrote and the model would read them.
     expect(response.body.request.contents[0]?.parts[0]).toEqual({ text: "" });
     expect(response.degradations).toContain("antigravity:opening-turn-added");
+  });
+
+  test("a history ending on a model turn gets a trailing user turn", () => {
+    // Measured: `Requests ending with a model turn are not supported.` — and
+    // reachable from an ordinary feature, since an Anthropic client prefills the
+    // answer with a trailing assistant turn for the model to continue from.
+    const { body, degradations } = build({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Count to three." }] },
+        { role: "assistant", content: [{ type: "text", text: "1, 2," }] },
+      ],
+    });
+    // The prefill is kept, not dropped: it is the thing the client asked for.
+    expect(body.request.contents.map((c) => c.role)).toEqual(["user", "model", "user"]);
+    expect(body.request.contents[1]?.parts).toEqual([{ text: "1, 2," }]);
+    // A space, not the empty string `openingTurn` uses — measured: a trailing
+    // turn holding only `{ text: "" }` is refused with the same message.
+    expect(body.request.contents[2]).toEqual({ role: "user", parts: [{ text: " " }] });
+    expect(degradations).toContain("antigravity:closing-turn-added");
+  });
+
+  test("a history already ending on a user turn is left alone", () => {
+    const { body, degradations } = build({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "assistant", content: [{ type: "text", text: "hello" }] },
+        { role: "user", content: [{ type: "text", text: "again" }] },
+      ],
+    });
+    expect(body.request.contents.map((c) => c.role)).toEqual(["user", "model", "user"]);
+    expect(body.request.contents[2]?.parts).toEqual([{ text: "again" }]);
+    expect(degradations).not.toContain("antigravity:closing-turn-added");
+  });
+
+  test("a lone model turn is repaired at both ends", () => {
+    const { body, degradations } = build({
+      messages: [{ role: "assistant", content: [{ type: "text", text: "hello" }] }],
+    });
+    expect(body.request.contents).toEqual([
+      { role: "user", parts: [{ text: "" }] },
+      { role: "model", parts: [{ text: "hello" }] },
+      { role: "user", parts: [{ text: " " }] },
+    ]);
+    expect(degradations).toContain("antigravity:opening-turn-added");
+    expect(degradations).toContain("antigravity:closing-turn-added");
   });
 
   test("a history already opening on a user turn is left alone", () => {
@@ -1333,7 +1381,7 @@ describe("the Cloud Code output ceiling", () => {
     }
     const byId = new Map(ANTIGRAVITY_MODELS.models.map((m) => [m.id, m.limits.maxOutputTokens]));
     expect(byId.get("gemini-3.8-flash-high")).toBe(65_536);
-    expect(byId.get("gemini-3.1-pro-high")).toBe(65_535);
+    expect(byId.get("gemini-pro-agent")).toBe(65_535);
   });
 
   test("a thinking budget leaves room for an answer above it", () => {

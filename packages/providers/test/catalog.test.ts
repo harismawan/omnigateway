@@ -95,7 +95,7 @@ const EXPECTED = {
       "gemini-3.5-flash-extra-low",
       "gemini-3-flash",
       "gemini-3.5-flash-lite",
-      "gemini-3.1-pro-high",
+      "gemini-pro-agent",
       "gemini-3.1-pro-low",
       "gemini-3.1-flash-lite",
       "gemini-2.5-pro",

@@ -346,6 +346,46 @@ walk rather than inside it. Where a repair has a choice, it infers rather than
 deletes — a node carrying `properties` *is* an object — except against a client's
 explicitly stated contradicting type, which is not the encoder's to overrule.
 
+### `gemini-3.1-pro-high` is listed and not servable
+
+Found by running the full shape battery against **every** catalog row rather
+than the one the incident named. `gemini-3.1-pro-high` answers
+`400 Request contains an invalid argument.` on every request shape — plain, with
+tools, at each reasoning mode, at each output ceiling — while
+`gemini-3.1-pro-low` answers 200 to the same body. So it is the id, and not the
+tier, the entitlement or the request.
+
+`fetchAvailableModels` reports **both** `gemini-3.1-pro-high` and
+`gemini-pro-agent`, and the second carries the displayName "Gemini 3.1 Pro
+(High)". An earlier reading of this file left `gemini-pro-agent` out as "the same
+row under a name that does not say which model it is" — right about the model,
+wrong about which id the backend takes. The row now ships the id that serves.
+
+**The catalog probe cannot see this.** It reports rows that do not work, so
+"the probe lists it" is not evidence a row is servable; only a request is. A
+saved target still naming the old id keeps failing exactly as it does today,
+since catalog edits reach new targets only.
+
+Note also that `fetchAvailableModels` answers on `daily-cloudcode-pa` and its
+`models` field is an **object keyed by id**, not an array — reading it as an
+array silently yields an empty comparison that looks like agreement.
+
+### Images are accepted on their bytes, not their declared type
+
+Probed 2026-09-05 across mime types and payload shapes: `image/bmp`,
+`application/pdf`, `text/plain`, an empty string and `image/png; charset=utf-8`
+all answer 200 carrying PNG bytes, so `inlineData.mimeType` is not validated.
+What is validated is the payload — malformed base64 answers
+`Base64 decoding failed`, and empty or truncated bytes answer `Unable to process
+input image`. Base64url is accepted; a `data:` URI prefix is not, and that case
+is unreachable because `ingress/schemas.ts` already splits data URIs before the
+IR sees them. **No repair here on purpose**: an image cannot be repaired, and
+dropping one would answer a question about a picture without the picture, which
+is worse than the 400.
+
+Nothing size-related was found: 1 MB of `systemInstruction`, 4 MB of user text,
+500 history turns and 40 large images all answer 200.
+
 ### The same staging applies outside the schema
 
 Hardening `parameters` left every neighbouring field the encoder builds from
@@ -381,6 +421,14 @@ reachable than anything in the schema:
   `stop_sequences`, and a non-positive `maxOutputTokens` answers a bare
   `Request contains an invalid argument.` All clamped; `maxTokens: 0` is dropped
   instead, since the model's own default beats a one-token ceiling.
+- **The closing turn.** `Requests ending with a model turn are not supported.`
+  Reachable from an ordinary feature, not a malformed request: an Anthropic
+  client prefills the answer with a trailing assistant turn. The prefill is
+  **kept** and a trailing user turn added after it — dropping the turn also runs
+  and throws away the thing the client asked for. That turn holds a **single
+  space**, and the asymmetry with the opening repair is measured rather than
+  chosen: a trailing turn holding only `{ text: "" }` is refused with the same
+  message, while a *leading* empty turn is accepted.
 - **The opening turn.** A function call must follow a user turn or a function
   response, and a function response must follow a call. Only the *first* entry
   can break this — an orphan response later is fine, because `mergeSameRole` has

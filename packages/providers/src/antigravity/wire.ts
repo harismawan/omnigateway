@@ -152,6 +152,30 @@ function openingTurn(contents: Content[], note: (d: string) => void): Content[] 
 }
 
 /**
+ * A history that may not end on a model turn.
+ *
+ * **`Requests ending with a model turn are not supported.`** — measured
+ * 2026-09-05, and reachable from an ordinary feature rather than a malformed
+ * request: an Anthropic client prefills the answer by sending a trailing
+ * assistant turn for the model to continue from.
+ *
+ * The prefill is **kept** and a trailing user turn added after it, so the model
+ * still reads its own partial answer as context. Dropping the turn instead also
+ * runs (measured) and throws away the thing the client asked for.
+ *
+ * The added turn holds a **single space, not the empty string** `openingTurn`
+ * uses. That asymmetry is measured and not a preference: a trailing user turn
+ * whose only part is `{ text: "" }` is still refused with the same message,
+ * where `{ text: " " }` is accepted. A leading empty turn is accepted, so each
+ * repair uses the least it can.
+ */
+function closingTurn(contents: Content[], note: (d: string) => void): Content[] {
+  if (contents[contents.length - 1]?.role !== "model") return contents;
+  note("antigravity:closing-turn-added");
+  return [...contents, { role: "user", parts: [{ text: " " }] }];
+}
+
+/**
  * Whether a block carries a cache breakpoint.
  *
  * `in` rather than a property read: the union has no common `cacheControl` to
@@ -637,7 +661,9 @@ export function toAntigravityWire(
     if (parts.length > 0) contents.push({ role, parts });
   }
 
-  const request: GeminiRequest = { contents: openingTurn(mergeSameRole(contents), note) };
+  const request: GeminiRequest = {
+    contents: closingTurn(openingTurn(mergeSameRole(contents), note), note),
+  };
 
   const system = systemText(req.system, "antigravity", note);
   if (system !== undefined && system.length > 0) {
