@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { ANTHROPIC_CLI_VERSION, anthropicBodyOrder } from "./anthropic/profile.ts";
+import { antigravityBodyOrder } from "./antigravity/profile.ts";
 import { customBodyOrder } from "./custom/profile.ts";
 import { grokBodyOrder } from "./grok/profile.ts";
 import { kiloBodyOrder } from "./kilo/profile.ts";
@@ -19,6 +20,7 @@ export const BODY_ORDER: Readonly<Record<string, readonly string[]>> = {
   kimi: kimiBodyOrder,
   kilo: kiloBodyOrder,
   grok: grokBodyOrder,
+  antigravity: antigravityBodyOrder,
   custom: customBodyOrder,
 };
 

@@ -1,4 +1,5 @@
 import { anthropicDescriptor } from "./anthropic/descriptor.ts";
+import { antigravityDescriptor } from "./antigravity/descriptor.ts";
 import { customDescriptor } from "./custom/descriptor.ts";
 import type { ProviderDescriptors } from "./descriptor.ts";
 import { grokDescriptor } from "./grok/descriptor.ts";
@@ -45,6 +46,7 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptors = {
   kimi: kimiDescriptor,
   kilo: kiloDescriptor,
   grok: grokDescriptor,
+  antigravity: antigravityDescriptor,
   custom: customDescriptor,
 };
 

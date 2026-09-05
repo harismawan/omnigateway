@@ -290,6 +290,7 @@ test("OAuth inference uses the Kimi Coding API", async () => {
 test("the registry exposes every provider", () => {
   expect(Object.keys(ADAPTERS).sort()).toEqual([
     "anthropic",
+    "antigravity",
     "custom",
     "grok",
     "kilo",

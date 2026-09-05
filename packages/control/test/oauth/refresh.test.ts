@@ -351,6 +351,7 @@ test("a provider that does have a refresh still reaches it", async () => {
   // for its own five, or "refused cleanly" would be true of everything.
   expect(Object.keys(OAUTH_PROVIDERS).sort()).toEqual([
     "anthropic",
+    "antigravity",
     "grok",
     "kilo",
     "kimi",

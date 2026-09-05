@@ -91,7 +91,7 @@ shape and why the HTTP client is built on `node:http`.
    **Write a `PluginOAuthFlow`, not an `OAuthProvider`.** Each step is an `async function*` that
    **yields a described request** and reads the response the host hands back; `oauthAdapter` — which
    is the host's, in `@omni/control`, because it holds the transport — turns it into the
-   `OAuthProvider` every consumer already takes. All five built-in flows are written this way and
+   `OAuthProvider` every consumer already takes. All six built-in flows are written this way and
    exported as flows, e.g. `export const grokOAuthFlow: PkcePluginFlow = { ... }`, which is the same
    argument step 7 makes for codecs: a plugin-supplied flow takes exactly the shape a built-in does,
    so no rule holds for one and not the other. Type it with its own arm — `PkcePluginFlow` or
@@ -121,7 +121,7 @@ shape and why the HTTP client is built on `node:http`.
    **Write a `codec.ts`; there is no other shape.** `ProviderCodec` in
    `packages/providers/src/codec.ts` describes a request and reads a stream; `codecAdapter` performs
    it, checks the status, applies the deadline and refuses an empty body — once, for every provider,
-   instead of once per provider. All six built-ins are codecs and `codecAdapter` is the only
+   instead of once per provider. All seven built-ins are codecs and `codecAdapter` is the only
    implementation of `ProviderAdapter` this repository ships, which is what makes the plugin
    capability honest: a plugin-supplied provider takes exactly the shape a built-in does, so no rule
    holds for one and not the other. `ProviderAdapter` survives as the *injection point* dispatch and

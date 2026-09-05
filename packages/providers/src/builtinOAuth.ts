@@ -1,5 +1,6 @@
 import type { ProviderId } from "@omni/ir";
 import { anthropicOAuthFlow } from "./anthropic/oauth.ts";
+import { antigravityOAuthFlow } from "./antigravity/oauth.ts";
 import { grokOAuthFlow } from "./grok/oauth.ts";
 import { kiloOAuthFlow } from "./kilo/oauth.ts";
 import { kimiOAuthFlow } from "./kimi/oauth.ts";
@@ -42,5 +43,6 @@ export function builtinOAuthFlows(): ReadonlyArray<readonly [ProviderId, PluginO
     ["kimi", kimiOAuthFlow],
     ["kilo", kiloOAuthFlow],
     ["grok", grokOAuthFlow],
+    ["antigravity", antigravityOAuthFlow],
   ];
 }
