@@ -123,9 +123,22 @@ describe("ConnectDialog", () => {
   test("Kilo is offered and connects by device code, not by paste", async () => {
     const user = userEvent.setup();
     const onConnected = mock(() => {});
+    let polls = 0;
     createFetchStub({
       "POST /api/connect/start": () => deviceStart,
-      "POST /api/connect/poll": () => ({ status: "complete", id: "cred-kilo" }),
+      // Pending first, the way the device test above does it, and for a reason
+      // this test learned the hard way: completing on the *first* poll gives the
+      // assertions below only `pollIntervalMs` — 20ms — before the dialog resets
+      // and closes itself, because that is what the effect does on `complete`.
+      // Green locally and on CI for months, then a loaded release runner missed
+      // the window and failed the whole release. The screen has to stay put
+      // while it is being read.
+      "POST /api/connect/poll": () => {
+        polls += 1;
+        return polls === 1
+          ? { status: 202, body: { status: "pending" } }
+          : { status: "complete", id: "cred-kilo" };
+      },
     });
     open(onConnected);
 
