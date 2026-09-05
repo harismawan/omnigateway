@@ -294,6 +294,7 @@ test("the registry exposes one flow per provider once the built-ins are seeded",
   // `builtins.ts` is what runs the seed, so this asserts the seed's own result.
   expect(Object.keys(OAUTH_PROVIDERS).sort()).toEqual([
     "anthropic",
+    "antigravity",
     "grok",
     "kilo",
     "kimi",

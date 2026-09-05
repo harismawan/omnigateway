@@ -1,8 +1,19 @@
 // The codec is exported alongside the adapter so the round-trip tests in
 // Task 17 can drive it without a live HTTP call.
+
 export { anthropicAdapter, decodeAnthropic, toWire as toAnthropicWire } from "./anthropic/index.ts";
 export { anthropicOAuthFlow, parseAnthropicUsage } from "./anthropic/oauth.ts";
 export * from "./anthropic/tools.ts";
+export {
+  antigravityAdapter,
+  decodeAntigravityStream,
+  toAntigravityWire,
+} from "./antigravity/index.ts";
+export {
+  ANTIGRAVITY_CLIENT_ID,
+  antigravityOAuthFlow,
+  parseAntigravityQuota,
+} from "./antigravity/oauth.ts";
 export * from "./body.ts";
 export { builtinOAuthFlows } from "./builtinOAuth.ts";
 export * from "./catalog.ts";

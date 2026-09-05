@@ -662,36 +662,50 @@ async function tokenUrlOf(provider: OAuthProvider): Promise<string | undefined> 
 }
 
 /**
- * Providers whose usage probe is not a `GET`, and why each one is not.
+ * What a probe needs on `providerData` before it will make its call.
  *
- * An allowlist rather than a relaxed assertion, because the method check is
- * load-bearing for everyone else: a `GET` cannot be the credential-minting call
- * by construction, and that is most of what the URL check below is protecting.
- * Adding a name here is a decision a reviewer sees; widening the assertion to
- * `GET | POST` is one nobody would.
- *
- * `muse` — Meta serves `subs_usage` from `POST /muse-code/key` and from nowhere
- * else, so the probe is a mint. Safe because minting is a **read** of the
- * account's existing key rather than an issue of a new one: two mints seconds
- * apart against one account returned a byte-identical `api_key`, measured
- * against the live endpoint. Were that ever to change, the probe would swap the
- * stored key out every poll interval and `usage` cannot write one back — so if
- * this line is ever copied for a second provider, that is the property to
- * measure first.
+ * Most read nothing and get `{}`. Antigravity's quota RPC is scoped to the Cloud
+ * Code project the connect flow minted, and the probe **returns null rather than
+ * calling** when there is none — an account still bootstrapping reads as unknown
+ * instead of as a failed read. Without this the walk below would record zero
+ * calls for it and conclude the probe was missing.
  */
-const NON_GET_USAGE_PROBES: Readonly<Record<string, "POST">> = { muse: "POST" };
+const PROBE_STATE: Readonly<Record<string, Record<string, unknown>>> = {
+  antigravity: { projectId: "projects/p-1" },
+};
+
+/** The HTTP method each probe uses, where it is not the GET every other one is. */
+/**
+ * Probes that are not a `GET`, and why each one is not.
+ *
+ * `antigravity` — Google's quota RPC is a POST carrying the project id in its
+ * body. `muse` — Meta serves `subs_usage` from `POST /muse-code/key` and from
+ * nowhere else, so that probe is a mint. Safe because minting is a **read** of
+ * the account's existing key rather than an issue of a new one: two mints
+ * seconds apart against one account returned a byte-identical `api_key`,
+ * measured against the live endpoint. Were that ever to change the probe would
+ * swap the stored key out every poll interval, and `usage` cannot write one
+ * back — so a third entry here should measure that property first.
+ */
+const PROBE_METHOD: Readonly<Record<string, string>> = { antigravity: "POST", muse: "POST" };
 
 test("every usage probe reads a usage endpoint, authenticated, and gates on status", async () => {
   for (const [id, provider] of Object.entries(OAUTH_PROVIDERS)) {
     if (provider.usage === undefined) continue;
 
     const { sent, deps } = recorder();
-    await provider.usage({ accessToken: "tok" }, deps, {});
+    const state = Object.hasOwn(PROBE_STATE, id) ? (PROBE_STATE[id] ?? {}) : {};
+    await provider.usage({ accessToken: "tok" }, deps, state);
 
     expect({ id, calls: sent.length }).toEqual({ id, calls: 1 });
     const call = sent[0];
-    const expected = NON_GET_USAGE_PROBES[id] ?? "GET";
-    expect({ id, method: call?.method }).toEqual({ id, method: expected });
+    // **A map rather than one method, and rather than nothing.** All five flows
+    // this test was written against use GET; Google's quota RPC is a POST
+    // carrying the project id in its body. Dropping the assertion outright
+    // would have let the existing four silently switch method — their own
+    // suites do not pin it — so the contract is kept and antigravity states its
+    // exception.
+    expect({ id, method: call?.method }).toEqual({ id, method: PROBE_METHOD[id] ?? "GET" });
 
     // **The URL, which is the assertion that matters.** A probe pointed at the
     // *token* endpoint sends a bearer token to the credential-minting URL, and

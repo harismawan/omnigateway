@@ -1,4 +1,5 @@
 import { anthropicAdapter } from "./anthropic/index.ts";
+import { antigravityAdapter } from "./antigravity/index.ts";
 import { BODY_ORDER } from "./body.ts";
 import { customAdapter } from "./custom/index.ts";
 import type { ProviderDescriptor } from "./descriptor.ts";
@@ -46,6 +47,7 @@ export const ADAPTERS: Readonly<Record<string, ProviderAdapter>> = {
   kimi: kimiAdapter,
   kilo: kiloAdapter,
   grok: grokAdapter,
+  antigravity: antigravityAdapter,
   muse: museAdapter,
   custom: customAdapter,
 };

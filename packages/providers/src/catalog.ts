@@ -1,5 +1,6 @@
 import type { ProviderId } from "@omni/ir";
 import { ANTHROPIC_MODELS } from "./anthropic/models.ts";
+import { ANTIGRAVITY_MODELS } from "./antigravity/models.ts";
 import type {
   CatalogAuth,
   ProviderModelCatalogEntry,
@@ -45,6 +46,7 @@ export const PROVIDER_MODEL_CATALOG: Readonly<Record<string, ProviderModelCatalo
   kimi: KIMI_MODELS,
   kilo: KILO_MODELS,
   grok: GROK_MODELS,
+  antigravity: ANTIGRAVITY_MODELS,
   muse: MUSE_MODELS,
   custom: CUSTOM_MODELS,
 };

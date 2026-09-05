@@ -57,6 +57,27 @@ const http = async (): Promise<HttpResponse> => ({
   text: async () => "",
 });
 
+/**
+ * What one adapter needs on its credential before it will reach its encoder.
+ *
+ * The default below is an API key and a custom endpoint, which covers five of
+ * the seven. A provider that refuses earlier than that states the difference
+ * here rather than having the shared fixture widened for everyone: giving every
+ * adapter an access token would send Anthropic down its OAuth leg, which injects
+ * an identity line and records `anthropic:oauth-system-prefix` — a real
+ * degradation about something else, and one that would make the control below
+ * assert nothing.
+ *
+ * Keyed by id and consulted by `Object.hasOwn`, so a provider absent from it
+ * still runs. The walk is still the registry's.
+ */
+const CREDENTIAL_NEEDS: Readonly<Record<string, { accessToken?: string; projectId?: string }>> = {
+  // OAuth only — `v1internal` has no API-key way in — and every request carries
+  // the Cloud Code project the connect flow minted, which the codec refuses to
+  // send blank.
+  antigravity: { accessToken: "test-token", projectId: "projects/p-1" },
+};
+
 async function encode(
   id: string,
   system: ContentBlock[],
@@ -64,6 +85,7 @@ async function encode(
 ) {
   const adapter = ADAPTERS[id];
   if (adapter === undefined) throw new Error(`no adapter for ${id}`);
+  const needs = Object.hasOwn(CREDENTIAL_NEEDS, id) ? (CREDENTIAL_NEEDS[id] ?? {}) : {};
   const result = await adapter.send({
     request: request(system),
     model: "m",
@@ -71,11 +93,8 @@ async function encode(
     // encodes — `custom` needs an API key and an origin, the OAuth ones need a
     // token. The point of reach here is the encoder, not the auth check.
     credentials: {
-      // API key rather than a token: Anthropic's OAuth leg injects its own
-      // identity line and records `anthropic:oauth-system-prefix` for it, which
-      // is a real degradation about something else and would make the control
-      // below assert nothing.
-      accessToken: null,
+      // API key rather than a token by default: see `CREDENTIAL_NEEDS`.
+      accessToken: needs.accessToken ?? null,
       apiKey: "test-key",
       providerData: {
         endpointId: "e1",
@@ -83,6 +102,7 @@ async function encode(
         origin: "https://upstream.test",
         basePath: "",
         protocol,
+        ...(needs.projectId === undefined ? {} : { projectId: needs.projectId }),
       },
     },
     http,

@@ -70,7 +70,7 @@ test("a reseed reinstalls a built-in that was removed, rather than leaving a hol
   // ordering the operator sees is the seed's own; a recovery restores what is
   // *reachable*, which is what a caller with a hole in its registry needs.
   expect(Object.keys(registry).sort()).toEqual(
-    ["anthropic", "openai", "kimi", "kilo", "grok", "muse"].sort(),
+    ["anthropic", "openai", "kimi", "kilo", "grok", "antigravity", "muse"].sort(),
   );
 });
 

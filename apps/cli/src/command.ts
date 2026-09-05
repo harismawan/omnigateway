@@ -90,6 +90,7 @@ const TONES: Record<Tone, true> = {
   magenta: true,
   cyan: true,
   orange: true,
+  violet: true,
   azure: true,
 };
 

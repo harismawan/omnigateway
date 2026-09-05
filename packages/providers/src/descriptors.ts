@@ -1,4 +1,5 @@
 import { anthropicDescriptor } from "./anthropic/descriptor.ts";
+import { antigravityDescriptor } from "./antigravity/descriptor.ts";
 import { customDescriptor } from "./custom/descriptor.ts";
 import type { ProviderDescriptors } from "./descriptor.ts";
 import { grokDescriptor } from "./grok/descriptor.ts";
@@ -15,7 +16,7 @@ export { isProviderIdFormat, PROVIDER_ID_PATTERN } from "./descriptor.ts";
 /**
  * Every provider's data, keyed by id.
  *
- * The seven built-ins are written out here as literals. That is *not* a compile
+ * The six built-ins are written out here as literals. That is *not* a compile
  * error if one goes missing — the type is `Record<string, …>`, which accepts any
  * subset, so writing the ids as literals constrains nothing. Measured: deleting
  * a line here typechecks cleanly. What catches it is the unused-import lint and
@@ -23,7 +24,7 @@ export { isProviderIdFormat, PROVIDER_ID_PATTERN } from "./descriptor.ts";
  * own.
  *
  * Nor is the rest of the package derived from this: `ADAPTERS`, `PROFILES`,
- * `BODY_ORDER` and `PROVIDER_MODEL_CATALOG` are hand-written literals
+ * `BODY_ORDER` and `PROVIDER_MODEL_CATALOG` are hand-written six-key literals
  * too, and only `PROVIDERS` walks. `descriptor.test.ts` is what holds all of
  * them to the same id set.
  *
@@ -46,6 +47,7 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptors = {
   kimi: kimiDescriptor,
   kilo: kiloDescriptor,
   grok: grokDescriptor,
+  antigravity: antigravityDescriptor,
   muse: museDescriptor,
   custom: customDescriptor,
 };

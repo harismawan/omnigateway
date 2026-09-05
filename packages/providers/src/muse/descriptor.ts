@@ -11,7 +11,7 @@ export const museDescriptor: ProviderDescriptor = {
   modelPrefixes: ["muse-", "muse-spark"],
   presentation: {
     label: "Muse",
-    order: 6,
+    order: 7,
     tone: "azure",
     // Meta blue, #0866FF.
     colour: { light: "oklch(0.55 0.23 262)", dark: "oklch(0.72 0.17 262)" },

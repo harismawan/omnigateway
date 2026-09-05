@@ -1,5 +1,6 @@
 import type { ProviderId } from "@omni/ir";
 import { anthropicOAuthFlow } from "./anthropic/oauth.ts";
+import { antigravityOAuthFlow } from "./antigravity/oauth.ts";
 import { grokOAuthFlow } from "./grok/oauth.ts";
 import { kiloOAuthFlow } from "./kilo/oauth.ts";
 import { kimiOAuthFlow } from "./kimi/oauth.ts";
@@ -8,7 +9,7 @@ import type { PluginOAuthFlow } from "./oauthFlow.ts";
 import { openaiOAuthFlow } from "./openai/oauth.ts";
 
 /**
- * The six flows this repository ships, for a host to register at boot.
+ * The five flows this repository ships, for a host to register at boot.
  *
  * One seed, two callers — the gateway from `installPluginProviders`, the CLI
  * from `run()`, because `omni connect` runs without a gateway — and zero copies
@@ -43,6 +44,7 @@ export function builtinOAuthFlows(): ReadonlyArray<readonly [ProviderId, PluginO
     ["kimi", kimiOAuthFlow],
     ["kilo", kiloOAuthFlow],
     ["grok", grokOAuthFlow],
+    ["antigravity", antigravityOAuthFlow],
     ["muse", museOAuthFlow],
   ];
 }

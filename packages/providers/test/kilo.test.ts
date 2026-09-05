@@ -865,6 +865,7 @@ test("identifies the editor on every request", async () => {
 test("the registry serves kilo with its canonical capabilities", () => {
   expect(Object.keys(ADAPTERS).sort()).toEqual([
     "anthropic",
+    "antigravity",
     "custom",
     "grok",
     "kilo",

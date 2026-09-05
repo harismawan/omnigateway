@@ -53,6 +53,7 @@ function deviceBuiltin(id: string): DeviceOAuthProvider {
 }
 
 export const anthropicOAuth = builtin("anthropic");
+export const antigravityOAuth = builtin("antigravity");
 export const grokOAuth = builtin("grok");
 export const openaiOAuth = builtin("openai");
 export const kiloOAuth = deviceBuiltin("kilo");

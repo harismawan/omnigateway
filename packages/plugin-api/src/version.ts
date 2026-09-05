@@ -109,11 +109,16 @@ export const PLUGIN_API_VERSION = 3;
  * stranger's `node_modules`; the version is the only part of that repair a
  * consumer can see.
  *
- * `0.1.7` likewise changed no API: the `muse` provider added `--p-muse` to
- * `CSS_VARIABLES`, which is additive — every earlier panel keeps resolving the
- * names it already used, and a panel that reaches for the new one against an
- * older console gets a `var()` that paints nothing, exactly as it would for any
- * id the console does not define.
+ * `0.1.7` changed no API either. It exists because `--p-antigravity` joined
+ * `CSS_VARIABLES` — the list of palette names the console guarantees are
+ * defined — which is an addition a panel can rely on and therefore a version a
+ * panel can ask for. This package moved to `0.4.1` alongside it, for the reason
+ * the paragraph below gives.
+ *
+ * `0.1.8` is `--p-muse`, on the same terms as the entry before it: additive, so
+ * every earlier panel keeps resolving the names it already used. It moves
+ * because `muse` landed after the release that carried `0.1.7`, not because
+ * anything about that release was wrong.
  *
  * **Changing this line means republishing _this_ package, not just the SDK.**
  * It reads as an SDK fact and it lives here, so the obvious move — bump
@@ -127,4 +132,4 @@ export const PLUGIN_API_VERSION = 3;
  * advertised. `publishable.test.ts` now refuses a state where this package
  * trails the SDK.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.7";
+export const DASHBOARD_SDK_VERSION = "0.1.8";

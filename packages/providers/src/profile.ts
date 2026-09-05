@@ -1,4 +1,5 @@
 import { anthropicProfile } from "./anthropic/profile.ts";
+import { antigravityProfile } from "./antigravity/profile.ts";
 import { customProfile } from "./custom/profile.ts";
 import { grokProfile } from "./grok/profile.ts";
 import type { ClientProfile } from "./headers.ts";
@@ -7,6 +8,7 @@ import { kimiProfile } from "./kimi/profile.ts";
 import { museProfile } from "./muse/profile.ts";
 import { openaiProfile } from "./openai/profile.ts";
 
+export { ANTHROPIC_CLI_VERSION, anthropicProfile } from "./anthropic/profile.ts";
 // Each profile is also re-exported under its own name, for callers that already
 // know which provider they are. An OAuth flow for one provider is not a lookup —
 // it is that provider's code, and naming the profile it wears is more honest
@@ -18,7 +20,7 @@ import { openaiProfile } from "./openai/profile.ts";
 // `<id>/profile.ts` can read them without importing this module, which would
 // close a cycle against the assembly below. They are re-exported here because
 // this is the name every caller outside the package already imports.
-export { ANTHROPIC_CLI_VERSION, anthropicProfile } from "./anthropic/profile.ts";
+export { antigravityProfile } from "./antigravity/profile.ts";
 export { customProfile } from "./custom/profile.ts";
 export { grokProfile } from "./grok/profile.ts";
 export {
@@ -56,6 +58,7 @@ export const PROFILES: Readonly<Record<string, ClientProfile>> = {
   kimi: kimiProfile,
   kilo: kiloProfile,
   grok: grokProfile,
+  antigravity: antigravityProfile,
   muse: museProfile,
   custom: customProfile,
 };

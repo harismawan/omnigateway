@@ -16,15 +16,19 @@ const ANSI = {
   blue: "\u001b[34m",
   magenta: "\u001b[35m",
   cyan: "\u001b[36m",
-  // The hues the eight-colour palette does not carry. Each provider needs a
-  // tone that is not red, and the basic set holds exactly six once red is out
-  // — so every provider past the sixth either wears `dim`, which means
-  // "unknown" in every table a provider appears in, or the palette grows. It
+  // The one hue the eight-colour palette does not carry. Six providers need
+  // six tones that are not red, and the basic set holds exactly six once red
+  // is out — so the sixth provider either wears `dim`, which means "unknown"
+  // in every table a provider appears in, or the palette grows by one. It
   // grows: 256-colour sits behind the same `ctx.color` switch that already
-  // drops every escape for `NO_COLOR`, a pipe, or a dumb terminal.
+  // drops every escape for `NO_COLOR`, a pipe, or a dumb terminal. Each
+  // provider past the sixth grew it again, by the same argument, and each new
+  // entry is named for the hue the console gives that provider — so one
+  // provider does not read as one colour in the browser and an unrelated one
+  // here. `violet` is antigravity's `oklch(… 277)`; `azure` is muse's
+  // `oklch(… 262)`, kept clear of `blue`, which most terminals render as navy.
   orange: "\u001b[38;5;208m",
-  // Distinct from `blue`, which most terminals render as navy — Muse's brand
-  // blue is far brighter, and two providers a shade apart is worse than none.
+  violet: "\u001b[38;5;99m",
   azure: "\u001b[38;5;33m",
 } as const;
 
