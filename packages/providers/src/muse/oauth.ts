@@ -40,8 +40,15 @@ const MINT_URL = "https://api.meta.ai/muse-code/key";
 const CLIENT_ID = "1031625952748946";
 const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 
-/** Where the operator ends up if `begin()` never got to state a URL. */
-const FALLBACK_VERIFICATION_URL = "https://auth.meta.com/device";
+/**
+ * Where the operator ends up if `begin()` never got to state a URL.
+ *
+ * Quoted from a live `device/authorization/` response rather than guessed: the
+ * verification page is under `/oauth/`, and the `/device` this first said was a
+ * plausible-looking 404. Only reachable when the response omits the field, so a
+ * wrong value here fails on the one path nothing else covers.
+ */
+const FALLBACK_VERIFICATION_URL = "https://auth.meta.com/oauth/device/";
 const DEFAULT_INTERVAL_SECONDS = 5;
 
 /** Errors that mean "keep polling" rather than "this flow failed". */
