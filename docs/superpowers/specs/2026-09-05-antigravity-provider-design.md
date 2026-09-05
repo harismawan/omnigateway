@@ -234,6 +234,294 @@ headroom. Only trying a second host distinguished them.
 account. Nothing here calls it; noted because it was a second signal pointing at
 the caller rather than at the request, and it was misread as such.
 
+## Tool schemas are a proto message, not JSON Schema
+
+Found in production, not by the probe above: the first two real requests to
+`gemini-3.8-flash-high` both answered `400 BAD_REQUEST` in ~130ms with no tokens
+billed. Recovered by decrypting their `request_bodies` artifacts — the code and
+the credential id are all `request_logs` keeps, so the artifact is the only place
+the upstream's own words survive.
+
+`v1internal` parses a tool's `parameters` as
+`google.cloud.aiplatform.master.Schema`, a proto message with a closed field set,
+and protobuf-JSON refuses an unknown name rather than ignoring it — the same rule
+the envelope follows one level up. The answer is one error line per occurrence:
+32 Claude Code tools produced 41, on `$schema` (once per tool — every zod and
+pydantic exporter emits it), `propertyNames`, `exclusiveMinimum` and `const`. The
+error list was complete rather than capped, which is what makes the silences in
+it readable.
+
+**The fix is an allowlist, not a denylist of those four**, because a denylist is
+only ever as long as the last payload that failed: `$ref`, `oneOf`, `not`,
+`multipleOf`, `uniqueItems` are all still out there. Failing this way round is
+also the cheap direction — a dropped constraint is advisory to the model, a kept
+unknown one is a request that never runs. `pruneSchema` in `wire.ts` walks
+schema-bearing positions structurally rather than scanning keys, because
+`enum: ["const"]` and a property *named* `const` are data and a name scan
+rewrites both.
+
+Two things the keyword list alone does not cover, and both were live-confirmed:
+
+- **`Schema.enum` is `repeated string`.** Translating `const: 5` into
+  `enum: [5]` swaps `Unknown name "const"` for
+  `Invalid value at '…enum[0]' (TYPE_STRING)` — the same dead request with a
+  worse message. Only a string `const` becomes an `enum`; a `const` beside an
+  existing `enum` is dropped, since the proto can hold one of the two and the
+  `enum` is the client's own explicit vocabulary.
+- **Naming a field is not accepting any value under it.** `Schema.type` is a
+  proto enum and `Schema.items` is singular, so draft-07's `type: ["string",
+  "null"]` and tuple-form `items: [ … ]` are parse errors under names that are
+  otherwise fine. The union type is *translated* (`type` plus `nullable`, which
+  is lossless and records nothing); the tuple is dropped.
+
+**`allOf`, `anyOf` and `additionalProperties` are in the allowlist and
+`google.cloud.aiplatform.v1.Schema` publishes only the last two.** They are kept
+on the strong evidence rather than the weak one: each was present in the request
+that answered **200**, not merely absent from an error list. The A/B was run on
+the live endpoint with the real account, same envelope, differing only in the
+schemas — control `400 Unknown name "$schema"`, treatment `200` with content.
+
+Two traps for whoever repeats this:
+
+- **A captured body is forensic, not replayable.** `request_bodies` artifacts are
+  structurally bounded before encryption, so deep nodes are the literal string
+  `"[omitted: nesting past 6 levels]"`. Replaying one produces
+  `Invalid value at '…' (…Schema), "[omitted: …]"` — errors belonging to the
+  fixture. Read the artifact to learn *which* keywords the upstream named, then
+  hand-build a small valid payload carrying those shapes.
+- **A probe must send the provider's real headers.** The same pruned body without
+  `User-Agent: antigravity/ide/…` answers `403 SUBSCRIPTION_REQUIRED`, which
+  reads as an account problem and is not one — the identical failure direction
+  the host bug above had.
+
+`$ref`/`$defs` are published fields but are deliberately left out, so a schema
+carrying one loses that subtree. Nothing this gateway has seen emits them into a
+tool schema, and a resolver is a lot of code to carry on speculation.
+
+### The upstream validates in stages, and each stage hides the next
+
+The first fix was verified by one live A/B and looked complete. It was not.
+A sweep of 129 hand-built schema shapes against the live endpoint found **five
+error classes, and only the first was visible at the start** — Cloud Code stops
+after the stage that fails, so every later class is invisible while any earlier
+one remains. Each fix *revealed* the next; none of them could have been reasoned
+out from the original 400, and a code review of the fix found none of them
+either.
+
+| Stage | Class | What it answers |
+| --- | --- | --- |
+| Parse | unknown field name | `Unknown name "$schema" … Cannot find field.` |
+| Parse | wrong value type for a known field | `Invalid value at '…value.pattern' (TYPE_STRING), 5` |
+| Parse | value outside a proto enum | `Invalid value at '…value.type' (…master.Type), "text"` |
+| Parse | JSON nested too deep | `Message too deep. Max recursion depth reached for key 'x'` |
+| Semantic | cross-field disagreement | `* …required[1]: property is not defined` |
+
+The measured rules, all live on 2026-09-05:
+
+- **`type`'s value is an enum.** `string`, `number`, `integer`, `boolean`,
+  `array`, `object`, `null`, `type_unspecified`, case-insensitive. Everything
+  else tried was refused, including `""`, `any`, `int`, `float`, `list` and a
+  trailing space.
+- **Numeric spelling.** An `int64` field takes a JSON string of plain decimal
+  digits — `"1000"` yes, `"1e3"` no, `1.5` no. A `double` takes any finite
+  number or numeric string.
+- **`repeated string` means string.** `enum: [5]` and `required: [5]` are 400s;
+  a lone `"x"` in place of `["x"]` is accepted.
+- **Depth.** 30 levels of `properties` answered 200, 31 was refused. The
+  message names no `function_declarations[N]`, so one such tool kills the whole
+  request and the log cannot say which. `MAX_SCHEMA_DEPTH` is set well under
+  the measured figure because a `properties` hop costs two JSON levels and an
+  `items` hop costs one.
+- **`type: "array"` obliges `items`, and `items` obliges `type: "array"`.**
+  `properties`/`required`/`propertyOrdering` oblige `type: "object"`. An
+  *absent* type satisfies neither — `TYPE_UNSPECIFIED` fails both predicates.
+- **`required` and `propertyOrdering` may only name properties that exist**, and
+  a property key may not be empty.
+
+Two of these the encoder **creates itself**: dropping a `properties` member the
+client listed as `required`, and dropping a `type` it could not name off a node
+that carries `properties`. A transform that removes things has to re-check the
+invariants that removal can break, which is why those two repairs run after the
+walk rather than inside it. Where a repair has a choice, it infers rather than
+deletes — a node carrying `properties` *is* an object — except against a client's
+explicitly stated contradicting type, which is not the encoder's to overrule.
+
+### The prompt cache is real, implicit, and not steerable
+
+`wire.ts` records `antigravity:cache-control-dropped` for a breakpoint the
+envelope cannot carry, and that degradation is easy to misread as "this provider
+does not cache". It caches. Measured 2026-09-05 against the live backend, with a
+fresh random prefix per run so the first send is genuinely cold and a separate
+prefix as the control:
+
+| send | prompt | cached | notes |
+| --- | --- | --- | --- |
+| 1 (cold) | 61,244 | 0 | |
+| 2 (same prefix, new question) | 61,244 | 0 | |
+| 3 (same prefix, new question) | 61,244 | **57,309** | 94% of the prompt |
+| control, fresh prefix | 62,445 | 0 | it is the prefix, not global warmth |
+
+What that establishes, and the shape of each claim:
+
+- **The gateway has no say in it.** No marker appears anywhere in the request;
+  the backend decides. `autoCacheEnabled` exists for a provider whose markers the
+  gateway can place, so there is nothing here for it to switch on.
+- **`cachedContentTokenCount` is counted inside `promptTokenCount`.** The decoder
+  already assumed this and nothing had tested it: 61,244 − 57,309 = 3,935 of
+  fresh input, and a cache read larger than any plausible standalone prompt is
+  what makes the direction unambiguous. Pinned in `antigravityDecode.test.ts`
+  with these numbers rather than round synthetic ones.
+- **No write tokens, ever.** Google bills implicit-cache storage by the hour and
+  reports no per-write count, which is the measurement behind the catalog's
+  `cacheWrite5m`/`cacheWrite1h` being a real zero rather than a missing figure.
+- **The first hit lands on send 2 or 3, and is not monotonic.** Four of five
+  fresh prefixes hit on send 2 and one on send 3; a 45-second idle between sends
+  1 and 2 did not help, so it is repetition rather than write latency. One run
+  read `0 / 24,545 / 0 / 24,545` — a hit, a miss, then a hit again. **Do not
+  write a test, a heuristic or a projection that assumes a warm cache stays
+  warm.**
+- **There is a size floor**, between measured prompts of 15,646 (never cached
+  over four sends) and 18,246 (cached). Below it the cache never engages, so a
+  short-prompt workload sees none of this.
+- **Every family caches** — Flash high and low, `gemini-pro-agent`, Flash Lite
+  all behaved the same way.
+
+The cached fraction runs 67–96% of the prompt, so `cacheRead` is the price that
+matters most on this provider once a prompt clears the floor.
+
+### The catalog carries list prices nobody is billed
+
+The rows shipped unpriced, on the reasoning that Antigravity is a flat
+subscription stating no per-token rate and that the public Gemini API's prices
+"do not apply and must not be copied in". **That was overridden deliberately by
+the operator**, so `cost_usd` reads as what the same traffic would have cost on
+the paid API rather than as zero.
+
+The consequence is recorded here because it is not cosmetic: catalog pricing is
+the default a **new** target stores, a target's stored price is what `finishLog`
+debits, and so an API key carrying a dollar limit will exhaust it against spend
+that did not happen. Setting `costPerMTok` to zero on the saved target restores
+the old behaviour; catalog edits reach new targets only, so targets saved before
+this change keep what they already hold.
+
+Rates read 2026-09-05 from `ai.google.dev/gemini-api/docs/pricing`, and the
+mapping is nowhere one-to-one:
+
+- Each row is priced by the model its **displayName** names, not its id — the
+  `-high`/`-low` suffixes are Antigravity's tiers and the public API prices one
+  model per family.
+- **3.8, 3.7 and 3.6 Flash carry their standard rate, not the introductory
+  one.** Google prices those three at $0.75/$3.75 through 2026-12-31 and
+  $1.50/$7.50 from 1 January 2027; the standard figure is stored on purpose,
+  because a table holding the promotional rate is right today and silently wrong
+  on a date nobody is watching for. Traffic before the changeover is therefore
+  over-costed by 2x against list. Every other family is already on its standard
+  rate, so this is the only group where the two differ.
+- Pro and 2.5 Pro price in two bands by prompt size; the ≤200K band is carried,
+  so a long-context request is under-costed.
+- `cacheWrite5m`/`cacheWrite1h` are **0 as a real price**: Google bills cache
+  *storage* per hour, a different quantity from the per-token write premium
+  those fields hold, and converting it would need an invented residency time.
+- `gemini-3-flash` stays at zero — the price list has no "Gemini 3 Flash" row,
+  and a test pins it as the *only* unpriced row so a future addition cannot land
+  at zero by omission.
+
+### `gemini-3.1-pro-high` is listed and not servable
+
+Found by running the full shape battery against **every** catalog row rather
+than the one the incident named. `gemini-3.1-pro-high` answers
+`400 Request contains an invalid argument.` on every request shape — plain, with
+tools, at each reasoning mode, at each output ceiling — while
+`gemini-3.1-pro-low` answers 200 to the same body. So it is the id, and not the
+tier, the entitlement or the request.
+
+`fetchAvailableModels` reports **both** `gemini-3.1-pro-high` and
+`gemini-pro-agent`, and the second carries the displayName "Gemini 3.1 Pro
+(High)". An earlier reading of this file left `gemini-pro-agent` out as "the same
+row under a name that does not say which model it is" — right about the model,
+wrong about which id the backend takes. The row now ships the id that serves.
+
+**The catalog probe cannot see this.** It reports rows that do not work, so
+"the probe lists it" is not evidence a row is servable; only a request is. A
+saved target still naming the old id keeps failing exactly as it does today,
+since catalog edits reach new targets only.
+
+Note also that `fetchAvailableModels` answers on `daily-cloudcode-pa` and its
+`models` field is an **object keyed by id**, not an array — reading it as an
+array silently yields an empty comparison that looks like agreement.
+
+### Images are accepted on their bytes, not their declared type
+
+Probed 2026-09-05 across mime types and payload shapes: `image/bmp`,
+`application/pdf`, `text/plain`, an empty string and `image/png; charset=utf-8`
+all answer 200 carrying PNG bytes, so `inlineData.mimeType` is not validated.
+What is validated is the payload — malformed base64 answers
+`Base64 decoding failed`, and empty or truncated bytes answer `Unable to process
+input image`. Base64url is accepted; a `data:` URI prefix is not, and that case
+is unreachable because `ingress/schemas.ts` already splits data URIs before the
+IR sees them. **No repair here on purpose**: an image cannot be repaired, and
+dropping one would answer a question about a picture without the picture, which
+is worse than the 400.
+
+Nothing size-related was found: 1 MB of `systemInstruction`, 4 MB of user text,
+500 history turns and 40 large images all answer 200.
+
+### The same staging applies outside the schema
+
+Hardening `parameters` left every neighbouring field the encoder builds from
+client input unprobed. A second sweep found four more, and the first is more
+reachable than anything in the schema:
+
+- **Function names.** `^[A-Za-z_][A-Za-z0-9_.-]{0,127}$` — 128 characters pass,
+  129 do not; dots and dashes are legal so `mcp__server__tool` is fine; a space,
+  a leading digit, any non-ASCII letter, or a duplicate name
+  (`Duplicate function declaration found: …`) is a 400 for the **whole
+  request**. The name is not the gateway's to choose — it comes from the
+  client's tool list, and an MCP server may name a tool anything.
+
+  Handled by a **tool cloak**, in `antigravity/cloak.ts`: the name is renamed on
+  the way out and restored in `decode.ts` from the map `codec.ts` carries in
+  `decodeState`. Renaming rather than dropping, because a dropped tool is a
+  capability the client asked for and never learns it lost — and only names the
+  grammar refuses are touched, so an ordinary tool set builds no cloak at all.
+  Four sources feed it: `tools[]`, a `toolUse` in history (the client may drop
+  the tool and keep the turn that called it), `toolChoice`, and this encoder's
+  own fourth — an unmatched `toolResult`, whose **id** is sent in place of a
+  name and is as free-form as one. Deduplication survives the rename and is
+  separate from it, since `Duplicate function declaration found` is its own 400.
+
+  **This is the second copy of that machinery** — `anthropic/cloak.ts` is the
+  first, and the collision reasoning is the part worth reading there. The shapes
+  match and every policy differs: Anthropic renames to defeat fingerprinting so
+  most names change, this renames only what the grammar refuses so almost none
+  do. Forked per boundary rule 2; a third copy should promote the gather / claim
+  / suffix loop to the package root and leave the policies where they are.
+- **`generationConfig` ranges.** `temperature` in `[0.0, 2.0]`,
+  `thinking_budget` in `[-1, 65535]` (one below `MAX_OUTPUT_TOKENS`), at most 5
+  `stop_sequences`, and a non-positive `maxOutputTokens` answers a bare
+  `Request contains an invalid argument.` All clamped; `maxTokens: 0` is dropped
+  instead, since the model's own default beats a one-token ceiling.
+- **The closing turn.** `Requests ending with a model turn are not supported.`
+  Reachable from an ordinary feature, not a malformed request: an Anthropic
+  client prefills the answer with a trailing assistant turn. The prefill is
+  **kept** and a trailing user turn added after it — dropping the turn also runs
+  and throws away the thing the client asked for. That turn holds a **single
+  space**, and the asymmetry with the opening repair is measured rather than
+  chosen: a trailing turn holding only `{ text: "" }` is refused with the same
+  message, while a *leading* empty turn is accepted.
+- **The opening turn.** A function call must follow a user turn or a function
+  response, and a function response must follow a call. Only the *first* entry
+  can break this — an orphan response later is fine, because `mergeSameRole` has
+  already folded it into the user turn beside it — and it breaks exactly when a
+  client trims history. Repaired with an **empty** leading user turn, verified
+  against both failing shapes; a placeholder like "(continued)" would put words
+  in the prompt the client never wrote.
+
+**Re-probe after every behaviour change to the transform, not once at the end.**
+Three of the five classes appeared only after an earlier fix unmasked them, and
+the tuple-`items` repair introduced a fresh 400 (`items: missing field`) that the
+change which caused it was itself verified against.
+
 ## What is skipped
 
 - The `cloudcode-pa` and sandbox hosts as inference *failover*. One runtime host,

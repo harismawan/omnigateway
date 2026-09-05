@@ -95,7 +95,7 @@ const EXPECTED = {
       "gemini-3.5-flash-extra-low",
       "gemini-3-flash",
       "gemini-3.5-flash-lite",
-      "gemini-3.1-pro-high",
+      "gemini-pro-agent",
       "gemini-3.1-pro-low",
       "gemini-3.1-flash-lite",
       "gemini-2.5-pro",
@@ -170,17 +170,25 @@ const KILO_UNPRICED: readonly string[] = [
   "kilo-auto/free",
 ];
 
+/**
+ * The one antigravity row with no published rate.
+ *
+ * `ai.google.dev/gemini-api/docs/pricing` has no "Gemini 3 Flash" entry, and
+ * inventing one would put a fabricated figure into `cost_usd`.
+ */
+const ANTIGRAVITY_UNPRICED: readonly string[] = ["gemini-3-flash"];
+
 test("every model carries a usable price", () => {
   for (const provider of PROVIDERS) {
-    // Antigravity is unpriced **as a provider**, not per model the way kilo's
-    // routers are: it is sold as a subscription and states no per-token rate
-    // anywhere, so there is no row here to exempt individually. Skipped whole,
-    // with the test below as the positive control — without that, this skip
-    // would also hide a row that quietly gained a price.
-    if (provider === "antigravity") continue;
     for (const model of tableEntry(PROVIDER_MODEL_CATALOG, provider, "PROVIDER_MODEL_CATALOG")
       .models) {
       if (provider === "kilo" && KILO_UNPRICED.includes(model.id)) continue;
+      // Antigravity was once skipped as a whole provider — it is sold as a
+      // subscription and states no per-token rate — and now carries the public
+      // Gemini API's list prices instead, at the operator's request. One row is
+      // exempt per model, the way kilo's routers are, because the price list has
+      // no "Gemini 3 Flash" row to copy.
+      if (provider === "antigravity" && ANTIGRAVITY_UNPRICED.includes(model.id)) continue;
       const { input, output, cacheRead } = model.pricing;
       // A zero price is read by the router as "unpriced", which would silently
       // remove this model from cost ranking.
@@ -195,18 +203,14 @@ test("every model carries a usable price", () => {
   }
 });
 
-test("antigravity states no price at all, on every row", () => {
-  // The positive control for the whole-provider skip above. A row that gained a
-  // figure would fail here, and a row that lost one on a *priced* provider still
-  // fails there — the two together are what the kilo exemption gets from its
-  // named list.
-  for (const model of tableEntry(PROVIDER_MODEL_CATALOG, "antigravity", "PROVIDER_MODEL_CATALOG")
-    .models) {
-    expect({ id: model.id, pricing: model.pricing }).toEqual({
-      id: model.id,
-      pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 },
-    });
-  }
+test("antigravity prices everything the public list names", () => {
+  // The positive control for the exemption above: the named list has to be
+  // exactly the unpriced set, so a new row cannot land at zero by omission and
+  // an exemption cannot outlive the row it was written for.
+  const unpriced = tableEntry(PROVIDER_MODEL_CATALOG, "antigravity", "PROVIDER_MODEL_CATALOG")
+    .models.filter((model) => model.pricing.input === 0 && model.pricing.output === 0)
+    .map((model) => model.id);
+  expect(unpriced).toEqual([...ANTIGRAVITY_UNPRICED]);
 });
 
 test("kilo states a price for everything except its free tier and its routers", () => {

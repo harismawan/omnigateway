@@ -3,6 +3,7 @@ import type { CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
 import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { HeaderPair } from "../types.ts";
+import { buildToolCloak, type ToolCloak } from "./cloak.ts";
 import { decodeAntigravityStream } from "./decode.ts";
 import { antigravityProfile } from "./profile.ts";
 import { toAntigravityWire } from "./wire.ts";
@@ -86,6 +87,20 @@ function projectOf(input: CodecInput): string {
   return project;
 }
 
+/**
+ * What this codec puts in `decodeState`, and the only thing that reads it back.
+ *
+ * `decodeState` is `unknown` to the host by design, so the narrowing has to
+ * happen here. Same shape and same reasoning as the Anthropic sibling's.
+ */
+function cloakOf(state: unknown): ToolCloak | null {
+  if (state === null || typeof state !== "object") return null;
+  const cloak = (state as { cloak?: unknown }).cloak;
+  if (cloak === null || cloak === undefined || typeof cloak !== "object") return null;
+  const { toWire, fromWire } = cloak as { toWire?: unknown; fromWire?: unknown };
+  return toWire instanceof Map && fromWire instanceof Map ? (cloak as ToolCloak) : null;
+}
+
 export const antigravityCodec: ProviderCodec = {
   buildRequest(input: CodecInput): CodecRequest {
     const accessToken = input.credentials.accessToken;
@@ -102,9 +117,15 @@ export const antigravityCodec: ProviderCodec = {
         ? input.requestId
         : derivedRequestId(`${input.model}:${project}`);
 
+    // Built here rather than stashed on the request: the `ChatRequest` is
+    // shared across failover attempts, so a cloak stored on it would follow the
+    // request into the next provider.
+    const cloak = buildToolCloak(input.request);
+
     const { body, degradations } = toAntigravityWire(input.request, input.model, {
       project,
       requestId,
+      cloak,
     });
 
     const protocol: HeaderPair[] = [["Authorization", `Bearer ${accessToken}`]];
@@ -125,11 +146,13 @@ export const antigravityCodec: ProviderCodec = {
         // more key.
         body: JSON.stringify(body),
       },
+      decodeState: { cloak },
       degradations,
+      ...(cloak === null ? {} : { cloakedTools: cloak.toWire.size }),
     };
   },
 
-  decode({ body }) {
-    return decodeAntigravityStream(parseSse(body));
+  decode({ body, decodeState }) {
+    return decodeAntigravityStream(parseSse(body), { cloak: cloakOf(decodeState) });
   },
 };
