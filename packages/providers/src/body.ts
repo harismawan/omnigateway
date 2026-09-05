@@ -4,6 +4,7 @@ import { customBodyOrder } from "./custom/profile.ts";
 import { grokBodyOrder } from "./grok/profile.ts";
 import { kiloBodyOrder } from "./kilo/profile.ts";
 import { kimiBodyOrder } from "./kimi/profile.ts";
+import { museBodyOrder } from "./muse/profile.ts";
 import { openaiBodyOrder } from "./openai/profile.ts";
 
 export type SystemBlock = {
@@ -19,6 +20,7 @@ export const BODY_ORDER: Readonly<Record<string, readonly string[]>> = {
   kimi: kimiBodyOrder,
   kilo: kiloBodyOrder,
   grok: grokBodyOrder,
+  muse: museBodyOrder,
   custom: customBodyOrder,
 };
 

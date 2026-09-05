@@ -109,6 +109,12 @@ export const PLUGIN_API_VERSION = 3;
  * stranger's `node_modules`; the version is the only part of that repair a
  * consumer can see.
  *
+ * `0.1.7` likewise changed no API: the `muse` provider added `--p-muse` to
+ * `CSS_VARIABLES`, which is additive — every earlier panel keeps resolving the
+ * names it already used, and a panel that reaches for the new one against an
+ * older console gets a `var()` that paints nothing, exactly as it would for any
+ * id the console does not define.
+ *
  * **Changing this line means republishing _this_ package, not just the SDK.**
  * It reads as an SDK fact and it lives here, so the obvious move — bump
  * `packages/dashboard-sdk`, tag, done — leaves the registry with a
@@ -121,4 +127,4 @@ export const PLUGIN_API_VERSION = 3;
  * advertised. `publishable.test.ts` now refuses a state where this package
  * trails the SDK.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.6";
+export const DASHBOARD_SDK_VERSION = "0.1.7";

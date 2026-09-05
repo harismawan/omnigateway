@@ -11,6 +11,7 @@ const PROVIDERS = [
   "kimi",
   "kilo",
   "grok",
+  "muse",
   "custom",
 ] as const satisfies readonly ProviderId[];
 
@@ -74,6 +75,15 @@ const EXPECTED = {
       "grok-4.20-0309-reasoning",
       "grok-4.20-0309-non-reasoning",
       "grok-4.20-multi-agent-0309",
+    ],
+  },
+  muse: {
+    defaultModel: "muse-spark-1.3",
+    ids: [
+      "muse-spark-1.3",
+      "muse-spark-1.3-contributor",
+      "muse-spark-1.2",
+      "muse-spark-1.2-contributor",
     ],
   },
   custom: { defaultModel: "", ids: [] },
@@ -355,6 +365,9 @@ test("every provider states which credentials it can hold", () => {
     kimi: ["apiKey", "oauth"],
     kilo: ["apiKey", "oauth"],
     grok: ["apiKey", "oauth"],
+    // A subscription is spent minting a Model API key, and a key made at
+    // dev.meta.ai reaches the same host, so both ways in are real here.
+    muse: ["apiKey", "oauth"],
     // The one provider with no authorization flow behind it.
     custom: ["apiKey"],
   });

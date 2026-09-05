@@ -684,6 +684,7 @@ test("registry includes custom provider", () => {
     "grok",
     "kilo",
     "kimi",
+    "muse",
     "openai",
   ]);
 });

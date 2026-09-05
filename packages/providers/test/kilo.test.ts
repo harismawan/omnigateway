@@ -869,6 +869,7 @@ test("the registry serves kilo with its canonical capabilities", () => {
     "grok",
     "kilo",
     "kimi",
+    "muse",
     "openai",
   ]);
   expect(entry(ADAPTERS, "kilo", "ADAPTERS").id).toBe("kilo");

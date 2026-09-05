@@ -4,6 +4,7 @@ import { grokProfile } from "./grok/profile.ts";
 import type { ClientProfile } from "./headers.ts";
 import { kiloProfile } from "./kilo/profile.ts";
 import { kimiProfile } from "./kimi/profile.ts";
+import { museProfile } from "./muse/profile.ts";
 import { openaiProfile } from "./openai/profile.ts";
 
 // Each profile is also re-exported under its own name, for callers that already
@@ -29,6 +30,7 @@ export {
 } from "./headers.ts";
 export { kiloProfile } from "./kilo/profile.ts";
 export { kimiProfile } from "./kimi/profile.ts";
+export { museProfile } from "./muse/profile.ts";
 export { openaiProfile } from "./openai/profile.ts";
 
 /**
@@ -54,6 +56,7 @@ export const PROFILES: Readonly<Record<string, ClientProfile>> = {
   kimi: kimiProfile,
   kilo: kiloProfile,
   grok: grokProfile,
+  muse: museProfile,
   custom: customProfile,
 };
 

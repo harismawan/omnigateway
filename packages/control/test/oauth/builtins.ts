@@ -2,7 +2,7 @@ import { OAUTH_PROVIDERS, seedBuiltinOAuth } from "../../src/oauth/index.ts";
 import type { DeviceOAuthProvider, OAuthProvider } from "../../src/oauth/types.ts";
 
 /**
- * The five built-in flows, adapted the way a running host adapts them.
+ * The built-in flows, adapted the way a running host adapts them.
  *
  * The vendor modules moved to `@omni/providers` and now export a
  * `PluginOAuthFlow`; `oauthAdapter` is the host's and stayed here. So the tests
@@ -57,3 +57,4 @@ export const grokOAuth = builtin("grok");
 export const openaiOAuth = builtin("openai");
 export const kiloOAuth = deviceBuiltin("kilo");
 export const kimiOAuth = deviceBuiltin("kimi");
+export const museOAuth = deviceBuiltin("muse");

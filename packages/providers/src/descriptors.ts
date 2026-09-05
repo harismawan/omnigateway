@@ -4,6 +4,7 @@ import type { ProviderDescriptors } from "./descriptor.ts";
 import { grokDescriptor } from "./grok/descriptor.ts";
 import { kiloDescriptor } from "./kilo/descriptor.ts";
 import { kimiDescriptor } from "./kimi/descriptor.ts";
+import { museDescriptor } from "./muse/descriptor.ts";
 import { openaiDescriptor } from "./openai/descriptor.ts";
 
 // Re-exported from the leaf so a reader of one descriptor need not know that the
@@ -14,7 +15,7 @@ export { isProviderIdFormat, PROVIDER_ID_PATTERN } from "./descriptor.ts";
 /**
  * Every provider's data, keyed by id.
  *
- * The six built-ins are written out here as literals. That is *not* a compile
+ * The seven built-ins are written out here as literals. That is *not* a compile
  * error if one goes missing — the type is `Record<string, …>`, which accepts any
  * subset, so writing the ids as literals constrains nothing. Measured: deleting
  * a line here typechecks cleanly. What catches it is the unused-import lint and
@@ -45,6 +46,7 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptors = {
   kimi: kimiDescriptor,
   kilo: kiloDescriptor,
   grok: grokDescriptor,
+  muse: museDescriptor,
   custom: customDescriptor,
 };
 

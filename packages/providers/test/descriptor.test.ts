@@ -21,6 +21,7 @@ const IDS = [
   "kimi",
   "kilo",
   "grok",
+  "muse",
   "custom",
 ] as const satisfies readonly ProviderId[];
 
@@ -44,6 +45,12 @@ type BuiltIn = (typeof IDS)[number];
  * which is the whole failure this fixture exists to prevent. When a provider's
  * real pricing changes, this fixture changes in the same commit and the diff
  * says so.
+ *
+ * A provider added *after* the descriptors existed — `muse` is the first — has
+ * no pre-change table to be quoted from, so its row here states the value its
+ * descriptor was written with. The fixture's job is unchanged either way: it is
+ * a second, independent statement of the number, and the diff still has to say
+ * so when one moves.
  */
 const WRITE_OVER_INPUT_BEFORE: Readonly<Record<BuiltIn, { fiveMinute: number; oneHour: number }>> =
   {
@@ -52,6 +59,7 @@ const WRITE_OVER_INPUT_BEFORE: Readonly<Record<BuiltIn, { fiveMinute: number; on
     kimi: { fiveMinute: 0, oneHour: 0 },
     kilo: { fiveMinute: 0, oneHour: 0 },
     grok: { fiveMinute: 0, oneHour: 0 },
+    muse: { fiveMinute: 0, oneHour: 0 },
     custom: { fiveMinute: 0, oneHour: 0 },
   };
 
@@ -64,6 +72,7 @@ const CAPABILITIES_BEFORE: Readonly<
   kimi: { tools: true, images: false, reasoning: false },
   kilo: { tools: true, images: true, reasoning: true },
   grok: { tools: true, images: true, reasoning: true },
+  muse: { tools: true, images: true, reasoning: true },
   custom: { tools: true, images: true, reasoning: true },
 };
 
@@ -196,6 +205,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: ["kimi-", "moonshot"],
     kilo: [],
     grok: ["grok-"],
+    muse: ["muse-", "muse-spark"],
     custom: [],
   };
 
@@ -212,6 +222,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: "Kimi",
     kilo: "Kilo",
     grok: "Grok",
+    muse: "Muse",
     custom: "OpenAI Compatible",
   };
 
@@ -222,6 +233,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: "blue",
     kilo: "orange",
     grok: "yellow",
+    muse: "azure",
     custom: "cyan",
   };
 
@@ -232,6 +244,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: { light: "oklch(0.53 0.17 330)", dark: "oklch(0.72 0.16 330)" },
     kilo: { light: "oklch(0.52 0.14 224)", dark: "oklch(0.74 0.14 224)" },
     grok: { light: "oklch(0.52 0.14 125)", dark: "oklch(0.74 0.14 125)" },
+    muse: { light: "oklch(0.55 0.23 262)", dark: "oklch(0.72 0.17 262)" },
     custom: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
   };
 
@@ -251,6 +264,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kimi: "Enter the code on Kimi's device page. This dialog finishes on its own.",
     kilo: "Approve the code on Kilo's device page. This dialog finishes on its own.",
     grok: "Authorize in the browser. When it redirects to 127.0.0.1, paste the whole URL.",
+    muse: "Enter the code on Meta's device page. This dialog finishes on its own.",
     custom: "Enter endpoint metadata and API key.",
   };
 
@@ -261,6 +275,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     "kimi",
     "kilo",
     "grok",
+    "muse",
     "custom",
   ];
 

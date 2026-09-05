@@ -81,7 +81,7 @@ test("boot seeds the five built-in oauth flows, in the order operators are offer
 
   installPluginProviders([], captureLogger(), registry);
 
-  expect(Object.keys(registry)).toEqual(["anthropic", "openai", "kimi", "kilo", "grok"]);
+  expect(Object.keys(registry)).toEqual(["anthropic", "openai", "kimi", "kilo", "grok", "muse"]);
   expect(registry.anthropic?.kind).toBe("pkce");
   expect(registry.kilo?.kind).toBe("device");
 });

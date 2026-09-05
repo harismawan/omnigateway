@@ -21,6 +21,8 @@ export { kiloOAuthFlow } from "./kilo/oauth.ts";
 export * from "./kimi/device.ts";
 export { decodeChat, kimiAdapter, toChatWire } from "./kimi/index.ts";
 export { kimiOAuthFlow, parseKimiUsage } from "./kimi/oauth.ts";
+export { decodeMuseResponses, museAdapter, toMuseWire } from "./muse/index.ts";
+export { museOAuthFlow } from "./muse/oauth.ts";
 export * from "./oauthFlow.ts";
 export * from "./oauthRequests.ts";
 export * from "./oauthUsage.ts";

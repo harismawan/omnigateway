@@ -12,7 +12,7 @@ export const customDescriptor: ProviderDescriptor = {
   modelPrefixes: [],
   presentation: {
     label: "OpenAI Compatible",
-    order: 6,
+    order: 7,
     tone: "cyan",
     colour: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
     pasteHint: "Enter endpoint metadata and API key.",

@@ -297,6 +297,7 @@ test("the registry exposes one flow per provider once the built-ins are seeded",
     "grok",
     "kilo",
     "kimi",
+    "muse",
     "openai",
   ]);
   expect(kimiOAuth.id).toBe("kimi");
