@@ -216,9 +216,14 @@ const PRUNED = "antigravity:tool-schema-pruned";
 const AGENT_PREAMBLE_DROPPED = "antigravity:agent-preamble-dropped";
 
 function dropAgentPreamble(system: string, note: (d: string) => void): string {
-  const paragraphs = system.split(/\n{2,}/);
+  // CRLF included: a paragraph separated that way is still a paragraph to the
+  // upstream, and a split that misses it leaves the refused text on the wire.
+  const paragraphs = system.split(/(?:\r?\n){2,}/);
   const kept = paragraphs.filter((p) => p.trim() !== AGENT_PREAMBLE);
-  if (kept.length !== paragraphs.length) note(AGENT_PREAMBLE_DROPPED);
+  // The untouched string back, not a rejoined copy of itself: rebuilding would
+  // normalise every blank-line run in a prompt this has no business editing.
+  if (kept.length === paragraphs.length) return system;
+  note(AGENT_PREAMBLE_DROPPED);
   return kept.join("\n\n");
 }
 
@@ -708,7 +713,10 @@ export function toAntigravityWire(
 
   const joined = systemText(req.system, "antigravity", note);
   const system = joined === undefined ? undefined : dropAgentPreamble(joined, note);
-  if (system !== undefined && system.length > 0) {
+  // `trim` rather than `length`: dropping the preamble out of a block that held
+  // little else leaves whitespace, and a `systemInstruction` of one space is an
+  // instruction that says nothing and still costs a part.
+  if (system !== undefined && system.trim().length > 0) {
     request.systemInstruction = { parts: [{ text: system }] };
   }
 

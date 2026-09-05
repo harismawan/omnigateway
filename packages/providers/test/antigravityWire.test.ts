@@ -105,6 +105,36 @@ describe("message mapping", () => {
     expect(degradations).toContain("antigravity:agent-preamble-dropped");
   });
 
+  test("drops the preamble when the paragraphs are separated by CRLF", () => {
+    const { body, degradations } = build({
+      system: [{ type: "text", text: `before\r\n\r\n${AGENT_PREAMBLE}\r\n\r\nafter` }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    expect(body.request.systemInstruction).toEqual({ parts: [{ text: "before\n\nafter" }] });
+    expect(degradations).toContain("antigravity:agent-preamble-dropped");
+  });
+
+  test("leaves a prompt without the preamble byte-identical", () => {
+    // Rejoining would normalise this to one blank line, editing a prompt that
+    // gave no reason to be touched.
+    const text = "before\n\n\n\nafter\r\n\r\nlast";
+    const { body, degradations } = build({
+      system: [{ type: "text", text }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    expect(body.request.systemInstruction).toEqual({ parts: [{ text }] });
+    expect(degradations).not.toContain("antigravity:agent-preamble-dropped");
+  });
+
+  test("sends no systemInstruction when the preamble was all there was", () => {
+    const { body, degradations } = build({
+      system: [{ type: "text", text: `${AGENT_PREAMBLE}\n\n ` }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    expect(body.request.systemInstruction).toBeUndefined();
+    expect(degradations).toContain("antigravity:agent-preamble-dropped");
+  });
+
   test("leaves a near-miss paragraph alone: the upstream matches the exact string", () => {
     const { body, degradations } = build({
       system: [{ type: "text", text: "You are an agent, built on the Claude Agent SDK." }],
