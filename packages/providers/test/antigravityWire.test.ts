@@ -283,11 +283,11 @@ describe("generation config and tools", () => {
 });
 
 describe("the Cloud Code output ceiling", () => {
-  test("a request above the wrapper's limit is clamped and says so", () => {
-    // Cloud Code answers 400 above 16,384 whatever the model's own ceiling is,
-    // so a client naming its own figure has it lowered rather than refused.
-    const { body, degradations } = build({ maxTokens: 65_536 });
-    expect(body.request.generationConfig?.maxOutputTokens).toBe(16_384);
+  test("a request above the ceiling is clamped and says so", () => {
+    // A client naming a figure above what the backend advertises has it lowered
+    // rather than refused.
+    const { body, degradations } = build({ maxTokens: 131_072 });
+    expect(body.request.generationConfig?.maxOutputTokens).toBe(65_536);
     expect(degradations).toContain("antigravity:max-tokens-clamped");
   });
 
@@ -297,15 +297,19 @@ describe("the Cloud Code output ceiling", () => {
     expect(degradations).toEqual([]);
   });
 
-  test("the catalog advertises the wrapper's ceiling, not the model's", () => {
-    // A client paces itself by `GET /v1/models`; advertising 65K would have it
-    // build requests this provider cannot serve.
+  test("the catalog advertises what the live catalog reports per row", () => {
+    // A client paces itself by `GET /v1/models`. The Flash rows report 65,536
+    // and the Pro and Lite rows one below that; nothing may exceed the figure
+    // `wire.ts` clamps against.
     for (const model of ANTIGRAVITY_MODELS.models) {
-      expect({ id: model.id, max: model.limits.maxOutputTokens }).toEqual({
+      expect({ id: model.id, ok: model.limits.maxOutputTokens <= 65_536 }).toEqual({
         id: model.id,
-        max: 16_384,
+        ok: true,
       });
     }
+    const byId = new Map(ANTIGRAVITY_MODELS.models.map((m) => [m.id, m.limits.maxOutputTokens]));
+    expect(byId.get("gemini-3.8-flash-high")).toBe(65_536);
+    expect(byId.get("gemini-3.1-pro-high")).toBe(65_535);
   });
 
   test("a thinking budget leaves room for an answer above it", () => {
@@ -319,7 +323,7 @@ describe("the Cloud Code output ceiling", () => {
   });
 
   test("the room made for a budget still respects the ceiling", () => {
-    const { body } = build({ reasoning: { mode: "budget", budgetTokens: 16_384 } });
-    expect(body.request.generationConfig?.maxOutputTokens).toBe(16_384);
+    const { body } = build({ reasoning: { mode: "budget", budgetTokens: 65_536 } });
+    expect(body.request.generationConfig?.maxOutputTokens).toBe(65_536);
   });
 });
