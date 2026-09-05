@@ -30,7 +30,13 @@ export type MuseResponsesBody = {
 
 /** A client-supplied cache key, when it is a usable string. */
 function suppliedKey(req: ChatRequest): string | undefined {
-  const vendor = req.vendor?.muse;
+  // `openai`, not `muse`, and the key names the **dialect** rather than the
+  // provider. Both Responses-shaped ingresses write `vendor = { openai: extras }`
+  // and nothing anywhere constructs a `muse` bag, so reading one would drop
+  // every passthrough field a client sent — `include` among them, which is what
+  // decides whether reasoning items come back replayable. `custom/` reads the
+  // same bag for the same reason.
+  const vendor = req.vendor?.openai;
   for (const name of ["prompt_cache_key", "session_id"] as const) {
     const value = vendor?.[name];
     if (typeof value === "string" && value.length > 0) return value;
@@ -269,7 +275,7 @@ export function toMuseWire(
 
   const key = suppliedKey(req) ?? cacheKey(req, instructions ?? "", input[0]);
 
-  Object.assign(body, req.vendor?.muse ?? {});
+  Object.assign(body, req.vendor?.openai ?? {});
 
   // Written **after** the vendor merge, and the order is the whole point. The
   // merge copies the client's bag verbatim, including a `prompt_cache_key` that

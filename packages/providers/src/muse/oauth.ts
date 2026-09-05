@@ -9,6 +9,7 @@ import {
 } from "../oauthFlow.ts";
 import { parsed as parseBody, postJsonRequest } from "../oauthRequests.ts";
 import { numberOf, recordOf, reportFrom, usageReadable, windowFrom } from "../oauthUsage.ts";
+import { trustedBaseUrl } from "./endpoint.ts";
 import { museProfile } from "./profile.ts";
 
 /**
@@ -187,40 +188,6 @@ async function* postForm(
   throw fail(tokenErrorCode(res.status), tokenErrorMessage(res.status, parsed));
 }
 
-/** Endpoints are only honoured under this registrable domain. */
-const TRUSTED_HOST = "meta.ai";
-
-/**
- * Accepts the base URL the mint states, or falls back to the compiled default.
- *
- * The mint answers `base_url: "https://api.meta.ai/v1"`, and Muse's own client
- * reads it — "unrecognized Model API base URL from login; using the default" is
- * its wording for refusing one, which is the behaviour copied here. It matters
- * because this value decides where a decrypted credential is sent, so an
- * unvalidated string from a response is a redirect of every subsequent request
- * to a host of the responder's choosing.
- *
- * `endsWith(".meta.ai")` rather than `endsWith("meta.ai")`, so `evilmeta.ai`
- * and `meta.ai.attacker.example` are both refused. `URL` has already lowercased
- * and punycoded the host by this point. Null on anything unusable, and the
- * caller falls back — an unrecognized base URL is not a reason to fail a
- * connect the operator already approved.
- */
-function trustedBaseUrl(value: string | null): string | null {
-  if (value === null) return null;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return null;
-  }
-  const host = url.hostname;
-  if (url.protocol !== "https:") return null;
-  if (host !== TRUSTED_HOST && !host.endsWith(`.${TRUSTED_HOST}`)) return null;
-  // Trailing slash dropped so the codec can append a path without doubling it.
-  return url.toString().replace(/\/$/, "");
-}
-
 /**
  * Spends the OAuth token on a Model API key.
  *
@@ -258,7 +225,15 @@ async function* mint(accessToken: string, fail: AuthHelpers["fail"]): AuthStep<M
         "muse rejected the saved login; reconnect the account or use a different one",
       );
     }
-    throw fail(tokenErrorCode(res.status), tokenErrorMessage(res.status, parsed));
+    if (res.status === 429) {
+      throw fail("RATE_LIMIT", `muse rate limited the key mint: http_${res.status}`);
+    }
+    // **Not `tokenErrorCode`**, which is written for a token endpoint and maps
+    // every 4xx but 429 to `AUTH`. `AUTH` is what `createRefresher` disables a
+    // credential on, and a 400, 404 or 408 from the mint says the request or
+    // the endpoint was wrong — not that the login was repudiated. Only the two
+    // statuses above are the provider looking at the credential and refusing it.
+    throw fail("UPSTREAM", `muse key mint failed: http_${res.status}`);
   }
 
   const record = recordFrom(parsed);
@@ -288,7 +263,7 @@ async function* mint(accessToken: string, fail: AuthHelpers["fail"]): AuthStep<M
     email: stringFrom(record, "user_email"),
     tierName: stringFrom(record, "subs_tier_name"),
     subscriptionActive: record.is_subs_active === true,
-    baseUrl: trustedBaseUrl(stringFrom(record, "base_url")),
+    baseUrl: trustedBaseUrl(record.base_url),
     usage: record.subs_usage,
   };
 }

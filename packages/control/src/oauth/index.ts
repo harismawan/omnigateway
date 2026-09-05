@@ -29,7 +29,7 @@ import type { OAuthProvider } from "./types.ts";
 export const OAUTH_PROVIDERS: Record<string, OAuthProvider> = Object.create(null);
 
 /**
- * Installs the five flows this repository ships.
+ * Installs the built-in flows this repository ships.
  *
  * Called by the gateway from `installPluginProviders` — which is **after**
  * `loadPlugins`, and safe only because the loader registers no flow — and by

@@ -78,7 +78,7 @@ export function installPluginProviders(
   registry: Record<string, OAuthProvider> = OAUTH_PROVIDERS,
 ): void {
   // First, and unconditionally — an empty `providers` must still leave a host
-  // with its own five flows.
+  // with its own built-in flows.
   seedBuiltinOAuth(registry);
 
   for (const provider of providers) {

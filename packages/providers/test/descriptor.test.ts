@@ -26,7 +26,7 @@ const IDS = [
 ] as const satisfies readonly ProviderId[];
 
 /**
- * The six, as a type.
+ * The built-ins, as a type.
  *
  * Every `*_BEFORE` fixture below is keyed on this rather than on `ProviderId`,
  * which is a validated string now and would let a fixture drop a provider

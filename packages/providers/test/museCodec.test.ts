@@ -157,10 +157,194 @@ test("the vendor bag cannot put back a cache key the encoder rejected", async ()
   // there is on this path.
   const sent = await sentFor(creds({ apiKey: "meta-key" }), {
     ...request,
-    vendor: { muse: { prompt_cache_key: "" } },
+    vendor: { openai: { prompt_cache_key: "" } },
   });
 
   expect(sent.body).toContain(`"prompt_cache_key":"${KEY}"`);
+});
+
+test("passthrough rides the dialect's bag, which is `openai` and not `muse`", async () => {
+  // Both Responses-shaped ingresses write `vendor = { openai: extras }`, and
+  // nothing constructs a `muse` bag. Reading one dropped every field a client
+  // sent — silently, since a bag nobody writes is indistinguishable from a
+  // client that sent nothing. Asserted through a field that reaches the wire.
+  const sent = await sentFor(creds({ apiKey: "meta-key" }), {
+    ...request,
+    vendor: { openai: { service_tier: "priority" } },
+  });
+
+  expect(sent.body).toContain('"service_tier":"priority"');
+});
+
+test("a client's own cache key is taken from the dialect's bag", async () => {
+  // The *other* read of the bag. `suppliedKey` looks there before deriving one,
+  // and it is a separate line from the merge below — so a fork that fixed only
+  // the merge would still ignore a key the client chose, and the header and the
+  // body would both carry a hash of ours instead.
+  const sent = await sentFor(creds({ apiKey: "meta-key" }), {
+    ...request,
+    vendor: { openai: { prompt_cache_key: "client-chosen" } },
+  });
+
+  expect(sent.body).toContain('"prompt_cache_key":"client-chosen"');
+  expect(sent.headers).toContainEqual(["x-meta-ai-gateway-session-id", "client-chosen"]);
+});
+
+test("a `muse` bag is ignored, so a stray one cannot smuggle fields onto the wire", async () => {
+  const sent = await sentFor(creds({ apiKey: "meta-key" }), {
+    ...request,
+    vendor: { muse: { service_tier: "priority" } },
+  });
+
+  expect(sent.body).not.toContain("service_tier");
+});
+
+test("`include` from the client is what turns native reasoning on", async () => {
+  // The decode side of the same bag. `include: ["reasoning.encrypted_content"]`
+  // is how a client says it will replay reasoning items itself; reading the
+  // wrong bag left this permanently false and every muse reasoning item came
+  // back as a plain thinking block, unreplayable under `store: false`.
+  const capture = capturing(
+    [
+      "event: response.output_item.added",
+      'data: {"output_index":0,"item":{"type":"reasoning"}}',
+      "",
+      "event: response.reasoning_summary_text.delta",
+      'data: {"output_index":0,"delta":"weighing it"}',
+      "",
+      "event: response.output_item.done",
+      'data: {"output_index":0,"item":{"type":"reasoning","encrypted_content":"opaque"}}',
+      "",
+      "event: response.completed",
+      'data: {"response":{"status":"completed"}}',
+      "",
+    ].join("\n"),
+  );
+  const result = await museAdapter.send({
+    request: {
+      ...request,
+      vendor: { openai: { include: ["reasoning.encrypted_content"] } },
+    },
+    model: "muse-spark-1.3",
+    credentials: creds({ apiKey: "meta-key" }),
+    http: capture.http,
+    signal: new AbortController().signal,
+  });
+
+  const events = [];
+  for await (const event of result.events) events.push(event);
+
+  const start = events.find((e) => e.type === "blockStart");
+  expect(start?.type === "blockStart" ? start.block : null).toEqual({
+    type: "providerNative",
+    provider: "muse",
+    blockType: "reasoning",
+    data: {},
+  });
+  // Tagged `muse`, never `openai`: the block's `provider` is what the router
+  // reads to decide which targets may receive this history, so a wrong tag pins
+  // the conversation to the wrong vendor.
+  // **Every** provider-native delta, not the first. The decoder tags three
+  // places — the block start, the streaming summary, and the fold that carries
+  // `encrypted_content` — and asserting one of them let a wrong tag survive on
+  // the other two. The summary path in particular had no fixture at all.
+  const tags = events.flatMap((e) =>
+    e.type === "blockDelta" && e.delta.type === "providerNative" ? [e.delta.provider] : [],
+  );
+  expect(tags).toEqual(["muse", "muse"]);
+  expect(tags.length).toBe(2);
+});
+
+test("a tool call ends the turn as toolUse, not endTurn", async () => {
+  // `endTurn` on a turn that asked for a tool is the one wrong answer nobody
+  // notices: the client reads a finished reply and stops, never running the
+  // tool the model asked for.
+  const capture = capturing(
+    [
+      "event: response.output_item.added",
+      'data: {"output_index":0,"item":{"type":"function_call","call_id":"c1","name":"ls"}}',
+      "",
+      "event: response.completed",
+      'data: {"response":{"status":"completed"}}',
+      "",
+    ].join("\n"),
+  );
+  const result = await museAdapter.send({
+    request,
+    model: "muse-spark-1.3",
+    credentials: creds({ apiKey: "meta-key" }),
+    http: capture.http,
+    signal: new AbortController().signal,
+  });
+
+  const events = [];
+  for await (const event of result.events) events.push(event);
+  const end = events.find((e) => e.type === "end");
+  expect(end?.type === "end" ? end.stopReason : null).toBe("toolUse");
+});
+
+test("cached input is subtracted, so it is not billed as ordinary input too", async () => {
+  // `Usage.inputTokens` is *uncached* input. `input_tokens` arrives inclusive of
+  // the cached part, so failing to subtract prices the same tokens twice — once
+  // at the input rate and once as a cache read.
+  const capture = capturing(
+    [
+      "event: response.completed",
+      'data: {"response":{"status":"completed","usage":{"input_tokens":100,' +
+        '"output_tokens":5,"input_tokens_details":{"cached_tokens":80}}}}',
+      "",
+    ].join("\n"),
+  );
+  const result = await museAdapter.send({
+    request,
+    model: "muse-spark-1.3",
+    credentials: creds({ apiKey: "meta-key" }),
+    http: capture.http,
+    signal: new AbortController().signal,
+  });
+
+  const events = [];
+  for await (const event of result.events) events.push(event);
+  const end = events.find((e) => e.type === "end");
+  const usage = end?.type === "end" ? end.usage : null;
+  expect(usage?.inputTokens).toBe(20);
+  expect(usage?.cacheReadTokens).toBe(80);
+});
+
+test("an upstream error keeps its class, and an unknown event names muse", async () => {
+  const authed = capturing(
+    ["event: error", 'data: {"error":{"code":"invalid_api_key","message":"bad key"}}', ""].join(
+      "\n",
+    ),
+  );
+  const a = await museAdapter.send({
+    request,
+    model: "muse-spark-1.3",
+    credentials: creds({ apiKey: "meta-key" }),
+    http: authed.http,
+    signal: new AbortController().signal,
+  });
+  const first = [];
+  for await (const event of a.events) first.push(event);
+  // `AUTH`, not `UPSTREAM`: the breaker and the retry policy read this, and a
+  // dead key retried as a transient fault burns every attempt.
+  expect(first.find((e) => e.type === "error")).toMatchObject({ code: "AUTH" });
+
+  const unknown = capturing(["event: response.hallucinated", "data: {}", ""].join("\n"));
+  const b = await museAdapter.send({
+    request,
+    model: "muse-spark-1.3",
+    credentials: creds({ apiKey: "meta-key" }),
+    http: unknown.http,
+    signal: new AbortController().signal,
+  });
+  const second = [];
+  for await (const event of b.events) second.push(event);
+  // Fails visibly rather than skipping, and says whose stream it was — a fork
+  // that still named OpenAI here sent a reader to the wrong provider's docs.
+  expect(second.find((e) => e.type === "error")).toMatchObject({
+    message: 'unrecognized muse stream event "response.hallucinated"',
+  });
 });
 
 test("what this dialect cannot express is recorded, not dropped in silence", async () => {
@@ -305,11 +489,38 @@ test("the base url the mint stated is where inference goes", async () => {
   expect(sent.url).toBe("https://api.meta.ai/v2/responses");
 });
 
-test("a credential with no stored base url falls back rather than building a broken one", async () => {
-  // Every credential minted before the field was read has none, and a restored
-  // database can carry anything at all.
-  for (const providerData of [{}, { baseUrl: "" }, { baseUrl: 7 }, { baseUrl: "ftp://x/v1" }]) {
-    const sent = await sentFor(creds({ apiKey: "meta-key", providerData }));
-    expect(sent.url).toBe("https://api.meta.ai/v1/responses");
+test("a stored base url is validated at the read that attaches the key", async () => {
+  // `providerData` is parsed back out of the database with a bare `JSON.parse`
+  // and a restored snapshot bypasses every schema, so the mint-time check is
+  // not a guarantee this read may lean on. Each of these would otherwise send
+  // `Authorization: Bearer <minted key>` to a host Meta does not control.
+  for (const baseUrl of [
+    "https://evil.example/v1",
+    "https://api.meta.ai@evil.example/v1",
+    "https://evilmeta.ai/v1",
+    "https://api.meta.ai.attacker.example/v1",
+    "http://api.meta.ai/v1",
+    "https://api.meta.ai/v1?x=1",
+    "https://api.meta.ai/v1#f",
+    "",
+    7,
+    "ftp://api.meta.ai/v1",
+  ]) {
+    const sent = await sentFor(creds({ apiKey: "meta-key", providerData: { baseUrl } }));
+    expect({ baseUrl, url: sent.url }).toEqual({
+      baseUrl,
+      url: "https://api.meta.ai/v1/responses",
+    });
+  }
+});
+
+test("a base url Meta really could have published is honoured", async () => {
+  for (const [baseUrl, url] of [
+    ["https://api.meta.ai/v1", "https://api.meta.ai/v1/responses"],
+    ["https://api.meta.ai/v1/", "https://api.meta.ai/v1/responses"],
+    ["https://eu.api.meta.ai/v2", "https://eu.api.meta.ai/v2/responses"],
+  ] as const) {
+    const sent = await sentFor(creds({ apiKey: "meta-key", providerData: { baseUrl } }));
+    expect({ baseUrl, url: sent.url }).toEqual({ baseUrl, url });
   }
 });

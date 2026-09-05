@@ -257,6 +257,23 @@ test("a rejected saved login is AUTH; a bad minute upstream is not", async () =>
   ).rejects.toMatchObject({ code: "RATE_LIMIT" });
 });
 
+test("a mint 4xx that is not a refusal of the credential is not AUTH", async () => {
+  // `tokenErrorCode` maps every 4xx but 429 to `AUTH`, which is written for a
+  // token endpoint and wrong for this one. `createRefresher` disables a
+  // credential on `AUTH`, so a 400 from a request Meta stopped accepting, or a
+  // 404 from a moved endpoint, would permanently disable a healthy account the
+  // day `refresh` becomes reachable. Only 401 and 403 are Meta looking at the
+  // credential and refusing it.
+  for (const status of [400, 404, 408, 422]) {
+    await expect(
+      museOAuth.exchange(
+        { code: "", pending: PENDING },
+        { http: sequence(TOKEN, { status, body: {} }), now: () => NOW },
+      ),
+    ).rejects.toMatchObject({ code: "UPSTREAM" });
+  }
+});
+
 test("refresh renews the token and mints a fresh key", async () => {
   const http = sequence(
     { status: 200, body: { access_token: "tok-2", refresh_token: "refresh-2", expires_in: 60 } },

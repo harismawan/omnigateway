@@ -4,6 +4,7 @@ import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { HeaderPair } from "../types.ts";
 import { decodeMuseResponses } from "./decode.ts";
+import { museResponsesUrl } from "./endpoint.ts";
 import { museBodyOrder, museProfile } from "./profile.ts";
 import { toMuseWire } from "./wire.ts";
 
@@ -18,26 +19,6 @@ import { toMuseWire } from "./wire.ts";
  * `accessToken` — which the flow also stores — belongs to the mint and the
  * usage probe alone.
  */
-const API_URL = "https://api.meta.ai/v1/responses";
-
-/**
- * Where this credential's inference goes.
- *
- * The mint states a `base_url` and Muse's own client follows it, so a
- * credential minted against a different deployment reaches that one rather than
- * the compiled constant. Validated at mint time — `trustedBaseUrl` in
- * `oauth.ts` refuses anything that is not https under `meta.ai` — because this
- * decides where a decrypted key is sent. Re-checked here only for shape: a
- * credential predating the field, or one restored from a database that bypassed
- * the schema, falls back rather than building a URL from whatever was stored.
- */
-function endpointFor(providerData: Record<string, unknown>): string {
-  const base = providerData.baseUrl;
-  return typeof base === "string" && base.startsWith("https://") && base.length > 0
-    ? `${base}/responses`
-    : API_URL;
-}
-
 export const museCodec: ProviderCodec = {
   buildRequest(input: CodecInput): CodecRequest {
     const { body, degradations, cacheKey } = toMuseWire(input.request, input.model);
@@ -71,7 +52,10 @@ export const museCodec: ProviderCodec = {
     return {
       decodeState: { nativeReasoning },
       request: {
-        url: endpointFor(input.credentials.providerData),
+        // Validated here, not trusted from storage: this is the read that
+        // attaches a decrypted key, and `providerData` is parsed back out of
+        // the database with no schema between.
+        url: museResponsesUrl(input.credentials.providerData),
         method: "POST",
         headers,
         // Always SSE. A non-streaming client request is served by collecting the

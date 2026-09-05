@@ -23,7 +23,7 @@ export { isProviderIdFormat, PROVIDER_ID_PATTERN } from "./descriptor.ts";
  * own.
  *
  * Nor is the rest of the package derived from this: `ADAPTERS`, `PROFILES`,
- * `BODY_ORDER` and `PROVIDER_MODEL_CATALOG` are hand-written six-key literals
+ * `BODY_ORDER` and `PROVIDER_MODEL_CATALOG` are hand-written literals
  * too, and only `PROVIDERS` walks. `descriptor.test.ts` is what holds all of
  * them to the same id set.
  *
