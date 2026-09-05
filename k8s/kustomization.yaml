@@ -11,4 +11,4 @@ resources:
 # tag, and Argo CD syncs `main`. Edit by hand only to roll back.
 images:
   - name: ghcr.io/harismawan/omnigateway
-    newTag: 0.10.0
+    newTag: 0.10.1
