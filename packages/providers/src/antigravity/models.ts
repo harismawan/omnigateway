@@ -49,10 +49,14 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  *   is priced by the **model its displayName names**, not by its id — the tier
  *   suffixes (`-high`, `-low`) are Antigravity's own and the public API prices
  *   one model per family.
- * - **`gemini-3.8`, `-3.7` and `-3.6` Flash are on introductory pricing that
- *   ends 2026-12-31**, after which input and output both double ($0.75→$1.50,
- *   $3.75→$7.50, cache read $0.075→$0.15). These numbers go silently wrong on
- *   1 January 2027; that is the date to revisit this table.
+ * - **`gemini-3.8`, `-3.7` and `-3.6` Flash carry their `standard` rate, not the
+ *   introductory one.** Google prices those three families at $0.75/$3.75
+ *   through 2026-12-31 and $1.50/$7.50 from 1 January 2027. The standard figure
+ *   is the one stored, deliberately: a table holding the promotional rate would
+ *   be correct today and silently wrong on a date nobody is watching for, and
+ *   these numbers are a reference for spend rather than an invoice. Every other
+ *   family below is already on its standard rate, so this is the only row group
+ *   where the two differ.
  * - Pro and 2.5 Pro price in two bands by prompt size. The **≤200K** band is
  *   carried, because `ProviderModelPricing` holds one number and the smaller
  *   band is the common case; a long-context request is under-costed here.
@@ -112,55 +116,55 @@ export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
     {
       id: "gemini-3.8-flash-high",
       label: "Gemini 3.8 Flash (High)",
-      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.8-flash-medium",
       label: "Gemini 3.8 Flash (Medium)",
-      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.8-flash-low",
       label: "Gemini 3.8 Flash (Low)",
-      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.7-flash-high",
       label: "Gemini 3.7 Flash (High)",
-      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.7-flash-medium",
       label: "Gemini 3.7 Flash (Medium)",
-      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.7-flash-low",
       label: "Gemini 3.7 Flash (Low)",
-      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.6-flash-high",
       label: "Gemini 3.6 Flash (High)",
-      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.6-flash-medium",
       label: "Gemini 3.6 Flash (Medium)",
-      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.6-flash-low",
       label: "Gemini 3.6 Flash (Low)",
-      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     // The 3.5 Flash tiers keep ids that do not say which model or tier they are.

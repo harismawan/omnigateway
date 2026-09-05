@@ -1402,12 +1402,15 @@ describe("the Cloud Code output ceiling", () => {
 
 describe("the catalog's list prices", () => {
   // Read 2026-09-05 from ai.google.dev/gemini-api/docs/pricing, keyed by the
-  // model each row's *displayName* names — the `-high`/`-low` suffixes are
+  // model each row's *displayName* names. The 3.8/3.7/3.6 Flash families are on
+  // their **standard** rate, not the introductory one that expires 2026-12-31 —
+  // a promotional figure would be right today and wrong on a date nobody
+  // watches for — the `-high`/`-low` suffixes are
   // Antigravity's own tiers and the public API prices one model per family.
   const PUBLISHED: Record<string, { input: number; output: number; cacheRead: number }> = {
-    "Gemini 3.8 Flash": { input: 0.75, output: 3.75, cacheRead: 0.075 },
-    "Gemini 3.7 Flash": { input: 0.75, output: 3.75, cacheRead: 0.075 },
-    "Gemini 3.6 Flash": { input: 0.75, output: 3.75, cacheRead: 0.075 },
+    "Gemini 3.8 Flash": { input: 1.5, output: 7.5, cacheRead: 0.15 },
+    "Gemini 3.7 Flash": { input: 1.5, output: 7.5, cacheRead: 0.15 },
+    "Gemini 3.6 Flash": { input: 1.5, output: 7.5, cacheRead: 0.15 },
     "Gemini 3.5 Flash": { input: 1.5, output: 9, cacheRead: 0.15 },
     "Gemini 3.5 Flash Lite": { input: 0.3, output: 2.5, cacheRead: 0.03 },
     "Gemini 3.1 Pro": { input: 2, output: 12, cacheRead: 0.2 },

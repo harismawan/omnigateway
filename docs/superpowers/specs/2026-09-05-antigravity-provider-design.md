@@ -367,9 +367,13 @@ mapping is nowhere one-to-one:
 - Each row is priced by the model its **displayName** names, not its id — the
   `-high`/`-low` suffixes are Antigravity's tiers and the public API prices one
   model per family.
-- **3.8, 3.7 and 3.6 Flash are on introductory pricing that ends 2026-12-31**,
-  after which input and output both double. These numbers go silently wrong on
-  1 January 2027.
+- **3.8, 3.7 and 3.6 Flash carry their standard rate, not the introductory
+  one.** Google prices those three at $0.75/$3.75 through 2026-12-31 and
+  $1.50/$7.50 from 1 January 2027; the standard figure is stored on purpose,
+  because a table holding the promotional rate is right today and silently wrong
+  on a date nobody is watching for. Traffic before the changeover is therefore
+  over-costed by 2x against list. Every other family is already on its standard
+  rate, so this is the only group where the two differ.
 - Pro and 2.5 Pro price in two bands by prompt size; the ≤200K band is carried,
   so a long-context request is under-costed.
 - `cacheWrite5m`/`cacheWrite1h` are **0 as a real price**: Google bills cache
