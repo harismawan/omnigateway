@@ -70,11 +70,13 @@ test("setup claude prompts for explicit mappings and writes one merged settings 
 
   const config = readJson(join(dir, "settings.json"));
   const env = config.env as Record<string, string>;
+  // Mirrored ids: Claude Code's picker lists nothing else, and ingress unwinds
+  // the prefix before the key allowlist runs.
   expect(env).toMatchObject({
-    ANTHROPIC_MODEL: "opus",
-    ANTHROPIC_DEFAULT_FABLE_MODEL: "mystery",
-    ANTHROPIC_DEFAULT_OPUS_MODEL: "opus",
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: "haiku",
+    ANTHROPIC_MODEL: "claude/opus",
+    ANTHROPIC_DEFAULT_FABLE_MODEL: "claude/mystery",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "claude/opus",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude/haiku",
     ANTHROPIC_AUTH_TOKEN: "<your OmniGateway key>",
   });
   expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined();
@@ -167,7 +169,7 @@ test("a Claude dry run shows the real merge and writes nothing", async () => {
 
   expect(result.code).toBe(0);
   expect(result.out).toContain('"theme": "dark"');
-  expect(result.out).toContain('"ANTHROPIC_MODEL": "opus"');
+  expect(result.out).toContain('"ANTHROPIC_MODEL": "claude/opus"');
 });
 
 test("setup writes through the injected filesystem seam", async () => {
