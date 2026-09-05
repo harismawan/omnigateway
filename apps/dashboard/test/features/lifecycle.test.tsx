@@ -15,7 +15,7 @@ describe("LifecycleControls", () => {
     stubLifecycle({ "GET /api/lifecycle": () => lifecycle({ version: "1.2.3" }) });
     renderWithProviders(<LifecycleControls />);
 
-    expect(await screen.findByText("v1.2.3")).toBeTruthy();
+    expect(await screen.findByText("omnigateway v1.2.3")).toBeTruthy();
   });
 
   /**
