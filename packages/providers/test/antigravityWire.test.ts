@@ -1399,3 +1399,65 @@ describe("the Cloud Code output ceiling", () => {
     expect(body.request.generationConfig?.maxOutputTokens).toBe(65_536);
   });
 });
+
+describe("the catalog's list prices", () => {
+  // Read 2026-09-05 from ai.google.dev/gemini-api/docs/pricing, keyed by the
+  // model each row's *displayName* names — the `-high`/`-low` suffixes are
+  // Antigravity's own tiers and the public API prices one model per family.
+  const PUBLISHED: Record<string, { input: number; output: number; cacheRead: number }> = {
+    "Gemini 3.8 Flash": { input: 0.75, output: 3.75, cacheRead: 0.075 },
+    "Gemini 3.7 Flash": { input: 0.75, output: 3.75, cacheRead: 0.075 },
+    "Gemini 3.6 Flash": { input: 0.75, output: 3.75, cacheRead: 0.075 },
+    "Gemini 3.5 Flash": { input: 1.5, output: 9, cacheRead: 0.15 },
+    "Gemini 3.5 Flash Lite": { input: 0.3, output: 2.5, cacheRead: 0.03 },
+    "Gemini 3.1 Pro": { input: 2, output: 12, cacheRead: 0.2 },
+    "Gemini 3.1 Flash Lite": { input: 0.25, output: 1.5, cacheRead: 0.025 },
+    "Gemini 2.5 Pro": { input: 1.25, output: 10, cacheRead: 0.125 },
+  };
+
+  /** The family a row's label names, with any `(High)`/`(Low)` tier removed. */
+  const familyOf = (label: string) => label.replace(/\s*\((?:High|Medium|Low)\)$/, "");
+
+  test("every row carries its family's published rate", () => {
+    // A row priced from the wrong family is silent money: it reaches `cost_usd`
+    // and an API key's dollar limit debits it.
+    for (const model of ANTIGRAVITY_MODELS.models) {
+      const published = PUBLISHED[familyOf(model.label)];
+      if (published === undefined) continue;
+      expect({ id: model.id, ...published }).toEqual({
+        id: model.id,
+        input: model.pricing.input,
+        output: model.pricing.output,
+        cacheRead: model.pricing.cacheRead,
+      });
+    }
+  });
+
+  test("the only unpriced row is the one the price list does not name", () => {
+    // The guard against a future row landing at zero by omission rather than by
+    // decision. "Gemini 3 Flash" has no published row; everything else does.
+    const unpriced = ANTIGRAVITY_MODELS.models.filter((m) => m.pricing.input === 0);
+    expect(unpriced.map((m) => m.id)).toEqual(["gemini-3-flash"]);
+    expect(PUBLISHED[familyOf("Gemini 3 Flash")]).toBeUndefined();
+  });
+
+  test("cache writes are zero because Google bills storage by the hour", () => {
+    // A real price, not a missing one: $/1M/hour is a different quantity from
+    // the per-token write premium these fields hold, and converting it would
+    // need an invented residency time.
+    for (const model of ANTIGRAVITY_MODELS.models) {
+      expect(model.pricing.cacheWrite5m).toBe(0);
+      expect(model.pricing.cacheWrite1h).toBe(0);
+    }
+  });
+
+  test("output costs more than input wherever a row is priced at all", () => {
+    // Catches a transposed pair, which the table above would not: swapping the
+    // two numbers on one row keeps both of them "published".
+    for (const model of ANTIGRAVITY_MODELS.models) {
+      if (model.pricing.input === 0) continue;
+      expect(model.pricing.output).toBeGreaterThan(model.pricing.input);
+      expect(model.pricing.cacheRead).toBeLessThan(model.pricing.input);
+    }
+  });
+});

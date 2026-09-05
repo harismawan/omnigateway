@@ -346,6 +346,39 @@ walk rather than inside it. Where a repair has a choice, it infers rather than
 deletes — a node carrying `properties` *is* an object — except against a client's
 explicitly stated contradicting type, which is not the encoder's to overrule.
 
+### The catalog carries list prices nobody is billed
+
+The rows shipped unpriced, on the reasoning that Antigravity is a flat
+subscription stating no per-token rate and that the public Gemini API's prices
+"do not apply and must not be copied in". **That was overridden deliberately by
+the operator**, so `cost_usd` reads as what the same traffic would have cost on
+the paid API rather than as zero.
+
+The consequence is recorded here because it is not cosmetic: catalog pricing is
+the default a **new** target stores, a target's stored price is what `finishLog`
+debits, and so an API key carrying a dollar limit will exhaust it against spend
+that did not happen. Setting `costPerMTok` to zero on the saved target restores
+the old behaviour; catalog edits reach new targets only, so targets saved before
+this change keep what they already hold.
+
+Rates read 2026-09-05 from `ai.google.dev/gemini-api/docs/pricing`, and the
+mapping is nowhere one-to-one:
+
+- Each row is priced by the model its **displayName** names, not its id — the
+  `-high`/`-low` suffixes are Antigravity's tiers and the public API prices one
+  model per family.
+- **3.8, 3.7 and 3.6 Flash are on introductory pricing that ends 2026-12-31**,
+  after which input and output both double. These numbers go silently wrong on
+  1 January 2027.
+- Pro and 2.5 Pro price in two bands by prompt size; the ≤200K band is carried,
+  so a long-context request is under-costed.
+- `cacheWrite5m`/`cacheWrite1h` are **0 as a real price**: Google bills cache
+  *storage* per hour, a different quantity from the per-token write premium
+  those fields hold, and converting it would need an invented residency time.
+- `gemini-3-flash` stays at zero — the price list has no "Gemini 3 Flash" row,
+  and a test pins it as the *only* unpriced row so a future addition cannot land
+  at zero by omission.
+
 ### `gemini-3.1-pro-high` is listed and not servable
 
 Found by running the full shape battery against **every** catalog row rather

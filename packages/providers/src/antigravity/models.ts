@@ -30,14 +30,40 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  * model as `gemini-3.1-pro-high`, and it is the only one of the two the backend
  * will actually serve. See the row below.
  *
- * **Everything here is unpriced**, which is a deliberate zero and not a missing
- * figure. Antigravity is sold as a subscription and states no per-token rate at
- * all, so the router's scorer reads these as unknown and drops them from the
- * cost term — the same treatment, and the same stored value, as Kilo's
- * `kilo-auto/*` routers. An operator who wants an antigravity target cost-ranked
- * sets a real `costPerMTok` on the saved target. The public Gemini API's list
- * prices do not apply and must not be copied in: nobody is billed per token on
- * this surface.
+ * **These prices are the public Gemini API's list rates, and nobody is billed
+ * them on this surface.** Antigravity is sold as a flat subscription and states
+ * no per-token rate at all; the figures below are carried at the operator's
+ * explicit request, so that `cost_usd` reads as what the same traffic would have
+ * cost on the paid API rather than as zero.
+ *
+ * Read what that means before changing anything that consumes them. Catalog
+ * pricing is the default a **new** target stores, and a target's stored price is
+ * what `finishLog` debits — so an API key with a dollar limit will exhaust that
+ * limit against spend which did not happen. An operator who wants the older
+ * behaviour sets `costPerMTok` to zero on the saved target; catalog edits reach
+ * new targets only, so existing targets keep whatever they already hold.
+ *
+ * Sources and the shape of the mapping, since none of it is one-to-one:
+ *
+ * - Rates read 2026-09-05 from `ai.google.dev/gemini-api/docs/pricing`. Each row
+ *   is priced by the **model its displayName names**, not by its id — the tier
+ *   suffixes (`-high`, `-low`) are Antigravity's own and the public API prices
+ *   one model per family.
+ * - **`gemini-3.8`, `-3.7` and `-3.6` Flash are on introductory pricing that
+ *   ends 2026-12-31**, after which input and output both double ($0.75→$1.50,
+ *   $3.75→$7.50, cache read $0.075→$0.15). These numbers go silently wrong on
+ *   1 January 2027; that is the date to revisit this table.
+ * - Pro and 2.5 Pro price in two bands by prompt size. The **≤200K** band is
+ *   carried, because `ProviderModelPricing` holds one number and the smaller
+ *   band is the common case; a long-context request is under-costed here.
+ * - Where a family prices audio above text, the **text** rate is carried.
+ * - `cacheWrite5m` and `cacheWrite1h` are **0, and that is a real price rather
+ *   than a missing one**: Google bills cache *storage* per hour, which is a
+ *   different quantity from the per-token write premium these two fields hold.
+ *   There is nowhere honest to put $/1M/hour, so it is left out rather than
+ *   converted with an invented residency time.
+ * - `gemini-3-flash` stays at zero: the public price list has no "Gemini 3
+ *   Flash" row, and inventing one is the thing this comment exists to prevent.
  *
  * Antigravity's backend also serves Claude (250K context) and GPT-OSS models,
  * and the probe returns them. They are left out on purpose: `claude-` is already
@@ -67,7 +93,11 @@ export const MAX_OUTPUT_TOKENS = 65_536;
 /** What the Pro and Lite rows advertise instead — one below the Flash ceiling. */
 const PRO_MAX_OUTPUT_TOKENS = 65_535;
 
-const FREE = { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 };
+/** Google bills cache storage per hour, not per write. See the note above. */
+const NO_CACHE_WRITE = { cacheWrite5m: 0, cacheWrite1h: 0 };
+
+/** The one row the public price list does not name. */
+const FREE = { input: 0, output: 0, cacheRead: 0, ...NO_CACHE_WRITE };
 const FLASH_LIMITS = { contextWindow: 1_048_576, maxOutputTokens: MAX_OUTPUT_TOKENS };
 const PRO_LIMITS = { contextWindow: 1_048_576, maxOutputTokens: PRO_MAX_OUTPUT_TOKENS };
 
@@ -82,55 +112,55 @@ export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
     {
       id: "gemini-3.8-flash-high",
       label: "Gemini 3.8 Flash (High)",
-      pricing: FREE,
+      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.8-flash-medium",
       label: "Gemini 3.8 Flash (Medium)",
-      pricing: FREE,
+      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.8-flash-low",
       label: "Gemini 3.8 Flash (Low)",
-      pricing: FREE,
+      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.7-flash-high",
       label: "Gemini 3.7 Flash (High)",
-      pricing: FREE,
+      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.7-flash-medium",
       label: "Gemini 3.7 Flash (Medium)",
-      pricing: FREE,
+      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.7-flash-low",
       label: "Gemini 3.7 Flash (Low)",
-      pricing: FREE,
+      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.6-flash-high",
       label: "Gemini 3.6 Flash (High)",
-      pricing: FREE,
+      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.6-flash-medium",
       label: "Gemini 3.6 Flash (Medium)",
-      pricing: FREE,
+      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.6-flash-low",
       label: "Gemini 3.6 Flash (Low)",
-      pricing: FREE,
+      pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     // The 3.5 Flash tiers keep ids that do not say which model or tier they are.
@@ -140,19 +170,19 @@ export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
     {
       id: "gemini-3-flash-agent",
       label: "Gemini 3.5 Flash (High)",
-      pricing: FREE,
+      pricing: { input: 1.5, output: 9, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.5-flash-low",
       label: "Gemini 3.5 Flash (Medium)",
-      pricing: FREE,
+      pricing: { input: 1.5, output: 9, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
       id: "gemini-3.5-flash-extra-low",
       label: "Gemini 3.5 Flash (Low)",
-      pricing: FREE,
+      pricing: { input: 1.5, output: 9, cacheRead: 0.15, ...NO_CACHE_WRITE },
       limits: FLASH_LIMITS,
     },
     {
@@ -164,7 +194,7 @@ export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
     {
       id: "gemini-3.5-flash-lite",
       label: "Gemini 3.5 Flash Lite",
-      pricing: FREE,
+      pricing: { input: 0.3, output: 2.5, cacheRead: 0.03, ...NO_CACHE_WRITE },
       limits: PRO_LIMITS,
     },
     {
@@ -182,25 +212,25 @@ export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
       // the probe cannot show it: `fetchAvailableModels` reports both.
       id: "gemini-pro-agent",
       label: "Gemini 3.1 Pro (High)",
-      pricing: FREE,
+      pricing: { input: 2, output: 12, cacheRead: 0.2, ...NO_CACHE_WRITE },
       limits: PRO_LIMITS,
     },
     {
       id: "gemini-3.1-pro-low",
       label: "Gemini 3.1 Pro (Low)",
-      pricing: FREE,
+      pricing: { input: 2, output: 12, cacheRead: 0.2, ...NO_CACHE_WRITE },
       limits: PRO_LIMITS,
     },
     {
       id: "gemini-3.1-flash-lite",
       label: "Gemini 3.1 Flash Lite",
-      pricing: FREE,
+      pricing: { input: 0.25, output: 1.5, cacheRead: 0.025, ...NO_CACHE_WRITE },
       limits: PRO_LIMITS,
     },
     {
       id: "gemini-2.5-pro",
       label: "Gemini 2.5 Pro",
-      pricing: FREE,
+      pricing: { input: 1.25, output: 10, cacheRead: 0.125, ...NO_CACHE_WRITE },
       limits: PRO_LIMITS,
     },
   ],
