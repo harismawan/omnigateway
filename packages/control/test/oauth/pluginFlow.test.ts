@@ -661,6 +661,26 @@ async function tokenUrlOf(provider: OAuthProvider): Promise<string | undefined> 
   return sent[0]?.url;
 }
 
+/**
+ * Providers whose usage probe is not a `GET`, and why each one is not.
+ *
+ * An allowlist rather than a relaxed assertion, because the method check is
+ * load-bearing for everyone else: a `GET` cannot be the credential-minting call
+ * by construction, and that is most of what the URL check below is protecting.
+ * Adding a name here is a decision a reviewer sees; widening the assertion to
+ * `GET | POST` is one nobody would.
+ *
+ * `muse` — Meta serves `subs_usage` from `POST /muse-code/key` and from nowhere
+ * else, so the probe is a mint. Safe because minting is a **read** of the
+ * account's existing key rather than an issue of a new one: two mints seconds
+ * apart against one account returned a byte-identical `api_key`, measured
+ * against the live endpoint. Were that ever to change, the probe would swap the
+ * stored key out every poll interval and `usage` cannot write one back — so if
+ * this line is ever copied for a second provider, that is the property to
+ * measure first.
+ */
+const NON_GET_USAGE_PROBES: Readonly<Record<string, "POST">> = { muse: "POST" };
+
 test("every usage probe reads a usage endpoint, authenticated, and gates on status", async () => {
   for (const [id, provider] of Object.entries(OAUTH_PROVIDERS)) {
     if (provider.usage === undefined) continue;
@@ -670,7 +690,8 @@ test("every usage probe reads a usage endpoint, authenticated, and gates on stat
 
     expect({ id, calls: sent.length }).toEqual({ id, calls: 1 });
     const call = sent[0];
-    expect({ id, method: call?.method }).toEqual({ id, method: "GET" });
+    const expected = NON_GET_USAGE_PROBES[id] ?? "GET";
+    expect({ id, method: call?.method }).toEqual({ id, method: expected });
 
     // **The URL, which is the assertion that matters.** A probe pointed at the
     // *token* endpoint sends a bearer token to the credential-minting URL, and

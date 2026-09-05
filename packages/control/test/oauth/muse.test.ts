@@ -49,14 +49,32 @@ const TOKEN: Reply = {
   status: 200,
   body: { access_token: "oauth-tok", refresh_token: "oauth-refresh", expires_in: 3600 },
 };
+/**
+ * Shaped on a live `muse-code/key` response, with the identifying values
+ * replaced. The field set is the real one — fifteen fields, `base_url` among
+ * them — rather than the twelve the binary's serde metadata named.
+ */
 const MINTED: Reply = {
   status: 200,
   body: {
     api_key: "meta-key",
+    base_url: "https://api.meta.ai/v1",
     user_email: "dev@example.com",
+    user_full_name: "A Developer",
     is_subs_active: true,
+    subs_tier_id: "tier-2",
     subs_tier_name: "Muse Pro",
+    is_subs_upgrade_available: false,
+    has_payment_method: true,
     require_payment: false,
+    can_subscribe: false,
+    show_subs_upsell: false,
+    payment_method: null,
+    action_url: "https://dev.meta.ai/billing/",
+    subs_usage: {
+      window: { used_percent: 40, resets_at: 1_700_000_600, window_duration_mins: 300 },
+      weekly: { used_percent: 9, resets_at: 1_700_086_400 },
+    },
   },
 };
 
@@ -129,6 +147,8 @@ test("approval buys a token, and the token buys the key", async () => {
   expect(result.accountEmail).toBe("dev@example.com");
   expect(result.providerData.subscriptionTier).toBe("Muse Pro");
   expect(result.providerData.subscriptionActive).toBe(true);
+  // The mint states where inference goes, and the client follows it.
+  expect(result.providerData.baseUrl).toBe("https://api.meta.ai/v1");
   // The OAuth token's expiry, not the key's, which Meta states nowhere. Every
   // refresh re-mints, so the key is replaced at least as often as this.
   expect(result.expiresAt).toBe(NOW + 3_600_000);
@@ -275,4 +295,87 @@ test("a token response with a blank access token never reaches the mint", async 
     museOAuth.exchange({ code: "", pending: PENDING }, { http, now: () => NOW }),
   ).rejects.toThrow("token endpoint returned no access_token");
   expect(http.seen()).toHaveLength(1);
+});
+
+test("the mint is sent an empty object, never an empty body", async () => {
+  // Measured against the live endpoint: `""` is refused with 400 "Request body
+  // is required but was empty or null" and mints nothing, so a credential could
+  // never be created at all. The contents are ignored; the syntax is not.
+  const http = sequence(TOKEN, MINTED);
+  await museOAuth.exchange({ code: "", pending: PENDING }, { http, now: () => NOW });
+
+  const mint = http.seen()[1];
+  expect(mint?.body).toBe("{}");
+  expect(mint?.headers).toContainEqual(["Content-Type", "application/json"]);
+});
+
+test("a base url outside meta.ai is refused, and the codec's constant stands", async () => {
+  // This value decides where a decrypted key is sent, so a response cannot
+  // redirect it. `.meta.ai` with the dot, so `evilmeta.ai` is refused too.
+  for (const base of [
+    "https://evilmeta.ai/v1",
+    "https://api.meta.ai.attacker.example/v1",
+    "http://api.meta.ai/v1",
+    "not a url",
+  ]) {
+    const http = sequence(TOKEN, {
+      status: 200,
+      body: { api_key: "meta-key", base_url: base },
+    });
+    const result = await museOAuth.exchange(
+      { code: "", pending: PENDING },
+      { http, now: () => NOW },
+    );
+    // Absent rather than stored-and-ignored: the codec falls back on absence,
+    // and a rejected value left in `providerData` is one a later reader trusts.
+    expect({ base, stored: result.providerData.baseUrl }).toEqual({ base, stored: undefined });
+  }
+});
+
+test("the usage probe reads both windows off a fresh mint", async () => {
+  const http = sequence(MINTED);
+  const report = await museOAuth.usage?.(
+    { accessToken: "oauth-tok" },
+    { http, now: () => NOW },
+    {},
+  );
+
+  expect(report?.windows.map((w) => [w.windowType, w.used, w.limit])).toEqual([
+    ["fiveHour", 40, 100],
+    ["weekly", 9, 100],
+  ]);
+  // Stated by the payload, not inferred from the window's name.
+  expect(report?.windows[0]?.windowMs).toBe(300 * 60_000);
+
+  const [call] = http.seen();
+  expect(call?.url).toBe("https://api.meta.ai/muse-code/key");
+  expect(call?.body).toBe("{}");
+});
+
+test("a pay-as-you-go account reports unknown quota rather than an empty one", async () => {
+  // The live shape for an account with no subscription: fourteen fields and no
+  // `subs_usage` at all. Reporting zeros would have the console draw a full
+  // allowance nobody has.
+  const http = sequence({
+    status: 200,
+    body: { api_key: "meta-key", is_subs_active: false, require_payment: false },
+  });
+  const report = await museOAuth.usage?.(
+    { accessToken: "oauth-tok" },
+    { http, now: () => NOW },
+    {},
+  );
+
+  expect(report).toBe(null);
+});
+
+test("the usage probe never judges the credential it reads", async () => {
+  // A probe reports; `require_payment` is `exchange`'s verdict to make, not
+  // this one's. Throwing AUTH from here would disable an account over a quota
+  // read, and the poller runs unattended.
+  const http = sequence({ status: 200, body: { require_payment: true } });
+
+  expect(await museOAuth.usage?.({ accessToken: "oauth-tok" }, { http, now: () => NOW }, {})).toBe(
+    null,
+  );
 });

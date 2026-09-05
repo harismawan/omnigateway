@@ -8,7 +8,7 @@ import {
   type UsageReport,
 } from "../oauthFlow.ts";
 import { parsed as parseBody, postJsonRequest } from "../oauthRequests.ts";
-import { numberOf, recordOf, reportFrom, windowFrom } from "../oauthUsage.ts";
+import { numberOf, recordOf, reportFrom, usageReadable, windowFrom } from "../oauthUsage.ts";
 import { museProfile } from "./profile.ts";
 
 /**
@@ -67,12 +67,26 @@ type DeviceCodeResponse = {
   interval: number;
 };
 
-/** What the mint answers with, of the fourteen fields it sends. */
+/**
+ * What the mint answers with, of the fifteen fields a live response carries.
+ *
+ * Quoted from one: `api_key`, `base_url`, `has_payment_method`,
+ * `require_payment`, `is_subs_active`, `can_subscribe`, `show_subs_upsell`,
+ * `user_full_name`, `user_email`, `payment_method`, `action_url`,
+ * `subs_tier_id`, `subs_tier_name`, `is_subs_upgrade_available` — plus
+ * `subs_usage`, which the binary's serde metadata names and which an account
+ * with no active subscription does **not** receive. That absence is the normal
+ * case for a pay-as-you-go key, and it reads as unknown quota rather than zero.
+ */
 type MintedKey = {
   apiKey: string;
   email: string | null;
   tierName: string | null;
   subscriptionActive: boolean;
+  /** Where this credential's inference goes, as the mint stated it. */
+  baseUrl: string | null;
+  /** The subscription usage snapshot, absent unless a subscription is active. */
+  usage: unknown;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -173,6 +187,40 @@ async function* postForm(
   throw fail(tokenErrorCode(res.status), tokenErrorMessage(res.status, parsed));
 }
 
+/** Endpoints are only honoured under this registrable domain. */
+const TRUSTED_HOST = "meta.ai";
+
+/**
+ * Accepts the base URL the mint states, or falls back to the compiled default.
+ *
+ * The mint answers `base_url: "https://api.meta.ai/v1"`, and Muse's own client
+ * reads it — "unrecognized Model API base URL from login; using the default" is
+ * its wording for refusing one, which is the behaviour copied here. It matters
+ * because this value decides where a decrypted credential is sent, so an
+ * unvalidated string from a response is a redirect of every subsequent request
+ * to a host of the responder's choosing.
+ *
+ * `endsWith(".meta.ai")` rather than `endsWith("meta.ai")`, so `evilmeta.ai`
+ * and `meta.ai.attacker.example` are both refused. `URL` has already lowercased
+ * and punycoded the host by this point. Null on anything unusable, and the
+ * caller falls back — an unrecognized base URL is not a reason to fail a
+ * connect the operator already approved.
+ */
+function trustedBaseUrl(value: string | null): string | null {
+  if (value === null) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  const host = url.hostname;
+  if (url.protocol !== "https:") return null;
+  if (host !== TRUSTED_HOST && !host.endsWith(`.${TRUSTED_HOST}`)) return null;
+  // Trailing slash dropped so the codec can append a path without doubling it.
+  return url.toString().replace(/\/$/, "");
+}
+
 /**
  * Spends the OAuth token on a Model API key.
  *
@@ -191,7 +239,11 @@ async function* postForm(
 async function* mint(accessToken: string, fail: AuthHelpers["fail"]): AuthStep<MintedKey> {
   const res = yield postJsonRequest(MINT_URL, museProfile, {
     contentType: "application/json",
-    body: "",
+    // `"{}"`, not `""`. An empty body is refused outright — measured against
+    // the live endpoint, which answers 400 "Request body is required but was
+    // empty or null" and mints nothing. The object's contents are ignored;
+    // what it wants is a syntactically valid one.
+    body: "{}",
     extraHeaders: [
       ["Authorization", `Bearer ${accessToken}`],
       ["Accept", "application/json"],
@@ -236,16 +288,24 @@ async function* mint(accessToken: string, fail: AuthHelpers["fail"]): AuthStep<M
     email: stringFrom(record, "user_email"),
     tierName: stringFrom(record, "subs_tier_name"),
     subscriptionActive: record.is_subs_active === true,
+    baseUrl: trustedBaseUrl(stringFrom(record, "base_url")),
+    usage: record.subs_usage,
   };
 }
 
 /**
  * One token grant plus one mint, as the credential the store holds.
  *
- * `expiresAt` is the **OAuth** token's, not the minted key's, whose lifetime
- * Meta states nowhere. That is the conservative pairing rather than a
- * compromise: the refresher wakes on this expiry, and every refresh re-mints,
- * so the key is replaced at least as often as the token that bought it.
+ * **Meta issues neither a refresh token nor an expiry**, measured: a completed
+ * device grant carries `access_token` and `token_type` and nothing else, though
+ * the client's own `TokenGrant` type has a `refresh_token` field. So
+ * `expiresAt` is null on every muse credential, and the refresher — which wakes
+ * on a non-null expiry — never runs. `refresh` below is kept because the token
+ * endpoint does accept the grant, and a scope or a plan that starts issuing one
+ * would make it live; it is simply unreachable today, exactly as kilo's is.
+ *
+ * The practical consequence is worth stating where an operator will meet it: a
+ * muse account is reconnected by hand when its token dies, not renewed.
  */
 function toResult(
   token: TokenResponse,
@@ -271,6 +331,9 @@ function toResult(
     providerData: {
       ...(key.tierName === null ? {} : { subscriptionTier: key.tierName }),
       subscriptionActive: key.subscriptionActive,
+      // Read back by the codec, which falls back to its own constant. Stored
+      // rather than re-fetched because the codec holds no client.
+      ...(key.baseUrl === null ? {} : { baseUrl: key.baseUrl }),
     },
   };
 }
@@ -350,23 +413,40 @@ export const museOAuthFlow: DevicePluginFlow = {
     return toResult(token, yield* mint(token.accessToken, fail), refreshToken, now);
   },
 
-  // No `usage` step yet, and the gap is now about the *carrier* rather than the
-  // shape — `parseMuseUsage` below reads the payload already.
-  //
-  // The only endpoint known to answer with `subs_usage` is the mint, and the
-  // quota poller runs every `quotaPollIntervalMs` (300_000 by default). So
-  // wiring it here means minting a key every five minutes, and `usage` receives
-  // `UsageSecrets` — access token only — so it cannot write a rotated key back.
-  // If minting rotates, the stored key goes stale and every request answers 401
-  // until the next refresh re-mints, which is up to an hour of a credential the
-  // console still shows as healthy.
-  //
-  // Unsettled rather than assumed. Against rotation: Muse mints at every
-  // startup, so revoking the previous key would stop an operator running two
-  // terminals at once. For it: the client distinguishes `stored_api_key` from
-  // `unsaved_api_key`, which is the shape of a mint that can hand back
-  // something new. Two mints against one account decide it; until then the
-  // account reads as *unknown*, which is the honest answer.
+  /**
+   * The 5-hour and weekly windows, read off a fresh mint.
+   *
+   * The mint is the only endpoint that carries `subs_usage`, so the probe is a
+   * mint — which was the open question, because a rotating key would be swapped
+   * out from under the stored credential every poll and `usage` cannot write
+   * one back. **Measured, not reasoned about**: two mints seconds apart against
+   * one account returned a byte-identical `api_key`. Minting is a read of the
+   * account's existing key, not an issue of a new one.
+   *
+   * The returned key is deliberately dropped rather than compared. `usage` has
+   * no channel to persist one, so noticing a change here could only produce a
+   * log line about a credential this step is powerless to repair; `refresh` is
+   * where a new key is stored, and it re-mints anyway.
+   *
+   * `subs_usage` is **absent** on an account with no active subscription — a
+   * pay-as-you-go key gets fourteen fields and no usage — so a null report is
+   * the ordinary answer for those, and the account reads as unknown.
+   */
+  async *usage({ secrets, now }) {
+    if (secrets.accessToken === null) return null;
+    const res = yield postJsonRequest(MINT_URL, museProfile, {
+      contentType: "application/json",
+      // Same empty-object body the mint requires; see the note in `mint`.
+      body: "{}",
+      extraHeaders: [
+        ["Authorization", `Bearer ${secrets.accessToken}`],
+        ["Accept", "application/json"],
+      ],
+    });
+    if (!usageReadable(res.status, "muse")) return null;
+    const record = recordOf(parseBody(res.body));
+    return record === null ? null : parseMuseUsage(record.subs_usage, now());
+  },
 };
 
 /**

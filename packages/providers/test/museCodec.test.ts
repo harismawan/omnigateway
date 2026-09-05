@@ -294,3 +294,22 @@ test("a stream decodes to text and usage", async () => {
   expect(end?.type === "end" ? end.usage?.inputTokens : null).toBe(11);
   expect(end?.type === "end" ? end.usage?.outputTokens : null).toBe(2);
 });
+
+test("the base url the mint stated is where inference goes", async () => {
+  // Muse's own client follows `base_url` from the login rather than a compiled
+  // constant, and a credential minted against another deployment reaches it.
+  const sent = await sentFor(
+    creds({ apiKey: "meta-key", providerData: { baseUrl: "https://api.meta.ai/v2" } }),
+  );
+
+  expect(sent.url).toBe("https://api.meta.ai/v2/responses");
+});
+
+test("a credential with no stored base url falls back rather than building a broken one", async () => {
+  // Every credential minted before the field was read has none, and a restored
+  // database can carry anything at all.
+  for (const providerData of [{}, { baseUrl: "" }, { baseUrl: 7 }, { baseUrl: "ftp://x/v1" }]) {
+    const sent = await sentFor(creds({ apiKey: "meta-key", providerData }));
+    expect(sent.url).toBe("https://api.meta.ai/v1/responses");
+  }
+});

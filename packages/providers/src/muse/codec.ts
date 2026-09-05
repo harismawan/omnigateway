@@ -20,6 +20,24 @@ import { toMuseWire } from "./wire.ts";
  */
 const API_URL = "https://api.meta.ai/v1/responses";
 
+/**
+ * Where this credential's inference goes.
+ *
+ * The mint states a `base_url` and Muse's own client follows it, so a
+ * credential minted against a different deployment reaches that one rather than
+ * the compiled constant. Validated at mint time — `trustedBaseUrl` in
+ * `oauth.ts` refuses anything that is not https under `meta.ai` — because this
+ * decides where a decrypted key is sent. Re-checked here only for shape: a
+ * credential predating the field, or one restored from a database that bypassed
+ * the schema, falls back rather than building a URL from whatever was stored.
+ */
+function endpointFor(providerData: Record<string, unknown>): string {
+  const base = providerData.baseUrl;
+  return typeof base === "string" && base.startsWith("https://") && base.length > 0
+    ? `${base}/responses`
+    : API_URL;
+}
+
 export const museCodec: ProviderCodec = {
   buildRequest(input: CodecInput): CodecRequest {
     const { body, degradations, cacheKey } = toMuseWire(input.request, input.model);
@@ -53,7 +71,7 @@ export const museCodec: ProviderCodec = {
     return {
       decodeState: { nativeReasoning },
       request: {
-        url: API_URL,
+        url: endpointFor(input.credentials.providerData),
         method: "POST",
         headers,
         // Always SSE. A non-streaming client request is served by collecting the
