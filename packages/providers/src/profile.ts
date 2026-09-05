@@ -5,6 +5,7 @@ import { grokProfile } from "./grok/profile.ts";
 import type { ClientProfile } from "./headers.ts";
 import { kiloProfile } from "./kilo/profile.ts";
 import { kimiProfile } from "./kimi/profile.ts";
+import { museProfile } from "./muse/profile.ts";
 import { openaiProfile } from "./openai/profile.ts";
 
 export { ANTHROPIC_CLI_VERSION, anthropicProfile } from "./anthropic/profile.ts";
@@ -31,6 +32,7 @@ export {
 } from "./headers.ts";
 export { kiloProfile } from "./kilo/profile.ts";
 export { kimiProfile } from "./kimi/profile.ts";
+export { museProfile } from "./muse/profile.ts";
 export { openaiProfile } from "./openai/profile.ts";
 
 /**
@@ -57,6 +59,7 @@ export const PROFILES: Readonly<Record<string, ClientProfile>> = {
   kilo: kiloProfile,
   grok: grokProfile,
   antigravity: antigravityProfile,
+  muse: museProfile,
   custom: customProfile,
 };
 

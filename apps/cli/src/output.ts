@@ -21,12 +21,15 @@ const ANSI = {
   // is out — so the sixth provider either wears `dim`, which means "unknown"
   // in every table a provider appears in, or the palette grows by one. It
   // grows: 256-colour sits behind the same `ctx.color` switch that already
-  // drops every escape for `NO_COLOR`, a pipe, or a dumb terminal. The seventh
-  // provider grew it again, by the same argument: `violet` below is named for
-  // the hue the console gives antigravity — `oklch(… 277)` — so one provider
-  // does not read as one colour in the browser and an unrelated one here.
+  // drops every escape for `NO_COLOR`, a pipe, or a dumb terminal. Each
+  // provider past the sixth grew it again, by the same argument, and each new
+  // entry is named for the hue the console gives that provider — so one
+  // provider does not read as one colour in the browser and an unrelated one
+  // here. `violet` is antigravity's `oklch(… 277)`; `azure` is muse's
+  // `oklch(… 262)`, kept clear of `blue`, which most terminals render as navy.
   orange: "\u001b[38;5;208m",
   violet: "\u001b[38;5;99m",
+  azure: "\u001b[38;5;33m",
 } as const;
 
 export type Tone = keyof Omit<typeof ANSI, "reset">;

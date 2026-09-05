@@ -12,6 +12,7 @@ import { CUSTOM_MODELS } from "./custom/models.ts";
 import { GROK_MODELS } from "./grok/models.ts";
 import { KILO_MODELS } from "./kilo/models.ts";
 import { KIMI_MODELS } from "./kimi/models.ts";
+import { MUSE_MODELS } from "./muse/models.ts";
 import { OPENAI_MODELS } from "./openai/models.ts";
 
 export type {
@@ -46,6 +47,7 @@ export const PROVIDER_MODEL_CATALOG: Readonly<Record<string, ProviderModelCatalo
   kilo: KILO_MODELS,
   grok: GROK_MODELS,
   antigravity: ANTIGRAVITY_MODELS,
+  muse: MUSE_MODELS,
   custom: CUSTOM_MODELS,
 };
 

@@ -295,6 +295,7 @@ test("the registry exposes every provider", () => {
     "grok",
     "kilo",
     "kimi",
+    "muse",
     "openai",
   ]);
   expect(entry(ADAPTERS, "kimi", "ADAPTERS").capabilities.images).toBe(false);

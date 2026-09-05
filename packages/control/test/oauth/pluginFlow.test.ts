@@ -675,7 +675,19 @@ const PROBE_STATE: Readonly<Record<string, Record<string, unknown>>> = {
 };
 
 /** The HTTP method each probe uses, where it is not the GET every other one is. */
-const PROBE_METHOD: Readonly<Record<string, string>> = { antigravity: "POST" };
+/**
+ * Probes that are not a `GET`, and why each one is not.
+ *
+ * `antigravity` — Google's quota RPC is a POST carrying the project id in its
+ * body. `muse` — Meta serves `subs_usage` from `POST /muse-code/key` and from
+ * nowhere else, so that probe is a mint. Safe because minting is a **read** of
+ * the account's existing key rather than an issue of a new one: two mints
+ * seconds apart against one account returned a byte-identical `api_key`,
+ * measured against the live endpoint. Were that ever to change the probe would
+ * swap the stored key out every poll interval, and `usage` cannot write one
+ * back — so a third entry here should measure that property first.
+ */
+const PROBE_METHOD: Readonly<Record<string, string>> = { antigravity: "POST", muse: "POST" };
 
 test("every usage probe reads a usage endpoint, authenticated, and gates on status", async () => {
   for (const [id, provider] of Object.entries(OAUTH_PROVIDERS)) {

@@ -5,6 +5,7 @@ import type { ProviderDescriptors } from "./descriptor.ts";
 import { grokDescriptor } from "./grok/descriptor.ts";
 import { kiloDescriptor } from "./kilo/descriptor.ts";
 import { kimiDescriptor } from "./kimi/descriptor.ts";
+import { museDescriptor } from "./muse/descriptor.ts";
 import { openaiDescriptor } from "./openai/descriptor.ts";
 
 // Re-exported from the leaf so a reader of one descriptor need not know that the
@@ -47,6 +48,7 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptors = {
   kilo: kiloDescriptor,
   grok: grokDescriptor,
   antigravity: antigravityDescriptor,
+  muse: museDescriptor,
   custom: customDescriptor,
 };
 

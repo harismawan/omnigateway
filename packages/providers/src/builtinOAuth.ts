@@ -4,6 +4,7 @@ import { antigravityOAuthFlow } from "./antigravity/oauth.ts";
 import { grokOAuthFlow } from "./grok/oauth.ts";
 import { kiloOAuthFlow } from "./kilo/oauth.ts";
 import { kimiOAuthFlow } from "./kimi/oauth.ts";
+import { museOAuthFlow } from "./muse/oauth.ts";
 import type { PluginOAuthFlow } from "./oauthFlow.ts";
 import { openaiOAuthFlow } from "./openai/oauth.ts";
 
@@ -44,5 +45,6 @@ export function builtinOAuthFlows(): ReadonlyArray<readonly [ProviderId, PluginO
     ["kilo", kiloOAuthFlow],
     ["grok", grokOAuthFlow],
     ["antigravity", antigravityOAuthFlow],
+    ["muse", museOAuthFlow],
   ];
 }

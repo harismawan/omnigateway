@@ -73,6 +73,7 @@ export const CSS_VARIABLES = [
   "--p-kilo",
   "--p-grok",
   "--p-antigravity",
+  "--p-muse",
   "--p-custom",
 
   // Chart furniture and elevation.

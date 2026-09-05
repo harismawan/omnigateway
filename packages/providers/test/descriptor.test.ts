@@ -22,6 +22,7 @@ const IDS = [
   "kilo",
   "grok",
   "antigravity",
+  "muse",
   "custom",
 ] as const satisfies readonly ProviderId[];
 
@@ -58,6 +59,7 @@ const WRITE_OVER_INPUT_BEFORE: Readonly<Record<BuiltIn, { fiveMinute: number; on
     // must be total: a provider added without one stops this file compiling,
     // which is the property that keeps the literals honest.
     antigravity: { fiveMinute: 0, oneHour: 0 },
+    muse: { fiveMinute: 0, oneHour: 0 },
     custom: { fiveMinute: 0, oneHour: 0 },
   };
 
@@ -71,6 +73,7 @@ const CAPABILITIES_BEFORE: Readonly<
   kilo: { tools: true, images: true, reasoning: true },
   grok: { tools: true, images: true, reasoning: true },
   antigravity: { tools: true, images: true, reasoning: true },
+  muse: { tools: true, images: true, reasoning: true },
   custom: { tools: true, images: true, reasoning: true },
 };
 
@@ -204,6 +207,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kilo: [],
     grok: ["grok-"],
     antigravity: ["gemini-"],
+    muse: ["muse-", "muse-spark"],
     custom: [],
   };
 
@@ -222,6 +226,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kilo: "Kilo",
     grok: "Grok",
     antigravity: "Antigravity",
+    muse: "Muse",
     custom: "OpenAI Compatible",
   };
 
@@ -233,6 +238,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kilo: "orange",
     grok: "yellow",
     antigravity: "violet",
+    muse: "azure",
     custom: "cyan",
   };
 
@@ -244,6 +250,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kilo: { light: "oklch(0.52 0.14 224)", dark: "oklch(0.74 0.14 224)" },
     grok: { light: "oklch(0.52 0.14 125)", dark: "oklch(0.74 0.14 125)" },
     antigravity: { light: "oklch(0.52 0.14 277)", dark: "oklch(0.74 0.14 277)" },
+    muse: { light: "oklch(0.55 0.23 262)", dark: "oklch(0.72 0.17 262)" },
     custom: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
   };
 
@@ -265,6 +272,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     grok: "Authorize in the browser. When it redirects to 127.0.0.1, paste the whole URL.",
     antigravity:
       "Approve in a browser on the gateway's own machine — or SSH-forward port 51121 first. When it redirects to 127.0.0.1, paste the whole URL.",
+    muse: "Enter the code on Meta's device page. This dialog finishes on its own.",
     custom: "Enter endpoint metadata and API key.",
   };
 
@@ -276,6 +284,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     "kilo",
     "grok",
     "antigravity",
+    "muse",
     "custom",
   ];
 

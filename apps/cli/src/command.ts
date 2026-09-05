@@ -91,6 +91,7 @@ const TONES: Record<Tone, true> = {
   cyan: true,
   orange: true,
   violet: true,
+  azure: true,
 };
 
 function isTone(name: string): name is Tone {

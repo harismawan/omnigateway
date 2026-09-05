@@ -12,6 +12,7 @@ const PROVIDERS = [
   "kilo",
   "grok",
   "antigravity",
+  "muse",
   "custom",
 ] as const satisfies readonly ProviderId[];
 
@@ -92,6 +93,15 @@ const EXPECTED = {
       "gemini-2.5-flash-thinking",
       "gemini-2.5-flash",
       "gemini-2.5-flash-lite",
+    ],
+  },
+  muse: {
+    defaultModel: "muse-spark-1.3",
+    ids: [
+      "muse-spark-1.3",
+      "muse-spark-1.3-contributor",
+      "muse-spark-1.2",
+      "muse-spark-1.2-contributor",
     ],
   },
   custom: { defaultModel: "", ids: [] },
@@ -396,6 +406,9 @@ test("every provider states which credentials it can hold", () => {
     // The one provider with no key way in: `v1internal` is the Antigravity
     // IDE's own surface and authenticates with a Google account.
     antigravity: ["oauth"],
+    // A subscription is spent minting a Model API key, and a key made at
+    // dev.meta.ai reaches the same host, so both ways in are real here.
+    muse: ["apiKey", "oauth"],
     // The one provider with no authorization flow behind it.
     custom: ["apiKey"],
   });

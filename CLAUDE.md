@@ -196,7 +196,7 @@ it", which cover `custom` without saying so.
     nothing else may); `credentials.ts` plus `models.ts` ask `=== "custom"` about endpoint
     metadata. That is all.
     **OAuth out of core.** `OAUTH_PROVIDERS` is empty null-prototype registry
-    `registerOAuthProvider` fill; six vendor modules at `providers/src/<id>/oauth.ts`;
+    `registerOAuthProvider` fill; seven vendor modules at `providers/src/<id>/oauth.ts`;
     `builtinOAuthFlows()` in `@omni/providers` is one list. Do not re-add literal.
     `seedBuiltinOAuth()` fill it from **`installPluginProviders`** on gateway (called
     unconditionally at boot, reachable from harness — `main()` called by no test) and from
@@ -210,7 +210,7 @@ it", which cover `custom` without saying so.
     `installPluginProviders` must stay **unconditional** — `if (providers.length > 0)` kill OAuth
     on every plugin-less install; `oauthSeed.test.ts` catch it by asserting call sit at
     two-space indent in `main()`. Seed **order is operator-facing order** — anthropic, openai,
-    kimi, kilo, grok, antigravity — because `oauthProviderIds` derive from `Object.keys`;
+    kimi, kilo, grok, antigravity, muse — because `oauthProviderIds` derive from `Object.keys`;
     `apps/cli/test/connect.test.ts` match by equality,
     `apps/gateway/test/plugins/install.test.ts` pin as literal. Never pin against
     `builtinOAuthFlows()`. Registry empty until seeded, so any test reading it **seed first**.

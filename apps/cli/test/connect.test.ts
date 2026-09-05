@@ -37,7 +37,7 @@ function stubFlows(input: {
     // that the gate runs before a store is opened — and the harness overrides
     // only `connect`. The tests below that assert a refusal are therefore
     // exercising the **real** `connectableProviders`.
-    connectableIds: () => ["anthropic", "openai", "kimi", "kilo", "grok", "antigravity"],
+    connectableIds: () => ["anthropic", "openai", "kimi", "kilo", "grok", "antigravity", "muse"],
     async start(): Promise<ConnectStart> {
       return {
         flowId: "flow-1",
@@ -159,7 +159,7 @@ test("an unknown provider is refused before a flow is started", async () => {
   // has grown a provider on the end, which is precisely the drift the list is
   // here to catch. Only equality notices both a provider added and one dropped.
   expect(result.err.split("\n")[0]).toBe(
-    "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity",
+    "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse",
   );
   expect(started).toBe(false);
 });
@@ -185,7 +185,7 @@ test("connect refuses custom, which is a provider with no flow to start", async 
 
   expect(result.code).toBe(2);
   expect(result.err.split("\n")[0]).toBe(
-    "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity",
+    "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse",
   );
   expect(started).toBe(false);
 });
@@ -327,7 +327,7 @@ test("connect reaches a plugin-supplied provider, through the real flows", async
 
   // It must not be refused by the connectable gate, and it must not be refused
   // by `start` either. Before the fix the second refusal read:
-  //   "provider must be one of anthropic, openai, kimi, kilo, grok, acme-ai"
+  //   "provider must be one of anthropic, openai, kimi, kilo, grok, muse, acme-ai"
   // — a list containing the provider it was refusing.
   expect(result.err).not.toContain("provider must be one of");
   expect(result.out + result.err).toContain("https://api.acme.test/authorize");

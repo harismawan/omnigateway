@@ -8,6 +8,7 @@ import { grokAdapter } from "./grok/index.ts";
 import type { ClientProfile } from "./headers.ts";
 import { kiloAdapter } from "./kilo/index.ts";
 import { kimiAdapter } from "./kimi/index.ts";
+import { museAdapter } from "./muse/index.ts";
 import { openaiAdapter } from "./openai/index.ts";
 import { PROFILES } from "./profile.ts";
 import type { ProviderAdapter } from "./types.ts";
@@ -47,6 +48,7 @@ export const ADAPTERS: Readonly<Record<string, ProviderAdapter>> = {
   kilo: kiloAdapter,
   grok: grokAdapter,
   antigravity: antigravityAdapter,
+  muse: museAdapter,
   custom: customAdapter,
 };
 

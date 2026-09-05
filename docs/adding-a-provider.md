@@ -121,7 +121,7 @@ shape and why the HTTP client is built on `node:http`.
    **Write a `codec.ts`; there is no other shape.** `ProviderCodec` in
    `packages/providers/src/codec.ts` describes a request and reads a stream; `codecAdapter` performs
    it, checks the status, applies the deadline and refuses an empty body — once, for every provider,
-   instead of once per provider. All seven built-ins are codecs and `codecAdapter` is the only
+   instead of once per provider. All eight built-ins are codecs and `codecAdapter` is the only
    implementation of `ProviderAdapter` this repository ships, which is what makes the plugin
    capability honest: a plugin-supplied provider takes exactly the shape a built-in does, so no rule
    holds for one and not the other. `ProviderAdapter` survives as the *injection point* dispatch and
