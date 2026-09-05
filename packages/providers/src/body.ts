@@ -67,7 +67,12 @@ const CCH_MASK = 0xfffffn;
 const CCV_SALT = "59cf53e54c78";
 
 const BILLING_PREFIX = "x-anthropic-billing-header:";
-const AGENT_PREAMBLE = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+/**
+ * Exported because `antigravity/wire.ts` has to drop this exact paragraph —
+ * Cloud Code fingerprints it and answers `429 RESOURCE_EXHAUSTED`. One copy, so
+ * a CLI wording change moves both sites together.
+ */
+export const AGENT_PREAMBLE = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
 /**
  * The suffix after the version in `cc_version` is not a build number. The CLI
