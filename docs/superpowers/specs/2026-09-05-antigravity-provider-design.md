@@ -690,3 +690,59 @@ in `packages/control/test/oauth/antigravity.test.ts`, which asserts the challeng
 reaches the authorize URL *and* that the exchange sends the matching
 `code_verifier` — a challenge with no verifier is `invalid_grant`, which reads as
 an expired code rather than as a flow that never sends one.
+
+### The 429 that meant "I recognise this prompt"
+
+Reported 2026-09-05: spawning a Claude Code subagent against an Antigravity
+target failed every time, while the session that spawned it kept working. The
+gateway logged `ALL_CANDIDATES_FAILED` over an upstream
+`429 RESOURCE_EXHAUSTED`, and `quota_windows` read `used=0` of `100` on both
+windows — the second time this provider has answered something that was not
+about the account by naming the account. The first was the hostname; see the
+note at the top of `antigravity/codec.ts`.
+
+The classifier came before the theory. Of the 60 stored requests at the time,
+grouping `request_bodies` by whether the client's `system` contained the exact
+paragraph `You are a Claude agent, built on Anthropic's Claude Agent SDK.`:
+
+| | carries the paragraph | does not |
+| --- | --- | --- |
+| `200` | 0 | 50 |
+| `429` | 10 | 0 |
+
+Claude Code sends that paragraph as its own system block for subagents only,
+which is the whole of "subagents fail and sessions do not".
+
+Bisecting the live request by halves — tools, then message content, then system
+block, then the sentence — with each probe spaced past the gateway's own 60s
+`rate_limited_until` cooldown:
+
+| system prompt | answer |
+| --- | --- |
+| minimal, no system | 200 |
+| billing-header block alone | 200 |
+| the long subagent prompt alone | 200 |
+| **the preamble block alone** | **429** |
+| `You are a Claude agent.` | 200 |
+| `You are helpful, built on Anthropic's Claude Agent SDK.` | 200 |
+| `You are an agent, built on the Claude Agent SDK.` | 200 |
+| `You are an agent, built on an Agent SDK.` | 200 |
+| **the paragraph, verbatim** | **429** |
+
+So the match is on the exact string and nothing weaker — a prompt fingerprint
+wearing a quota code, the same class as the Anthropic tool-name fingerprint that
+`FINGERPRINT_REFUSED` names. Neither "Claude" nor "Anthropic" is refused on its
+own: the long subagent prompt says both and answers 200.
+
+`dropAgentPreamble` in `wire.ts` removes the paragraph and records
+`antigravity:agent-preamble-dropped`. Dropped rather than reworded, on
+`applyAnthropicSystem`'s `IDENTITY_PREFIXES` precedent: the line is an identity
+the rest of the prompt already carries, and a reworded one is a wording this
+repository would then own. Filtered per paragraph rather than per block because
+a client may concatenate its system blocks, and split on CRLF as well as LF
+because a paragraph the split misses reaches the wire refused. A prompt with no
+preamble is returned **unchanged** rather than rejoined — rebuilding would
+normalise every blank-line run in a prompt this has no business editing.
+
+Verified against the live account 20 seconds apart, byte-identical but for that
+paragraph: restored, `429`; the encoder's own body, `200`.

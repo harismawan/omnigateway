@@ -1,4 +1,5 @@
 import type { ChatRequest, ContentBlock, ToolChoice } from "@omni/ir";
+import { AGENT_PREAMBLE } from "../body.ts";
 import { systemText } from "../system.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { MAX_OUTPUT_TOKENS } from "./models.ts";
@@ -188,6 +189,43 @@ const hasCacheControl = (block: ContentBlock): boolean =>
 
 /** Recorded once per tool set, for any keyword or shape this drops. */
 const PRUNED = "antigravity:tool-schema-pruned";
+
+/**
+ * **Cloud Code answers `429 RESOURCE_EXHAUSTED` to the Claude Agent SDK
+ * preamble, and the match is on the exact string.**
+ *
+ * Measured 2026-09-05 against a live account whose quota RPC read 0% of both
+ * windows, with requests seconds either side of the refusal returning 200. Of
+ * the 60 stored requests at the time, all 10 refusals carried the paragraph and
+ * none of the 50 successes did. Bisecting the sentence: `You are a Claude
+ * agent.`, `… built on Anthropic's Claude Agent SDK.` and `You are an agent,
+ * built on the Claude Agent SDK.` each answered 200; only the whole paragraph,
+ * verbatim, was refused. So this is a prompt fingerprint wearing a quota code —
+ * the same shape as Anthropic's `FINGERPRINT_REFUSED`, and the second time this
+ * provider has named the account for something that was not the account.
+ *
+ * Claude Code sends it as its own system block for **subagents only**, which is
+ * why spawning one failed while the session around it worked.
+ *
+ * Dropped rather than reworded, on `body.ts`'s `IDENTITY_PREFIXES` precedent:
+ * the paragraph is an identity line the rest of the prompt already carries, and
+ * a reworded one is a string this repository would then own the wording of.
+ * Paragraph-wise rather than block-wise because a client may concatenate its
+ * system blocks — the same reason `applyAnthropicSystem` filters that way.
+ */
+const AGENT_PREAMBLE_DROPPED = "antigravity:agent-preamble-dropped";
+
+function dropAgentPreamble(system: string, note: (d: string) => void): string {
+  // CRLF included: a paragraph separated that way is still a paragraph to the
+  // upstream, and a split that misses it leaves the refused text on the wire.
+  const paragraphs = system.split(/(?:\r?\n){2,}/);
+  const kept = paragraphs.filter((p) => p.trim() !== AGENT_PREAMBLE);
+  // The untouched string back, not a rejoined copy of itself: rebuilding would
+  // normalise every blank-line run in a prompt this has no business editing.
+  if (kept.length === paragraphs.length) return system;
+  note(AGENT_PREAMBLE_DROPPED);
+  return kept.join("\n\n");
+}
 
 /** `the number of stop_sequences must not exceed 5`, measured. */
 const MAX_STOP_SEQUENCES = 5;
@@ -673,8 +711,12 @@ export function toAntigravityWire(
     contents: closingTurn(openingTurn(mergeSameRole(contents), note), note),
   };
 
-  const system = systemText(req.system, "antigravity", note);
-  if (system !== undefined && system.length > 0) {
+  const joined = systemText(req.system, "antigravity", note);
+  const system = joined === undefined ? undefined : dropAgentPreamble(joined, note);
+  // `trim` rather than `length`: dropping the preamble out of a block that held
+  // little else leaves whitespace, and a `systemInstruction` of one space is an
+  // instruction that says nothing and still costs a part.
+  if (system !== undefined && system.trim().length > 0) {
     request.systemInstruction = { parts: [{ text: system }] };
   }
 
