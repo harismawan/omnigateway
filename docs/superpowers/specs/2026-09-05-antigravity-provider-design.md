@@ -67,8 +67,10 @@ on `cloudcode-pa.googleapis.com`.
 - authorize `https://accounts.google.com/o/oauth2/v2/auth`
 - token `https://oauth2.googleapis.com/token`
 - userinfo `https://www.googleapis.com/oauth2/v1/userinfo`
-- redirect: loopback, with the paste-the-URL fallback every provider here uses,
-  because the gateway is usually not on the browser's machine.
+- redirect: `https://antigravity.google/oauth-callback`, Antigravity's own hosted
+  callback, with the paste-the-URL fallback every provider here uses. It was a
+  loopback first; see History for why that could not stay and what it drags with
+  it.
 
 The client id (`…apps.googleusercontent.com`) and secret (`GOCSPX-…`) are the
 Antigravity desktop client's, embedded in a distributed binary. Google documents
@@ -86,12 +88,19 @@ comment on `MASK` states outright that it is scanner evasion rather than
 security, and that a value which genuinely needed protecting would be an
 operator-supplied environment variable.
 
-**No `openid` scope and no PKCE.** omniroute's comment records that adding either
-routes Google into a `firstparty/nativeapp` consent screen that never completes,
-and that matching 9router exactly — the five scopes below, `access_type=offline`,
-`prompt=consent`, no code challenge — is what fixed it. This is the one place
-where the flow deviates from what this repository would otherwise write, so it is
-also the one most likely to be "corrected" later. It must not be.
+~~**No `openid` scope and no PKCE.** omniroute's comment records that adding
+either routes Google into a `firstparty/nativeapp` consent screen that never
+completes, and that matching 9router exactly — the five scopes below,
+`access_type=offline`, `prompt=consent`, no code challenge — is what fixed it.
+This is the one place where the flow deviates from what this repository would
+otherwise write, so it is also the one most likely to be "corrected" later. It
+must not be.~~
+
+**Half wrong, and measured — see "PKCE and the redirect are one setting" under
+History.** No `openid`, still: it was measured to change nothing. But the code
+challenge is now **required**, because the hosted callback refuses the request
+without one. The rule above was true of the loopback redirect only; the two
+variables moved together in omniroute's fix and the wrong one got the credit.
 
 Scopes: `cloud-platform`, `userinfo.email`, `userinfo.profile`, `cclog`,
 `experimentsandconfigs`.
@@ -210,9 +219,13 @@ shipped codec end to end. Four things were confirmed and one was wrong.
 **Confirmed.** Google's consent redirects to the loopback — it does not hang, so
 the paste fallback works and dropping `openid` and PKCE is right. The token
 exchange, the `loadCodeAssist` bootstrap (project and tier both resolved), and
-the quota RPC all work as designed; the quota figures matched what the
-Antigravity IDE showed the operator for the same account, which is the only
-check that could confirm the family filter reads the right buckets.
+the quota RPC all work as designed.
+
+> Two claims in this paragraph did not survive the day. "Dropping `openid` and
+> PKCE is right" was true only of the loopback redirect, and "the quota figures
+> matched what the Antigravity IDE showed" was never a real comparison — both are
+> corrected under History below. The paragraph is kept as written because what it
+> got wrong is the point of the entries.
 
 **Wrong: the host.** Every request answered `429 RESOURCE_EXHAUSTED` while the
 account's quota read 0% used and its IDE generated normally. It was not the
@@ -588,3 +601,92 @@ mid-conversation system placement — plus three specific to this provider:
 2. `usageMetadata` arithmetic subtracts `cachedContentTokenCount`.
 3. The quota window matcher returns *unknown* rather than zero for a bucket whose
    display name does not match.
+
+## History
+
+### The quota probe is correct and will read 0% forever on free tier
+
+Reported 2026-09-05 as a bug: the console showed 0% used for an Antigravity
+account whose IDE meter was visibly reduced. It is not a bug. Measured against
+the live account, project `aicode-consumers`, tier `free-tier`, all within a
+minute:
+
+| RPC | buckets | distinct `remainingFraction` |
+| --- | --- | --- |
+| `retrieveUserQuotaSummary` | 4 | `[1]` |
+| `retrieveUserQuota` | 28 | `[1]` |
+| `fetchAvailableModels` (`quotaInfo`) | 28 | `[1]` |
+
+Every model reads full, including `gemini-3.1-pro-high` and
+`claude-opus-4-6-thinking`. The stored `quota_windows` rows matched exactly, and
+the poller had written them minutes earlier — the pipeline is end to end correct.
+
+What was ruled out, in order, because each looked like the answer first: probe
+scheduling (rows fresh), the `projectId` (`loadCodeAssist` returns the same
+string we stored, and `userDefinedCloudaicompanionProject` is unset), token
+validity, the group/window/fraction parse (all three match), the choice of
+endpoint, the OAuth client id (**identical** to `agy`'s), and the scope set —
+`agy`'s token carries `aicode` and `openid` and ours does not, and both tokens
+return byte-identical quota responses.
+
+**There is no fourth endpoint.** `agy` 1.1.27's binary contains exactly two,
+`retrieveUserQuotaSummary` and `retrieveUserQuota`; nine other plausible names
+(`retrieveUserUsage`, `getUserQuota`, `listUserQuota`, …) all 404. Its own
+changelog string describes `/usage` and `/quota` as "a real-time reload of model
+configuration and remaining quotas" — `fetchAvailableModels` plus
+`retrieveUserQuota`, both probed here — and it renders them with `%.0f%%
+remaining`, the same field.
+
+So the IDE's meter is **client-side accounting**, not a server figure. omniroute
+3.8.49 ranks its quota sources `{fetchAvailableModels: 0, localUsageHistory: 1,
+retrieveUserQuota: 2}`, and `localUsageHistory` is not an endpoint. On free tier
+the server-side fraction appears to stay at 1.0 and the tier is enforced by 429s
+instead.
+
+Consequences, neither of them a change to the parser:
+
+- **Do not "fix" this by switching endpoints.** All three agree; a switch moves
+  the 0% without changing it.
+- The surface renders "provider reports full" and "no data" identically. On this
+  provider the first is permanent, so that ambiguity is the real defect this hunt
+  found, and it is in the console rather than here.
+
+### PKCE and the redirect are one setting
+
+The loopback callback was replaced by Antigravity's own hosted one,
+`https://antigravity.google/oauth-callback`, because a loopback assumes a browser
+on the gateway's machine — which a container does not have, and where the consent
+screen had been observed to hang with nothing in the address bar to paste.
+
+The swap does not stand alone. Measured by varying one parameter at a time
+against `accounts.google.com` and reading the authorize redirect (`/v3/signin`
+accepted, `/signin/oauth/error` refused):
+
+| redirect | code challenge | `openid` | `aicode` | result |
+| --- | --- | --- | --- | --- |
+| hosted | no | no | no | refused |
+| hosted | **yes** | no | no | accepted |
+| hosted | no | yes | no | refused |
+| hosted | no | no | yes | refused |
+| hosted | **yes** | yes | no | accepted |
+| hosted | **yes** | yes | yes | accepted |
+| loopback | no | no | no | accepted |
+
+The code challenge is the only parameter the hosted callback requires; `openid`
+and `aicode` change nothing either way and stay off, since adding a scope
+re-consents every operator for no measured gain.
+
+This reverses the rule the flow's header had carried since the provider landed,
+and the reversal is narrower than it looks. omniroute 3.8.49 recorded that
+`openid` plus a challenge routed Google into a `firstparty/nativeapp` consent
+that hung, and dropped both. That was measured on the **loopback**, where a
+challenge is optional — so dropping it worked, and dropping `openid` alongside it
+made the pair look load-bearing when only the redirect ever was. Two variables
+moved together and the wrong one got the credit.
+
+Reverting either line alone fails: the redirect without the challenge is refused
+at authorize, and the challenge without the redirect is merely harmless. Pinned
+in `packages/control/test/oauth/antigravity.test.ts`, which asserts the challenge
+reaches the authorize URL *and* that the exchange sends the matching
+`code_verifier` — a challenge with no verifier is `invalid_grant`, which reads as
+an expired code rather than as a flow that never sends one.

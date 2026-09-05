@@ -28,20 +28,34 @@ import { antigravityProfile } from "./profile.ts";
  * XOR-masked rather than written as literals, and the note on `MASK` below says
  * exactly why that is a concession to a scanner and not a security measure.
  *
- * **No `openid` scope and no PKCE, and neither omission is an oversight.**
- * omniroute 3.8.49 records that requesting `openid` with a code challenge routes
- * Google into its `firstparty/nativeapp` consent, which then hangs without ever
- * redirecting — so the authorization code never arrives at all and there is
- * nothing for the operator to paste. Its fix was to match the flow that works
- * exactly: the five scopes below, `access_type=offline`, `prompt=consent`, and
- * no code challenge. This is the one place where the flow deviates from what
- * this repository would otherwise write, and it is therefore the one most
- * likely to be "corrected" by someone who has read the PKCE guidance and not
- * this comment. It must not be.
+ * **PKCE is required, and which redirect is in use is what decides that.**
+ * The two are one setting, not two: measured live on 2026-09-05 against
+ * `accounts.google.com` with this client id, varying one parameter at a time
+ * and reading the authorize redirect — `/v3/signin` for accepted,
+ * `/signin/oauth/error` for refused:
  *
- * The consequence is that `PendingFlow`'s `verifier` and `challenge` are unused,
- * and carried as empty strings. `state` is still minted and still checked: CSRF
- * protection is a separate property from PKCE and nothing here gives it up.
+ *     hosted callback, no code challenge          refused
+ *     hosted callback + code challenge            accepted
+ *     hosted callback + `openid`, no challenge    refused
+ *     hosted callback + `aicode`, no challenge    refused
+ *     hosted callback + challenge + openid        accepted
+ *     loopback, no code challenge                 accepted
+ *
+ * So the code challenge is the only parameter the hosted callback requires, and
+ * `openid` and `aicode` change nothing either way. Antigravity's own CLI (`agy`
+ * 1.1.27) sends all three against this same client id.
+ *
+ * This reverses an earlier rule in this file, and the reason it was ever right
+ * is worth keeping: omniroute 3.8.49 recorded that `openid` plus a code
+ * challenge routed Google into its `firstparty/nativeapp` consent, which hung
+ * without ever redirecting, and its fix was to drop both. That was measured
+ * against the **loopback** redirect, where a code challenge is merely optional —
+ * dropping it worked, and dropping `openid` with it made the pair look
+ * load-bearing when only the redirect was. Against the hosted callback the
+ * dependency runs the other way and dropping the challenge fails outright.
+ *
+ * `state` is minted and checked in every combination: CSRF protection is a
+ * separate property from PKCE and nothing here has ever given it up.
  */
 /**
  * **This is scanner evasion, not security, and the difference matters.**
@@ -360,8 +374,9 @@ export const antigravityOAuthFlow: PkcePluginFlow = {
   supportsManualPaste: true,
 
   // biome-ignore lint/correctness/useYield: nothing to ask an endpoint for
-  async *start({ redirectUri, randomState }) {
+  async *start({ redirectUri, randomState, pkce }) {
     const state = randomState();
+    const { verifier, challenge } = pkce();
     const url = new URL(AUTHORIZE_URL);
     url.searchParams.set("client_id", CLIENT_ID);
     url.searchParams.set("response_type", "code");
@@ -373,11 +388,13 @@ export const antigravityOAuthFlow: PkcePluginFlow = {
     // what makes reconnecting a second account possible.
     url.searchParams.set("access_type", "offline");
     url.searchParams.set("prompt", "consent");
+    // Required by the hosted callback, not optional here. See the file header.
+    url.searchParams.set("code_challenge", challenge);
+    url.searchParams.set("code_challenge_method", "S256");
 
-    // No code challenge. See the file header — this is deliberate and load-bearing.
     return {
       authorizeUrl: url.toString(),
-      pending: { verifier: "", challenge: "", state, redirectUri },
+      pending: { verifier, challenge, state, redirectUri },
     };
   },
 
@@ -395,6 +412,7 @@ export const antigravityOAuthFlow: PkcePluginFlow = {
         client_secret: CLIENT_SECRET,
         code: (rawCode ?? "").trim(),
         redirect_uri: pending.redirectUri,
+        code_verifier: pending.verifier,
       },
       fail,
     );

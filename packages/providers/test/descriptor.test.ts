@@ -215,7 +215,10 @@ describe("presentation and routing data match their pre-change fixtures", () => 
   const CALLBACKS_BEFORE: Readonly<Partial<Record<BuiltIn, { uri: string; label: string }>>> = {
     openai: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
     grok: { uri: "http://127.0.0.1:56121/callback", label: "Grok" },
-    antigravity: { uri: "http://127.0.0.1:51121/callback", label: "Antigravity" },
+    // Not a loopback since 2026-09-05: Antigravity moved to the hosted callback
+    // its own CLI uses, which works from a browser on any machine. The change is
+    // paired with a code challenge — see `antigravity/oauth.ts`'s header.
+    antigravity: { uri: "https://antigravity.google/oauth-callback", label: "Antigravity" },
   };
 
   /** `PROVIDER_LABEL`, which existed in three separate copies. */
@@ -271,7 +274,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     kilo: "Approve the code on Kilo's device page. This dialog finishes on its own.",
     grok: "Authorize in the browser. When it redirects to 127.0.0.1, paste the whole URL.",
     antigravity:
-      "Approve in a browser on the gateway's own machine — or SSH-forward port 51121 first. When it redirects to 127.0.0.1, paste the whole URL.",
+      "Approve in any browser, then paste the whole URL it lands on. A code shown on its own works too.",
     muse: "Enter the code on Meta's device page. This dialog finishes on its own.",
     custom: "Enter endpoint metadata and API key.",
   };
