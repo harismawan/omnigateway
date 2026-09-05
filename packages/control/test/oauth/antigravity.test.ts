@@ -4,7 +4,7 @@ import { ANTIGRAVITY_CLIENT_ID } from "@omni/providers";
 import { antigravityOAuth } from "./builtins.ts";
 
 const NOW = 1_000_000;
-const REDIRECT = "http://127.0.0.1:51121/callback";
+const REDIRECT = "https://antigravity.google/oauth-callback";
 /**
  * Imported rather than restated, which is a real weakening and is why the shape
  * assertions below exist.
@@ -76,7 +76,7 @@ test("is registered as a pasteable pkce provider", () => {
   expect(antigravityOAuth.id).toBe("antigravity");
 });
 
-test("the authorize url asks Google for offline access and no code challenge", async () => {
+test("the authorize url asks Google for offline access", async () => {
   const start = await antigravityOAuth.start({ redirectUri: REDIRECT }, deps(stubHttp({})));
   const url = new URL(start.authorizeUrl);
 
@@ -91,10 +91,11 @@ test("the authorize url asks Google for offline access and no code challenge", a
   expect(start.pending.state.length).toBeGreaterThan(0);
 });
 
-test("no openid scope and no PKCE reach the authorize url", async () => {
-  // The deviation the flow's header documents, asserted so that "correcting" it
-  // to look like every other PKCE flow here fails loudly rather than shipping a
-  // consent screen that hangs with nothing to paste.
+test("a code challenge reaches the authorize url, and no openid scope does", async () => {
+  // The challenge is what the hosted callback requires — measured both ways in
+  // the flow's header — so dropping it back to the loopback-era shape fails here
+  // rather than at an operator's authorize step. `openid` stays off: it was
+  // measured to change nothing either way, and adding it re-consents everyone.
   const start = await antigravityOAuth.start({ redirectUri: REDIRECT }, deps(stubHttp({})));
   const url = new URL(start.authorizeUrl);
 
@@ -105,8 +106,29 @@ test("no openid scope and no PKCE reach the authorize url", async () => {
     "https://www.googleapis.com/auth/cclog",
     "https://www.googleapis.com/auth/experimentsandconfigs",
   ]);
-  expect(url.searchParams.get("code_challenge")).toBeNull();
-  expect(url.searchParams.get("code_challenge_method")).toBeNull();
+  expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+  expect(url.searchParams.get("code_challenge")).toBe(start.pending.challenge);
+  expect(start.pending.challenge.length).toBeGreaterThan(0);
+  expect(start.pending.verifier.length).toBeGreaterThan(0);
+});
+
+test("the exchange sends the verifier the authorize url committed to", async () => {
+  // The half a challenge alone cannot catch: a challenge on the authorize call
+  // with no matching `code_verifier` on the exchange is `invalid_grant`, which
+  // reads as an expired code rather than as a flow that never sends one.
+  const start = await antigravityOAuth.start({ redirectUri: REDIRECT }, deps(stubHttp({})));
+  const http = stubHttp({
+    [TOKEN_URL]: OK_TOKEN,
+    [USERINFO_URL]: OK_EMAIL,
+    [LOAD_URL]: OK_PROJECT,
+  });
+
+  await antigravityOAuth.exchange(
+    { code: `abc#${start.pending.state}`, pending: start.pending },
+    deps(http),
+  );
+
+  expect(body(http.to(TOKEN_URL)).get("code_verifier")).toBe(start.pending.verifier);
 });
 
 test("exchange trades the code, reads the email, and discovers the project", async () => {
