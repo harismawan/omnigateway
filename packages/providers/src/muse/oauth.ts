@@ -5,8 +5,10 @@ import {
   type FlowResult,
   tokenErrorCode,
   tokenErrorMessage,
+  type UsageReport,
 } from "../oauthFlow.ts";
 import { parsed as parseBody, postJsonRequest } from "../oauthRequests.ts";
+import { numberOf, recordOf, reportFrom, windowFrom } from "../oauthUsage.ts";
 import { museProfile } from "./profile.ts";
 
 /**
@@ -341,17 +343,53 @@ export const museOAuthFlow: DevicePluginFlow = {
     return toResult(token, yield* mint(token.accessToken, fail), refreshToken, now);
   },
 
-  // No `usage`, and this is a gap rather than a decision about Muse.
+  // No `usage` step yet, and the gap is now about the *carrier* rather than the
+  // shape — `parseMuseUsage` below reads the payload already.
   //
-  // The mint response carries `subs_usage`, so the data exists and arrives on a
-  // call this flow already makes. What is missing is its shape: the field is
-  // deserialized into a generic value in the shipped binary, so no field names
-  // survive as readable strings, and `WindowType` has no `monthly` member for
-  // what is sold as a monthly subscription. Filing a month under `weekly` would
-  // have `spanStartOf` infer a window start three weeks late and draw a chart
-  // of readings that never happened.
+  // The only endpoint known to answer with `subs_usage` is the mint, and the
+  // quota poller runs every `quotaPollIntervalMs` (300_000 by default). So
+  // wiring it here means minting a key every five minutes, and `usage` receives
+  // `UsageSecrets` — access token only — so it cannot write a rotated key back.
+  // If minting rotates, the stored key goes stale and every request answers 401
+  // until the next refresh re-mints, which is up to an hour of a credential the
+  // console still shows as healthy.
   //
-  // An omitted probe makes the account read as *unknown*, which is the truth.
-  // One real mint response is all this needs — map it through `windowFrom` and
-  // state the duration in `windowMs`.
+  // Unsettled rather than assumed. Against rotation: Muse mints at every
+  // startup, so revoking the previous key would stop an operator running two
+  // terminals at once. For it: the client distinguishes `stored_api_key` from
+  // `unsaved_api_key`, which is the shape of a mint that can hand back
+  // something new. Two mints against one account decide it; until then the
+  // account reads as *unknown*, which is the honest answer.
 };
+
+/**
+ * Reads Muse's subscription usage payload.
+ *
+ * Two windows, and the field names are the client's own: `subs_usage` holds
+ * `window` — the rolling one, which states its own length in
+ * `window_duration_mins` — and `weekly`. Both carry `used_percent` and
+ * `resets_at`, which `windowFrom` already understands, so nothing here parses
+ * counters by hand.
+ *
+ * `window_duration_mins` is read rather than assumed to be 300. The plans
+ * document "every 5 hours" today, and `windowMs` exists precisely so a provider
+ * that states a duration is not rounded to the nearest of three names — a
+ * window filed under `fiveHour` but actually running three would have its start
+ * inferred two hours early.
+ *
+ * Exported for fixture tests, as kimi's is.
+ */
+export function parseMuseUsage(value: unknown, now: number): UsageReport | null {
+  const root = recordOf(value);
+  if (root === null) return null;
+
+  const window = recordOf(root.window);
+  const mins = window === null ? null : numberOf(window, ["window_duration_mins"]);
+
+  return reportFrom([
+    windowFrom(root.window, "fiveHour", now, mins === null ? null : mins * 60_000),
+    // The weekly snapshot states no duration; `weekly` already means seven days
+    // to `durationFor`, so saying nothing is correct rather than lazy.
+    windowFrom(root.weekly, "weekly", now),
+  ]);
+}
