@@ -235,7 +235,7 @@ export function LifecycleControls({ pollMs = RESTART_POLL_MS }: { pollMs?: numbe
     return (
       <>
         <Spacer />
-        {capability === undefined ? null : <Version>v{capability.version}</Version>}
+        {capability === undefined ? null : <Version>omnigateway v{capability.version}</Version>}
         <Rule />
         <Foot>
           <Stack $gap={1}>
@@ -256,7 +256,7 @@ export function LifecycleControls({ pollMs = RESTART_POLL_MS }: { pollMs?: numbe
   return (
     <>
       <Spacer />
-      {capability === undefined ? null : <Version>v{capability.version}</Version>}
+      {capability === undefined ? null : <Version>omnigateway v{capability.version}</Version>}
       <Rule />
       <Foot title={capability === undefined ? undefined : SUPERVISOR_BLURB[capability.supervisor]}>
         <RailButton
