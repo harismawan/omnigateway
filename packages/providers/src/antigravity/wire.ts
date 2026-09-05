@@ -1,5 +1,6 @@
 import type { ChatRequest, ContentBlock, ToolChoice } from "@omni/ir";
 import { systemText } from "../system.ts";
+import { cloakName, type ToolCloak } from "./cloak.ts";
 import { MAX_OUTPUT_TOKENS } from "./models.ts";
 
 /**
@@ -123,6 +124,34 @@ function mergeSameRole(contents: readonly Content[]): Content[] {
 }
 
 /**
+ * A history that may not open on a tool exchange.
+ *
+ * **Cloud Code requires a function call to follow a user turn or a function
+ * response, and a function response to follow a call** — `Please ensure that
+ * function call turn comes immediately after a user turn …`. Only the *opening*
+ * entry can break it: measured 2026-09-05, a conversation starting with a model
+ * turn and one starting with a function response are each a 400, while an
+ * orphan response later in the history is fine, because `mergeSameRole` has
+ * already folded it into the user turn beside it.
+ *
+ * That is precisely the shape a client which trims history sends, so it is
+ * repaired rather than refused. An **empty** leading user turn is what the
+ * upstream accepts (verified against both failing shapes) and it invents no
+ * words — a placeholder like "(continued)" would put text in the prompt the
+ * client never wrote, and the model would read it.
+ */
+function openingTurn(contents: Content[], note: (d: string) => void): Content[] {
+  const first = contents[0];
+  if (first === undefined) return contents;
+  const opensOnTool =
+    first.role === "model" ||
+    (first.parts[0] !== undefined && "functionResponse" in first.parts[0]);
+  if (!opensOnTool) return contents;
+  note("antigravity:opening-turn-added");
+  return [{ role: "user", parts: [{ text: "" }] }, ...contents];
+}
+
+/**
  * Whether a block carries a cache breakpoint.
  *
  * `in` rather than a property read: the union has no common `cacheControl` to
@@ -133,7 +162,378 @@ function mergeSameRole(contents: readonly Content[]): Content[] {
 const hasCacheControl = (block: ContentBlock): boolean =>
   "cacheControl" in block && block.cacheControl !== undefined;
 
-function encodeToolChoice(choice: ToolChoice): unknown {
+/** Recorded once per tool set, for any keyword or shape this drops. */
+const PRUNED = "antigravity:tool-schema-pruned";
+
+/** `the number of stop_sequences must not exceed 5`, measured. */
+const MAX_STOP_SEQUENCES = 5;
+
+/**
+ * `thinking_budget must be in the range [-1, 65535]`, measured.
+ *
+ * One below `MAX_OUTPUT_TOKENS`, which is what makes the "raise the ceiling
+ * above the budget" repair below reachable at the top of the range.
+ */
+const MAX_THINKING_BUDGET = 65_535;
+
+/**
+ * How a `Schema` field's *value* is checked, once its name is known to be one.
+ *
+ * **Naming a field is not accepting any value under it**, and this is the
+ * second error class the upstream has — `Invalid value at '…value.pattern'
+ * (TYPE_STRING), 5`, which no amount of keyword filtering can see. Measured
+ * live on 2026-09-05 across 32 wrong-typed shapes: protobuf-JSON is lenient
+ * where a JSON string can be read as a number (`minLength: "1"` is fine) and
+ * strict everywhere else (`minLength: 1.5`, `pattern: 5`, `enum: [5]`,
+ * `title: {}` are each a 400).
+ *
+ * `enum` is the one that matters in practice: any numeric or boolean literal
+ * union — `Literal[1, 2]`, `z.union([z.literal(1), …])` — exports as
+ * `enum: [1, 2]` into a `repeated string`.
+ */
+type FieldKind = "walked" | "text" | "texts" | "int" | "double" | "free";
+
+/**
+ * A scalar field's value, or `undefined` when the proto would refuse it.
+ *
+ * A `texts` field keeps its usable members rather than going whole: an
+ * eight-member enum with one number in it still constrains the model seven
+ * ways, and dropping the constraint entirely is the larger loss.
+ */
+function scalarValue(kind: FieldKind, value: unknown): unknown {
+  const numeric = (v: unknown, whole: boolean): boolean => {
+    if (typeof v === "number") return Number.isFinite(v) && (!whole || Number.isInteger(v));
+    if (typeof v !== "string") return false;
+    // An int64 arrives as a JSON string of plain decimal digits — `"1e3"` is
+    // refused even though it reads as a whole number, so this is a spelling
+    // test and not `Number.isInteger(Number(v))`.
+    if (whole) return /^-?\d+$/.test(v);
+    return v.trim().length > 0 && Number.isFinite(Number(v));
+  };
+  switch (kind) {
+    case "free":
+      return value;
+    case "text":
+      return typeof value === "string" ? value : undefined;
+    case "texts": {
+      // A lone value in a repeated field is accepted by protobuf-JSON.
+      if (typeof value === "string") return value;
+      if (!Array.isArray(value)) return undefined;
+      const members = (value as unknown[]).filter((m): m is string => typeof m === "string");
+      return members.length === 0 ? undefined : members;
+    }
+    case "int":
+      return numeric(value, true) ? value : undefined;
+    case "double":
+      return numeric(value, false) ? value : undefined;
+    case "walked":
+      return value;
+  }
+}
+
+/**
+ * The field names Gemini's `Schema` message declares.
+ *
+ * **`v1internal` parses a tool's `parameters` as a proto message, not as JSON
+ * Schema, so an unknown keyword is a hard 400** — the same
+ * `Invalid JSON payload received. Unknown name "…": Cannot find field.` the
+ * envelope refuses an unknown top-level key with. Measured 2026-09-05: an
+ * ordinary Claude Code tool set produced 41 of them, on `$schema` (once per
+ * tool, emitted by every zod/pydantic exporter), `propertyNames`,
+ * `exclusiveMinimum` and `const`.
+ *
+ * An allowlist rather than a denylist of those four, because the denylist is
+ * only ever as long as the last payload that failed: `$ref`, `oneOf`, `not`,
+ * `multipleOf`, `uniqueItems`, `$defs` and the rest are all still out there.
+ * Failing this way round is also the cheap direction — a dropped constraint is
+ * advisory to the model, a kept unknown one is a request that never runs.
+ *
+ * The set is `google.cloud.aiplatform…Schema`'s published field list — the
+ * message the 400 names — plus `allOf`, which it does not publish. `allOf`,
+ * `anyOf` and `additionalProperties` are all here on the same evidence, and it
+ * is the strong kind: each was **present in the request that answered 200**,
+ * not merely absent from an error list.
+ *
+ * `$ref`/`$defs` are published fields but are **left out and so dropped, not
+ * resolved**: nothing this gateway has seen emits them into a tool schema, and
+ * a resolver is a lot of code to carry on speculation. A schema that ever
+ * arrives with one loses that subtree, which the degradation says.
+ *
+ * Naming a field here is not the same as accepting any value under it: several
+ * of these are singular or scalar in the proto where JSON Schema allows an
+ * array, so `pruneSchema` checks the shapes it can reach. Measurements and the
+ * failing payloads: `docs/superpowers/specs/2026-09-05-antigravity-provider-design.md`.
+ */
+const SCHEMA_FIELDS: ReadonlyMap<string, FieldKind> = new Map<string, FieldKind>([
+  // Walked by the switch below.
+  ["type", "walked"],
+  ["items", "walked"],
+  ["properties", "walked"],
+  ["anyOf", "walked"],
+  ["allOf", "walked"],
+  ["additionalProperties", "walked"],
+  // `TYPE_STRING`.
+  ["format", "text"],
+  ["title", "text"],
+  ["description", "text"],
+  ["pattern", "text"],
+  // `repeated string`.
+  ["enum", "texts"],
+  ["required", "texts"],
+  ["propertyOrdering", "texts"],
+  // `TYPE_INT64` — a JSON string is accepted, a fractional number is not.
+  ["minItems", "int"],
+  ["maxItems", "int"],
+  ["minLength", "int"],
+  ["maxLength", "int"],
+  ["minProperties", "int"],
+  ["maxProperties", "int"],
+  // `TYPE_DOUBLE`.
+  ["minimum", "double"],
+  ["maximum", "double"],
+  // `Value` and `bool`: measured to accept any JSON this can produce.
+  ["default", "free"],
+  ["example", "free"],
+  ["nullable", "free"],
+]);
+
+/**
+ * The values `Schema.type` accepts.
+ *
+ * A proto **enum**, so unlike every other field here its *value* is checked as
+ * well as its name: `type: "text"` answers
+ * `Invalid value at '…value.type' (…master.Type), "text"`. Enumerated live on
+ * 2026-09-05 — these eight are accepted case-insensitively and everything else
+ * tried was refused, including `""`, `"any"`, `"int"`, `"float"`, `"list"` and
+ * a trailing space. `"null"` standing alone is a real type here, which is why
+ * only the *union* spelling needs translating into `nullable`.
+ */
+const SCHEMA_TYPES: ReadonlySet<string> = new Set([
+  "string",
+  "number",
+  "integer",
+  "boolean",
+  "array",
+  "object",
+  "null",
+  "type_unspecified",
+]);
+
+/**
+ * How deep a schema may nest before its remainder is cut.
+ *
+ * The upstream's JSON parser has a recursion ceiling and answers
+ * `Invalid JSON payload received. Message too deep. Max recursion depth reached
+ * for key '…'` — with **no `function_declarations[N]` in it**, so the whole
+ * request dies and the log cannot even say which tool did it.
+ *
+ * Measured 2026-09-05 through `properties`: 30 levels answered 200, 31 was
+ * refused. That is a *JSON* ceiling, not a schema one, and the two are not the
+ * same count — a `properties` hop costs two levels (the map, then the member)
+ * and an `items` hop costs one — so this is set well under the measured figure
+ * rather than at it, and stays right when the envelope above it changes shape.
+ * No tool schema this gateway has seen comes near either number.
+ */
+const MAX_SCHEMA_DEPTH = 24;
+
+const isSchema = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * A tool schema reduced to what the upstream will parse.
+ *
+ * Walks only the positions that hold schemas — `properties` values, `items`,
+ * the `anyOf`/`allOf` arms, an object-valued `additionalProperties`. Everything
+ * else is left alone, which is the whole point of doing this structurally
+ * rather than by scanning keys: `enum: ["const"]` and a property *named*
+ * `const` are data, and a walk that pruned by name would silently rewrite both.
+ *
+ * A schema position holding something that is not a schema is dropped rather
+ * than forwarded, for the same reason an unknown name is: the proto refuses it
+ * either way, and there is nothing to recurse into.
+ *
+ * `const` is the one keyword translated rather than dropped — it is how a
+ * discriminated union names its arm, and `enum` with one member says the same
+ * thing in the vocabulary Gemini has. A `const` beside an existing `enum` is
+ * dropped instead: the proto can express one of the two, and the `enum` is the
+ * client's own explicit vocabulary.
+ */
+function pruneSchema(node: Record<string, unknown>, note: (d: string) => void, depth = 0): unknown {
+  const out: Record<string, unknown> = {};
+  const drop = (): void => note(PRUNED);
+  const sub = (v: unknown): unknown => {
+    if (!isSchema(v) || depth >= MAX_SCHEMA_DEPTH) {
+      drop();
+      return undefined;
+    }
+    return pruneSchema(v, note, depth + 1);
+  };
+
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "const") {
+      drop();
+      // **`Schema.enum` is `repeated string`.** A numeric or boolean literal
+      // said this way trades `Unknown name "const"` for
+      // `Invalid value at '…enum[0]' (TYPE_STRING)`, which is the same dead
+      // request with a less helpful message, so only a string const survives.
+      if (typeof value === "string" && !Object.hasOwn(node, "enum")) out.enum = [value];
+      continue;
+    }
+    const kind = SCHEMA_FIELDS.get(key);
+    if (kind === undefined) {
+      drop();
+      continue;
+    }
+    switch (key) {
+      case "type": {
+        // `Schema.type` is a proto enum, so draft-07's union spelling
+        // (`["string", "null"]`) is a parse error. It says two things Gemini
+        // has two fields for, so it is translated rather than dropped; a union
+        // of two real types keeps the first and records the loss.
+        if (typeof value === "string") {
+          if (SCHEMA_TYPES.has(value.toLowerCase())) out.type = value;
+          else drop();
+          break;
+        }
+        const named = Array.isArray(value)
+          ? (value as unknown[]).filter(
+              (t): t is string => typeof t === "string" && SCHEMA_TYPES.has(t.toLowerCase()),
+            )
+          : [];
+        const real = named.filter((t) => t.toLowerCase() !== "null");
+        if (!Array.isArray(value) || named.length !== value.length || real.length !== 1) drop();
+        if (real[0] !== undefined) out.type = real[0];
+        if (named.length !== real.length) out.nullable = true;
+        break;
+      }
+      case "properties": {
+        if (!isSchema(value)) {
+          drop();
+          break;
+        }
+        const entries: [string, unknown][] = [];
+        for (const [name, member] of Object.entries(value)) {
+          // `properties[]: key cannot be empty` — the map's key is validated
+          // too, and an unnamed property is not something a rename can fix.
+          if (name.length === 0) {
+            drop();
+            continue;
+          }
+          const pruned = sub(member);
+          if (pruned !== undefined) entries.push([name, pruned]);
+        }
+        out.properties = Object.fromEntries(entries);
+        break;
+      }
+      case "items": {
+        // Tuple form — `items: [A, B]` — is an array in a singular message
+        // field. Reduced to `A` rather than dropped: "array of the first arm"
+        // is wrong about the tail but right about the shape, and an array left
+        // with no `items` at all is refused outright (see below).
+        if (Array.isArray(value)) {
+          drop();
+          const first = sub((value as unknown[])[0]);
+          if (first !== undefined) out.items = first;
+          break;
+        }
+        const pruned = sub(value);
+        if (pruned !== undefined) out.items = pruned;
+        break;
+      }
+      case "anyOf":
+      case "allOf": {
+        if (!Array.isArray(value)) {
+          drop();
+          break;
+        }
+        const arms: unknown[] = [];
+        for (const arm of value as unknown[]) {
+          const pruned = sub(arm);
+          if (pruned !== undefined) arms.push(pruned);
+        }
+        out[key] = arms;
+        break;
+      }
+      case "additionalProperties": {
+        if (typeof value === "boolean") {
+          out[key] = value;
+          break;
+        }
+        const pruned = sub(value);
+        if (pruned !== undefined) out[key] = pruned;
+        break;
+      }
+      default: {
+        const kept = scalarValue(kind, value);
+        if (kept === undefined) drop();
+        else {
+          if (Array.isArray(kept) && Array.isArray(value) && kept.length !== value.length) drop();
+          out[key] = kept;
+        }
+      }
+    }
+  }
+
+  // **Structural fields are gated on the node's `type`** — `properties`,
+  // `required` and `propertyOrdering` answer
+  // `* …properties[a].properties: only allowed for OBJECT type`, and `items`
+  // answers `field predicate failed: $type == Type.ARRAY`. An *absent* type is
+  // not a pass: `TYPE_UNSPECIFIED` fails both, which is the trap, because this
+  // function produces exactly that whenever it drops a type it could not name.
+  //
+  // Repaired by inferring rather than by deleting: a node carrying `properties`
+  // **is** an object and one carrying `items` **is** an array, which is what
+  // every other reader of the schema already assumes. Only a node that states a
+  // *contradicting* type loses the structure instead — there the client said
+  // something explicit and the encoder is not entitled to overrule it.
+  const declared = typeof out.type === "string" ? out.type.toLowerCase() : undefined;
+  const agree = (want: string, fields: readonly string[]): void => {
+    if (!fields.some((f) => out[f] !== undefined)) return;
+    if (declared === want) return;
+    if (declared === undefined) {
+      out.type = want;
+      return;
+    }
+    drop();
+    for (const f of fields) delete out[f];
+  };
+  agree("object", ["properties", "required", "propertyOrdering"]);
+  agree("array", ["items"]);
+
+  // **`required` and `propertyOrdering` may only name properties that exist** —
+  // `* GenerateContentRequest…required[1]: property is not defined`. This is a
+  // *cross-field* check, invisible until every parse error is gone (the
+  // upstream validates in two stages and stops after the first), and this
+  // function creates the condition itself whenever it drops a member the
+  // client listed as required.
+  for (const key of ["required", "propertyOrdering"] as const) {
+    const names = out[key];
+    if (!Array.isArray(names)) continue;
+    const known = isSchema(out.properties) ? out.properties : {};
+    const kept = (names as unknown[]).filter(
+      (n) => typeof n === "string" && Object.hasOwn(known, n),
+    );
+    if (kept.length === names.length) continue;
+    drop();
+    if (kept.length === 0) delete out[key];
+    else out[key] = kept;
+  }
+
+  // **`type: "array"` obliges `items`** — Cloud Code answers
+  // `* GenerateContentRequest…properties[x].items: missing field.`, which is a
+  // *required*-field error and not an unknown-name one, so the allowlist alone
+  // never sees it. Reachable whenever `items` was unusable and from a client
+  // that never sent one, so the repair is here rather than in that branch:
+  // dropping the type leaves a schema that says less and parses, where keeping
+  // it fails the whole request.
+  if (out.type === "array" && out.items === undefined) {
+    drop();
+    delete out.type;
+  }
+  return out;
+}
+
+function encodeToolChoice(choice: ToolChoice, cloak: ToolCloak | null): unknown {
   switch (choice.type) {
     case "auto":
       return { functionCallingConfig: { mode: "AUTO" } };
@@ -142,15 +542,21 @@ function encodeToolChoice(choice: ToolChoice): unknown {
     case "none":
       return { functionCallingConfig: { mode: "NONE" } };
     case "tool":
-      return { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [choice.name] } };
+      return {
+        functionCallingConfig: {
+          mode: "ANY",
+          allowedFunctionNames: [cloakName(cloak, choice.name)],
+        },
+      };
   }
 }
 
 export function toAntigravityWire(
   req: ChatRequest,
   model: string,
-  identity: { project: string; requestId: string },
+  identity: { project: string; requestId: string; cloak?: ToolCloak | null },
 ): { body: AntigravityEnvelope; degradations: string[] } {
+  const cloak = identity.cloak ?? null;
   const degradations: string[] = [];
   const note = (d: string): void => {
     if (!degradations.includes(d)) degradations.push(d);
@@ -193,7 +599,7 @@ export function toAntigravityWire(
         case "toolUse":
           parts.push({
             thoughtSignature: SIGNATURE_BYPASS,
-            functionCall: { name: block.name, args: block.input },
+            functionCall: { name: cloakName(cloak, block.name), args: block.input },
           });
           break;
         case "toolResult": {
@@ -205,7 +611,9 @@ export function toAntigravityWire(
           if (block.isError === true) note("antigravity:tool-result-error-flag-dropped");
           parts.push({
             functionResponse: {
-              name: name ?? block.toolUseId,
+              // Cloaked whichever it is: the recovered name and the id
+              // fallback both land in the same field under the same grammar.
+              name: cloakName(cloak, name ?? block.toolUseId),
               response: { output: block.content },
             },
           });
@@ -229,17 +637,40 @@ export function toAntigravityWire(
     if (parts.length > 0) contents.push({ role, parts });
   }
 
-  const request: GeminiRequest = { contents: mergeSameRole(contents) };
+  const request: GeminiRequest = { contents: openingTurn(mergeSameRole(contents), note) };
 
   const system = systemText(req.system, "antigravity", note);
   if (system !== undefined && system.length > 0) {
     request.systemInstruction = { parts: [{ text: system }] };
   }
 
+  // **Cloud Code range-checks `generationConfig` and answers 400 on each**, in
+  // its own semantic pass rather than as a parse error, so none of these are
+  // visible until the request parses. Measured 2026-09-05:
+  // `temperature must be in the range [0.0, 2.0]`,
+  // `the number of stop_sequences must not exceed 5`,
+  // `thinking_budget must be in the range [-1, 65535]`, and a non-positive
+  // `maxOutputTokens` answers a bare `Request contains an invalid argument.`
+  //
+  // Clamped rather than forwarded, on the standing rule that a request the
+  // client can still use beats one that never runs. Each records what moved.
   const generationConfig: GenerationConfig = {};
-  if (req.maxTokens !== undefined) generationConfig.maxOutputTokens = req.maxTokens;
-  if (req.temperature !== undefined) generationConfig.temperature = req.temperature;
-  if (req.stopSequences !== undefined) generationConfig.stopSequences = req.stopSequences;
+  if (req.maxTokens !== undefined) {
+    // Dropped, not clamped to 1: a client asking for no output has said
+    // something this encoder cannot honour, and the model's own default is a
+    // better answer than a one-token ceiling.
+    if (req.maxTokens > 0) generationConfig.maxOutputTokens = req.maxTokens;
+    else note("antigravity:max-tokens-dropped");
+  }
+  if (req.temperature !== undefined) {
+    const clamped = Math.min(Math.max(req.temperature, 0), 2);
+    if (clamped !== req.temperature) note("antigravity:temperature-clamped");
+    generationConfig.temperature = clamped;
+  }
+  if (req.stopSequences !== undefined) {
+    generationConfig.stopSequences = req.stopSequences.slice(0, MAX_STOP_SEQUENCES);
+    if (req.stopSequences.length > MAX_STOP_SEQUENCES) note("antigravity:stop-sequences-dropped");
+  }
 
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {
@@ -255,10 +686,15 @@ export function toAntigravityWire(
         // alone has the model spend reasoning tokens and return no thought
         // parts, so a client that asked to see the reasoning is billed for it
         // and shown nothing.
-        generationConfig.thinkingConfig = {
-          thinkingBudget: req.reasoning.budgetTokens,
-          includeThoughts: req.reasoning.budgetTokens !== 0,
-        };
+        {
+          const asked = req.reasoning.budgetTokens;
+          const budget = Math.min(Math.max(asked, -1), MAX_THINKING_BUDGET);
+          if (budget !== asked) note("antigravity:thinking-budget-clamped");
+          generationConfig.thinkingConfig = {
+            thinkingBudget: budget,
+            includeThoughts: budget !== 0,
+          };
+        }
         break;
       case "adaptive":
         // The tier *is* the model here: `gemini-3.6-flash-high` and `-low` are
@@ -306,19 +742,47 @@ export function toAntigravityWire(
   if (req.tools !== undefined) {
     const portable = req.tools.filter((t) => t.kind === "portable");
     if (portable.length !== req.tools.length) note("antigravity:provider-tool-dropped");
-    if (portable.length > 0) {
+
+    // A name the upstream will not take costs the **whole request** rather than
+    // itself, so it is renamed on the way out and restored in `decode.ts` from
+    // the map `codec.ts` carries in `decodeState`. Renaming rather than
+    // dropping: a dropped tool is a capability the client asked for and never
+    // learns it lost.
+    //
+    // Deduplication survives the rename and cannot be folded into it —
+    // `Duplicate function declaration found: …` is its own 400, and two
+    // declarations sharing one name are the same tool twice from the wire's
+    // point of view. The first wins, so the survivor is the client's own.
+    const seen = new Set<string>();
+    const named: {
+      name: string;
+      description: string | undefined;
+      inputSchema: Record<string, unknown>;
+    }[] = [];
+    for (const tool of portable) {
+      const name = cloakName(cloak, tool.name);
+      if (seen.has(name)) {
+        note("antigravity:duplicate-tool-dropped");
+        continue;
+      }
+      seen.add(name);
+      named.push({ name, description: tool.description, inputSchema: tool.inputSchema });
+    }
+    if (cloak !== null && cloak.toWire.size > 0) note("antigravity:tool-name-renamed");
+
+    if (named.length > 0) {
       request.tools = [
         {
-          functionDeclarations: portable.map((t) => ({
+          functionDeclarations: named.map((t) => ({
             name: t.name,
             description: t.description,
-            parameters: t.inputSchema,
+            parameters: pruneSchema(t.inputSchema, note),
           })),
         },
       ];
     }
   }
-  if (req.toolChoice !== undefined) request.toolConfig = encodeToolChoice(req.toolChoice);
+  if (req.toolChoice !== undefined) request.toolConfig = encodeToolChoice(req.toolChoice, cloak);
 
   // Last, so an operator can override anything above — and into `request`, not
   // into the envelope. See the file header for why that distinction is fatal

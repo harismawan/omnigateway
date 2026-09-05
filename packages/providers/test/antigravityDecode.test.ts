@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { StreamEvent } from "@omni/ir";
+import type { ChatRequest, StreamEvent } from "@omni/ir";
+import { buildToolCloak } from "../src/antigravity/cloak.ts";
 import { decodeAntigravityStream } from "../src/antigravity/decode.ts";
 import type { SseMessage } from "../src/sse.ts";
 
@@ -244,5 +245,54 @@ describe("errors", () => {
     );
     const end = events.at(-1);
     expect(end?.type === "end" && end.stopReason).toBe("contentFilter");
+  });
+});
+
+describe("the tool cloak on the way back", () => {
+  /** One frame carrying a single function call under `name`. */
+  const callFrame = (name: string) => ({
+    response: { candidates: [{ content: { parts: [{ functionCall: { name, args: {} } }] } }] },
+  });
+
+  test("a cloaked name is restored to the client's own", async () => {
+    const request: ChatRequest = {
+      model: "m",
+      stream: true,
+      messages: [],
+      tools: [{ kind: "portable", name: "has space", description: "d", inputSchema: {} }],
+    };
+    const cloak = buildToolCloak(request);
+    const out: StreamEvent[] = [];
+    for await (const event of decodeAntigravityStream(frames(callFrame("has_space")), { cloak })) {
+      out.push(event);
+    }
+    const start = out.find((e) => e.type === "blockStart");
+    expect(start).toMatchObject({ block: { type: "toolUse", name: "has space" } });
+  });
+
+  test("without a cloak the upstream's name is passed through untouched", async () => {
+    // The positive control: a decoder that rewrote names unconditionally would
+    // satisfy the test above and corrupt every ordinary tool call.
+    const out: StreamEvent[] = [];
+    for await (const event of decodeAntigravityStream(frames(callFrame("Read")))) out.push(event);
+    expect(out.find((e) => e.type === "blockStart")).toMatchObject({
+      block: { type: "toolUse", name: "Read" },
+    });
+  });
+
+  test("a name the cloak never saw is left alone", async () => {
+    const cloak = buildToolCloak({
+      model: "m",
+      stream: true,
+      messages: [],
+      tools: [{ kind: "portable", name: "has space", description: "d", inputSchema: {} }],
+    });
+    const out: StreamEvent[] = [];
+    for await (const event of decodeAntigravityStream(frames(callFrame("Unrelated")), { cloak })) {
+      out.push(event);
+    }
+    expect(out.find((e) => e.type === "blockStart")).toMatchObject({
+      block: { type: "toolUse", name: "Unrelated" },
+    });
   });
 });

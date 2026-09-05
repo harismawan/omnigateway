@@ -6,6 +6,7 @@ import {
   usageFromPromptTotal,
 } from "@omni/ir";
 import type { SseMessage } from "../sse.ts";
+import { type ToolCloak, uncloakName } from "./cloak.ts";
 
 /**
  * Antigravity's Cloud Code stream to canonical events.
@@ -129,7 +130,9 @@ type OpenBlock = { kind: "text" | "thinking"; index: number } | null;
 
 export async function* decodeAntigravityStream(
   messages: AsyncGenerator<SseMessage> | AsyncIterable<SseMessage>,
+  opts: { cloak?: ToolCloak | null } = {},
 ): AsyncGenerator<StreamEvent, void, undefined> {
+  const cloak = opts.cloak ?? null;
   let started = false;
   let terminal = false;
   let nextIndex = 0;
@@ -232,7 +235,11 @@ export async function* decodeAntigravityStream(
           block: {
             type: "toolUse",
             id: typeof call.id === "string" && call.id.length > 0 ? call.id : `fc_${toolCalls}`,
-            name: call.name,
+            // The only place the cloak is undone. Restoring here rather than
+            // at egress is load-bearing: RTK normalises tool names by case and
+            // separator, so a name still cloaked when it reaches the filters
+            // classifies as something else entirely.
+            name: uncloakName(cloak, call.name),
           },
         };
         // Arrives whole rather than as a delta stream: Gemini emits the complete
