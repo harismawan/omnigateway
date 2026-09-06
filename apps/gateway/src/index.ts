@@ -107,7 +107,17 @@ async function main(): Promise<void> {
   if (config.logLevelFallbackFrom !== null) {
     logger.info("invalid log level; using info", { reason: config.logLevelFallbackFrom });
   }
-  logger.info("omnigateway booting", { host: config.host, port: config.port });
+  logger.info(
+    config.dayOffsetFallbackFrom === null
+      ? "omnigateway booting"
+      : "omnigateway booting; invalid day offset, using host offset",
+    {
+      host: config.host,
+      port: config.port,
+      dayOffsetMinutes: config.dayOffsetMinutes,
+      ...(config.dayOffsetFallbackFrom === null ? {} : { reason: config.dayOffsetFallbackFrom }),
+    },
+  );
 
   /**
    * Where the built dashboard lives.
@@ -139,6 +149,7 @@ async function main(): Promise<void> {
     encryptionKey,
     logger,
     nodeId,
+    dayOffsetMinutes: config.dayOffsetMinutes,
   });
 
   // A request still marked in-flight under a process nobody has heard from

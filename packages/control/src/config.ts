@@ -1,4 +1,5 @@
 import { type LogLevel, parseLogLevel } from "@omni/ir";
+import { hostDayOffsetMinutes } from "@omni/store";
 
 export type Config = {
   port: number;
@@ -53,6 +54,10 @@ export type Config = {
   databaseUrl: string | null;
   /** `OMNI_REDIS_URL`: the coordinator every process of a cluster shares. Null single-node. */
   redisUrl: string | null;
+  /** Fixed minutes east of UTC used for daily usage buckets. */
+  dayOffsetMinutes: number;
+  /** Set when `OMNI_DAY_OFFSET_MINUTES` was invalid and the host offset was used. */
+  dayOffsetFallbackFrom: string | null;
   /**
    * Set when `OMNI_LOG_LEVEL` held something unrecognised.
    *
@@ -70,6 +75,7 @@ const MIN_KEY_LENGTH = 16;
 /** Spellings of "on" a flag accepts. Anything else, including empty, is off. */
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
 const DECIMAL_INTEGER = /^\d+$/;
+const SIGNED_INTEGER = /^-?\d+$/;
 
 function optionalText(value: string | undefined, fallback: string): string {
   return value?.trim() || fallback;
@@ -123,6 +129,17 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     );
   }
 
+  const rawDayOffset = env.OMNI_DAY_OFFSET_MINUTES?.trim();
+  const parsedDayOffset = rawDayOffset === undefined ? NaN : Number(rawDayOffset);
+  const validDayOffset =
+    rawDayOffset !== undefined &&
+    SIGNED_INTEGER.test(rawDayOffset) &&
+    Number.isInteger(parsedDayOffset) &&
+    parsedDayOffset >= -1440 &&
+    parsedDayOffset <= 1440;
+  const dayOffsetMinutes = validDayOffset ? parsedDayOffset : hostDayOffsetMinutes();
+  const dayOffsetFallbackFrom = rawDayOffset !== undefined && !validDayOffset ? rawDayOffset : null;
+
   const bodyLoggingAllowed = TRUTHY.has((env.OMNI_BODY_LOGGING_ALLOWED ?? "").trim().toLowerCase());
 
   // Deliberately not fatal, unlike OMNI_PORT: a typo in a log level is not a
@@ -158,6 +175,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     clusterMode,
     databaseUrl: clusterMode ? (databaseUrl ?? null) : null,
     redisUrl: clusterMode ? (redisUrl ?? null) : null,
+    dayOffsetMinutes,
+    dayOffsetFallbackFrom,
     metricsToken,
     metricsMaxSeries,
     otlpEndpoint,

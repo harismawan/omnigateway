@@ -1,10 +1,10 @@
-import { hourOf, startOfLocalDay } from "../sqlite/rollup.ts";
+import { hourOf, startOfDay } from "../sqlite/rollup.ts";
 import type { RequestLog, RollupAudit } from "../types.ts";
 import { type Conn, num, type Rows } from "./db.ts";
 
 /**
  * The two rollups the SQLite store keeps, written the same way here. The
- * bucket arithmetic — `hourOf`, `startOfLocalDay` — is imported from the
+ * bucket arithmetic — `hourOf`, `startOfDay` — is imported from the
  * SQLite module rather than copied: it is pure, and a second copy of "which
  * hour is this instant in" is one that can disagree with `omni doctor`.
  *
@@ -38,9 +38,13 @@ const DAILY_UPSERT = `
  * with the rows it summarizes. Empty strings where the log had nulls, because
  * the primary key treats NULLs as distinct.
  */
-export async function rollupLog(conn: Conn, log: RequestLog): Promise<void> {
+export async function rollupLog(
+  conn: Conn,
+  log: RequestLog,
+  dayOffsetMinutes: number,
+): Promise<void> {
   await conn.unsafe(DAILY_UPSERT, [
-    startOfLocalDay(log.at),
+    startOfDay(log.at, dayOffsetMinutes),
     log.resolvedProvider ?? "",
     log.credentialId ?? "",
     log.requestedModel,

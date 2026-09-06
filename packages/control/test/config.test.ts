@@ -80,6 +80,20 @@ test("refuses invalid observability number settings", () => {
   expect(() => loadConfig({ ...base, OMNI_TRACE_SAMPLE: "1.1" })).toThrow("OMNI_TRACE_SAMPLE");
 });
 
+test("reads a valid day offset and falls back to the host offset for invalid values", () => {
+  for (const value of ["-1440", "330", "1440"]) {
+    const configured = loadConfig({ ...base, OMNI_DAY_OFFSET_MINUTES: value });
+    expect(configured.dayOffsetMinutes).toBe(Number(value));
+    expect(configured.dayOffsetFallbackFrom).toBeNull();
+  }
+
+  for (const value of ["", "1.5", "nope", "1441", "-1441"]) {
+    const fallback = loadConfig({ ...base, OMNI_DAY_OFFSET_MINUTES: value });
+    expect(fallback.dayOffsetMinutes).toBe(-new Date().getTimezoneOffset());
+    expect(fallback.dayOffsetFallbackFrom).toBe(value);
+  }
+});
+
 test("falls back to info for an invalid log level without refusing to boot", () => {
   const config = loadConfig({ ...base, OMNI_LOG_LEVEL: "verbose" });
   expect(config.logLevel).toBe("info");

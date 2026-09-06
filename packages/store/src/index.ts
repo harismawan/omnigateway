@@ -20,6 +20,7 @@ export { openDb } from "./sqlite/db.ts";
 export { createKeyRepo, generateApiKey, hashApiKey } from "./sqlite/keys.ts";
 export { createMaintenanceRepo } from "./sqlite/maintenance.ts";
 export { createPluginRepo } from "./sqlite/plugins.ts";
+export { hostDayOffsetMinutes, startOfDay } from "./sqlite/rollup.ts";
 export { createStore } from "./sqlite/store.ts";
 export { createUsageRepo } from "./sqlite/usage.ts";
 export * from "./types.ts";
@@ -35,10 +36,12 @@ import type { Store } from "./types.ts";
  * know which they hold; this is for the boot path, which reads one setting.
  */
 export function openStore(
-  opts: { encryptionKey: CryptoKey; logger?: Logger; nodeId?: string } & (
-    | { url: string; path?: undefined }
-    | { path: string; url?: undefined }
-  ),
+  opts: {
+    encryptionKey: CryptoKey;
+    logger?: Logger;
+    nodeId?: string;
+    dayOffsetMinutes?: number;
+  } & ({ url: string; path?: undefined } | { path: string; url?: undefined }),
 ): Promise<Store> {
   return opts.url === undefined ? sqlite(opts) : postgres(opts);
 }

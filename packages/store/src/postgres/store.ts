@@ -1,4 +1,5 @@
 import { type Logger, noopLogger } from "@omni/ir";
+import { hostDayOffsetMinutes } from "../sqlite/rollup.ts";
 import type { RoutingChange, Store } from "../types.ts";
 import { createBodyRepo } from "./bodies.ts";
 import { createConfigRepo } from "./config.ts";
@@ -35,9 +36,12 @@ export async function createPostgresStore(opts: {
   logger?: Logger;
   /** This process's identity on `request_logs.node_id`. Fresh per boot when absent. */
   nodeId?: string;
+  /** Fixed minutes east of UTC used for every daily usage bucket. */
+  dayOffsetMinutes?: number;
 }): Promise<Store> {
   const logger = opts.logger ?? noopLogger;
   const nodeId = opts.nodeId ?? crypto.randomUUID();
+  const dayOffsetMinutes = opts.dayOffsetMinutes ?? hostDayOffsetMinutes();
   const listeners = new Set<(change: RoutingChange) => void>();
   const emit = (change: RoutingChange): void => {
     for (const listener of listeners) {
@@ -92,7 +96,7 @@ export async function createPostgresStore(opts: {
     // The one repo handed the logger: an unreadable `limits` column is
     // reported rather than thrown, so this is where that trail is written.
     keys: createKeyRepo(sql, logger),
-    usage: createUsageRepo(sql, nodeId),
+    usage: createUsageRepo(sql, nodeId, dayOffsetMinutes),
     bodies: createBodyRepo(sql, opts.encryptionKey),
     maintenance: createMaintenanceRepo(sql, nodeId),
     plugins: createPluginRepo(sql),

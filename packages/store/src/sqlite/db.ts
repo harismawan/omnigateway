@@ -11,14 +11,18 @@ import keyLimits009 from "./migrations/009_key_limits.sql" with { type: "text" }
 import usageRollup010 from "./migrations/010_usage_rollup.sql" with { type: "text" };
 import pluginMigrations011 from "./migrations/011_plugin_migrations.sql" with { type: "text" };
 import nodes012 from "./migrations/012_nodes.sql" with { type: "text" };
-import { backfillDaily, backfillRtkUsage, rebuildRollup } from "./rollup.ts";
+import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
  * `after` runs inside the migration's own transaction, for the cases where the
  * data step needs the same day arithmetic the runtime uses rather than a SQL
  * approximation of it.
  */
-const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database) => void }> = [
+const MIGRATIONS: ReadonlyArray<{
+  id: number;
+  sql: string;
+  after?: (db: Database, dayOffsetMinutes: number) => void;
+}> = [
   { id: 1, sql: init001 },
   { id: 2, sql: usageDaily002, after: backfillDaily },
   { id: 3, sql: quotaSnapshot003 },
@@ -49,7 +53,7 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
  * defaults. `reopen()` after a database swap goes through `createStore`'s
  * `open()`, which calls this; keep it that way.
  */
-export function openDb(path: string): Database {
+export function openDb(path: string, dayOffsetMinutes = hostDayOffsetMinutes()): Database {
   const db = new Database(path, { create: true });
   db.run("PRAGMA journal_mode = WAL");
   // The single largest cost on the request path, and it is a pragma rather than
@@ -109,7 +113,7 @@ export function openDb(path: string): Database {
     if (done.has(m.id)) continue;
     db.transaction(() => {
       db.run(m.sql);
-      m.after?.(db);
+      m.after?.(db, dayOffsetMinutes);
       db.run("INSERT INTO migrations (id, applied_at) VALUES (?, ?)", [m.id, Date.now()]);
     })();
   }

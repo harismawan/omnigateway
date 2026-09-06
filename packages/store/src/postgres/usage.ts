@@ -1,7 +1,7 @@
 import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
 import type { SQL } from "bun";
-import { HOUR_MS, hourOf, startOfLocalDay } from "../sqlite/rollup.ts";
+import { HOUR_MS, hourOf, startOfDay } from "../sqlite/rollup.ts";
 import {
   NODE_GRACE_MS,
   type RequestLog,
@@ -237,7 +237,7 @@ const sum = (row: SumRow | undefined) => ({
   costUsd: row === undefined ? 0 : row.cost_usd,
 });
 
-export function createUsageRepo(sql: SQL, nodeId: string): UsageRepo {
+export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: number): UsageRepo {
   /**
    * The raw row and both rollups are written together: a crash between them
    * would leave the year view, or a key's hourly counters, quietly disagreeing
@@ -258,7 +258,7 @@ export function createUsageRepo(sql: SQL, nodeId: string): UsageRepo {
     )[0];
     if (stored !== undefined) {
       const restored = toLog(stored);
-      await rollupLog(conn, restored);
+      await rollupLog(conn, restored, dayOffsetMinutes);
       await rollupHour(conn, restored);
     }
   };
@@ -443,7 +443,7 @@ export function createUsageRepo(sql: SQL, nodeId: string): UsageRepo {
 
       // A daily bucket is whole: floor the lower bound so the first partial day
       // of the window is reported in full rather than dropped.
-      const since = daily ? startOfLocalDay(q.since) : q.since;
+      const since = daily ? startOfDay(q.since, dayOffsetMinutes) : q.since;
       const until = q.until ?? Number.MAX_SAFE_INTEGER;
       const timeColumn = daily ? "day" : "at";
 
