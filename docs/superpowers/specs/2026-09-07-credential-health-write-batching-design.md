@@ -35,6 +35,44 @@ opening is the one stuck in the queue: until it commits, other replicas' snapsho
 the credential closed, so they keep routing to it, keep failing, and keep lengthening the
 queue. The load-shedding mechanism is gated behind the resource its own load saturates.
 
+### The write also invalidates every replica's routing snapshot
+
+Unverified against a live Postgres; read from the schema and the cache, and it should be
+measured before it is relied on.
+
+`packages/store/src/postgres/migrations/001_init.sql:285-287`:
+
+```sql
+CREATE TRIGGER credential_health_config_version
+  AFTER INSERT OR UPDATE OR DELETE ON credential_health
+  FOR EACH STATEMENT EXECUTE FUNCTION bump_config_version();
+```
+
+`bump_config_version` is `UPDATE config_version SET version = version + 1 WHERE id = 1`, and
+`apps/gateway/src/dispatch/snapshotCache.ts:69-70` compares that counter on every `get()`:
+a change sets `stale`, and `stale` means `buildSnapshot` — five queries
+(`packages/router/src/snapshot.ts:12-18`).
+
+Chained, on Postgres:
+
+1. a request finishes and writes health,
+2. the trigger bumps a counter every replica polls,
+3. every replica's next request rebuilds its whole routing snapshot.
+
+Two consequences, both worse than the lock this spec started from:
+
+- **The cache cannot stay warm under load.** `snapshotCache.ts:43-48` already knows how to
+  patch a `healthSaved` row into the held map without rebuilding — that path is written and
+  is dead, because the version check at `:69-70` runs first and marks the snapshot stale
+  before the patch can matter. CLAUDE.md's claim that own writes "still patch, not rebuild"
+  holds for the pubsub filter and is defeated by the trigger.
+- **`config_version` is one row.** Every request, on every credential, on every replica,
+  updates it. That is a tighter serialization point than the per-credential advisory lock:
+  the advisory lock at least partitions by credential.
+
+Both are consequences of writing on every request, so the design below addresses them with
+the same change — plus one trigger edit, [below](#the-version-trigger).
+
 ### What the write actually says
 
 `recordSuccess` (`packages/router/src/breaker.ts:63-83`) returns:
@@ -158,18 +196,57 @@ measurements, never a decision field — those were written through when they ha
 `packages/control/src/copyStore.ts:22-28` already declares credential health non-durable
 across a copy, so this is a narrower loss than one the codebase has accepted.
 
-### Cross-replica freshness is unchanged
+### The version trigger
 
-Write-through keeps emitting `healthSaved` exactly as today, so
-`apps/gateway/src/dispatch/snapshotCache.ts:43-48` patches its map, `app.ts:276-282`
-re-publishes onto the `routing` pubsub topic, and other replicas apply it. The Postgres
-trigger at `packages/store/src/postgres/migrations/001_init.sql:285-287` still bumps
-`config_version` behind it, so a dropped publish still costs one late rebuild rather than a
-replica routing into an open breaker.
+Batching alone leaves the rebuild storm in place, only slower: the flusher writes, the trigger
+bumps, and every replica rebuilds on a five-second cycle. That is still five queries per
+replica per flush to react to a latency measurement moving.
 
-**That safety net is the reason decisions are written through rather than batched.** A design
-that flushed breaker transitions on the same schedule would put a five-second hole in exactly
-the fact the fan-out exists to carry, with nothing behind it.
+The trigger fires blind because it is statement-level, and a statement-level trigger has no
+`OLD`/`NEW` to test. Make the `UPDATE` arm row-level and conditional:
+
+```sql
+CREATE TRIGGER credential_health_config_version
+  AFTER UPDATE ON credential_health
+  FOR EACH ROW
+  WHEN (OLD.breaker_state       IS DISTINCT FROM NEW.breaker_state
+     OR OLD.rate_limited_until  IS DISTINCT FROM NEW.rate_limited_until
+     OR OLD.opened_at           IS DISTINCT FROM NEW.opened_at)
+  EXECUTE FUNCTION bump_config_version();
+```
+
+`INSERT` and `DELETE` keep an unconditional trigger — a new pair, or a credential removal
+cascading — both rare, and neither has a prior row to compare against.
+
+**The `WHEN` clause names the same three fields the accumulator uses to choose write-through.**
+That is not a coincidence to be maintained by hand: both are asking "did a decision change",
+and they must not drift. The columns belong in one place with both sides reading it, and a
+test asserting the trigger condition and the accumulator's predicate cover the same set.
+
+With this in place the flush writes only measurement columns, the counter does not move, the
+`healthSaved` patch at `snapshotCache.ts:43-48` does the job it was written for, and no rebuild
+happens at all. Rebuilds return to meaning what they should: routing configuration changed.
+
+### What this costs, stated plainly
+
+Write-through keeps emitting `healthSaved`, so `snapshotCache.ts:43-48` patches, `app.ts:276-282`
+re-publishes onto the `routing` pubsub topic, and other replicas apply it. For **decision**
+changes the version counter still moves, so a dropped publish still costs one late rebuild
+rather than a replica routing into an open breaker. That safety net is intact, and it is why
+decisions are written through rather than batched: flushing a breaker transition on the
+schedule would put a five-second hole in exactly the fact the fan-out exists to carry.
+
+For **measurement** changes the safety net is gone, deliberately. `coord.pubsub` is
+fire-and-forget (`app.ts:277`) and fails open to a per-process emitter on a Redis fault
+(`coord/redis.ts:216-227`), so a dropped publish now means that replica's `ewmaTtftMs` and
+`lastUsedAt` for that pair stay stale until something else invalidates the snapshot.
+
+That is acceptable — those two fields feed a scoring *preference* (`packages/router/src/score.ts:114-152`),
+not an admission decision, and α=0.3 reconverges in a handful of requests. But it is a real
+narrowing of a guarantee that used to be total, and it is written here so it is a choice on the
+record rather than a surprise found later. The operator-visible edge: `omni credentials health`
+and the dashboard's LAST USED column read the stored row, so on a replica that missed a publish
+they can lag by more than the flush interval.
 
 ### Why not coord
 
@@ -205,6 +282,12 @@ and none of them is required to remove the ceiling this spec is about.
   and `hashtext` returns int4. Both are worth fixing — two-argument form, wider hash — and
   neither is load-bearing once the lock is taken at a few writes per second instead of a few
   thousand. Separate change.
+- **The other four `config_version` triggers.** `credentials`, `quota_windows`,
+  `virtual_models` and `settings` all bump the same single row unconditionally. Only
+  `quota_windows` is written often enough to matter (the quota poller, per interval), and only
+  `quotaSaved` has a patch path like health's. Worth the same conditional treatment; not needed
+  to fix this problem, and bundling it would put four tables' invalidation semantics into one
+  change.
 - **Per-request PG round-trips generally.** Auth (`keys.findByHash`) is uncached and
   `usage.begin` is awaited before dispatch. Real, unrelated, separate spec.
 
@@ -224,6 +307,17 @@ and none of them is required to remove the ceiling this spec is about.
 - **Both backends.** The merge `apply` runs inside `updateHealth`, so it belongs in
   `packages/store/test/contract/credentials.test.ts` where it runs against SQLite and Postgres
   both, rather than against whichever one is convenient.
+- **A measurement write does not move `config_version`; a decision write does.** Two
+  `updateHealth` calls against Postgres, one changing only `ewmaTtftMs`, one opening the
+  breaker; read `routing.version()` either side. This is the trigger's whole contract and
+  nothing else pins it. Postgres-only, so it must sit where the suite skips cleanly without
+  `OMNI_TEST_DATABASE_URL` rather than passing vacuously.
+- **The trigger's `WHEN` columns and the accumulator's predicate name the same set.** Assert
+  it from the shared definition, so adding a fourth decision field to one and not the other
+  fails here instead of becoming a replica that never learns about it.
+- **The snapshot is patched, not rebuilt, across a flush.** Count `buildSnapshot` calls over a
+  flush cycle that carries only measurements: expected zero. Without this the trigger fix can
+  regress silently — everything still works, just five queries at a time.
 
 Do not add a test per `observe*` call site. One dispatch-level test with a store double that
 refuses writes kills every mutant that reintroduces a per-request write, the same instrument
@@ -251,3 +345,14 @@ on every existing test, and the interval only has to be correct where it is non-
   that Redis is the more forgiving home.
 - The scheduler-probes-providers shape was proposed and rejected on cost and fidelity, but it
   is what produced the design's central rule: schedule the save, not the observation.
+- **The version trigger was found by asking "but does it still rebuild the snapshot every five
+  seconds?" of the first draft.** The answer was yes, and following it back found the larger
+  fact the first draft had missed entirely: the trigger fires on every health write, so today
+  every request invalidates every replica's routing snapshot, and `config_version` is a single
+  row the whole fleet updates per request. The advisory lock this spec was opened to fix at
+  least partitions by credential; that row does not. Both were invisible while the write was
+  treated as a local cost rather than followed to what observes it.
+
+  Recorded because the first draft's error was structural, not careless: it read the write
+  path and stopped there. `snapshotCache.ts:43-48` had a working patch path that was dead, and
+  nothing about the write site says so.
