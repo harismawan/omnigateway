@@ -60,16 +60,34 @@ predicate below.
 Evaluated against `snapshot.health` **before** the attempt, never inside `updateHealth`'s
 `apply` — `apply` runs inside the transaction this design exists to skip.
 
+Do not hand-maintain the field list. Derive it from what `recordSuccess` resets, compared
+against `blankHealth`, so the predicate cannot drift from the transition it describes:
+
 ```ts
-const h = snapshot.health.get(healthKey(credentialId, model));
-const wouldChange =
-  h === undefined ||
-  h.breakerState !== "closed" ||
-  h.consecutiveFailures > 0 ||
-  h.rateLimitedUntil !== null;
+export const SUCCESS_RESETS = [
+  "breakerState", "consecutiveFailures", "openedAt", "rateLimitedUntil",
+] as const satisfies ReadonlyArray<keyof CredentialHealth>;
+
+export function successWouldChange(current: CredentialHealth | undefined): boolean {
+  if (current === undefined) return false;
+  const blank = blankHealth(current.credentialId, current.model);
+  return SUCCESS_RESETS.some((field) => current[field] !== blank[field]);
+}
 ```
 
-Write through when `wouldChange`; otherwise return without touching the store.
+Write through when it returns true; otherwise return without touching the store.
+
+Two things an earlier draft of this section got wrong, both caught by implementing it:
+
+- **`openedAt` belongs in the set.** The draft's literal predicate omitted it while the trigger's
+  `WHEN` clause included `opened_at`, so the superset test this spec mandates failed against the
+  spec's own predicate. `recordSuccess` resets `openedAt`, so by the predicate's own definition
+  it was always a member.
+- **A missing row means silence, not a write.** The draft opened with `h === undefined ||` →
+  write, which would mint a row on the first success for every credential and contradict this
+  spec's own claim that a healthy account commonly has no row. A missing row reads as blank
+  everywhere routing looks — `healthScore(undefined)` is 1, the filters admit — so there is
+  nothing for a success to reset. Rows come into being on failure.
 
 **`consecutiveFailures > 0` is not optional, and omitting it is the worst bug this design can
 have.** `recordFailure` on a sub-threshold hard failure writes `consecutiveFailures: n` with
@@ -202,6 +220,19 @@ missed.** The write is an upsert (`postgres/credentials.ts:71-81`, `ON CONFLICT 
 PostgreSQL fires *statement-level* `INSERT` triggers on an upsert regardless of which path each
 row took, so a statement-level `INSERT` arm bumps on every write and the `WHEN` clause on the
 `UPDATE` arm never matters. Row-level `AFTER INSERT` fires only for rows actually inserted.
+
+Measured on PostgreSQL 16 rather than reasoned about, and the current shape is worse than the
+paragraph above: a single upsert taking the UPDATE path bumps the counter **twice**, because
+`AFTER INSERT OR UPDATE OR DELETE … FOR EACH STATEMENT` fires both the INSERT arm and the UPDATE
+arm. So today one health write — one per request — is two increments of the fleet-wide row.
+
+The replacement behaves as specified:
+
+| write | counter |
+| --- | --- |
+| upsert that inserts | bump |
+| upsert, UPDATE path, count only | **no bump** |
+| upsert, UPDATE path, breaker changed | bump |
 
 What this narrows: for decision changes the counter still moves, so a dropped `coord.pubsub`
 publish (`app.ts:276-281`, fire-and-forget, degrading to a per-process emitter on a Redis fault
