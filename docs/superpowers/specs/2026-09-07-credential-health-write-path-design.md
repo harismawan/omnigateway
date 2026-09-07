@@ -122,21 +122,44 @@ And `roundRobin` becomes a misnomer; the strategy spreads load rather than rotat
 in prose only. The stored `strategy` value is a storage contract
 (`virtual_models.targets`) and does not move.
 
-### `lastUsedAt` after that
+### `lastUsedAt` leaves `CredentialHealth`
 
-Display-only: the CLI's LAST USED column (`apps/cli/src/commands/credentials.ts:441`) and the
-dashboard (`apps/dashboard/src/lib/vitals.ts:243-246`).
+Once the tiebreak no longer reads it, its only consumers are display: the CLI's LAST USED
+column (`apps/cli/src/commands/credentials.ts:441`) and the dashboard
+(`apps/dashboard/src/lib/vitals.ts:243-246`). Keeping it as a stored field would mean a column
+that moves only on failures and recoveries while claiming to say when a credential was last
+used — a lie that gets worse the healthier the account is.
 
-Keep the column, keep writing it on the writes that still happen — failures and recoveries —
-and **relabel both surfaces**, because it no longer means "last used". It means the last time
-this credential's state changed. A column labelled LAST USED that only moves on failure is
-worse than one honestly labelled.
+Drop the field and answer the question from `request_logs`, which already holds it:
 
-Deriving true last-use from `request_logs` is out of scope and has a reason:
-`packages/control/test/credentials.test.ts:395-417` explicitly forbids `credentialHealth` from
-aggregating request logs, because the console refetches it every 10s on the same connection
-that serves `/v1/messages`. If an operator wants "is this account active right now", the shared
-gauge behind `loadRegistry` already answers it, better, and that is a separate change.
+```sql
+SELECT MAX(at) FROM request_logs WHERE credential_id = $1
+```
+
+`CREATE INDEX idx_request_logs_cred ON request_logs (credential_id, at DESC)` exists on both
+backends (`postgres/migrations/001_init.sql:156`, `sqlite/migrations/001_init.sql:82`), so this
+is a seek to the head of one index range per credential — one row read each, for a credential
+count in the dozens.
+
+**This must not go through `usage.aggregate`.**
+`packages/control/test/credentials.test.ts:395-417` stubs that method to throw and asserts
+`credentialHealth` never calls it, because the console refetches the route every ten seconds on
+the same synchronous connection that serves `/v1/messages`, and a week-scale aggregate there is
+head-of-line blocking rather than a slow query. That objection is to the scan, not to the
+table; an indexed `MAX` is a different cost class and the index was put there for this shape.
+A narrow repo method — `usage.lastUsedByCredential()` — keeps the existing test standing as
+written, and the test should stay exactly as it is.
+
+Two behaviour changes to state rather than discover:
+
+- **Retention truncates the answer.** A credential unused for longer than the log retention
+  window reads "never" instead of "four months ago". More honest than a stale number, and
+  different from today.
+- **`credential_id` is nullable** on `request_logs` — rows logged before routing resolves carry
+  none. They are excluded, correctly: those requests never reached a credential.
+
+If an operator wants "is this account busy *now*" rather than "when last", the shared gauge
+behind `loadRegistry` already answers it and answers it better. Separate change.
 
 ### The `config_version` trigger
 
@@ -224,6 +247,13 @@ Each closes a door, and each was reached by trying the other side first.
 - **Round-robin spreads across pods.** Rank the same candidate set from several `rand` values
   and assert the selection distributes, rather than asserting one specific pick. An
   example-shaped test here passes for a tiebreak that always returns the first candidate.
+- **`lastUsedByCredential` reports the newest log, and `null` past retention.** Contract-suite
+  shaped, so both backends answer alike. Include a credential with only `NULL`-`credential_id`
+  rows: the answer is `null`, not the newest unrelated row.
+- **`credentialHealth` still never calls `usage.aggregate`.** The existing test at
+  `packages/control/test/credentials.test.ts:395-417` is not modified — if a `lastUsedAt`
+  implementation reaches for the aggregate, it fails there, which is the point of leaving it
+  untouched.
 
 Do not add a test per call site. One dispatch-level test with a store double that refuses
 writes kills every mutant that reintroduces a per-request write — the same instrument
@@ -264,3 +294,10 @@ writes kills every mutant that reintroduces a per-request write — the same ins
   it, the coord interface addition that sharing it would have required. Both questions came from
   outside the code. The recorded lesson is that each of the three drafts was internally
   well-argued, and the argument was what kept the unnecessary machinery alive.
+- **`lastUsedAt` was proposed for deletion early and argued down for the wrong reason.** The
+  objection cited was `credentials.test.ts:395-417`, read as "health may not touch request
+  logs". It says something narrower — health may not call `usage.aggregate`, because a
+  week-scale scan on the console's ten-second refresh is head-of-line blocking — and
+  `idx_request_logs_cred` exists on both backends precisely so the indexed question is cheap.
+  The real blocker was the round-robin hot-path read, which the tiebreak change removed. A test
+  comment naming a cost is not a prohibition on a table; the distinction was worth two rounds.
