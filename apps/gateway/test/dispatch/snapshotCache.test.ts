@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { healthKey } from "@omni/router";
-import { createStore, deriveKey } from "@omni/store";
+import { createPostgresStore, createStore, deriveKey, type Store } from "@omni/store";
 import { memoryStore, seedCredential } from "@omni/testkit";
+import { SQL } from "bun";
 import { createRoutingSnapshotCache } from "../../src/dispatch/snapshotCache.ts";
 
 async function seedRoutingStore() {
@@ -80,18 +81,14 @@ test("local health writes patch cached health without rebuilding", async () => {
   const cache = createRoutingSnapshotCache(store);
   const first = await cache.get(100);
 
-  await store.credentials.saveHealth([
-    {
-      credentialId: "c1",
-      model: "claude-opus-4",
-      breakerState: "open",
-      consecutiveFailures: 3,
-      openedAt: 200,
-      rateLimitedUntil: null,
-      ewmaTtftMs: 300,
-      lastUsedAt: 200,
-    },
-  ]);
+  await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "open",
+    consecutiveFailures: 3,
+    openedAt: 200,
+    rateLimitedUntil: null,
+  }));
   const second = await cache.get(200);
 
   expect(second).not.toBe(first);
@@ -287,8 +284,6 @@ test("remote health writes patch cached health without rebuilding", async () => 
         consecutiveFailures: 3,
         openedAt: 200,
         rateLimitedUntil: null,
-        ewmaTtftMs: 300,
-        lastUsedAt: 200,
       },
     ],
   });
@@ -304,3 +299,91 @@ test("remote health writes patch cached health without rebuilding", async () => 
   cache.close();
   store.close();
 });
+
+/**
+ * Postgres alone bumps `config_version` from a trigger, and the version check
+ * runs before the `healthSaved` patch, so only there can a health write make
+ * the cache rebuild. SQLite's `data_version` never moves on the writer's own
+ * connection, which is why this passes vacuously there and is not run there.
+ *
+ * Specifically a `closed → closed` count increment: a failure that opens the
+ * breaker changes a decision column and is *supposed* to rebuild.
+ */
+const pg = process.env.OMNI_TEST_DATABASE_URL;
+test.skipIf(pg === undefined || pg === "")(
+  "postgres: a sub-threshold failure is patched into the snapshot, not rebuilt",
+  async () => {
+    const url = pg as string;
+    const admin = new SQL({ url, max: 1 });
+    try {
+      await admin.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+    } finally {
+      await admin.close();
+    }
+    const store: Store = await createPostgresStore({
+      url,
+      encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
+    });
+    await seedCredential(store, { id: "c1" });
+    const listRouting = store.credentials.listRouting.bind(store.credentials);
+    let builds = 0;
+    store.credentials.listRouting = async () => {
+      builds++;
+      return listRouting();
+    };
+    // `routing.version()` is read-behind: each call returns the last fetched
+    // value and starts the next fetch. Poll until a write has had the chance to
+    // be seen, so "not rebuilt" is asserted after the check could have fired.
+    const settle = async () => {
+      for (let i = 0; i < 20; i++) {
+        store.routing.version();
+        await Bun.sleep(10);
+      }
+    };
+    const cache = createRoutingSnapshotCache(store);
+    const key = healthKey("c1", "claude-opus-4");
+    const blank = {
+      credentialId: "c1",
+      model: "claude-opus-4",
+      breakerState: "closed" as const,
+      consecutiveFailures: 0,
+      openedAt: null,
+      rateLimitedUntil: null,
+    };
+
+    // The row's creation is an insert, which is a rebuild by design.
+    await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+      ...blank,
+      consecutiveFailures: 1,
+    }));
+    await settle();
+    await cache.get(100);
+    await settle();
+    await cache.get(100);
+    const before = builds;
+
+    await store.credentials.updateHealth("c1", "claude-opus-4", (current) => ({
+      ...(current ?? blank),
+      consecutiveFailures: 2,
+    }));
+    await settle();
+    const patched = await cache.get(200);
+    expect(patched.health.get(key)?.consecutiveFailures).toBe(2);
+    expect(builds).toBe(before);
+
+    // And the instrument is live: a decision column moving does rebuild.
+    await store.credentials.updateHealth("c1", "claude-opus-4", (current) => ({
+      ...(current ?? blank),
+      breakerState: "open",
+      openedAt: 200,
+    }));
+    await settle();
+    await cache.get(300);
+    await settle();
+    await cache.get(300);
+    expect(builds).toBeGreaterThan(before);
+
+    cache.close();
+    store.close();
+  },
+);

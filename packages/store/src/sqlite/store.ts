@@ -126,7 +126,6 @@ export async function createStore(opts: {
         handle.credentials.updateSecrets(id, secrets, expiresAt, expectedVersion),
       remove: (id) => handle.credentials.remove(id),
       listHealth: () => handle.credentials.listHealth(),
-      saveHealth: (rows) => handle.credentials.saveHealth(rows),
       updateHealth: (id, model, apply) => handle.credentials.updateHealth(id, model, apply),
       listQuota: () => handle.credentials.listQuota(),
       saveQuota: (rows) => handle.credentials.saveQuota(rows),
@@ -168,6 +167,7 @@ export async function createStore(opts: {
       // carries the scope that keeps one API key's logs away from another's, so
       // dropping it would serve every row and report no fault.
       recent: (limit, apiKeyId) => handle.usage.recent(limit, apiKeyId),
+      lastUsedByCredential: (credentialId) => handle.usage.lastUsedByCredential(credentialId),
       scan: (cursor, limit) => handle.usage.scan(cursor, limit),
       aggregate: (q) => handle.usage.aggregate(q),
       sumSince: (apiKeyId, sinceMs) => handle.usage.sumSince(apiKeyId, sinceMs),

@@ -371,6 +371,17 @@ export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
         .map(toLog);
     },
 
+    async lastUsedByCredential(credentialId) {
+      // `MAX(at)` over one `credential_id` is a seek to the head of
+      // `idx_request_logs_cred (credential_id, at DESC)`, not a scan.
+      const row = db
+        .query<{ at: number | null }, [string]>(
+          "SELECT MAX(at) AS at FROM request_logs WHERE credential_id = ?",
+        )
+        .get(credentialId);
+      return row?.at ?? null;
+    },
+
     async scan(cursor, limit) {
       const rows =
         cursor === null

@@ -85,18 +85,20 @@ export function rank(input: RankInput): RankResult {
 
     case "roundRobin": {
       const idle = (c: Candidate): number => {
-        const h = input.snapshot.health.get(healthKey(c.credential.id, c.target.model));
-        return h?.lastUsedAt == null ? Number.POSITIVE_INFINITY : input.now - h.lastUsedAt;
+        const at = input.recent?.get(healthKey(c.credential.id, c.target.model))?.lastReleasedAt;
+        return at === undefined ? Number.POSITIVE_INFINITY : input.now - at;
       };
       // Least-loaded first, then least-recently-used, except that an account
       // close to exhaustion drops to the tail. Strict rotation would keep
       // handing work to the account about to be excluded, and spend the rest of
       // its window on retries.
       //
-      // In-flight has to outrank idle time. `lastUsedAt` only moves when a
+      // In-flight has to outrank idle time. `lastReleasedAt` only moves when a
       // request *finishes*, so a burst that arrives together reads identical
       // idle times and stacks onto one credential — the exact opposite of what
       // this strategy is for. Idle time still breaks ties once nothing is busy.
+      // It is this process's record, not the fleet's: on one node that is exact
+      // rotation, and across a fleet it balances rather than converges.
       const spent = (c: Candidate): number => (headroom(c) < QUOTA_FLOOR ? 1 : 0);
       scored.sort((a, b) => spent(a) - spent(b) || inflight(a) - inflight(b) || idle(b) - idle(a));
       break;
@@ -113,9 +115,24 @@ export function rank(input: RankInput): RankResult {
   return { candidates: scored, excluded };
 }
 
-export { blankHealth, PENALTY, type Penalty, recordFailure, recordSuccess } from "./breaker.ts";
+export {
+  blankHealth,
+  PENALTY,
+  type Penalty,
+  recordFailure,
+  recordSuccess,
+  SUCCESS_RESETS,
+  successWouldChange,
+} from "./breaker.ts";
 export { eligible, type Pair, requiredCapabilities } from "./filters.ts";
 export { QUOTA_FLOOR, quotaHeadroom, quotaStaleAfterMs, UNKNOWN_QUOTA } from "./quota.ts";
 export { resolveModel } from "./resolve.ts";
 export { buildSnapshot, healthKey } from "./snapshot.ts";
-export type { Candidate, Excluded, RankInput, RankResult, Snapshot } from "./types.ts";
+export type {
+  Candidate,
+  Excluded,
+  RankInput,
+  RankResult,
+  RecentUse,
+  Snapshot,
+} from "./types.ts";

@@ -256,6 +256,8 @@ Nothing here thrown away: exclusion list with reasons is exactly what `omni mode
 
 Dispatch is where side effects router refuses to have actually live: request deadline, retries, failover, token refresh, health writes, cost pricing, load accounting.
 
+**A success writes health only when it would change something routing decides on.** `successWouldChange` in `packages/router/src/breaker.ts` reads snapshot row before attempt — never inside `updateHealth`'s `apply`, which run inside transaction the check exist to skip — and answer true when any field `recordSuccess` reset (`SUCCESS_RESETS`: breaker state, failure count, `openedAt`, `rateLimitedUntil`) differ from blank. No row read as blank, so healthy account ordinarily has **no `credential_health` row at all**; rows come into being on failure. Failure count is in that set on purpose: leave it out and next success never reset it, breaker open on cumulative failures rather than consecutive. Every failure still write. Measurements — last use, time-to-first-token — are process-local in `loadRegistry` and reach ranking as `RankInput.recent`; console's "last used" come from `request_logs` via `usage.lastUsedByCredential`, one seek on `idx_request_logs_cred`. Postgres `config_version` trigger on this table is row-level and conditional on decision columns only (`002_health_measurements.sql`), strict subset of `SUCCESS_RESETS`: count change patch through `healthSaved`, never rebuild. Design: `docs/superpowers/specs/2026-09-07-credential-health-write-path-design.md`.
+
 Important rule is **commit point**:
 
 ```mermaid
@@ -344,7 +346,7 @@ flowchart TB
 
   subgraph accounts[Accounts]
     cred["<b>credentials</b><br/>access_token 🔒 refresh_token 🔒<br/>api_key 🔒 id_token 🔒"]
-    health["<b>credential_health</b><br/>breaker · failures · ewma ttft"]
+    health["<b>credential_health</b><br/>breaker · failures · rate limit<br/><i>written on failure or recovery only</i>"]
     quota["<b>quota_windows</b><br/>provider observations,<br/>not gateway counts"]
     samples["<b>quota_samples</b><br/>one row per changed reading<br/><i>pruned at logRetentionDays</i>"]
   end
@@ -841,7 +843,10 @@ pending rows out of another's `sweepPending`. `complete()` in both usage reposit
 **claim** — `ON CONFLICT DO UPDATE … WHERE state = 'pending'`, rollup only when a row changed —
 so a row swept as dead and then completed by its owner is billed once. A remote routing change
 arrives as the `RoutingChange` itself over the `routing` topic and goes through
-`snapshots.applyRemote`, so a foreign health write patches rather than rebuilds.
+`snapshots.applyRemote`, so a foreign health write patches rather than rebuilds. On Postgres
+`config_version` move only when a decision column of `credential_health` change, so a bare
+failure-count increment is patched there too — and a dropped publish leave that count stale on
+one replica until something else invalidates, which shorten a backoff and nothing more.
 
 **What moved where.**
 

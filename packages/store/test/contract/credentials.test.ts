@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
+import { SQL } from "bun";
 import {
   type CredentialHealth,
   type RoutingChange,
   SAME_WINDOW_TOLERANCE_MS,
   WINDOW_DURATION_MS,
 } from "../../src/types.ts";
-import { forEachStore } from "./harness.ts";
+import { type Backend, forEachStore } from "./harness.ts";
 
 const input = {
   id: "c1",
@@ -33,9 +34,11 @@ const blank: CredentialHealth = {
   consecutiveFailures: 0,
   openedAt: null,
   rateLimitedUntil: null,
-  ewmaTtftMs: null,
-  lastUsedAt: null,
 };
+
+/** Seeds one row whole, for tests that need a starting state to transition from. */
+const seedHealth = (s: Awaited<ReturnType<Backend["fresh"]>>, row: CredentialHealth) =>
+  s.credentials.updateHealth(row.credentialId, row.model, () => row);
 
 forEachStore((backend) => {
   test("create then get round-trips metadata and secrets", async () => {
@@ -134,7 +137,7 @@ forEachStore((backend) => {
   test("remove cascades to health, quota and samples", async () => {
     const s = await backend.fresh();
     await s.credentials.create(input);
-    await s.credentials.saveHealth([blank]);
+    await seedHealth(s, blank);
     await s.credentials.saveQuota([
       {
         credentialId: "c1",
@@ -156,15 +159,15 @@ forEachStore((backend) => {
     expect(await s.credentials.listQuotaSamples({ since: 0, until: 1e15 })).toEqual([]);
   });
 
-  test("saveHealth upserts and updateHealth composes atomically from the stored row", async () => {
+  test("updateHealth upserts and composes atomically from the stored row", async () => {
     const s = await backend.fresh();
     await s.credentials.create(input);
-    await s.credentials.saveHealth([blank]);
-    await s.credentials.saveHealth([{ ...blank, consecutiveFailures: 2, ewmaTtftMs: 12.5 }]);
+    await seedHealth(s, blank);
+    await seedHealth(s, { ...blank, consecutiveFailures: 2, rateLimitedUntil: 12 });
     const rows = await s.credentials.listHealth();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.consecutiveFailures).toBe(2);
-    expect(rows[0]?.ewmaTtftMs).toBe(12.5);
+    expect(rows[0]?.rateLimitedUntil).toBe(12);
 
     const changes: RoutingChange[] = [];
     s.routing.subscribe((change) => changes.push(change));
@@ -186,6 +189,46 @@ forEachStore((backend) => {
     expect(seen).toBeNull();
     expect(await s.credentials.listHealth()).toHaveLength(2);
   });
+
+  // Postgres alone has the trigger. The statement-level one bumped the fleet's
+  // one `config_version` row on every health write; the row-level one bumps
+  // only when a column routing decides on moved. The second `updateHealth`
+  // matters: it takes the upsert's `ON CONFLICT` path, and a statement-level
+  // INSERT arm fires there too — a raw UPDATE would never catch it.
+  if (backend.name === "postgres") {
+    test("a measurement-only health write leaves config_version alone; a decision moves it", async () => {
+      const s = await backend.fresh();
+      await s.credentials.create(input);
+      const admin = new SQL({ url: process.env.OMNI_TEST_DATABASE_URL as string, max: 1 });
+      const version = async () =>
+        Number(
+          (await admin.unsafe<Array<{ version: string }>>("SELECT version FROM config_version"))[0]
+            ?.version,
+        );
+      try {
+        // The row is created: an insert, which every replica must see.
+        await seedHealth(s, { ...blank, consecutiveFailures: 1 });
+        const afterInsert = await version();
+
+        // Count moves, nothing decided on does: patched, never rebuilt.
+        await s.credentials.updateHealth("c1", "m", (current) => ({
+          ...(current ?? blank),
+          consecutiveFailures: 2,
+        }));
+        expect(await version()).toBe(afterInsert);
+
+        // Same row, same count, breaker opens: a decision.
+        await s.credentials.updateHealth("c1", "m", (current) => ({
+          ...(current ?? blank),
+          breakerState: "open",
+          openedAt: 5,
+        }));
+        expect(await version()).toBe(afterInsert + 1);
+      } finally {
+        await admin.close();
+      }
+    });
+  }
 
   test("saveQuota replaces a credential's window set and leaves another's alone", async () => {
     const s = await backend.fresh();
@@ -265,7 +308,7 @@ forEachStore((backend) => {
     await s.credentials.create(input);
     await s.credentials.update("c1", { label: "x" });
     await s.credentials.updateSecrets("c1", { accessToken: "y" }, null);
-    await s.credentials.saveHealth([blank]);
+    await seedHealth(s, blank);
     await s.credentials.saveQuota([]);
     await s.credentials.remove("c1");
     await s.config.putModel({ id: "m", targets: [], strategy: "score", isAlias: false });

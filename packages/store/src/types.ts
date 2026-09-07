@@ -238,6 +238,15 @@ export type CredentialView = Credential & {
   openForUsage: () => Promise<UsageSecrets>;
 };
 
+/**
+ * What routing *decides* on for one (credential, model), and nothing else.
+ *
+ * A row exists only once something wrote one: a success against a credential
+ * whose row already reads closed-and-zero writes nothing, so a healthy account
+ * commonly has no row at all. Measurements — last use, time-to-first-token —
+ * are process-local in the gateway's `loadRegistry`; "last used" for display
+ * comes from `request_logs` via `usage.lastUsedByCredential`.
+ */
 export type CredentialHealth = {
   credentialId: string;
   model: string;
@@ -245,8 +254,6 @@ export type CredentialHealth = {
   consecutiveFailures: number;
   openedAt: number | null;
   rateLimitedUntil: number | null;
-  ewmaTtftMs: number | null;
-  lastUsedAt: number | null;
 };
 
 /**
@@ -748,14 +755,6 @@ export interface CredentialRepo {
   remove(id: string): Promise<void>;
   listHealth(): Promise<CredentialHealth[]>;
   /**
-   * Writes whole rows, last writer wins.
-   *
-   * Correct for seeding and for an operator editing a row outright. Not for a
-   * transition: a caller that derives its row from an earlier read loses any
-   * write that landed in between. Use `updateHealth` for those.
-   */
-  saveHealth(rows: CredentialHealth[]): Promise<void>;
-  /**
    * Applies a health transition atomically, and returns the row it persisted.
    *
    * `apply` runs inside the write transaction against the row as it is on disk
@@ -1096,6 +1095,16 @@ export interface UsageRepo {
    * cannot see. Anonymous rows carry a NULL `api_key_id` and match no scope.
    */
   recent(limit: number, apiKeyId?: string): Promise<RequestLog[]>;
+  /**
+   * The `at` of the newest row that ran against one credential, or null.
+   *
+   * One seek to the head of `idx_request_logs_cred`, so it is cheap enough for
+   * a route the console polls. Bounded by retention: a credential unused for
+   * longer than the log window reads null, "never" — not the last time it was
+   * used. Rows logged before routing resolved carry a NULL `credential_id` and
+   * never answer for anyone.
+   */
+  lastUsedByCredential(credentialId: string): Promise<number | null>;
   /**
    * Every row in `(at, id)` order, `limit` at a time, from just after `cursor`.
    * For copying an installation between backends: `recent` is a page with no

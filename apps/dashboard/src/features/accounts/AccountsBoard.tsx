@@ -14,7 +14,7 @@ import {
 import type { Credential, ProviderId, VirtualModel } from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
-import { formatMs, formatPercent, formatRelative } from "../../lib/format.ts";
+import { formatPercent, formatRelative } from "../../lib/format.ts";
 import {
   burnOf,
   credentialStatus,
@@ -257,9 +257,6 @@ export function AccountsBoard() {
                           Enabled
                         </Th>
                         <Th $width="240px">Quota</Th>
-                        <Th $align="right" $width="88px">
-                          TTFT
-                        </Th>
                         <Th $align="right" $width="130px">
                           Token expires
                         </Th>
@@ -391,9 +388,6 @@ export function AccountsBoard() {
                                     ))}
                                   </QuotaStack>
                                 )}
-                              </Td>
-                              <Td $align="right" $mono>
-                                {formatMs(status.ttftMs)}
                               </Td>
                               <Td $align="right" $mono>
                                 {credential.expiresAt === null

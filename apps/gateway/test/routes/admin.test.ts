@@ -948,21 +948,20 @@ test("a key that says nothing inherits the installation's capture policy", async
   expect(listed.keys[0]?.bodyLoggingOptOut).toBe(false);
 });
 
-test("credential health returns the health and quota rows the dashboard renders", async () => {
+test("credential health returns the health, quota and last-use rows the dashboard renders", async () => {
   const { store, call } = await harness();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
-  await store.credentials.saveHealth([
-    {
-      credentialId: "c1",
-      model: "claude-opus-4",
-      breakerState: "closed",
-      consecutiveFailures: 0,
-      openedAt: null,
-      rateLimitedUntil: null,
-      ewmaTtftMs: 400,
-      lastUsedAt: NOW,
-    },
-  ]);
+  await seedCredential(store, { id: "c2", provider: "anthropic" });
+  await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+    rateLimitedUntil: null,
+  }));
+  await store.usage.append(requestLog({ id: "r1", at: NOW - 5_000, credentialId: "c1" }));
+  await store.usage.append(requestLog({ id: "r2", at: NOW - 1_000, credentialId: "c1" }));
   await store.credentials.saveQuota([
     {
       credentialId: "c1",
@@ -981,6 +980,7 @@ test("credential health returns the health and quota rows the dashboard renders"
   const body = (await response.json()) as {
     health: Array<{ credentialId: string; model: string; consecutiveFailures: number }>;
     quota: Array<{ credentialId: string; windowType: string; used: number; limit: number | null }>;
+    lastUsed: Record<string, number>;
   };
   expect(body.health).toHaveLength(1);
   expect(body.health[0]).toMatchObject({
@@ -988,6 +988,9 @@ test("credential health returns the health and quota rows the dashboard renders"
     model: "claude-opus-4",
     consecutiveFailures: 0,
   });
+  // Last use rides the log, not the health row: `c2` has served nothing and
+  // is absent, not null — and a healthy account commonly has no health row.
+  expect(body.lastUsed).toEqual({ c1: NOW - 1_000 });
   expect(body.quota[0]).toMatchObject({
     credentialId: "c1",
     windowType: "fiveHour",

@@ -191,9 +191,6 @@ export type CredentialStatus = {
   state: LampState;
   /** Short reason, shown next to the lamp. Empty when nothing is wrong. */
   note: string;
-  /** Slowest-moving EWMA across this credential's models. */
-  ttftMs: number | null;
-  lastUsedAt: number | null;
   consecutiveFailures: number;
 };
 
@@ -201,7 +198,9 @@ export type CredentialStatus = {
  * Rolls a credential's per-model health rows into one lamp.
  *
  * The worst row wins: one open breaker on one model is a fault the operator
- * needs to see, even if the credential's other models are fine.
+ * needs to see, even if the credential's other models are fine. No rows at all
+ * is the common case for a healthy account — the gateway writes one only when
+ * routing has something to record — so it reads as fine, not as unknown.
  */
 export function credentialStatus(
   rows: readonly CredentialHealth[],
@@ -219,33 +218,15 @@ export function credentialStatus(
     return {
       state: needsReconnect ? "down" : "idle",
       note: needsReconnect ? RECONNECT_NOTE[disabledReason] : "disabled",
-      ttftMs: null,
-      lastUsedAt: null,
-      consecutiveFailures: 0,
-    };
-  }
-  if (rows.length === 0) {
-    return {
-      state: "idle",
-      note: "unused",
-      ttftMs: null,
-      lastUsedAt: null,
       consecutiveFailures: 0,
     };
   }
 
   let state: LampState = "ok";
   let note = "";
-  let ttftMs: number | null = null;
-  let lastUsedAt: number | null = null;
   let consecutiveFailures = 0;
 
   for (const row of rows) {
-    if (row.ewmaTtftMs !== null)
-      ttftMs = ttftMs === null ? row.ewmaTtftMs : Math.max(ttftMs, row.ewmaTtftMs);
-    if (row.lastUsedAt !== null) {
-      lastUsedAt = lastUsedAt === null ? row.lastUsedAt : Math.max(lastUsedAt, row.lastUsedAt);
-    }
     consecutiveFailures = Math.max(consecutiveFailures, row.consecutiveFailures);
 
     if (row.breakerState === "open") {
@@ -264,7 +245,7 @@ export function credentialStatus(
     }
   }
 
-  return { state, note, ttftMs, lastUsedAt, consecutiveFailures };
+  return { state, note, consecutiveFailures };
 }
 
 export const WINDOW_LABEL: Record<QuotaWindow["windowType"], string> = {

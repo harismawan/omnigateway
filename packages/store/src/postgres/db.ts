@@ -1,5 +1,6 @@
 import { SQL } from "bun";
 import init001 from "./migrations/001_init.sql" with { type: "text" };
+import healthMeasurements002 from "./migrations/002_health_measurements.sql" with { type: "text" };
 
 /**
  * Anything that can run a statement: the pool, a reserved connection, or the
@@ -30,7 +31,10 @@ export const numOrNull = (v: string | number | null): number | null =>
  */
 export const MIGRATION_LOCK = 7_140_641;
 
-const MIGRATIONS: ReadonlyArray<{ id: number; sql: string }> = [{ id: 1, sql: init001 }];
+const MIGRATIONS: ReadonlyArray<{ id: number; sql: string }> = [
+  { id: 1, sql: init001 },
+  { id: 2, sql: healthMeasurements002 },
+];
 
 /**
  * Opens the pool and applies any migrations not yet recorded. Safe to call on

@@ -11,6 +11,7 @@ import keyLimits009 from "./migrations/009_key_limits.sql" with { type: "text" }
 import usageRollup010 from "./migrations/010_usage_rollup.sql" with { type: "text" };
 import pluginMigrations011 from "./migrations/011_plugin_migrations.sql" with { type: "text" };
 import nodes012 from "./migrations/012_nodes.sql" with { type: "text" };
+import healthMeasurements013 from "./migrations/013_health_measurements.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -36,6 +37,7 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
   // load. All migration 011 does is create the ledger that walk writes to.
   { id: 11, sql: pluginMigrations011 },
   { id: 12, sql: nodes012 },
+  { id: 13, sql: healthMeasurements013 },
 ];
 
 /**

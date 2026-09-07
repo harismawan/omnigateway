@@ -872,16 +872,183 @@ test("a rate limit landing after a hard failure does not resurrect its count", a
   store.close();
 });
 
-test("a success records latency and marks the credential used", async () => {
+/** A store whose health write is a sentinel throw: reaching it is the failure. */
+function refusingHealthWrites(store: Store): Store {
+  return {
+    ...store,
+    credentials: {
+      ...store.credentials,
+      updateHealth: () => Promise.reject(new Error("HEALTH_WRITE_SENTINEL")),
+    },
+  };
+}
+
+// The one dispatch-level test that kills every mutant reintroducing a
+// per-request write: the store refuses the write outright, so a success that
+// reaches it fails the request rather than merely counting. On Postgres that
+// write was an advisory lock and a fleet-wide snapshot rebuild per request.
+test("a success against a healthy credential with no failure count writes no health", async () => {
   const store = await seeded(1);
+  const adapter = stubAdapter(() => textStream("hi"));
+  const configured = { ...deps(store, adapter), store: refusingHealthWrites(store) };
+
+  for (let i = 0; i < 3; i++) {
+    const outcome = await dispatch(req, configured, new AbortController().signal, `req_${i}`);
+    const events = await drain(outcome.events);
+    expect(events.at(-1)).toMatchObject({ type: "end" });
+    expect(outcome.log().status).toBe(200);
+  }
+
+  expect(await store.credentials.listHealth()).toEqual([]);
+
+  // A row that already reads closed-and-zero is the other silent case.
+  await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+    rateLimitedUntil: null,
+  }));
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_seeded");
+  await drain(outcome.events);
+  expect(outcome.log().status).toBe(200);
+  store.close();
+});
+
+// The cumulative-failure test. A predicate that skips the success on a row
+// carrying a sub-threshold count never resets it, and the breaker then opens
+// on the third failure *ever* rather than the third in a row. Every other test
+// here passes against that mutant.
+test("two sub-threshold failures, a success, then a failure leave the breaker closed", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ maxAttempts: 1, breakerThreshold: 3 });
+  const run = async (adapter: ProviderAdapter, id: string) =>
+    drain((await dispatch(req, deps(store, adapter), new AbortController().signal, id)).events);
+  const failing = () => stubAdapter(() => new GatewayError("UPSTREAM", "boom"));
+
+  await run(failing(), "req_1");
+  await run(failing(), "req_2");
+  expect((await store.credentials.listHealth())[0]?.consecutiveFailures).toBe(2);
+
+  await run(
+    stubAdapter(() => textStream("hi")),
+    "req_3",
+  );
+  expect((await store.credentials.listHealth())[0]?.consecutiveFailures).toBe(0);
+
+  await run(failing(), "req_4");
+  const rows = await store.credentials.listHealth();
+  expect(rows[0]?.breakerState).toBe("closed");
+  expect(rows[0]?.consecutiveFailures).toBe(1);
+  store.close();
+});
+
+// Both arms, because `=== "open"` passes the first and fails the second: a
+// half-open probe's recovery is a decision every replica has to see.
+for (const breakerState of ["open", "halfOpen"] as const) {
+  test(`a success against a ${breakerState} breaker writes through`, async () => {
+    const store = await seeded(1);
+    await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+      credentialId: "c1",
+      model: "claude-opus-4",
+      breakerState,
+      // Zero, so the breaker state is the only term that can write: a count
+      // would write on its own and hide a predicate narrowed to `=== "open"`.
+      consecutiveFailures: 0,
+      // Long past any cooldown, so routing admits the probe.
+      openedAt: 0,
+      rateLimitedUntil: null,
+    }));
+    const adapter = stubAdapter(() => textStream("hi"));
+    const outcome = await dispatch(
+      req,
+      deps(store, adapter),
+      new AbortController().signal,
+      "req_test",
+    );
+    await drain(outcome.events);
+
+    expect(outcome.log().status).toBe(200);
+    const rows = await store.credentials.listHealth();
+    expect(rows[0]).toMatchObject({
+      breakerState: "closed",
+      consecutiveFailures: 0,
+      openedAt: null,
+    });
+    store.close();
+  });
+}
+
+test("a stale rate limit is cleared by the next success", async () => {
+  const store = await seeded(1);
+  await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+    rateLimitedUntil: 999_000,
+  }));
   const adapter = stubAdapter(() => textStream("hi"));
   await drain(
     (await dispatch(req, deps(store, adapter), new AbortController().signal, "req_test")).events,
   );
+  expect((await store.credentials.listHealth())[0]?.rateLimitedUntil).toBeNull();
+  store.close();
+});
 
-  const rows = await store.credentials.listHealth();
-  expect(rows[0]?.lastUsedAt).toBe(1_000_000);
-  expect(rows[0]?.ewmaTtftMs).not.toBeNull();
+test("failures still write", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ maxAttempts: 1 });
+  const adapter = stubAdapter(() => new GatewayError("UPSTREAM", "boom"));
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), store: refusingHealthWrites(store) },
+    new AbortController().signal,
+    "req_test",
+  );
+  // The refused write is what surfaces, which is the proof the failure path
+  // still reaches the store.
+  await expect(drain(outcome.events)).rejects.toThrow("HEALTH_WRITE_SENTINEL");
+  store.close();
+});
+
+// Round-robin's tiebreak reads the process's own release record, not a shared
+// health column. Nothing is in flight between these four sequential
+// requests, so the tiebreak *is* the strategy: exact ABAB, not a distribution.
+test("round robin rotates through the real release hook", async () => {
+  const store = await seeded(2);
+  await store.config.putModel({
+    id: "fast",
+    strategy: "roundRobin",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  let tick = 0;
+  const registry = createLoadRegistry(undefined, () => ++tick);
+  const adapter = stubAdapter(() => textStream("hi"));
+
+  for (let i = 0; i < 4; i++) {
+    const outcome = await dispatch(
+      req,
+      { ...deps(store, adapter), loadRegistry: registry },
+      new AbortController().signal,
+      `req_${i}`,
+    );
+    await drain(outcome.events);
+  }
+
+  expect(adapter.calls).toEqual(["test-token-1", "test-token-2", "test-token-1", "test-token-2"]);
   store.close();
 });
 

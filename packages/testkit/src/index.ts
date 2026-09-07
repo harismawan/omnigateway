@@ -7,7 +7,7 @@ import {
   type StreamEvent,
 } from "@omni/ir";
 import type { ProviderAdapter } from "@omni/providers";
-import { healthKey, type Snapshot } from "@omni/router";
+import { healthKey, type RecentUse, type Snapshot } from "@omni/router";
 import type {
   ApiKey,
   ApiKeyInput,
@@ -150,8 +150,6 @@ export function health(overrides: Partial<CredentialHealth> = {}): CredentialHea
     consecutiveFailures: 0,
     openedAt: null,
     rateLimitedUntil: null,
-    ewmaTtftMs: null,
-    lastUsedAt: null,
     ...overrides,
   };
 }
@@ -297,6 +295,22 @@ export function snapshot(parts: {
     },
     builtAt: parts.builtAt ?? 1_000_000,
   };
+}
+
+/**
+ * A `RankInput.recent` map keyed by credential id against the fixture model,
+ * for ranking tests that need one process's release record without a registry.
+ */
+export function recent(
+  byCredential: Record<string, Partial<RecentUse>>,
+  model = "claude-opus-4",
+): ReadonlyMap<string, RecentUse> {
+  return new Map(
+    Object.entries(byCredential).map(([id, use]) => [
+      healthKey(id, model),
+      { lastReleasedAt: 0, ewmaTtftMs: null, ...use },
+    ]),
+  );
 }
 
 /** An adapter set where every provider replays a fixed event list. */

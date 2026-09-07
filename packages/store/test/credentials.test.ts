@@ -41,8 +41,6 @@ const blank: CredentialHealth = {
   consecutiveFailures: 0,
   openedAt: null,
   rateLimitedUntil: null,
-  ewmaTtftMs: null,
-  lastUsedAt: null,
 };
 
 test("create then get round-trips metadata", async () => {
@@ -216,21 +214,17 @@ test("null refresh token round-trips as null", async () => {
 test("health and quota rows round-trip", async () => {
   const { repo, db } = await setup();
   await repo.create(input);
-  await repo.saveHealth([
-    {
-      credentialId: "c1",
-      model: "claude-opus-4",
-      breakerState: "open",
-      consecutiveFailures: 3,
-      openedAt: 111,
-      rateLimitedUntil: 222,
-      ewmaTtftMs: 350,
-      lastUsedAt: 333,
-    },
-  ]);
+  await repo.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "open",
+    consecutiveFailures: 3,
+    openedAt: 111,
+    rateLimitedUntil: 222,
+  }));
   const health = await repo.listHealth();
   expect(health[0]?.breakerState).toBe("open");
-  expect(health[0]?.ewmaTtftMs).toBe(350);
+  expect(health[0]?.rateLimitedUntil).toBe(222);
 
   await repo.saveQuota([
     {
@@ -402,27 +396,6 @@ test("a disabled reason round-trips and clears", async () => {
   db.close();
 });
 
-test("saveHealth upserts rather than duplicating", async () => {
-  const { repo, db } = await setup();
-  await repo.create(input);
-  const row = {
-    credentialId: "c1",
-    model: "m",
-    breakerState: "closed" as const,
-    consecutiveFailures: 0,
-    openedAt: null,
-    rateLimitedUntil: null,
-    ewmaTtftMs: null,
-    lastUsedAt: null,
-  };
-  await repo.saveHealth([row]);
-  await repo.saveHealth([{ ...row, consecutiveFailures: 2 }]);
-  const health = await repo.listHealth();
-  expect(health).toHaveLength(1);
-  expect(health[0]?.consecutiveFailures).toBe(2);
-  db.close();
-});
-
 // A transition reads the row as it is on disk, inside the write transaction, so
 // two of them cannot lose each other's increment the way two whole-row upserts
 // computed from one snapshot do.
@@ -462,7 +435,7 @@ test("updateHealth hands apply a null row when none exists yet", async () => {
 test("updateHealth returns the row it persisted", async () => {
   const { repo, db } = await setup();
   await repo.create(input);
-  await repo.saveHealth([{ ...blank, consecutiveFailures: 4, ewmaTtftMs: 250 }]);
+  await repo.updateHealth("c1", "m", () => ({ ...blank, consecutiveFailures: 4, openedAt: 250 }));
 
   const written = await repo.updateHealth("c1", "m", (current) => ({
     ...(current ?? blank),
@@ -470,7 +443,7 @@ test("updateHealth returns the row it persisted", async () => {
   }));
 
   expect(written.consecutiveFailures).toBe(5);
-  expect(written.ewmaTtftMs).toBe(250);
+  expect(written.openedAt).toBe(250);
   expect(await repo.listHealth()).toEqual([written]);
   db.close();
 });
@@ -487,7 +460,7 @@ test("updateHealth emits one healthSaved carrying the transition's result", asyn
     changes.push(c),
   );
   await repo.create(input);
-  await repo.saveHealth([{ ...blank, consecutiveFailures: 7 }]);
+  await repo.updateHealth("c1", "m", () => ({ ...blank, consecutiveFailures: 7 }));
   changes.length = 0;
 
   const written = await repo.updateHealth("c1", "m", (current) => ({
@@ -543,18 +516,7 @@ test("remove deletes the credential", async () => {
 test("remove cascades to health and quota rows", async () => {
   const { repo, db } = await setup();
   await repo.create(input);
-  await repo.saveHealth([
-    {
-      credentialId: "c1",
-      model: "claude-opus-4",
-      breakerState: "closed",
-      consecutiveFailures: 0,
-      openedAt: null,
-      rateLimitedUntil: null,
-      ewmaTtftMs: null,
-      lastUsedAt: null,
-    },
-  ]);
+  await repo.updateHealth("c1", "claude-opus-4", () => ({ ...blank, model: "claude-opus-4" }));
   await repo.saveQuota([
     {
       credentialId: "c1",

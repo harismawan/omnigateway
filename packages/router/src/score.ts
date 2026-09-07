@@ -98,7 +98,7 @@ export function healthScore(h: CredentialHealth | undefined): number {
 }
 
 export function score(pairs: Pair[], input: RankInput): Candidate[] {
-  const { snapshot, now, load } = input;
+  const { snapshot, now, load, recent } = input;
   const w = snapshot.settings.weights;
 
   const tiers = pairs.map((p) => p.target.tier);
@@ -109,10 +109,13 @@ export function score(pairs: Pair[], input: RankInput): Candidate[] {
   const costs = pairs.map((p) => requestCost(p.target, tokens));
   const bestCost = bestPositive(costs);
 
+  // This process's own measurement, not a shared one: time-to-first-token is
+  // a property of this node's path to the provider.
+  const ewmaOf = (key: string): number | null => recent?.get(key)?.ewmaTtftMs ?? null;
   const bestLatency = bestPositive(
     pairs.flatMap((p) => {
-      const h = snapshot.health.get(healthKey(p.credential.id, p.target.model));
-      return h?.ewmaTtftMs != null ? [h.ewmaTtftMs] : [];
+      const ewma = ewmaOf(healthKey(p.credential.id, p.target.model));
+      return ewma === null ? [] : [ewma];
     }),
   );
 
@@ -122,9 +125,9 @@ export function score(pairs: Pair[], input: RankInput): Candidate[] {
 
     const tier = lowerIsBetter(pair.target.tier, minTier, maxTier);
 
-    // Requests already in flight, not requests already finished. `lastUsedAt`
-    // only moves on completion, so it cannot separate a burst that arrives
-    // together; this can.
+    // Requests already in flight, not requests already finished. A release
+    // stamp only moves on completion, so it cannot separate a burst that
+    // arrives together; this can.
     const inflight = load.get(key) ?? 0;
     const loadTerm = 1 / (1 + inflight);
 
@@ -144,10 +147,9 @@ export function score(pairs: Pair[], input: RankInput): Candidate[] {
     // Zero is "no useful measurement", the same as absent: `bestPositive`
     // already refuses it as a denominator, and passing it as a numerator would
     // score it 1 off a reading that means nothing.
+    const ewma = ewmaOf(key);
     const latency =
-      h?.ewmaTtftMs == null || h.ewmaTtftMs <= 0 || bestLatency === null
-        ? UNKNOWN
-        : ratio(h.ewmaTtftMs, bestLatency);
+      ewma === null || ewma <= 0 || bestLatency === null ? UNKNOWN : ratio(ewma, bestLatency);
 
     const reasons = { tier, health, quota, cost, latency, load: loadTerm };
     const base =

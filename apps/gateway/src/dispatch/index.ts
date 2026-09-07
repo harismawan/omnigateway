@@ -18,10 +18,12 @@ import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import {
   blankHealth,
   type Candidate,
+  healthKey,
   rank,
   recordFailure,
   recordSuccess,
   resolveModel,
+  successWouldChange,
 } from "@omni/router";
 import { transformRequest } from "@omni/rtk";
 import type {
@@ -282,6 +284,7 @@ export async function dispatch(
     now: startedAt,
     rand: deps.rand(),
     load: deps.loadRegistry.counts(),
+    recent: deps.loadRegistry.recent(),
     // Threaded rather than left to the router's default, so routing, the
     // adapter lookup and pricing all judge the same installation. Every site in
     // this function passes `deps.providers` the same way and `undefined`
@@ -446,6 +449,16 @@ export async function dispatch(
               candidate.target.model,
               candidate.target.provider,
             );
+
+        // Decided here, against the snapshot routing judged this candidate on,
+        // and never inside `updateHealth`'s `apply` — that runs inside the
+        // store transaction a silent success exists to skip. A success writes
+        // only when it would change something routing decides on; a healthy
+        // credential with no failure count writes nothing, and on Postgres
+        // that write was an advisory lock plus a fleet-wide snapshot rebuild.
+        const successWrites = successWouldChange(
+          snapshot.health.get(healthKey(candidate.credential.id, candidate.target.model)),
+        );
 
         // Held for the whole attempt, including the stream drain, so ranking
         // sees this request as in flight until the last byte. Every way out of
@@ -714,13 +727,7 @@ export async function dispatch(
                 );
               }
 
-              await persistHealth(candidate, (current) =>
-                recordSuccess(current, {
-                  settings: snapshot.settings,
-                  now: deps.now(),
-                  ttftMs: log.ttftMs,
-                }),
-              );
+              if (successWrites) await persistHealth(candidate, recordSuccess);
               log.status = 200;
               log.errorCode = null;
               log.durationMs = deps.now() - startedAt;
@@ -852,7 +859,7 @@ export async function dispatch(
             }
             deps.trace.activeAttempt = null;
           }
-          releaseSlot();
+          releaseSlot(log.ttftMs);
         }
       }
 

@@ -36,18 +36,14 @@ test("routing subscribers receive committed local changes", async () => {
     apiKey: null,
     idToken: null,
   });
-  await s.credentials.saveHealth([
-    {
-      credentialId: "c1",
-      model: "claude-opus-4",
-      breakerState: "closed",
-      consecutiveFailures: 0,
-      openedAt: null,
-      rateLimitedUntil: null,
-      ewmaTtftMs: 100,
-      lastUsedAt: 200,
-    },
-  ]);
+  await s.credentials.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "closed",
+    consecutiveFailures: 1,
+    openedAt: null,
+    rateLimitedUntil: null,
+  }));
   await s.credentials.saveQuota([
     {
       credentialId: "c1",

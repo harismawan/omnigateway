@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
-import { credential, health, quota, snapshot, target } from "@omni/testkit";
+import { credential, health, quota, recent, snapshot, target } from "@omni/testkit";
 import { healthKey, rank } from "../src/index.ts";
 
 const NOW = 1_000_000;
@@ -92,15 +92,12 @@ test("prefers the faster credential when latency is the only weighted term", () 
     model: model(),
     snapshot: snapshot({
       credentials: [credential({ id: "slow" }), credential({ id: "quick" })],
-      health: [
-        health({ credentialId: "slow", ewmaTtftMs: 3000 }),
-        health({ credentialId: "quick", ewmaTtftMs: 200 }),
-      ],
       settings: { weights: { tier: 0, health: 0, quota: 0, cost: 0, latency: 1, load: 0 } },
     }),
     now: NOW,
     rand: 0,
     load: new Map(),
+    recent: recent({ slow: { ewmaTtftMs: 3000 }, quick: { ewmaTtftMs: 200 } }),
   });
   expect(candidates[0]?.credential.id).toBe("quick");
 });
@@ -162,14 +159,11 @@ test("roundRobin puts the least recently used credential first", () => {
     model: model([target()], "roundRobin"),
     snapshot: snapshot({
       credentials: [credential({ id: "a" }), credential({ id: "b" })],
-      health: [
-        health({ credentialId: "a", lastUsedAt: NOW }),
-        health({ credentialId: "b", lastUsedAt: NOW - 10 }),
-      ],
     }),
     now: NOW,
     rand: 0,
     load: new Map(),
+    recent: recent({ a: { lastReleasedAt: NOW }, b: { lastReleasedAt: NOW - 10 } }),
   });
   expect(candidates[0]?.credential.id).toBe("b");
 });
@@ -317,10 +311,6 @@ test("round robin skips past an account close to exhaustion", () => {
     model: model([target()], "roundRobin"),
     snapshot: snapshot({
       credentials: [credential({ id: "idle-but-spent" }), credential({ id: "busier" })],
-      health: [
-        health({ credentialId: "idle-but-spent", lastUsedAt: NOW - 600_000 }),
-        health({ credentialId: "busier", lastUsedAt: NOW - 1_000 }),
-      ],
       quota: [
         quota({
           credentialId: "idle-but-spent",
@@ -335,6 +325,10 @@ test("round robin skips past an account close to exhaustion", () => {
     now: NOW,
     rand: 0,
     load: new Map(),
+    recent: recent({
+      "idle-but-spent": { lastReleasedAt: NOW - 600_000 },
+      busier: { lastReleasedAt: NOW - 1_000 },
+    }),
   });
 
   // Strict least-recently-used would pick the idle account and spend the rest
@@ -349,10 +343,6 @@ test("round robin still rotates when both accounts have headroom", () => {
     model: model([target()], "roundRobin"),
     snapshot: snapshot({
       credentials: [credential({ id: "idle" }), credential({ id: "busier" })],
-      health: [
-        health({ credentialId: "idle", lastUsedAt: NOW - 600_000 }),
-        health({ credentialId: "busier", lastUsedAt: NOW - 1_000 }),
-      ],
       quota: [
         quota({ credentialId: "idle", used: 40, limit: 100, observedAt: NOW, resetsAt: null }),
         quota({ credentialId: "busier", used: 20, limit: 100, observedAt: NOW, resetsAt: null }),
@@ -361,6 +351,10 @@ test("round robin still rotates when both accounts have headroom", () => {
     now: NOW,
     rand: 0,
     load: new Map(),
+    recent: recent({
+      idle: { lastReleasedAt: NOW - 600_000 },
+      busier: { lastReleasedAt: NOW - 1_000 },
+    }),
   });
   expect(candidates[0]?.credential.id).toBe("idle");
 });
@@ -371,16 +365,16 @@ test("round robin counts requests in flight, not requests already finished", () 
     model: model([target()], "roundRobin"),
     snapshot: snapshot({
       credentials: [credential({ id: "serving" }), credential({ id: "free" })],
-      health: [
-        // The free credential looks *less* idle by the old measure, because it
-        // finished its last request recently rather than being mid-burst.
-        health({ credentialId: "serving", lastUsedAt: NOW - 600_000 }),
-        health({ credentialId: "free", lastUsedAt: NOW - 1_000 }),
-      ],
     }),
     now: NOW,
     rand: 0,
     load: new Map([[healthKey("serving", "claude-opus-4"), 3]]),
+    // The free credential looks *less* idle by the old measure, because it
+    // finished its last request recently rather than being mid-burst.
+    recent: recent({
+      serving: { lastReleasedAt: NOW - 600_000 },
+      free: { lastReleasedAt: NOW - 1_000 },
+    }),
   });
   expect(candidates[0]?.credential.id).toBe("free");
 });

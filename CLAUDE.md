@@ -487,6 +487,15 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   `OMNI_ROOT` not suppress it: both ambient.
 - Quota cooldowns, `1m` and `concurrency` process-local, reset on restart; `5h` and `1w` come
   from database, survive one.
+- **A success writes `credential_health` only when `successWouldChange` say so**, read off
+  snapshot before attempt, never inside `updateHealth`'s `apply`. `SUCCESS_RESETS` in
+  `router/src/breaker.ts` is one copy of what a success reset; `consecutiveFailures` stay in
+  it or breaker count cumulative failures, not consecutive. Postgres trigger `WHEN` is strict
+  subset — never add the count there. No row read as blank, so healthy account commonly has
+  none: nothing may assume a row exist. `lastUsedAt`/`ewmaTtftMs` live in `loadRegistry`,
+  reach ranking as `RankInput.recent`; display read `usage.lastUsedByCredential`. Pinned by
+  `apps/gateway/test/dispatch/dispatch.test.ts` (refusing store, cumulative test, ABAB) and
+  `packages/router/test/breaker.test.ts` (superset against migration SQL).
 - `usage.append` must run at most once per request ID; duplicate completion double-count
   `usage_daily` and `usage_rollup`. Pending rows hold placeholder metrics; inspect `state`, not
   `status`.

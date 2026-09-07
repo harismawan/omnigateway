@@ -266,9 +266,12 @@ export type GatewayRate = {
 };
 
 export type CredentialHealthResponse = {
+  /** One row per (credential, model) routing has recorded; a healthy account may have none. */
   health: CredentialHealth[];
   quota: QuotaWindow[];
   burn: BurnEstimate[];
+  /** Newest request per credential id, from the gateway's log; absent means none retained. */
+  lastUsed: Record<string, number>;
 };
 
 /** Both bounds are epoch milliseconds; the route clamps them to retention. */

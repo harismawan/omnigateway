@@ -1,14 +1,14 @@
 import { type Coord, memoryCoord } from "@omni/coord";
 import type { ProviderId } from "@omni/ir";
-import { healthKey } from "@omni/router";
+import { healthKey, type RecentUse } from "@omni/router";
 
 /**
  * How many requests are in flight against each (credential, model) right now.
  *
  * The router ranks on this so a burst of simultaneous requests fans out instead
- * of stacking. Nothing else can answer the question: `lastUsedAt` only moves
- * when a request *finishes*, so twenty requests that arrive together all read
- * the same history and all pick the same credential.
+ * of stacking. Nothing else can answer the question: the release stamp below
+ * only moves when a request *finishes*, so twenty requests that arrive together
+ * all read the same history and all pick the same credential.
  *
  * Two sources, read together. A local map is exact and synchronous — a burst
  * on one process claims and ranks without yielding between the two, which is
@@ -18,6 +18,13 @@ import { healthKey } from "@omni/router";
  * that long, and nothing short of ranking inside the shared service could
  * prevent it. `counts` reports the larger of the two per key, so one process
  * never under-reads itself and never double-counts what it published.
+ *
+ * The release hook is also where this process learns a request finished, so
+ * it keeps the two measurements routing reads — when each pair was last
+ * released, and this process's latency average — in the same local map. They
+ * used to ride `credential_health`, which cost every successful request a
+ * store write; here they cost nothing and describe *this* node's path to the
+ * provider, which is the one that matters to its own ranking.
  */
 export type LoadRegistry = {
   /**
@@ -27,10 +34,19 @@ export type LoadRegistry = {
    * is idempotent: calling it twice frees one slot, not two. That matters
    * because a leaked or double-counted slot has no visible symptom — it
    * silently deranks a credential until the process restarts.
+   *
+   * The release takes the attempt's time-to-first-token when it has one; the
+   * first call stamps `lastReleasedAt` and folds the sample into the average.
    */
-  acquire(credentialId: string, model: string, provider?: ProviderId): () => void;
+  acquire(
+    credentialId: string,
+    model: string,
+    provider?: ProviderId,
+  ): (ttftMs?: number | null) => void;
   /** In-flight count per `healthKey`. A missing key means zero. */
   counts(): ReadonlyMap<string, number>;
+  /** This process's record per `healthKey`. A missing key means never released here. */
+  recent(): ReadonlyMap<string, RecentUse>;
   /** Synchronous process-local provider totals, for per-instance observability only. */
   localCounts?(): ReadonlyMap<ProviderId, number>;
   /** Samples the fleet's gauge. Call before `counts`, on a path that may yield. */
@@ -47,9 +63,16 @@ const PREFIX = "load:";
  */
 const SLOT_TTL_MS = 300_000;
 
-export function createLoadRegistry(coord: Coord = memoryCoord()): LoadRegistry {
+/** Weight of the newest latency sample. Low enough to ride out one slow call. */
+const EWMA_ALPHA = 0.3;
+
+export function createLoadRegistry(
+  coord: Coord = memoryCoord(),
+  now: () => number = Date.now,
+): LoadRegistry {
   const local = new Map<string, number>();
   const providers = new Map<ProviderId, number>();
+  const history = new Map<string, RecentUse>();
   let remote: ReadonlyMap<string, number> = new Map();
 
   return {
@@ -60,9 +83,19 @@ export function createLoadRegistry(coord: Coord = memoryCoord()): LoadRegistry {
       void coord.gauge.acquire(PREFIX + key, SLOT_TTL_MS);
 
       let released = false;
-      return () => {
+      return (ttftMs) => {
         if (released) return;
         released = true;
+        const prior = history.get(key)?.ewmaTtftMs ?? null;
+        history.set(key, {
+          lastReleasedAt: now(),
+          ewmaTtftMs:
+            ttftMs === undefined || ttftMs === null
+              ? prior
+              : prior === null
+                ? ttftMs
+                : prior * (1 - EWMA_ALPHA) + ttftMs * EWMA_ALPHA,
+        });
         const next = (local.get(key) ?? 0) - 1;
         if (next > 0) local.set(key, next);
         else local.delete(key);
@@ -87,6 +120,10 @@ export function createLoadRegistry(coord: Coord = memoryCoord()): LoadRegistry {
 
     localCounts() {
       return new Map(providers);
+    },
+
+    recent() {
+      return history;
     },
 
     async refresh() {

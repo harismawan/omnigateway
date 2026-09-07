@@ -405,14 +405,19 @@ export const credentialsAddKey: Command = {
   },
 };
 
-/** Health and quota as the router currently sees them. */
+/**
+ * Health as the router currently sees it. A row exists only once routing had
+ * something to record, so a healthy, unused credential has none and `--all`
+ * lists what exists rather than every account. Latency is process-local to the
+ * running gateway and unreadable from here; last use comes from `request_logs`.
+ */
 export const credentialsHealth: Command = {
   usage: "credentials health",
-  summary: "Show breaker state and latency per credential and model",
+  summary: "Show breaker state per credential and model",
   options: { all: { type: "boolean" } },
   async run(args, { ctx, writer }) {
     const store = await ctx.store();
-    const [{ health: rows }, credentials] = await Promise.all([
+    const [{ health: rows, lastUsed }, credentials] = await Promise.all([
       credentialHealth({ store, now: ctx.now }),
       listCredentials(store),
     ]);
@@ -421,7 +426,7 @@ export const credentialsHealth: Command = {
       ? rows
       : rows.filter((r) => r.breakerState !== "closed" || r.consecutiveFailures > 0);
 
-    emit(ctx, writer, { health: rows }, () => {
+    emit(ctx, writer, { health: rows, lastUsed }, () => {
       if (shown.length === 0) return "every credential is healthy";
       return table(
         [
@@ -429,7 +434,6 @@ export const credentialsHealth: Command = {
           { header: "MODEL" },
           { header: "BREAKER" },
           { header: "FAILS", align: "right" },
-          { header: "TTFT", align: "right" },
           { header: "LAST USED" },
         ],
         shown.map((row) => [
@@ -437,8 +441,7 @@ export const credentialsHealth: Command = {
           row.model,
           state(ctx, row.breakerState === "closed", row.breakerState),
           String(row.consecutiveFailures),
-          row.ewmaTtftMs === null ? "—" : `${Math.round(row.ewmaTtftMs)}ms`,
-          paint(ctx, "dim", formatTime(row.lastUsedAt)),
+          paint(ctx, "dim", formatTime(lastUsed[row.credentialId] ?? null)),
         ]),
       );
     });

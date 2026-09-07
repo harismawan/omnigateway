@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import type { CredentialView } from "@omni/store";
-import { captureLogger, health, memoryStore, quota, seedCredential } from "@omni/testkit";
+import {
+  captureLogger,
+  health,
+  memoryStore,
+  quota,
+  requestLog,
+  seedCredential,
+} from "@omni/testkit";
 import {
   createApiKeyCredential,
   credentialHealth,
@@ -348,18 +355,28 @@ test("refreshCredential rejects missing and API-key credentials", async () => {
   });
 });
 
-test("credentialHealth returns stored health and quota", async () => {
+test("credentialHealth returns stored health, quota and last use per credential", async () => {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1" });
-  await store.credentials.saveHealth([health({ credentialId: "c1", model: "model-1" })]);
+  await seedCredential(store, { id: "c2" });
+  const row = health({ credentialId: "c1", model: "model-1" });
+  await store.credentials.updateHealth("c1", "model-1", () => row);
   await store.credentials.saveQuota([
     quota({ credentialId: "c1", used: 4, limit: 10, observedAt: NOW }),
   ]);
+  await store.usage.append(requestLog({ id: "r1", at: NOW - 60_000, credentialId: "c1" }));
+  await store.usage.append(requestLog({ id: "r2", at: NOW - 10_000, credentialId: "c1" }));
+  // Routed nowhere: the newest row in the table, and nobody's last use.
+  await store.usage.append(requestLog({ id: "r3", at: NOW, credentialId: null }));
 
   const result = await credentialHealth({ store, now: () => NOW });
 
   expect(result.health).toHaveLength(1);
   expect(result.quota).toHaveLength(1);
+  // `c2` never served and has no health row either — the ordinary state of a
+  // healthy account, since a row is written only when routing records
+  // something — so it is absent rather than null.
+  expect(result.lastUsed).toEqual({ c1: NOW - 10_000 });
 });
 
 test("credentialHealth derives a burn estimate per reported window", async () => {
@@ -392,7 +409,7 @@ test("credentialHealth derives a burn estimate per reported window", async () =>
   ]);
 });
 
-test("credentialHealth reads no request logs at all", async () => {
+test("credentialHealth never aggregates request logs on the console's poll", async () => {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1" });
   await store.credentials.saveQuota([
@@ -409,7 +426,9 @@ test("credentialHealth reads no request logs at all", async () => {
   // synchronous connection that serves inference. A week-scale aggregate here
   // is not a slow query, it is head-of-line blocking on the hot path, so the
   // absence of the call is the property under test. Only a throw proves it was
-  // never made; asserting on a value would pass either way.
+  // never made; asserting on a value would pass either way. The route does
+  // read `request_logs` — one indexed seek per credential for last use — and
+  // that is a different cost class from a grouped scan over the window.
   store.usage.aggregate = () => {
     throw new Error("credentialHealth must not aggregate request logs");
   };
