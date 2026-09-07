@@ -4,7 +4,8 @@
 
 Every completed request writes a `credential_health` row before it is allowed to finish.
 `persistHealth` (`apps/gateway/src/dispatch/index.ts:394-411`) is awaited at three sites, and
-one of them is the success path — `dispatch/index.ts:717`, before `log.status = 200`.
+one of them is the success path — `dispatch/index.ts:717-724`, before `log.status = 200`,
+unconditional.
 
 On SQLite that is 16.4µs of synchronous `db.transaction()` and costs nothing worth naming. On
 Postgres the same call is `sql.begin` wrapping three statements
@@ -15,29 +16,30 @@ round-trips holding one advisory lock keyed on `(credentialId, model)`.
 Three consequences, in increasing order of how badly they were understood.
 
 **A per-credential throughput ceiling.** Every replica's every request through one credential
-queues on one lock, at roughly `1 / (6 × RTT)` — near 170/s on a 1ms LAN, near 30/s across an
-availability-zone boundary. This applies to *successful* traffic.
+queues on one lock. Magnitude is unmeasured; the mechanism is not.
 
 **A self-reinforcing failure herd.** When a credential starts failing, every in-flight request
 on every replica calls `recordFailure` for the same pair and they all queue. The breaker exists
-to shed that load, but the write that records it opening is the one stuck in the queue: until
-it commits, other replicas still see the credential closed, keep routing to it, and keep
-lengthening the queue.
+to shed that load, but the write that records it opening is the one stuck in the queue.
 
 **Every request invalidates every replica's routing snapshot.** Unverified against a live
 Postgres — read from the schema and the cache, and it must be measured before it is relied on.
-`packages/store/src/postgres/migrations/001_init.sql:285-287` bumps a global counter on every
-`credential_health` write; `apps/gateway/src/dispatch/snapshotCache.ts:69-70` compares that
-counter on every `get()`, and a change means `buildSnapshot` — five queries
-(`packages/router/src/snapshot.ts:12-18`). So a health write on any replica costs every replica
-a full rebuild. Worse, `bump_config_version` is `UPDATE config_version SET version = version + 1
-WHERE id = 1`: **one row**, updated by every request on every credential on every replica. That
-is a tighter serialization point than the advisory lock, which at least partitions by
-credential.
+`postgres/migrations/001_init.sql:285-287` bumps a global counter on every `credential_health`
+write; `apps/gateway/src/dispatch/snapshotCache.ts:67-68` marks the snapshot stale on any
+change, and stale means `buildSnapshot` — five queries (`packages/router/src/snapshot.ts:12-18`).
+`snapshotCache.ts:76-80` then re-checks the version after the build and calls `get()` again if
+it moved, so under constant fleet writes one `get()` can rebuild several times in a row.
 
-Meanwhile `snapshotCache.ts:43-48` already knows how to patch a `healthSaved` row into the held
-map without rebuilding. That path is written, and dead, because the version check at `:69-70`
-runs first.
+`bump_config_version` (`001_init.sql:270-275`) is `UPDATE config_version SET version = version + 1
+WHERE id = 1`: **one row**, updated inside the writer's transaction and therefore row-locked
+until commit, by every request on every credential on every replica. That is a tighter
+serialization point than the advisory lock, which at least partitions by credential.
+
+Meanwhile `snapshotCache.ts:41-46` already knows how to patch a `healthSaved` row into the held
+map without rebuilding. On Postgres that path is written and dead, because the version check at
+`:67-68` runs first. **On SQLite it is live**: `routing.version()` there is `PRAGMA data_version`
+(`sqlite/store.ts:223-224`), which moves only on *other* connections' commits, so a single
+process never invalidates itself.
 
 ### What the successful write actually says
 
@@ -45,266 +47,285 @@ runs first.
 `consecutiveFailures: 0`, `openedAt: null`, `rateLimitedUntil: null`, plus `ewmaTtftMs` and
 `lastUsedAt`.
 
-On a healthy credential the first four are already those values. **Four of the six fields
-re-assert what the row already holds**, and the remaining two are a latency estimate and a
-timestamp. The fleet takes a cluster-wide lock, once per request, to write that.
+On a credential that is healthy *and has no accumulated failure count*, the first four are
+already those values. That qualifier is load-bearing and cost this spec a draft; see the
+predicate below.
 
 ## Design
 
-> A successful request writes nothing, unless it is the one that brings a credential back.
+> A successful request writes nothing, unless it would change something a router decides on.
 
-That is the whole design. Everything below is what it takes to hold it.
+### The success predicate
 
-### Successes
+Evaluated against `snapshot.health` **before** the attempt, never inside `updateHealth`'s
+`apply` — `apply` runs inside the transaction this design exists to skip.
 
-`persistHealth` on the success path becomes conditional on one question: **was the breaker
-anything other than closed?** If yes, write through as today — this is a recovery, and other
-replicas need it now. If no, return without touching the store.
+```ts
+const h = snapshot.health.get(healthKey(credentialId, model));
+const wouldChange =
+  h === undefined ||
+  h.breakerState !== "closed" ||
+  h.consecutiveFailures > 0 ||
+  h.rateLimitedUntil !== null;
+```
 
-Write the predicate as `!== "closed"`, never as `=== "open"`. `halfOpen` is a third state that
+Write through when `wouldChange`; otherwise return without touching the store.
+
+**`consecutiveFailures > 0` is not optional, and omitting it is the worst bug this design can
+have.** `recordFailure` on a sub-threshold hard failure writes `consecutiveFailures: n` with
+`breakerState: "closed"` (`breaker.ts:117-122`). Today the next success resets the count to 0
+(`breaker.ts:77`). A predicate testing only breaker state makes that success silent, so the
+count never resets and **the breaker opens on cumulative failures rather than consecutive
+ones**. With the default threshold of 3 (`packages/store/src/types.ts:1432`): one `TIMEOUT` on
+Monday, one Wednesday, one Friday, ten thousand successes between — Friday opens the breaker,
+and every credential converges on open over a long enough horizon. `healthScore` is
+`1 / (1 + consecutiveFailures)` (`score.ts:95`), so scoring permanently deranks anything that
+ever hiccuped, and `omni credentials health` lists it as unhealthy forever
+(`apps/cli/src/commands/credentials.ts:422`).
+
+`breakerState !== "closed"` rather than `=== "open"`: `halfOpen` is a third state that
 [the half-open probe design](2026-09-07-breaker-half-open-probe-design.md) starts writing, and
-a literal `=== "open"` check would make every probe recovery silent — stranding the credential
-in `halfOpen`, which is the failure this spec is otherwise removing.
+a narrower comparison would make every probe recovery silent.
 
-Recovery must write, and this is not negotiable: `recordSuccess` is the only thing that sets
-`breakerState: "closed"` and `openedAt: null`. Without it an open breaker never closes, the row
-stays `open` forever, and `cooldownMs` — doubling per failure past threshold, capped at an hour
-(`packages/router/src/filters.ts:116-119`) — throttles a fully recovered account to one request
-an hour, permanently. That is not stale health; that is a credential that never comes back.
-
-Recoveries are rare. The common case writes nothing.
+**The predicate and the trigger's `WHEN` clause are deliberately different sets, and an earlier
+draft claimed they were the same question.** They are not. The predicate asks "would this write
+change anything at all", which includes the failure counter. The trigger asks "must every
+replica rebuild", which the counter does not require — it patches. One test should assert the
+predicate is a strict superset of the trigger's columns; asserting equality would force
+`consecutive_failures` into the trigger and reinstate the rebuild storm.
 
 ### Failures
 
 Unchanged. Every failure writes, exactly as today.
 
-Batching them was designed and discarded. Once the breaker opens, routing sheds the traffic at
-`filters.ts`, so the failure burst is bounded by what was in flight at that moment — tens, once
-— not by the ongoing request rate. That does not need an accumulator, a flush loop, a delta
-merge, or a rule for what `consecutiveFailures` means when two replicas count concurrently. All
-of that was solving a problem the breaker already solves.
-
-### `ewmaTtftMs` becomes process-local
-
-It is never persisted again. It feeds a scoring *preference* (`packages/router/src/score.ts:114-152`),
-not an admission decision, and at α=0.3 it reconverges in a handful of requests.
-
-Per-replica is also more correct than shared: a replica's time-to-first-token to a provider is
-a property of that replica's network path, and averaging it with another pod's describes
-neither.
-
-### Round-robin stops needing `lastUsedAt`
-
-`packages/router/src/index.ts:86-101` sorts `roundRobin` candidates by quota-spent, then
-in-flight, then least-recently-used. The last term reads `lastUsedAt`, which is the only
-remaining hot-path reader.
-
-Replace it with `rand`:
-
-```
-sort by: quota-spent, then in-flight   (unchanged)
-tie-break: rand                         (was: idle time descending)
-```
-
-`RankInput.rand` already exists (`packages/router/src/types.ts:72`), already injected to keep
-ranking pure. No new plumbing.
-
-**This is better than what it replaces, not merely cheaper.** Per-replica LRU converges: every
-pod sees the same credential as idle, because none of *it* has used it, so all pods
-independently pick the same one — the opposite of spreading. Independent random choices spread
-uniformly across pods with zero communication and no shared state. And in-flight, which stays
-the primary key, is already fleet-exact through the shared gauge (`loadRegistry.ts:92-93`), so
-the random tiebreak only fires on an exact tie — the case where the choice matters least.
-
-The codebase already found LRU to be the weak signal. `loadRegistry.ts:9-11`: *"`lastUsedAt`
-only moves when a request finishes, so twenty requests that arrive together all read the same
-history and all pick the same credential."* That is why in-flight was introduced and why it
-outranks idle time. This change finishes that reasoning rather than starting a new one.
-
-Costs, stated: random has variance where LRU was deterministic, so with two or three accounts
-at low volume it can transiently favour one — self-correcting as soon as anything is in flight.
-And `roundRobin` becomes a misnomer; the strategy spreads load rather than rotating. Rename it
-in prose only. The stored `strategy` value is a storage contract
-(`virtual_models.targets`) and does not move.
+Batching them was designed and discarded. Once the breaker opens, routing sheds the traffic, so
+the failure burst is bounded by what was in flight at that moment — tens, once — not by the
+ongoing request rate. That needs no accumulator, flush loop, delta merge, or rule for what
+`consecutiveFailures` means when two replicas count concurrently.
 
 ### `lastUsedAt` leaves `CredentialHealth`
 
-Once the tiebreak no longer reads it, its only consumers are display: the CLI's LAST USED
-column (`apps/cli/src/commands/credentials.ts:441`) and the dashboard
-(`apps/dashboard/src/lib/vitals.ts:243-246`). Keeping it as a stored field would mean a column
-that moves only on failures and recoveries while claiming to say when a credential was last
-used — a lie that gets worse the healthier the account is.
+Its consumers are the round-robin tiebreak (`packages/router/src/index.ts:86-101`) and two
+display surfaces — the CLI's LAST USED column (`apps/cli/src/commands/credentials.ts:441`) and
+the dashboard (`apps/dashboard/src/lib/vitals.ts:243-247`).
 
-Drop the field and answer the question from `request_logs`, which already holds it:
+**The tiebreak moves into `loadRegistry`.** That module already owns a synchronous per-key map
+and a release hook firing at request end (`apps/gateway/src/dispatch/loadRegistry.ts`), so it
+can record `lastReleasedAt` per `healthKey` for free — no I/O, no store read, no coord call. It
+reaches ranking as one more field on `RankInput`, the same plumbing shape `load` already uses,
+and `packages/router` stays pure.
 
-```sql
-SELECT MAX(at) FROM request_logs WHERE credential_id = $1
-```
+This preserves today's behaviour where it is most visible. A single-node install alternating two
+OAuth accounts keeps exact ABAB rotation. In a fleet, rotation becomes per-replica — which
+aggregates to balanced rather than converging, and in-flight counts outrank it anyway.
 
-`CREATE INDEX idx_request_logs_cred ON request_logs (credential_id, at DESC)` exists on both
-backends (`postgres/migrations/001_init.sql:156`, `sqlite/migrations/001_init.sql:82`), so this
-is a seek to the head of one index range per credential — one row read each, for a credential
-count in the dozens.
+An earlier draft replaced the tiebreak with `RankInput.rand` and argued that per-replica LRU
+"converges". That argument was against a design that does not exist: `lastUsedAt` is in the
+shared store today and reaches every replica, so current LRU is fleet-wide at the snapshot's
+lag. Random would have been simpler and strictly worse for the single-node case, where nothing
+is ever in flight at rank time and the tiebreak *is* the strategy.
 
-**This must not go through `usage.aggregate`.**
-`packages/control/test/credentials.test.ts:395-417` stubs that method to throw and asserts
-`credentialHealth` never calls it, because the console refetches the route every ten seconds on
-the same synchronous connection that serves `/v1/messages`, and a week-scale aggregate there is
-head-of-line blocking rather than a slow query. That objection is to the scan, not to the
-table; an indexed `MAX` is a different cost class and the index was put there for this shape.
-A narrow repo method — `usage.lastUsedByCredential()` — keeps the existing test standing as
-written, and the test should stay exactly as it is.
+Correcting a second claim from that draft: in-flight counts are **not** fleet-exact.
+`loadRegistry.ts:15-18` says so — "one round trip stale by construction; a burst split across
+processes can stack for that long".
 
-Two behaviour changes to state rather than discover:
+**The display surfaces read `request_logs` instead.** `CREATE INDEX idx_request_logs_cred ON
+request_logs (credential_id, at DESC)` exists on both backends
+(`postgres/migrations/001_init.sql:156`, `sqlite/migrations/001_init.sql:82`), so
+`SELECT MAX(at) FROM request_logs WHERE credential_id = $1` is a seek to the head of one index
+range. A narrow repo method, `usage.lastUsedByCredential()`, not `usage.aggregate`.
 
-- **Retention truncates the answer.** A credential unused for longer than the log retention
-  window reads "never" instead of "four months ago". More honest than a stale number, and
-  different from today.
-- **`credential_id` is nullable** on `request_logs` — rows logged before routing resolves carry
-  none. They are excluded, correctly: those requests never reached a credential.
+`packages/control/src/credentials.ts:231-232` says "nothing here may touch `request_logs`" and
+`packages/control/test/credentials.test.ts:395` is titled "credentialHealth reads no request
+logs at all". **Both must be rewritten, not left standing.** An earlier draft said to leave the
+test exactly as it is, which would have made a green test assert something false. The rule being
+protected is a cost class — no week-scale aggregate on the connection serving `/v1/messages`,
+because the console refetches every ten seconds — so the test should stub `usage.aggregate` to
+throw, as it does now, and be retitled to name the aggregate rather than the table.
 
-If an operator wants "is this account busy *now*" rather than "when last", the shared gauge
-behind `loadRegistry` already answers it and answers it better. Separate change.
+Two behaviour changes to state: **retention truncates the answer** (a credential unused longer
+than the log window reads "never"), and **rows with a `NULL` `credential_id`** — logged before
+routing resolves — are excluded, correctly.
+
+**Wire shape.** After this change a healthy credential may have **no `credential_health` row at
+all**, since rows are only created by a write. So `lastUsedAt` cannot ride on the health row.
+`credentialHealth()` returns `{health, quota, burn}`; it gains a fourth member keyed by
+credential id, and `apps/dashboard/src/api/types.ts` plus `vitals.ts:196` mirror it. Absent
+health rows are already handled — `vitals.ts:223,232` construct a blank status — but that path
+is currently reached only for a credential that has never served, and it becomes the common
+case. Worth a test of its own.
+
+### `ewmaTtftMs` leaves `CredentialHealth` too
+
+It rides the same `loadRegistry` map as `lastReleasedAt` — the release hook already knows when
+the attempt ended, and `log.ttftMs` is in hand at that point. One field on `RankInput` carries
+both, and `score.ts:115,148-150` reads it from there instead of from `snapshot.health`.
+
+Per-replica is also more correct than shared: time-to-first-token is a property of *that*
+replica's network path to the provider, and averaging two pods' measurements describes neither.
+
+**The cost, which an earlier draft did not state: the CLI's TTFT column dies.**
+`apps/cli/src/commands/credentials.ts:440` reads it through `@omni/control` against the store
+directly, and the CLI never talks to the running gateway (CLAUDE.md, boundary 11), so a
+process-local value is invisible to it. The column goes. The dashboard's `ttftMs`
+(`vitals.ts:244-245`) can be served from the gateway, which holds the registry — or from
+`request_logs`, which records `ttft_ms` per request and is the better source for a display
+anyway. Either is a separate change; this spec removes the field and says so rather than
+pretending the surfaces are unaffected.
 
 ### The `config_version` trigger
 
-With successes silent the counter mostly stops moving, but a failure write still invalidates
-every replica's snapshot when the `healthSaved` patch at `snapshotCache.ts:43-48` could have
-handled it. The trigger fires blind because it is statement-level, and a statement-level
-trigger has no `OLD`/`NEW` to test. Make the `UPDATE` arm row-level and conditional:
+With successes mostly silent the counter mostly stops moving, but a failure write still
+invalidates every replica's snapshot where the `healthSaved` patch could have handled it. The
+trigger fires blind because it is statement-level. Make it row-level and conditional:
 
 ```sql
-CREATE TRIGGER credential_health_config_version
+CREATE TRIGGER credential_health_config_version_upd
   AFTER UPDATE ON credential_health
   FOR EACH ROW
   WHEN (OLD.breaker_state      IS DISTINCT FROM NEW.breaker_state
      OR OLD.rate_limited_until IS DISTINCT FROM NEW.rate_limited_until
      OR OLD.opened_at          IS DISTINCT FROM NEW.opened_at)
   EXECUTE FUNCTION bump_config_version();
+
+CREATE TRIGGER credential_health_config_version_ins
+  AFTER INSERT ON credential_health
+  FOR EACH ROW EXECUTE FUNCTION bump_config_version();
+
+CREATE TRIGGER credential_health_config_version_del
+  AFTER DELETE ON credential_health
+  FOR EACH ROW EXECUTE FUNCTION bump_config_version();
 ```
 
-`INSERT` and `DELETE` keep an unconditional trigger — a new pair, or a credential removal
-cascading — both rare, and neither has a prior row to compare against.
-
-The three columns in the `WHEN` clause are the same three the success path tests to decide
-whether it is a recovery. That is one question asked in two languages, and they must not drift:
-they belong in one definition with a test asserting both sides cover the same set.
+**The `INSERT` arm must be `FOR EACH ROW`, and this is the trap that makes the whole fix moot if
+missed.** The write is an upsert (`postgres/credentials.ts:71-81`, `ON CONFLICT DO UPDATE`).
+PostgreSQL fires *statement-level* `INSERT` triggers on an upsert regardless of which path each
+row took, so a statement-level `INSERT` arm bumps on every write and the `WHEN` clause on the
+`UPDATE` arm never matters. Row-level `AFTER INSERT` fires only for rows actually inserted.
 
 What this narrows: for decision changes the counter still moves, so a dropped `coord.pubsub`
-publish still costs one late rebuild rather than a replica routing into an open breaker. For
-everything else the counter is no longer a fallback behind a fire-and-forget publish
-(`app.ts:277`, fails open on a Redis fault per `coord/redis.ts:216-227`). Acceptable, because
-after this change "everything else" is only `lastUsedAt` — and it is on the record rather than
-discovered later.
+publish (`app.ts:276-281`, fire-and-forget, degrading to a per-process emitter on a Redis fault
+per `coord/redis.ts:196-207`) still costs one late rebuild rather than a replica routing into an
+open breaker. For a bare `consecutiveFailures` increment the counter no longer moves, so a
+dropped publish leaves that replica's count stale until something else invalidates. Acceptable —
+it shortens a backoff, and the breaker state itself is not at risk — but on the record.
 
 ## Decisions taken before design
 
-Each closes a door, and each was reached by trying the other side first.
-
-- **A scheduler that probes providers was proposed and rejected.** A probe against an inference
-  provider is a billed request; a one-token probe succeeds on a credential that would fail the
-  real 100k-token request; a 30s schedule detects a dead credential *slower* than the first real
-  failure does; and `rateLimitedUntil` is read from the provider's own `Retry-After` on a real
-  429 (`breaker.ts:47`), which a probe can only learn by getting itself rate-limited. The half
-  of that proposal which survives — requests must not write — is this spec.
+- **A scheduler that probes providers was proposed and rejected.** A probe is a billed request;
+  a one-token probe succeeds where the real 100k-token request fails; a 30s schedule detects a
+  dead credential *slower* than the first real failure; and `rateLimitedUntil` comes from the
+  provider's own `Retry-After` on a real 429 (`breaker.ts:47`), which a probe can only learn by
+  getting itself rate-limited. The surviving half — requests must not write — is this spec.
 - **Moving `credential_health` into `@omni/coord` was chosen, then rejected on four counts.**
-  `Coord` has no compare-and-set or read-modify-write, so a record fits only in `kv` under
-  `mutex.withLock`, and `memoryCoord.mutex` carries `// ponytail: contenders race, no fairness`.
-  `kv` is the one Redis primitive that does *not* fail open (`coord/redis.ts:222-226`) — it
-  answers `OVERLOADED`, which would land before `log.status = 200`, turning a Redis blip into a
-  5xx on every successful request. `kv` requires a TTL and forbids serving past it
-  (`packages/coord/src/index.ts:128-133`), while a `QUOTA_EXHAUSTED` park is an hour-long claim
-  about the *provider* that must survive a restart. And `kv` has no listing primitive, which
-  `buildSnapshot` needs. Solvable, all of it — but it is a new durability story, not a code
-  move, and none of it is required here.
+  No compare-and-set or read-modify-write, so a record fits only in `kv` under `mutex.withLock`,
+  and `memoryCoord.mutex` carries `// ponytail: contenders race, no fairness`. `kv` is the one
+  Redis primitive that does *not* fail open (`coord/redis.ts:204-206`, throw at `:641`) — it
+  answers `OVERLOADED`, which would land before `log.status = 200`. `kv` requires a TTL
+  (`packages/coord/src/index.ts:113-114`, `:344-346`) while a `QUOTA_EXHAUSTED` park is an
+  hour-long claim about the provider that must survive a restart. And `kv` has no listing
+  primitive, which `buildSnapshot` needs.
 - **Batching writes behind an accumulator and a flush loop was designed in full, then
-  discarded** when "does it still rebuild every five seconds?" turned out to be "yes". Making
-  successes silent removes the writes outright instead of rescheduling them, which is both
-  smaller and strictly better.
-- **Single-node SQLite keeps today's behaviour.** It has no race to fix — `db.transaction()`
-  with a contractually synchronous `apply` (`packages/store/src/types.ts:759-768`) cannot
-  interleave, which is why that backend takes no lock. It still gets the change, because fewer
-  pointless writes is not worse anywhere, and one code path beats two.
-- **`saveHealth` is deleted, not kept.** Zero production callers; every call site is a test, and
-  its doc comment (`packages/store/src/types.ts:751-757`) exists to steer readers away. Leaving
-  a second write door open in front of a rule about writes is how the rule gets bypassed.
+  discarded** when "does it still rebuild every five seconds?" turned out to be "yes".
+- **Single-node SQLite keeps working, but is not unaffected.** It has no race to fix, and its
+  patch path is already live. It still gets the change — fewer pointless writes is not worse —
+  but it loses the CLI TTFT column and, without `consecutiveFailures > 0` in the predicate,
+  would be the install *most* hurt by the cumulative-failure bug, since sub-threshold blips are
+  its only failures.
+- **`saveHealth` is deleted, not kept.** Zero production callers; its doc comment
+  (`packages/store/src/types.ts:751-757`) exists to steer readers away.
+
+## Known pre-existing bug, surfaced not fixed
+
+`recordFailure` writes `breakerState: open ? "open" : "closed"` (`breaker.ts:120`), so **a
+failure can close a breaker**. An `AUTH` failure opens at `consecutiveFailures: 1`
+(`breaker.ts:113`); a later non-`AUTH` failure on that row computes `failures = 2 < threshold`,
+is not `halfOpen`, and writes `closed` with the old `openedAt`.
+
+This means the "recovery must write" argument holds for a narrower reason than first stated: not
+"nothing else writes `closed`", but "nothing else writes `closed` on a row whose count has
+already reached the threshold". The design is unaffected. The bug is not — it deserves its own
+fix, and `recordFailure` should never widen a breaker's admission.
 
 ## Testing
 
-- **A successful request against a healthy credential issues no store write.** A store double
-  that throws on `updateHealth`, N successful dispatches, assert none reached it. This is the
-  central claim; if it passes while the ceiling remains, the check is not on the path.
-- **A success against a non-closed breaker writes through.** Same double, one success, asserted
-  for `open` **and** for `halfOpen`. This is the case whose absence strands a recovered
-  credential at one request per hour, so it is the one to write first, and the `halfOpen` arm is
-  what stops the predicate from being narrowed to `=== "open"` later.
-- **Failures still write.** Guards against fixing the ceiling by making the breaker unable to
-  open.
-- **A measurement-only write does not move `config_version`; a decision write does.** Two
-  `updateHealth` calls against Postgres, read `routing.version()` either side. This is the
-  trigger's whole contract. Postgres-only, so it must skip cleanly without
-  `OMNI_TEST_DATABASE_URL` rather than pass vacuously.
-- **The trigger's `WHEN` columns and the recovery predicate name the same set**, asserted from
-  the shared definition — so adding a fourth decision field to one and not the other fails here
-  rather than becoming a replica that never learns about it.
-- **The snapshot is patched, not rebuilt, across a failure write.** Count `buildSnapshot` calls:
-  expected zero. Without this the trigger fix regresses silently — everything still works, five
-  queries at a time.
-- **Round-robin spreads across pods.** Rank the same candidate set from several `rand` values
-  and assert the selection distributes, rather than asserting one specific pick. An
-  example-shaped test here passes for a tiebreak that always returns the first candidate.
-- **`lastUsedByCredential` reports the newest log, and `null` past retention.** Contract-suite
-  shaped, so both backends answer alike. Include a credential with only `NULL`-`credential_id`
-  rows: the answer is `null`, not the newest unrelated row.
-- **`credentialHealth` still never calls `usage.aggregate`.** The existing test at
-  `packages/control/test/credentials.test.ts:395-417` is not modified — if a `lastUsedAt`
-  implementation reaches for the aggregate, it fails there, which is the point of leaving it
-  untouched.
+- **A successful request against a healthy credential with a zero failure count issues no store
+  write.** Store double throwing on `updateHealth`, N successful dispatches, assert none reached
+  it.
+- **Two sub-threshold failures, one success, a third failure — the breaker is still closed.**
+  This is the cumulative-failure test. Without it, a predicate omitting `consecutiveFailures`
+  passes every other test in this list.
+- **A success against a non-closed breaker writes through**, asserted for `open` **and** for
+  `halfOpen`. The `halfOpen` arm is what stops the predicate being narrowed to `=== "open"`.
+- **The predicate's column set is a strict superset of the trigger's `WHEN` columns**, asserted
+  from a shared definition. Not equality — see the design note.
+- **A measurement-only write does not move `config_version`; a decision write does.** Postgres
+  only, skipping cleanly without `OMNI_TEST_DATABASE_URL`. **Call `updateHealth` twice on the
+  same pair** so the second call takes the `ON CONFLICT` path — that is what catches a
+  statement-level `INSERT` arm, which a raw `UPDATE` would not.
+- **A sub-threshold failure is patched, not rebuilt.** Postgres only, and specifically a
+  `closed → closed` count increment: a failure that *opens* the breaker changes a decision
+  column and is *supposed* to rebuild. An earlier draft asked for zero rebuilds across "a
+  failure write", which fails by design on Postgres and passes vacuously on SQLite, where the
+  patch path is already live.
+- **Round-robin still rotates.** Two candidates, no in-flight, four sequential requests through
+  the real `loadRegistry` release hook: assert ABAB, not a distribution.
+- **`lastUsedByCredential` returns the newest log, `null` past retention, and `null` for a
+  credential whose only rows have a `NULL` `credential_id`** — not the newest unrelated row.
+  Contract-suite shaped, so both backends answer alike.
+- **A credential with no health row renders.** After this change that is the common case for a
+  healthy account, and `vitals.ts:223,232` currently reaches its blank-status path only for one
+  that never served.
+- **Guards, not evidence:** "failures still write", "`credentialHealth` never calls
+  `usage.aggregate`", "`packages/router` stays pure" all pass against current code. Keep them,
+  do not count them.
 
-Do not add a test per call site. One dispatch-level test with a store double that refuses
-writes kills every mutant that reintroduces a per-request write — the same instrument
+Do not add a test per call site. One dispatch-level test with a store double that refuses writes
+kills every mutant that reintroduces a per-request write — the instrument
 `apps/gateway/test/dispatch/dispatch.test.ts` already uses for registry threading.
 
 ## Out of scope
 
-- **`halfOpen` is never written**, and underneath that, nothing limits a probe to one request —
-  so a dead credential takes a full traffic flood once per cooldown. Found while writing this
-  spec; specced separately in
-  [the half-open probe design](2026-09-07-breaker-half-open-probe-design.md). The two interact
-  at one point, noted below.
-- **The advisory lock's shape.** `pg_advisory_xact_lock(hashtext($1))` uses the single-argument
-  form, sharing one lock space with `MIGRATION_LOCK = 7_140_641` (`postgres/db.ts:48`), and
-  `hashtext` returns int4. Worth fixing; not load-bearing once the lock is taken on failures
-  only.
-- **The other four `config_version` triggers.** `credentials`, `quota_windows`, `virtual_models`
-  and `settings` bump the same single row unconditionally. Only `quota_windows` is written often
-  enough to matter, and only `quotaSaved` has a patch path like health's. Same treatment, later.
-- **Per-request Postgres round-trips generally.** `keys.findByHash` is uncached and `usage.begin`
-  is awaited before dispatch. Real, unrelated.
+- **`halfOpen` is never written**, and nothing limits a probe to one request, so a dead
+  credential takes a full traffic flood once per cooldown. Specced separately in
+  [the half-open probe design](2026-09-07-breaker-half-open-probe-design.md).
+- **`recordFailure` closing a breaker**, above.
+- **The advisory lock's shape.** Single-argument `pg_advisory_xact_lock(hashtext($1))` shares a
+  lock space with `MIGRATION_LOCK = 7_140_641` (`postgres/db.ts:48`) and `hashtext` returns
+  int4.
+- **The other four `config_version` triggers.** `credentials`, `quota_windows`,
+  `virtual_models`, `settings` bump the same row unconditionally; only `quota_windows` is
+  written often enough to matter.
+- **Restoring the CLI TTFT and LAST USED columns from `request_logs`.** Display sourcing, not
+  write-path.
+
+## Known unknowns
+
+- No live-Postgres measurement of the ceiling or the rebuild rate. The mechanism is in the code;
+  the magnitudes are asserted, not measured, and should be before anyone quotes them.
+- Whether a stale-snapshot success is worth handling: replica B opens the breaker, replica A's
+  in-flight request routed on the old snapshot succeeds and sees `closed`, so it stays silent
+  and the breaker stays open until a probe. One cooldown of cost. Left alone deliberately.
+  Related: a success in flight beside a real 429 no longer clears `rateLimitedUntil`, which is
+  an improvement.
 
 ## History
 
 - **2026-09-07.** Found while tracing what blocks the event loop on the streaming path in
   cluster mode.
 - The first survey reported the health write as failure-path-only. Wrong: `dispatch/index.ts:717`
-  writes on every success, unguarded, which moved this from an incident-time concern to a
-  steady-state ceiling.
+  writes on every success, unguarded.
 - The `config_version` trigger was found by asking "but does it still rebuild the snapshot every
-  five seconds?" of a draft that batched writes. The answer was yes, and following it back found
-  the larger fact that draft had missed entirely — every request invalidating every replica's
-  snapshot, and one row the whole fleet updates per request. The draft's error was structural,
-  not careless: it read the write path and stopped there, and nothing at the write site says
-  that `snapshotCache.ts:43-48` has a working patch path that is dead.
+  five seconds?" of a draft that batched writes. Following that back found every request
+  invalidating every replica's snapshot, and one row the whole fleet updates per request.
 - The design shrank three times, each time from a question that refused the current shape rather
-  than optimising it: *why write on success at all* deleted the accumulator and the flush loop;
-  *why not change round-robin instead* deleted the last hot-path reader of `lastUsedAt` and, with
-  it, the coord interface addition that sharing it would have required. Both questions came from
-  outside the code. The recorded lesson is that each of the three drafts was internally
-  well-argued, and the argument was what kept the unnecessary machinery alive.
-- **`lastUsedAt` was proposed for deletion early and argued down for the wrong reason.** The
-  objection cited was `credentials.test.ts:395-417`, read as "health may not touch request
-  logs". It says something narrower — health may not call `usage.aggregate`, because a
-  week-scale scan on the console's ten-second refresh is head-of-line blocking — and
-  `idx_request_logs_cred` exists on both backends precisely so the indexed question is cheap.
-  The real blocker was the round-robin hot-path read, which the tiebreak change removed. A test
-  comment naming a cost is not a prohibition on a table; the distinction was worth two rounds.
+  than optimising it. Each draft was internally well-argued, and the argument was what kept the
+  unnecessary machinery alive.
+- **Adversarial review, 2026-09-08, found two design-breaking flaws.** The success predicate
+  omitted `consecutiveFailures`, which would have converted the breaker from consecutive to
+  cumulative failures — and every test then proposed passed against that mutant. And the
+  round-robin argument was against a strawman: `lastUsedAt` is shared today, not process-local,
+  so replacing fleet-wide LRU with `rand` was a regression dressed as a fix. Both errors have
+  the same shape — a claim about existing behaviour asserted from the design's own logic rather
+  than read from the code. The `lastUsedAt` one had already been corrected once, in the opposite
+  direction, earlier in the same spec.
