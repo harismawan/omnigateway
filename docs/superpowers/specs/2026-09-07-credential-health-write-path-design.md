@@ -58,8 +58,13 @@ That is the whole design. Everything below is what it takes to hold it.
 ### Successes
 
 `persistHealth` on the success path becomes conditional on one question: **was the breaker
-open?** If yes, write through as today — this is a recovery, and other replicas need it now.
-If no, return without touching the store.
+anything other than closed?** If yes, write through as today — this is a recovery, and other
+replicas need it now. If no, return without touching the store.
+
+Write the predicate as `!== "closed"`, never as `=== "open"`. `halfOpen` is a third state that
+[the half-open probe design](2026-09-07-breaker-half-open-probe-design.md) starts writing, and
+a literal `=== "open"` check would make every probe recovery silent — stranding the credential
+in `halfOpen`, which is the failure this spec is otherwise removing.
 
 Recovery must write, and this is not negotiable: `recordSuccess` is the only thing that sets
 `breakerState: "closed"` and `openedAt: null`. Without it an open breaker never closes, the row
@@ -229,9 +234,10 @@ Each closes a door, and each was reached by trying the other side first.
 - **A successful request against a healthy credential issues no store write.** A store double
   that throws on `updateHealth`, N successful dispatches, assert none reached it. This is the
   central claim; if it passes while the ceiling remains, the check is not on the path.
-- **A success against an open breaker writes through.** Same double, breaker open, one success,
-  assert the write happened before the dispatch returned. This is the case whose absence
-  strands a recovered credential at one request per hour, so it is the one to write first.
+- **A success against a non-closed breaker writes through.** Same double, one success, asserted
+  for `open` **and** for `halfOpen`. This is the case whose absence strands a recovered
+  credential at one request per hour, so it is the one to write first, and the `halfOpen` arm is
+  what stops the predicate from being narrowed to `=== "open"` later.
 - **Failures still write.** Guards against fixing the ceiling by making the breaker unable to
   open.
 - **A measurement-only write does not move `config_version`; a decision write does.** Two
@@ -261,10 +267,11 @@ writes kills every mutant that reintroduces a per-request write — the same ins
 
 ## Out of scope
 
-- **`halfOpen` is never written.** It is read at `breaker.ts:114`, `score.ts:97`, and the
-  dashboard's "probing" lamp (`vitals.ts:261-264`), and assigned nowhere in the codebase. So the
-  "a failed probe re-opens immediately" rule cannot fire and that lamp cannot light. Found while
-  writing this spec; pre-existing, unrelated, needs its own fix.
+- **`halfOpen` is never written**, and underneath that, nothing limits a probe to one request —
+  so a dead credential takes a full traffic flood once per cooldown. Found while writing this
+  spec; specced separately in
+  [the half-open probe design](2026-09-07-breaker-half-open-probe-design.md). The two interact
+  at one point, noted below.
 - **The advisory lock's shape.** `pg_advisory_xact_lock(hashtext($1))` uses the single-argument
   form, sharing one lock space with `MIGRATION_LOCK = 7_140_641` (`postgres/db.ts:48`), and
   `hashtext` returns int4. Worth fixing; not load-bearing once the lock is taken on failures
