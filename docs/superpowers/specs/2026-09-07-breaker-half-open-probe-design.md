@@ -121,14 +121,25 @@ A candidate marked `probe` whose claim returns non-zero is skipped, recording
 `breaker:probing` — distinct from `breaker:open`, because "someone is testing it right now" and
 "it is in cooldown" are different facts.
 
+**The loser must release its own acquire.** `gauge.acquire` increments unconditionally and
+returns the prior count, so a request that learns it lost has nonetheless raised the gauge.
+Assign the release immediately after the acquire, before branching on the result, so the same
+`finally` frees it either way. Without this, two contenders leave the pair reading two until
+`PROBE_TTL_MS` expires, and a third is refused for no reason. This was left implicit and found
+in implementation.
+
 ### Two costs to name
 
-**Skipping burns an attempt.** `maxAttempts = min(settings.maxAttempts, candidates.length)`
-(`dispatch/index.ts:355`) and the loop counts iterations, so a `breaker:probing` skip consumes
-one. With `maxAttempts: 3` and candidates `[probeA, B, C]`, only B is tried. Under round-robin
-the probe candidate has zero in-flight and ranks at the head for every request while the probe
-runs, so this fires on every request during a probe. The skip must not increment `i` — it is a
-candidate that was never attempted, which is what the counter means.
+**Skipping burns an attempt.** `maxAttempts = min(settings.maxAttempts, candidates.length)` and
+the loop counts iterations, so a `breaker:probing` skip consumes one. With `maxAttempts: 3` and
+candidates `[probeA, B, C]`, only B is tried. The skip must not increment the attempt counter —
+it is a candidate that was never attempted, which is what the counter means. Count attempts
+separately from candidates rather than reusing the loop index.
+
+This bites under `roundRobin`, where the probe candidate has zero in-flight and ranks at the
+head for every request while the probe runs. Under `priority` and `score` it ranks *last*,
+because `score.ts:97` halves an open or half-open candidate — so the cost is strategy-specific,
+not universal.
 
 Relatedly: if the probe is the sole candidate and loses the claim, `lastError` is null and the
 current code rejects with `ALL_CANDIDATES_FAILED` "all candidates failed"
@@ -236,3 +247,11 @@ the test.
   paragraph, quoted above, describes the bug the draft then shipped. Writing down the failure
   mode did not prevent implementing it — the paragraph was about a *simpler* fix, and it was not
   re-read against the design that replaced it.
+- **The prediction about the tests held.** This spec claimed the concurrent flood test could not
+  catch a missing `halfOpen` arm, because all N requests rank before the write lands, and that
+  only a sequential test could. Mutation testing during implementation confirmed exactly that:
+  reverting the arm left the concurrent test green and was killed by the sequential one. The
+  concurrent test is the obvious one to write and would have shipped the bug alone.
+- Line numbers in this spec predate the write-path implementation (`d7979e9`) and have drifted
+  by roughly twenty lines in `dispatch/index.ts`. The structure they describe is intact; treat
+  them as landmarks, not addresses.
