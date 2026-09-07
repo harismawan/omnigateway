@@ -4,7 +4,24 @@ import { type CredentialView, servesTarget, type Target } from "@omni/store/type
 import { healthKey } from "./snapshot.ts";
 import type { Excluded, RankInput } from "./types.ts";
 
-export type Pair = { credential: CredentialView; target: Target };
+export type Pair = {
+  credential: CredentialView;
+  target: Target;
+  /**
+   * Whether this pair is in probe territory: an open breaker past its cooldown,
+   * or one already marked `halfOpen`. The router decides *whether* a candidate
+   * is a probe, never *who* probes — that claim is I/O, made by dispatch
+   * against `coord` for one request per pair, and this package stays pure.
+   *
+   * `halfOpen` counts too, and that arm is load-bearing. Dispatch writes
+   * `halfOpen` when it takes the claim, so every request ranking after that
+   * write reads this state; treating it as ordinary admitted the whole flood
+   * with the "probing" lamp lit. The same arm makes an abandoned probe — a
+   * client hang-up before health persisted — self-heal: the next request
+   * re-claims and probes again.
+   */
+  probe: boolean;
+};
 
 /**
  * Every provider whose own dialect this request carries.
@@ -231,6 +248,7 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
         continue;
       }
 
+      let probe = false;
       const h = snapshot.health.get(healthKey(credential.id, target.model));
       if (h !== undefined) {
         if (h.rateLimitedUntil !== null && h.rateLimitedUntil > now) {
@@ -243,7 +261,9 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
             drop("breaker:open");
             continue;
           }
-          // Cooldown elapsed: admitted as a half-open probe.
+          probe = true; // Cooldown elapsed: probe territory.
+        } else if (h.breakerState === "halfOpen") {
+          probe = true; // Someone may already be probing; dispatch finds out.
         }
       }
 
@@ -259,7 +279,7 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
         continue;
       }
 
-      pairs.push({ credential, target });
+      pairs.push({ credential, target, probe });
     }
 
     // The same argument as `pin:missing`, for the rule beside the pin. An

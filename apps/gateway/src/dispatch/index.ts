@@ -1,4 +1,5 @@
 import { DISPATCH_REFRESH_LEAD_MS } from "@omni/control";
+import type { Coord } from "@omni/coord";
 import {
   type ChatRequest,
   describeError,
@@ -62,6 +63,13 @@ export type DispatchDeps = {
   rand: () => number;
   /** In-flight accounting, so ranking can see a burst that has not finished yet. */
   loadRegistry: LoadRegistry;
+  /**
+   * Where the half-open probe claim is made: one in-flight probe per
+   * `(credential, model)` across the fleet, on `gauge`. Required rather than
+   * defaulted, because a default built here would be per request, and a claim
+   * nobody else can see is no claim at all.
+   */
+  coord: Coord;
   refresh: (credential: CredentialView) => Promise<CredentialSecrets>;
   logger?: Logger;
   /** Called when an attempt selects its target, before outbound work starts. */
@@ -74,6 +82,17 @@ export type DispatchDeps = {
   trace?: TraceRecord | null;
   telemetry?: Telemetry;
 };
+
+/**
+ * How long a probe claim outlives a holder that never released it.
+ *
+ * Above the request deadline (120s default) so a live probe is never
+ * displaced, and not far above it, because it is also how long a coordinator
+ * fault between acquire and release keeps the whole fleet from probing that
+ * pair — the release then reaches the memory fallback and the shared slot
+ * lives out its TTL.
+ */
+export const PROBE_TTL_MS = 180_000;
 
 export type DispatchOutcome = {
   events: AsyncGenerator<StreamEvent, void, undefined>;
@@ -416,7 +435,14 @@ export async function dispatch(
     try {
       let lastError: GatewayError | null = null;
 
-      candidateLoop: for (let i = 0; i < maxAttempts; i++) {
+      // Attempts and candidates are counted apart. A probe candidate whose
+      // claim is already held is skipped without being tried, and a skip that
+      // consumed an attempt would let a probe in progress cost every request
+      // one of its retries — under round-robin the probe ranks at the head
+      // for as long as it runs.
+      let attempts = 0;
+      candidateLoop: for (const candidate of candidates) {
+        if (attempts >= maxAttempts) break;
         try {
           checkCancellation();
         } catch (error) {
@@ -427,8 +453,6 @@ export async function dispatch(
               : new GatewayError("TIMEOUT", "request deadline exceeded");
           break;
         }
-        const candidate = candidates[i] as Candidate;
-
         // Claimed before the first await of the attempt. `onRoute` writes a row
         // in production, and claiming after it would leave the request counted
         // nowhere for the length of that write — visible to concurrent ranking
@@ -467,22 +491,48 @@ export async function dispatch(
         // adapter, and the generator being closed early mid-stream.
         const attemptStartedAt = deps.now();
         let attemptCode: ErrorCode | undefined;
-        if (deps.trace !== null && deps.trace !== undefined) {
-          deps.trace.activeAttempt = addSpan(
-            deps.trace,
-            "dispatch.attempt",
-            0,
-            attemptStartedAt - startedAt,
-            attemptStartedAt - startedAt,
-            {
-              attempt: i + 1,
-              provider: candidate.target.provider,
-              model: candidate.target.model,
-              credential_id: candidate.credential.id,
-            },
-          );
-        }
+        let releaseProbe: (() => Promise<void>) | undefined;
         try {
+          // The probe claim, taken inside the `try` so the `finally` beside
+          // `releaseSlot` frees it on every way out, including failover. The
+          // router said this pair is probe territory; `coord` says whether
+          // this request is the one probe. `acquire` reports the count before
+          // it, so anything above zero means someone is already testing the
+          // credential and this candidate is skipped — released at once, so
+          // the gauge still reads one — without counting as an attempt.
+          if (candidate.probe) {
+            const key = `probe:${healthKey(candidate.credential.id, candidate.target.model)}`;
+            const held = await deps.coord.gauge.acquire(key, PROBE_TTL_MS);
+            releaseProbe = () => deps.coord.gauge.release(key);
+            if (held > 0) {
+              noteDegradations([`excluded:${candidate.credential.id}:breaker:probing`]);
+              logger.debug("routing candidate excluded", {
+                requestId,
+                credentialId: candidate.credential.id,
+                reason: "breaker:probing",
+              });
+              continue;
+            }
+            // A decision-field change, so it writes through and every replica
+            // ranks the pair as `halfOpen` from here on.
+            await persistHealth(candidate, (current) => ({ ...current, breakerState: "halfOpen" }));
+          }
+          const i = attempts++;
+          if (deps.trace !== null && deps.trace !== undefined) {
+            deps.trace.activeAttempt = addSpan(
+              deps.trace,
+              "dispatch.attempt",
+              0,
+              attemptStartedAt - startedAt,
+              attemptStartedAt - startedAt,
+              {
+                attempt: i + 1,
+                provider: candidate.target.provider,
+                model: candidate.target.model,
+                credential_id: candidate.credential.id,
+              },
+            );
+          }
           log.attempts = i + 1;
           log.credentialId = candidate.credential.id;
           log.resolvedProvider = candidate.target.provider;
@@ -813,7 +863,7 @@ export async function dispatch(
                 }),
               );
 
-              if (!committed && RETRYABLE[failure.code] && i + 1 < maxAttempts) {
+              if (!committed && RETRYABLE[failure.code] && attempts < maxAttempts) {
                 logger.warn("attempt failed; retrying", {
                   requestId,
                   provider: candidate.target.provider,
@@ -860,19 +910,29 @@ export async function dispatch(
             deps.trace.activeAttempt = null;
           }
           releaseSlot(log.ttftMs);
+          void releaseProbe?.();
         }
       }
 
+      // Every candidate was a probe someone else was already running: nothing
+      // was tried, so nothing failed.
+      const untried = attempts === 0 && lastError === null;
       const code =
         lastError?.code === "TIMEOUT"
           ? "TIMEOUT"
           : lastError !== null && !RETRYABLE[lastError.code]
             ? lastError.code
-            : "ALL_CANDIDATES_FAILED";
+            : untried
+              ? "NO_CANDIDATES"
+              : "ALL_CANDIDATES_FAILED";
       log.status = HTTP_STATUS[code];
       log.errorCode = code;
       log.durationMs = deps.now() - startedAt;
-      const message = lastError?.message ?? "all candidates failed";
+      const message =
+        lastError?.message ??
+        (untried
+          ? `no eligible credential for model "${safeToken(request.model)}"`
+          : "all candidates failed");
       // Whoever wrote the last candidate's message wrote this one. Where no
       // candidate ever ran there is no `lastError`, and the text below is this
       // gateway's own — which is exactly the case a blanket "assume upstream"

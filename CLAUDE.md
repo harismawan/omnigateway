@@ -588,6 +588,16 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   `models.ts` from existence, same split `heldAuths` make.
   Both surfaces that remove account name models pinned to it **before** confirm; console
   treat unanswered `useModels()` or empty credential list as unknown, never as no pin.
+- **Breaker probe is one claim per `(credential, model)`, made in dispatch, gated in router.**
+  `filters.ts` mark `open`-past-cooldown **and `halfOpen`** as `Pair.probe`; dropping the
+  `halfOpen` arm restore the flood with "probing" lamp lit, because dispatch write `halfOpen`
+  on claim and every later request rank against it. Claim `coord.gauge.acquire("probe:…")`
+  sit inside attempt `try` beside `releaseSlot`, released in same `finally` after drain.
+  Skip on lost claim (`breaker:probing`) consume **no** attempt; all-skipped is
+  `NO_CANDIDATES`. `DispatchDeps.coord` required, never defaulted per request. Pinned by
+  probe block in `apps/gateway/test/dispatch/dispatch.test.ts` (sequential test is the one
+  that see the `halfOpen` arm) and `packages/router/test/imports.test.ts` (`@omni/coord`
+  denied). Design: `docs/superpowers/specs/2026-09-07-breaker-half-open-probe-design.md`.
 - `provider:missing` follow pin rule exactly: **once per target**, `kind: "target"`,
   `credentialId: ""`, **first** guard in target loop. Dispatch's `INTERNAL "no adapter for
   provider …"` stay throw: reaching it mean router admitted what it should have excluded;

@@ -30,6 +30,8 @@ export type Snapshot = {
 export type Candidate = {
   credential: CredentialView;
   target: Target;
+  /** In probe territory; see `Pair.probe`. Dispatch makes the claim. */
+  probe: boolean;
   score: number;
   /** Per-term contributions, surfaced in the request log for debugging. */
   reasons: Record<string, number>;

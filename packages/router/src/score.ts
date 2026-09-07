@@ -163,6 +163,7 @@ export function score(pairs: Pair[], input: RankInput): Candidate[] {
     return {
       credential: pair.credential,
       target: pair.target,
+      probe: pair.probe,
       score: base * pair.credential.weight * pair.target.weight,
       reasons,
     };

@@ -49,6 +49,13 @@ const FORBIDDEN: ReadonlyArray<ForbiddenImport> = [
   },
   { pattern: /^@omni\/control(\/|$)/, why: "control owns side effects; the router is pure" },
   {
+    // The half-open probe claim lives in dispatch. The router says whether a
+    // pair is probe territory (`Pair.probe`) and never who probes.
+    pattern: /^@omni\/coord(\/|$)/,
+    why: "coordination is I/O; the router marks a probe candidate and dispatch makes the claim",
+    alsoTypeOnly: true,
+  },
+  {
     pattern: /^node:/,
     why: "rule 3: no transport, no filesystem, no timers. An injected clock is a parameter, not an import",
   },
