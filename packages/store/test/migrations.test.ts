@@ -347,3 +347,50 @@ test("a failing statement aborts a multi-statement migration and leaves it unrec
   expect(ids.map((row) => row.id)).toContain(13);
   db.close();
 });
+
+/**
+ * A database left at migration 1 with traffic in it opens.
+ *
+ * Migration 2's `after` hook backfills `usage_daily` from `request_logs`, and
+ * it used the same upsert the runtime uses — which names two columns migration
+ * 6 adds, four migrations later. So the walk threw "table usage_daily has no
+ * column named rtk_saved_tokens" and the database could not be opened at all.
+ *
+ * Invisible on every install that migrated through 2 before 6 existed, and on
+ * a fresh one, where `request_logs` is empty at that point and the backfill
+ * inserts nothing. The way in is restoring an old snapshot with traffic, which
+ * re-runs the walk on `reopen()`. Seeding a row before the walk is the whole
+ * test; without it every migration file is `CREATE`-only and cannot fail.
+ */
+test("a migration-1 database holding request logs migrates to head", () => {
+  const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
+  const old = new Database(path, { create: true });
+  for (const statement of init001.split(/;[ \t]*(?:\n|$)/)) {
+    if (statement.trim().length > 0) old.run(statement);
+  }
+  old.run(
+    "CREATE TABLE IF NOT EXISTS migrations (id INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)",
+  );
+  old.run("INSERT INTO migrations (id, applied_at) VALUES (1, 0)");
+  old.run(
+    `INSERT INTO request_logs
+       (id, at, requested_model, status, input_tokens, output_tokens,
+        cache_read_tokens, cache_write_tokens, duration_ms, cost_usd)
+     VALUES ('r1', 1, 'm', 200, 5, 7, 0, 0, 12, 0.5)`,
+  );
+  old.close();
+
+  const db = openDb(path);
+  const daily = db
+    .query<{ requests: number; input_tokens: number; rtk_saved_tokens: number }, []>(
+      "SELECT requests, input_tokens, rtk_saved_tokens FROM usage_daily",
+    )
+    .all();
+  // The row is carried through, and the columns migration 6 added arrive at
+  // their default rather than being lost with the backfill that skipped them.
+  expect(daily).toHaveLength(1);
+  expect(daily[0]?.requests).toBe(1);
+  expect(daily[0]?.input_tokens).toBe(5);
+  expect(daily[0]?.rtk_saved_tokens).toBe(0);
+  db.close();
+});

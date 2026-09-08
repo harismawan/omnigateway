@@ -15,6 +15,8 @@ export type RedisCoordDeps = {
 export type RedisCoord = Coord & {
   /** Whether the last call reached Redis. What `/health` reports as `coord`. */
   healthy(): boolean;
+  /** Faults since boot, timeouts included. What `omni_coord_faults_total` reports. */
+  faults(): number;
   close(): void;
 };
 
@@ -44,8 +46,11 @@ const CONNECT_WAIT_MS = 2_000;
  * "Redis is slow", which is the one that happens.
  *
  * The race does not cancel the command; it may still land after the caller has
- * been answered from memory. That direction is the safe one — a claim counted
- * twice over-counts, which is what the limiter permits.
+ * been answered from memory. For `window`, `gauge` and `buckets` that is the
+ * safe direction — a claim counted twice over-counts, which the limiter
+ * permits. It is not safe for `mutex`: a `SET NX` that lands late is a lock
+ * taken under a token nobody holds, and since `fn` never ran nothing releases
+ * it before the TTL — so `withLock`'s fallback sends the release anyway.
  */
 const COMMAND_TIMEOUT_MS = 1_000;
 
@@ -212,6 +217,12 @@ const SCRIPTS = [
 
 type Envelope = { topic: string; payload: string };
 
+class TimedOut extends Error {
+  constructor() {
+    super("command timed out");
+  }
+}
+
 /**
  * The fleet's coordinator, and what it does when Redis is not there.
  *
@@ -254,16 +265,22 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
     return `${NS}gidx:${colon === -1 ? name : name.slice(0, colon + 1)}`;
   };
 
+  // `healthy` says whether the last call reached Redis, so a coordinator that
+  // times out one call in a hundred reads healthy almost always; the count is
+  // what makes that visible.
+  let faults = 0;
   const fault = (error: unknown): void => {
     healthy = false;
+    faults++;
     const at = now();
     if (at - lastFault < faultInterval) return;
     lastFault = at;
-    logger.warn("coordinator unreachable; serving from memory", {
-      coord: "redis",
-      coordFallback: true,
-      reason: describeError(error, "unknown"),
-    });
+    logger.warn(
+      error instanceof TimedOut
+        ? "coordinator slow; serving from memory"
+        : "coordinator unreachable; serving from memory",
+      { coord: "redis", coordFallback: true, reason: describeError(error, "unknown") },
+    );
   };
 
   // Every script is loaded at connect and called by digest afterwards, so a
@@ -314,14 +331,20 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
     Bun.sleep(CONNECT_WAIT_MS),
   ]);
 
-  /** Runs `redis`; on a transport fault records it and runs `instead`. */
   /**
    * Debits made while Redis was away went to the embedded memory coordinator
    * and were dropped there (an unseeded key ignores adds), so on recovery the
    * shared picture is short by every one of them — an under-count, which is
    * the direction the limiter forbids. Dropping every bucket hash makes the
    * next admission reseed from the store, which has the rows.
+   *
+   * Owed only once a debit has actually gone to memory. The hashes are shared
+   * by every replica, and a reseed is every replica reading every active
+   * window from the store under the seed lock, so a fault that lost nothing
+   * — a claim answered from memory, a slow read — must not trigger one:
+   * slowness arrives with load, which is when the store can least absorb it.
    */
+  let lostDebit = false;
   const reseedAfterOutage = async (): Promise<void> => {
     const keys = await scan(client, `${key("b", "")}*`);
     if (keys.length > 0) await client.send("UNLINK", keys);
@@ -340,7 +363,7 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
       return await Promise.race([
         redis(),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("command timed out")), commandTimeout);
+          timer = setTimeout(() => reject(new TimedOut()), commandTimeout);
         }),
       ]);
     } finally {
@@ -353,11 +376,14 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
       await ready;
       if (!client.connected) throw new Error("not connected");
       const out = await deadline(redis);
-      if (!healthy && lastFault !== Number.NEGATIVE_INFINITY) {
-        healthy = true;
-        void reseedAfterOutage().catch(fault);
-      }
       healthy = true;
+      if (lostDebit) {
+        lostDebit = false;
+        void reseedAfterOutage().catch((error: unknown) => {
+          lostDebit = true;
+          fault(error);
+        });
+      }
       return out;
     } catch (error) {
       fault(error);
@@ -420,6 +446,7 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
 
   return {
     healthy: () => healthy,
+    faults: () => faults,
     close() {
       subscriber.close();
       client.close();
@@ -506,7 +533,10 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
               [at, grainMs, windowMs, delta.requests, delta.tokens, delta.costUsd],
             );
           },
-          () => fallback.buckets.add(name, grainMs, windowMs, at, delta),
+          () => {
+            lostDebit = true;
+            return fallback.buckets.add(name, grainMs, windowMs, at, delta);
+          },
         );
       },
       sum(name, grainMs, windowMs, at) {
@@ -581,6 +611,10 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
           const taken = await attempt(
             async () => (await client.set(full, token, "PX", String(ttlMs), "NX")) === "OK",
             async () => {
+              // The `SET` may still land after its deadline (comment on
+              // `COMMAND_TIMEOUT_MS`). Same connection, so this queues behind
+              // it and undoes it; a `SET` that never landed makes it a no-op.
+              void evalScript(MUTEX_RELEASE, [full], [token]).catch(() => {});
               throw new LockUnavailable(name);
             },
           );
@@ -636,20 +670,23 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
     },
 
     pubsub: {
-      publish(topic, payload) {
+      // `listened` is awaited outside `attempt`, so its own wait — capped at
+      // `CONNECT_WAIT_MS`, twice the command deadline — cannot make the first
+      // publish at boot a spurious fault.
+      async publish(topic, payload) {
+        await listened;
         return attempt(
           async () => {
-            await listened;
             if (!listening) throw new Error("not listening");
             await client.publish(CHANNEL, JSON.stringify({ topic, payload } satisfies Envelope));
           },
           () => fallback.pubsub.publish(topic, payload),
         );
       },
-      publishSequenced(topic, payload, seqKey) {
+      async publishSequenced(topic, payload, seqKey) {
+        await listened;
         return attempt(
           async () => {
-            await listened;
             if (!listening) throw new Error("not listening");
             return (await evalScript(
               PUBLISH_SEQUENCED,

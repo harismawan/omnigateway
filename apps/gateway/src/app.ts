@@ -64,6 +64,7 @@ export type AppDeps = {
   mode?: "single" | "cluster";
   /** Whether the coordinator's last call reached it. Absent means in memory, which is always up. */
   coordHealthy?: () => boolean;
+  coordFaults?: () => number;
   /** Overridden by tests that assert in-flight accounting; one per process otherwise. */
   loadRegistry?: LoadRegistry;
   /** Overridden by tests that read the concurrency gauge; one per process otherwise. */
@@ -400,6 +401,7 @@ export function createApp(deps: AppDeps) {
                   loadRegistry.localCounts?.() ?? new Map(),
                   registry.stats(),
                   coordFallback,
+                  deps.coordFaults?.() ?? 0,
                 ),
                 { headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" } },
               );
