@@ -54,7 +54,7 @@ test("opens with WAL, synchronous NORMAL, and foreign keys on", () => {
 test("opens every writable connection through openDb", () => {
   const storeSrc = readFileSync(new URL("../src/sqlite/store.ts", import.meta.url), "utf8");
   // `reopen()` calls `open()`, so pinning `open` covers the swap path too.
-  expect(storeSrc).toContain("const db = openDb(opts.path);");
+  expect(storeSrc).toContain("const db = openDb(opts.path, dayOffsetMinutes);");
 
   const sources = ["../src/sqlite/db.ts", "../src/sqlite/store.ts", "../src/sqlite/maintenance.ts"];
   const openers: string[] = [];

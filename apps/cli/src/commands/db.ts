@@ -75,6 +75,7 @@ export const dbMigrate: Command = {
       const target = await createPostgresStore({
         url: to,
         encryptionKey: await deriveKey(ctx.config().encryptionKey),
+        dayOffsetMinutes: ctx.config().dayOffsetMinutes,
       });
       try {
         const report = await copyStore(source, target);

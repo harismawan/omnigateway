@@ -447,10 +447,14 @@ export class ApiKeyRateLimiter {
    * `requests` at `1m` and `concurrency` — never reach the store, and keep
    * enforcing exactly through the fault.
    *
-   * There is deliberately no timeout on the seed read. `bun:sqlite` is
-   * synchronous: the timer that would fire cannot run until the query it is
-   * bounding has returned, so a deadline here is a promise the runtime cannot
-   * keep.
+   * There is deliberately no timeout on the seed read, and the reason is the
+   * SQLite backend alone: `bun:sqlite` is synchronous, so the timer that would
+   * fire cannot run until the query it is bounding has returned, and a deadline
+   * there is a promise the runtime cannot keep. On the Postgres backend the
+   * loop is free and a deadline would hold — the coordinator's own commands
+   * carry one for exactly that reason (`COMMAND_TIMEOUT_MS` in
+   * `coord/redis.ts`). Do not read this paragraph as saying a slow store cannot
+   * stall a request; on a cluster it can, and bounding it is open work.
    */
   private async longCounts(
     keyId: string,

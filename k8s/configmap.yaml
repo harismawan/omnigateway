@@ -11,6 +11,13 @@ data:
   # OMNI_REDIS_URL, which live in the Secret.
   OMNI_CLUSTER_MODE: "true"
 
+  # Where the day ends for the daily usage buckets, in minutes east of UTC.
+  # 420 = Asia/Jakarta (UTC+7). Set here rather than left to the host, because
+  # pods default to UTC and one rescheduled onto a node with a different TZ
+  # would write the same day into a second row. Fixed offset, so it does not
+  # follow DST. Every replica must carry the same value.
+  OMNI_DAY_OFFSET_MINUTES: "420"
+
   # Public origin: what OAuth callbacks and generated client configs point at.
   # Must be the ingress host, not the Service.
   OMNI_BASE_URL: "https://omni.harismawan.com"

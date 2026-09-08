@@ -229,7 +229,13 @@ export function createContext(parsed: Parsed, options: ContextOptions = {}): Con
         const current = config;
         if (current === null) throw new CliError(configError ?? "invalid configuration");
         opened = deriveKey(current.encryptionKey)
-          .then((key) => createStore({ path: databasePath, encryptionKey: key }))
+          .then((key) =>
+            createStore({
+              path: databasePath,
+              encryptionKey: key,
+              dayOffsetMinutes: current.dayOffsetMinutes,
+            }),
+          )
           .then((created) => {
             store = created;
             return created;

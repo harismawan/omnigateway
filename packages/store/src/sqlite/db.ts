@@ -12,14 +12,18 @@ import usageRollup010 from "./migrations/010_usage_rollup.sql" with { type: "tex
 import pluginMigrations011 from "./migrations/011_plugin_migrations.sql" with { type: "text" };
 import nodes012 from "./migrations/012_nodes.sql" with { type: "text" };
 import healthMeasurements013 from "./migrations/013_health_measurements.sql" with { type: "text" };
-import { backfillDaily, backfillRtkUsage, rebuildRollup } from "./rollup.ts";
+import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
  * `after` runs inside the migration's own transaction, for the cases where the
  * data step needs the same day arithmetic the runtime uses rather than a SQL
  * approximation of it.
  */
-const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database) => void }> = [
+const MIGRATIONS: ReadonlyArray<{
+  id: number;
+  sql: string;
+  after?: (db: Database, dayOffsetMinutes: number) => void;
+}> = [
   { id: 1, sql: init001 },
   { id: 2, sql: usageDaily002, after: backfillDaily },
   { id: 3, sql: quotaSnapshot003 },
@@ -70,7 +74,7 @@ function statements(sql: string): string[] {
  * defaults. `reopen()` after a database swap goes through `createStore`'s
  * `open()`, which calls this; keep it that way.
  */
-export function openDb(path: string): Database {
+export function openDb(path: string, dayOffsetMinutes = hostDayOffsetMinutes()): Database {
   const db = new Database(path, { create: true });
   db.run("PRAGMA journal_mode = WAL");
   // The single largest cost on the request path, and it is a pragma rather than
@@ -136,7 +140,7 @@ export function openDb(path: string): Database {
       // migration recorded and the schema half-applied. Verified on Bun 1.4.0;
       // `packages/store/test/migrations.test.ts` holds the reduced case.
       for (const statement of statements(m.sql)) db.run(statement);
-      m.after?.(db);
+      m.after?.(db, dayOffsetMinutes);
       db.run("INSERT INTO migrations (id, applied_at) VALUES (?, ?)", [m.id, Date.now()]);
     })();
   }

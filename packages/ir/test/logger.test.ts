@@ -307,6 +307,7 @@ describe("the field allowlist and the render order stay in step", () => {
     sizeBytes: 13,
     host: "h",
     port: 9000,
+    dayOffsetMinutes: 330,
     path: "/p",
     supervisor: "systemd",
     reason: "because",

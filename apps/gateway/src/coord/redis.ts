@@ -8,6 +8,8 @@ export type RedisCoordDeps = {
   now?: () => number;
   /** How long between two log lines about the same fault. */
   faultLogIntervalMs?: number;
+  /** How long one command may take before it counts as a fault. */
+  commandTimeoutMs?: number;
 };
 
 export type RedisCoord = Coord & {
@@ -29,6 +31,23 @@ const FAULT_LOG_INTERVAL_MS = 30_000;
 
 /** How long the first call waits for the first connect before reading `connected`. */
 const CONNECT_WAIT_MS = 2_000;
+
+/**
+ * How long one command may take before it counts as a fault.
+ *
+ * `connectionTimeout` bounds the connect alone, and `connected` stays true for
+ * a server that accepted the socket and then stopped answering — a blocked
+ * server, another client's slow script, a blackholed path where no RST comes
+ * back. Without a deadline the await never settles, and because
+ * `window.claim` sits ahead of every other yield in a request, the request
+ * hangs before it has done anything. Fail-open covered "Redis is gone" and not
+ * "Redis is slow", which is the one that happens.
+ *
+ * The race does not cancel the command; it may still land after the caller has
+ * been answered from memory. That direction is the safe one — a claim counted
+ * twice over-counts, which is what the limiter permits.
+ */
+const COMMAND_TIMEOUT_MS = 1_000;
 
 /**
  * A local-only topic a subscriber may hold to learn the shared channel was
@@ -210,6 +229,7 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
   const logger = deps.logger ?? noopLogger;
   const now = deps.now ?? (() => Date.now());
   const faultInterval = deps.faultLogIntervalMs ?? FAULT_LOG_INTERVAL_MS;
+  const commandTimeout = deps.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
   const fallback = memoryCoord({ now });
   // Offline queueing off: a command issued while Redis is away must fail now,
   // not sit in a queue and succeed after the request it belonged to has been
@@ -307,11 +327,32 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
     if (keys.length > 0) await client.send("UNLINK", keys);
   };
 
+  /**
+   * The command, or a fault once it has taken too long.
+   *
+   * The timer is cleared in `finally` so a fast command leaves nothing behind:
+   * these run once or more per request, and a live handle each would keep the
+   * loop from ever going idle.
+   */
+  const deadline = async <T>(redis: () => Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        redis(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("command timed out")), commandTimeout);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   const attempt = async <T>(redis: () => Promise<T>, instead: () => Promise<T>): Promise<T> => {
     try {
       await ready;
       if (!client.connected) throw new Error("not connected");
-      const out = await redis();
+      const out = await deadline(redis);
       if (!healthy && lastFault !== Number.NEGATIVE_INFINITY) {
         healthy = true;
         void reseedAfterOutage().catch(fault);

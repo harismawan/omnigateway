@@ -307,6 +307,7 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_CLUSTER_MODE` | No | unset | `true` selects [cluster mode](docs/deploying.md#running-more-than-one-gateway) and requires the two URLs below; unset is one process on SQLite, and then the URLs must be unset too |
 | `OMNI_DATABASE_URL` | In cluster mode | — | The shared Postgres store |
 | `OMNI_REDIS_URL` | In cluster mode | — | The coordinator every process of a cluster shares: rate-limit counters, sessions, leases, push fan-out |
+| `OMNI_DAY_OFFSET_MINUTES` | No | host's current UTC offset | Fixed minutes east of UTC for daily usage buckets; set explicitly and identically on every replica |
 
 `OMNI_ROOT` is the one variable read from your shell and never from a root's `.env`, for the
 reason it has to be: a variable that selects the installation cannot live inside the installation
@@ -374,8 +375,8 @@ Worth knowing before you deploy it:
   password and a per-key client dashboard exist; there is no multi-tenancy —
   every provider account is the operator's, whoever is looking.
 - **Two grains of usage history.** Detailed request logs are pruned after 30
-  days by default; a daily rollup is kept for 400 days. A day is your host's
-  local midnight, fixed when the row is written.
+  days by default; a daily rollup is kept for 400 days. A day uses a fixed UTC
+  offset, defaulting to the host's current offset; fleets must set it explicitly.
 - **Body capture is forensics, not an archive.** It is off unless you turn it on
   with both keys, it expires on the request-log window, and it is capped at
   100,000 rows. `omni bodies` reads one request's capture; nothing searches
