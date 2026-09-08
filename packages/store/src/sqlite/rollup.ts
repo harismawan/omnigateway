@@ -22,9 +22,13 @@ export function hourOf(at: number): number {
 
 const DAY_MS = 86_400_000;
 
-/** The host's current offset in minutes east of UTC, preserving single-node defaults. */
+/**
+ * The host's current offset in minutes east of UTC, preserving single-node
+ * defaults. `|| 0` turns the `-0` a UTC host negates into `0`, so the boot
+ * line does not print a sign.
+ */
 export function hostDayOffsetMinutes(): number {
-  return -new Date().getTimezoneOffset();
+  return -new Date().getTimezoneOffset() || 0;
 }
 
 /**
@@ -34,6 +38,12 @@ export function hostDayOffsetMinutes(): number {
  * Unlike the old calendar-based local boundary, a fixed offset does not walk
  * DST, so a DST-zone install sees a one-hour-shifted boundary for part of the
  * year. That is the chosen price of a fleet sharing one day definition.
+ *
+ * The default is the host's offset *at boot*, so a DST-zone node that leaves
+ * the offset unset pays once more: on the first restart after each transition
+ * the day in progress is split across two `usage_daily` rows, keyed an hour
+ * apart, both rendering as the same date. Setting `OMNI_DAY_OFFSET_MINUTES`
+ * is what avoids that; it is not only a cluster setting.
  *
  * `Math.floor` is load-bearing for fractional `at`, just as it is in `hourOf`:
  * a bucket persisted as a key must still be an integer epoch.

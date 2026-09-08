@@ -290,7 +290,7 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_CLUSTER_MODE` | No | unset | `true` selects [cluster mode](docs/deploying.md#running-more-than-one-gateway) and requires the two URLs below; unset is one process on SQLite, and then the URLs must be unset too |
 | `OMNI_DATABASE_URL` | In cluster mode | — | The shared Postgres store |
 | `OMNI_REDIS_URL` | In cluster mode | — | The coordinator every process of a cluster shares: rate-limit counters, sessions, leases, push fan-out |
-| `OMNI_DAY_OFFSET_MINUTES` | No | host's current UTC offset | Fixed minutes east of UTC for daily usage buckets; set explicitly and identically on every replica |
+| `OMNI_DAY_OFFSET_MINUTES` | No | host's UTC offset at boot | Fixed minutes east of UTC for daily usage buckets; set explicitly and identically on every replica |
 
 `OMNI_ROOT` is the one variable read from your shell and never from a root's `.env`, for the
 reason it has to be: a variable that selects the installation cannot live inside the installation

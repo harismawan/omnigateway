@@ -31,6 +31,8 @@ test("metrics bearer auth returns an empty 401 and accepts the exact token", asy
     baseUrl: "http://localhost",
     metricsToken: "correct horse",
     telemetry: telemetry(),
+    coordHealthy: () => true,
+    coordFaults: () => 3,
   });
   const wrong = await app.handle(
     new Request("http://localhost/metrics", { headers: { authorization: "Bearer wrong" } }),
@@ -43,7 +45,12 @@ test("metrics bearer auth returns an empty 401 and accepts the exact token", asy
     }),
   );
   expect(right.status).toBe(200);
-  expect(await right.text()).toContain("omni_build_info");
+  const body = await right.text();
+  expect(body).toContain("omni_build_info");
+  // `healthy` is only the last call, so a coordinator late one call in a
+  // hundred reads healthy on nearly every scrape; the count is what shows it.
+  expect(body).toContain("omni_coord_fallback 0");
+  expect(body).toContain("omni_coord_faults_total 3");
 });
 
 test("scrape reads neither store nor coordinator", async () => {

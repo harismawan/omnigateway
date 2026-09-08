@@ -12,6 +12,7 @@ export type MetricName =
   | "omni_stream_queued"
   | "omni_stream_dropped_total"
   | "omni_coord_fallback"
+  | "omni_coord_faults_total"
   | "omni_metrics_series_folded_total"
   | "omni_otlp_spans_dropped_total"
   | "omni_build_info";
@@ -63,6 +64,10 @@ const DEFINITIONS: Readonly<
   omni_coord_fallback: {
     help: "Whether this process is using coordination fallback.",
     type: "gauge",
+  },
+  omni_coord_faults_total: {
+    help: "Coordinator calls this process answered from memory, timeouts included.",
+    type: "counter",
   },
   omni_metrics_series_folded_total: {
     help: "Metric series folded into api_key_id other.",

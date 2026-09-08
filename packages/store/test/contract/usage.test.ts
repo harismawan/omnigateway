@@ -18,7 +18,14 @@ forEachStore((backend) => {
     const s = await backend.fresh(undefined, offset);
     await s.usage.append(logRow({ id: "offset", at }));
 
-    const daily = await s.usage.aggregate({ since: at, groupBy: "day", grain: "daily" });
+    // `since` sits four hours past the row, inside the same offset day but
+    // past UTC midnight: the floor is what reaches back to the row, and only
+    // a floor at this offset does — at UTC the day starts after `at`, and the
+    // row is dropped. `since: at` would pass with any floor at all.
+    const since = at + 4 * HOUR_MS;
+    expect(startOfDay(since, offset)).toBeLessThanOrEqual(at);
+    expect(startOfDay(since, 0)).toBeGreaterThan(at);
+    const daily = await s.usage.aggregate({ since, groupBy: "day", grain: "daily" });
     expect(daily.map((row) => row.key)).toEqual([String(startOfDay(at, offset))]);
     expect(startOfDay(at, offset)).not.toBe(startOfDay(at, 0));
   });
