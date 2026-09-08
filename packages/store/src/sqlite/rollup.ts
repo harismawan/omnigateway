@@ -20,17 +20,27 @@ export function hourOf(at: number): number {
   return Math.floor(at / HOUR_MS);
 }
 
+const DAY_MS = 86_400_000;
+
+/** The host's current offset in minutes east of UTC, preserving single-node defaults. */
+export function hostDayOffsetMinutes(): number {
+  return -new Date().getTimezoneOffset();
+}
+
 /**
- * The epoch of the host's local midnight containing `at`.
+ * The epoch of midnight at a fixed offset east of UTC containing `at`.
  *
- * Local rather than UTC because the gateway is single-node and single-operator:
- * the host's day is the operator's day. `setHours` walks the calendar rather
- * than subtracting a fixed 24h, so a DST transition still lands on midnight.
+ * An explicit offset makes every replica agree regardless of its host timezone.
+ * Unlike the old calendar-based local boundary, a fixed offset does not walk
+ * DST, so a DST-zone install sees a one-hour-shifted boundary for part of the
+ * year. That is the chosen price of a fleet sharing one day definition.
+ *
+ * `Math.floor` is load-bearing for fractional `at`, just as it is in `hourOf`:
+ * a bucket persisted as a key must still be an integer epoch.
  */
-export function startOfLocalDay(at: number): number {
-  const day = new Date(at);
-  day.setHours(0, 0, 0, 0);
-  return day.getTime();
+export function startOfDay(at: number, offsetMinutes: number): number {
+  const offsetMs = offsetMinutes * 60_000;
+  return Math.floor((at + offsetMs) / DAY_MS) * DAY_MS - offsetMs;
 }
 
 /** Counters a single request contributes to its day's row. */
@@ -76,9 +86,9 @@ const UPSERT = `
     cost_usd              = cost_usd + excluded.cost_usd,
     duration_ms_sum    = duration_ms_sum + excluded.duration_ms_sum`;
 
-function keyOf(log: RequestLog): Key {
+function keyOf(log: RequestLog, dayOffsetMinutes: number): Key {
   return [
-    startOfLocalDay(log.at),
+    startOfDay(log.at, dayOffsetMinutes),
     log.resolvedProvider ?? "",
     log.credentialId ?? "",
     log.requestedModel,
@@ -123,8 +133,8 @@ function upsert(db: Database, key: Key, c: Counters): void {
  * the same transaction as the raw log insert, so the rollup can never disagree
  * with the rows it summarizes.
  */
-export function rollupLog(db: Database, log: RequestLog): void {
-  upsert(db, keyOf(log), countersOf(log));
+export function rollupLog(db: Database, log: RequestLog, dayOffsetMinutes: number): void {
+  upsert(db, keyOf(log, dayOffsetMinutes), countersOf(log));
 }
 
 type BackfillRow = {
@@ -154,7 +164,7 @@ type BackfillRow = {
  *
  * Returns the number of rows written.
  */
-export function backfillDaily(db: Database): number {
+export function backfillDaily(db: Database, dayOffsetMinutes: number): number {
   const groups = new Map<string, { key: Key; counters: Counters }>();
 
   for (const row of db
@@ -166,7 +176,7 @@ export function backfillDaily(db: Database): number {
     )
     .all()) {
     const key: Key = [
-      startOfLocalDay(row.at),
+      startOfDay(row.at, dayOffsetMinutes),
       row.resolved_provider ?? "",
       row.credential_id ?? "",
       row.requested_model,
@@ -338,7 +348,7 @@ export function auditRollup(db: Database): RollupAudit {
 }
 
 /** Backfills only RTK measures without adding the existing usage counters twice. */
-export function backfillRtkUsage(db: Database): void {
+export function backfillRtkUsage(db: Database, dayOffsetMinutes: number): void {
   type RtkBackfillRow = Pick<
     BackfillRow,
     | "at"
@@ -361,7 +371,7 @@ export function backfillRtkUsage(db: Database): void {
     )
     .all()) {
     const key: Key = [
-      startOfLocalDay(row.at),
+      startOfDay(row.at, dayOffsetMinutes),
       row.resolved_provider ?? "",
       row.credential_id ?? "",
       row.requested_model,

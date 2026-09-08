@@ -19,6 +19,7 @@ import { openDb } from "./db.ts";
 import { createKeyRepo } from "./keys.ts";
 import { createMaintenanceRepo } from "./maintenance.ts";
 import { createPluginRepo } from "./plugins.ts";
+import { hostDayOffsetMinutes } from "./rollup.ts";
 import { createUsageRepo } from "./usage.ts";
 
 /**
@@ -59,9 +60,12 @@ export async function createStore(opts: {
   logger?: Logger;
   /** This process's identity on `request_logs.node_id`. Fresh per boot when absent. */
   nodeId?: string;
+  /** Fixed minutes east of UTC used for every daily usage bucket. */
+  dayOffsetMinutes?: number;
 }): Promise<Store> {
   const logger = opts.logger ?? noopLogger;
   const nodeId = opts.nodeId ?? crypto.randomUUID();
+  const dayOffsetMinutes = opts.dayOffsetMinutes ?? hostDayOffsetMinutes();
   const listeners = new Set<(change: RoutingChange) => void>();
   const emit = (change: RoutingChange): void => {
     for (const listener of listeners) {
@@ -75,7 +79,7 @@ export async function createStore(opts: {
   };
 
   const open = (): Handle => {
-    const db = openDb(opts.path);
+    const db = openDb(opts.path, dayOffsetMinutes);
     logger.debug("store opened", { path: opts.path });
     return {
       db,
@@ -84,7 +88,7 @@ export async function createStore(opts: {
       // The one repo handed the logger: an unreadable `limits` column is
       // reported rather than thrown, so this is where that trail is written.
       keys: createKeyRepo(db, logger),
-      usage: createUsageRepo(db, nodeId),
+      usage: createUsageRepo(db, nodeId, dayOffsetMinutes),
       // Derived from the database path rather than configured. One installation
       // is one directory: an artifact tree that could be pointed elsewhere is one
       // an operator can lose track of, and a prompt corpus is the last thing that

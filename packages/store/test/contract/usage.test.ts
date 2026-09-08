@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { RTK_FILTER_IDS } from "@omni/rtk/catalog";
-import { HOUR_MS, startOfLocalDay } from "../../src/sqlite/rollup.ts";
+import { HOUR_MS, hostDayOffsetMinutes, startOfDay } from "../../src/sqlite/rollup.ts";
 import { NODE_GRACE_MS } from "../../src/types.ts";
 import { forEachStore, logRow } from "./harness.ts";
 
@@ -12,6 +12,17 @@ const noon = (n: number): number => {
 };
 
 forEachStore((backend) => {
+  test("configured day offset controls the daily bucket on every backend", async () => {
+    const offset = 777;
+    const at = Date.UTC(2024, 0, 1, 20);
+    const s = await backend.fresh(undefined, offset);
+    await s.usage.append(logRow({ id: "offset", at }));
+
+    const daily = await s.usage.aggregate({ since: at, groupBy: "day", grain: "daily" });
+    expect(daily.map((row) => row.key)).toEqual([String(startOfDay(at, offset))]);
+    expect(startOfDay(at, offset)).not.toBe(startOfDay(at, 0));
+  });
+
   test("append then recent round-trips every column, including RTK metrics", async () => {
     const s = await backend.fresh();
     const log = logRow({
@@ -164,7 +175,7 @@ forEachStore((backend) => {
     expect(await s.usage.recent(10)).toHaveLength(1);
     const daily = await s.usage.aggregate({ since: 0, groupBy: "model", grain: "daily" });
     expect(daily[0]?.requests).toBe(2);
-    expect(await s.usage.pruneDaily(startOfLocalDay(noon(3)))).toBe(1);
+    expect(await s.usage.pruneDaily(startOfDay(noon(3), hostDayOffsetMinutes()))).toBe(1);
     expect(
       (await s.usage.aggregate({ since: 0, groupBy: "model", grain: "daily" }))[0]?.requests,
     ).toBe(1);

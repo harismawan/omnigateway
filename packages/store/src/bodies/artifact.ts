@@ -197,13 +197,15 @@ export function prepareArtifact(input: BodyArtifact): { artifact: BodyArtifact; 
   };
 
   const json = JSON.stringify(bounded);
-  const size = encoder.encode(json).length;
+  // `byteLength` measures without materialising the bytes: `encoder.encode`
+  // allocated a whole second copy of a body that is already at the budget.
+  const size = Buffer.byteLength(json);
   if (size <= MAX_ARTIFACT_BYTES) return { artifact: bounded, json };
 
   const marker = omission(size);
   const omitted = omitBodies(bounded, marker);
   const omittedJson = JSON.stringify(omitted);
-  if (encoder.encode(omittedJson).length <= MAX_ARTIFACT_BYTES) {
+  if (Buffer.byteLength(omittedJson) <= MAX_ARTIFACT_BYTES) {
     return { artifact: omitted, json: omittedJson };
   }
 

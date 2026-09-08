@@ -490,6 +490,8 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - `usage.append` must run at most once per request ID; duplicate completion double-count
   `usage_daily` and `usage_rollup`. Pending rows hold placeholder metrics; inspect `state`, not
   `status`.
+- `startOfDay` in `packages/store/src/sqlite/rollup.ts` takes the configured fixed offset; thread it
+  through both store factories, pinned by `packages/store/test/contract/usage.test.ts`.
 - `usage_rollup` derived, never authoritative: `request_logs` source of truth; `rebuildRollup`
   reproduce every bucket. Written in `append`'s transaction, pruned with rows it summarizes, rebuilt
   after restore, compared by `omni doctor`. Replaced unbounded `SELECT SUM` — `bun:sqlite`

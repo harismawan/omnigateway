@@ -14,11 +14,12 @@ import {
 import {
   auditRollup,
   HOUR_MS,
+  hostDayOffsetMinutes,
   hourOf,
   rebuildRollup,
   rollupHour,
   rollupLog,
-  startOfLocalDay,
+  startOfDay,
 } from "./rollup.ts";
 
 type Row = {
@@ -252,7 +253,11 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_filters = excluded.rtk_filters
   WHERE request_logs.state = 'pending'`;
 
-export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
+export function createUsageRepo(
+  db: Database,
+  nodeId: string,
+  dayOffsetMinutes = hostDayOffsetMinutes(),
+): UsageRepo {
   /**
    * The raw row and both rollups are written together: a crash between them
    * would leave the year view, or a key's hourly counters, quietly disagreeing
@@ -270,7 +275,7 @@ export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
     const stored = db.query<Row, [string]>("SELECT * FROM request_logs WHERE id = ?").get(log.id);
     if (stored !== null) {
       const restored = toLog(stored);
-      rollupLog(db, restored);
+      rollupLog(db, restored, dayOffsetMinutes);
       rollupHour(db, restored);
     }
   });
@@ -496,7 +501,7 @@ export function createUsageRepo(db: Database, nodeId: string): UsageRepo {
 
       // A daily bucket is whole: floor the lower bound so the first partial day
       // of the window is reported in full rather than dropped.
-      const since = daily ? startOfLocalDay(q.since) : q.since;
+      const since = daily ? startOfDay(q.since, dayOffsetMinutes) : q.since;
       const until = q.until ?? Number.MAX_SAFE_INTEGER;
       const timeColumn = daily ? "day" : "at";
 

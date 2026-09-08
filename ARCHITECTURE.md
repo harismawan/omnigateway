@@ -889,9 +889,11 @@ it, through a `valkey` service), and `test/cluster/sharedCoord.test.ts` runs the
 over two **separate** Redis coordinators — which is what two pods actually hold.
 
 **The store.** `OMNI_CLUSTER_MODE=true` selects `packages/store/src/postgres/` at
-`OMNI_DATABASE_URL`, a second
-implementation of the same `Store` interface over `Bun.SQL`. Migrations are its own numbered
-list under an advisory lock. Request bodies are `bytea` rows rather than files. `vacuum`,
+`OMNI_DATABASE_URL`, a second implementation of the same `Store` interface over `Bun.SQL`.
+Every replica must use the same fixed `OMNI_DAY_OFFSET_MINUTES` so one instant has one
+`usage_daily.day`; set it explicitly in a fleet rather than inheriting each host's current offset.
+Migrations are its own numbered list under an advisory lock. Request bodies are `bytea` rows rather
+than files. `vacuum`,
 `snapshotTo`, `inspect`, restore and the quiesce latch are SQLite's and are refused; plugin
 storage is Postgres, and its SQL is the plugin's to write for it — which is why `ctx.storage`
 became asynchronous at plugin-api generation 3.

@@ -141,6 +141,8 @@ export type LogFields = {
   sizeBytes?: number | undefined;
   host?: string | undefined;
   port?: number | undefined;
+  /** Fixed minutes east of UTC used to bucket daily usage. */
+  dayOffsetMinutes?: number | undefined;
   path?: string | undefined;
   /** What would restart this process: one of three words from `describeLifecycle`. */
   supervisor?: "systemd" | "container" | "none" | undefined;
@@ -188,6 +190,7 @@ const FIELD_ORDER = [
   "sizeBytes",
   "host",
   "port",
+  "dayOffsetMinutes",
   "path",
   "supervisor",
   // Last on purpose: the only free-text field, and the only truncated one, so

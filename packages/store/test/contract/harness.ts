@@ -16,8 +16,8 @@ import type { Store } from "../../src/types.ts";
  */
 export type Backend = {
   name: "sqlite" | "postgres";
-  fresh(nodeId?: string): Promise<Store>;
-  sibling(nodeId?: string): Promise<Store>;
+  fresh(nodeId?: string, dayOffsetMinutes?: number): Promise<Store>;
+  sibling(nodeId?: string, dayOffsetMinutes?: number): Promise<Store>;
 };
 
 const SECRET = "test-secret-value-for-unit-tests";
@@ -44,23 +44,27 @@ export function forEachStore(define: (backend: Backend) => void): void {
     afterAll(async () => {
       for (const file of files) await rm(file, { force: true });
     });
-    const open = async (nodeId: string | undefined): Promise<Store> =>
+    const open = async (
+      nodeId: string | undefined,
+      dayOffsetMinutes: number | undefined,
+    ): Promise<Store> =>
       track(
         await createStore({
           path,
           encryptionKey: await deriveKey(SECRET),
           ...(nodeId === undefined ? {} : { nodeId }),
+          ...(dayOffsetMinutes === undefined ? {} : { dayOffsetMinutes }),
         }),
       );
     define({
       name: "sqlite",
-      async fresh(nodeId) {
+      async fresh(nodeId, dayOffsetMinutes) {
         // A file rather than `:memory:`, so `sibling` can open the same database.
         path = join(tmpdir(), `omni-contract-${crypto.randomUUID()}.sqlite`);
         files.push(path, `${path}-wal`, `${path}-shm`);
-        return open(nodeId);
+        return open(nodeId, dayOffsetMinutes);
       },
-      sibling: (nodeId) => open(nodeId),
+      sibling: (nodeId, dayOffsetMinutes) => open(nodeId, dayOffsetMinutes),
     });
   });
 
@@ -71,26 +75,30 @@ export function forEachStore(define: (backend: Backend) => void): void {
   }
 
   describe("postgres", () => {
-    const open = async (nodeId: string | undefined): Promise<Store> =>
+    const open = async (
+      nodeId: string | undefined,
+      dayOffsetMinutes: number | undefined,
+    ): Promise<Store> =>
       track(
         await createPostgresStore({
           url,
           encryptionKey: await deriveKey(SECRET),
           ...(nodeId === undefined ? {} : { nodeId }),
+          ...(dayOffsetMinutes === undefined ? {} : { dayOffsetMinutes }),
         }),
       );
     define({
       name: "postgres",
-      async fresh(nodeId) {
+      async fresh(nodeId, dayOffsetMinutes) {
         const admin = new SQL({ url, max: 1 });
         try {
           await admin.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
         } finally {
           await admin.close();
         }
-        return open(nodeId);
+        return open(nodeId, dayOffsetMinutes);
       },
-      sibling: (nodeId) => open(nodeId),
+      sibling: (nodeId, dayOffsetMinutes) => open(nodeId, dayOffsetMinutes),
     });
   });
 }

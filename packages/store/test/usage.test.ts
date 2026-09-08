@@ -2,11 +2,17 @@ import { expect, test } from "bun:test";
 import { RTK_FILTER_IDS } from "@omni/rtk/catalog";
 import { deriveKey } from "../src/encryption.ts";
 import { openDb } from "../src/sqlite/db.ts";
-import { backfillDaily, backfillRtkUsage, startOfLocalDay } from "../src/sqlite/rollup.ts";
+import {
+  backfillDaily,
+  backfillRtkUsage,
+  hostDayOffsetMinutes,
+  startOfDay,
+} from "../src/sqlite/rollup.ts";
 import { createStore } from "../src/sqlite/store.ts";
 import type { RequestLog, Store } from "../src/types.ts";
 
 const DAY_MS = 86_400_000;
+const localDay = (at: number): number => startOfDay(at, hostDayOffsetMinutes());
 
 async function store(): Promise<Store> {
   return createStore({
@@ -46,8 +52,16 @@ function log(patch: Partial<RequestLog> & { id: string; at: number }): RequestLo
 
 /** Noon, so a test's arithmetic never straddles a local midnight by accident. */
 function noon(daysAgo: number): number {
-  return startOfLocalDay(Date.now() - daysAgo * DAY_MS) + 12 * 3_600_000;
+  return localDay(Date.now() - daysAgo * DAY_MS) + 12 * 3_600_000;
 }
+
+test("startOfDay uses the explicit offset and keeps bucket epochs integral", () => {
+  const at = Date.UTC(2024, 0, 1, 20) + 0.5;
+  expect(startOfDay(at, 0)).toBe(Date.UTC(2024, 0, 1));
+  expect(startOfDay(at, 330)).toBe(Date.UTC(2024, 0, 1, 18, 30));
+  expect(startOfDay(at, -300)).toBe(Date.UTC(2024, 0, 1, 5));
+  expect(Number.isInteger(startOfDay(at, 330))).toBe(true);
+});
 
 test("request logs round-trip RTK aggregate metrics", async () => {
   const s = await store();
@@ -85,7 +99,7 @@ test("appending a log rolls it into the day it happened on", async () => {
   await s.usage.append(log({ id: "r3", at: noon(1) }));
 
   const days = await s.usage.aggregate({ since: noon(3), grain: "daily", groupBy: "day" });
-  const today = days.find((row) => row.key === String(startOfLocalDay(noon(0))));
+  const today = days.find((row) => row.key === String(localDay(noon(0))));
   expect(today?.requests).toBe(2);
   expect(today?.errors).toBe(1);
   expect(today?.inputTokens).toBe(200);
@@ -93,7 +107,7 @@ test("appending a log rolls it into the day it happened on", async () => {
   expect(today?.rtkSavedTokens).toBe(0);
   expect(today?.rtkAppliedRequests).toBe(0);
   expect(today?.durationMsSum).toBe(2400);
-  expect(days.find((row) => row.key === String(startOfLocalDay(noon(1))))?.requests).toBe(1);
+  expect(days.find((row) => row.key === String(localDay(noon(1))))?.requests).toBe(1);
   s.close();
 });
 
@@ -146,13 +160,13 @@ test("pruneDaily drops rollup rows past its own, longer horizon", async () => {
   expect(await s.usage.pruneDaily(Date.now() - 400 * DAY_MS)).toBe(1);
   const days = await s.usage.aggregate({ since: noon(500), grain: "daily", groupBy: "day" });
   expect(days).toHaveLength(1);
-  expect(days[0]?.key).toBe(String(startOfLocalDay(noon(1))));
+  expect(days[0]?.key).toBe(String(localDay(noon(1))));
   s.close();
 });
 
 test("a daily window includes the whole of its first, partial day", async () => {
   const s = await store();
-  const at = startOfLocalDay(Date.now()) + 3_600_000;
+  const at = localDay(Date.now()) + 3_600_000;
   await s.usage.append(log({ id: "r1", at }));
 
   // Asking from mid-morning still reports the request logged at 01:00.
@@ -204,7 +218,7 @@ test("splitBy yields one bucket per pair, which is what stacks a time series", a
     groupBy: "day",
     splitBy: "provider",
   });
-  const today = String(startOfLocalDay(noon(0)));
+  const today = String(localDay(noon(0)));
   expect(rows.filter((row) => row.key === today)).toHaveLength(2);
   expect(rows.find((row) => row.key === today && row.split === "openai")?.requests).toBe(1);
   expect(rows.every((row) => row.split !== undefined)).toBe(true);
@@ -387,7 +401,7 @@ test("sweepPending retires rows the last process left behind", async () => {
 
 test("the RTK migration backfills saved tokens without recounting usage", () => {
   const db = openDb(":memory:");
-  const at = startOfLocalDay(Date.now()) + 3_600_000;
+  const at = localDay(Date.now()) + 3_600_000;
   db.run(
     `INSERT INTO request_logs
        (id, at, api_key_id, requested_model, resolved_provider, resolved_model, credential_id,
@@ -397,9 +411,9 @@ test("the RTK migration backfills saved tokens without recounting usage", () => 
     [at],
   );
   db.run("DELETE FROM usage_daily");
-  expect(backfillDaily(db)).toBe(1);
+  expect(backfillDaily(db, hostDayOffsetMinutes())).toBe(1);
 
-  backfillRtkUsage(db);
+  backfillRtkUsage(db, hostDayOffsetMinutes());
   const row = db
     .query<
       {
@@ -425,7 +439,7 @@ test("the RTK migration backfills saved tokens without recounting usage", () => 
 
 test("the migration seeds the rollup from logs already on disk", () => {
   const db = openDb(":memory:");
-  const at = startOfLocalDay(Date.now()) + 3_600_000;
+  const at = localDay(Date.now()) + 3_600_000;
   for (const [id, status] of [
     ["r1", 200],
     ["r2", 200],
@@ -442,13 +456,13 @@ test("the migration seeds the rollup from logs already on disk", () => {
   }
   db.run("DELETE FROM usage_daily");
 
-  expect(backfillDaily(db)).toBe(1);
+  expect(backfillDaily(db, hostDayOffsetMinutes())).toBe(1);
   const row = db
     .query<{ day: number; requests: number; errors: number; input_tokens: number }, []>(
       "SELECT day, requests, errors, input_tokens FROM usage_daily",
     )
     .get();
-  expect(row?.day).toBe(startOfLocalDay(at));
+  expect(row?.day).toBe(localDay(at));
   expect(row?.requests).toBe(3);
   expect(row?.errors).toBe(1);
   expect(row?.input_tokens).toBe(30);
