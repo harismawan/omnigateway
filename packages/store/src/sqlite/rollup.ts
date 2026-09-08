@@ -122,6 +122,52 @@ function countersOf(log: RequestLog): Counters {
   };
 }
 
+/**
+ * The same upsert without the two RTK columns, for migration 2's backfill.
+ *
+ * `UPSERT` names columns that migration 6 adds, and migration 2's `after` hook
+ * runs four migrations before that — so a database sitting at migration 1 with
+ * any rows in `request_logs` failed to open with "table usage_daily has no
+ * column named rtk_saved_tokens". Not reachable on an install that migrated
+ * through 2 before 6 existed, nor on a fresh one, where `request_logs` is empty
+ * at that point and the backfill inserts nothing. It is reachable by restoring
+ * an old snapshot with traffic in it, which re-runs the walk on `reopen()`.
+ *
+ * Nothing is lost by omitting them: the backfill's own SELECT reads no RTK
+ * field, so it always wrote two zeroes, and migration 6's `backfillRtkUsage`
+ * fills the columns for exactly these rows straight afterwards.
+ */
+const BACKFILL_UPSERT = `
+  INSERT INTO usage_daily
+    (day, provider, credential_id, requested_model, resolved_model, api_key_id,
+     requests, errors, input_tokens, output_tokens, cache_read_tokens,
+     cache_write_tokens, cost_usd, duration_ms_sum)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ON CONFLICT (day, provider, credential_id, requested_model, resolved_model, api_key_id)
+  DO UPDATE SET
+    requests           = requests + excluded.requests,
+    errors             = errors + excluded.errors,
+    input_tokens       = input_tokens + excluded.input_tokens,
+    output_tokens      = output_tokens + excluded.output_tokens,
+    cache_read_tokens  = cache_read_tokens + excluded.cache_read_tokens,
+    cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+    cost_usd           = cost_usd + excluded.cost_usd,
+    duration_ms_sum    = duration_ms_sum + excluded.duration_ms_sum`;
+
+function upsertPreRtk(db: Database, key: Key, c: Counters): void {
+  db.run(BACKFILL_UPSERT, [
+    ...key,
+    c.requests,
+    c.errors,
+    c.inputTokens,
+    c.outputTokens,
+    c.cacheReadTokens,
+    c.cacheWriteTokens,
+    c.costUsd,
+    c.durationMsSum,
+  ]);
+}
+
 function upsert(db: Database, key: Key, c: Counters): void {
   db.run(UPSERT, [
     ...key,
@@ -218,7 +264,7 @@ export function backfillDaily(db: Database, dayOffsetMinutes: number): number {
     if (seen === undefined) groups.set(id, { key, counters });
   }
 
-  for (const group of groups.values()) upsert(db, group.key, group.counters);
+  for (const group of groups.values()) upsertPreRtk(db, group.key, group.counters);
   return groups.size;
 }
 
